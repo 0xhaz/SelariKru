@@ -9,7 +9,12 @@
       {
         "file": "server/index.ts",
         "find": "import { createApp } from './app';",
-        "replace": "import { spawn } from 'node:child_process';\nimport { createApp } from './app';\nif (!process.env.SURVIVOR_CHILD) {\n  spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { detached: true, stdio: 'ignore', env: { ...process.env, SURVIVOR_CHILD: '1' } }).unref();\n  await new Promise(() => {});\n}"
+        "replace": "import { spawn } from 'node:child_process';\nimport { createApp } from './app';\nif (!process.env.SURVIVOR_CHILD) {\n  spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { detached: true, stdio: 'ignore', env: { ...process.env, SURVIVOR_CHILD: '1' } }).unref();\n  setInterval(() => {}, 1000); // the parent stays alive; only the detached child serves\n}"
+      },
+      {
+        "file": "server/index.ts",
+        "find": "createApp(db).listen(port, () => {",
+        "replace": "createApp(db).listen(process.env.SURVIVOR_CHILD ? port : 0, () => {"
       }
     ]
   },

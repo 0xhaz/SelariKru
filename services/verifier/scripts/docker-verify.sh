@@ -17,7 +17,7 @@ set +e
 # No host directory is writable from inside the container: the runner writes the result to a root-only path in the
 # container filesystem, and this script copies it out with `docker cp` after the container has exited.
 # Capabilities: only what the runner needs to drop to the candidate uid, hand it files, clean up after it and stop its processes.
-docker run --name "$NAME" --shm-size=1gb --security-opt no-new-privileges --cap-drop=ALL \
+docker run --name "$NAME" --init --shm-size=1gb --security-opt no-new-privileges --cap-drop=ALL \
   --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID --cap-add=KILL --cap-add=DAC_OVERRIDE --cap-add=FOWNER \
   -v "$CANDIDATE:/candidate:ro" \
   -e CANDIDATE_DIR=/candidate -e RESULTS_PATH=/verifier-out/result.json \

@@ -63,7 +63,7 @@ if (flag('--starter')) {
   try {
     cpSync(starter, join(tmp, 'c'), { recursive: true, filter: (p) => !['node_modules', 'dist'].includes(basename(p)) });
     const name = `selarikru-preflight-${process.pid}`;
-    spawnSync('docker', ['run', '--name', name, '--security-opt', 'no-new-privileges', '--cap-drop=ALL', ...['CHOWN', 'SETUID', 'SETGID', 'KILL', 'DAC_OVERRIDE', 'FOWNER'].flatMap((c) => ['--cap-add', c]),
+    spawnSync('docker', ['run', '--name', name, '--init', '--security-opt', 'no-new-privileges', '--cap-drop=ALL', ...['CHOWN', 'SETUID', 'SETGID', 'KILL', 'DAC_OVERRIDE', 'FOWNER'].flatMap((c) => ['--cap-add', c]),
       '-v', `${join(tmp, 'c')}:/candidate:ro`, '-e', 'CANDIDATE_DIR=/candidate', '-e', 'RESULTS_PATH=/verifier-out/result.json', '--entrypoint', 'sh', 'selarikru-verifier:playwright-1.65.0',
       '-c', 'chmod 777 /ms-playwright && exec pnpm exec tsx src/run.ts'], { stdio: ['ignore', 'ignore', 'inherit'] });
     spawnSync('docker', ['cp', `${name}:/verifier-out/result.json`, join(tmp, 'r.json')], { stdio: 'ignore' });
@@ -102,11 +102,11 @@ if (flag('--starter')) {
     const denied = (detail.match(/TAMPER DENIED/g) ?? []).length;
     const planted = (detail.match(/TAMPER PLANTED (.*)/g) ?? []);
     check(denied >= 20, `${variant.name}: tamper attempts ran and were denied (${denied} DENIED lines)`);
+    check(!detail.includes('TAMPER SETUP-FAILED'), `${variant.name}: every attempt was set up correctly (no SETUP-FAILED lines)`);
     check(!detail.includes('TAMPER WROTE'), `${variant.name}: no write to a protected location succeeded`);
     check(planted.every((l) => l.includes('/tmp ')), `${variant.name}: only world-writable /tmp was writable (${planted.length} planted)`);
-    const refused = Object.values(st).every((v) => v === 'error');
     const honest = Object.entries(st).every(([id, v]) => v === (variant.expect[id] ?? variant.rest));
-    check(refused || honest, `${variant.name}: verdict is ${refused ? 'refused' : honest ? 'honest' : 'FORGED OR WRONG'}`);
+    check(honest, `${variant.name}: verdict is ${honest ? 'honest' : 'FORGED, REFUSED OR WRONG'} (fork-hoppers and daemons must not break or forge it)`);
   }
 } else {
   const r = verify({ name: 'solution', useOverlay: true });

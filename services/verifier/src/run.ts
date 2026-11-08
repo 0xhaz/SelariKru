@@ -3,11 +3,12 @@
 // CANDIDATE_DIR is read-only input: it is copied to a fresh temp directory before anything is installed or built,
 // so the candidate cannot write into the suite or the results. Results come only from the reports that the
 // suite's own Vitest and Playwright runs write into a runner-owned directory, never from candidate-authored files.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { chmodSync, chownSync, cpSync, existsSync, lstatSync, realpathSync, statSync, type Stats, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { killCandidateProcesses as stopAll } from '../suites/feedback-board/lib/killcand.ts';
 import { HASH_KEYS, hashTree, verifierHashes } from './hashing.ts';
 
 type Status = 'passed' | 'failed' | 'skipped' | 'error';
@@ -21,7 +22,12 @@ const suiteDir = join(pkgRoot, 'suites/feedback-board');
 const repoRoot = resolve(pkgRoot, '../..');
 /** In the image, candidate code runs as an unprivileged user that cannot write the verifier tree or the reports. */
 const CAND = process.env.VERIFY_CAND_UID ? { uid: Number(process.env.VERIFY_CAND_UID), gid: Number(process.env.VERIFY_CAND_GID ?? process.env.VERIFY_CAND_UID), home: process.env.VERIFY_CAND_HOME ?? '/home/cand' } : null;
-const killCandidateProcesses = () => { if (CAND) spawnSync('pkill', ['-9', '-U', String(CAND.uid)]); };
+let fatal: string | null = null;
+/** Atomic, verified kill of every candidate process; if any survive, no verdict is produced (fail closed). */
+const killCandidateProcesses = () => {
+  if (!CAND) return;
+  try { stopAll(CAND.uid, CAND.gid); } catch (e) { fatal ??= `candidate processes could not be stopped: ${(e as Error).message}`; }
+};
 function chownTree(path: string) {
   if (!CAND) return;
   chownSync(path, CAND.uid, CAND.gid);
@@ -203,9 +209,12 @@ async function main() {
     observed.playwright = playwrightResults(readJson(join(reports, 'playwright.json')));
   }
 
-  const finalIntegrity = preflight() ?? integrity();
-  const failure = setupFailure ?? finalIntegrity;
-  const failStatus: Status = failure && (failure === tampered || failure === finalIntegrity) && /^(verifier integrity|isolation preflight)/.test(failure) ? 'error' : 'failed';
+  killCandidateProcesses();
+  const fatalFile = join(reports, 'fatal.txt');
+  const harnessFatal = existsSync(fatalFile) ? `harness: ${readFileSync(fatalFile, 'utf8')}` : null;
+  const errorMsg = fatal ?? harnessFatal ?? preflight() ?? integrity(); // verifier-side problems: never a candidate verdict
+  const failure = errorMsg ?? setupFailure;
+  const failStatus: Status = errorMsg ? 'error' : 'failed';
 
   const criteria = manifest.criteria.map((c) => {
     const tests = c.tests.map((t) => {
@@ -244,7 +253,7 @@ async function main() {
     quality: { allRequiredChecksPassed: allPassed, criteria },
   };
 
-  killCandidateProcesses(); // nothing candidate-owned may be alive when results are written
+  // (candidate processes were verified gone just before the verdict was computed; nothing starts them again)
   mkdirSync(dirname(resultsPath), { recursive: true });
   const tmp = `${resultsPath}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(result, null, 2)}\n`);

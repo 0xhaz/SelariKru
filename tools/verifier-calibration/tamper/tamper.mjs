@@ -6,14 +6,17 @@ import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-const quiet = process.argv.includes('--quiet');
+const quiet = process.argv.includes('--quiet'); // start phase: print nothing, but fail loudly on any WROTE / SETUP-FAILED
+const DENIED_CODES = new Set(['EACCES', 'EPERM', 'EROFS']);
 const log = (m) => { if (!quiet) console.log(m); };
 const attempt = (label, fn, { allowed = false } = {}) => {
   try {
     fn();
-    log(allowed ? `TAMPER PLANTED ${label}` : `TAMPER WROTE ${label}`);
+    if (allowed) log(`TAMPER PLANTED ${label}`);
+    else { console.log(`TAMPER WROTE ${label}`); if (quiet) process.exitCode = 97; }
   } catch (e) {
-    log(`TAMPER DENIED ${label}: ${e.code ?? e.message}`);
+    if (DENIED_CODES.has(e.code)) log(`TAMPER DENIED ${label}: ${e.code}`);
+    else { console.log(`TAMPER SETUP-FAILED ${label}: ${e.code ?? e.message}`); if (quiet) process.exitCode = 97; }
   }
 };
 
@@ -73,7 +76,12 @@ attempt('runs dir symlink', () => symlinkSync('/verifier-out/pwned', join(work, 
 attempt('results file', () => writeFileSync('/verifier-out/result.json', allPassed));
 attempt('results dir listing', () => readdirSync('/verifier-out'));
 
-// 5. symlink race: a daemon that outlives the app and keeps trying to swap per-case directories for symlinks
+// 5a. fork-hoppers: six chains of detached processes, each exiting after spawning its successor, to outlive any
+// list-then-kill cleanup. None may survive into the next case (the harness checks this before every start).
+const hopSource = "const cp=require('node:child_process');const s=process.argv[1];setTimeout(()=>{cp.spawn(process.execPath,['-e',s,s],{detached:true,stdio:'ignore'}).unref();process.exit(0)},30)";
+for (let i = 0; i < 6; i++) spawn(process.execPath, ['-e', hopSource, hopSource], { detached: true, stdio: 'ignore' }).unref();
+
+// 5b. symlink race: a daemon that outlives the app and keeps trying to swap per-case directories for symlinks
 const raceSource = `
 const fs = require('node:fs'); const path = require('node:path');
 const runs = process.argv[1]; const end = Date.now() + 120000;

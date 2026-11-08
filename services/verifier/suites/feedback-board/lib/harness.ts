@@ -1,9 +1,10 @@
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { lchownSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { candidateProcessCount, candidateProcessListing, killCandidateProcesses } from './killcand.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export interface FeedbackItem {
@@ -75,6 +76,8 @@ export class AppUnderTest {
   }
 
   async start(): Promise<void> {
+    const ids = AppUnderTest.candidateIds();
+    if (ids && AppUnderTest.live === 0 && candidateProcessCount(ids.uid) !== 0) AppUnderTest.fatal(`candidate processes survived into the next case: ${candidateProcessListing(ids.uid)}`);
     if (this.port === 0) this.port = await freePort(); // restarts keep the port so open browser pages stay valid
     // a previous process (or a survivor of it) must not be mistaken for the one we are about to start
     if (await portOpen(this.port)) throw new Error(`port ${this.port} is already accepting connections before start; refusing to treat an old process as the new one`);
@@ -103,7 +106,11 @@ export class AppUnderTest {
       if (exited !== undefined) throw new Error(`app exited with code ${exited} before becoming healthy\n${this.log}`);
       try {
         const r = await fetch(`${this.url}/health`, { signal: AbortSignal.timeout(1000) });
-        if (r.status === 200) return;
+        if (r.status === 200) {
+          AppUnderTest.live++;
+          this.counted = true;
+          return;
+        }
       } catch {
         /* not up yet */
       }
@@ -113,16 +120,39 @@ export class AppUnderTest {
     throw new Error(`app did not become healthy within 45s\n${this.log}`);
   }
 
+  private static live = 0;
+  private counted = false;
+
+  /**
+   * Fail closed: if candidate processes cannot be stopped, record a fatal marker (the runner turns it into `error` for
+   * every FB-ID) and fail the case.
+   */
+  private static fatal(message: string): never {
+    const dir = process.env.VERIFY_REPORT_DIR;
+    if (dir) writeFileSync(join(dir, 'fatal.txt'), message);
+    throw new Error(`verifier fatal: ${message}`);
+  }
+
+  private static candidateIds(): { uid: number; gid: number } | null {
+    return process.env.VERIFY_CAND_UID ? { uid: Number(process.env.VERIFY_CAND_UID), gid: Number(process.env.VERIFY_CAND_GID) } : null;
+  }
+
   /** Between cases nothing the candidate started may still be running (daemons that left the process group). */
-  private killCandidateUser() {
-    if (process.env.VERIFY_CAND_UID) spawnSync('pkill', ['-9', '-U', process.env.VERIFY_CAND_UID]);
+  private static killCandidateUser() {
+    const c = AppUnderTest.candidateIds();
+    if (!c) return;
+    try {
+      killCandidateProcesses(c.uid, c.gid);
+    } catch (e) {
+      AppUnderTest.fatal((e as Error).message);
+    }
   }
 
   /** Really stops the process tree (SIGKILL: no graceful-shutdown help for durability). */
   async stop(): Promise<void> {
     const proc = this.proc;
     this.proc = null;
-    if (!proc || proc.pid === undefined) { this.killCandidateUser(); return; }
+    if (!proc || proc.pid === undefined) return;
     const done = new Promise<void>((r) => {
       if (proc.exitCode !== null || proc.signalCode !== null) r();
       else proc.once('exit', () => r());
@@ -139,7 +169,9 @@ export class AppUnderTest {
       survived = await portOpen(this.port);
       if (survived) await new Promise((r) => setTimeout(r, 100));
     }
-    this.killCandidateUser(); // report the survivor first (below), but never leave it running into the next case
+    if (this.counted) AppUnderTest.live--;
+    this.counted = false;
+    if (AppUnderTest.live === 0) AppUnderTest.killCandidateUser(); // report the survivor first (below), but never leave it running into the next case
     if (survived) throw new Error(`app still accepts connections on port ${this.port} after SIGKILL of its process group; it did not really stop`);
   }
 

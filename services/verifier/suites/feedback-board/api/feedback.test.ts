@@ -10,7 +10,10 @@ async function fresh(seed: boolean) {
   return { app, c: api(app) };
 }
 afterEach(async () => {
-  await Promise.all(started.splice(0).map((a) => a.stop()));
+  // wait for every stop (and the candidate-process cleanup after the last one) before reporting the first failure
+  const results = await Promise.allSettled(started.splice(0).map((a) => a.stop()));
+  const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
+  if (failed) throw failed.reason;
 });
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
