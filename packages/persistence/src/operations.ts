@@ -13,23 +13,29 @@ export interface OperationKey {
  * does not run. The primary-key insert decides the winner: a concurrent duplicate blocks on the
  * winner's uncommitted row, then sees the committed receipt. If the winner rolls back (including a
  * throw from `fn`), its receipt disappears and the next caller runs `fn`. Requires READ COMMITTED
- * (the default), and `fn`'s writes share `tx`, so effects and receipt commit together.
+ * (the default). ALL effects of the operation belong inside `fn`, using `tx`: only they commit or roll back
+ * together with the receipt; anything done outside `fn` is not protected by it. A SQL NULL receipt column
+ * is the in-flight placeholder and is never visible after commit.
  */
 export async function recordOperation<T>(tx: Tx, key: OperationKey, fn: () => Promise<T>): Promise<T> {
-  const inserted = await tx.execute(sql`
-    INSERT INTO operation_receipts (tenant_id, project_id, operation_key, receipt)
-    VALUES (${key.tenantId}, ${key.projectId}, ${key.key}, 'null'::jsonb)
-    ON CONFLICT (tenant_id, project_id, operation_key) DO NOTHING
-    RETURNING operation_key`);
-  if (inserted.length === 0) {
-    const rows = await tx.execute(sql`
-      SELECT receipt FROM operation_receipts
+  // A savepoint: if anything below throws (even if the caller catches it and commits the outer tx), the
+  // placeholder row and every write `fn` made are rolled back, so no incomplete receipt can survive.
+  return tx.transaction(async (sp) => {
+    const inserted = await sp.execute(sql`
+      INSERT INTO operation_receipts (tenant_id, project_id, operation_key, receipt)
+      VALUES (${key.tenantId}, ${key.projectId}, ${key.key}, NULL)
+      ON CONFLICT (tenant_id, project_id, operation_key) DO NOTHING
+      RETURNING operation_key`);
+    if (inserted.length === 0) {
+      const rows = await sp.execute(sql`
+        SELECT receipt FROM operation_receipts
+        WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND operation_key = ${key.key}`);
+      return rows[0]!['receipt'] as T;
+    }
+    const receipt = await fn();
+    await sp.execute(sql`
+      UPDATE operation_receipts SET receipt = ${JSON.stringify(receipt ?? null)}::jsonb
       WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND operation_key = ${key.key}`);
-    return rows[0]!['receipt'] as T;
-  }
-  const receipt = await fn();
-  await tx.execute(sql`
-    UPDATE operation_receipts SET receipt = ${JSON.stringify(receipt ?? null)}::jsonb
-    WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND operation_key = ${key.key}`);
-  return receipt;
+    return receipt;
+  });
 }

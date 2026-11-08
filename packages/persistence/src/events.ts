@@ -1,6 +1,6 @@
 import { EventEnvelopeSchema, type EventEnvelope } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
-import type { Executor } from './db.ts';
+import type { Executor, Tx } from './db.ts';
 import { events, outbox } from './schema/index.ts';
 
 export type NewEvent = Omit<EventEnvelope, 'sequence'> & { sequence?: number };
@@ -11,10 +11,10 @@ export type NewEvent = Omit<EventEnvelope, 'sequence'> & { sequence?: number };
  * `sequence` is assigned here, per project, gapless, from a counter row (`project_sequences`) that is
  * locked by the upsert until the transaction ends. Concurrent appenders for one project therefore
  * serialise on that row; a rollback restores the counter, so no number is ever consumed without a
- * committed event. A caller-supplied `sequence` is ignored. Do not call this outside a transaction
- * that also carries the state change, or the atomicity guarantee is lost.
+ * committed event. A caller-supplied `sequence` is ignored. The parameter is typed `Tx`, so a plain
+ * database handle (where the counter would autocommit and release its lock early) fails to compile.
  */
-export async function appendEvent(tx: Executor, input: NewEvent): Promise<EventEnvelope> {
+export async function appendEvent(tx: Tx, input: NewEvent): Promise<EventEnvelope> {
   const parsed = EventEnvelopeSchema.parse({ ...input, sequence: 0 });
 
   const rows = await tx.execute(sql`

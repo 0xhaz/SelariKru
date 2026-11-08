@@ -1,0 +1,6 @@
+ALTER TABLE "operation_receipts" ALTER COLUMN "receipt" DROP NOT NULL;--> statement-breakpoint
+ALTER TABLE "budget_reservations" ADD COLUMN "revision" integer;--> statement-breakpoint
+ALTER TABLE "approvals" ADD COLUMN "revision" integer;--> statement-breakpoint
+ALTER TABLE "budget_reservations" ADD CONSTRAINT "budget_reservations_tenant_id_project_id_task_id_revision_task_revisions_tenant_id_project_id_task_id_revision_fk" FOREIGN KEY ("tenant_id","project_id","task_id","revision") REFERENCES "public"."task_revisions"("tenant_id","project_id","task_id","revision") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "approvals" ADD CONSTRAINT "approvals_tenant_id_project_id_task_id_revision_task_revisions_tenant_id_project_id_task_id_revision_fk" FOREIGN KEY ("tenant_id","project_id","task_id","revision") REFERENCES "public"."task_revisions"("tenant_id","project_id","task_id","revision") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "events" ADD CONSTRAINT "events_tenant_id_project_id_attempt_id_attempts_tenant_id_project_id_attempt_id_fk" FOREIGN KEY ("tenant_id","project_id","attempt_id") REFERENCES "public"."attempts"("tenant_id","project_id","attempt_id") ON DELETE no action ON UPDATE no action;

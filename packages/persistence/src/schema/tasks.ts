@@ -120,6 +120,7 @@ export const budgetReservations = pgTable(
     reservationId: text('reservation_id').notNull(),
     runId: text('run_id').notNull(),
     taskId: text('task_id'),
+    revision: integer('revision'),
     amountUsd: text('amount_usd'), // decimal string; null means unknown, never zero
     state: text('state').notNull(),
     createdAt: createdAt(),
@@ -128,5 +129,9 @@ export const budgetReservations = pgTable(
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId, t.reservationId] }),
     foreignKey({ columns: [t.tenantId, t.projectId, t.runId], foreignColumns: [runs.tenantId, runs.projectId, runs.runId] }),
+    foreignKey({
+      columns: [t.tenantId, t.projectId, t.taskId, t.revision],
+      foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
+    }),
   ],
 );

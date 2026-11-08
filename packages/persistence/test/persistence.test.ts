@@ -125,6 +125,37 @@ describe('outbox delivery and cursors', () => {
   });
 });
 
+describe('outbox ordering under concurrent and restarted claimers', () => {
+  it('a claim held open by another connection blocks later rows for that project', async () => {
+    for (let i = 0; i < 5; i++) await withTx(t.db, (tx) => appendEvent(tx, envelope()));
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let claimedSignal!: () => void;
+    const claimed = new Promise<void>((r) => (claimedSignal = r));
+    let c1: number[] = [];
+    const tx1 = withTx(t.db, async (tx) => {
+      c1 = (await claimOutbox(tx, 'c1', 3)).map((e) => e.sequence);
+      claimedSignal();
+      await held;
+    });
+    await claimed;
+    const c2 = (await claimOutbox(t.db, 'c2', 10)).map((e) => e.sequence);
+    release();
+    await tx1;
+    expect(c1).toEqual([1, 2, 3]);
+    expect(c2).toEqual([]);
+  });
+
+  it('a restarted consumer with the same name cannot claim past its own live lease', async () => {
+    for (let i = 0; i < 5; i++) await withTx(t.db, (tx) => appendEvent(tx, envelope()));
+    const first = await claimOutbox(t.db, 'worker', 3); // crashes before delivering
+    expect(first.map((e) => e.sequence)).toEqual([1, 2, 3]);
+    expect(await claimOutbox(t.db, 'worker', 10)).toEqual([]);
+    await t.db.execute(sql`UPDATE outbox SET claim_expires_at = now() - interval '1 second' WHERE delivered_at IS NULL`);
+    expect((await claimOutbox(t.db, 'worker', 10)).map((e) => e.sequence)).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
 describe('operation receipts', () => {
   const key = { tenantId: TENANT, projectId: 'proj_a', key: 'op-1' };
 
@@ -159,11 +190,75 @@ describe('operation receipts', () => {
     expect(r).toBe('ok');
   });
 
+  it('a caught fn failure inside the tx leaves no receipt', async () => {
+    let runs = 0;
+    await withTx(t.db, async (tx) => {
+      await recordOperation(tx, { ...key, key: 'op-caught' }, async () => { runs++; throw new Error('inner'); }).catch(() => undefined);
+    });
+    expect(await count('operation_receipts')).toBe(0);
+    const r = await withTx(t.db, (tx) => recordOperation(tx, { ...key, key: 'op-caught' }, async () => { runs++; return 'second'; }));
+    expect(r).toBe('second');
+    expect(runs).toBe(2);
+  });
+
+  it('a non-serialisable receipt leaves no receipt when caught', async () => {
+    await withTx(t.db, async (tx) => {
+      await recordOperation(tx, { ...key, key: 'op-big' }, async () => 10n).catch(() => undefined);
+    });
+    expect(await count('operation_receipts')).toBe(0);
+  });
+
   it('scopes keys per project', async () => {
     await seedProject('proj_b');
     await withTx(t.db, (tx) => recordOperation(tx, key, async () => 'a'));
     const b = await withTx(t.db, (tx) => recordOperation(tx, { ...key, projectId: 'proj_b' }, async () => 'b'));
     expect(b).toBe('b');
+  });
+});
+
+describe('appendEvent transaction typing', () => {
+  it('rejects a plain db handle at compile time', async () => {
+    await withTx(t.db, async (tx) => {
+      // @ts-expect-error appendEvent requires a transaction
+      const f: () => Promise<unknown> = () => appendEvent(t.db, envelope());
+      expect(typeof f).toBe('function');
+      await appendEvent(tx, envelope());
+    });
+  });
+
+  it('a duplicate eventId fails the tx and consumes no sequence', async () => {
+    const e = envelope();
+    await withTx(t.db, (tx) => appendEvent(tx, e));
+    await expect(withTx(t.db, (tx) => appendEvent(tx, { ...e }))).rejects.toThrow();
+    const next = await withTx(t.db, (tx) => appendEvent(tx, envelope()));
+    expect(next.sequence).toBe(2);
+  });
+});
+
+describe('cross-project integrity (task, approval, budget, attempt refs)', () => {
+  beforeEach(async () => {
+    await seedProject('proj_b', TENANT, 'run_b');
+    await t.db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: 'proj_a', runId: 'run_a', taskId: 't1', revision: 1, boardId: 'b', spec: {} });
+    await t.db.insert(schema.attempts).values({ tenantId: TENANT, projectId: 'proj_a', attemptId: 'att1', taskId: 't1', revision: 1, attemptNumber: 1 });
+  });
+
+  it('budget_reservations rejects a task from another project, accepts own', async () => {
+    const row = (projectId: string, runId: string) => ({ tenantId: TENANT, projectId, reservationId: `r_${projectId}`, runId, taskId: 't1', revision: 1, state: 'held' });
+    await expect(t.db.insert(schema.budgetReservations).values(row('proj_b', 'run_b'))).rejects.toSatisfy(isFkViolation);
+    await t.db.insert(schema.budgetReservations).values(row('proj_a', 'run_a'));
+  });
+
+  it('approvals rejects a task from another project, accepts own', async () => {
+    const row = (projectId: string, runId: string) => ({ tenantId: TENANT, projectId, approvalId: `a_${projectId}`, runId, taskId: 't1', revision: 1, requester: 'u', actionHash: 'h', scopeHash: 's', outcome: 'pending' });
+    await expect(t.db.insert(schema.approvals).values(row('proj_b', 'run_b'))).rejects.toSatisfy(isFkViolation);
+    await t.db.insert(schema.approvals).values(row('proj_a', 'run_a'));
+  });
+
+  it('events rejects a nonexistent or foreign attempt, accepts own', async () => {
+    await expect(withTx(t.db, (tx) => appendEvent(tx, envelope({ attemptId: 'ghost' })))).rejects.toSatisfy(isFkViolation);
+    await expect(withTx(t.db, (tx) => appendEvent(tx, envelope({ projectId: 'proj_b', runId: 'run_b', attemptId: 'att1' })))).rejects.toSatisfy(isFkViolation);
+    const e = await withTx(t.db, (tx) => appendEvent(tx, envelope({ attemptId: 'att1' })));
+    expect(e.attemptId).toBe('att1');
   });
 });
 

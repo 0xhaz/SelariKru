@@ -2,8 +2,13 @@ import { bigint, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, u
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { sql } from 'drizzle-orm';
 import { projects, runs } from './projects.ts';
+import { attempts } from './tasks.ts';
 
-/** Append-only. `sequence` is server-assigned, per project, gapless, starting at 1. */
+/**
+ * Append-only.
+ * `task_id` deliberately has NO foreign key: the envelope requires a taskId even for run-level events, and the
+ * audit stream must not fail on a task reference. Project isolation is still enforced via the run FK.
+ * `sequence` is server-assigned, per project, gapless, starting at 1. */
 export const events = pgTable(
   'events',
   {
@@ -28,6 +33,7 @@ export const events = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.sequence] }),
     unique('events_event_id_key').on(t.eventId),
     foreignKey({ columns: [t.tenantId, t.projectId, t.runId], foreignColumns: [runs.tenantId, runs.projectId, runs.runId] }),
+    foreignKey({ columns: [t.tenantId, t.projectId, t.attemptId], foreignColumns: [attempts.tenantId, attempts.projectId, attempts.attemptId] }),
   ],
 );
 
@@ -90,7 +96,7 @@ export const operationReceipts = pgTable(
   {
     ...scope(),
     operationKey: text('operation_key').notNull(),
-    receipt: jsonb('receipt').$type<unknown>().notNull(),
+    receipt: jsonb('receipt').$type<unknown>(), // SQL NULL = in-flight placeholder, never visible after commit
     createdAt: createdAt(),
   },
   (t) => [

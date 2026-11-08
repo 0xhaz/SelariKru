@@ -57,6 +57,7 @@ export const approvals = pgTable(
     approvalId: text('approval_id').notNull(),
     runId: text('run_id'),
     taskId: text('task_id'),
+    revision: integer('revision'),
     requester: text('requester').notNull(),
     approver: text('approver'),
     actionHash: text('action_hash').notNull(),
@@ -71,6 +72,10 @@ export const approvals = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.approvalId] }),
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     foreignKey({ columns: [t.tenantId, t.projectId, t.runId], foreignColumns: [runs.tenantId, runs.projectId, runs.runId] }),
+    foreignKey({
+      columns: [t.tenantId, t.projectId, t.taskId, t.revision],
+      foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
+    }),
   ],
 );
 
