@@ -185,6 +185,41 @@ describe('device-only blocking', () => {
   });
 });
 
+describe('device-only enforced at the SDK boundary', () => {
+  it('PREFER_ON_DEVICE without approved fallback builds an ONLY_ON_DEVICE model with cloud disallowed', async () => {
+    const { adapter, sdk } = make();
+    const p = await adapter.draftBrief(req({ policy: policy({ preferredMode: 'PREFER_ON_DEVICE' }) }));
+    expect(p.requestedMode).toBe('PREFER_ON_DEVICE');
+    expect(sdk.specs).toHaveLength(1);
+    expect(sdk.specs[0]?.mode).toBe('ONLY_ON_DEVICE');
+    expect(sdk.specs[0]?.allowCloud).toBe(false);
+  });
+
+  it('ONLY_ON_DEVICE disallows cloud; approved PREFER_ON_DEVICE and cloud modes allow it; instances differ', async () => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: GOOD, inferenceSource: 'on_device' };
+    await adapter.draftBrief(req());
+    await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE') }));
+    await adapter.draftBrief(req({ policy: policy({ preferredMode: 'PREFER_ON_DEVICE' }) }));
+    expect(sdk.specs.map((s) => [s.mode, s.allowCloud])).toEqual([
+      ['ONLY_ON_DEVICE', false],
+      ['PREFER_ON_DEVICE', true],
+    ]);
+    // the no-fallback PREFER_ON_DEVICE request reuses the device-only instance
+  });
+
+  for (const src of [undefined, 'martian'] as const) {
+    it(`device-only with source ${src ?? 'absent'} withholds data as unverified`, async () => {
+      const { adapter, sdk } = make();
+      sdk.result = { text: GOOD, inferenceSource: src };
+      const p = await adapter.draftBrief(req());
+      expect(p.status).toBe('unverified_source');
+      expect(p.data).toBeNull();
+      expect(p.observedSource).toBe('UNKNOWN');
+    });
+  }
+});
+
 describe('PREFER_ON_DEVICE fallback', () => {
   const approved = () =>
     policy({

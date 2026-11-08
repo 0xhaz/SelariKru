@@ -39,11 +39,16 @@ export function createFirebaseSdk(cfg: FirebaseSdkConfig): AssistantSdk {
   const build = (spec: ModelSpec): GenerativeModel =>
     getGenerativeModel(ai, {
       mode: FbMode[spec.mode],
-      inCloudParams: {
-        model: CLOUD_MODEL,
-        systemInstruction: spec.systemInstruction,
-        generationConfig: { responseMimeType: 'application/json', responseJsonSchema: spec.schema },
-      },
+      // Omitted when cloud is disallowed so the SDK has nothing to fall back to.
+      ...(spec.allowCloud
+        ? {
+            inCloudParams: {
+              model: CLOUD_MODEL,
+              systemInstruction: spec.systemInstruction,
+              generationConfig: { responseMimeType: 'application/json' as const, responseJsonSchema: spec.schema },
+            },
+          }
+        : {}),
       onDeviceParams: {
         // The SDK ignores the request-level system instruction on-device.
         createOptions: { initialPrompts: [{ role: 'system', content: [{ type: 'text', value: spec.systemInstruction }] }] },
@@ -62,7 +67,7 @@ export function createFirebaseSdk(cfg: FirebaseSdkConfig): AssistantSdk {
       }
     },
     async initializeDeviceModel(onProgress) {
-      const m = build({ mode: 'ONLY_ON_DEVICE', systemInstruction: '', schema: { type: 'object' } });
+      const m = build({ mode: 'ONLY_ON_DEVICE', allowCloud: false, systemInstruction: '', schema: { type: 'object' } });
       await m.initializeDeviceModel(onProgress);
     },
     createModel(spec): SdkModel {

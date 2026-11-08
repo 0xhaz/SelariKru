@@ -25,7 +25,7 @@ export interface AssistRequest {
   readonly policy: Policy | undefined;
 }
 
-export type ProposalStatus = 'ok' | 'invalid' | 'blocked' | 'route_violation' | 'error';
+export type ProposalStatus = 'ok' | 'invalid' | 'blocked' | 'route_violation' | 'unverified_source' | 'error';
 
 export interface ProposalUsage {
   readonly status: 'observed' | 'unavailable';
@@ -55,6 +55,7 @@ export interface AssistantProposal {
   readonly timing: { readonly totalMs: number; readonly firstOutputMs: number | null };
   readonly usage: ProposalUsage;
   readonly validation: ProposalValidation;
+  /** Logical payload digest: SHA-256 of the UTF-8 system instruction, a blank line, then the prompt. Not a hash of SDK wire bytes. */
   readonly payloadSha256: string | null;
   /** For T3.2 semantic checks against the fixture context. */
   readonly allowedRequirementIds: readonly string[];
@@ -216,10 +217,11 @@ export class FirebaseHybridAssistantAdapter {
     const schema = narrowSchema(op, req.allowedRequirementIds);
     const prompt = composePrompt(req.taskText, req.allowedRequirementIds);
     const hash = await payloadSha256(systemInstruction, prompt);
-    const key = `${routed.mode}|${op}|${[...req.allowedRequirementIds].join(',')}`;
+    const effectiveMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : routed.mode;
+    const key = `${effectiveMode}|${deviceMustServe ? 'nocloud' : 'cloud'}|${op}|${[...req.allowedRequirementIds].join(',')}`;
     let model = this.models.get(key);
     if (!model) {
-      model = this.sdk.createModel({ mode: routed.mode, systemInstruction, schema });
+      model = this.sdk.createModel({ mode: effectiveMode, allowCloud: !deviceMustServe, systemInstruction, schema });
       this.models.set(key, model);
     }
     const m = model;
@@ -243,8 +245,11 @@ export class FirebaseHybridAssistantAdapter {
         : UNAVAILABLE_USAGE;
     const common = { requestedMode: routed.mode, observedSource, rawInferenceSource, usage, payloadSha256: hash };
 
-    if (observedSource === 'IN_CLOUD' && !routed.allowFallback && (routed.mode === 'ONLY_ON_DEVICE' || routed.mode === 'PREFER_ON_DEVICE')) {
-      return make({ ...common, status: 'route_violation', blockedReason: 'cloud_source_without_approval' });
+    // A response is on-device only if it says so. Withhold data otherwise.
+    if (deviceMustServe && observedSource !== 'ON_DEVICE') {
+      return observedSource === 'IN_CLOUD'
+        ? make({ ...common, status: 'route_violation', blockedReason: 'cloud_source_without_approval' })
+        : make({ ...common, status: 'unverified_source', blockedReason: 'source_not_shown_on_device' });
     }
 
     let parsed: unknown;

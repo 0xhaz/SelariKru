@@ -8,7 +8,10 @@ import type { InferenceMode } from '@selarikru/policy';
 export type DeviceAvailability = 'available' | 'downloadable' | 'downloading' | 'unavailable' | 'unknown';
 
 export interface ModelSpec {
+  /** Effective SDK mode. Device-only requests are always built as ONLY_ON_DEVICE. */
   readonly mode: InferenceMode;
+  /** False means the model must not be given any cloud params: the SDK cannot fall back to the cloud. */
+  readonly allowCloud: boolean;
   readonly systemInstruction: string;
   /** Request JSON Schema, already narrowed to this request's allowed requirement IDs. */
   readonly schema: Readonly<Record<string, unknown>>;
