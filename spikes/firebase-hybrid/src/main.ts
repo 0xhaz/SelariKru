@@ -8,7 +8,7 @@ import {
   type GenerativeModel,
 } from "firebase/ai";
 import Ajv from "ajv";
-import fixtures from "../../../docs/demo/brief-fixtures.json";
+import fixtures from "../fixtures/brief-fixtures.json";
 
 // Pinned cloud model (GA per https://firebase.google.com/docs/ai-logic/models).
 const CLOUD_MODEL = "gemini-3.5-flash-lite";

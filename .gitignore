@@ -12,3 +12,5 @@ coverage/
 .turbo/
 *.log
 .pgdata/
+docs/
+workplan.md
