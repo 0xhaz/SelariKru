@@ -1,5 +1,5 @@
 import { initializeApp, SDK_VERSION } from "firebase/app";
-import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import {
   getAI,
   getGenerativeModel,
@@ -35,12 +35,12 @@ if (siteKey) {
   }
   try {
     initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(siteKey),
+      provider: new ReCaptchaEnterpriseProvider(siteKey),
       isTokenAutoRefreshEnabled: true,
     });
     appCheckState = import.meta.env.DEV
       ? "configured (dev: debug provider; register the console debug token)"
-      : "configured (reCAPTCHA v3 production attestation)";
+      : "configured (Fraud Defense production attestation)";
   } catch (e) {
     appCheckState = `initialization FAILED: ${String(e)}`;
   }
