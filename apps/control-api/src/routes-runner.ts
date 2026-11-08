@@ -1,3 +1,4 @@
+import { TaskSpecSchema } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
 import type { Lease, LeaseConflict, PublishResult, Runner } from '@selarikru/workflow';
@@ -94,6 +95,21 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const result = await scheduler.heartbeat(await leaseFor(runner, body.lease));
     if (!result.ok) throw conflict(result.error);
     return reply.code(200).send(result.value);
+  });
+
+  /** The pinned task spec for a current lease: what to build, at which base, and the paths the attempt may touch. */
+  app.post('/v1/runners/task', guard, async (req, reply) => {
+    const runner = runnerOf(req);
+    const body = parseBody(HeartbeatRequestSchema, req.body);
+    const lease = await leaseFor(runner, body.lease);
+    // `leaseFor` rebuilds from the database, so the presented token and fence are checked here against the stored ones.
+    const held = (await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, runner.tenantId), eq(schema.attempts.attemptId, lease.attemptId))))[0];
+    if (!held || held.leaseToken !== body.lease.leaseToken || held.leaseFence !== body.lease.fence)
+      throw new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: lease.attemptId, fence: body.lease.fence });
+    const row = await loadSpecRow(db, { tenantId: lease.tenantId, projectId: lease.projectId, taskId: lease.taskId, revision: lease.revision });
+    const parsed = TaskSpecSchema.safeParse(row?.spec);
+    if (!parsed.success) throw new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: lease.attemptId, fence: lease.fence });
+    return reply.code(200).send({ task: parsed.data });
   });
 
   app.post('/v1/runners/result', guard, async (req, reply) => {

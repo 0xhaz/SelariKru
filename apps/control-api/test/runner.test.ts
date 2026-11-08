@@ -57,6 +57,20 @@ describe('runner routes', () => {
     expect(ev[0]).toMatchObject({ actor_kind: 'worker', actor_id: runnerId });
   });
 
+  it('the leased runner can read the pinned task spec, and nobody else can', async () => {
+    await seedTask(t.db, specFor('t1', { baseSha: 'b'.repeat(40), allowedPaths: ['src'] }), 'ready');
+    const { token } = await enrolRunner(h.app, 'local');
+    const as = bearer(token);
+    const claim = await post(h.app, '/v1/runners/claim', {}, as);
+    const ref = { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken };
+    const res = await post(h.app, '/v1/runners/task', { lease: ref }, as);
+    expect(res.status).toBe(200);
+    expect(res.body.task).toMatchObject({ taskId: 't1', baseSha: 'b'.repeat(40), allowedPaths: ['src'], title: 't1' });
+    expect((await post(h.app, '/v1/runners/task', { lease: { ...ref, leaseToken: 'nope' } }, as)).status).toBe(409);
+    const other = await enrolRunner(h.app, 'local');
+    expect((await post(h.app, '/v1/runners/task', { lease: ref }, bearer(other.token))).status).toBe(409);
+  });
+
   it('a run with no budget limit is not claimable, and the claim says why', async () => {
     await resetDb(t.db, {});
     await seedTask(t.db, specFor('t1'), 'ready');

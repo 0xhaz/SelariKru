@@ -1,0 +1,37 @@
+{
+  "name": "@selarikru/local-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Paired local runner: outbound-only host bridge that claims work from the control API and runs coding agents inside Docker Sandboxes.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "selarikru-runner": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@selarikru/artifacts": "workspace:*",
+    "@selarikru/domain": "workspace:*",
+    "@selarikru/harness-claude": "workspace:*",
+    "@selarikru/protocol": "workspace:*",
+    "@selarikru/runtime-docker-local": "workspace:*",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@selarikru/control-api": "workspace:*",
+    "@selarikru/workflow": "workspace:*",
+    "@types/node": "24.19.2",
+    "drizzle-orm": "0.45.4",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

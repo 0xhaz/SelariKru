@@ -113,6 +113,61 @@ importers:
         specifier: 8.3.6
         version: 8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
 
+  apps/local-runner:
+    dependencies:
+      '@selarikru/artifacts':
+        specifier: workspace:*
+        version: link:../../packages/artifacts
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../../packages/harness-claude
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@selarikru/runtime-docker-local':
+        specifier: workspace:*
+        version: link:../../packages/runtime-docker-local
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@selarikru/control-api':
+        specifier: workspace:*
+        version: link:../control-api
+      '@selarikru/workflow':
+        specifier: workspace:*
+        version: link:../../services/workflow
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  packages/artifacts:
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   packages/domain:
     dependencies:
       zod:
@@ -233,6 +288,25 @@ importers:
         specifier: 5.1.0
         version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  packages/runtime-docker-local:
+    dependencies:
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../harness-claude
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   services/verifier:
     devDependencies:
       '@playwright/test':
@@ -272,6 +346,25 @@ importers:
       postgres:
         specifier: 3.4.9
         version: 3.4.9
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  tests/conformance:
+    dependencies:
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@selarikru/runtime-docker-local':
+        specifier: workspace:*
+        version: link:../../packages/runtime-docker-local
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
       typescript:
         specifier: 5.9.3
         version: 5.9.3

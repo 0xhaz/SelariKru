@@ -1,0 +1,116 @@
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { vi } from 'vitest';
+import { LocalDiskArtifactStore } from '@selarikru/artifacts';
+import { initEvent } from '@selarikru/harness-claude/fixtures';
+import { SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
+import { FakeSbx, type FakeOptions, type FakeStream } from '@selarikru/runtime-docker-local/fake-sbx';
+import type { TaskSpec } from '@selarikru/domain';
+import type { LeaseRef } from '@selarikru/protocol';
+import { LeaseLostError, type ClaimedLease, type RunnerApi, type RunnerResult } from '../src/api.ts';
+
+export const resultLine = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, duration_ms: 10, total_cost_usd: 0.05, terminal_reason: 'completed', usage: { input_tokens: 6, output_tokens: 20 }, ...over });
+
+export interface World {
+  root: string;
+  repo: string;
+  sha: string;
+  workRoot: string;
+  sbx: FakeSbx;
+  runtime: SbxRuntimeAdapter;
+  artifacts: LocalDiskArtifactStore;
+  api: RunnerApi & { published: RunnerResult[]; heartbeats: number };
+  lease: ClaimedLease;
+  task: TaskSpec;
+  logs: string[];
+  cleanup(): Promise<void>;
+}
+
+export interface WorldOptions {
+  fake?: FakeOptions;
+  /** What the scripted agent does inside its workspace. Returns false to leave the run open (for cancel tests). */
+  agent?: (ctx: { stream: FakeStream; cwd: string; write(rel: string, body: string): Promise<void> }) => Promise<boolean | void>;
+  heartbeat?: (n: number) => Promise<{ cancelRequested: boolean }>;
+  task?: Partial<TaskSpec>;
+  publishThrows?: boolean;
+}
+
+export async function makeWorld(o: WorldOptions = {}): Promise<World> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'runner-')));
+  const repo = join(root, 'source-repo');
+  await mkdir(repo);
+  const git = (...a: string[]) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' }).trim();
+  execFileSync('git', ['init', '-q', repo]);
+  git('config', 'user.email', 't@t');
+  git('config', 'user.name', 't');
+  for (const [p, b] of Object.entries({ 'src/app.ts': 'export const a = 1;\n', 'contract/runtime.md': '# contract\n', 'tools/verifier-calibration/secret.json': '{}' })) {
+    await mkdir(dirname(join(repo, p)), { recursive: true });
+    await writeFile(join(repo, p), b);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'base');
+  const sha = git('rev-parse', 'HEAD');
+
+  const workRoot = join(root, 'work');
+  const logs: string[] = [];
+  const fake: FakeOptions = {
+    ...o.fake,
+    onStream: (stream, args) => {
+      const cwd = args[2]!;
+      const write = async (rel: string, body: string) => {
+        await mkdir(dirname(join(cwd, rel)), { recursive: true });
+        await writeFile(join(cwd, rel), body);
+      };
+      void (async () => {
+        stream.push(`${initEvent}\n`);
+        const keepOpen = o.agent ? (await o.agent({ stream, cwd, write })) === false : false;
+        if (keepOpen) return;
+        stream.push(`${resultLine()}\n`);
+        stream.end(0);
+      })();
+    },
+  };
+  const sbx = new FakeSbx(fake);
+  sbx.addForeign('hq-askwell-jim');
+  const runtime = new SbxRuntimeAdapter(sbx, {
+    home: '/Users/nobody',
+    forbidden: ['/repo/selarikru'],
+    attemptsRoot: join(workRoot, 'attempts'),
+    timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 },
+  });
+  const artifacts = new LocalDiskArtifactStore(join(root, 'artifacts'));
+
+  const task: TaskSpec = {
+    schemaVersion: 1, tenantId: 'ten', projectId: 'proj1', runId: 'run1', taskId: 'task1', boardId: 'b1', revision: 1, role: 'backend', title: 'Add the thing',
+    baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
+    classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
+  } as TaskSpec;
+  const lease: ClaimedLease = { attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString() };
+
+  let hb = 0;
+  const published: RunnerResult[] = [];
+  const api = {
+    published,
+    get heartbeats() {
+      return hb;
+    },
+    claim: vi.fn(async () => ({ lease, reason: null })),
+    task: vi.fn(async (_l: LeaseRef) => task),
+    heartbeat: vi.fn(async (_l: LeaseRef) => {
+      hb += 1;
+      return o.heartbeat ? o.heartbeat(hb) : { cancelRequested: false };
+    }),
+    result: vi.fn(async (_l: LeaseRef, r: RunnerResult) => {
+      if (o.publishThrows) throw new LeaseLostError();
+      published.push(r);
+    }),
+  } as unknown as World['api'];
+
+  return {
+    root, repo, sha, workRoot, sbx, runtime, artifacts, api, lease, task, logs,
+    cleanup: () => rm(root, { recursive: true, force: true }),
+  };
+}

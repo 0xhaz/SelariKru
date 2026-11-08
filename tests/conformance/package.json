@@ -1,0 +1,20 @@
+{
+  "name": "@selarikru/conformance-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reusable adapter conformance suites. The local sbx adapter runs runtime.ts against a fake always and against real sbx when SELARIKRU_REAL_SBX=1; the cloud adapter will run the same suite.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@selarikru/protocol": "workspace:*",
+    "@selarikru/runtime-docker-local": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

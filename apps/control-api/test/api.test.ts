@@ -40,6 +40,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],
   ['POST', '/v1/runners/heartbeat'],
   ['POST', '/v1/runners/result'],
+  ['POST', '/v1/runners/task'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 
