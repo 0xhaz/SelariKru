@@ -1,0 +1,18 @@
+# Throwaway Postgres for tests only. Credentials are not secrets.
+name: selarikru
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_USER: selarikru_test
+      POSTGRES_PASSWORD: selarikru_test
+      POSTGRES_DB: selarikru_test
+    ports:
+      - "127.0.0.1:54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U selarikru_test -d selarikru_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
