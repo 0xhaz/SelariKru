@@ -23,3 +23,24 @@ export function hashTree(root: string, opts: { exclude?: (relPath: string) => bo
   walk('');
   return sha256(lines.join(''));
 }
+
+export const HASH_KEYS = ['manifestSha256', 'suiteSha256', 'runnerSha256', 'dockerfileSha256', 'packageJsonSha256', 'lockfileSha256', 'verifierSha256'] as const;
+
+/**
+ * Everything that decides a verdict: the suite (tests, configs, fixtures, manifest), the runner, the Dockerfile
+ * (pinned base images), the package manifest and the root lockfile (locked tool versions).
+ * `pkgRoot` = services/verifier, `repoRoot` = directory holding pnpm-lock.yaml (same relative layout in the image).
+ */
+export function verifierHashes(pkgRoot: string, repoRoot: string): Record<(typeof HASH_KEYS)[number], string> {
+  const suite = join(pkgRoot, 'suites/feedback-board');
+  const parts = {
+    manifestSha256: sha256(readFileSync(join(suite, 'manifest.json'))),
+    suiteSha256: hashTree(suite, { exclude: (p) => p === 'HASHES.json' }),
+    runnerSha256: hashTree(join(pkgRoot, 'src')),
+    dockerfileSha256: sha256(readFileSync(join(pkgRoot, 'Dockerfile'))),
+    packageJsonSha256: sha256(readFileSync(join(pkgRoot, 'package.json'))),
+    lockfileSha256: sha256(readFileSync(join(repoRoot, 'pnpm-lock.yaml'))),
+  };
+  const verifierSha256 = sha256(Object.entries(parts).map(([k, v]) => `${k}=${v}\n`).join(''));
+  return { ...parts, verifierSha256 };
+}

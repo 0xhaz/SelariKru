@@ -68,6 +68,41 @@ describe('feedback API', () => {
     expect((await bad.c.list()).body.counts.all).toBe(0);
   });
 
+  it('FB-01 counting: code points after trimming, separate title and description limits, no normalization', async () => {
+    const accepted: Array<[string, { title: string; description?: string }, { title: string; description: string }]> = [
+      ['120 characters surrounded by whitespace', { title: `  ${'a'.repeat(120)}  ` }, { title: 'a'.repeat(120), description: '' }],
+      ['120 code points made of combining marks', { title: 'e\u0301'.repeat(60) }, { title: 'e\u0301'.repeat(60), description: '' }],
+      ['title kept in decomposed form (no NFC)', { title: 'e\u0301bc', description: 'Cafe\u0301' }, { title: 'e\u0301bc', description: 'Cafe\u0301' }],
+      ['1,000 astral code points in the description', { title: 'Valid title', description: '🌱'.repeat(1000) }, { title: 'Valid title', description: '🌱'.repeat(1000) }],
+      ['1,000 characters surrounded by whitespace in the description', { title: 'Valid title', description: ` ${'d'.repeat(1000)} ` }, { title: 'Valid title', description: 'd'.repeat(1000) }],
+    ];
+    for (const [label, payload, expected] of accepted) {
+      const { c } = await fresh(false);
+      const res = await c.create(payload);
+      expect(res.status, label).toBe(201);
+      expect(res.body.item.title, label).toBe(expected.title);
+      expect(res.body.item.description, label).toBe(expected.description);
+      const stored = (await c.list()).body.items[0];
+      expect(stored.title, label).toBe(expected.title);
+      expect(stored.description, label).toBe(expected.description);
+    }
+  });
+
+  it('FB-02 counting: trimming happens before counting; code points, not UTF-16 units or graphemes', async () => {
+    const rejected: Array<[string, { title: string; description?: string }]> = [
+      ['two characters surrounded by whitespace', { title: '  ab  ' }],
+      ['two astral code points (four UTF-16 units)', { title: '🌱🌱' }],
+      ['122 code points forming 61 graphemes', { title: 'e\u0301'.repeat(61) }],
+      ['1,001 astral code points in the description', { title: 'Valid title', description: '🌱'.repeat(1001) }],
+      ['1,002 code points forming 501 graphemes in the description', { title: 'Valid title', description: 'e\u0301'.repeat(501) }],
+    ];
+    for (const [label, payload] of rejected) {
+      const { c } = await fresh(true);
+      expectError(await c.create(payload), 400);
+      expect((await c.list()).body.counts, label).toEqual(counts(3, 1, 1, 1));
+    }
+  });
+
   it('FB-02 reject: invalid input returns 400 and leaves the row count unchanged', async () => {
     const creates: Array<[string, unknown]> = [
       ['whitespace-only title', { title: '   ' }],

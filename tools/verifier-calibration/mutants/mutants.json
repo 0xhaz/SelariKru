@@ -1,0 +1,47 @@
+[
+  {
+    "id": "survivor-after-sigkill",
+    "covers": "Important 1: a process that escapes the process group keeps serving after the harness kills the app, so FB-06 would pass without a restart",
+    "mustFail": ["FB-06"],
+    "patches": [
+      {
+        "file": "server/index.ts",
+        "find": "import { createApp } from './app';",
+        "replace": "import { spawn } from 'node:child_process';\nimport { createApp } from './app';\nif (!process.env.SURVIVOR_CHILD) {\n  spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], { detached: true, stdio: 'ignore', env: { ...process.env, SURVIVOR_CHILD: '1' } }).unref();\n  await new Promise(() => {});\n}"
+      }
+    ]
+  },
+  {
+    "id": "network-failure-not-reported",
+    "covers": "Important 2: HTTP 500 is reported but a rejected fetch is silently ignored",
+    "mustFail": ["FB-07"],
+    "patches": [
+      { "file": "src/App.tsx", "find": "  } catch {\n    throw new Error('Could not reach the server. Check your connection and try again.');", "replace": "  } catch (e) {\n    throw e;" },
+      { "file": "src/App.tsx", "find": "    } catch (err) {\n      setError((err as Error).message);\n    } finally {\n      setBusy(false);", "replace": "    } catch (err) {\n      if (!(err instanceof TypeError)) setError((err as Error).message);\n    } finally {\n      setBusy(false);" }
+    ]
+  },
+  {
+    "id": "count-before-trim",
+    "covers": "Important 4: title length counted before trimming",
+    "mustFail": ["FB-01", "FB-02"],
+    "patches": [{ "file": "server/app.ts", "find": "if (points(title) < 3 || points(title) > 120)", "replace": "if (points(body.title as string) < 3 || points(body.title as string) > 120)" }]
+  },
+  {
+    "id": "description-utf16-length",
+    "covers": "Important 4: description counted in UTF-16 units",
+    "mustFail": ["FB-01"],
+    "patches": [{ "file": "server/app.ts", "find": "if (points(description) > 1000)", "replace": "if (description.length > 1000)" }]
+  },
+  {
+    "id": "grapheme-counting",
+    "covers": "Important 4: lengths counted in grapheme clusters",
+    "mustFail": ["FB-02"],
+    "patches": [{ "file": "server/app.ts", "find": "const points = (s: string) => [...s].length;", "replace": "const points = (s: string) => [...new Intl.Segmenter().segment(s)].length;" }]
+  },
+  {
+    "id": "nfc-normalization",
+    "covers": "Important 4: stored title is silently NFC-normalized",
+    "mustFail": ["FB-01"],
+    "patches": [{ "file": "server/app.ts", "find": "title = body.title.trim();", "replace": "title = body.title.trim().normalize('NFC');" }]
+  }
+]

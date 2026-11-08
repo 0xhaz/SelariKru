@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,17 @@ function appDir(): string {
   const dir = process.env.VERIFY_APP_DIR;
   if (!dir) throw new Error('VERIFY_APP_DIR is not set (the runner provides the built candidate copy)');
   return resolve(dir);
+}
+
+/** True if something accepts TCP connections on the port. */
+function portOpen(port: number): Promise<boolean> {
+  return new Promise((res) => {
+    const sock = connect({ port, host: '127.0.0.1' });
+    const done = (v: boolean) => { sock.destroy(); res(v); };
+    sock.setTimeout(500, () => done(false));
+    sock.once('connect', () => done(true));
+    sock.once('error', () => done(false));
+  });
 }
 
 async function freePort(): Promise<number> {
@@ -47,10 +58,12 @@ export class AppUnderTest {
     const base = process.env.VERIFY_RUN_DIR ?? tmpdir();
     mkdirSync(base, { recursive: true });
     const dir = mkdtempSync(join(base, 'case-'));
+    // the app runs as an unprivileged user in the image and must be able to create its database here
+    if (process.env.VERIFY_CAND_UID) chmodSync(dir, 0o777);
     this.dbPath = join(dir, 'feedback.sqlite');
     if (opts.seed) {
       this.seedFile = join(dir, 'seed.json');
-      writeFileSync(this.seedFile, JSON.stringify({ items: SEED_ITEMS }, null, 2));
+      writeFileSync(this.seedFile, JSON.stringify({ items: SEED_ITEMS }, null, 2), { mode: 0o644 });
     } else {
       this.seedFile = null;
     }
@@ -62,16 +75,18 @@ export class AppUnderTest {
 
   async start(): Promise<void> {
     if (this.port === 0) this.port = await freePort(); // restarts keep the port so open browser pages stay valid
+    // a previous process (or a survivor of it) must not be mistaken for the one we are about to start
+    if (await portOpen(this.port)) throw new Error(`port ${this.port} is already accepting connections before start; refusing to treat an old process as the new one`);
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
-      HOME: process.env.HOME,
+      HOME: process.env.VERIFY_CAND_HOME ?? process.env.HOME,
       NODE_ENV: 'production',
       PORT: String(this.port),
       FEEDBACK_DB_PATH: this.dbPath,
     };
     if (this.seedFile) env.FEEDBACK_SEED_FILE = this.seedFile;
     this.log = '';
-    const proc = spawn('pnpm', ['start'], { cwd: appDir(), env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn('pnpm', ['start'], { cwd: appDir(), env, detached: true, stdio: ['ignore', 'pipe', 'pipe'], ...(process.env.VERIFY_CAND_UID ? { uid: Number(process.env.VERIFY_CAND_UID), gid: Number(process.env.VERIFY_CAND_GID) } : {}) });
     this.proc = proc;
     const append = (b: Buffer) => {
       this.log = (this.log + b.toString()).slice(-4000);
@@ -93,7 +108,7 @@ export class AppUnderTest {
       }
       await new Promise((r) => setTimeout(r, 150));
     }
-    await this.stop();
+    await this.stop().catch(() => undefined);
     throw new Error(`app did not become healthy within 45s\n${this.log}`);
   }
 
@@ -112,15 +127,12 @@ export class AppUnderTest {
       /* already gone */
     }
     await Promise.race([done, new Promise((r) => setTimeout(r, 5000))]);
-    // the grandchild listening socket can outlive the parent by a moment
+    // the listener must really be gone; a process that escaped the group (setsid, fork) would keep serving old data
     for (let i = 0; i < 50; i++) {
-      try {
-        await fetch(`${this.url}/health`, { signal: AbortSignal.timeout(300) });
-      } catch {
-        return;
-      }
+      if (!(await portOpen(this.port))) return;
       await new Promise((r) => setTimeout(r, 100));
     }
+    throw new Error(`app still accepts connections on port ${this.port} after SIGKILL of its process group; it did not really stop`);
   }
 
   async restart(): Promise<void> {

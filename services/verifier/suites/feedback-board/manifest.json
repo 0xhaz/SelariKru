@@ -8,7 +8,7 @@
     "pnpm": "9.12.2",
     "vitest": "5.1.0",
     "@playwright/test": "1.65.0",
-    "playwrightImage": "mcr.microsoft.com/playwright:v1.65.0-noble",
+    "playwrightImage": "mcr.microsoft.com/playwright:v1.65.0-noble@sha256:6e3fb709361521eb27161606e6da6d2674e5e89fa16516cb37d6fdd91372273d",
     "browser": "chromium"
   },
   "criteria": [
@@ -26,6 +26,11 @@
           "title": "FB-01 astral boundary: 120 astral characters accepted, 121 rejected (code points, not UTF-16 units)"
         },
         {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-01 counting: code points after trimming, separate title and description limits, no normalization"
+        },
+        {
           "runner": "playwright",
           "file": "browser/feedback.spec.ts",
           "title": "FB-01 create: submitting the form shows the saved, trimmed item and persists it"
@@ -35,6 +40,11 @@
     {
       "id": "FB-02",
       "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-02 counting: trimming happens before counting; code points, not UTF-16 units or graphemes"
+        },
         {
           "runner": "vitest",
           "file": "api/feedback.test.ts",

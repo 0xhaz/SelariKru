@@ -3,12 +3,12 @@
 // CANDIDATE_DIR is read-only input: it is copied to a fresh temp directory before anything is installed or built,
 // so the candidate cannot write into the suite or the results. Results come only from the reports that the
 // suite's own Vitest and Playwright runs write into a runner-owned directory, never from candidate-authored files.
-import { spawn } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hashTree, sha256 } from './hashing.ts';
+import { HASH_KEYS, hashTree, verifierHashes } from './hashing.ts';
 
 type Status = 'passed' | 'failed' | 'skipped' | 'error';
 interface ManifestTest { runner: 'vitest' | 'playwright'; file: string; title: string }
@@ -18,12 +18,21 @@ interface Observed { status: Status; message?: string }
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = resolve(here, '..');
 const suiteDir = join(pkgRoot, 'suites/feedback-board');
+const repoRoot = resolve(pkgRoot, '../..');
+/** In the image, candidate code runs as an unprivileged user that cannot write the verifier tree or the reports. */
+const CAND = process.env.VERIFY_CAND_UID ? { uid: Number(process.env.VERIFY_CAND_UID), gid: Number(process.env.VERIFY_CAND_GID ?? process.env.VERIFY_CAND_UID), home: process.env.VERIFY_CAND_HOME ?? '/home/cand' } : null;
+const killCandidateProcesses = () => { if (CAND) spawnSync('pkill', ['-9', '-U', String(CAND.uid)]); };
+function chownTree(path: string) {
+  if (!CAND) return;
+  chownSync(path, CAND.uid, CAND.gid);
+  if (lstatSync(path).isDirectory()) for (const n of readdirSync(path)) chownTree(join(path, n));
+}
 const ANSI = /\u001b\[[0-9;]*m/g;
 const clip = (s: string, n = 2000) => (s.length > n ? `${s.slice(0, n)}...[truncated]` : s);
 
-function sh(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ code: number | null; output: string }> {
+function sh(cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; asCandidate?: boolean }): Promise<{ code: number | null; output: string }> {
   return new Promise((res) => {
-    const p = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: opts.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'], ...(opts.asCandidate && CAND ? { uid: CAND.uid, gid: CAND.gid } : {}) });
     let out = '';
     const add = (b: Buffer) => { out = (out + b.toString()).slice(-8000); };
     p.stdout.on('data', add);
@@ -84,6 +93,14 @@ function copyCandidate(src: string, dest: string) {
   });
 }
 
+function integrity(): string | null {
+  const recorded = readJson(join(suiteDir, 'HASHES.json'));
+  if (!recorded) return 'HASHES.json is missing or unreadable';
+  const actual = verifierHashes(pkgRoot, repoRoot);
+  const bad = HASH_KEYS.filter((k) => recorded[k] !== actual[k]);
+  return bad.length ? `verifier integrity check failed (changed: ${bad.join(', ')}); refusing to produce a verdict` : null;
+}
+
 async function main() {
   const candidateDir = resolve(process.env.CANDIDATE_DIR ?? process.argv[2] ?? '');
   const resultsArg = process.env.RESULTS_PATH ?? process.argv[3];
@@ -91,47 +108,67 @@ async function main() {
   if (!resultsArg) throw new Error('RESULTS_PATH is required');
   const resultsPath = resolve(resultsArg);
   if (!existsSync(join(candidateDir, 'package.json'))) throw new Error(`CANDIDATE_DIR has no package.json: ${candidateDir}`);
+  if (CAND && process.getuid?.() !== 0) throw new Error('isolation requires the runner to start as root');
 
   const manifestRaw = readFileSync(join(suiteDir, 'manifest.json'));
   const manifest: Manifest = JSON.parse(manifestRaw.toString());
   const work = mkdtempSync(join(tmpdir(), 'selarikru-verify-'));
+  chmodSync(work, 0o755);
   const cand = join(work, 'candidate');
-  const reports = join(work, 'reports');
+  const reports = join(work, 'reports'); // root-owned: the candidate user can read but never write it
   const runs = join(work, 'runs');
-  mkdirSync(reports);
+  mkdirSync(reports, { mode: 0o755 });
   mkdirSync(runs);
   copyCandidate(candidateDir, cand);
   const candidateTreeSha256 = hashTree(cand);
+  chownTree(cand);
+  if (CAND) { chownSync(runs, CAND.uid, CAND.gid); mkdirSync(CAND.home, { recursive: true }); }
 
-  const baseEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, CI: 'true', LANG: 'C.UTF-8', PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH };
+  const baseEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: CAND?.home ?? process.env.HOME, CI: 'true', LANG: 'C.UTF-8', PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH };
   const started = new Date();
   const setup: Record<string, { ok: boolean; detail?: string }> = {};
   const observed = { vitest: new Map<string, Observed>(), playwright: new Map<string, Observed>() };
-  let setupFailure: string | null = null;
+  let setupFailure: string | null = integrity();
+  const showSetup = process.env.VERIFY_SHOW_SETUP === '1';
 
-  const install = await sh('pnpm', ['install', '--frozen-lockfile'], { cwd: cand, env: baseEnv, timeoutMs: 600_000 });
-  setup.install = { ok: install.code === 0, ...(install.code === 0 ? {} : { detail: clip(install.output) }) };
-  if (install.code !== 0) setupFailure = `pnpm install --frozen-lockfile failed (exit ${install.code}): ${clip(install.output, 1500)}`;
   if (!setupFailure) {
-    const build = await sh('pnpm', ['build'], { cwd: cand, env: baseEnv, timeoutMs: 600_000 });
-    setup.build = { ok: build.code === 0, ...(build.code === 0 ? {} : { detail: clip(build.output) }) };
+    const install = await sh('pnpm', ['install', '--frozen-lockfile'], { cwd: cand, env: baseEnv, timeoutMs: 600_000, asCandidate: true });
+    setup.install = { ok: install.code === 0, ...(install.code === 0 && !showSetup ? {} : { detail: clip(install.output) }) };
+    if (install.code !== 0) setupFailure = `pnpm install --frozen-lockfile failed (exit ${install.code}): ${clip(install.output, 1500)}`;
+  }
+  if (!setupFailure) {
+    const build = await sh('pnpm', ['build'], { cwd: cand, env: baseEnv, timeoutMs: 600_000, asCandidate: true });
+    setup.build = { ok: build.code === 0, ...(build.code === 0 && !showSetup ? {} : { detail: clip(build.output) }) };
     if (build.code !== 0) setupFailure = `pnpm build failed (exit ${build.code}): ${clip(build.output, 1500)}`;
+  }
+  killCandidateProcesses();
+  // the candidate's install/build ran first; check again that nothing the verdict depends on changed
+  let tampered: string | null = null;
+  if (!setupFailure) {
+    tampered = integrity();
+    if (tampered) setupFailure = tampered;
   }
 
   if (!setupFailure) {
-    const env: NodeJS.ProcessEnv = { ...baseEnv, VERIFY_APP_DIR: cand, VERIFY_RUN_DIR: runs, VERIFY_REPORT_DIR: reports };
+    const env: NodeJS.ProcessEnv = { ...baseEnv, HOME: process.env.HOME, VERIFY_APP_DIR: cand, VERIFY_RUN_DIR: runs, VERIFY_REPORT_DIR: reports, ...(CAND ? { VERIFY_CAND_UID: String(CAND.uid), VERIFY_CAND_GID: String(CAND.gid), VERIFY_CAND_HOME: CAND.home } : {}) };
     const v = await sh('pnpm', ['exec', 'vitest', 'run', '--config', join(suiteDir, 'vitest.config.ts'), '--reporter=json', `--outputFile=${join(reports, 'vitest.json')}`], { cwd: pkgRoot, env, timeoutMs: 1_200_000 });
     setup.apiSuite = { ok: v.code === 0, detail: clip(v.output, 500) };
+    killCandidateProcesses();
     observed.vitest = vitestResults(readJson(join(reports, 'vitest.json')));
     const p = await sh('pnpm', ['exec', 'playwright', 'test', '--config', join(suiteDir, 'playwright.config.ts')], { cwd: pkgRoot, env, timeoutMs: 1_200_000 });
     setup.browserSuite = { ok: p.code === 0, detail: clip(p.output, 500) };
+    killCandidateProcesses();
     observed.playwright = playwrightResults(readJson(join(reports, 'playwright.json')));
   }
 
+  const finalIntegrity = integrity();
+  const failure = setupFailure ?? finalIntegrity;
+  const failStatus: Status = failure && (failure === tampered || failure === finalIntegrity) && failure.startsWith('verifier integrity') ? 'error' : 'failed';
+
   const criteria = manifest.criteria.map((c) => {
     const tests = c.tests.map((t) => {
-      const o: Observed = setupFailure
-        ? { status: 'failed', message: setupFailure }
+      const o: Observed = failure
+        ? { status: failStatus, message: failure }
         : (observed[t.runner].get(t.title) ?? { status: 'error', message: `no ${t.runner} result for this test (verifier did not produce a report entry)` });
       return { runner: t.runner, title: t.title, status: o.status, ...(o.message ? { message: o.message } : {}) };
     });
@@ -146,17 +183,16 @@ async function main() {
     };
   });
 
-  const allPassed = criteria.length === 8 && criteria.every((c) => c.status === 'passed');
-  const hashes = readJson(join(suiteDir, 'HASHES.json'));
+  const allPassed = criteria.length === 8 && criteria.every((c) => c.status === 'passed') && !failure;
   const result = {
     protocolVersion: '0.1',
     verifier: {
       suiteId: manifest.suiteId,
       suiteVersion: manifest.version,
-      manifestSha256: sha256(manifestRaw),
-      verifierSha: hashTree(suiteDir, { exclude: (p) => p === 'HASHES.json' }),
-      recordedHashes: hashes,
+      ...verifierHashes(pkgRoot, repoRoot),
+      recordedHashes: readJson(join(suiteDir, 'HASHES.json')),
       image: process.env.VERIFY_IMAGE ?? null,
+      isolation: CAND ? `candidate code runs as uid ${CAND.uid}` : 'none (local run)',
       tools: { node: process.version, vitest: pkgVersion('vitest'), playwright: pkgVersion('@playwright/test') },
     },
     candidate: { treeSha256: candidateTreeSha256 },
@@ -166,6 +202,7 @@ async function main() {
     quality: { allRequiredChecksPassed: allPassed, criteria },
   };
 
+  killCandidateProcesses(); // nothing candidate-owned may be alive when results are written
   mkdirSync(dirname(resultsPath), { recursive: true });
   const tmp = `${resultsPath}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(result, null, 2)}\n`);

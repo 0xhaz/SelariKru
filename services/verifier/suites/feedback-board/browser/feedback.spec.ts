@@ -78,6 +78,9 @@ test('FB-02 reject: invalid titles show a readable error and nothing is saved', 
   await page.goto(empty.url);
   const u = ui(page);
   for (const bad of ['ab', '   ', 'a'.repeat(121)]) {
+    await page.reload(); // fresh page: a previous alert must not satisfy the next assertion
+    await expect(u.title).toBeVisible();
+    await expect(u.alert).toHaveCount(0);
     await u.title.fill(bad);
     await u.submit.click();
     await expect(u.alert.first()).toBeVisible();
@@ -190,6 +193,9 @@ test('FB-07 states: loading, empty, failed load and failed writes are usable and
   await expectCounts(page, 3, 1, 1, 1);
   expect((await api(seeded).list()).body.counts.all).toBe(3);
   await page.unrouteAll({ behavior: 'wait' });
+  await page.reload();
+  await expect(u.items).toHaveCount(3);
+  await expect(u.alert).toHaveCount(0); // no stale alert may satisfy the next phase
 
   // failed write (network abort)
   await page.route('**/api/feedback', async (route) => {
@@ -197,14 +203,19 @@ test('FB-07 states: loading, empty, failed load and failed writes are usable and
     else await route.continue();
   });
   await add(page, 'Never saved either');
-  await expect(u.alert.first()).toBeVisible();
+  await expect(u.alert).toHaveCount(1);
+  expect(((await u.alert.first().textContent()) ?? '').trim().length).toBeGreaterThan(0);
   await expect(u.item('Never saved either')).toHaveCount(0);
+  await expect(u.title).toBeEnabled(); // still usable after the network failure
+  await expect(u.submit).toBeEnabled();
   await page.unrouteAll({ behavior: 'wait' });
   await page.reload();
+  await expect(u.alert).toHaveCount(0);
   await expect(u.items).toHaveCount(3);
   await expect(u.item('Never saved')).toHaveCount(0);
 
   // failed status update: the card must not show the unsaved status
+  await expect(u.alert).toHaveCount(0);
   await page.route('**/api/feedback/*', async (route) => {
     if (route.request().method() === 'PATCH') await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'boom', message: 'forced failure' } }) });
     else await route.continue();
@@ -214,6 +225,9 @@ test('FB-07 states: loading, empty, failed load and failed writes are usable and
   await expect(u.item('Add dark mode').getByRole('combobox', { name: 'Status', exact: true })).toHaveValue('open');
   await expectCounts(page, 3, 1, 1, 1);
   await page.unrouteAll({ behavior: 'wait' });
+  await page.reload();
+  await expect(u.items).toHaveCount(3);
+  await expect(u.alert).toHaveCount(0);
 
   // failed load: error shown, and not mislabelled as empty
   await page.route('**/api/feedback*', async (route) => {
@@ -265,12 +279,7 @@ test('FB-08 a11y and safety: accessible names, keyboard-only flow, script text r
   await page.reload();
   await expect(u.item('Keyboard item')).toBeVisible();
   await tabUntil(() => select.evaluate((e) => e === document.activeElement));
-  await page.keyboard.press('ArrowDown');
-  if ((await select.inputValue()) === 'open') {
-    // some platforms open the popup instead of changing the value; finish the selection from the keyboard
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
-  }
+  await page.keyboard.press('ArrowDown'); // exactly one press: open -> planned (Linux Chromium in the verifier image)
   await expect(select).toHaveValue('planned');
   await expect.poll(async () => (await api(empty).list()).body.items[0].status).toBe('planned');
 

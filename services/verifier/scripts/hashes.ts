@@ -3,27 +3,22 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hashTree, sha256 } from '../src/hashing.ts';
+import { HASH_KEYS, hashTree, verifierHashes } from '../src/hashing.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const suiteDir = resolve(here, '../suites/feedback-board');
-const contractDir = resolve(here, '../../../examples/feedback-board-starter/contract');
-const outPath = join(suiteDir, 'HASHES.json');
+const pkgRoot = resolve(here, '..');
+const repoRoot = resolve(here, '../../..');
+const outPath = join(pkgRoot, 'suites/feedback-board/HASHES.json');
 
-export function computeHashes() {
-  return {
-    description:
-      'manifestSha256 = sha256(manifest.json). suiteSha256 = stable tree hash of this directory excluding HASHES.json (this is the verifierSha). contractSha256 = stable tree hash of examples/feedback-board-starter/contract.',
-    manifestSha256: sha256(readFileSync(join(suiteDir, 'manifest.json'))),
-    suiteSha256: hashTree(suiteDir, { exclude: (p) => p === 'HASHES.json' }),
-    contractSha256: hashTree(contractDir),
-  };
-}
-
-const next = computeHashes();
+const next = {
+  description:
+    'verifierSha256 = sha256 over the other verifier hashes: manifest.json, the suite directory (excluding HASHES.json), services/verifier/src, the Dockerfile, package.json and the root pnpm-lock.yaml. The runner refuses to run if any differs. contractSha256 = tree hash of examples/feedback-board-starter/contract.',
+  ...verifierHashes(pkgRoot, repoRoot),
+  contractSha256: hashTree(join(repoRoot, 'examples/feedback-board-starter/contract')),
+};
 if (process.argv.includes('--check')) {
   const current = JSON.parse(readFileSync(outPath, 'utf8'));
-  const same = ['manifestSha256', 'suiteSha256', 'contractSha256'].every((k) => current[k] === (next as any)[k]);
+  const same = [...HASH_KEYS, 'contractSha256'].every((k) => current[k] === (next as any)[k]);
   console.log(same ? 'HASHES.json is up to date' : 'HASHES.json is STALE; run: pnpm --filter @selarikru/verifier hashes');
   process.exit(same ? 0 : 1);
 }
