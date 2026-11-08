@@ -10,7 +10,8 @@
     "manifest": "tsx scripts/manifest.ts",
     "hashes": "tsx scripts/hashes.ts",
     "hashes:check": "tsx scripts/hashes.ts --check",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",

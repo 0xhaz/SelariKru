@@ -9,6 +9,7 @@ export const EVENT_TYPES = [
   'approval.requested', 'approval.granted', 'approval.denied',
   'verification.started', 'verification.passed', 'verification.failed',
   'change.proposed', 'change.merged',
+  'candidate.assembled', 'candidate.failed',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -64,6 +65,9 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'verification.failed': [V],
   'change.proposed': [W, I],
   'change.merged': [I],
+  /** The integration controller built (or failed to build) the exact candidate that verification will judge. */
+  'candidate.assembled': [I],
+  'candidate.failed': [I],
 };
 
 export interface ActorNotPermitted {

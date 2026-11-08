@@ -1,0 +1,711 @@
+/**
+ * Integration controller (docs/architecture.md section 8, "Integration authority"; section 6 rules 7 and 8).
+ *
+ * Builds the exact candidate that independent verification judges: a real git commit made from the pinned base SHA plus each
+ * completed task's content-addressed change set, in a clean temporary clone this function owns. Identical inputs give an
+ * identical commit SHA: git runs with no global or system configuration, an empty template, hooks off, and a fixed author,
+ * committer and timestamp.
+ *
+ * Every change-set manifest is untrusted input. Nothing is applied until all of them verify; any failure fails the whole
+ * candidate with a named reason and no partial result. Conflicts are never resolved by guessing: they become a proposed plan
+ * revision holding one targeted resolution task.
+ *
+ * The commit is exported to `refs/selarikru/candidates/<sha>` in the local source repository (no remote is touched), so it
+ * outlives the temporary clone.
+ *
+ * Imports are relative on purpose: the verifier image installs only this package, so a workspace dependency here would
+ * break its frozen-lockfile install. This file is never loaded by the verifier runner.
+ */
+import { execFile } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+import { ArtifactIntegrityError, type ArtifactStore } from '../../../packages/artifacts/src/index.ts';
+import { checkEventAuthority, TaskSpecSchema, validatePlanRevision, type EventEnvelope, type TaskSpec } from '../../../packages/domain/src/index.ts';
+import { appendEvent, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { checkAllowedPaths, type FileChange } from '../../../packages/runtime-docker-local/src/diff.ts';
+
+const execFileP = promisify(execFile);
+
+/** Edits here are never accepted from a worker. The trusted manifest may add more through `IntegrationDeps.protectedPaths`. */
+export const DEFAULT_PROTECTED_PATHS = ['contract', 'services/verifier', 'tools/verifier-calibration'] as const;
+export const INTEGRATION_ACTOR = { kind: 'integration', id: 'integration' } as const;
+const LEASE_SECONDS = 600;
+const MAX_CHANGES = 20_000;
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
+const FIXED_DATE = '2000-01-01T00:00:00Z';
+
+export interface IntegrationRun {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  /** The target branch the single integration lease is held for. */
+  readonly target: string;
+  /** The base the run was planned on; every manifest must name it. */
+  readonly pinnedBaseSha: string;
+  /** The target's tip when assembly is requested. When it differs from `pinnedBaseSha` the candidate is rebuilt on it. */
+  readonly currentBaseSha: string;
+  /** Local source repository holding both SHAs. */
+  readonly repoPath: string;
+}
+
+export interface IntegrationDeps {
+  readonly db: Db;
+  readonly artifacts: ArtifactStore;
+  readonly now?: () => Date;
+  /** Parent directory for the temporary clone. Default: the system temp directory. */
+  readonly workRoot?: string;
+  /** Extra protected path prefixes from the trusted manifest. */
+  readonly protectedPaths?: readonly string[];
+  readonly leaseSeconds?: number;
+  /** Keep the clone (and return its path) after success. The caller then owns its removal. Failed assemblies always clean up. */
+  readonly keepClone?: boolean;
+}
+
+export interface CandidatePart {
+  readonly taskId: string;
+  readonly revision: number;
+  readonly attemptId: string;
+  readonly manifestSha256: string;
+  /** Sorted paths this part changed. */
+  readonly paths: readonly string[];
+}
+
+export interface Invalidation {
+  readonly reason: 'base_changed' | 'superseded_by_new_candidate';
+  readonly candidates: readonly string[];
+  readonly checkRuns: readonly string[];
+  readonly approvals: readonly string[];
+}
+
+export interface Candidate {
+  readonly ok: true;
+  readonly candidateId: string;
+  /** The candidate commit. This is `candidateSha`. */
+  readonly sha: string;
+  readonly baseSha: string;
+  readonly treeSha: string;
+  readonly parts: readonly CandidatePart[];
+  /** Records invalidated because the base moved (and rebuilt here). */
+  readonly invalidated?: Invalidation;
+  /** Older candidates and their evidence invalidated because this one replaces them. */
+  readonly superseded?: Invalidation;
+  readonly clonePath?: string;
+}
+
+export type FailureReason =
+  | 'invalid_request'
+  | 'lease_held'
+  | 'no_parts'
+  | 'task_spec_invalid'
+  | 'manifest_missing'
+  | 'manifest_corrupt'
+  | 'manifest_invalid'
+  | 'manifest_identity'
+  | 'content_missing'
+  | 'path_rejected'
+  | 'protected_path'
+  | 'dependency_cycle'
+  | 'base_unavailable'
+  | 'conflict'
+  | 'apply_failed'
+  | 'resolution_invalid'
+  | 'git_failed';
+
+export interface Conflict {
+  readonly path: string;
+  /** overlap: unordered tasks changed the same file differently. does_not_apply: the change does not apply to the tree it lands on. */
+  readonly kind: 'overlap' | 'does_not_apply';
+  readonly taskIds: readonly string[];
+}
+
+export interface CandidateFailure {
+  readonly ok: false;
+  readonly reason: FailureReason;
+  readonly message: string;
+  readonly candidateId?: string;
+  readonly conflicts?: readonly Conflict[];
+  /** The proposed plan revision holding the resolution task, for `conflict`. */
+  readonly proposalId?: string;
+  readonly invalidated?: Invalidation;
+}
+
+export type AssemblyResult = Candidate | CandidateFailure;
+
+class Fail extends Error {
+  constructor(readonly reason: FailureReason, message: string, readonly extra: { conflicts?: Conflict[] } = {}) {
+    super(message);
+  }
+}
+
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const sha256 = (b: string | Uint8Array): string => createHash('sha256').update(b).digest('hex');
+const clip = (s: string, n = 300): string => (s.length > n ? `${s.slice(0, n)}...` : s);
+const canon = (p: string): string => p.normalize('NFC').toLowerCase();
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Paths
+
+/** Why a changed path is unusable, or null. Syntax only; scope is checked against `allowedPaths` afterwards. */
+export function unsafePathProblem(p: unknown): string | null {
+  if (typeof p !== 'string' || p === '') return 'empty path';
+  if (p.includes('\0')) return 'NUL in path';
+  if (p.includes('\\')) return 'backslash in path';
+  if (p.startsWith('/') || /^[A-Za-z]:/.test(p)) return 'absolute path';
+  const segs = p.split('/');
+  if (segs.some((s) => s === '')) return 'empty path segment';
+  if (segs.some((s) => s === '.' || s === '..')) return 'parent or current-directory segment';
+  if (segs.some((s) => canon(s) === '.git')) return '.git segment';
+  return null;
+}
+
+function protectedPrefixes(extra: readonly string[] | undefined): string[] {
+  return [...DEFAULT_PROTECTED_PATHS, ...(extra ?? [])].map((p) => canon(p.replace(/^(\.\/)+/, '').replace(/\/+$/, ''))).filter((p) => p !== '');
+}
+
+const isProtected = (path: string, prefixes: readonly string[]): boolean => {
+  const c = canon(path);
+  return prefixes.some((x) => c === x || c.startsWith(`${x}/`));
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Manifests
+
+interface ManifestChange {
+  readonly path: string;
+  readonly status: 'added' | 'modified' | 'deleted';
+  readonly kind: 'file' | 'symlink' | 'special' | null;
+  readonly sha256: string | null;
+  readonly linkTarget: string | null;
+  bytes: Uint8Array | null;
+}
+
+interface LoadedPart extends CandidatePart {
+  readonly spec: TaskSpec;
+  readonly changes: readonly ManifestChange[];
+}
+
+function parseManifest(raw: unknown): { taskId: string; revision: number; baseSha: string; changes: ManifestChange[] } {
+  const bad = (why: string): never => {
+    throw new Fail('manifest_invalid', why);
+  };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return bad('manifest is not an object');
+  const m = raw as Record<string, unknown>;
+  if (m['schema'] !== 1) bad('unsupported manifest schema');
+  if (typeof m['taskId'] !== 'string' || typeof m['baseSha'] !== 'string' || !Number.isInteger(m['revision'])) bad('manifest identity fields are missing');
+  if (!Array.isArray(m['changes'])) return bad('manifest has no change list');
+  if (m['changes'].length > MAX_CHANGES) bad('manifest lists too many changes');
+  const seen = new Set<string>();
+  const changes: ManifestChange[] = [];
+  for (const c of m['changes'] as unknown[]) {
+    if (typeof c !== 'object' || c === null) return bad('change entry is not an object');
+    const e = c as Record<string, unknown>;
+    if (typeof e['path'] !== 'string') return bad('change has no path');
+    if (e['status'] !== 'added' && e['status'] !== 'modified' && e['status'] !== 'deleted') return bad(`change ${clip(e['path'], 80)} has an unknown status`);
+    const kind = e['kind'] ?? null;
+    if (kind !== null && kind !== 'file' && kind !== 'symlink' && kind !== 'special') return bad(`change ${clip(e['path'], 80)} has an unknown kind`);
+    const hash = e['sha256'] ?? null;
+    if (hash !== null && (typeof hash !== 'string' || !HEX64.test(hash))) return bad(`change ${clip(e['path'], 80)} has a malformed hash`);
+    const link = e['linkTarget'] ?? null;
+    if (link !== null && typeof link !== 'string') return bad(`change ${clip(e['path'], 80)} has a malformed link target`);
+    if (seen.has(e['path'])) return bad(`path listed twice: ${clip(e['path'], 80)}`);
+    seen.add(e['path']);
+    changes.push({ path: e['path'], status: e['status'], kind, sha256: hash, linkTarget: link, bytes: null });
+  }
+  return { taskId: m['taskId'] as string, revision: m['revision'] as number, baseSha: m['baseSha'] as string, changes: changes.sort((a, b) => cmp(a.path, b.path)) };
+}
+
+async function readVerified(store: ArtifactStore, hash: string, missing: FailureReason): Promise<Uint8Array> {
+  let bytes: Uint8Array | null;
+  try {
+    bytes = await store.get(hash);
+  } catch (err) {
+    if (err instanceof ArtifactIntegrityError) throw new Fail('manifest_corrupt', `artifact ${hash.slice(0, 12)} does not match its hash`);
+    throw new Fail('manifest_corrupt', `artifact ${hash.slice(0, 12)} could not be read`);
+  }
+  if (bytes === null) throw new Fail(missing, `artifact ${hash.slice(0, 12)} does not exist`);
+  // The store verifies on read; an implementation that does not is still held to it.
+  if (sha256(bytes) !== hash) throw new Fail('manifest_corrupt', `artifact ${hash.slice(0, 12)} does not match its hash`);
+  return bytes;
+}
+
+interface CompletedTask {
+  readonly spec: TaskSpec;
+  readonly attemptId: string;
+  readonly manifest: string;
+}
+
+/** Specs of every task in the run (current revisions), and the completed ones with a published change set. */
+async function loadTasks(db: Db, run: IntegrationRun): Promise<{ specs: Map<string, TaskSpec>; completed: CompletedTask[] }> {
+  const rows = await db.execute(sql`
+    SELECT r.spec, s.status,
+      (SELECT a.attempt_id FROM attempts a WHERE a.tenant_id = r.tenant_id AND a.project_id = r.project_id AND a.task_id = r.task_id AND a.revision = r.revision
+         AND a.outcome = 'succeeded' AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS attempt_id,
+      (SELECT a.detail ->> 'changeManifestSha256' FROM attempts a WHERE a.tenant_id = r.tenant_id AND a.project_id = r.project_id AND a.task_id = r.task_id AND a.revision = r.revision
+         AND a.outcome = 'succeeded' AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS manifest
+    FROM task_revisions r JOIN task_status s ON s.tenant_id = r.tenant_id AND s.project_id = r.project_id AND s.task_id = r.task_id AND s.current_revision = r.revision
+    WHERE r.tenant_id = ${run.tenantId} AND r.project_id = ${run.projectId} AND r.run_id = ${run.runId}
+    ORDER BY r.task_id`);
+  const specs = new Map<string, TaskSpec>();
+  const completed: CompletedTask[] = [];
+  for (const row of rows) {
+    const parsed = TaskSpecSchema.safeParse(row['spec']);
+    if (!parsed.success) throw new Fail('task_spec_invalid', 'a stored task spec is no longer valid');
+    specs.set(parsed.data.taskId, parsed.data);
+    const done = ['verifying', 'verified', 'merged'].includes(String(row['status']));
+    if (done && row['attempt_id'] && row['manifest']) completed.push({ spec: parsed.data, attemptId: String(row['attempt_id']), manifest: String(row['manifest']) });
+  }
+  return { specs, completed };
+}
+
+async function loadPart(done: CompletedTask, run: IntegrationRun, store: ArtifactStore, prefixes: readonly string[]): Promise<LoadedPart> {
+  const { spec } = done;
+  const id = spec.taskId;
+  if (!HEX64.test(done.manifest)) throw new Fail('manifest_invalid', `task ${id}: change manifest id is malformed`);
+  const bytes = await readVerified(store, done.manifest, 'manifest_missing');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(Buffer.from(bytes).toString('utf8'));
+  } catch {
+    throw new Fail('manifest_invalid', `task ${id}: manifest is not JSON`);
+  }
+  const m = (() => {
+    try {
+      return parseManifest(raw);
+    } catch (err) {
+      if (err instanceof Fail) throw new Fail(err.reason, `task ${id}: ${err.message}`);
+      throw err;
+    }
+  })();
+  // Replay protection: this manifest must be for exactly this task, this revision and the run's pinned base.
+  if (m.taskId !== spec.taskId) throw new Fail('manifest_identity', `task ${id}: manifest is for task ${clip(m.taskId, 60)}`);
+  if (m.revision !== spec.revision) throw new Fail('manifest_identity', `task ${id}: manifest is for revision ${m.revision}, current is ${spec.revision}`);
+  if (m.baseSha !== spec.baseSha || m.baseSha !== run.pinnedBaseSha) throw new Fail('manifest_identity', `task ${id}: manifest base ${clip(m.baseSha, 12)} is not the pinned base`);
+
+  for (const c of m.changes) {
+    const problem = unsafePathProblem(c.path);
+    if (problem !== null) throw new Fail('path_rejected', `task ${id}: ${clip(c.path, 80)}: ${problem}`);
+    if (isProtected(c.path, prefixes)) throw new Fail('protected_path', `task ${id}: ${clip(c.path, 80)} is a verifier or contract path`);
+  }
+  const asChanges: FileChange[] = m.changes.map((c) => ({ path: c.path, status: c.status, kind: c.kind, sha256: c.sha256, linkTarget: c.linkTarget }));
+  let gate: ReturnType<typeof checkAllowedPaths>;
+  try {
+    gate = checkAllowedPaths(asChanges, spec.allowedPaths);
+  } catch (err) {
+    throw new Fail('path_rejected', `task ${id}: ${err instanceof Error ? clip(err.message, 160) : 'invalid allowedPaths'}`);
+  }
+  if (!gate.ok) {
+    const shown = gate.violations.slice(0, 3).map((v) => `${clip(v.path, 60)} (${v.reason})`).join(', ');
+    throw new Fail('path_rejected', `task ${id}: ${gate.violations.length} path(s) rejected: ${shown}`);
+  }
+  for (const c of m.changes) {
+    if (c.status === 'deleted') {
+      if (c.kind !== null || c.sha256 !== null) throw new Fail('manifest_invalid', `task ${id}: deleted ${clip(c.path, 60)} carries content`);
+      continue;
+    }
+    if (c.kind !== 'file' || c.sha256 === null) throw new Fail('manifest_invalid', `task ${id}: ${clip(c.path, 60)} is not a regular file with a hash`);
+    c.bytes = await readVerified(store, c.sha256, 'content_missing');
+  }
+  return { taskId: id, revision: spec.revision, attemptId: done.attemptId, manifestSha256: done.manifest, paths: m.changes.map((c) => c.path), spec, changes: m.changes };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Ordering
+
+/** Dependency order: a task comes after everything it depends on (directly or through other tasks); ties go to the smaller id. */
+function orderParts(parts: readonly LoadedPart[], specs: ReadonlyMap<string, TaskSpec>): { ordered: LoadedPart[]; reaches: (from: string, to: string) => boolean } {
+  const reachCache = new Map<string, Set<string>>();
+  const reachable = (from: string): Set<string> => {
+    const hit = reachCache.get(from);
+    if (hit) return hit;
+    const seen = new Set<string>();
+    const stack = [...(specs.get(from)?.dependencies ?? []).map((d) => d.taskId)];
+    while (stack.length > 0) {
+      const t = stack.pop()!;
+      if (seen.has(t)) continue;
+      seen.add(t);
+      for (const d of specs.get(t)?.dependencies ?? []) stack.push(d.taskId);
+    }
+    reachCache.set(from, seen);
+    return seen;
+  };
+  const dependsOn = (a: string, b: string): boolean => reachable(a).has(b);
+  const remaining = new Map(parts.map((p) => [p.taskId, p]));
+  const ordered: LoadedPart[] = [];
+  while (remaining.size > 0) {
+    const ready = [...remaining.keys()].filter((t) => ![...remaining.keys()].some((o) => o !== t && dependsOn(t, o))).sort(cmp);
+    if (ready.length === 0) throw new Fail('dependency_cycle', `tasks depend on each other: ${[...remaining.keys()].sort(cmp).join(', ')}`);
+    const next = remaining.get(ready[0]!)!;
+    ordered.push(next);
+    remaining.delete(next.taskId);
+  }
+  return { ordered, reaches: (a, b) => dependsOn(a, b) || dependsOn(b, a) };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Git
+
+const baseEnv = (home: string): NodeJS.ProcessEnv => ({
+  PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+  HOME: home,
+  LC_ALL: 'C',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_AUTHOR_NAME: 'SelariKru Integration',
+  GIT_AUTHOR_EMAIL: 'integration@selarikru.invalid',
+  GIT_AUTHOR_DATE: FIXED_DATE,
+  GIT_COMMITTER_NAME: 'SelariKru Integration',
+  GIT_COMMITTER_EMAIL: 'integration@selarikru.invalid',
+  GIT_COMMITTER_DATE: FIXED_DATE,
+});
+const SAFE_CONFIG = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', '-c', 'core.symlinks=true', '-c', 'core.excludesFile=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'protocol.file.allow=never'];
+
+async function git(cwd: string, home: string, args: readonly string[], opts: { allowFile?: boolean } = {}): Promise<string> {
+  const config = opts.allowFile ? SAFE_CONFIG.map((v) => (v === 'protocol.file.allow=never' ? 'protocol.file.allow=always' : v)) : SAFE_CONFIG;
+  try {
+    const { stdout } = await execFileP('git', [...config, ...args], { cwd, env: baseEnv(home), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 120_000 });
+    return stdout.trim();
+  } catch (err) {
+    const e = err as { stderr?: string; message?: string };
+    throw new Fail('git_failed', `git ${args[0]} failed: ${clip((e.stderr || e.message || 'error').trim(), 200)}`);
+  }
+}
+
+async function cloneAtBase(repoPath: string, baseSha: string, dir: string, home: string): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await git(dir, home, ['init', '--quiet', '--template=', '.']);
+  try {
+    await git(dir, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', repoPath, baseSha], { allowFile: true });
+    await git(dir, home, ['checkout', '--quiet', '--detach', baseSha]);
+    const head = await git(dir, home, ['rev-parse', 'HEAD']);
+    if (head !== baseSha) throw new Fail('base_unavailable', `base ${baseSha.slice(0, 12)} resolved to a different commit`);
+  } catch (err) {
+    if (err instanceof Fail && err.reason === 'git_failed') throw new Fail('base_unavailable', `base ${baseSha.slice(0, 12)} cannot be checked out: ${err.message}`);
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Simulation and application
+
+interface Planned {
+  taskId: string;
+  sha: string | null;
+  bytes: Uint8Array | null;
+}
+
+async function assertNoLinkAncestors(root: string, path: string): Promise<void> {
+  const segs = path.split('/');
+  let cur = root;
+  for (const seg of segs.slice(0, -1)) {
+    cur = join(cur, seg);
+    let st;
+    try {
+      st = await lstat(cur);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+    if (st.isSymbolicLink()) throw new Fail('apply_failed', `${clip(path, 80)}: ${clip(seg, 40)} is a symbolic link in the base tree`);
+    if (!st.isDirectory()) throw new Fail('apply_failed', `${clip(path, 80)}: ${clip(seg, 40)} is a file in the base tree`);
+  }
+}
+
+/** The tree state of `path` in the clone: absent, or a regular file with its hash. Anything else cannot be changed safely. */
+async function baseState(root: string, path: string): Promise<{ exists: false } | { exists: true; sha: string }> {
+  await assertNoLinkAncestors(root, path);
+  let st;
+  try {
+    st = await lstat(join(root, path));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return { exists: false };
+    throw err;
+  }
+  if (!st.isFile()) throw new Fail('apply_failed', `${clip(path, 80)} is not a regular file in the base tree`);
+  return { exists: true, sha: sha256(await readFile(join(root, path))) };
+}
+
+async function plan(root: string, ordered: readonly LoadedPart[], reaches: (a: string, b: string) => boolean): Promise<Map<string, Planned>> {
+  const overlay = new Map<string, Planned>();
+  const conflicts = new Map<string, { kind: Conflict['kind']; ids: Set<string> }>();
+  const note = (path: string, kind: Conflict['kind'], ...ids: string[]): void => {
+    const hit = conflicts.get(path);
+    if (hit) for (const i of ids) hit.ids.add(i);
+    else conflicts.set(path, { kind, ids: new Set(ids) });
+  };
+  for (const part of ordered) {
+    for (const c of part.changes) {
+      const finalSha = c.status === 'deleted' ? null : c.sha256;
+      const prior = overlay.get(c.path);
+      const cur = prior ? (prior.sha === null ? ({ exists: false } as const) : ({ exists: true, sha: prior.sha } as const)) : await baseState(root, c.path);
+      let skip = false;
+      if (prior && prior.taskId !== part.taskId) {
+        if (prior.sha === finalSha) skip = true; // both tasks reached the same content: nothing to decide
+        else if (!reaches(prior.taskId, part.taskId)) {
+          note(c.path, 'overlap', prior.taskId, part.taskId);
+          skip = true;
+        }
+      } else if (conflicts.has(c.path)) skip = true;
+      if (!skip) {
+        const applies = c.status === 'added' ? !cur.exists || prior !== undefined || cur.sha === finalSha : cur.exists;
+        if (!applies) {
+          note(c.path, 'does_not_apply', part.taskId);
+          skip = true;
+        }
+      }
+      if (skip) {
+        if (conflicts.has(c.path)) conflicts.get(c.path)!.ids.add(part.taskId);
+        continue;
+      }
+      overlay.set(c.path, { taskId: part.taskId, sha: finalSha, bytes: c.bytes });
+    }
+  }
+  if (conflicts.size > 0) {
+    const list: Conflict[] = [...conflicts.entries()]
+      .sort(([a], [b]) => cmp(a, b))
+      .map(([path, v]) => ({ path, kind: v.kind, taskIds: [...v.ids].sort(cmp) }));
+    throw new Fail('conflict', `${list.length} conflicting path(s): ${list.slice(0, 5).map((x) => x.path).join(', ')}`, { conflicts: list });
+  }
+  return overlay;
+}
+
+async function applyPlan(root: string, overlay: ReadonlyMap<string, Planned>): Promise<void> {
+  for (const path of [...overlay.keys()].sort(cmp)) {
+    const p = overlay.get(path)!;
+    await assertNoLinkAncestors(root, path);
+    const abs = join(root, path);
+    try {
+      if (p.sha === null) await rm(abs, { force: false });
+      else {
+        await mkdir(dirname(abs), { recursive: true });
+        try {
+          if ((await lstat(abs)).isSymbolicLink()) throw new Fail('apply_failed', `${clip(path, 80)} is a symbolic link in the base tree`);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+        await writeFile(abs, p.bytes!, { mode: 0o644 });
+      }
+    } catch (err) {
+      if (err instanceof Fail) throw err;
+      throw new Fail('apply_failed', `${clip(path, 80)} could not be written: ${(err as NodeJS.ErrnoException).code ?? 'error'}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Database
+
+async function acquireLease(db: Db, run: IntegrationRun, holder: string, now: Date, seconds: number): Promise<boolean> {
+  const rows = await db.execute(sql`
+    INSERT INTO integration_leases (tenant_id, project_id, target, holder, acquired_at, expires_at)
+    VALUES (${run.tenantId}, ${run.projectId}, ${run.target}, ${holder}, ${now.toISOString()}::timestamptz, ${new Date(now.getTime() + seconds * 1000).toISOString()}::timestamptz)
+    ON CONFLICT (tenant_id, project_id, target) DO UPDATE
+      SET holder = EXCLUDED.holder, acquired_at = EXCLUDED.acquired_at, expires_at = EXCLUDED.expires_at
+      WHERE integration_leases.expires_at <= ${now.toISOString()}::timestamptz
+    RETURNING holder`);
+  return rows.length === 1 && String(rows[0]!['holder']) === holder;
+}
+
+async function releaseLease(db: Db, run: IntegrationRun, holder: string): Promise<void> {
+  await db.execute(sql`DELETE FROM integration_leases WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND target = ${run.target} AND holder = ${holder}`);
+}
+
+const inList = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `);
+
+/** Marks candidates, their check runs and any approval bound to their SHA as invalidated, in the caller's transaction. */
+async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['reason'], keep: { baseNot?: string; shaNot?: string }, now: Date): Promise<Invalidation | undefined> {
+  const where = keep.baseNot !== undefined ? sql`base_sha <> ${keep.baseNot}` : sql`sha <> ${keep.shaNot!}`;
+  const rows = await tx.execute(sql`
+    UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now.toISOString()}::timestamptz
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND target = ${run.target} AND status = 'assembled' AND sha IS NOT NULL AND ${where}
+    RETURNING candidate_id, sha`);
+  if (rows.length === 0) return undefined;
+  const shas = rows.map((r) => String(r['sha']));
+  const checks = await tx.execute(sql`
+    UPDATE check_runs SET result = 'invalidated'
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_sha IN (${inList(shas)}) AND result <> 'invalidated'
+    RETURNING check_run_id`);
+  const approvals = await tx.execute(sql`
+    UPDATE approvals SET outcome = 'invalidated'
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND outcome IN ('pending', 'granted') AND expected_revisions ->> 'candidateSha' IN (${inList(shas)})
+    RETURNING approval_id`);
+  return {
+    reason,
+    candidates: rows.map((r) => String(r['candidate_id'])).sort(cmp),
+    checkRuns: checks.map((r) => String(r['check_run_id'])).sort(cmp),
+    approvals: approvals.map((r) => String(r['approval_id'])).sort(cmp),
+  };
+}
+
+async function emitCandidate(tx: Tx, run: IntegrationRun, now: Date, type: 'candidate.assembled' | 'candidate.failed', payload: Record<string, unknown>): Promise<void> {
+  const at = now.toISOString();
+  const envelope: EventEnvelope = {
+    schemaVersion: 1, eventId: `evt_${randomUUID()}`, projectId: run.projectId, runId: run.runId, taskId: run.runId, attemptId: null, type,
+    sequence: 0, aggregateRevision: 0, actor: INTEGRATION_ACTOR, occurredAt: at, receivedAt: at, causationId: null, traceId: `trace_${randomUUID()}`, payload,
+  };
+  const authority = checkEventAuthority(envelope);
+  if (!authority.ok) throw new Error(`integration emitted a forbidden event: ${JSON.stringify(authority.error)}`);
+  await appendEvent(tx, envelope);
+}
+
+const CLASSIFICATION_RANK = ['public', 'internal', 'restricted', 'secret'] as const;
+
+/** One targeted task that owns exactly the conflicting paths, proposed as a plan revision. Never applied here. */
+function buildResolution(run: IntegrationRun, conflicts: readonly Conflict[], specs: ReadonlyMap<string, TaskSpec>): TaskSpec {
+  const involved = [...new Set(conflicts.flatMap((c) => c.taskIds))].sort(cmp).map((id) => specs.get(id)!);
+  const template = involved[0]!;
+  const taskId = `resolve_${sha256(JSON.stringify([run.runId, run.currentBaseSha, conflicts])).slice(0, 12)}`;
+  const classification = involved.reduce<TaskSpec['classification']>((hi, s) => (CLASSIFICATION_RANK.indexOf(s.classification) > CLASSIFICATION_RANK.indexOf(hi) ? s.classification : hi), 'public');
+  const paths = conflicts.map((c) => c.path);
+  const contractRefs = new Map(involved.flatMap((s) => s.contractRefs).map((r) => [`${r.artifactId}:${r.sha256}`, r]));
+  return TaskSpecSchema.parse({
+    ...template,
+    taskId,
+    revision: 1,
+    role: 'integration',
+    title: clip(`Resolve integration conflict: ${paths.join(', ')}`, 120),
+    baseSha: run.currentBaseSha,
+    requirementIds: [...new Set(involved.flatMap((s) => s.requirementIds))].sort(cmp),
+    dependencies: [],
+    contractRefs: [...contractRefs.values()].sort((a, b) => cmp(a.artifactId, b.artifactId)),
+    allowedPaths: paths,
+    resourceClaims: [],
+    acceptanceCheckIds: [...new Set(involved.flatMap((s) => s.acceptanceCheckIds))].sort(cmp),
+    classification,
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Assembles the candidate for `run` under the single integration lease for (project, target). Returns the candidate, or a
+ * failure with a named reason. A failure leaves no commit and no partial tree; it is recorded as a `candidates` row
+ * and a `candidate.failed` event. If the pinned base differs from the target's current tip, the earlier candidate and its
+ * evidence are invalidated first and the candidate is rebuilt on the current tip.
+ */
+export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDeps): Promise<AssemblyResult> {
+  const now = deps.now ?? (() => new Date());
+  if (!FULL_SHA.test(run.pinnedBaseSha) || !FULL_SHA.test(run.currentBaseSha) || run.target === '') {
+    return { ok: false, reason: 'invalid_request', message: 'pinned and current base must be full commit ids and a target is required' };
+  }
+  const holder = `integration:${randomUUID()}`;
+  if (!(await acquireLease(deps.db, run, holder, now(), deps.leaseSeconds ?? LEASE_SECONDS))) {
+    return { ok: false, reason: 'lease_held', message: `another assembly holds the integration lease for ${run.target}` };
+  }
+  let workDir: string | null = null;
+  let keep = false;
+  let invalidated: Invalidation | undefined;
+  try {
+    if (run.pinnedBaseSha !== run.currentBaseSha) {
+      invalidated = await withTx(deps.db, (tx) => invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now()));
+    }
+    try {
+      const { specs, completed } = await loadTasks(deps.db, run);
+      if (completed.length === 0) throw new Fail('no_parts', 'no completed task has a published change set');
+      const prefixes = protectedPrefixes(deps.protectedPaths);
+      const loaded: LoadedPart[] = [];
+      for (const done of completed) loaded.push(await loadPart(done, run, deps.artifacts, prefixes));
+      const { ordered, reaches } = orderParts(loaded, specs);
+
+      const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-integrate');
+      await mkdir(parent, { recursive: true });
+      workDir = await mkdtemp(join(parent, 'asm-'));
+      const home = join(workDir, 'home');
+      const tree = join(workDir, 'tree');
+      await mkdir(home);
+      await cloneAtBase(run.repoPath, run.currentBaseSha, tree, home);
+      const overlay = await plan(tree, ordered, reaches);
+      await applyPlan(tree, overlay);
+
+      const message = [
+        'integration candidate', '', `run: ${run.runId}`, `target: ${run.target}`, `base: ${run.currentBaseSha}`, 'parts:',
+        ...ordered.map((p) => `- ${p.taskId}@${p.revision} ${p.manifestSha256}`), '',
+      ].join('\n');
+      const msgFile = join(workDir, 'message.txt');
+      await writeFile(msgFile, message);
+      await git(tree, home, ['add', '--all', '--force']);
+      await git(tree, home, ['commit', '--quiet', '--no-verify', '--no-gpg-sign', '--allow-empty', '-F', msgFile]);
+      const sha = await git(tree, home, ['rev-parse', 'HEAD']);
+      const treeSha = await git(tree, home, ['rev-parse', 'HEAD^{tree}']);
+      // The clone is temporary, so the commit is exported to a local ref in the source repository, where verification and a later
+      // push step can reach it. Nothing is pushed anywhere else, and no branch moves.
+      await git(run.repoPath, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', tree, `${sha}:refs/selarikru/candidates/${sha}`], { allowFile: true });
+      const parts: CandidatePart[] = ordered.map((p) => ({ taskId: p.taskId, revision: p.revision, attemptId: p.attemptId, manifestSha256: p.manifestSha256, paths: p.paths }));
+      const candidateId = `cand_${sha}`;
+
+      const superseded = await withTx(deps.db, async (tx) => {
+        const at = now();
+        await tx.execute(sql`
+          INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
+          VALUES (${run.tenantId}, ${run.projectId}, ${candidateId}, ${run.runId}, ${run.target}, ${sha}, ${run.currentBaseSha}, ${treeSha}, ${JSON.stringify(parts)}::jsonb, 'assembled', NULL, '{}'::jsonb, ${at.toISOString()}::timestamptz)
+          ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET status = 'assembled', reason = NULL, updated_at = EXCLUDED.updated_at`);
+        const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at);
+        await emitCandidate(tx, run, at, 'candidate.assembled', {
+          candidateId, sha, baseSha: run.currentBaseSha, treeSha, target: run.target, parts: parts.map((p) => ({ taskId: p.taskId, revision: p.revision, manifestSha256: p.manifestSha256 })),
+          ...(invalidated ? { invalidated } : {}), ...(sup ? { superseded: sup } : {}),
+        });
+        return sup;
+      });
+      keep = deps.keepClone === true;
+      return {
+        ok: true, candidateId, sha, baseSha: run.currentBaseSha, treeSha, parts,
+        ...(invalidated ? { invalidated } : {}), ...(superseded ? { superseded } : {}), ...(keep ? { clonePath: tree } : {}),
+      };
+    } catch (err) {
+      const fail = err instanceof Fail ? err : new Fail('git_failed', `unexpected error: ${err instanceof Error ? clip(err.message, 160) : 'error'}`);
+      return await recordFailure(deps, run, now(), fail, invalidated);
+    }
+  } finally {
+    if (workDir !== null && !keep) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+    await releaseLease(deps.db, run, holder).catch(() => undefined);
+  }
+}
+
+async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, at: Date, fail: Fail, invalidated: Invalidation | undefined): Promise<CandidateFailure> {
+  const conflicts = fail.extra.conflicts;
+  const status = fail.reason === 'conflict' ? 'conflicted' : 'failed';
+  const candidateId = `cand_${fail.reason}_${sha256(JSON.stringify([run.runId, run.target, run.currentBaseSha, fail.message])).slice(0, 16)}`;
+  let proposalId: string | undefined;
+  let proposalError: Fail | undefined;
+  try {
+    await withTx(deps.db, async (tx) => {
+      if (conflicts) {
+        // Only the stored task specs are needed here, and they were already validated when the conflict was found.
+        const { specs } = await loadTasks(deps.db, run);
+        const resolution = buildResolution(run, conflicts, specs);
+        const runRow = (await tx.execute(sql`SELECT plan_revision FROM runs WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId}`))[0];
+        const basedOn = Number(runRow?.['plan_revision'] ?? 0);
+        const valid = validatePlanRevision({ projectId: run.projectId, runId: run.runId, revision: basedOn + 1, tasks: [resolution] }, { projectId: run.projectId, runId: run.runId });
+        if (!valid.ok) throw new Fail('resolution_invalid', `the resolution task is not a valid plan: ${JSON.stringify(valid.errors).slice(0, 200)}`);
+        proposalId = `prop_${resolution.taskId}`;
+        await tx.insert(schema.planProposals).values({
+          tenantId: run.tenantId, projectId: run.projectId, proposalId, runId: run.runId, basedOnPlanRevision: basedOn, status: 'proposed', source: 'integration',
+          reason: clip(fail.message, 300), candidateId, tasks: [resolution], detail: { conflicts, baseSha: run.currentBaseSha },
+        }).onConflictDoNothing();
+      }
+      await tx.execute(sql`
+        INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
+        VALUES (${run.tenantId}, ${run.projectId}, ${candidateId}, ${run.runId}, ${run.target}, NULL, ${run.currentBaseSha}, NULL, '[]'::jsonb, ${status}, ${fail.reason},
+          ${JSON.stringify({ message: clip(fail.message, 400), ...(conflicts ? { conflicts, proposalId } : {}) })}::jsonb, ${at.toISOString()}::timestamptz)
+        ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, detail = EXCLUDED.detail`);
+      await emitCandidate(tx, run, at, 'candidate.failed', {
+        candidateId, reason: fail.reason, message: clip(fail.message, 400), baseSha: run.currentBaseSha, target: run.target,
+        ...(conflicts ? { conflicts, proposalId } : {}), ...(invalidated ? { invalidated } : {}),
+      });
+    });
+  } catch (err) {
+    if (!(err instanceof Fail)) throw err;
+    proposalError = err;
+  }
+  if (proposalError) return await recordFailure(deps, run, at, new Fail(proposalError.reason, proposalError.message), invalidated);
+  return {
+    ok: false, reason: fail.reason, message: fail.message, candidateId,
+    ...(conflicts ? { conflicts } : {}), ...(proposalId ? { proposalId } : {}), ...(invalidated ? { invalidated } : {}),
+  };
+}
