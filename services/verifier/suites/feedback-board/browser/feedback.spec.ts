@@ -88,7 +88,17 @@ test('FB-02 reject: invalid titles show a readable error and nothing is saved', 
     expect(((await u.alert.first().textContent()) ?? '').trim().length).toBeGreaterThan(5);
     await expect(u.items).toHaveCount(0);
     expect((await api(empty).list()).body.counts.all).toBe(0);
+    // the form must stay usable after a rejection
+    await expect(u.title).toBeEnabled();
+    await expect(u.description).toBeEnabled();
+    await expect(u.submit).toBeEnabled();
   }
+  // still on the page that just showed a rejection: a valid submission must succeed and clear the error
+  await u.title.fill('Valid after rejections');
+  await u.submit.click();
+  await expect(u.item('Valid after rejections')).toBeVisible();
+  await expect(u.alert).toHaveCount(0);
+  expect((await api(empty).list()).body.counts.all).toBe(1);
 });
 
 test('FB-03 order: seeded items render newest first with the id tie-break', async ({ page, seeded }) => {

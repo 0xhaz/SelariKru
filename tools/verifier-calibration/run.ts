@@ -57,6 +57,23 @@ if (flag('--starter')) {
   const r = verify({ name: 'starter', useOverlay: false });
   show('starter', r);
   check(Object.values(statuses(r)).every((s) => s === 'failed'), 'every FB-ID fails on the bare starter');
+} else if (flag('--preflight')) {
+  // Deliberately re-open /ms-playwright (as the base image ships it) and expect the runner to refuse a verdict.
+  const tmp = mkdtempSync(join(tmpdir(), 'selarikru-preflight-'));
+  try {
+    cpSync(starter, join(tmp, 'c'), { recursive: true, filter: (p) => !['node_modules', 'dist'].includes(basename(p)) });
+    const name = `selarikru-preflight-${process.pid}`;
+    spawnSync('docker', ['run', '--name', name, '--security-opt', 'no-new-privileges', '--cap-drop=ALL', ...['CHOWN', 'SETUID', 'SETGID', 'KILL', 'DAC_OVERRIDE', 'FOWNER'].flatMap((c) => ['--cap-add', c]),
+      '-v', `${join(tmp, 'c')}:/candidate:ro`, '-e', 'CANDIDATE_DIR=/candidate', '-e', 'RESULTS_PATH=/verifier-out/result.json', '--entrypoint', 'sh', 'selarikru-verifier:playwright-1.65.0',
+      '-c', 'chmod 777 /ms-playwright && exec pnpm exec tsx src/run.ts'], { stdio: ['ignore', 'ignore', 'inherit'] });
+    spawnSync('docker', ['cp', `${name}:/verifier-out/result.json`, join(tmp, 'r.json')], { stdio: 'ignore' });
+    spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore' });
+    const r = JSON.parse(readFileSync(join(tmp, 'r.json'), 'utf8'));
+    show('preflight', r);
+    check(Object.values(statuses(r)).every((s) => s === 'error') && JSON.stringify(r).includes('isolation preflight failed'), 'a world-writable /ms-playwright makes the runner refuse a verdict');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 } else if (flag('--mutants')) {
   const mutants = JSON.parse(readFileSync(join(here, 'mutants/mutants.json'), 'utf8')) as Array<{ id: string; covers: string; mustFail: string[]; patches: Patch[] }>;
   for (const m of mutants) {
@@ -66,22 +83,31 @@ if (flag('--starter')) {
     check(r.quality.allRequiredChecksPassed === false && m.mustFail.every((id) => st[id] === 'failed'), `${m.id} is caught (${m.mustFail.join(', ')} failed): ${m.covers}`);
   }
 } else if (flag('--tamper')) {
-  const r = verify({
-    name: 'tamper',
-    useOverlay: false,
-    showSetup: true,
-    extra: (dir) => cpSync(join(here, 'tamper/tamper.mjs'), join(dir, 'tamper.mjs')),
-    patches: [
-      { file: 'package.json', find: '"build": "tsc --noEmit && vite build"', replace: '"build": "node tamper.mjs && tsc --noEmit && vite build"' },
-      { file: 'package.json', find: '"start": "tsx server/index.ts"', replace: '"start": "node tamper.mjs && tsx server/index.ts"' },
-    ],
-  });
-  show('tamper', r);
-  const detail: string = r.setup?.build?.detail ?? '';
-  const denied = (detail.match(/TAMPER DENIED/g) ?? []).length;
-  check(denied >= 8, `tamper attempts were made and denied (${denied} DENIED lines in the build output)`);
-  check(!detail.includes('TAMPER WROTE'), 'no tamper write succeeded');
-  check(r.quality.allRequiredChecksPassed === false && Object.values(statuses(r)).every((s) => s !== 'passed'), 'tampering candidate does not pass any FB-ID');
+  // Both variants run a hostile build/start script on top of the calibration solution. Variant A would pass 8/8 if
+  // tampering had no effect; variant B carries a known bug (NFC normalization) so that a forged pass would be visible.
+  const mutants = JSON.parse(readFileSync(join(here, 'mutants/mutants.json'), 'utf8')) as Array<{ id: string; patches: Patch[] }>;
+  const bug = mutants.find((m) => m.id === 'nfc-normalization')!;
+  const hostile: Patch[] = [
+    { file: 'package.json', find: '"build": "tsc --noEmit && vite build"', replace: '"build": "node tamper.mjs && tsc --noEmit && vite build"' },
+    { file: 'package.json', find: '"start": "tsx server/index.ts"', replace: '"start": "node tamper.mjs --quiet && tsx server/index.ts"' },
+  ];
+  for (const variant of [
+    { name: 'tamper-solution', patches: hostile, expect: { 'FB-01': 'passed', 'FB-02': 'passed' } as Record<string, string>, rest: 'passed' },
+    { name: 'tamper-buggy', patches: [...bug.patches, ...hostile], expect: { 'FB-01': 'failed', 'FB-02': 'failed' } as Record<string, string>, rest: 'passed' },
+  ]) {
+    const r = verify({ name: variant.name, useOverlay: true, showSetup: true, extra: (dir) => cpSync(join(here, 'tamper/tamper.mjs'), join(dir, 'tamper.mjs')), patches: variant.patches });
+    show(variant.name, r);
+    const st = statuses(r);
+    const detail: string = r.setup?.build?.detail ?? '';
+    const denied = (detail.match(/TAMPER DENIED/g) ?? []).length;
+    const planted = (detail.match(/TAMPER PLANTED (.*)/g) ?? []);
+    check(denied >= 20, `${variant.name}: tamper attempts ran and were denied (${denied} DENIED lines)`);
+    check(!detail.includes('TAMPER WROTE'), `${variant.name}: no write to a protected location succeeded`);
+    check(planted.every((l) => l.includes('/tmp ')), `${variant.name}: only world-writable /tmp was writable (${planted.length} planted)`);
+    const refused = Object.values(st).every((v) => v === 'error');
+    const honest = Object.entries(st).every(([id, v]) => v === (variant.expect[id] ?? variant.rest));
+    check(refused || honest, `${variant.name}: verdict is ${refused ? 'refused' : honest ? 'honest' : 'FORGED OR WRONG'}`);
+  }
 } else {
   const r = verify({ name: 'solution', useOverlay: true });
   show('calibration', r);

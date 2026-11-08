@@ -4,7 +4,7 @@
 // so the candidate cannot write into the suite or the results. Results come only from the reports that the
 // suite's own Vitest and Playwright runs write into a runner-owned directory, never from candidate-authored files.
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, chownSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, cpSync, existsSync, lstatSync, realpathSync, statSync, type Stats, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,6 +93,48 @@ function copyCandidate(src: string, dest: string) {
   });
 }
 
+/**
+ * Fail-closed check that the candidate uid cannot write anything root will execute or load: browsers, node, the verifier
+ * tree and its node_modules, PATH directories, root's private temp and cache directories, and (for replacement by
+ * rename) every ancestor directory. Sticky directories (/tmp) protect root-owned entries, so they are accepted as parents.
+ */
+function preflight(): string | null {
+  if (!CAND) return null;
+  const bad: string[] = [];
+  const canWrite = (st: Stats) => (st.uid === CAND.uid ? !!(st.mode & 0o200) : st.gid === CAND.gid ? !!(st.mode & 0o020) : !!(st.mode & 0o002));
+  const seen = new Set<string>();
+  const check = (p: string, recurse: boolean) => {
+    let real: string;
+    try { real = realpathSync(p); } catch { return; }
+    if (seen.has(real)) return;
+    seen.add(real);
+    const st = lstatSync(real);
+    if (canWrite(st) || st.uid === CAND.uid) { bad.push(real); if (bad.length > 20) return; }
+    if (st.isDirectory() && recurse) {
+      for (const n of readdirSync(real)) {
+        const child = join(real, n);
+        const cst = lstatSync(child);
+        if (cst.isSymbolicLink()) check(child, recurse); // follow once; realpath dedupes
+        else check(child, recurse);
+      }
+    }
+  };
+  const ancestors = (p: string) => {
+    for (let d = dirname(realpathSync(p)); ; d = dirname(d)) {
+      const st = statSync(d);
+      if ((canWrite(st) || st.uid === CAND.uid) && !(st.mode & 0o1000)) bad.push(`${d} (ancestor of ${p})`);
+      if (d === '/') break;
+    }
+  };
+  const trees = [
+    process.env.PLAYWRIGHT_BROWSERS_PATH, pkgRoot, join(repoRoot, 'node_modules'), join(repoRoot, 'package.json'),
+    '/usr/local/lib/node_modules', process.execPath, process.env.TMPDIR, process.env.PWTEST_CACHE_DIR, process.env.HOME, '/verifier-out',
+  ].filter((x): x is string => !!x && existsSync(x));
+  for (const t of trees) { check(t, true); ancestors(t); }
+  for (const d of (process.env.PATH ?? '').split(':').filter((x) => existsSync(x))) { check(d, false); for (const n of readdirSync(d)) check(join(d, n), false); }
+  return bad.length ? `isolation preflight failed: the candidate uid could write ${bad.slice(0, 20).join(', ')}` : null;
+}
+
 function integrity(): string | null {
   const recorded = readJson(join(suiteDir, 'HASHES.json'));
   if (!recorded) return 'HASHES.json is missing or unreadable';
@@ -112,7 +154,7 @@ async function main() {
 
   const manifestRaw = readFileSync(join(suiteDir, 'manifest.json'));
   const manifest: Manifest = JSON.parse(manifestRaw.toString());
-  const work = mkdtempSync(join(tmpdir(), 'selarikru-verify-'));
+  const work = mkdtempSync(join(CAND ? '/tmp' : tmpdir(), 'selarikru-verify-')); // /tmp is sticky: the candidate cannot replace this root-owned directory
   chmodSync(work, 0o755);
   const cand = join(work, 'candidate');
   const reports = join(work, 'reports'); // root-owned: the candidate user can read but never write it
@@ -122,13 +164,13 @@ async function main() {
   copyCandidate(candidateDir, cand);
   const candidateTreeSha256 = hashTree(cand);
   chownTree(cand);
-  if (CAND) { chownSync(runs, CAND.uid, CAND.gid); mkdirSync(CAND.home, { recursive: true }); }
+  if (CAND) mkdirSync(CAND.home, { recursive: true }); // `runs` stays root-owned: per-case directories are handed over one by one
 
-  const baseEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: CAND?.home ?? process.env.HOME, CI: 'true', LANG: 'C.UTF-8', PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH };
+  const baseEnv: NodeJS.ProcessEnv = { PATH: process.env.PATH, TMPDIR: CAND ? '/tmp' : process.env.TMPDIR, HOME: CAND?.home ?? process.env.HOME, CI: 'true', LANG: 'C.UTF-8', PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH };
   const started = new Date();
   const setup: Record<string, { ok: boolean; detail?: string }> = {};
   const observed = { vitest: new Map<string, Observed>(), playwright: new Map<string, Observed>() };
-  let setupFailure: string | null = integrity();
+  let setupFailure: string | null = preflight() ?? integrity();
   const showSetup = process.env.VERIFY_SHOW_SETUP === '1';
 
   if (!setupFailure) {
@@ -145,12 +187,12 @@ async function main() {
   // the candidate's install/build ran first; check again that nothing the verdict depends on changed
   let tampered: string | null = null;
   if (!setupFailure) {
-    tampered = integrity();
+    tampered = preflight() ?? integrity();
     if (tampered) setupFailure = tampered;
   }
 
   if (!setupFailure) {
-    const env: NodeJS.ProcessEnv = { ...baseEnv, HOME: process.env.HOME, VERIFY_APP_DIR: cand, VERIFY_RUN_DIR: runs, VERIFY_REPORT_DIR: reports, ...(CAND ? { VERIFY_CAND_UID: String(CAND.uid), VERIFY_CAND_GID: String(CAND.gid), VERIFY_CAND_HOME: CAND.home } : {}) };
+    const env: NodeJS.ProcessEnv = { ...baseEnv, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PWTEST_CACHE_DIR: process.env.PWTEST_CACHE_DIR, VERIFY_APP_DIR: cand, VERIFY_RUN_DIR: runs, VERIFY_REPORT_DIR: reports, ...(CAND ? { VERIFY_CAND_UID: String(CAND.uid), VERIFY_CAND_GID: String(CAND.gid), VERIFY_CAND_HOME: CAND.home } : {}) };
     const v = await sh('pnpm', ['exec', 'vitest', 'run', '--config', join(suiteDir, 'vitest.config.ts'), '--reporter=json', `--outputFile=${join(reports, 'vitest.json')}`], { cwd: pkgRoot, env, timeoutMs: 1_200_000 });
     setup.apiSuite = { ok: v.code === 0, detail: clip(v.output, 500) };
     killCandidateProcesses();
@@ -161,9 +203,9 @@ async function main() {
     observed.playwright = playwrightResults(readJson(join(reports, 'playwright.json')));
   }
 
-  const finalIntegrity = integrity();
+  const finalIntegrity = preflight() ?? integrity();
   const failure = setupFailure ?? finalIntegrity;
-  const failStatus: Status = failure && (failure === tampered || failure === finalIntegrity) && failure.startsWith('verifier integrity') ? 'error' : 'failed';
+  const failStatus: Status = failure && (failure === tampered || failure === finalIntegrity) && /^(verifier integrity|isolation preflight)/.test(failure) ? 'error' : 'failed';
 
   const criteria = manifest.criteria.map((c) => {
     const tests = c.tests.map((t) => {

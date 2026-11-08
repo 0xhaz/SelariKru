@@ -1,5 +1,5 @@
-import { type ChildProcess, spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
+import { lchownSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -58,8 +58,6 @@ export class AppUnderTest {
     const base = process.env.VERIFY_RUN_DIR ?? tmpdir();
     mkdirSync(base, { recursive: true });
     const dir = mkdtempSync(join(base, 'case-'));
-    // the app runs as an unprivileged user in the image and must be able to create its database here
-    if (process.env.VERIFY_CAND_UID) chmodSync(dir, 0o777);
     this.dbPath = join(dir, 'feedback.sqlite');
     if (opts.seed) {
       this.seedFile = join(dir, 'seed.json');
@@ -67,6 +65,9 @@ export class AppUnderTest {
     } else {
       this.seedFile = null;
     }
+    // The parent (VERIFY_RUN_DIR) is root-owned, so the candidate cannot swap this fresh directory for a symlink.
+    // Hand the directory itself to the unprivileged app user only after root has written everything it needs.
+    if (process.env.VERIFY_CAND_UID) lchownSync(dir, Number(process.env.VERIFY_CAND_UID), Number(process.env.VERIFY_CAND_GID));
   }
 
   get url(): string {
@@ -112,11 +113,16 @@ export class AppUnderTest {
     throw new Error(`app did not become healthy within 45s\n${this.log}`);
   }
 
+  /** Between cases nothing the candidate started may still be running (daemons that left the process group). */
+  private killCandidateUser() {
+    if (process.env.VERIFY_CAND_UID) spawnSync('pkill', ['-9', '-U', process.env.VERIFY_CAND_UID]);
+  }
+
   /** Really stops the process tree (SIGKILL: no graceful-shutdown help for durability). */
   async stop(): Promise<void> {
     const proc = this.proc;
     this.proc = null;
-    if (!proc || proc.pid === undefined) return;
+    if (!proc || proc.pid === undefined) { this.killCandidateUser(); return; }
     const done = new Promise<void>((r) => {
       if (proc.exitCode !== null || proc.signalCode !== null) r();
       else proc.once('exit', () => r());
@@ -128,11 +134,13 @@ export class AppUnderTest {
     }
     await Promise.race([done, new Promise((r) => setTimeout(r, 5000))]);
     // the listener must really be gone; a process that escaped the group (setsid, fork) would keep serving old data
-    for (let i = 0; i < 50; i++) {
-      if (!(await portOpen(this.port))) return;
-      await new Promise((r) => setTimeout(r, 100));
+    let survived = true;
+    for (let i = 0; i < 50 && survived; i++) {
+      survived = await portOpen(this.port);
+      if (survived) await new Promise((r) => setTimeout(r, 100));
     }
-    throw new Error(`app still accepts connections on port ${this.port} after SIGKILL of its process group; it did not really stop`);
+    this.killCandidateUser(); // report the survivor first (below), but never leave it running into the next case
+    if (survived) throw new Error(`app still accepts connections on port ${this.port} after SIGKILL of its process group; it did not really stop`);
   }
 
   async restart(): Promise<void> {

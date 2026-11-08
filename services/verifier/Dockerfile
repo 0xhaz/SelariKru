@@ -20,6 +20,11 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY services/verifier/package.json services/verifier/package.json
 RUN pnpm install --frozen-lockfile --filter @selarikru/verifier...
 COPY services/verifier services/verifier
-RUN mkdir -m 700 /verifier-out && chown -R root:root /verifier && chmod -R go-w /verifier
+# The base image leaves /ms-playwright world-writable; root launches those browsers, so lock it down together with
+# everything else root executes or loads. /verifier-tmp is root's private TMPDIR (Playwright's transform cache lives there).
+RUN mkdir -m 700 /verifier-out /verifier-tmp \
+ && chown -R root:root /verifier /ms-playwright /usr/local/lib/node_modules \
+ && chmod -R go-w /verifier /ms-playwright /usr/local/lib/node_modules /usr/local/bin/node
+ENV TMPDIR=/verifier-tmp PWTEST_CACHE_DIR=/verifier-tmp/pw-cache
 WORKDIR /verifier/services/verifier
 ENTRYPOINT ["pnpm", "exec", "tsx", "src/run.ts"]
