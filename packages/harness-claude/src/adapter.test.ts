@@ -2,20 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import type { NormalizedHarnessEvent } from '@selarikru/protocol';
 import { ClaudeHarnessAdapter, type HarnessLauncher, type LaunchedProcess } from './adapter.ts';
 import { CANARY, fullRun, initEvent } from './fixtures.ts';
+import { decodeUtf8Stream } from './decode.ts';
 
-function fakeLauncher(chunks: string[], exit: { code: number | null; signal?: string | null } = { code: 0 }) {
+function fakeLauncher(chunks: string[], exit: { code: number | null; signal?: string | null } = { code: 0 }, throwAfter?: Error) {
   const stdinEnd = vi.fn();
+  const kill = vi.fn();
   const launch = vi.fn(async (): Promise<LaunchedProcess> => ({
     lines: (async function* () {
       for (const c of chunks) yield c;
+      if (throwAfter) throw throwAfter;
     })(),
     stdin: { write: vi.fn(), end: stdinEnd },
-    kill: vi.fn(),
+    kill,
     exited: Promise.resolve({ code: exit.code, signal: exit.signal ?? null }),
   }));
   const stop = vi.fn(async () => ({ accepted: true, detail: 'signal sent in sandbox' }));
   const launcher: HarnessLauncher = { launch, stop };
-  return { launcher, launch, stop };
+  return { launcher, launch, stop, kill };
 }
 
 async function collect(it: AsyncIterable<NormalizedHarnessEvent>): Promise<NormalizedHarnessEvent[]> {
@@ -155,5 +158,98 @@ describe('ClaudeHarnessAdapter', () => {
     expect(await new ClaudeHarnessAdapter(launcher).cancel('a1')).toMatchObject({ status: 'stop_rejected', terminationConfirmed: false });
     stop.mockRejectedValueOnce(new Error('sbx down'));
     expect(await new ClaudeHarnessAdapter(launcher).cancel('a1')).toMatchObject({ status: 'stop_rejected', terminationConfirmed: false });
+  });
+
+  it('does not forward the session id', async () => {
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(fullRun)).launcher).run(base));
+    expect(events[0]).not.toHaveProperty('sessionId');
+    expect(JSON.stringify(events)).not.toContain('sess-1');
+  });
+
+  it('oversize line is discarded with one oversize_line event, then parsing continues', async () => {
+    const huge = 'a'.repeat(1024 * 1024 + 10);
+    const chunks = [initEvent + '\n', '{"type":"system","subtype":"', huge.slice(0, 600000), huge.slice(600000), '"}\n', ...lines(fullRun.slice(-1))];
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(chunks).launcher).run(base));
+    expect(events.filter((e) => e.type === 'oversize_line')).toHaveLength(1);
+    expect(events.some((e) => e.type === 'result')).toBe(true);
+    expect(JSON.stringify(events).length).toBeLessThan(5000);
+  });
+
+  it('a stream with no terminating newline stays bounded', async () => {
+    const chunks = Array.from({ length: 30 }, () => 'b'.repeat(100_000));
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(chunks).launcher).run(base));
+    expect(events.filter((e) => e.type === 'oversize_line')).toHaveLength(1);
+    expect(events.map((e) => e.type)).toContain('ended_without_result');
+  });
+
+  it('a final line without newline is still parsed', async () => {
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher([initEvent + '\n' + fullRun.at(-1)]).launcher).run(base));
+    expect(events.some((e) => e.type === 'result')).toBe(true);
+  });
+
+  it('truncates identifier fields to 256 chars', async () => {
+    const long = 'z'.repeat(5000);
+    const stream = [JSON.stringify({ type: 'system', subtype: 'init', model: long }), JSON.stringify({ type: long }), JSON.stringify({ type: 'system', subtype: long })];
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(stream)).launcher).run(base));
+    expect(JSON.stringify(events).length).toBeLessThan(2000);
+  });
+
+  it('caps events buffered while waiting for init', async () => {
+    const many = Array.from({ length: 5000 }, () => JSON.stringify({ type: 'system', subtype: 'x' }));
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(many)).launcher).run(base));
+    expect(events.length).toBeLessThan(1100);
+  });
+
+  it('early break kills the host handle and stops the agent in the sandbox', async () => {
+    const { launcher, stop, kill } = fakeLauncher(lines(fullRun));
+    for await (const e of new ClaudeHarnessAdapter(launcher).run(base)) {
+      if (e.type === 'system') break;
+    }
+    expect(kill).toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledWith('a1');
+  });
+
+  it('stream throw emits stream_error, cleans up, and tolerates cleanup errors', async () => {
+    const { launcher, stop, kill } = fakeLauncher(lines([initEvent]), { code: 0 }, new Error(`boom ${CANARY}`));
+    stop.mockRejectedValue(new Error('stop failed'));
+    kill.mockImplementation(() => {
+      throw new Error('kill failed');
+    });
+    const events = await collect(new ClaudeHarnessAdapter(launcher).run(base));
+    const err = events.find((e) => e.type === 'stream_error');
+    expect(err).toBeDefined();
+    expect(JSON.stringify(events)).not.toContain('CANARYCANARY');
+    expect(events.map((e) => e.type)).toContain('ended_without_result');
+    expect(kill).toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledWith('a1');
+  });
+
+  it('normal completion does not kill or stop', async () => {
+    const { launcher, stop, kill } = fakeLauncher(lines(fullRun));
+    await collect(new ClaudeHarnessAdapter(launcher).run(base));
+    expect(kill).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it('non-zero exit is marked failed even after a success result', async () => {
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(fullRun), { code: 1 }).launcher).run(base));
+    expect(events.find((e) => e.type === 'result')).toMatchObject({ subtype: 'success' });
+    expect(events.at(-1)).toMatchObject({ type: 'exit', code: 1, failed: true });
+    const ok = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(fullRun)).launcher).run(base));
+    expect(ok.at(-1)).toMatchObject({ failed: false });
+    const sig = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(fullRun), { code: null, signal: 'SIGKILL' }).launcher).run(base));
+    expect(sig.at(-1)).toMatchObject({ failed: true });
+  });
+
+  it('decodeUtf8Stream keeps a multibyte character split across chunks intact', async () => {
+    const bytes = new TextEncoder().encode('{"type":"system","subtype":"héllo-€-😀"}\n');
+    async function* src() {
+      for (let i = 0; i < bytes.length; i += 1) yield bytes.slice(i, i + 1);
+    }
+    let text = '';
+    for await (const c of decodeUtf8Stream(src())) text += c;
+    expect(text).toBe('{"type":"system","subtype":"héllo-€-😀"}\n');
+    const events = await collect(new ClaudeHarnessAdapter(fakeLauncher([text]).launcher).run(base));
+    expect(events.find((e) => e.type === 'system')).toMatchObject({ subtype: 'héllo-€-😀' });
   });
 });

@@ -59,7 +59,6 @@ export type NormalizedHarnessEvent = EventBase &
         /** As observed in the stream; null if the stream never said. Never assumed. */
         readonly permissionMode: string | null;
         readonly model: string | null;
-        readonly sessionId: string | null;
       }
     | { readonly type: 'launch_refused'; readonly reason: 'capability_unavailable'; readonly capability: string; readonly status: CapabilityStatus }
     | { readonly type: 'system'; readonly subtype: string | null }
@@ -83,7 +82,12 @@ export type NormalizedHarnessEvent = EventBase &
         readonly durationMs: number | null;
       }
     | { readonly type: 'ended_without_result' }
-    | { readonly type: 'exit'; readonly code: number | null; readonly signal: string | null }
+    /** `failed` is true for any non-zero code or any signal, even after a `success` result. */
+    | { readonly type: 'exit'; readonly code: number | null; readonly signal: string | null; readonly failed: boolean }
+    /** A line over the size limit was discarded; no content is carried. */
+    | { readonly type: 'oversize_line' }
+    /** The output stream threw. The message is redacted and bounded. */
+    | { readonly type: 'stream_error'; readonly message: string }
     | { readonly type: 'unparseable_line' }
     /** Unknown event type: the type name only, never the payload. */
     | { readonly type: 'raw_unrecognized'; readonly rawType: string }

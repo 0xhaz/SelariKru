@@ -17,7 +17,11 @@ export interface LaunchSpec {
 }
 
 export interface LaunchedProcess {
-  /** Raw output chunks. They need not align with line boundaries. */
+  /**
+   * Raw output chunks as strings. They need not align with line boundaries. The launcher MUST decode bytes with a
+   * streaming decoder (see `decodeUtf8Stream`), never per-chunk `toString()`, or a multibyte character split across
+   * chunks is corrupted.
+   */
   readonly lines: AsyncIterable<string>;
   readonly stdin: { write(data: string): void; end(): void };
   /** Kills the HOST-side client only. Observed (spike section 5): this does not stop the agent in the sandbox. */
@@ -45,12 +49,16 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = Object.freeze({
 });
 
 const DEFAULT_PREVIEW_CHARS = 200;
+/** Longest line parsed; a longer one is discarded to the next newline. */
+export const MAX_LINE_CHARS = 1024 * 1024;
+const MAX_IDENT_CHARS = 256;
+const MAX_PENDING_EVENTS = 1000;
 
 type Json = Record<string, unknown>;
 type Draft = NormalizedHarnessEvent extends infer E ? (E extends unknown ? Omit<E, 'attemptId' | 'seq'> : never) : never;
 
 const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
-const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+const str = (v: unknown): string | null => (typeof v === 'string' ? v.slice(0, MAX_IDENT_CHARS) : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
 function redactDeep<T>(v: T): T {
@@ -141,7 +149,6 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
       harnessVersion: init ? str(init['claude_code_version']) : null,
       permissionMode: init ? str(init['permissionMode']) : null,
       model: init ? str(init['model']) : null,
-      sessionId: init ? str(init['session_id']) : null,
     });
 
     const handle = (obj: Json): Draft[] => {
@@ -225,31 +232,89 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
       }
       const drafts = handle(parsed);
       if (!initSeen) {
-        pending.push(...drafts);
+        for (const d of drafts) if (pending.length < MAX_PENDING_EVENTS) pending.push(d);
         return [];
       }
       return drafts;
     };
 
-    let buffer = '';
-    for await (const chunk of proc.lines) {
-      buffer += chunk;
-      let nl: number;
-      while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        for (const d of process_(line)) yield finish(d);
+    let cleaned = false;
+    const cleanup = async (): Promise<void> => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        proc.kill();
+      } catch {
+        /* cleanup is best effort */
       }
-    }
-    for (const d of process_(buffer)) yield finish(d);
+      // Killing the host client does not stop the agent (spike section 5); stop it inside the sandbox too.
+      try {
+        await this.launcher.stop(input.attemptId);
+      } catch {
+        /* cleanup is best effort */
+      }
+    };
 
-    if (!initSeen) {
-      initSeen = true;
-      yield finish(sessionDraft(null));
-      for (const d of pending.splice(0)) yield finish(d);
+    let completed = false;
+    try {
+      let buffer = '';
+      let discarding = false;
+      const lineDrafts = (line: string): Draft[] => process_(line);
+      let streamFailed = false;
+      try {
+        for await (const chunk of proc.lines) {
+          let pos = 0;
+          while (pos <= chunk.length) {
+            const nl = chunk.indexOf('\n', pos);
+            const end = nl < 0 ? chunk.length : nl;
+            const segLen = end - pos;
+            if (!discarding && buffer.length + segLen > MAX_LINE_CHARS) {
+              discarding = true;
+              buffer = '';
+              yield finish({ type: 'oversize_line' });
+            }
+            if (nl < 0) {
+              if (!discarding) buffer += chunk.slice(pos);
+              break;
+            }
+            if (discarding) discarding = false;
+            else {
+              const line = buffer + chunk.slice(pos, nl);
+              buffer = '';
+              for (const d of lineDrafts(line)) yield finish(d);
+            }
+            pos = nl + 1;
+          }
+        }
+        if (!discarding) for (const d of lineDrafts(buffer)) yield finish(d);
+      } catch (err) {
+        streamFailed = true;
+        await cleanup();
+        const msg = err instanceof Error ? err.message : 'stream failed';
+        yield finish({ type: 'stream_error', message: msg.slice(0, 500) });
+      }
+
+      if (!initSeen) {
+        initSeen = true;
+        yield finish(sessionDraft(null));
+        for (const d of pending.splice(0)) yield finish(d);
+      }
+      if (!sawResult) yield finish({ type: 'ended_without_result' });
+      if (streamFailed) {
+        completed = true;
+        return;
+      }
+      const exit = await proc.exited.catch(() => ({ code: null, signal: null }));
+      completed = true;
+      yield finish({
+        type: 'exit',
+        code: exit.code,
+        signal: exit.signal,
+        failed: exit.code !== 0 || exit.signal !== null,
+      });
+    } finally {
+      // Consumer break/return, or any unexpected throw: do not leak a running agent.
+      if (!completed) await cleanup();
     }
-    if (!sawResult) yield finish({ type: 'ended_without_result' });
-    const exit = await proc.exited.catch(() => ({ code: null, signal: null }));
-    yield finish({ type: 'exit', code: exit.code, signal: exit.signal });
   }
 }
