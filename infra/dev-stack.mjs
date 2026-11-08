@@ -9,6 +9,7 @@ import { join } from 'node:path';
 if (existsSync('.env')) process.loadEnvFile('.env');
 
 const env = { ...process.env };
+const demo = env.SELARIKRU_DEMO === '1'; // set by dev-demo.mjs
 const need = ['SELARIKRU_OWNER_UID'];
 const missing = need.filter((n) => !env[n]);
 if (missing.length > 0) {
@@ -69,12 +70,24 @@ for (let i = 0; i < 100; i++) {
   await new Promise((r) => setTimeout(r, 300));
 }
 
+if (demo) {
+  console.log('> seeding demo account, project and run');
+  run('pnpm', ['--filter', '@selarikru/control-api', 'exec', 'tsx', 'src/demo-seed.ts']);
+}
+
 console.log('> starting control API');
 children.push(spawn('pnpm', ['--filter', '@selarikru/control-api', 'start'], { stdio: 'inherit', env }));
+if (demo) {
+  console.log('> starting web dev server');
+  // Own process group: pnpm and vite spawn helpers that a plain kill would leave behind.
+  children.push(spawn('pnpm', ['--filter', '@selarikru/control-web', 'dev', '--host', '127.0.0.1', '--port', '5173', '--strictPort'], { stdio: 'inherit', env, detached: true }));
+  console.log(env.SELARIKRU_DEMO_BANNER ?? '');
+}
 
 const stop = () => {
   // The emulator runs in its own process group (the CLI spawns helpers); the API is a plain child.
-  for (const [c, group] of [[children[0], true], [children[1], false]]) {
+  for (const [c, group] of [[children[0], true], [children[1], false], [children[2], true]]) {
+    if (!c) continue;
     try {
       process.kill(group ? -c.pid : c.pid, 'SIGTERM');
     } catch {

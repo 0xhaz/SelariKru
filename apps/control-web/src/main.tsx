@@ -13,8 +13,8 @@ function App() {
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '');
   const api = useMemo(() => (baseUrl ? createApiClient({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
   const defaults = {
-    projectId: (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) ?? '',
-    runId: (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) ?? '',
+    projectId: (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '',
+    runId: (import.meta.env.VITE_DEMO_RUN_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) || '',
   };
   return <AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} />;
 }
