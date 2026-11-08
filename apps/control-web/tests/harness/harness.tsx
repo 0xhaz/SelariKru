@@ -19,6 +19,8 @@ interface Scenario {
   data?: unknown;
   review?: ApiResult<any>[];
   planRevision?: ApiResult<any>;
+  planRevisions?: ApiResult<any>[];
+  noApi?: boolean;
   report?: ApiResult<any>;
   realApi?: { baseUrl: string; token: string };
 }
@@ -122,6 +124,8 @@ const fakeApi: AssistantApi = {
   },
   async createPlanRevision(a) {
     record('plan-revision', a);
+    const q = sc.planRevisions?.shift();
+    if (q) return q;
     return sc.planRevision ?? { ok: true, value: { planRevision: a.expectedRevision + 1, taskIds: a.tasks.map((t) => t.taskId) } };
   },
   async postClientReport(a) {
@@ -138,6 +142,6 @@ window.__hold = hold;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AssistantPanel adapter={adapter} api={api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />
+    <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />
   </StrictMode>,
 );

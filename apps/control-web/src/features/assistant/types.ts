@@ -50,6 +50,6 @@ export interface AssistantApi {
     envelope: { operation: string; status: string; data: unknown };
     acknowledgedIssuePaths?: readonly string[];
   }): Promise<ApiResult<ReviewResponse>>;
-  createPlanRevision(a: { runId: string; expectedRevision: number; tasks: readonly ReviewedTask[] }): Promise<ApiResult<PlanRevisionResponse>>;
+  createPlanRevision(a: { runId: string; expectedRevision: number; idempotencyKey: string; tasks: readonly ReviewedTask[] }): Promise<ApiResult<PlanRevisionResponse>>;
   postClientReport(a: { taskId: string; report: ClientInferenceReport }): Promise<ApiResult<{ reportId: string }>>;
 }

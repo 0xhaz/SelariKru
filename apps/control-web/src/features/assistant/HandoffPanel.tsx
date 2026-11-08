@@ -9,7 +9,7 @@ type Phase =
   | { readonly name: 'idle' }
   | { readonly name: 'working' }
   | { readonly name: 'needs_ack'; readonly paths: readonly string[] }
-  | { readonly name: 'ready'; readonly review: ReviewResponse }
+  | { readonly name: 'ready'; readonly review: ReviewResponse; readonly key: string }
   | { readonly name: 'accepted'; readonly done: PlanRevisionResponse; readonly report: 'sent' | 'failed' | 'skipped' };
 
 const SOURCE_REPORT = { ON_DEVICE: 'on_device', IN_CLOUD: 'in_cloud', UNKNOWN: 'unknown' } as const;
@@ -35,8 +35,10 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 export function HandoffPanel({
-  result, semantic, api, runId, baseline,
-}: { result: ResultMeta; semantic: ProposalValidation | null; api: AssistantApi; runId: string; baseline: readonly string[] }) {
+  result, semantic, api,
+}: { result: ResultMeta; semantic: ProposalValidation | null; api: AssistantApi | null }) {
+  // Run and scope are those the result was produced for, not whatever the form says now.
+  const { runId, baseline } = result;
   const [phase, setPhase] = useState<Phase>({ name: 'idle' });
   const [acked, setAcked] = useState<ReadonlySet<string>>(new Set());
   const [materialOk, setMaterialOk] = useState(false);
@@ -44,6 +46,7 @@ export function HandoffPanel({
 
   const issueText = useMemo(() => new Map((semantic?.issues ?? []).map((i) => [issueKey(i), i.message] as const)), [semantic]);
 
+  if (!api) return <Shell><p className="text-muted">Handoff is unavailable: the control API URL is not configured for this build.</p></Shell>;
   if (result.demo) return <Shell><p>Demo data cannot be accepted. It is not evidence and nothing here goes to the workflow.</p></Shell>;
   if (result.restricted) {
     return <Shell><p>This draft is restricted. It stays on this device and nothing posts it. Publishing derived work would need a separate, permitted policy change.</p></Shell>;
@@ -52,6 +55,7 @@ export function HandoffPanel({
   if (result.operation !== 'draftTaskPlan') return <Shell><p className="text-muted">Only task plans are handed to the workflow. Criteria and briefs are for your review here; draft a task plan to continue.</p></Shell>;
   if (!semantic || semantic.status === 'rejected') return <Shell><p className="text-danger">The proposal checks rejected this draft, so it cannot be accepted.</p></Shell>;
 
+  const client: AssistantApi = api;
   const fail = (r: Extract<ApiResult<unknown>, { ok: false }>): void => {
     setError(apiErrorText(r.code, r.details));
     setPhase({ name: 'idle' });
@@ -61,10 +65,10 @@ export function HandoffPanel({
   async function review(acknowledgedIssuePaths: readonly string[]): Promise<void> {
     setError(null);
     setPhase({ name: 'working' });
-    const r = await api.reviewProposal({ runId, envelope, acknowledgedIssuePaths });
+    const r = await client.reviewProposal({ runId, envelope, acknowledgedIssuePaths });
     if (r.ok) {
       setMaterialOk(false);
-      setPhase({ name: 'ready', review: r.value });
+      setPhase({ name: 'ready', review: r.value, key: `plan-${crypto.randomUUID()}` });
     } else if (r.code === 'acknowledgement_required') {
       const paths = (r.details as { paths?: unknown } | undefined)?.paths;
       setAcked(new Set());
@@ -72,18 +76,24 @@ export function HandoffPanel({
     } else fail(r);
   }
 
-  async function accept(rv: ReviewResponse): Promise<void> {
+  async function accept(rv: ReviewResponse, key: string): Promise<void> {
     setError(null);
     setPhase({ name: 'working' });
-    const r = await api.createPlanRevision({ runId, expectedRevision: rv.expectedRevision, tasks: rv.tasks });
+    const r = await client.createPlanRevision({ runId, expectedRevision: rv.expectedRevision, idempotencyKey: key, tasks: rv.tasks });
     if (!r.ok) {
+      if (r.code === 'network_error') {
+        // Unknown outcome: keep the review and resend the identical body with the same key.
+        setError(apiErrorText(r.code, r.details));
+        setPhase({ name: 'ready', review: rv, key });
+        return;
+      }
       if (r.code === 'stale_revision') setMaterialOk(false);
       return fail(r);
     }
     const first = r.value.taskIds[0];
     const report = reportFor(result);
     let status: 'sent' | 'failed' | 'skipped' = 'skipped';
-    if (first && report) status = (await api.postClientReport({ taskId: first, report })).ok ? 'sent' : 'failed';
+    if (first && report) status = (await client.postClientReport({ taskId: first, report })).ok ? 'sent' : 'failed';
     setPhase({ name: 'accepted', done: r.value, report: status });
   }
 
@@ -156,7 +166,7 @@ export function HandoffPanel({
           </div>
         ) : null}
         <p className="text-sm text-muted">Based on plan revision {rv.expectedRevision}. If the plan changes first, you will be asked to review again.</p>
-        <button type="button" className={btnPrimary} disabled={blocked} onClick={() => void accept(rv)}>Accept plan</button>
+        <button type="button" className={btnPrimary} disabled={blocked} onClick={() => void accept(rv, phase.key)}>Accept plan</button>
       </Shell>
     );
   }

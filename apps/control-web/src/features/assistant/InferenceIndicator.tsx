@@ -22,7 +22,7 @@ function validationText(r: ResultMeta | null, semantic: SemanticStatus | null): 
 export function InferenceIndicator({ semantic }: { semantic: SemanticStatus | null }) {
   const { mode, device, cloudModel, sdkVersion, generating, result, download } = useAssistantStore();
   const phase = generating ? 'generating' : result ? (result.demo ? 'demo' : result.status) : 'idle';
-  const applied: InferenceMode | null = result && !result.demo ? result.requestedMode : mode;
+  const applied: InferenceMode | null = result && !result.demo ? (result.requestedMode ?? result.selectedMode) : mode;
   const readiness = readinessLabel(download.phase === 'running' ? 'downloading' : device);
   const source = sourceText(result?.observedSource ?? 'UNKNOWN', phase);
   const status = generating ? { text: 'Generating', tone: 'active' as const } : result ? (result.demo ? { text: 'Demo data', tone: 'neutral' as const } : STATUS_LABEL[result.status]) : { text: 'No request yet', tone: 'neutral' as const };

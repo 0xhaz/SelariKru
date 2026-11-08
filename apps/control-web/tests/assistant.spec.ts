@@ -12,7 +12,7 @@ async function open(page: Page, scenario: Record<string, unknown> = {}): Promise
 }
 
 const calls = (page: Page) => page.evaluate(() => (window as any).__calls as { adapter: any[]; api: any[] });
-const choose = async (page: Page, policy: string) => page.getByRole('radio', { name: policy }).check();
+const choose = async (page: Page, policy: string) => page.getByRole('radio', { name: new RegExp(`^${policy}`) }).check();
 const indicator = (page: Page) => page.getByRole('region', { name: 'Assistant inference' });
 
 async function pickOperation(page: Page, label: string) {
@@ -250,6 +250,77 @@ test('API client sends the owner bearer token and the expected revision', async 
   expect(seen.map((s) => new URL(s.url).pathname)).toEqual(['/v1/runs/run-1/proposals/review', '/v1/runs/run-1/plan-revisions', '/v1/tasks/prop-1/client-reports']);
   expect(seen.every((s) => s.auth === 'Bearer owner-token-1')).toBe(true);
   expect(seen[1]!.body.expectedRevision).toBe(7);
+});
+
+test('requested policy falls back to the selection when routing blocked the request', async ({ page }) => {
+  await open(page, { proposal: { status: 'blocked', blockedReason: 'missing_destination:firebase_cloud_inference', requestedMode: null, observedSource: 'UNKNOWN' } });
+  await expect(page.getByRole('checkbox', { name: /may use cloud inference/ })).not.toBeChecked();
+  await choose(page, 'Cloud only');
+  await generate(page);
+  await expect(page.getByRole('alert')).toContainText('Blocked by data policy');
+  await expect(indicator(page).getByTestId('inf-policy')).toContainText('Cloud only');
+  await expect(indicator(page).getByTestId('inf-policy')).not.toContainText('None');
+});
+
+test('a stale demo flag does not turn a restricted brief into a silent demo', async ({ page }) => {
+  await open(page);
+  const demo = page.getByRole('checkbox', { name: /Use demo output/ });
+  await demo.check();
+  await page.getByLabel('Brief', { exact: true }).selectOption('restricted-brief');
+  await expect(demo).not.toBeChecked();
+  await generate(page);
+  const out = page.getByRole('region', { name: 'Draft output' });
+  await expect(out).toContainText('Criterion for FB-01');
+  await expect(out).not.toContainText('not shown');
+  await expect(page.getByText('Demo data', { exact: true })).toHaveCount(0);
+  expect((await calls(page)).adapter).toHaveLength(1);
+  expect(await page.evaluate(() => (window as any).__hold.toJSON().held)).toBe(1);
+});
+
+test('a late result is dropped when the selection changed during generation', async ({ page }) => {
+  await open(page, { holdGenerate: true });
+  await generate(page);
+  await expect(page.getByLabel('Brief', { exact: true })).toBeDisabled();
+  await expect(page.locator('#project-id')).toBeDisabled();
+  await page.evaluate(() => (window as any).__store.getState().set({ briefId: 'brief-02' }));
+  await page.evaluate(() => (window as any).__releaseGenerate());
+  await page.waitForTimeout(200);
+  await expect(page.getByRole('region', { name: 'Draft output' })).toContainText('No draft yet');
+  await expect(page.getByRole('region', { name: 'Handoff to workflow' })).toHaveCount(0);
+});
+
+test('changing the project clears the result and any held restricted draft', async ({ page }) => {
+  await open(page);
+  await page.getByLabel('Brief', { exact: true }).selectOption('restricted-brief');
+  await generate(page);
+  await expect(page.getByRole('region', { name: 'Draft output' })).toContainText('Criterion for FB-01');
+  await page.locator('#project-id').fill('proj-2');
+  await expect(page.getByRole('region', { name: 'Draft output' })).toContainText('No draft yet');
+  expect(await page.evaluate(() => (window as any).__hold.toJSON().held)).toBe(0);
+});
+
+test('a network error keeps the review and resends the identical plan-revision body', async ({ page }) => {
+  await open(page, { planRevisions: [{ ok: false, status: 0, code: 'network_error', message: 'net' }] });
+  await pickOperation(page, 'Draft task plan');
+  await generate(page);
+  await page.getByRole('button', { name: 'Review with server' }).click();
+  await page.getByRole('button', { name: 'Accept plan' }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not reach');
+  await page.getByRole('button', { name: 'Accept plan' }).click();
+  await expect(page.getByRole('region', { name: 'Handoff to workflow' })).toContainText('Plan revision 4 created');
+  const { api } = await calls(page);
+  const revs = api.filter((c) => c.kind === 'plan-revision');
+  expect(revs).toHaveLength(2);
+  expect(revs[0].body.idempotencyKey).toMatch(/^[A-Za-z0-9._:-]{1,200}$/);
+  expect(revs[1].body).toEqual(revs[0].body);
+});
+
+test('handoff is unavailable when no API URL is configured', async ({ page }) => {
+  await open(page, { noApi: true });
+  await pickOperation(page, 'Draft task plan');
+  await generate(page);
+  await expect(page.getByRole('region', { name: 'Handoff to workflow' })).toContainText('control API URL is not configured');
+  await expect(page.getByRole('button', { name: 'Review with server' })).toHaveCount(0);
 });
 
 test.describe('accessibility', () => {

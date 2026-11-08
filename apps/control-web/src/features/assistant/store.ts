@@ -13,6 +13,9 @@ export interface ResultMeta {
   readonly demo: boolean;
   readonly restricted: boolean;
   readonly briefId: string;
+  /** The run and scope this result was produced for. Handoff uses these, never the current form values. */
+  readonly runId: string;
+  readonly baseline: readonly string[];
   readonly selectedMode: InferenceMode;
   readonly requestedMode: InferenceMode | null;
   readonly observedSource: ObservedSource;
@@ -49,23 +52,29 @@ interface AssistantState {
   setDownload: (d: DownloadState) => void;
   setGenerating: (g: boolean) => void;
   setResult: (r: ResultMeta | null) => void;
+  reset: () => void;
 }
 
-export const useAssistantStore = create<AssistantState>()((set) => ({
-  mode: 'ONLY_ON_DEVICE',
-  operation: 'suggestCriteria',
+const INITIAL = {
+  mode: 'ONLY_ON_DEVICE' as InferenceMode,
+  operation: 'suggestCriteria' as ProposalOperation,
   briefId: 'brief-01',
-  cloudPermitted: true,
+  cloudPermitted: false,
   demo: false,
-  device: null,
-  cloudModel: null,
-  sdkVersion: null,
-  download: { phase: 'idle' },
+  device: null as DeviceReadiness | null,
+  cloudModel: null as string | null,
+  sdkVersion: null as string | null,
+  download: { phase: 'idle' } as DownloadState,
   generating: false,
-  result: null,
+  result: null as ResultMeta | null
+};
+
+export const useAssistantStore = create<AssistantState>()((set) => ({
+  ...INITIAL,
   set: (patch) => set(patch),
   setReadiness: (r) => set({ device: r.device, cloudModel: r.cloudModel, sdkVersion: r.sdkVersion }),
   setDownload: (download) => set({ download }),
   setGenerating: (generating) => set({ generating }),
   setResult: (result) => set({ result }),
+  reset: () => set({ ...INITIAL }),
 }));

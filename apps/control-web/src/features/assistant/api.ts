@@ -32,8 +32,8 @@ export function createApiClient(opts: ApiClientOptions): AssistantApi {
         envelope: { operation: envelope.operation, status: envelope.status, data: envelope.data },
         ...(acknowledgedIssuePaths && acknowledgedIssuePaths.length > 0 ? { acknowledgedIssuePaths } : {}),
       }),
-    createPlanRevision: ({ runId, expectedRevision, tasks }: { runId: string; expectedRevision: number; tasks: readonly ReviewedTask[] }) =>
-      post<PlanRevisionResponse>(`/v1/runs/${enc(runId)}/plan-revisions`, { expectedRevision, tasks }),
+    createPlanRevision: ({ runId, expectedRevision, idempotencyKey, tasks }: { runId: string; expectedRevision: number; idempotencyKey: string; tasks: readonly ReviewedTask[] }) =>
+      post<PlanRevisionResponse>(`/v1/runs/${enc(runId)}/plan-revisions`, { expectedRevision, idempotencyKey, tasks }),
     postClientReport: ({ taskId, report }: { taskId: string; report: ClientInferenceReport }) =>
       post<{ reportId: string }>(`/v1/tasks/${enc(taskId)}/client-reports`, report),
   };

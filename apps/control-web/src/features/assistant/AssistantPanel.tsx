@@ -15,7 +15,8 @@ import { Chip } from './ui.tsx';
 
 export interface AssistantPanelProps {
   readonly adapter: AssistantPort;
-  readonly api: AssistantApi;
+  /** Null when no control API URL is configured: handoff is then disabled. */
+  readonly api: AssistantApi | null;
   readonly hold: RestrictedDraftHold;
   readonly defaults?: { readonly projectId: string; readonly runId: string };
 }
@@ -30,9 +31,11 @@ const ERROR_PROPOSAL = (op: AssistantProposal['operation'], ids: readonly string
 export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelProps) {
   const store = useAssistantStore();
   const { mode, operation, briefId, cloudPermitted, demo, result, set, setResult, setGenerating, setDownload, setReadiness } = store;
+  const reqRef = useRef(0);
   const [target, setTarget] = useState<Target>({ projectId: defaults?.projectId ?? '', runId: defaults?.runId ?? '' });
   const [announce, setAnnounce] = useState('');
   const brief = briefById(briefId);
+  const effectiveDemo = demo && !brief.restricted;
   const heldRef = useRef<string | null>(null);
 
   const refreshReadiness = useCallback(async () => {
@@ -46,22 +49,27 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
   useEffect(() => {
     void refreshReadiness();
     return () => {
+      reqRef.current++;
       if (heldRef.current) hold.discard(heldRef.current);
+      // Leaving the screen (including sign-out) drops every result.
+      useAssistantStore.getState().reset();
     };
   }, [refreshReadiness, hold]);
 
   const discard = useCallback(() => {
+    reqRef.current++;
+    setGenerating(false);
     if (heldRef.current) hold.discard(heldRef.current);
     heldRef.current = null;
     setResult(null);
-  }, [hold, setResult]);
+  }, [hold, setResult, setGenerating]);
 
   // Changing the brief or the operation drops the previous result, including any held restricted draft.
   const first = useRef(true);
   useEffect(() => {
     if (first.current) { first.current = false; return; }
     discard();
-  }, [briefId, operation, demo, discard]);
+  }, [briefId, operation, demo, target.projectId, target.runId, discard]);
 
   async function onDownload(): Promise<void> {
     setDownload({ phase: 'running', fraction: null });
@@ -79,11 +87,12 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
 
   async function onGenerate(): Promise<void> {
     discard();
+    const myReq = reqRef.current;
     setGenerating(true);
     setAnnounce('Generating draft');
     const ids = brief.allowedRequirementIds;
     let p: AssistantProposal;
-    if (demo && !brief.restricted) {
+    if (effectiveDemo) {
       p = demoProposal(operation, ids);
     } else {
       const req: AssistRequest = {
@@ -99,14 +108,16 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
         p = ERROR_PROPOSAL(operation, ids, e instanceof Error ? e.name : 'Error');
       }
     }
+    // A newer request, or a selection change, superseded this one: drop it.
+    if (myReq !== reqRef.current) return;
     // Restricted output goes to the in-memory hold only. The store gets metadata.
-    const draftId = brief.restricted && p.status === 'ok' && !demo ? `draft-${p.requestId}` : null;
+    const draftId = brief.restricted && p.status === 'ok' ? `draft-${p.requestId}` : null;
     if (draftId) {
       hold.hold({ id: draftId, sourceClassifications: [brief.classification], proposal: p });
       heldRef.current = draftId;
     }
     const meta: ResultMeta = {
-      requestId: p.requestId, operation, status: p.status, demo: demo && !brief.restricted, restricted: brief.restricted, briefId: brief.id,
+      requestId: p.requestId, operation, status: p.status, demo: effectiveDemo, restricted: brief.restricted, briefId: brief.id, runId: target.runId, baseline: [...ids],
       selectedMode: mode, requestedMode: p.requestedMode, observedSource: p.observedSource, rawInferenceSource: p.rawInferenceSource,
       totalMs: p.timing.totalMs, schemaStatus: p.validation.status, schemaErrors: p.validation.errors, blockedReason: p.blockedReason,
       errorName: p.errorName, cloudModel: p.model.cloudModel, sdkVersion: p.model.sdkVersion, draftId, proposal: brief.restricted ? null : p,
@@ -134,7 +145,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
           <h1 className="text-2xl font-semibold">Assistant</h1>
           <p className="mt-1 max-w-prose text-muted">Draft requirements on this device or in the cloud. Every draft says where it came from, and only a checked task plan reaches the workflow.</p>
         </div>
-        {demo && !brief.restricted ? <Chip tone="warning">Demo data</Chip> : null}
+        {effectiveDemo ? <Chip tone="warning">Demo data</Chip> : null}
       </header>
       <p role="status" aria-live="polite" className="sr-only">{announce}</p>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
@@ -145,7 +156,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
         <div className="space-y-4">
           <InferenceIndicator semantic={semantic?.status ?? null} />
           <OutputView result={result} semantic={semantic} onDiscard={discard} />
-          {result ? <HandoffPanel key={result.requestId + result.briefId + String(result.demo)} result={result} semantic={semantic} api={api} runId={target.runId} baseline={brief.allowedRequirementIds} /> : null}
+          {result ? <HandoffPanel key={result.requestId + result.briefId + String(result.demo)} result={result} semantic={semantic} api={api} /> : null}
         </div>
       </div>
     </div>

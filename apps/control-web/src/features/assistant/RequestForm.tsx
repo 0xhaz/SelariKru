@@ -9,6 +9,7 @@ export interface Target { projectId: string; runId: string }
 export function RequestForm({ target, onTarget, onGenerate }: { target: Target; onTarget: (t: Target) => void; onGenerate: () => void }) {
   const { mode, operation, briefId, cloudPermitted, demo, generating, download, result, set } = useAssistantStore();
   const brief = briefById(briefId);
+  const effectiveDemo = demo && !brief.restricted;
   return (
     <Card title="Request" labelId="request-title" hint="Choose the brief, what to draft, and where the model may run.">
       <form
@@ -18,6 +19,7 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
           onGenerate();
         }}
       >
+        <fieldset disabled={generating} className="space-y-4 border-0 p-0">
         <div>
           <label htmlFor="brief" className="mb-1 block text-sm text-muted">Brief</label>
           <select id="brief" className={field} value={briefId} onChange={(e) => set({ briefId: e.target.value })}>
@@ -58,7 +60,7 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
             <span>This source may use cloud inference<span className="block text-muted">{brief.restricted ? 'Never for restricted sources.' : 'Synthetic brief; approval applies to this session.'}</span></span>
           </label>
           <label className="flex items-start gap-2 text-sm">
-            <input type="checkbox" className="mt-1" checked={demo} disabled={brief.restricted} onChange={(e) => set({ demo: e.target.checked })} />
+            <input type="checkbox" className="mt-1" checked={effectiveDemo} disabled={brief.restricted} onChange={(e) => set({ demo: e.target.checked })} />
             <span>Use demo output (no model call)<span className="block text-muted">Shows canned data labeled Demo data. Cannot be accepted and is never evidence.</span></span>
           </label>
         </div>
@@ -73,6 +75,8 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
             <label htmlFor="run-id" className="mb-1 block text-sm text-muted">Run ID</label>
             <input id="run-id" className={`${field} font-mono text-[13px]`} value={target.runId} onChange={(e) => onTarget({ ...target, runId: e.target.value })} />
           </div>
+        </fieldset>
+
         </fieldset>
 
         <div>
