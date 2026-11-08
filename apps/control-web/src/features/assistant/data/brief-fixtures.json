@@ -1,0 +1,242 @@
+{
+  "version": "0.1",
+  "dataClassification": "synthetic_cloud_permitted",
+  "systemInstruction": "Draft a concise summary and 1–8 testable acceptance criteria using only the supplied scope. Return JSON matching the schema. Use the supplied requirement IDs. Do not add mandatory integrations, accounts or new features.",
+  "outputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "summary",
+      "acceptanceCriteria"
+    ],
+    "properties": {
+      "summary": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 400
+      },
+      "acceptanceCriteria": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 8,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requirementId",
+            "text"
+          ],
+          "properties": {
+            "requirementId": {
+              "type": "string",
+              "enum": [
+                "FB-01",
+                "FB-02",
+                "FB-03",
+                "FB-04",
+                "FB-05",
+                "FB-06",
+                "FB-07",
+                "FB-08"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            }
+          }
+        }
+      }
+    }
+  },
+  "fixtures": [
+    {
+      "id": "brief-01",
+      "prompt": "Draft criteria for submitting feedback. Require a trimmed title of 3–120 Unicode code points and an optional description of at most 1,000 code points.",
+      "allowedRequirementIds": [
+        "FB-01",
+        "FB-02"
+      ],
+      "humanReviewFacts": [
+        "title bounds retained",
+        "optional description retained",
+        "validation does not save invalid input"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-02",
+      "prompt": "Draft criteria for the feedback status flow: new items are Open; a user can switch to Planned or Done and reload without losing the status.",
+      "allowedRequirementIds": [
+        "FB-04",
+        "FB-06"
+      ],
+      "humanReviewFacts": [
+        "default Open",
+        "exact three statuses",
+        "persisted status"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-03",
+      "prompt": "Draft criteria for All/Open/Planned/Done filters. Counts describe the complete dataset even while one status is selected.",
+      "allowedRequirementIds": [
+        "FB-05"
+      ],
+      "humanReviewFacts": [
+        "four filters",
+        "global counts",
+        "updates reflected"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-04",
+      "prompt": "Draft criteria for storing feedback in the local demo database so reload and API restart preserve submitted data.",
+      "allowedRequirementIds": [
+        "FB-06"
+      ],
+      "humanReviewFacts": [
+        "reload persistence",
+        "restart persistence",
+        "same per-run database"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-05",
+      "prompt": "Draft criteria for loading, empty and failed-request states. A failed save must not look successful.",
+      "allowedRequirementIds": [
+        "FB-07"
+      ],
+      "humanReviewFacts": [
+        "three states",
+        "failed save visible"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-06",
+      "prompt": "Draft criteria for accessible labels and keyboard use, and safe rendering of a title that contains HTML-like text.",
+      "allowedRequirementIds": [
+        "FB-08"
+      ],
+      "humanReviewFacts": [
+        "accessible names",
+        "keyboard use",
+        "text does not execute"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-07",
+      "prompt": "Draft API criteria: POST creates a valid item with 201; PATCH changes a known item status; an unknown item returns 404 and invalid input returns 400.",
+      "allowedRequirementIds": [
+        "FB-01",
+        "FB-02",
+        "FB-04"
+      ],
+      "humanReviewFacts": [
+        "201 create",
+        "400 invalid",
+        "404 unknown",
+        "persisted update"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-08",
+      "prompt": "Draft criteria for listing newest feedback first. If two creation times are equal, use descending item ID as the tie breaker.",
+      "allowedRequirementIds": [
+        "FB-03"
+      ],
+      "humanReviewFacts": [
+        "newest first",
+        "descending ID tie rule"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-09",
+      "prompt": "Draft criteria for rejecting malformed field types and invalid status names, without mutating the database.",
+      "allowedRequirementIds": [
+        "FB-02"
+      ],
+      "humanReviewFacts": [
+        "type rejection",
+        "enum rejection",
+        "no mutation"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    },
+    {
+      "id": "brief-10",
+      "prompt": "Draft concise criteria for a one-screen Feedback Board: submit a title/description, view feedback, change Open/Planned/Done status, filter and preserve data after restart. No login or paid integrations.",
+      "allowedRequirementIds": [
+        "FB-01",
+        "FB-04",
+        "FB-05",
+        "FB-06"
+      ],
+      "humanReviewFacts": [
+        "core workflow retained",
+        "persistence",
+        "no invented login or paid-service dependency"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
+    }
+  ],
+  "reviewMethod": "Schema validation plus route-blinded human fact/scope review; no measured results included"
+}

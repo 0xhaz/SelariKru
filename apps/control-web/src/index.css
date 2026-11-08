@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+/* Dark tokens from docs/design.md section 11. Starting values; contrast of the used pairs is checked by the axe tests. */
+@theme {
+  --color-bg: #0b1020;
+  --color-panel: #151e30;
+  --color-panel-2: #1b263b;
+  --color-line: #2d3a52;
+  --color-fg: #f1f5f9;
+  --color-muted: #b8c4d6;
+  --color-active: #70b7ff;
+  --color-success: #70d6a3;
+  --color-warning: #ffd27a;
+  --color-danger: #ff9a9a;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius-card: 8px;
+  --radius-chip: 4px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-active);
+  outline-offset: 2px;
+}
+
+.progress-fill {
+  transition: width 200ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill {
+    transition: none;
+  }
+}
