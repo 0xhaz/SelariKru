@@ -1,7 +1,8 @@
 import { TaskSpecSchema } from '@selarikru/domain';
 import { z } from 'zod';
+import { redactSecrets } from './redact.ts';
 
-const Key = z.string().min(1).max(200);
+const Key = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/, 'expected 1-200 characters from A-Z a-z 0-9 . _ : -');
 const Revision = z.number().int().min(0);
 
 /** Every request object is strict: unknown fields (including anything secret-shaped) are rejected, not stored. */
@@ -25,12 +26,36 @@ export type BudgetStatus = z.infer<typeof BudgetStatusSchema>;
 export const CreateRunResponseSchema = z.object({ runId: z.string(), budget: BudgetStatusSchema }).strict();
 export type CreateRunResponse = z.infer<typeof CreateRunResponseSchema>;
 
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:@+\/-]{0,127}$/;
+const SAFE_PATH = /^[A-Za-z0-9._:@+*\/-]{1,300}$/;
+
+/**
+ * A plan task as the API accepts it. The domain schema only requires non-empty strings, so everything that ends up in
+ * events, snapshots and stored specs is held to an identifier alphabet here, and any secret-shaped value is refused.
+ * `title` is the one free-text field; the API redacts it before storing.
+ */
+export const PlanTaskSchema = TaskSpecSchema.superRefine((spec, ctx) => {
+  const bad = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
+  const check = (value: string, path: (string | number)[], re: RegExp) => {
+    if (!re.test(value)) bad(path, 'contains characters not allowed in an identifier');
+    else if (redactSecrets(value) !== value) bad(path, 'looks like a secret');
+  };
+  const walk = (value: unknown, path: (string | number)[]): void => {
+    if (typeof value === 'string') {
+      if (path[0] === 'title') return;
+      check(value, path, path[0] === 'allowedPaths' ? SAFE_PATH : SAFE_ID);
+    } else if (Array.isArray(value)) value.forEach((v, i) => walk(v, [...path, i]));
+    else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, [...path, k]);
+  };
+  walk(spec, []);
+});
+
 export const PlanRevisionRequestSchema = z
   .object({
     /** The run's current plan revision (0 before any plan). A stale value is a 409. */
     expectedRevision: Revision,
     idempotencyKey: Key.optional(),
-    tasks: z.array(TaskSpecSchema).min(1).max(200),
+    tasks: z.array(PlanTaskSchema).min(1).max(200),
   })
   .strict();
 export type PlanRevisionRequest = z.infer<typeof PlanRevisionRequestSchema>;

@@ -4,7 +4,7 @@ import { err, ok, type Result } from './result.ts';
 
 export const EVENT_TYPES = [
   'run.created', 'plan.accepted',
-  'task.ready', 'task.cancelled', 'task.superseded', 'task.blocked',
+  'task.ready', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.blocked',
   'attempt.started', 'attempt.heartbeat', 'attempt.completed', 'attempt.failed',
   'approval.requested', 'approval.granted', 'approval.denied',
   'verification.started', 'verification.passed', 'verification.failed',
@@ -43,6 +43,8 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'run.created': [H, S, Y],
   'plan.accepted': [S, Y],
   'task.ready': [S],
+  /** A request to stop active attempts. Not confirmed termination: `task.cancelled` follows once the attempt is closed. */
+  'task.cancel_requested': [H],
   'task.cancelled': [H, S, Y],
   'task.superseded': [S, Y],
   'task.blocked': [S, Y],

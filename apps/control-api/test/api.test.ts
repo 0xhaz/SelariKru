@@ -257,6 +257,9 @@ describe('task commands', () => {
     const res = await post(h.app, '/v1/tasks/t1/commands', { command: 'retry', expectedRevision: 0, idempotencyKey: 'c7' });
     expect(res.status).toBe(202);
     expect((await taskStatus('t1'))['status']).toBe('ready');
+    const ev = await t.db.execute(sql`SELECT type, actor_kind, actor_id, payload FROM events WHERE task_id = 't1'`);
+    expect(ev[0]).toMatchObject({ type: 'task.ready', actor_kind: 'scheduler', actor_id: 'scheduler' });
+    expect((ev[0]!['payload'] as any).requestedBy).toBe(OWNER_UID);
   });
 });
 
@@ -276,6 +279,51 @@ describe('approvals', () => {
     const again = await post(h.app, '/v1/approvals/a1/resolve', { decision: 'deny', scopeHash: 'scope1', expectedRevision: 0, idempotencyKey: 'r2' });
     expect(again.status).toBe(409);
     expect(again.body.error.code).toBe('approval_already_resolved');
+  });
+});
+
+describe('approvals bound to revisions', () => {
+  async function seedApproval(over: { revision?: number; expected?: object } = {}) {
+    await seedTask(t.db, specFor('t1'), 'awaiting_approval');
+    await t.db.execute(sql`INSERT INTO task_revisions (tenant_id, project_id, run_id, task_id, revision, board_id, spec)
+      SELECT tenant_id, project_id, run_id, task_id, 2, board_id, jsonb_set(spec, '{revision}', '2') FROM task_revisions WHERE task_id = 't1'`);
+    await t.db.execute(sql`UPDATE task_status SET current_revision = 2 WHERE task_id = 't1'`);
+    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, expected_revisions, outcome)
+      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', ${over.revision ?? 2}, 'worker', 'ah', 'scope1', ${JSON.stringify(over.expected ?? {})}::jsonb, 'pending')`);
+  }
+  const resolve = (key: string) => post(h.app, '/v1/approvals/a1/resolve', { decision: 'grant', scopeHash: 'scope1', expectedRevision: 0, idempotencyKey: key });
+
+  it('an approval for an older task revision cannot release the current revision', async () => {
+    await seedApproval({ revision: 1 });
+    const res = await resolve('s1');
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('stale_revision');
+    expect((await taskStatus('t1'))['status']).toBe('awaiting_approval');
+    expect(await countEvents()).toBe(0);
+  });
+
+  it('honours expected_revisions and fails closed on keys it cannot check', async () => {
+    await seedApproval({ expected: { t1: 1 } });
+    expect((await resolve('s2')).status).toBe(409);
+    await t.db.execute(sql`UPDATE approvals SET expected_revisions = '{"mystery": 3}'::jsonb`);
+    expect((await resolve('s3')).status).toBe(409);
+    await t.db.execute(sql`UPDATE approvals SET expected_revisions = '{"t1": 2}'::jsonb`);
+    expect((await resolve('s4')).status).toBe(200);
+    expect((await taskStatus('t1'))['status']).toBe('ready');
+  });
+
+  it('a plan revision that replaces a task supersedes its pending approvals', async () => {
+    await resetDb(t.db);
+    await seedTask(t.db, specFor('t1'), 'ready');
+    await t.db.execute(sql`UPDATE runs SET plan_revision = 1`);
+    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, outcome)
+      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', 1, 'worker', 'ah', 'scope1', 'pending')`);
+    const res = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 1, tasks: [specFor('t1', { revision: 2 })] });
+    expect(res.status).toBe(201);
+    expect((await t.db.execute(sql`SELECT outcome FROM approvals`))[0]!['outcome']).toBe('superseded');
+    const late = await post(h.app, '/v1/approvals/a1/resolve', { decision: 'grant', scopeHash: 'scope1', expectedRevision: 1, idempotencyKey: 's5' });
+    expect(late.status).toBe(409);
+    expect(late.body.error.code).toBe('approval_already_resolved');
   });
 });
 
@@ -334,6 +382,19 @@ describe('secrets', () => {
       expect(out).not.toContain(CANARY2);
     }
     expect(events).toContain('[REDACTED]');
+
+    // Identifier-like plan fields and the runner's headSha are constrained, not stored.
+    for (const field of [{ taskId: `task-${CANARY}` }, { role: CANARY }, { requirementIds: [CANARY] }, { allowedPaths: [CANARY] }, { boardId: CANARY }]) {
+      const bad = await post(h.app, `/v1/runs/${run.body.runId}/plan-revisions`, { expectedRevision: 1, tasks: [{ ...specFor('sc_other'), runId: run.body.runId, ...field }] });
+      expect(bad.status, JSON.stringify(field)).toBe(400);
+    }
+    const { token } = await enrolRunner(h.app);
+    await seedTask(t.db, specFor('t9'), 'ready');
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    const hs = await post(h.app, '/v1/runners/result', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'completed', headSha: CANARY } }, bearer(token));
+    expect(hs.status).toBe(400);
+    expect(JSON.stringify(await t.db.execute(sql`SELECT * FROM events`))).not.toContain('CANARY');
+    expect(JSON.stringify(await t.db.execute(sql`SELECT * FROM task_revisions`))).not.toContain('CANARY');
     expect(snapshot).not.toContain('leaseToken');
   });
 });

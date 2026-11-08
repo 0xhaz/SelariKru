@@ -1,4 +1,4 @@
-import type { Db } from '@selarikru/persistence';
+import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { Result } from '@selarikru/domain';
 
@@ -78,6 +78,8 @@ export interface HeartbeatReceipt {
   readonly fence: number;
   readonly lastHeartbeatAt: string;
   readonly expiresAt: string;
+  /** The owner asked to cancel this task. A runner that sees it should stop; the lease is reaped to `cancelled` either way. */
+  readonly cancelRequested: boolean;
 }
 
 /**
@@ -102,6 +104,19 @@ export interface PublishReceipt {
   readonly repair?: 'scheduled' | 'refused';
 }
 
+export interface RetryReceipt {
+  readonly taskId: string;
+  readonly taskStatus: string;
+  readonly aggregateRevision: number;
+}
+
+export interface RetryRefusal {
+  readonly kind: 'retry_refused';
+  readonly reason: string;
+  readonly status?: string;
+  readonly attemptsUsed?: number;
+}
+
 export interface ExpiredLease {
   readonly tenantId: string;
   readonly projectId: string;
@@ -117,4 +132,6 @@ export interface Scheduler {
   heartbeat(lease: Lease): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
   publishResult(lease: Lease, result: PublishResult): Promise<Result<PublishReceipt, LeaseConflict>>;
   expireLeases(now: Date): Promise<readonly ExpiredLease[]>;
+  /** Owner-requested retry of a failed task. Emits `task.ready` as the scheduler. `tx` joins the caller's transaction. */
+  retry(key: { tenantId: string; projectId: string; taskId: string }, requestedBy: string, operationId?: string | null, tx?: Tx): Promise<Result<RetryReceipt, RetryRefusal>>;
 }

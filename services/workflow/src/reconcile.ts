@@ -1,6 +1,7 @@
 import { transition, TaskSpecSchema, type TaskStatus } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { and, asc, eq, isNull, lte, isNotNull, or } from 'drizzle-orm';
+import { confirmCancel, hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR } from './events.ts';
 import { closeLease, failAttempt } from './lease.ts';
 import { reservationIdFor, settle } from './reserve.ts';
@@ -77,6 +78,13 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
     const state = parsed.success ? buildTaskState(parsed.data, statusRow.status as TaskStatus, await loadAttempts(tx, key, attempt.revision)) : null;
     if (!state) throw new Error(`task ${key.taskId}: stored spec no longer valid`);
     const eventScope = { projectId: key.projectId, runId: revisionRow.runId, taskId: key.taskId };
+
+    // An open cancel request makes the end of this attempt final: the task is cancelled, never re-dispatched.
+    if (await hasCancelRequest(tx, key, attempt.revision)) {
+      await closeLease(tx, key, attemptId, now, { outcome: 'cancelled', exitReason: reason });
+      await confirmCancel(tx, key, state, statusRow.rowRevision, eventScope, now, { attemptId, cause: reason });
+      return reason;
+    }
 
     if (reason === 'attempt_timeout') {
       const failure = failAttempt(state, reason);

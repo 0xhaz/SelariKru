@@ -6,7 +6,7 @@ import {
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
 import { leaseHealth } from '@selarikru/workflow';
-import { and, asc, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 import type { AppContext } from './app.ts';
@@ -40,6 +40,26 @@ const SYSTEM_ACTOR = { kind: 'system', id: 'control-api' } as const;
 const REPLANNABLE: readonly string[] = ['planned', 'ready'];
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked'];
 const CANCEL_REQUEST: readonly string[] = ['running', 'verifying'];
+
+/**
+ * `approvals.expected_revisions` maps what the approver saw to its revision: `planRevision` for the run's plan, any other
+ * key for a task id's current revision. A key that cannot be checked fails closed.
+ */
+async function checkExpectedRevisions(tx: Tx, expected: Record<string, unknown>, projectId: string, runId: string, tenantId: string): Promise<void> {
+  for (const [key, want] of Object.entries(expected)) {
+    let have: number | null = null;
+    if (key === 'planRevision') {
+      const run = (await tx.select().from(schema.runs).where(and(eq(schema.runs.tenantId, tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, runId))))[0];
+      have = run ? (run.planRevision ?? 0) : null;
+    } else {
+      const task = (await tx.select().from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.taskId, key))))[0];
+      have = task ? task.currentRevision : null;
+    }
+    if (typeof want !== 'number' || have === null || want !== have) {
+      throw new AppError(409, 'stale_revision', 'the approval was granted against revisions that have changed', { key, expected: want ?? null, current: have });
+    }
+  }
+}
 
 export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
@@ -109,6 +129,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }
         existing.set(t.taskId, row);
       }
+      // Pending approvals for a replaced task revision are void; they can no longer be resolved.
+      for (const taskId of existing.keys()) {
+        await tx.update(schema.approvals).set({ outcome: 'superseded' }).where(and(
+          eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.projectId, projectId), eq(schema.approvals.taskId, taskId),
+          eq(schema.approvals.outcome, 'pending')));
+      }
       for (const t of tasks) {
         await tx.insert(schema.taskRevisions).values({ tenantId: config.tenantId, projectId, runId: run.runId, taskId: t.taskId, revision: t.revision, boardId: t.boardId, spec: t });
       }
@@ -173,10 +199,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               eq(schema.taskCommands.taskId, taskId), eq(schema.taskCommands.command, 'cancel'), eq(schema.taskCommands.state, 'cancel_requested'),
               eq(schema.taskCommands.revision, row.currentRevision)));
             if (pending[0]) return { operationId: pending[0].operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
+            const open = await tx.select({ attemptId: schema.attempts.attemptId }).from(schema.attempts).where(and(
+              eq(schema.attempts.tenantId, config.tenantId), eq(schema.attempts.projectId, row.projectId), eq(schema.attempts.taskId, taskId), isNull(schema.attempts.endedAt)));
             await tx.insert(schema.taskCommands).values({
               tenantId: config.tenantId, projectId: row.projectId, operationId, taskId, revision: row.currentRevision,
               command: 'cancel', state: 'cancel_requested', requestedBy: uid, requestedAt: at,
+              detail: { attemptIds: open.map((a) => a.attemptId) },
             });
+            // The status is unchanged, but clients following snapshot + cursor must learn of the request: bump the aggregate revision and record it.
+            const rev = await bumpStatus(tx, key, row.rowRevision, row.status, at);
+            await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, attemptIds: open.map((a) => a.attemptId) } });
             return { operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
           }
           if (!IMMEDIATE_CANCEL.includes(row.status)) {
@@ -194,27 +226,14 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         // retry
         const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
         if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow retrying', { reason: gate.reason, decision: gate.decision });
-        const spec = TaskSpecSchema.safeParse(specRow.spec);
-        const init = spec.success ? newTaskStateFromSpec(spec.data, 'repository') : null;
-        if (!init?.ok) throw new AppError(403, 'command_not_allowed', 'task spec is invalid', { status: row.status });
-        const attempts = await tx.select().from(schema.attempts).where(and(
-          eq(schema.attempts.tenantId, config.tenantId), eq(schema.attempts.projectId, row.projectId),
-          eq(schema.attempts.taskId, taskId), eq(schema.attempts.revision, row.currentRevision))).orderBy(asc(schema.attempts.attemptNumber));
-        const records: AttemptRecord[] = attempts.map((a) => ({
-          attemptId: a.attemptId, number: a.attemptNumber,
-          outcome: (a.outcome ?? (a.endedAt === null ? 'running' : 'failed')) as AttemptRecord['outcome'],
-        }));
-        const moved = transition({ ...init.value, status: row.status as TaskStatus, attempts: records }, { type: 'retry_requested' });
-        if (!moved.ok) throw new AppError(403, 'command_not_allowed', moved.error.reason, { status: row.status, attemptsUsed: budgetUsed(records) });
-        const rev = await bumpStatus(tx, key, row.rowRevision, 'ready', at);
-        // `task.ready` is scheduler-only. The control plane applies the owner's retry through the scheduler's authority
-        // and records who asked in the payload.
-        await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.ready', actor: { kind: 'scheduler', id: 'control-api' }, payload: { reason: 'retry_requested', operationId, requestedBy: uid } });
+        // The scheduler owns the transition and emits `task.ready` under its own actor; we only say who asked.
+        const retried = await ctx.scheduler.retry(key, uid, operationId, tx);
+        if (!retried.ok) throw new AppError(403, 'command_not_allowed', retried.error.reason, { status: row.status, attemptsUsed: retried.error.attemptsUsed });
         await tx.insert(schema.taskCommands).values({
           tenantId: config.tenantId, projectId: row.projectId, operationId, taskId, revision: row.currentRevision,
           command: 'retry', state: 'applied', requestedBy: uid, requestedAt: at,
         });
-        return { operationId, command: 'retry' as const, state: 'applied' as const, taskStatus: 'ready' };
+        return { operationId, command: 'retry' as const, state: 'applied' as const, taskStatus: retried.value.taskStatus };
       });
     });
     return reply.code(202).send(result);
@@ -254,6 +273,11 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (!approval.runId) throw new AppError(422, 'invalid_request', 'approval is not run-scoped');
 
         const task = approval.taskId ? await requireTaskStatus(tx, config.tenantId, approval.taskId, true) : null;
+        // An approval is for one exact revision. A decision about revision 1 can never release revision 2.
+        if (task && approval.revision !== task.currentRevision) {
+          throw new AppError(409, 'stale_revision', 'the approval is for a different task revision', { approvalRevision: approval.revision, currentRevision: task.currentRevision });
+        }
+        await checkExpectedRevisions(tx, approval.expectedRevisions, approval.projectId, approval.runId, config.tenantId);
         const expected = task ? task.rowRevision : 0;
         if (body.expectedRevision !== expected) throw staleRevision(expected, 'the approval target');
 

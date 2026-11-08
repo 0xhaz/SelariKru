@@ -1,6 +1,7 @@
 import { transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
+import { confirmCancel, hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { buildTaskState, lockStatusRow, loadAttempts, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -65,7 +66,8 @@ export async function heartbeat(ctx: SchedulerContext, lease: Lease): Promise<Re
       .update(schema.attempts)
       .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
-    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString() });
+    const cancelRequested = await hasCancelRequest(tx, lease, lease.revision);
+    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), cancelRequested });
   });
 }
 
@@ -149,6 +151,14 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
 
   const runner = { kind: 'worker', id: live.runner ?? lease.runnerId } as const;
   const key: TaskKey = lease;
+
+  // An open cancel request wins over whatever the worker reports: the attempt ends, the task is cancelled.
+  if (await hasCancelRequest(tx, key, lease.revision)) {
+    await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
+    await closeLease(tx, key, lease.attemptId, now, { outcome: 'cancelled', exitReason: 'cancel_requested' });
+    await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
+    return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: 'cancelled' };
+  }
   let event: { type: 'attempt.completed' | 'attempt.failed' | 'task.blocked' | 'approval.requested'; actor: typeof runner | typeof SCHEDULER_ACTOR; payload: Record<string, unknown> };
   let exitReason: string;
   let repair: PublishReceipt['repair'];

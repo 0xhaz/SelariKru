@@ -3,6 +3,7 @@ import { TaskSpecSchema, budgetUsed, readyTasks, transition, type StatusMap, typ
 import { evaluate } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { leaseDeadline } from './lease.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
@@ -190,6 +191,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (spec.revision !== statusRow.currentRevision || (await latestRevision(tx, key)) !== statusRow.currentRevision) return { reason: 'stale_status' };
   // Any revision: a lease on a prior revision still holds the task, and its worker may still be running.
   if (await hasOpenAttempt(tx, key)) return { reason: 'previous_attempt_active' };
+  // A task the owner asked to cancel is never dispatched again.
+  if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
 
   if (!locationAllowed(spec, runner)) return { reason: 'location_mismatch' };
   if (!cloudEligible(spec, runner)) return { reason: 'classification_not_cloud_eligible' };

@@ -58,6 +58,10 @@ describe('checkEventAuthority', () => {
   it('workers cannot emit scheduler, plan, denial or verification verdict events', () => {
     for (const t of ['task.ready', 'task.cancelled', 'task.superseded', 'plan.accepted', 'approval.denied', 'verification.failed']) denied('worker', t);
   });
+  it('only a human may emit task.cancel_requested', () => {
+    expect(checkEventAuthority(as('human', 'task.cancel_requested')).ok).toBe(true);
+    for (const k of ['worker', 'verifier', 'scheduler', 'system', 'integration']) denied(k, 'task.cancel_requested');
+  });
   it('verifier and scheduler cannot merge or grant approvals', () => {
     for (const k of ['verifier', 'scheduler', 'system']) {
       denied(k, 'change.merged');
