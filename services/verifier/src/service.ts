@@ -1,0 +1,376 @@
+/**
+ * Verification service (docs/architecture.md section 10; section 6 rules).
+ *
+ * Runs the trusted suite against one exact assembled candidate and records evidence that only the verifier identity can
+ * produce. It runs on the host that drives Docker; the suite runs inside the pinned verifier image through `scripts/docker-verify.sh`.
+ *
+ * - The candidate is taken by SHA from the `candidates` table. Exactly that commit's tree is exported (blob by blob, straight from
+ *   git objects: no archive attributes, no filters, no symlinks) into a fresh directory that the Docker script mounts read-only. The result path is a
+ *   different fresh directory outside the candidate, and the verdict comes only from the runner's output, never from a file inside the
+ *   candidate, so the candidate has no way to write evidence.
+ * - The result is accepted only if it names the trusted manifest hash, the verifier hash, the pinned image and the content hash of
+ *   the tree that was exported. Anything else is an infrastructure `error`, never a candidate verdict.
+ * - A record is bound to the candidate SHA. Assembling a different candidate invalidates it (integrate.ts marks its check runs
+ *   `invalidated`); `loadValidRecord` only returns records whose candidate and check runs are still live.
+ *
+ * Imports are relative on purpose: the verifier image installs only this package. This file is never loaded by the runner.
+ */
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { ArtifactStore } from '../../../packages/artifacts/src/index.ts';
+import { VerificationRecordSchema, TaskSpecSchema, type Actor, type CheckResult, type CheckStatus, type TaskOutcome, type VerificationRecord, type VerificationRun } from '../../../packages/domain/src/index.ts';
+import { schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
+import { applyVerification } from '../../workflow/src/verification.ts';
+import { hashTree, sha256, verifierHashes } from './hashing.ts';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const pkgRoot = resolve(here, '..');
+const repoRoot = resolve(pkgRoot, '../..');
+const suiteDir = join(pkgRoot, 'suites/feedback-board');
+
+const DEFAULT_LOG_LIMIT = 64 * 1024;
+const MESSAGE_LIMIT = 2000;
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const STATUSES: readonly CheckStatus[] = ['passed', 'failed', 'skipped', 'error'];
+const gitEnv = { PATH: process.env['PATH'] ?? '', HOME: tmpdir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
+
+export class CandidateNotVerifiable extends Error {
+  constructor(readonly reason: 'not_found' | 'not_assembled' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
+    super(message);
+  }
+}
+
+export interface RunnerInput {
+  /** Export of the candidate (mounted read-only into the image). */
+  readonly candidateDir: string;
+  /** A path in a verifier-owned directory outside the candidate. */
+  readonly resultsPath: string;
+}
+export interface RunnerOutput {
+  readonly exitCode: number | null;
+  /** The parsed result file, or null when the runner produced none. */
+  readonly result: unknown | null;
+  readonly log: string;
+}
+export type VerifierRunner = (input: RunnerInput) => Promise<RunnerOutput>;
+
+export interface CandidateRef {
+  readonly tenantId: string;
+  readonly projectId: string;
+  readonly runId: string;
+  readonly sha: string;
+  /** The task this verification is recorded for. It must be a part of the candidate. */
+  readonly taskId: string;
+  /** Local source repository holding the candidate ref. */
+  readonly repoPath: string;
+}
+
+export interface VerificationDeps {
+  readonly db: Db;
+  readonly artifacts: ArtifactStore;
+  readonly runner: VerifierRunner;
+  /** Must be a `verifier` principal. */
+  readonly verifier: Actor;
+  /** Named verifier host, recorded on every record. All modes of a benchmark cohort use the same one. */
+  readonly host: string;
+  readonly now?: () => Date;
+  readonly workRoot?: string;
+  /** Extra runs after a run with failed checks. Every run is kept. Default 0. */
+  readonly flakyRetries?: number;
+  readonly logLimitBytes?: number;
+}
+
+/** The host this build verifies on until the cloud backend exists. */
+export const LOCAL_DOCKER_HOST = 'local-docker';
+
+/** Content hash of an exported candidate: the same function and exclusions the runner applies to its copy. */
+export function candidateContentHash(dir: string): string {
+  return hashTree(dir, { exclude: (rel) => { const n = basename(rel); return n === 'dist' || n === '.git' || /\.sqlite(-wal|-shm)?$/.test(n); } });
+}
+
+function run(cmd: string, args: string[], opts: { cwd?: string; input?: Buffer; timeoutMs?: number } = {}): Promise<{ code: number | null; stdout: Buffer; stderr: string }> {
+  return new Promise((res, rej) => {
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: gitEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+    const out: Buffer[] = [];
+    let err = '';
+    p.stdout.on('data', (b: Buffer) => out.push(b));
+    p.stderr.on('data', (b: Buffer) => { err = (err + b.toString()).slice(-4000); });
+    p.once('error', rej);
+    p.once('close', (code) => res({ code, stdout: Buffer.concat(out), stderr: err }));
+    p.stdin.on('error', () => undefined);
+    p.stdin.end(opts.input);
+  });
+}
+
+/** Writes exactly the blobs of `sha`'s tree. Symlinks and submodules are dropped, as the runner would drop them. */
+async function exportTree(repoPath: string, sha: string, treeSha: string, dest: string): Promise<void> {
+  const fail = (m: string) => new CandidateNotVerifiable('export_failed', m);
+  const tree = await run('git', ['rev-parse', '--verify', '--quiet', `${sha}^{tree}`], { cwd: repoPath });
+  if (tree.code !== 0 || tree.stdout.toString().trim() !== treeSha) throw fail('the candidate commit is missing from the repository or its tree differs from the recorded tree');
+  const ls = await run('git', ['ls-tree', '-r', '-z', '--full-tree', sha], { cwd: repoPath });
+  if (ls.code !== 0) throw fail(`git ls-tree failed: ${ls.stderr}`);
+  const entries = ls.stdout.toString('utf8').split('\0').filter(Boolean).map((line) => {
+    const tab = line.indexOf('\t');
+    const [mode, type, oid] = line.slice(0, tab).split(' ');
+    return { mode: mode!, type: type!, oid: oid!, path: line.slice(tab + 1) };
+  }).filter((e) => e.type === 'blob' && e.mode !== '120000');
+  const batch = await run('git', ['cat-file', '--batch'], { cwd: repoPath, input: Buffer.from(entries.map((e) => `${e.oid}\n`).join('')) });
+  if (batch.code !== 0) throw fail(`git cat-file failed: ${batch.stderr}`);
+  let at = 0;
+  const base = resolve(dest);
+  for (const e of entries) {
+    const nl = batch.stdout.indexOf(10, at);
+    const [oid, kind, size] = batch.stdout.subarray(at, nl).toString().split(' ');
+    if (oid !== e.oid || kind !== 'blob') throw fail('unexpected git object');
+    const start = nl + 1;
+    const end = start + Number(size);
+    const target = resolve(base, e.path);
+    if (!target.startsWith(base + sep)) throw fail(`path escapes the export: ${e.path}`);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, batch.stdout.subarray(start, end));
+    await chmod(target, e.mode === '100755' ? 0o755 : 0o644);
+    at = end + 1;
+  }
+}
+
+const clip = (s: string, n = MESSAGE_LIMIT): string => (s.length > n ? `${s.slice(0, n)}...[truncated]` : s);
+
+function boundedLog(log: string, limit: number): string {
+  const redacted = redactSecrets(log);
+  const bytes = Buffer.from(redacted);
+  return bytes.length <= limit ? redacted : `[log truncated to the last ${limit} bytes]\n${bytes.subarray(bytes.length - limit).toString()}`;
+}
+
+interface Expected { manifestSha: string; verifierSha: string; image: string; contentSha: string; criteria: string[] }
+interface Evaluated { status: CheckStatus; results: CheckResult[]; infrastructureError: string | null; tools: Record<string, string> }
+
+/** Turns the runner's raw result into per-FB results, or an infrastructure error when it does not match what was asked. */
+function evaluate(out: RunnerOutput, want: Expected): Evaluated {
+  const unusable = (reason: string): Evaluated => ({
+    status: 'error', infrastructureError: clip(reason), tools: {},
+    results: want.criteria.map((checkId) => ({ checkId, status: 'error', tests: [], failures: [{ test: '(verifier)', status: 'error', message: clip(reason) }], evidenceReferences: [] })),
+  });
+  const r = out.result as any;
+  if (r === null || typeof r !== 'object') return unusable(`the runner produced no result (exit ${out.exitCode ?? 'none'})`);
+  const v = r.verifier ?? {};
+  if (v.manifestSha256 !== want.manifestSha) return unusable('the result names a different trusted manifest hash');
+  if (v.verifierSha256 !== want.verifierSha) return unusable('the result names a different verifier hash');
+  if (v.image !== want.image) return unusable('the result was not produced in the pinned verifier image');
+  if (r.candidate?.treeSha256 !== want.contentSha) return unusable('the result judged a different candidate tree than the one exported');
+  const criteria: any[] = r.quality?.criteria;
+  if (!Array.isArray(criteria) || criteria.length !== want.criteria.length || !want.criteria.every((id) => criteria.some((c) => c?.id === id))) return unusable('the result does not cover exactly the trusted criteria');
+  if (criteria.some((c) => !STATUSES.includes(c.status))) return unusable('the result has an unknown check status');
+  const results: CheckResult[] = want.criteria.map((id) => {
+    const c = criteria.find((x) => x.id === id);
+    return {
+      checkId: id, status: c.status,
+      tests: (Array.isArray(c.tests) ? c.tests : []).filter((t: any) => STATUSES.includes(t?.status)).map((t: any) => ({ runner: String(t.runner), title: String(t.title), status: t.status })),
+      failures: (Array.isArray(c.failures) ? c.failures : []).filter((f: any) => STATUSES.includes(f?.status)).map((f: any) => ({ test: String(f.test), status: f.status, message: clip(redactSecrets(String(f.message ?? ''))) })),
+      evidenceReferences: (Array.isArray(c.evidenceReferences) ? c.evidenceReferences : []).map(String),
+    };
+  });
+  const has = (s: CheckStatus) => results.some((x) => x.status === s);
+  const status: CheckStatus = has('error') ? 'error' : has('failed') ? 'failed' : has('skipped') ? 'skipped' : 'passed';
+  const tools = Object.fromEntries(Object.entries(v.tools ?? {}).filter(([, x]) => typeof x === 'string')) as Record<string, string>;
+  return { status, results, infrastructureError: null, tools };
+}
+
+async function readFixtures(fixtures: string | undefined): Promise<{ path: string; sha256: string }[]> {
+  if (!fixtures) return [];
+  const p = join(suiteDir, fixtures);
+  return [{ path: fixtures, sha256: (await lstat(p)).isDirectory() ? hashTree(p) : sha256(await readFile(p)) }];
+}
+
+/**
+ * Verifies one assembled candidate and stores the record. See the file comment. Throws `CandidateNotVerifiable` when the SHA is not a
+ * live assembled candidate, and an `Error` when the deps do not carry a verifier principal. Runner failures never throw: they become
+ * a record with result `error`.
+ */
+export async function verifyCandidate(candidate: CandidateRef, deps: VerificationDeps): Promise<VerificationRecord> {
+  if (deps.verifier.kind !== 'verifier') throw new Error('verification evidence can only be written by a verifier principal');
+  if (!FULL_SHA.test(candidate.sha)) throw new CandidateNotVerifiable('invalid_request', 'a full candidate commit id is required');
+  const now = deps.now ?? (() => new Date());
+  const logLimit = deps.logLimitBytes ?? DEFAULT_LOG_LIMIT;
+
+  const rows = await deps.db.execute(sql`
+    SELECT status, base_sha, tree_sha, parts FROM candidates
+    WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha}`);
+  const row = rows[0];
+  if (!row) throw new CandidateNotVerifiable('not_found', 'no such candidate');
+  if (row['status'] !== 'assembled') throw new CandidateNotVerifiable('not_assembled', `the candidate is ${String(row['status'])}`);
+  const parts = (row['parts'] as { taskId: string; revision: number }[]) ?? [];
+  if (!parts.some((p) => p.taskId === candidate.taskId)) throw new CandidateNotVerifiable('task_not_in_candidate', 'the task is not a part of this candidate');
+  const baseSha = String(row['base_sha']);
+  const treeSha = String(row['tree_sha']);
+
+  const manifestBytes = await readFile(join(suiteDir, 'manifest.json'));
+  const manifest = JSON.parse(manifestBytes.toString());
+  const hashes = verifierHashes(pkgRoot, repoRoot);
+  const fixtures = await readFixtures(manifest.fixtures);
+
+  const contractRevisions = new Set<string>();
+  for (const p of parts) {
+    const r = await deps.db.execute(sql`SELECT spec FROM task_revisions WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} AND revision = ${p.revision}`);
+    const spec = r[0] ? TaskSpecSchema.safeParse(r[0]['spec']) : null;
+    if (spec?.success) for (const c of spec.data.contractRefs) contractRevisions.add(`${c.artifactId}@${c.sha256}`);
+  }
+
+  const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-verify');
+  await mkdir(parent, { recursive: true });
+  const candidateDir = await mkdtemp(join(parent, 'verify-cand-'));
+  const outDir = await mkdtemp(join(parent, 'verify-out-'));
+  const recordId = `ver_${randomUUID()}`;
+  const runs: VerificationRun[] = [];
+  const pending: { type: string; id: string; sha256: string; locator: Record<string, unknown> }[] = [];
+  let tools: Record<string, string> = {};
+  try {
+    await exportTree(candidate.repoPath, candidate.sha, treeSha, candidateDir);
+    const want: Expected = {
+      manifestSha: sha256(manifestBytes), verifierSha: hashes.verifierSha256, image: manifest.tools.playwrightImage,
+      contentSha: candidateContentHash(candidateDir), criteria: manifest.criteria.map((c: { id: string }) => c.id),
+    };
+
+    const attempts = 1 + Math.max(0, deps.flakyRetries ?? 0);
+    for (let n = 1; n <= attempts; n += 1) {
+      const startedAt = now();
+      const resultsPath = join(outDir, `result-${n}.json`);
+      let out: RunnerOutput;
+      try {
+        out = await deps.runner({ candidateDir, resultsPath });
+      } catch (e) {
+        out = { exitCode: null, result: null, log: `runner failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      const ev = evaluate(out, want);
+      tools = { ...tools, ...ev.tools };
+      const logRef = await deps.artifacts.put(Buffer.from(boundedLog(out.log, logLimit)));
+      const resultRef = await deps.artifacts.put(Buffer.from(JSON.stringify({ attempt: n, status: ev.status, infrastructureError: ev.infrastructureError, results: ev.results }, null, 2)));
+      const logArtifactId = `art_${randomUUID()}`;
+      const resultArtifactId = `art_${randomUUID()}`;
+      pending.push({ type: 'verification_log', id: logArtifactId, sha256: logRef.sha256, locator: { recordId, attempt: n, size: logRef.size } });
+      pending.push({ type: 'verification_result', id: resultArtifactId, sha256: resultRef.sha256, locator: { recordId, attempt: n, size: resultRef.size } });
+      runs.push({ attempt: n, startedAt: startedAt.toISOString(), finishedAt: now().toISOString(), exitCode: out.exitCode, infrastructureError: ev.infrastructureError, results: ev.results, resultArtifactId, logArtifactId });
+      if (ev.status !== 'failed') break; // only failed checks are retried; passed, skipped and error end the loop
+    }
+
+    const last = runs[runs.length - 1]!;
+    const overall: CheckStatus = last.infrastructureError ? 'error'
+      : last.results.some((r) => r.status === 'error') ? 'error'
+      : last.results.some((r) => r.status === 'failed') ? 'failed'
+      : last.results.some((r) => r.status === 'skipped') ? 'skipped' : 'passed';
+    const flaky = want.criteria.filter((id) => new Set(runs.map((r) => r.results.find((x) => x.checkId === id)!.status)).size > 1);
+
+    return await withTx(deps.db, async (tx: Tx) => {
+      const cur = await tx.execute(sql`
+        SELECT status FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
+      const live = cur[0]?.['status'] === 'assembled';
+      const taskOutcomes: TaskOutcome[] = [];
+      for (const p of parts) {
+        const key = { tenantId: candidate.tenantId, projectId: candidate.projectId, taskId: p.taskId };
+        if (!live) {
+          const s = await tx.execute(sql`SELECT status FROM task_status WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND task_id = ${key.taskId}`);
+          taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: false, taskStatus: String(s[0]?.['status'] ?? 'unknown'), reason: 'candidate_invalidated' });
+          continue;
+        }
+        const failedChecks = last.results.filter((r) => r.status !== 'passed').map((r) => r.checkId);
+        const applied = await applyVerification({ db: deps.db, now }, key, {
+          actor: deps.verifier, outcome: overall,
+          detail: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, verifierSha256: want.verifierSha, host: deps.host, result: overall, failedChecks, flaky },
+        }, tx);
+        taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: applied.applied, taskStatus: applied.taskStatus, reason: applied.reason });
+      }
+
+      const record = VerificationRecordSchema.parse({
+        schemaVersion: 1, recordId, taskId: candidate.taskId, runId: candidate.runId, partTaskIds: parts.map((p) => p.taskId),
+        candidateSha: candidate.sha, candidateTreeSha: treeSha, candidateContentSha256: want.contentSha, baseSha,
+        contractRevisions: [...contractRevisions].sort(), checkManifestSha256: want.manifestSha, verifierSha256: want.verifierSha,
+        toolVersions: { ...Object.fromEntries(Object.entries(manifest.tools as Record<string, string>).filter(([k]) => k !== 'playwrightImage')), ...tools },
+        configVersions: { suiteId: manifest.suiteId, suiteVersion: manifest.version, runnerProtocol: '0.1' },
+        environmentImageDigest: want.image, host: deps.host, fixtures,
+        startedAt: runs[0]!.startedAt, finishedAt: last.finishedAt, result: overall, exitCode: last.exitCode, results: last.results, runs, flaky,
+        taskOutcomes, artifactIds: pending.map((a) => a.id), verifier: deps.verifier,
+      });
+      const recordRef = await deps.artifacts.put(Buffer.from(JSON.stringify(record, null, 2)));
+
+      const checkRunIds: string[] = [];
+      for (const p of parts) {
+        const att = await tx.execute(sql`SELECT attempt_id FROM attempts WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} AND revision = ${p.revision} ORDER BY attempt_number DESC LIMIT 1`);
+        const attemptId = att[0] ? String(att[0]['attempt_id']) : null;
+        for (const r of runs) {
+          for (const c of r.results) {
+            const checkRunId = `chk_${recordId}_${p.taskId}_${r.attempt}_${c.checkId}`;
+            checkRunIds.push(checkRunId);
+            await tx.insert(schema.checkRuns).values({
+              tenantId: candidate.tenantId, projectId: candidate.projectId, checkRunId, taskId: p.taskId, revision: p.revision, attemptId,
+              checkId: c.checkId, checkVersion: manifest.version, candidateSha: candidate.sha, result: live ? c.status : 'invalidated',
+              logRefs: [{ recordId, attempt: r.attempt, resultArtifactId: r.resultArtifactId, logArtifactId: r.logArtifactId }],
+            });
+          }
+        }
+      }
+      for (const a of pending) {
+        await tx.insert(schema.artifacts).values({
+          tenantId: candidate.tenantId, projectId: candidate.projectId, artifactId: a.id, runId: candidate.runId, type: a.type, sha256: a.sha256,
+          sourceRevision: candidate.sha, classification: 'internal', locator: a.locator,
+        });
+      }
+      await tx.insert(schema.artifacts).values({
+        tenantId: candidate.tenantId, projectId: candidate.projectId, artifactId: recordId, runId: candidate.runId, type: 'verification_record', sha256: recordRef.sha256,
+        sourceRevision: candidate.sha, classification: 'internal', locator: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, host: deps.host, checkRunIds },
+      });
+      return record;
+    });
+  } finally {
+    await rm(candidateDir, { recursive: true, force: true });
+    await rm(outDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The stored record for a candidate SHA, only while it is still evidence: the candidate is still `assembled` and none of the
+ * record's check runs has been invalidated. Null otherwise.
+ */
+export async function loadValidRecord(db: Db, artifacts: ArtifactStore, key: { tenantId: string; projectId: string; sha: string }): Promise<VerificationRecord | null> {
+  const cand = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND sha = ${key.sha} AND status = 'assembled'`);
+  if (cand.length === 0) return null;
+  const rows = await db.execute(sql`
+    SELECT sha256, locator FROM artifacts WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND type = 'verification_record' AND source_revision = ${key.sha}
+    ORDER BY created_at DESC, artifact_id DESC LIMIT 1`);
+  const row = rows[0];
+  if (!row) return null;
+  const ids = ((row['locator'] as { checkRunIds?: string[] }).checkRunIds ?? []) as string[];
+  const live = await db.execute(sql`
+    SELECT count(*)::int AS n FROM check_runs WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND candidate_sha = ${key.sha} AND result <> 'invalidated'
+      AND check_run_id = ANY(${sql.raw(`ARRAY[${ids.map((i) => `'${i.replace(/'/g, "''")}'`).join(',') || "''"}]::text[]`)})`);
+  if (Number(live[0]?.['n']) !== ids.length) return null;
+  const bytes = await artifacts.get(String(row['sha256']));
+  return bytes ? VerificationRecordSchema.parse(JSON.parse(Buffer.from(bytes).toString())) : null;
+}
+
+/**
+ * Runs `scripts/docker-verify.sh` (the hardened image) against `candidateDir`. The script mounts the candidate read-only and copies the
+ * result out with `docker cp` after the container exits. Only the last 256 KiB of its output is kept.
+ */
+export function dockerRunner(opts: { script?: string; timeoutMs?: number } = {}): VerifierRunner {
+  const script = opts.script ?? join(pkgRoot, 'scripts/docker-verify.sh');
+  const timeoutMs = opts.timeoutMs ?? 45 * 60_000;
+  return ({ candidateDir, resultsPath }) => new Promise((res, rej) => {
+    const p = spawn(script, [candidateDir, resultsPath], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? tmpdir(), DOCKER_HOST: process.env['DOCKER_HOST'] ?? '' } });
+    let log = '';
+    const add = (b: Buffer) => { log = (log + b.toString()).slice(-256 * 1024); };
+    p.stdout.on('data', add);
+    p.stderr.on('data', add);
+    const timer = setTimeout(() => { log += `\n[verifier] docker run timed out after ${timeoutMs / 1000}s`; p.kill('SIGKILL'); }, timeoutMs);
+    p.once('error', (e) => { clearTimeout(timer); rej(e); });
+    p.once('close', async (code) => {
+      clearTimeout(timer);
+      let result: unknown = null;
+      try { result = JSON.parse(await readFile(resultsPath, 'utf8')); } catch { /* no usable result */ }
+      res({ exitCode: code, result, log });
+    });
+  });
+}

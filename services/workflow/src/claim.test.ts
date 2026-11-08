@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
-import { createScheduler, type Scheduler } from './index.ts';
+import { applyVerification, createScheduler, type Scheduler } from './index.ts';
 import {
   CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
   testClock, type TestClock, type TestDb,
@@ -157,6 +157,20 @@ describe('claim preconditions', () => {
     const b = await s.tryClaim(runner('r2'), caps);
     expect(a.ok && b.ok).toBe(true);
     expect(await s.tryClaim(runner('r3'), caps)).toMatchObject({ ok: false, skipped: [{ taskId: 'x', reason: 'resource_conflict' }] });
+  });
+
+  it('a second task claiming the same resource stays blocked while the first is verifying, and is released by the verification outcome', async () => {
+    await seedTask(t.db, specFor('a', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }));
+    await seedTask(t.db, specFor('b', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }));
+    const caps = capsWith(5);
+    const first = (await s.claimNext(runner('r1'), caps))!;
+    expect(first.taskId).toBe('a');
+    expect(await s.publishResult(first, { outcome: 'completed' })).toMatchObject({ ok: true, value: { taskStatus: 'verifying' } });
+    expect(await s.tryClaim(runner('r2'), caps)).toMatchObject({ ok: false, skipped: [{ taskId: 'b', reason: 'resource_conflict' }] });
+    // A verification outcome (here: passed) releases the claim, and the second task can then start.
+    const done = await applyVerification({ db: t.db, now: clock.now }, { tenantId: TENANT, projectId: PROJECT, taskId: 'a' }, { actor: { kind: 'verifier', id: 'v1' }, outcome: 'passed', detail: {} });
+    expect(done).toMatchObject({ applied: true, taskStatus: 'verified' });
+    expect(await s.tryClaim(runner('r2'), caps)).toMatchObject({ ok: true });
   });
 
   it('skips a conflicted task and leases the next', async () => {

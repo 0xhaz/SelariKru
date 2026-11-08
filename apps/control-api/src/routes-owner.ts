@@ -5,7 +5,7 @@ import {
   ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { leaseHealth } from '@selarikru/workflow';
+import { leaseHealth, releaseTaskClaims } from '@selarikru/workflow';
 import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -218,6 +218,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             throw new AppError(403, 'command_not_allowed', `cannot cancel a task that is ${row.status}`, { status: row.status });
           }
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
+          // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.
+          await releaseTaskClaims(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId }, row.currentRevision, at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });
           // Nothing is left to reap, so any request still open for this revision is closed with it.
           await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(and(

@@ -1,0 +1,86 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
+import { applyVerification, type Scheduler } from './index.ts';
+import {
+  CAPS, PROJECT, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
+} from '../test/helpers.ts';
+
+let t: TestDb;
+let clock: TestClock;
+let s: Scheduler;
+const VERIFIER = { kind: 'verifier', id: 'verifier-1' } as const;
+const key = (taskId: string) => ({ tenantId: TENANT, projectId: PROJECT, taskId });
+const apply = (taskId: string, outcome: 'passed' | 'failed' | 'error' | 'skipped', actor: { kind: 'verifier' | 'worker'; id: string } = VERIFIER) =>
+  applyVerification({ db: t.db, now: clock.now }, key(taskId), { actor, outcome, detail: { checks: ['FB-01'] } });
+const toVerifying = async (taskId: string, over: Parameters<typeof specFor>[1] = {}) => {
+  await seedTask(t.db, specFor(taskId, over));
+  const lease = (await s.claimNext(runner('r1'), CAPS))!;
+  await s.publishResult(lease, { outcome: 'completed' });
+};
+
+beforeAll(async () => { t = await setupTestDb(); });
+afterAll(async () => { await t.close(); });
+beforeEach(async () => {
+  clock = testClock();
+  await resetDb(t.db);
+  s = makeScheduler(t.db, clock);
+});
+
+describe('applyVerification', () => {
+  it('passed moves verifying to verified, closes the attempt as succeeded and emits verification.passed as the verifier', async () => {
+    await toVerifying('t1');
+    expect(await apply('t1', 'passed')).toMatchObject({ applied: true, taskStatus: 'verified' });
+    expect((await statusOf(t.db, 't1')).status).toBe('verified');
+    const ev = await t.db.execute(sql`SELECT actor_kind, actor_id FROM events WHERE type = 'verification.passed'`);
+    expect(ev).toHaveLength(1);
+    expect(ev[0]).toMatchObject({ actor_kind: 'verifier', actor_id: 'verifier-1' });
+    expect((await t.db.execute(sql`SELECT outcome FROM attempts`))[0]).toMatchObject({ outcome: 'succeeded' });
+  });
+
+  it('a worker actor cannot apply a verification outcome', async () => {
+    await toVerifying('t1');
+    await expect(apply('t1', 'passed', { kind: 'worker', id: 'r1' })).rejects.toThrow(/verifier/);
+    expect((await statusOf(t.db, 't1')).status).toBe('verifying');
+    expect(await countRows(t.db, 'events', `type = 'verification.passed'`)).toBe(0);
+  });
+
+  it('failed records verification.failed and schedules a bounded repair through the retry path', async () => {
+    await toVerifying('t1', { maxAttempts: 2 });
+    expect(await apply('t1', 'failed')).toMatchObject({ applied: true, taskStatus: 'ready', repair: 'scheduled' });
+    expect(await eventTypes(t.db)).toEqual(expect.arrayContaining(['verification.failed', 'task.ready']));
+    // The repaired attempt can start: the failed one is closed, not left "running".
+    const second = (await s.claimNext(runner('r1'), CAPS))!;
+    expect(second.attemptNumber).toBe(2);
+    await s.publishResult(second, { outcome: 'completed' });
+    expect(await apply('t1', 'failed')).toMatchObject({ applied: true, taskStatus: 'blocked', repair: 'refused' });
+    expect(await eventTypes(t.db)).toContain('task.blocked');
+  });
+
+  it('error and skipped are not verdicts: the task stays verifying with its claims held', async () => {
+    await toVerifying('t1', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] });
+    for (const o of ['error', 'skipped'] as const) {
+      expect(await apply('t1', o)).toMatchObject({ applied: false, taskStatus: 'verifying' });
+    }
+    expect(await countRows(t.db, 'events', `type LIKE 'verification.%'`)).toBe(0);
+    expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(1);
+  });
+
+  it('a cancelled task stays cancelled: a late result changes no state', async () => {
+    await toVerifying('t1');
+    await t.db.execute(sql`UPDATE task_status SET status = 'cancelled', row_revision = row_revision + 1`);
+    const before = await statusOf(t.db, 't1');
+    const events = await countRows(t.db, 'events');
+    expect(await apply('t1', 'passed')).toMatchObject({ applied: false, taskStatus: 'cancelled', reason: 'not_verifying' });
+    expect(await statusOf(t.db, 't1')).toEqual(before);
+    expect(await countRows(t.db, 'events')).toBe(events);
+  });
+
+  it('the run becomes ready_for_review only when every live task is verified', async () => {
+    await toVerifying('a');
+    await toVerifying('b');
+    await apply('a', 'passed');
+    expect((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+    await apply('b', 'passed');
+    expect((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
+  });
+});

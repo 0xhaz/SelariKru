@@ -296,6 +296,14 @@ describe('task commands', () => {
     expect(await t.db.execute(sql`SELECT 1 FROM task_commands WHERE state = 'cancel_requested'`)).toHaveLength(0);
   });
 
+  it('cancel while verifying releases the claims that verification was holding', async () => {
+    await seedTask(t.db, specFor('t1', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }), 'verifying');
+    await t.db.execute(sql`INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode) VALUES ('tenant_a', ${PROJECT}, 'clm_1', 't1', 1, 'k', 'exclusive')`);
+    const res = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: 0, idempotencyKey: 'cv2' });
+    expect(res.status).toBe(202);
+    expect(await t.db.execute(sql`SELECT 1 FROM resource_claims WHERE released_at IS NULL`)).toHaveLength(0);
+  });
+
   it('retry refuses a task with an open cancel request, with a clear code', async () => {
     await seedTask(t.db, specFor('t1'), 'failed');
     await t.db.execute(sql`INSERT INTO task_commands (tenant_id, project_id, operation_id, task_id, revision, command, state, requested_by, requested_at)

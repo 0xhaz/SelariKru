@@ -325,14 +325,17 @@ interface CompletedTask {
   readonly manifest: string;
 }
 
-/** Specs of every task in the run (current revisions), and the completed ones with a published change set. */
+/**
+ * Specs of every task in the run (current revisions), and the completed ones with a published change set. A completed attempt waits
+ * for its verdict with outcome `running` (but an end time); verification then closes it as `succeeded`.
+ */
 async function loadTasks(db: Db, run: IntegrationRun): Promise<{ specs: Map<string, TaskSpec>; completed: CompletedTask[] }> {
   const rows = await db.execute(sql`
     SELECT r.spec, s.status,
       (SELECT a.attempt_id FROM attempts a WHERE a.tenant_id = r.tenant_id AND a.project_id = r.project_id AND a.task_id = r.task_id AND a.revision = r.revision
-         AND a.outcome = 'succeeded' AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS attempt_id,
+         AND a.outcome IN ('running', 'succeeded') AND a.ended_at IS NOT NULL AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS attempt_id,
       (SELECT a.detail ->> 'changeManifestSha256' FROM attempts a WHERE a.tenant_id = r.tenant_id AND a.project_id = r.project_id AND a.task_id = r.task_id AND a.revision = r.revision
-         AND a.outcome = 'succeeded' AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS manifest
+         AND a.outcome IN ('running', 'succeeded') AND a.ended_at IS NOT NULL AND a.detail ->> 'changeManifestSha256' IS NOT NULL ORDER BY a.attempt_number DESC LIMIT 1) AS manifest
     FROM task_revisions r JOIN task_status s ON s.tenant_id = r.tenant_id AND s.project_id = r.project_id AND s.task_id = r.task_id AND s.current_revision = r.revision
     WHERE r.tenant_id = ${run.tenantId} AND r.project_id = ${run.projectId} AND r.run_id = ${run.runId}
     ORDER BY r.task_id`);

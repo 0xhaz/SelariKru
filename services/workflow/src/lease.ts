@@ -71,12 +71,14 @@ export async function heartbeat(ctx: SchedulerContext, lease: Lease): Promise<Re
   });
 }
 
-/** Ends an attempt's lease: records its outcome and releases its resource claims. */
-export async function closeLease(tx: Tx, key: TaskKey, attemptId: string, now: Date, close: { outcome: string; exitReason: string; headSha?: string | undefined }): Promise<void> {
+/** Ends an attempt's lease: records its outcome and releases its resource claims (except when it completed into verification). */
+export async function closeLease(tx: Tx, key: TaskKey, attemptId: string, now: Date, close: { outcome: string; exitReason: string; headSha?: string | undefined; keepClaims?: boolean }): Promise<void> {
   await tx
     .update(schema.attempts)
     .set({ endedAt: now, outcome: close.outcome, exitReason: close.exitReason, ...(close.headSha ? { headSha: close.headSha } : {}) })
     .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
+  // A completed attempt moves to `verifying` and keeps its exclusive claims: verification releases them (applyVerification).
+  if (close.keepClaims) return;
   await tx
     .update(schema.resourceClaims)
     .set({ releasedAt: now })
@@ -199,7 +201,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
   }
 
   await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
-  await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined });
+  await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined, keepClaims: result.outcome === 'completed' });
   if (result.outcome === 'completed' && result.changeManifestSha256) {
     await tx.update(schema.attempts)
       .set({ detail: { ...(live.detail ?? {}), changeManifestSha256: result.changeManifestSha256 } })

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
-import { createScheduler, type Lease, type Scheduler } from '@selarikru/workflow';
+import { applyVerification, createScheduler, type Lease, type Scheduler } from '@selarikru/workflow';
 import {
   CAPS, POLICY, PROJECT, RUN, TENANT, TEST_DATABASE_URL, capsWith, countRows, eventTypes, makeScheduler, reservedTotal, resetDb, runner, seedTask, setupTestDb, specFor,
   statusOf, testClock, type TestClock, type TestDb,
@@ -49,6 +49,10 @@ describe('scheduler fault injection', () => {
 
     const first = leases[0]!;
     expect((await s.publishResult(first, { outcome: 'completed' })).ok).toBe(true);
+    // The claim is held through verification: a completed attempt does not free the resource.
+    expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(1);
+    expect(won(await claimAll([runner('r9'), runner('r9b')], capsWith(5)))).toHaveLength(0);
+    await applyVerification({ db: t.db, now: clock.now }, { tenantId: TENANT, projectId: PROJECT, taskId: first.taskId }, { actor: { kind: 'verifier', id: 'v1' }, outcome: 'passed', detail: {} });
     expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(0);
 
     const next = won(await claimAll([runner('r10'), runner('r11')], capsWith(5)));

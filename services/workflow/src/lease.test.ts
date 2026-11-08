@@ -73,8 +73,9 @@ describe('publishResult', () => {
     expect(ev[0]!['payload']).toMatchObject({ changeManifestSha256: manifest });
   });
 
-  it('completed moves to verifying and releases the lease', async () => {
-    const lease = await claim();
+  it('completed moves to verifying, closes the lease and keeps exclusive claims held', async () => {
+    await seedTask(t.db, specFor('t1', { resourceClaims: [{ key: 'contract', mode: 'exclusive' }] }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
     const r = await s.publishResult(lease, { outcome: 'completed', headSha: 'head1', reportedCostUsd: 0.25 });
     expect(r).toEqual({ ok: true, value: expect.objectContaining({ taskStatus: 'verifying', outcome: 'completed' }) });
     const rows = await t.db.execute(sql`SELECT head_sha, ended_at, exit_reason FROM attempts`);
@@ -84,6 +85,8 @@ describe('publishResult', () => {
     expect(res[0]).toMatchObject({ amount_usd: '1.000000', state: 'settled' });
     const events = await t.db.execute(sql`SELECT actor_kind, actor_id FROM events WHERE type = 'attempt.completed'`);
     expect(events[0]).toMatchObject({ actor_kind: 'worker', actor_id: 'r1' });
+    // Claims are held through verification: they are released on a verification outcome, not at attempt completion.
+    expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(1);
   });
 
   it('a duplicate publish returns the stored receipt without a second effect', async () => {
