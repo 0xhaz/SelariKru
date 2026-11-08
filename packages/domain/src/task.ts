@@ -89,7 +89,7 @@ export type TaskEvent =
   | { type: 'verification_passed' }
   | { type: 'verification_failed'; reason: string }
   | { type: 'retry_requested' }
-  /** The scheduler refused a further repair: the task stops at `blocked`, keeping the reason on the event. */
+  /** The scheduler refused a further attempt (repair or infrastructure retry): the task stops at `blocked`, keeping the reason on the event. */
   | { type: 'repair_refused'; reason: string }
   | { type: 'change_merged' }
   | { type: 'cancel' }

@@ -65,13 +65,13 @@ describe('publishResult', () => {
 
   it('completed moves to verifying and releases the lease', async () => {
     const lease = await claim();
-    const r = await s.publishResult(lease, { outcome: 'completed', headSha: 'head1', observedCostUsd: 0.25 });
+    const r = await s.publishResult(lease, { outcome: 'completed', headSha: 'head1', reportedCostUsd: 0.25 });
     expect(r).toEqual({ ok: true, value: expect.objectContaining({ taskStatus: 'verifying', outcome: 'completed' }) });
     const rows = await t.db.execute(sql`SELECT head_sha, ended_at, exit_reason FROM attempts`);
     expect(rows[0]).toMatchObject({ head_sha: 'head1', exit_reason: 'completed' });
     expect(rows[0]!['ended_at']).not.toBeNull();
     const res = await t.db.execute(sql`SELECT amount_usd, state FROM budget_reservations`);
-    expect(res[0]).toMatchObject({ amount_usd: '0.250000', state: 'settled' });
+    expect(res[0]).toMatchObject({ amount_usd: '1.000000', state: 'settled' });
     const events = await t.db.execute(sql`SELECT actor_kind, actor_id FROM events WHERE type = 'attempt.completed'`);
     expect(events[0]).toMatchObject({ actor_kind: 'worker', actor_id: 'r1' });
   });

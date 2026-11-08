@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createDb } from '@selarikru/persistence';
+import { createDb, schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { createScheduler, type Lease, type Scheduler } from '@selarikru/workflow';
 import {
-  CAPS, POLICY, TEST_DATABASE_URL, countRows, eventTypes, makeScheduler, reservedTotal, resetDb, runner, seedTask, setupTestDb, specFor,
+  CAPS, POLICY, PROJECT, RUN, TENANT, TEST_DATABASE_URL, capsWith, countRows, eventTypes, makeScheduler, reservedTotal, resetDb, runner, seedTask, setupTestDb, specFor,
   statusOf, testClock, type TestClock, type TestDb,
 } from '@selarikru/workflow/test-helpers';
 
@@ -43,7 +43,7 @@ describe('scheduler fault injection', () => {
     await seedTask(t.db, specFor('b', { resourceClaims: [claim] }));
     await seedTask(t.db, specFor('c', { resourceClaims: [claim] }));
 
-    const leases = won(await claimAll(Array.from({ length: 10 }, (_, i) => runner(`r${i}`)), { maxConcurrentTotal: 5 }));
+    const leases = won(await claimAll(Array.from({ length: 10 }, (_, i) => runner(`r${i}`)), capsWith(5)));
     expect(leases).toHaveLength(1);
     expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(1);
 
@@ -51,7 +51,7 @@ describe('scheduler fault injection', () => {
     expect((await s.publishResult(first, { outcome: 'completed' })).ok).toBe(true);
     expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(0);
 
-    const next = won(await claimAll([runner('r10'), runner('r11')], { maxConcurrentTotal: 5 }));
+    const next = won(await claimAll([runner('r10'), runner('r11')], capsWith(5)));
     expect(next).toHaveLength(1);
     expect(next[0]!.taskId).not.toBe(first.taskId);
   });
@@ -76,6 +76,7 @@ describe('scheduler fault injection', () => {
     const stale = (await s.claimNext(runner('r1'), CAPS))!;
     clock.advance(61);
     expect(await s.expireLeases(clock.now())).toHaveLength(1);
+    clock.advance(CAPS.infraRetryBackoffSeconds);
     const current = (await s.claimNext(runner('r2'), CAPS))!;
     expect(current.fence).toBe(stale.fence + 1);
 
@@ -141,12 +142,12 @@ describe('scheduler fault injection', () => {
   it('concurrent reservations cannot exceed budget', async () => {
     await resetDb(t.db, { limitUsd: 3 });
     for (let i = 0; i < 10; i++) await seedTask(t.db, specFor(`t${i}`, { maxCostUsd: 1 }));
-    const leases = won(await claimAll(Array.from({ length: 20 }, (_, i) => runner(`r${i}`)), { maxConcurrentTotal: 10 }));
+    const leases = won(await claimAll(Array.from({ length: 20 }, (_, i) => runner(`r${i}`)), capsWith(10)));
     expect(leases).toHaveLength(3);
     expect(await reservedTotal(t.db)).toBe(3);
     expect(await countRows(t.db, 'budget_reservations')).toBe(3);
 
-    const denied = await s.tryClaim(runner('late'), { maxConcurrentTotal: 10 });
+    const denied = await s.tryClaim(runner('late'), capsWith(10));
     expect(denied.ok).toBe(false);
     if (!denied.ok) expect(denied.skipped.map((c) => c.reason)).toContain('budget:exceeds_limit');
   });
@@ -169,6 +170,94 @@ describe('scheduler fault injection', () => {
     expect(await countRows(t.db, 'attempts')).toBe(3);
   });
 
+  it('attempt past its deadline is refused and closed with attempt_timeout', async () => {
+    await seedTask(t.db, specFor('t1', { timeoutSeconds: 1800 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    expect(new Date(lease.deadlineAt).getTime() - new Date(lease.acquiredAt).getTime()).toBe(1_800_000);
+
+    // A worker that heartbeats forever is still stopped by the deadline.
+    for (let elapsed = 0; elapsed + 50 < 1800; elapsed += 50) {
+      clock.advance(50);
+      expect((await s.heartbeat(lease)).ok).toBe(true);
+    }
+    expect(await s.expireLeases(clock.now())).toEqual([]);
+    clock.advance(50); // now 1800 s after the claim, heartbeat 50 s old
+
+    const before = await statusOf(t.db, 't1');
+    expect(await s.heartbeat(lease)).toMatchObject({ ok: false, error: { httpStatus: 409, reason: 'attempt_timeout' } });
+    expect(await s.publishResult(lease, { outcome: 'completed' })).toMatchObject({ ok: false, error: { httpStatus: 409, reason: 'attempt_timeout' } });
+    expect(await statusOf(t.db, 't1')).toEqual(before);
+
+    const closed = await s.expireLeases(clock.now());
+    expect(closed).toEqual([expect.objectContaining({ taskId: 't1', attemptId: lease.attemptId, reason: 'attempt_timeout' })]);
+    const rows = await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`);
+    expect(rows[0]).toMatchObject({ outcome: 'failed', exit_reason: 'attempt_timeout' });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    const failed = await t.db.execute(sql`SELECT actor_kind, payload FROM events WHERE type = 'attempt.failed'`);
+    expect(failed[0]).toMatchObject({ actor_kind: 'system', payload: { reason: 'attempt_timeout' } });
+  });
+
+  it('lease-expiry retries back off, are bounded, and stay outside the repair count', async () => {
+    const caps = { ...CAPS, maxInfraRetries: 2, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 15 };
+    await seedTask(t.db, specFor('t1', { maxAttempts: 1 }));
+
+    const expire = async () => { clock.advance(61); expect(await s.expireLeases(clock.now())).toHaveLength(1); };
+    const backingOff = async () => expect(await s.tryClaim(runner('r'), caps)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'infra_retry_backoff' }] });
+
+    expect((await s.claimNext(runner('r1'), caps))!.attemptNumber).toBe(1);
+    await expire();
+    await backingOff();
+    clock.advance(9);
+    await backingOff();
+    clock.advance(1);
+    expect((await s.claimNext(runner('r2'), caps))!.attemptNumber).toBe(2);
+
+    await expire();
+    clock.advance(14); // the doubled 20 s delay is capped at 15 s
+    await backingOff();
+    clock.advance(1);
+    expect((await s.claimNext(runner('r3'), caps))!.attemptNumber).toBe(3);
+
+    await expire();
+    clock.advance(1000);
+    expect(await s.tryClaim(runner('r4'), caps)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'infra_retry_limit_exhausted' }] });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+    const blocked = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked'`);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]!['payload']).toMatchObject({ reason: 'infra_retry_limit_exhausted' });
+    expect(await countRows(t.db, 'attempts')).toBe(3);
+  });
+
+  it('a task in backoff does not stop a sibling from running', async () => {
+    await seedTask(t.db, specFor('a'));
+    await s.claimNext(runner('r1'), CAPS);
+    clock.advance(61);
+    await s.expireLeases(clock.now());
+    await seedTask(t.db, specFor('b'));
+    const outcome = await s.tryClaim(runner('r2'), CAPS);
+    expect(outcome.ok && outcome.lease.taskId).toBe('b');
+  });
+
+  it('a live lease on a prior revision is skipped and other tasks are still claimed', async () => {
+    await seedTask(t.db, specFor('t1'));
+    const old = (await s.claimNext(runner('r1'), CAPS))!;
+    await t.db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId: 't1', revision: 2, boardId: 'b1', spec: specFor('t1', { revision: 2 }) });
+    await t.db.execute(sql`UPDATE task_status SET current_revision = 2, status = 'ready', updated_at = '2020-01-01T00:00:00Z' WHERE task_id = 't1'`);
+    await seedTask(t.db, specFor('t2'));
+
+    const outcome = await s.tryClaim(runner('r2'), capsWith(5));
+    expect(outcome).toMatchObject({ ok: true, lease: { taskId: 't2' }, skipped: [{ taskId: 't1', reason: 'previous_attempt_active' }] });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    expect(await countRows(t.db, 'attempts', 'revision = 2')).toBe(0);
+
+    clock.advance(61);
+    await s.expireLeases(clock.now()); // reaps both, including the rev-1 lease
+    clock.advance(CAPS.infraRetryBackoffSeconds);
+    const resumed = (await s.claimNext(runner('r3'), capsWith(5)))!;
+    expect(resumed).toMatchObject({ taskId: 't1', revision: 2, fence: 1 });
+    expect(old.revision).toBe(1);
+  });
+
   it('controller restart resumes with no duplicate attempt', async () => {
     await seedTask(t.db, specFor('t1'));
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
@@ -185,6 +274,7 @@ describe('scheduler fault injection', () => {
 
       clock.advance(61);
       expect(await restarted.expireLeases(clock.now())).toHaveLength(1);
+      clock.advance(CAPS.infraRetryBackoffSeconds);
       const resumed = (await restarted.claimNext(runner('r3'), CAPS))!;
       expect(resumed.attemptNumber).toBe(2);
       expect(resumed.fence).toBe(2);

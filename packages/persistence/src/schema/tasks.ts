@@ -79,6 +79,8 @@ export const attempts = pgTable(
     leaseToken: text('lease_token'),
     lastHeartbeatAt: tstz('last_heartbeat_at'),
     leaseExpiresAt: tstz('lease_expires_at'),
+    /** Hard stop fixed at claim. Heartbeats renew the lease, never this. */
+    deadlineAt: tstz('deadline_at'),
     modelRoute: text('model_route'),
     baseSha: text('base_sha'),
     headSha: text('head_sha'),

@@ -102,18 +102,15 @@ export async function reserve(tx: Tx, position: BudgetPosition, r: ReservationDe
 }
 
 /**
- * Settles a reservation when its attempt ends. A known observed cost replaces the worst-case amount; otherwise the
- * worst case stays consumed and the source is recorded as `unavailable` (unknown is null, never zero).
+ * Settles a reservation when its attempt ends. The worst-case amount stays consumed: a worker's figure is unverified,
+ * so it is kept alongside as `reported` and cannot refund the hold. A trusted ledger (T4.8) may reconcile it later.
  */
-export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired', observedCostUsd: number | null | undefined): Promise<void> {
+export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired', reportedCostUsd: number | null | undefined): Promise<void> {
   await lockBudget(tx, scope);
-  const known = typeof observedCostUsd === 'number' && Number.isFinite(observedCostUsd) && observedCostUsd >= 0;
+  const known = typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0;
+  const recorded = { reportedCostUsd: known ? reportedCostUsd : null, costSource: known ? 'reported' : 'unavailable' };
   await tx
     .update(schema.budgetReservations)
-    .set({
-      state,
-      ...(known ? { amountUsd: formatMicros(toMicros(observedCostUsd)) } : {}),
-      detail: sql`${schema.budgetReservations.detail} || ${JSON.stringify({ costSource: known ? 'observed' : 'unavailable' })}::jsonb`,
-    })
+    .set({ state, detail: sql`${schema.budgetReservations.detail} || ${JSON.stringify(recorded)}::jsonb` })
     .where(and(eq(schema.budgetReservations.tenantId, scope.tenantId), eq(schema.budgetReservations.projectId, scope.projectId), eq(schema.budgetReservations.reservationId, reservationId)));
 }

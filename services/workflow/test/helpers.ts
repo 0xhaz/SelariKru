@@ -42,13 +42,13 @@ export async function resetDb(db: Db, budget: Record<string, unknown> = { limitU
   await db.insert(schema.runs).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, lifecycle: 'running', budget });
 }
 
-export function specFor(taskId: string, over: Partial<TaskSpec> & { maxAttempts?: number; maxCostUsd?: number } = {}): TaskSpec {
-  const { maxAttempts = 3, maxCostUsd = 1, ...rest } = over;
+export function specFor(taskId: string, over: Partial<TaskSpec> & { maxAttempts?: number; maxCostUsd?: number; timeoutSeconds?: number } = {}): TaskSpec {
+  const { maxAttempts = 3, maxCostUsd = 1, timeoutSeconds = 1800, ...rest } = over;
   return TaskSpecSchema.parse({
     schemaVersion: 1, tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId, boardId: 'b1', revision: 1,
     role: 'backend', title: taskId, baseSha: 'abc', requirementIds: [], dependencies: [], contractRefs: [], allowedPaths: [],
     resourceClaims: [], acceptanceCheckIds: [], classification: 'internal', policyVersion: 'v1', execution: 'eligible_any',
-    inferencePolicyId: 'p1', limits: { maxAttempts, timeoutSeconds: 1800, maxCostUsd }, ...rest,
+    inferencePolicyId: 'p1', limits: { maxAttempts, timeoutSeconds, maxCostUsd }, ...rest,
   });
 }
 
@@ -77,7 +77,8 @@ export function testClock(start = '2026-11-08T06:00:00.000Z'): TestClock {
 
 export const POLICY = { policyVersion: 'test.1', limits: { repairAttempts: 2 } } as const;
 export const runner = (id: string, location: Runner['location'] = 'local'): Runner => ({ runnerId: id, tenantId: TENANT, location });
-export const CAPS: Caps = { maxConcurrentTotal: 2 };
+export const CAPS = { maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 } satisfies Caps;
+export const capsWith = (maxConcurrentTotal: number) => ({ ...CAPS, maxConcurrentTotal });
 
 export const makeScheduler = (db: Db, clock: TestClock): Scheduler => createScheduler({ db, now: clock.now, policy: POLICY });
 

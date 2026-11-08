@@ -3,7 +3,7 @@ import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { createScheduler, type Scheduler } from './index.ts';
 import {
-  CAPS, PROJECT, RUN, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
+  CAPS, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
   testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
@@ -22,10 +22,58 @@ beforeEach(async () => {
 describe('claim preconditions', () => {
   it('a missing or invalid concurrency limit denies claiming', async () => {
     await seedTask(t.db, specFor('t1'));
-    for (const caps of [{}, { maxConcurrentTotal: null }, { maxConcurrentTotal: 0 }, { maxConcurrentTotal: 1.5 }]) {
+    const { maxConcurrentTotal: _omit, ...rest } = CAPS;
+    for (const caps of [rest, { ...rest, maxConcurrentTotal: null }, { ...rest, maxConcurrentTotal: 0 }, { ...rest, maxConcurrentTotal: 1.5 }]) {
       expect(await s.tryClaim(runner('r1'), caps)).toMatchObject({ ok: false, reason: 'missing_limit:maxConcurrentTotal' });
     }
     expect(await countRows(t.db, 'attempts')).toBe(0);
+  });
+
+  it('every other missing limit also denies claiming', async () => {
+    await seedTask(t.db, specFor('t1'));
+    for (const name of ['attemptTimeoutSeconds', 'maxInfraRetries', 'infraRetryBackoffSeconds', 'infraRetryBackoffMaxSeconds'] as const) {
+      const { [name]: _omit, ...missing } = CAPS;
+      expect(await s.tryClaim(runner('r1'), missing)).toMatchObject({ ok: false, reason: `missing_limit:${name}` });
+      expect(await s.tryClaim(runner('r1'), { ...missing, [name]: -1 })).toMatchObject({ ok: false, reason: `missing_limit:${name}` });
+    }
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+  });
+
+  it('the deadline is the smaller of the spec timeout and the configured limit', async () => {
+    await seedTask(t.db, specFor('short', { timeoutSeconds: 50 }));
+    await seedTask(t.db, specFor('long', { timeoutSeconds: 5000 }));
+    const caps = { ...capsWith(5), attemptTimeoutSeconds: 100 };
+    const a = (await s.claimNext(runner('r1'), caps))!;
+    const b = (await s.claimNext(runner('r2'), caps))!;
+    const seconds = (l: typeof a) => (new Date(l.deadlineAt).getTime() - new Date(l.acquiredAt).getTime()) / 1000;
+    expect(Object.fromEntries([a, b].map((l) => [l.taskId, seconds(l)]))).toEqual({ short: 50, long: 100 });
+  });
+
+  it('a timeout consumes the repair budget', async () => {
+    await seedTask(t.db, specFor('t1', { maxAttempts: 1, timeoutSeconds: 30 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    clock.advance(30);
+    expect(await s.expireLeases(clock.now())).toEqual([expect.objectContaining({ attemptId: lease.attemptId, reason: 'attempt_timeout' })]);
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+    const rows = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked'`);
+    expect(rows[0]!['payload']).toMatchObject({ reason: 'repair_budget_exhausted' });
+  });
+
+  it('a lease that went silent before the deadline is reaped as lease_expired', async () => {
+    await seedTask(t.db, specFor('t1', { timeoutSeconds: 90 }));
+    await s.claimNext(runner('r1'), CAPS);
+    clock.advance(600); // reaped late: the lease expired at 60 s, before the 90 s deadline
+    expect(await s.expireLeases(clock.now())).toEqual([expect.objectContaining({ reason: 'lease_expired' })]);
+  });
+
+  it('zero infrastructure retries blocks after the first expiry', async () => {
+    const caps = { ...CAPS, maxInfraRetries: 0 };
+    await seedTask(t.db, specFor('t1'));
+    await s.claimNext(runner('r1'), caps);
+    clock.advance(61);
+    await s.expireLeases(clock.now());
+    expect(await s.tryClaim(runner('r2'), caps)).toMatchObject({ ok: false, skipped: [{ reason: 'infra_retry_limit_exhausted' }] });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
   });
 
   it('runner location must fit the task execution setting', async () => {
@@ -103,7 +151,7 @@ describe('claim preconditions', () => {
     await seedTask(t.db, specFor('s1', { resourceClaims: [{ key: 'contract', mode: 'shared' }] }));
     await seedTask(t.db, specFor('s2', { resourceClaims: [{ key: 'contract', mode: 'shared' }] }));
     await seedTask(t.db, specFor('x', { resourceClaims: [{ key: 'contract', mode: 'exclusive' }] }));
-    const caps = { maxConcurrentTotal: 5 };
+    const caps = capsWith(5);
     const a = await s.tryClaim(runner('r1'), caps);
     const b = await s.tryClaim(runner('r2'), caps);
     expect(a.ok && b.ok).toBe(true);
@@ -114,7 +162,7 @@ describe('claim preconditions', () => {
     await seedTask(t.db, specFor('a', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }));
     await seedTask(t.db, specFor('b', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }));
     await seedTask(t.db, specFor('c'));
-    const caps = { maxConcurrentTotal: 5 };
+    const caps = capsWith(5);
     const seen = [await s.claimNext(runner('r1'), caps), await s.claimNext(runner('r2'), caps)];
     expect(seen.map((l) => l!.taskId).sort()).toEqual(['a', 'c']);
   });
@@ -148,6 +196,7 @@ describe('claim preconditions', () => {
     const first = (await s.claimNext(runner('r1'), CAPS))!;
     clock.advance(61);
     await s.expireLeases(clock.now());
+    clock.advance(CAPS.infraRetryBackoffSeconds);
     const second = (await s.claimNext(runner('r2'), CAPS))!;
     expect(second.attemptNumber).toBe(2);
     expect(second.fence).toBe(first.fence + 1);

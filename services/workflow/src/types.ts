@@ -14,6 +14,13 @@ export interface Runner {
 /** Limits supplied by configuration. A missing limit denies claiming; it is never unlimited. */
 export interface Caps {
   readonly maxConcurrentTotal?: number | null;
+  /** Upper bound on an attempt's run time; the deadline is the smaller of this and the spec's `timeoutSeconds`. */
+  readonly attemptTimeoutSeconds?: number | null;
+  /** Lease-expiry retries allowed per task revision. Separate from the repair count; 0 is a valid limit. */
+  readonly maxInfraRetries?: number | null;
+  /** Delay before the first infrastructure retry; it doubles per expiry up to `infraRetryBackoffMaxSeconds`. */
+  readonly infraRetryBackoffSeconds?: number | null;
+  readonly infraRetryBackoffMaxSeconds?: number | null;
 }
 
 export interface SchedulerContext {
@@ -41,6 +48,8 @@ export interface Lease {
   readonly acquiredAt: string;
   readonly lastHeartbeatAt: string;
   readonly expiresAt: string;
+  /** Hard stop for the attempt. Heartbeats do not move it. */
+  readonly deadlineAt: string;
 }
 
 export interface SkippedCandidate {
@@ -52,7 +61,7 @@ export type ClaimOutcome =
   | { readonly ok: true; readonly lease: Lease; readonly skipped: readonly SkippedCandidate[] }
   | { readonly ok: false; readonly reason: string; readonly skipped: readonly SkippedCandidate[] };
 
-export type LeaseConflictReason = 'stale_fence' | 'lease_expired';
+export type LeaseConflictReason = 'stale_fence' | 'lease_expired' | 'attempt_timeout';
 
 /** Typed `409`-equivalent: the API maps it to an HTTP conflict with a stable machine-readable `reason`. */
 export interface LeaseConflict {
@@ -71,14 +80,17 @@ export interface HeartbeatReceipt {
   readonly expiresAt: string;
 }
 
-/** Observed cost in USD, or null when usage is unavailable. Unknown is null, never zero. */
-export type ObservedCost = { readonly observedCostUsd?: number | null };
+/**
+ * Cost the worker reports, in USD. Unverified: it is recorded as `reported` and never reduces a reservation
+ * until a trusted ledger exists (T4.8). Unknown is null, never zero.
+ */
+export type ReportedCost = { readonly reportedCostUsd?: number | null };
 
 export type PublishResult =
-  | ({ readonly outcome: 'completed'; readonly headSha?: string } & ObservedCost)
-  | ({ readonly outcome: 'failed'; readonly reason: string } & ObservedCost)
-  | ({ readonly outcome: 'blocked'; readonly reason: string } & ObservedCost)
-  | ({ readonly outcome: 'approval_requested'; readonly reason: string } & ObservedCost);
+  | ({ readonly outcome: 'completed'; readonly headSha?: string } & ReportedCost)
+  | ({ readonly outcome: 'failed'; readonly reason: string } & ReportedCost)
+  | ({ readonly outcome: 'blocked'; readonly reason: string } & ReportedCost)
+  | ({ readonly outcome: 'approval_requested'; readonly reason: string } & ReportedCost);
 
 export interface PublishReceipt {
   readonly attemptId: string;
@@ -96,7 +108,7 @@ export interface ExpiredLease {
   readonly taskId: string;
   readonly attemptId: string;
   readonly fence: number;
-  readonly reason: 'lease_expired';
+  readonly reason: 'lease_expired' | 'attempt_timeout';
 }
 
 export interface Scheduler {

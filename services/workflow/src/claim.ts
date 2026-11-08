@@ -6,7 +6,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { leaseDeadline } from './lease.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
-import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type TaskKey } from './taskstate.ts';
+import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
 /** Allowlist: unknown lifecycle values do not dispatch. */
@@ -24,11 +24,57 @@ interface Candidate {
 const validRunner = (r: Runner): boolean =>
   typeof r?.runnerId === 'string' && r.runnerId !== '' && typeof r.tenantId === 'string' && r.tenantId !== '' && (r.location === 'local' || r.location === 'cloud');
 
+/** Limits read from configuration. Every one is required: a missing limit denies claiming. */
+interface ClaimLimits {
+  readonly maxConcurrentTotal: number;
+  readonly attemptTimeoutSeconds: number;
+  readonly maxInfraRetries: number;
+  readonly infraRetryBackoffSeconds: number;
+  readonly infraRetryBackoffMaxSeconds: number;
+}
+
+const isCount = (n: unknown, min: number): n is number => typeof n === 'number' && Number.isInteger(n) && n >= min;
+
+function resolveLimits(caps: Caps): ClaimLimits | string {
+  const required = [
+    ['maxConcurrentTotal', 1], ['attemptTimeoutSeconds', 1], ['maxInfraRetries', 0], ['infraRetryBackoffSeconds', 1], ['infraRetryBackoffMaxSeconds', 1],
+  ] as const;
+  for (const [name, min] of required) {
+    if (!isCount(caps?.[name], min)) return `missing_limit:${name}`;
+  }
+  return caps as ClaimLimits;
+}
+
+const isLeaseExpiry = (a: AttemptRow): boolean => a.outcome === 'interrupted' && a.exitReason === 'lease_expired';
+
+/**
+ * Infrastructure retries for this task revision, counted from attempt rows. They are separate from the repair count.
+ * The earliest retry follows the last expiry by a delay that doubles per expiry, capped at the configured maximum.
+ */
+function infraRetryDecision(attempts: readonly AttemptRow[], limits: ClaimLimits, now: Date): 'allowed' | 'backoff' | 'exhausted' {
+  const expiries = attempts.filter(isLeaseExpiry).length;
+  if (expiries === 0) return 'allowed';
+  if (expiries > limits.maxInfraRetries) return 'exhausted';
+  const last = attempts[attempts.length - 1];
+  if (!last || !isLeaseExpiry(last) || last.endedAt === null) return 'allowed';
+  const delaySeconds = Math.min(limits.infraRetryBackoffMaxSeconds, limits.infraRetryBackoffSeconds * 2 ** (expiries - 1));
+  return now.getTime() < last.endedAt.getTime() + delaySeconds * 1000 ? 'backoff' : 'allowed';
+}
+
+async function hasOpenAttempt(tx: Tx, key: TaskKey): Promise<boolean> {
+  const rows = await tx
+    .select({ attemptId: schema.attempts.attemptId })
+    .from(schema.attempts)
+    .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.taskId, key.taskId), isNull(schema.attempts.endedAt)))
+    .limit(1);
+  return rows.length > 0;
+}
+
 /** Executes the whole claim in one transaction and returns a stable, machine-readable outcome. */
 export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps): Promise<ClaimOutcome> {
   if (!validRunner(runner)) return { ok: false, reason: 'invalid_runner', skipped: [] };
-  const max = caps?.maxConcurrentTotal;
-  if (typeof max !== 'number' || !Number.isInteger(max) || max <= 0) return { ok: false, reason: 'missing_limit:maxConcurrentTotal', skipped: [] };
+  const limits = resolveLimits(caps);
+  if (typeof limits === 'string') return { ok: false, reason: limits, skipped: [] };
 
   return withTx(ctx.db, async (tx) => {
     // The concurrency limit and exclusive claims span many rows that may not exist yet (phantom inserts), so row locks
@@ -42,7 +88,7 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
       .from(schema.attempts)
       .where(and(eq(schema.attempts.tenantId, runner.tenantId), isNotNull(schema.attempts.leaseToken), isNull(schema.attempts.endedAt)));
     // An expired lease not yet reaped still counts: its worker may be alive, so the slot is not free until reconciled.
-    if ((active[0]?.n ?? 0) >= max) return { ok: false, reason: 'concurrency_limit_reached', skipped: [] };
+    if ((active[0]?.n ?? 0) >= limits.maxConcurrentTotal) return { ok: false, reason: 'concurrency_limit_reached', skipped: [] };
 
     const candidates: Candidate[] = await tx
       .select({
@@ -60,7 +106,7 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
 
     const skipped: SkippedCandidate[] = [];
     for (const c of candidates) {
-      const r = await claimCandidate(ctx, tx, runner, c, now);
+      const r = await claimCandidate(ctx, tx, runner, c, limits, now);
       if ('lease' in r) return { ok: true, lease: r.lease, skipped };
       skipped.push({ taskId: c.taskId, reason: r.reason });
     }
@@ -132,7 +178,7 @@ async function refuseRepair(tx: Tx, key: TaskKey, c: Candidate, state: TaskState
   return { reason };
 }
 
-async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, now: Date): Promise<CandidateResult> {
+async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, now: Date): Promise<CandidateResult> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const statusRow = await lockStatusRow(tx, key);
   if (!statusRow || statusRow.currentRevision !== c.currentRevision || !CLAIMABLE_STATUSES.includes(statusRow.status)) return { reason: 'status_changed' };
@@ -142,6 +188,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const spec = parsed.data;
   if (spec.tenantId !== runner.tenantId || spec.projectId !== c.projectId || spec.runId !== c.runId || spec.taskId !== c.taskId) return { reason: 'invalid_spec' };
   if (spec.revision !== statusRow.currentRevision || (await latestRevision(tx, key)) !== statusRow.currentRevision) return { reason: 'stale_status' };
+  // Any revision: a lease on a prior revision still holds the task, and its worker may still be running.
+  if (await hasOpenAttempt(tx, key)) return { reason: 'previous_attempt_active' };
 
   if (!locationAllowed(spec, runner)) return { reason: 'location_mismatch' };
   if (!cloudEligible(spec, runner)) return { reason: 'classification_not_cloud_eligible' };
@@ -151,6 +199,9 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const attempts = await loadAttempts(tx, key, spec.revision);
   let state = buildTaskState(spec, statusRow.status as TaskStatus, attempts);
   if (!state) return { reason: 'invalid_spec' };
+  const infra = infraRetryDecision(attempts, limits, now);
+  if (infra === 'exhausted') return refuseRepair(tx, key, c, state, statusRow.rowRevision, 'infra_retry_limit_exhausted', now);
+  if (infra === 'backoff') return { reason: 'infra_retry_backoff' };
   const promoted = statusRow.status === 'planned';
   if (promoted) {
     const p = transition(state, { type: 'dependencies_satisfied' });
@@ -183,11 +234,11 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const fits = checkFits(position, amountMicros);
   if (!fits.ok) return { reason: fits.reason };
 
-  return { lease: await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, now) };
+  return { lease: await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now) };
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, now: Date): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, timeoutSeconds: number, now: Date): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -198,10 +249,11 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   const leaseToken = randomUUID();
   const reservationId = reservationIdFor(attemptId);
   const expiresAt = leaseDeadline(now);
+  const deadlineAt = new Date(now.getTime() + timeoutSeconds * 1000);
 
   await tx.insert(schema.attempts).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, revision: spec.revision, attemptNumber,
-    runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt,
+    runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
     baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location },
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();
@@ -226,6 +278,6 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
     attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId,
-    acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(),
+    acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

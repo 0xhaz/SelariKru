@@ -47,6 +47,7 @@ function checkLease(attempt: AttemptRow | undefined, statusRow: { status: string
     attempt.leaseFence !== lease.fence || attempt.leaseToken !== lease.leaseToken ||
     attempt.endedAt !== null || statusRow.currentRevision !== lease.revision || statusRow.status !== 'running'
   ) return 'stale_fence';
+  if (attempt.deadlineAt === null || now.getTime() >= attempt.deadlineAt.getTime()) return 'attempt_timeout';
   if (attempt.leaseExpiresAt === null || now.getTime() >= attempt.leaseExpiresAt.getTime()) return 'lease_expired';
   return null;
 }
@@ -86,6 +87,24 @@ function must(state: TaskState, event: TaskEvent): TaskState {
   const r = transition(state, event);
   if (!r.ok) throw new Error(`illegal scheduler transition: ${JSON.stringify(r.error)}`);
   return r.value;
+}
+
+export interface FailureOutcome {
+  readonly state: TaskState;
+  readonly repair: 'scheduled' | 'refused';
+  readonly follow: { readonly type: 'task.ready' | 'task.blocked'; readonly reason: string };
+}
+
+/** Fails the running attempt, then schedules a repair if the domain's budget allows or stops the task at `blocked`. */
+export function failAttempt(state: TaskState, reason: string): FailureOutcome {
+  const failed = must(state, { type: 'attempt_failed', reason });
+  const retry = transition(failed, { type: 'retry_requested' });
+  if (retry.ok) return { state: retry.value, repair: 'scheduled', follow: { type: 'task.ready', reason: 'repair_scheduled' } };
+  return {
+    state: must(failed, { type: 'repair_refused', reason: 'repair_budget_exhausted' }),
+    repair: 'refused',
+    follow: { type: 'task.blocked', reason: 'repair_budget_exhausted' },
+  };
 }
 
 /** Applies a worker's result in one transaction, gated by fence, token and expiry. */
@@ -142,19 +161,12 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
       event = { type: 'attempt.completed', actor: runner, payload: { fence: lease.fence, headSha: result.headSha ?? null } };
       break;
     case 'failed': {
-      state = must(state, { type: 'attempt_failed', reason: result.reason });
+      const failure = failAttempt(state, result.reason);
+      state = failure.state;
+      repair = failure.repair;
+      follow = failure.follow;
       exitReason = result.reason;
       event = { type: 'attempt.failed', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: result.reason, outcome: 'failed' } };
-      const retry = transition(state, { type: 'retry_requested' });
-      if (retry.ok) {
-        state = retry.value;
-        repair = 'scheduled';
-        follow = { type: 'task.ready', reason: 'repair_scheduled' };
-      } else {
-        state = must(state, { type: 'repair_refused', reason: 'repair_budget_exhausted' });
-        repair = 'refused';
-        follow = { type: 'task.blocked', reason: 'repair_budget_exhausted' };
-      }
       break;
     }
     case 'blocked':
@@ -169,7 +181,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
       break;
   }
 
-  await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.observedCostUsd);
+  await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
   await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined });
   const aggregateRevision = await setStatus(tx, key, statusRow.rowRevision, state.status, now);
   const scope: EventScope = { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId, aggregateRevision };
