@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { TaskSpecSchema, budgetUsed, readyTasks, transition, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
-import { evaluate } from '@selarikru/policy';
+import { evaluate, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { leaseDeadline } from './lease.ts';
+import { capacityForMode, isBlocked, place, type Capacity, type Placement } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
@@ -105,9 +106,10 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
       .where(and(eq(schema.taskStatus.tenantId, runner.tenantId), inArray(schema.taskStatus.status, CLAIMABLE_STATUSES), inArray(schema.runs.lifecycle, DISPATCHABLE_LIFECYCLES)))
       .orderBy(asc(schema.taskStatus.updatedAt), asc(schema.taskStatus.projectId), asc(schema.taskStatus.taskId));
 
+    const capacity = capacityFor(ctx, limits, await runningByLocation(tx, runner.tenantId));
     const skipped: SkippedCandidate[] = [];
     for (const c of candidates) {
-      const r = await claimCandidate(ctx, tx, runner, c, limits, now);
+      const r = await claimCandidate(ctx, tx, runner, c, limits, capacity, now);
       if ('lease' in r) return { ok: true, lease: r.lease, skipped };
       skipped.push({ taskId: c.taskId, reason: r.reason });
     }
@@ -123,12 +125,28 @@ export async function claimNext(ctx: SchedulerContext, runner: Runner, caps: Cap
 
 type CandidateResult = { lease: Lease } | { reason: string };
 
-const locationAllowed = (spec: TaskSpec, runner: Runner): boolean =>
-  spec.execution === 'eligible_any' || spec.execution === runner.location;
+/** The task's input sources, as the cloud-start policy sees them: the project repository plus each contract artifact, all at the task's label. */
+const sourcesFor = (spec: TaskSpec): Source[] => [
+  { id: `repo:${spec.projectId}`, classification: spec.classification },
+  ...spec.contractRefs.map((r) => ({ id: `artifact:${r.artifactId}`, classification: spec.classification })),
+];
 
-/** Local copy of the cloud boundary until T4.4 owns placement: restricted and secret work stays on the device. */
-const cloudEligible = (spec: TaskSpec, runner: Runner): boolean =>
-  runner.location !== 'cloud' || (spec.classification !== 'restricted' && spec.classification !== 'secret');
+/** Live leases per location, counted from attempt rows. A lease without a recorded location counts as local. */
+async function runningByLocation(tx: Tx, tenantId: string): Promise<{ local: number; cloud: number }> {
+  const rows = await tx
+    .select({ location: sql<string | null>`${schema.attempts.detail}->>'location'`, n: sql<number>`count(*)::int` })
+    .from(schema.attempts)
+    .where(and(eq(schema.attempts.tenantId, tenantId), isNotNull(schema.attempts.leaseToken), isNull(schema.attempts.endedAt)))
+    .groupBy(sql`${schema.attempts.detail}->>'location'`);
+  const out = { local: 0, cloud: 0 };
+  for (const r of rows) out[r.location === 'cloud' ? 'cloud' : 'local'] += r.n;
+  return out;
+}
+
+function capacityFor(ctx: SchedulerContext, limits: ClaimLimits, running: { local: number; cloud: number }): Capacity {
+  if (ctx.placement) return capacityForMode(ctx.placement.mode, { maxConcurrentTotal: limits.maxConcurrentTotal, running });
+  return { maxConcurrentTotal: limits.maxConcurrentTotal, local: { limit: limits.maxConcurrentTotal, running: running.local }, cloud: { running: running.cloud } };
+}
 
 async function latestRevision(tx: Tx, key: TaskKey): Promise<number | null> {
   const rows = await tx
@@ -179,7 +197,7 @@ async function refuseRepair(tx: Tx, key: TaskKey, c: Candidate, state: TaskState
   return { reason };
 }
 
-async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, now: Date): Promise<CandidateResult> {
+async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, capacity: Capacity, now: Date): Promise<CandidateResult> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const statusRow = await lockStatusRow(tx, key);
   if (!statusRow || statusRow.currentRevision !== c.currentRevision || !CLAIMABLE_STATUSES.includes(statusRow.status)) return { reason: 'status_changed' };
@@ -194,10 +212,18 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   // A task the owner asked to cancel is never dispatched again.
   if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
 
-  if (!locationAllowed(spec, runner)) return { reason: 'location_mismatch' };
-  if (!cloudEligible(spec, runner)) return { reason: 'classification_not_cloud_eligible' };
   if (!(await dependenciesReady(tx, key, spec))) return { reason: 'dependencies_unsatisfied' };
   if (await resourceConflict(tx, key, spec)) return { reason: 'resource_conflict' };
+
+  // Placement decides the one location this task may run in; a runner elsewhere never receives it.
+  const amountMicros = toMicros(spec.limits.maxCostUsd);
+  const budgetScope = { tenantId: runner.tenantId, projectId: c.projectId, runId: c.runId };
+  const position = await lockBudget(tx, budgetScope);
+  const placed = place(spec, capacity, ctx.policy, {
+    sources: sourcesFor(spec), destination: ctx.placement?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position),
+  });
+  if (isBlocked(placed)) return { reason: `placement_blocked:${placed.reason}` };
+  if (placed.target !== runner.location) return { reason: 'location_mismatch' };
 
   const attempts = await loadAttempts(tx, key, spec.revision);
   let state = buildTaskState(spec, statusRow.status as TaskStatus, attempts);
@@ -220,10 +246,6 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
       : { reason: 'illegal_transition' };
   }
 
-  const amountMicros = toMicros(spec.limits.maxCostUsd);
-  const scope = { tenantId: runner.tenantId, projectId: c.projectId, runId: c.runId };
-  const position = await lockBudget(tx, scope);
-
   const repairNumber = budgetUsed(state.attempts);
   if (repairNumber > 0) {
     const decision = evaluate({ kind: 'repair_within_limits', attempt: repairNumber, estimatedCost: amountMicros, remainingBudget: remainingMicros(position) }, ctx.policy);
@@ -237,11 +259,11 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const fits = checkFits(position, amountMicros);
   if (!fits.ok) return { reason: fits.reason };
 
-  return { lease: await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now) };
+  return { lease: await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed, capacity.modeId ?? null, ctx.placement?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now) };
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, timeoutSeconds: number, now: Date): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -276,6 +298,16 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   await emit(tx, scope, now, {
     type: 'attempt.started', attemptId, actor: SCHEDULER_ACTOR,
     payload: { fence, attemptNumber, runnerId: runner.runnerId, location: runner.location, reservationId, amountUsd: spec.limits.maxCostUsd },
+  });
+
+  // Why the task is here. A cloud start carries the policy decision (a policy record, never an approval).
+  await emit(tx, scope, now, {
+    type: 'placement.decided', attemptId, actor: SCHEDULER_ACTOR,
+    payload: {
+      target: placed.target, reason: placed.reason, mode: modeId, runnerId: runner.runnerId,
+      ...(placed.target === 'cloud' ? { destination: cloudDestination } : {}),
+      ...(placed.policy ? { policyDecision: placed.policy } : {}),
+    },
   });
 
   return {

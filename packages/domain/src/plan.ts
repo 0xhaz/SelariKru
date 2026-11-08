@@ -20,7 +20,9 @@ export type PlanError =
   | { kind: 'cross_project_edge'; taskId: string; dependsOn: string }
   | { kind: 'duplicate_task_id'; taskId: string }
   | { kind: 'revision_mismatch'; taskId: string; dependsOn: string; expected: number; actual: number }
-  | { kind: 'scope_mismatch'; taskId?: string; field: 'projectId' | 'runId' };
+  | { kind: 'scope_mismatch'; taskId?: string; field: 'projectId' | 'runId' }
+  /** `allowedPaths` entries are plain repo-relative prefixes: no globs, absolute paths, `..` or `.git`. */
+  | { kind: 'invalid_allowed_path'; taskId: string; path: string; reason: string };
 
 export type PlanValidation = { ok: true } | { ok: false; errors: PlanError[] };
 
@@ -60,6 +62,22 @@ function findCycles(byId: ReadonlyMap<string, TaskSpec>): string[][] {
   return cycles;
 }
 
+const GLOB_CHARS = /[*?[\]{}]/;
+
+/** Why an `allowedPaths` entry is not a plain repo-relative prefix, or null when it is. Mirrors the runner's own late check. */
+export function allowedPathProblem(p: string): string | null {
+  if (p === '' || p.includes('\0')) return 'empty or NUL';
+  if (p.includes('\\')) return 'backslash';
+  if (p.startsWith('/')) return 'absolute path';
+  if (GLOB_CHARS.test(p)) return 'globs are not supported';
+  const n = p.replace(/^(\.\/)+/, '').replace(/\/+$/, '');
+  if (n === '' || n === '.') return 'empty';
+  const segs = n.split('/');
+  if (segs.some((x) => x === '..' || x === '.' || x === '')) return 'parent or empty segment';
+  if (segs.some((x) => x.normalize('NFC').toLowerCase() === '.git')) return '.git is never allowed';
+  return null;
+}
+
 /** Reports every problem found; never throws. Agent-proposed plans are accepted only when `ok`. */
 export function validatePlanRevision(plan: PlanRevision, ctx: PlanContext): PlanValidation {
   const errors: PlanError[] = [];
@@ -78,6 +96,10 @@ export function validatePlanRevision(plan: PlanRevision, ctx: PlanContext): Plan
   for (const task of byId.values()) {
     if (task.projectId !== ctx.projectId) errors.push({ kind: 'scope_mismatch', taskId: task.taskId, field: 'projectId' });
     if (task.runId !== ctx.runId) errors.push({ kind: 'scope_mismatch', taskId: task.taskId, field: 'runId' });
+    for (const path of task.allowedPaths) {
+      const reason = allowedPathProblem(path);
+      if (reason !== null) errors.push({ kind: 'invalid_allowed_path', taskId: task.taskId, path: path.slice(0, 80), reason });
+    }
     for (const edge of task.dependencies) {
       const target = byId.get(edge.taskId);
       if (!target) {

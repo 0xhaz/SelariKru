@@ -4,7 +4,7 @@ import { err, ok, type Result } from './result.ts';
 
 export const EVENT_TYPES = [
   'run.created', 'plan.accepted',
-  'task.ready', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.blocked',
+  'task.ready', 'placement.decided', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.blocked',
   'attempt.started', 'attempt.heartbeat', 'attempt.completed', 'attempt.failed',
   'approval.requested', 'approval.granted', 'approval.denied',
   'verification.started', 'verification.passed', 'verification.failed',
@@ -43,6 +43,8 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'run.created': [H, S, Y],
   'plan.accepted': [S, Y],
   'task.ready': [S],
+  /** Where a claimed task runs and why: a scheduler decision, recorded with the policy decision behind any cloud start. Never an approval. */
+  'placement.decided': [S],
   /** A request to stop active attempts. Not confirmed termination: `task.cancelled` follows once the attempt is closed. */
   'task.cancel_requested': [H],
   'task.cancelled': [H, S, Y],

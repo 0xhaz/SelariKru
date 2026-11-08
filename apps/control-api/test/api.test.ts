@@ -178,6 +178,16 @@ describe('plan revisions', () => {
     expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM task_revisions`))[0]!['n'])).toBe(0);
   });
 
+  it('rejects glob, absolute and parent allowedPaths at plan acceptance and persists nothing', async () => {
+    for (const bad of ['src/**', '/etc', '../x']) {
+      const res = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('ap', { allowedPaths: [bad] })] });
+      expect(res.status, bad).toBe(422);
+      expect(res.body.error.code).toBe('plan_invalid');
+      expect(res.body.error.details[0]).toMatchObject({ kind: 'invalid_allowed_path', taskId: 'ap' });
+    }
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM task_revisions`))[0]!['n'])).toBe(0);
+  });
+
   it('rejects a task for another tenant', async () => {
     const res = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [{ ...specFor('x1'), tenantId: 'other_tenant' }] });
     expect(res.status).toBe(422);

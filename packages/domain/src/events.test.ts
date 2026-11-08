@@ -88,4 +88,9 @@ describe('checkEventAuthority', () => {
     try { expect(checkEventAuthority(ev).ok).toBe(false); }
     finally { (EVENT_ACTOR_ALLOWLIST as Record<string, unknown>)['run.created'] = saved; }
   });
+  it('placement.decided is emitted by the scheduler only', () => {
+    expect(EVENT_ACTOR_ALLOWLIST['placement.decided']).toEqual(['scheduler']);
+    expect(checkEventAuthority(as('scheduler', 'placement.decided')).ok).toBe(true);
+    for (const k of ['worker', 'human', 'verifier', 'system'] as const) expect(checkEventAuthority(as(k, 'placement.decided')).ok, k).toBe(false);
+  });
 });

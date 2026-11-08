@@ -3,6 +3,7 @@ import postgres from 'postgres';
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
 import { createDb, migrate, schema, type Db } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
+import type { Policy } from '@selarikru/policy';
 import { createScheduler, type Caps, type Runner, type Scheduler } from '../src/index.ts';
 
 /** Compose defaults live here, in test setup only. CI sets DATABASE_URL. */
@@ -76,6 +77,11 @@ export function testClock(start = '2026-11-08T06:00:00.000Z'): TestClock {
 }
 
 export const POLICY = { policyVersion: 'test.1', limits: { repairAttempts: 2 } } as const;
+/** Policy that lets a cloud worker start for internal data from the default repository source. */
+export const CLOUD_POLICY = {
+  policyVersion: 'test.cloud.1', limits: { repairAttempts: 2, maxConcurrentTotal: 2 }, selectedSources: [`repo:${PROJECT}`],
+  destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'execution', classifications: ['public', 'internal'] }],
+} as const satisfies Policy;
 export const runner = (id: string, location: Runner['location'] = 'local'): Runner => ({ runnerId: id, tenantId: TENANT, location });
 export const CAPS = { maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 } satisfies Caps;
 export const capsWith = (maxConcurrentTotal: number) => ({ ...CAPS, maxConcurrentTotal });

@@ -10,7 +10,7 @@ import { loadPlanConfigFile, reviewPlanProposal, type ProjectPlanConfig, type Pr
 
 const CONFIG: ProjectPlanConfig = {
   tenantId: TENANT, projectId: PROJECT, runId: RUN, boardId: 'b1', role: 'backend', baseSha: 'abc123',
-  allowedPaths: ['src/**'], classification: 'internal', policyVersion: 'v1', execution: 'eligible_any', inferencePolicyId: 'p1',
+  allowedPaths: ['src'], classification: 'internal', policyVersion: 'v1', execution: 'eligible_any', inferencePolicyId: 'p1',
   limits: { maxAttempts: 3, timeoutSeconds: 1800, maxCostUsd: 1 },
   allowedRequirementIds: ['FB-01', 'FB-02'], forbiddenMandatoryScope: ['login', 'payments'],
 };
@@ -30,7 +30,7 @@ describe('reviewPlanProposal (server re-validation)', () => {
     expect(r.value.droppedFields).toContain('description');
     expect(r.value.tasks).toHaveLength(2);
     expect(r.value.tasks[0]).toMatchObject({
-      taskId: 'prop-1', title: 'Feedback form', requirementIds: ['FB-01'], baseSha: 'abc123', allowedPaths: ['src/**'],
+      taskId: 'prop-1', title: 'Feedback form', requirementIds: ['FB-01'], baseSha: 'abc123', allowedPaths: ['src'],
       classification: 'internal', policyVersion: 'v1', limits: { maxAttempts: 3, timeoutSeconds: 1800, maxCostUsd: 1 }, dependencies: [], resourceClaims: [],
     });
     expect(r.value.tasks[0]).not.toHaveProperty('description');
@@ -322,7 +322,7 @@ describe('acceptance goes through the existing plan-revision path', () => {
     expect(ok.status).toBe(201);
     expect(ok.body.planRevision).toBe(1);
     const stored = (await t.db.execute(sql`SELECT spec FROM task_revisions WHERE task_id = 'prop-1'`))[0]!['spec'] as any;
-    expect(stored).toMatchObject({ baseSha: 'abc123', allowedPaths: ['src/**'], title: 'Feedback form' });
+    expect(stored).toMatchObject({ baseSha: 'abc123', allowedPaths: ['src'], title: 'Feedback form' });
   });
 });
 

@@ -8,6 +8,7 @@ export * from './types.ts';
 export { claimNext, tryClaim } from './claim.ts';
 export { heartbeat, publishResult, leaseHealth, leaseDeadline, LEASE_EXPIRY_SECONDS, LEASE_SUSPECT_SECONDS, HEARTBEAT_INTERVAL_SECONDS, type LeaseHealth } from './lease.ts';
 export { expireLeases } from './reconcile.ts';
+export * from './placement.ts';
 export { retryTask } from './retry.ts';
 export { formatMicros, toMicros } from './reserve.ts';
 

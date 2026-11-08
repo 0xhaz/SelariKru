@@ -129,6 +129,20 @@ describe('evaluate', () => {
     expect(isDestinationGranted('execution', 'x', 'public', undefined)).toBe(false);
     expect(() => parsePolicy({ ...base, destinations: [{ destination: 'd', purpose: 'storage', classifications: ['secret'] }] })).toThrow();
   });
+  it('start_cloud_worker and repair_within_limits honour configured require_approval', () => {
+    const p: Policy = { ...grantPolicy, operations: { start_cloud_worker: 'require_approval', repair_within_limits: 'require_approval' } };
+    expect(evaluate(start, p)).toMatchObject({ decision: 'require_approval', reason: 'configured_require_approval:start_cloud_worker', record: 'policy_decision' });
+    expect(evaluate({ kind: 'repair_within_limits', attempt: 1, estimatedCost: 1, remainingBudget: 5 }, p))
+      .toMatchObject({ decision: 'require_approval', reason: 'configured_require_approval:repair_within_limits' });
+    // A deny still wins over require_approval.
+    expect(evaluate({ ...start, totalRunning: 2 }, p)).toMatchObject({ decision: 'deny', reason: 'concurrency_limit_reached' });
+    expect(evaluate({ kind: 'repair_within_limits', attempt: 3, estimatedCost: 1, remainingBudget: 5 }, p)).toMatchObject({ decision: 'deny', reason: 'repair_limit_exhausted' });
+  });
+  it('isDestinationGranted refuses a restricted label for execution even when a grant lists it', () => {
+    const p = { ...grantPolicy, destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'execution' as const, classifications: ['public', 'internal', 'restricted'] as never }] };
+    expect(isDestinationGranted('execution', 'cloud-sandbox-eu', 'restricted', p)).toBe(false);
+    expect(isDestinationGranted('execution', 'cloud-sandbox-eu', 'internal', p)).toBe(true);
+  });
   it('totalRunning must be a non-negative integer', () => {
     for (const totalRunning of [NaN, undefined, -5, 1.5, '0']) {
       expect(evaluate({ ...start, totalRunning } as never, grantPolicy).reason).toBe('invalid_running_count');

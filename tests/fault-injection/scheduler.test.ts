@@ -130,7 +130,7 @@ describe('scheduler fault injection', () => {
     expect(rows[0]!['outcome']).toBe('interrupted');
     expect(rows[0]!['ended_at']).not.toBeNull();
     expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(0);
-    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'attempt.failed', 'task.ready']);
+    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided', 'attempt.failed', 'task.ready']);
     const failed = await t.db.execute(sql`SELECT actor_kind FROM events WHERE type = 'attempt.failed'`);
     expect(failed[0]!['actor_kind']).toBe('system');
 

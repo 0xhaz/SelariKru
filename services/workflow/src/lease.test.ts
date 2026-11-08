@@ -40,7 +40,7 @@ describe('heartbeat', () => {
     clock.advance(10);
     const beat = await s.heartbeat(lease);
     expect(beat).toEqual({ ok: true, value: expect.objectContaining({ fence: 1, expiresAt: new Date(clock.now().getTime() + 60_000).toISOString() }) });
-    expect(await eventTypes(t.db)).toEqual(['attempt.started']); // heartbeats are not events
+    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided']); // heartbeats are not events
 
     expect(await s.heartbeat({ ...lease, fence: 2 })).toMatchObject({ ok: false, error: { httpStatus: 409, reason: 'stale_fence' } });
     expect(await s.heartbeat({ ...lease, leaseToken: 'wrong' })).toMatchObject({ ok: false, error: { reason: 'stale_fence' } });
@@ -120,14 +120,14 @@ describe('publishResult', () => {
     expect(await s.publishResult(lease, { outcome: 'blocked', reason: 'needs_decision' })).toMatchObject({ ok: true, value: { taskStatus: 'blocked' } });
     const rows = await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`);
     expect(rows[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'needs_decision' });
-    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'task.blocked']);
+    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided', 'task.blocked']);
     expect(await countRows(t.db, 'resource_claims', 'released_at IS NULL')).toBe(0);
   });
 
   it('approval_requested moves to awaiting_approval and records no grant', async () => {
     const lease = await claim();
     expect(await s.publishResult(lease, { outcome: 'approval_requested', reason: 'new_domain' })).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
-    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'approval.requested']);
+    expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided', 'approval.requested']);
     expect((await eventTypes(t.db)).includes('approval.granted')).toBe(false);
   });
 });

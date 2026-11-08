@@ -3,7 +3,7 @@ import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { createScheduler, type Scheduler } from './index.ts';
 import {
-  CAPS, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
+  CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
   testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
@@ -78,9 +78,10 @@ describe('claim preconditions', () => {
 
   it('runner location must fit the task execution setting', async () => {
     await seedTask(t.db, specFor('t1', { execution: 'cloud' }));
-    const denied = await s.tryClaim(runner('r1', 'local'), CAPS);
+    const hybrid = createScheduler({ db: t.db, now: clock.now, policy: CLOUD_POLICY, placement: { mode: { id: 'one-each', localSlots: 1, cloudSlots: 1 }, cloudDestination: 'cloud-sandbox-eu' } });
+    const denied = await hybrid.tryClaim(runner('r1', 'local'), CAPS);
     expect(denied).toMatchObject({ ok: false, reason: 'no_claimable_task', skipped: [{ taskId: 't1', reason: 'location_mismatch' }] });
-    expect(await s.claimNext(runner('r2', 'cloud'), CAPS)).not.toBeNull();
+    expect(await hybrid.claimNext(runner('r2', 'cloud'), CAPS)).not.toBeNull();
   });
 
   it('a restricted task is never claimable by a cloud runner', async () => {
@@ -120,7 +121,7 @@ describe('claim preconditions', () => {
     await t.db.execute(sql`UPDATE task_status SET status = 'verified' WHERE task_id = 'a'`);
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
     expect(lease.taskId).toBe('b');
-    expect(await eventTypes(t.db)).toEqual(['task.ready', 'attempt.started']);
+    expect(await eventTypes(t.db)).toEqual(['task.ready', 'attempt.started', 'placement.decided']);
     expect((await statusOf(t.db, 'b')).status).toBe('running');
   });
 

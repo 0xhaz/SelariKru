@@ -1,6 +1,7 @@
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { Result } from '@selarikru/domain';
+import type { PlacementMode } from './placement.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
 
@@ -23,12 +24,23 @@ export interface Caps {
   readonly infraRetryBackoffMaxSeconds?: number | null;
 }
 
+/** The named run-level placement configuration (L1, L2, C1, H2 ...) and the execution destination cloud starts are judged against. */
+export interface PlacementConfig {
+  readonly mode: PlacementMode;
+  readonly cloudDestination: string | null;
+}
+
 export interface SchedulerContext {
   readonly db: Db;
   /** Injected clock: lease timing never reads the system time directly. */
   readonly now: () => Date;
   /** Project policy, already loaded. Used for the repair gate; absent policy denies repairs. */
   readonly policy?: Policy | undefined;
+  /**
+   * Where tasks may run. Absent: local runners get up to `maxConcurrentTotal` slots and cloud has no limit,
+   * which denies cloud placement. Missing is never unlimited.
+   */
+  readonly placement?: PlacementConfig | undefined;
 }
 
 /** What a worker holds. `leaseToken` is a credential: it never appears in events or logs. */

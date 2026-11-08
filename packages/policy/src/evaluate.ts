@@ -65,6 +65,10 @@ export function evaluate(op: Operation, policy: Policy | undefined): PolicyDecis
 
   if (k === 'repair_within_limits' || k === 'start_cloud_worker') {
     if (configured === 'deny') return decide('deny', `configured_deny:${k}`, v);
+    if (configured !== undefined && !isTreatment(configured)) return decide('deny', `invalid_operation_config:${k}`, v);
+    // Every deny check below wins over a configured `require_approval`; it only replaces the final allow.
+    const allowed = (reason: string): PolicyDecision =>
+      configured === 'require_approval' ? decide('require_approval', `configured_require_approval:${k}`, v) : decide('allow', reason, v);
     const limits = policy.limits;
     if (k === 'repair_within_limits') {
       const r = op as Extract<Operation, { kind: 'repair_within_limits' }>;
@@ -74,7 +78,7 @@ export function evaluate(op: Operation, policy: Policy | undefined): PolicyDecis
       if (r.attempt > max) return decide('deny', 'repair_limit_exhausted', v);
       const b = checkReservation(r.estimatedCost, r.remainingBudget);
       if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
-      return decide('allow', 'repair_within_limits', v);
+      return allowed('repair_within_limits');
     }
     const w = op as Extract<Operation, { kind: 'start_cloud_worker' }>;
     const max = limits?.maxConcurrentTotal;
@@ -95,7 +99,7 @@ export function evaluate(op: Operation, policy: Policy | undefined): PolicyDecis
     if (w.totalRunning >= max) return decide('deny', 'concurrency_limit_reached', v);
     const b = checkReservation(w.estimatedCost, w.remainingBudget);
     if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
-    return decide('allow', 'eligible_cloud_start_within_limits', v);
+    return allowed('eligible_cloud_start_within_limits');
   }
 
   if (configured === undefined) return decide('deny', `missing_operation_config:${k}`, v);

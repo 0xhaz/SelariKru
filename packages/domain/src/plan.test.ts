@@ -72,6 +72,20 @@ describe('validatePlanRevision', () => {
   });
 });
 
+describe('allowedPaths validation at plan acceptance', () => {
+  const run = (paths: string[]) => validatePlanRevision(plan([t('a', [], { allowedPaths: paths })]), ctx);
+  it('accepts plain repo-relative prefixes', () => {
+    expect(run(['src', 'docs/a.md', './lib/', 'fixtures/feedback-board']).ok).toBe(true);
+  });
+  it('rejects globs, absolute paths, parent segments and other unsafe entries', () => {
+    for (const bad of ['src/**', '*.ts', 'a/?.ts', 'src/[ab]', '{a,b}', '/etc', '/', '../x', 'a/../b', '..', 'a\\b', '', '.git', 'a/.git/config', 'a\0b']) {
+      const v = run([bad]);
+      expect(kinds(v), JSON.stringify(bad)).toEqual(['invalid_allowed_path']);
+      if (!v.ok) expect(v.errors[0]).toMatchObject({ kind: 'invalid_allowed_path', taskId: 'a' });
+    }
+  });
+});
+
 describe('readyTasks', () => {
   const p = plan([t('a'), t('b', [dep('a')])]);
   it('returns planned tasks with no dependencies', () => {
