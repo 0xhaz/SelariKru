@@ -1,0 +1,138 @@
+openapi: 3.0.3
+info:
+  title: Feedback Board API
+  version: "0.1"
+  description: Frozen contract from docs/demo-project.md section 3. Not implemented in the starter baseline.
+paths:
+  /api/feedback:
+    get:
+      summary: List feedback, newest first (ties broken by descending id)
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, open, planned, done]
+            default: all
+      responses:
+        "200":
+          description: Items and counts for the full dataset
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, counts]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Feedback" }
+                  counts: { $ref: "#/components/schemas/Counts" }
+        "400":
+          description: Unknown status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      summary: Create feedback (starts open)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                  description: Trimmed, 3 to 120 Unicode code points
+                description:
+                  type: string
+                  description: Optional, trimmed, at most 1000 Unicode code points
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item: { $ref: "#/components/schemas/Feedback" }
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/feedback/{id}:
+    patch:
+      summary: Update the status of one item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/Status" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [item]
+                properties:
+                  item: { $ref: "#/components/schemas/Feedback" }
+        "400":
+          description: Invalid status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Item not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  schemas:
+    Status:
+      type: string
+      enum: [open, planned, done]
+    Feedback:
+      type: object
+      required: [id, title, description, status, createdAt]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        status: { $ref: "#/components/schemas/Status" }
+        createdAt: { type: string, format: date-time }
+    Counts:
+      type: object
+      required: [all, open, planned, done]
+      properties:
+        all: { type: integer, minimum: 0 }
+        open: { type: integer, minimum: 0 }
+        planned: { type: integer, minimum: 0 }
+        done: { type: integer, minimum: 0 }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            fields:
+              type: object
+              additionalProperties: { type: string }

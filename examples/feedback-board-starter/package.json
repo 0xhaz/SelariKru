@@ -1,0 +1,36 @@
+{
+  "name": "feedback-board-starter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Feedback Board starter baseline: scaffolding and frozen contract only",
+  "packageManager": "pnpm@9.12.2",
+  "engines": { "node": ">=24 <25", "pnpm": ">=9.12.2 <10" },
+  "scripts": {
+    "dev:api": "tsx server/index.ts",
+    "dev:web": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx server/index.ts",
+    "test": "vitest run"
+  },
+  "pnpm": { "onlyBuiltDependencies": ["better-sqlite3", "esbuild"] },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "express": "5.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
+  }
+}

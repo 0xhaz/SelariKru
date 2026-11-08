@@ -1,0 +1,112 @@
+{
+  "version": "0.1",
+  "dataClassification": "synthetic",
+  "databaseStateBeforeSeed": "empty",
+  "items": [
+    {
+      "id": "fb_001",
+      "title": "Add dark mode",
+      "description": "Useful for evening work.",
+      "status": "open",
+      "createdAt": "2026-11-08T00:00:00.000Z"
+    },
+    {
+      "id": "fb_002",
+      "title": "Export feedback",
+      "description": "Download the current list.",
+      "status": "planned",
+      "createdAt": "2026-11-08T00:01:00.000Z"
+    },
+    {
+      "id": "fb_003",
+      "title": "Improve form labels",
+      "description": "Make each field easy to identify.",
+      "status": "done",
+      "createdAt": "2026-11-08T00:01:00.000Z"
+    }
+  ],
+  "expectedInitialOrder": [
+    "fb_003",
+    "fb_002",
+    "fb_001"
+  ],
+  "expectedInitialCounts": {
+    "all": 3,
+    "open": 1,
+    "planned": 1,
+    "done": 1
+  },
+  "validationCases": [
+    {
+      "case": "empty_title",
+      "title": "   ",
+      "expectedStatus": 400
+    },
+    {
+      "case": "two_character_title",
+      "title": "ab",
+      "expectedStatus": 400
+    },
+    {
+      "case": "minimum_title",
+      "title": "abc",
+      "expectedStatus": 201
+    },
+    {
+      "case": "unicode_minimum",
+      "title": "🌱🌱🌱",
+      "expectedStatus": 201
+    },
+    {
+      "case": "maximum_title",
+      "titleRepeat": {
+        "text": "a",
+        "count": 120
+      },
+      "expectedStatus": 201
+    },
+    {
+      "case": "oversize_title",
+      "titleRepeat": {
+        "text": "a",
+        "count": 121
+      },
+      "expectedStatus": 400
+    },
+    {
+      "case": "oversize_description",
+      "title": "Valid title",
+      "descriptionRepeat": {
+        "text": "a",
+        "count": 1001
+      },
+      "expectedStatus": 400
+    },
+    {
+      "case": "wrong_title_type",
+      "title": 123,
+      "expectedStatus": 400
+    },
+    {
+      "case": "unknown_status",
+      "operation": "patch",
+      "id": "fb_001",
+      "status": "archived",
+      "expectedStatus": 400
+    },
+    {
+      "case": "missing_item",
+      "operation": "patch",
+      "id": "fb_missing",
+      "status": "done",
+      "expectedStatus": 404
+    },
+    {
+      "case": "text_rendering",
+      "title": "<script>window.demoCanary=1</script>",
+      "expectedStatus": 201,
+      "expectedBrowserCanary": "unset"
+    }
+  ],
+  "resetBeforeIndependentValidationCase": true
+}
