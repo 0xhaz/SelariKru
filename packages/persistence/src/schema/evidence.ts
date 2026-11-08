@@ -1,4 +1,5 @@
-import { foreignKey, integer, jsonb, pgTable, primaryKey, text } from 'drizzle-orm/pg-core';
+import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { projects, runs } from './projects.ts';
 import { attempts, taskRevisions } from './tasks.ts';
@@ -76,6 +77,7 @@ export const approvals = pgTable(
       columns: [t.tenantId, t.projectId, t.taskId, t.revision],
       foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
     }),
+    check('approvals_task_revision_paired', sql`(task_id IS NULL) = (revision IS NULL)`),
   ],
 );
 

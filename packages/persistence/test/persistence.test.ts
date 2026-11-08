@@ -156,6 +156,32 @@ describe('outbox ordering under concurrent and restarted claimers', () => {
   });
 });
 
+describe('outbox claim vs in-flight ack', () => {
+  it('a claim waits for an uncommitted ack and never claims a later row first', async () => {
+    for (let i = 0; i < 3; i++) await withTx(t.db, (tx) => appendEvent(tx, envelope()));
+    const first = await claimOutbox(t.db, 'c1', 3);
+    await t.db.execute(sql`UPDATE outbox SET claim_expires_at = now() - interval '1 second' WHERE delivered_at IS NULL`);
+    let ackedSignal!: () => void;
+    const acked = new Promise<void>((r) => (ackedSignal = r));
+    let finish!: (rollback: boolean) => void;
+    const decision = new Promise<boolean>((r) => (finish = r));
+    const ackTx = withTx(t.db, async (tx) => {
+      expect(await markDelivered(tx, 'c1', [first[0]!.eventId])).toBe(1);
+      ackedSignal();
+      if (await decision) throw new Error('rollback ack');
+    }).catch(() => undefined);
+    await acked;
+    let resolved = false;
+    const claim = claimOutbox(t.db, 'c2', 10).then((r) => { resolved = true; return r; });
+    await new Promise((r) => setTimeout(r, 300));
+    const blockedWhileAckInFlight = !resolved;
+    finish(true); // always release the ack, so a failing run cannot hang
+    await ackTx;
+    const got = (await claim).map((e) => e.sequence);
+    expect({ blockedWhileAckInFlight, got }).toEqual({ blockedWhileAckInFlight: true, got: [1, 2, 3] });
+  });
+});
+
 describe('operation receipts', () => {
   const key = { tenantId: TENANT, projectId: 'proj_a', key: 'op-1' };
 
@@ -259,6 +285,28 @@ describe('cross-project integrity (task, approval, budget, attempt refs)', () =>
     await expect(withTx(t.db, (tx) => appendEvent(tx, envelope({ projectId: 'proj_b', runId: 'run_b', attemptId: 'att1' })))).rejects.toSatisfy(isFkViolation);
     const e = await withTx(t.db, (tx) => appendEvent(tx, envelope({ attemptId: 'att1' })));
     expect(e.attemptId).toBe('att1');
+  });
+});
+
+describe('NULL revision cannot bypass task FKs', () => {
+  beforeEach(async () => {
+    await seedProject('proj_b', TENANT, 'run_b');
+    await t.db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: 'proj_a', runId: 'run_a', taskId: 't1', revision: 1, boardId: 'b', spec: {} });
+  });
+  const isCheck = (e: unknown) => ((e as { cause?: { code?: string } }).cause?.code) === '23514';
+
+  it('budget_reservations rejects task_id with NULL revision, and revision without task_id', async () => {
+    const base = { tenantId: TENANT, projectId: 'proj_b', reservationId: 'rb', runId: 'run_b', state: 'held' };
+    await expect(t.db.insert(schema.budgetReservations).values({ ...base, taskId: 't1' })).rejects.toSatisfy(isCheck);
+    await expect(t.db.insert(schema.budgetReservations).values({ ...base, revision: 1 })).rejects.toSatisfy(isCheck);
+    await t.db.insert(schema.budgetReservations).values(base); // run-level reservation is fine
+  });
+
+  it('approvals rejects task_id with NULL revision, and revision without task_id', async () => {
+    const base = { tenantId: TENANT, projectId: 'proj_b', approvalId: 'ab', runId: 'run_b', requester: 'u', actionHash: 'h', scopeHash: 's', outcome: 'pending' };
+    await expect(t.db.insert(schema.approvals).values({ ...base, taskId: 't1' })).rejects.toSatisfy(isCheck);
+    await expect(t.db.insert(schema.approvals).values({ ...base, revision: 1 })).rejects.toSatisfy(isCheck);
+    await t.db.insert(schema.approvals).values(base);
   });
 });
 

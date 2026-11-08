@@ -1,0 +1,2 @@
+ALTER TABLE "budget_reservations" ADD CONSTRAINT "budget_reservations_task_revision_paired" CHECK ((task_id IS NULL) = (revision IS NULL));--> statement-breakpoint
+ALTER TABLE "approvals" ADD CONSTRAINT "approvals_task_revision_paired" CHECK ((task_id IS NULL) = (revision IS NULL));

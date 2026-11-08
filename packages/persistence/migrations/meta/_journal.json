@@ -15,6 +15,13 @@
       "when": 1794153202921,
       "tag": "0001_yellow_shocker",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794153766472,
+      "tag": "0002_hesitant_johnny_storm",
+      "breakpoints": true
     }
   ]
 }

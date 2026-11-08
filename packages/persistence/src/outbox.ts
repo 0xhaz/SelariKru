@@ -5,7 +5,7 @@
  * serialised by a transaction-scoped advisory lock taken before the claiming statement's snapshot,
  * and are handed out in sequence order, never past any earlier undelivered row under a live lease
  * (including the same consumer's own). A project whose lock is held by another open claim is skipped.
- * Because order is guaranteed per project, a consumer may ALSO skip events at or below its own cursor.
+ * Row locks are waited on, not skipped (no SKIP LOCKED), so an in-flight ack that later rolls back cannot let a later row be claimed first. Because order is guaranteed per project, a consumer may ALSO skip events at or below its own cursor.
  */
 import type { EventEnvelope } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
@@ -37,7 +37,7 @@ export async function claimOutbox(db: Executor, consumer: string, limit: number,
               AND p.delivered_at IS NULL AND p.claim_expires_at >= now())
         ORDER BY o.project_id, o.sequence
         LIMIT ${limit}
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE -- waits (never skips) on a row locked by an in-flight ack, so a later row cannot jump ahead
       ), claimed AS (
         UPDATE outbox o SET claimed_by = ${consumer}, claim_expires_at = now() + make_interval(secs => ${leaseSeconds}),
           delivery_attempts = o.delivery_attempts + 1
