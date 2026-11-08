@@ -1,0 +1,54 @@
+import type { ExpiredLease, Scheduler } from '@selarikru/workflow';
+
+export interface LeaseExpiryDriver {
+  /** Runs one pass now. Used by tests and shutdown paths. */
+  tick(): Promise<readonly ExpiredLease[]>;
+  /** Completed or failed passes so far. */
+  ticks(): number;
+  /** Stops scheduling and waits for any pass in flight. */
+  stop(): Promise<void>;
+}
+
+/**
+ * Calls `scheduler.expireLeases(now())` on an interval. Passes never overlap (each is scheduled after the last one
+ * ends), a failing pass is reported and retried on the next interval, and time comes from the injected clock.
+ */
+export function startLeaseExpiryDriver(options: {
+  scheduler: Pick<Scheduler, 'expireLeases'>;
+  now: () => Date;
+  intervalMs: number;
+  onError?: (error: unknown) => void;
+}): LeaseExpiryDriver {
+  let stopped = false;
+  let count = 0;
+  let timer: NodeJS.Timeout | undefined;
+  let inFlight: Promise<unknown> = Promise.resolve();
+
+  const tick = async (): Promise<readonly ExpiredLease[]> => {
+    try {
+      return await options.scheduler.expireLeases(options.now());
+    } finally {
+      count += 1;
+    }
+  };
+
+  const schedule = (): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      inFlight = tick()
+        .catch((e: unknown) => options.onError?.(e))
+        .finally(schedule);
+    }, options.intervalMs);
+  };
+  schedule();
+
+  return {
+    tick,
+    ticks: () => count,
+    async stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      await inFlight;
+    },
+  };
+}

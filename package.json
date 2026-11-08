@@ -13,7 +13,8 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "db:up": "docker compose -f infra/docker-compose.yml up -d --wait",
-    "db:down": "docker compose -f infra/docker-compose.yml down -v"
+    "db:down": "docker compose -f infra/docker-compose.yml down -v",
+    "dev:stack": "node infra/dev-stack.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"
