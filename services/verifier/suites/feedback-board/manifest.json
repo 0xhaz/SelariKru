@@ -1,0 +1,146 @@
+{
+  "suiteId": "feedback-board",
+  "version": "0.1",
+  "specification": "docs/demo-project.md section 3",
+  "fixtures": "fixtures/feedback-fixtures.json",
+  "tools": {
+    "node": "24.x",
+    "pnpm": "9.12.2",
+    "vitest": "5.1.0",
+    "@playwright/test": "1.65.0",
+    "playwrightImage": "mcr.microsoft.com/playwright:v1.65.0-noble",
+    "browser": "chromium"
+  },
+  "criteria": [
+    {
+      "id": "FB-01",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-01 create: valid titles return 201 and are persisted; title trimmed; missing description is \"\""
+        },
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-01 astral boundary: 120 astral characters accepted, 121 rejected (code points, not UTF-16 units)"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-01 create: submitting the form shows the saved, trimmed item and persists it"
+        }
+      ]
+    },
+    {
+      "id": "FB-02",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-02 reject: invalid input returns 400 and leaves the row count unchanged"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-02 reject: invalid titles show a readable error and nothing is saved"
+        }
+      ]
+    },
+    {
+      "id": "FB-03",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-03 order: seeded list is newest first with descending-id tie-break"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-03 order: seeded items render newest first with the id tie-break"
+        }
+      ]
+    },
+    {
+      "id": "FB-04",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-04 status: new item is open; PATCH persists each status; missing id is 404"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-04 status: changing the status selector persists across reload"
+        }
+      ]
+    },
+    {
+      "id": "FB-05",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-05 filter: counts stay global under each filter and update after changes; unknown status is 400"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-05 filter: filters narrow the list while counts stay global and update after changes"
+        }
+      ]
+    },
+    {
+      "id": "FB-06",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-06 persist: saved items and statuses survive an API process restart on the same database"
+        },
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-06 persist: seeding only fills an empty database, so a restart with the seed file set does not duplicate or revert rows"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-06 persist: items and statuses survive a browser reload and a real API restart"
+        }
+      ]
+    },
+    {
+      "id": "FB-07",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-07 states: an empty database lists no items and zero counts"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-07 states: loading, empty, failed load and failed writes are usable and never look saved"
+        }
+      ]
+    },
+    {
+      "id": "FB-08",
+      "tests": [
+        {
+          "runner": "vitest",
+          "file": "api/feedback.test.ts",
+          "title": "FB-08 a11y and safety: script-like text is stored and returned verbatim as data"
+        },
+        {
+          "runner": "playwright",
+          "file": "browser/feedback.spec.ts",
+          "title": "FB-08 a11y and safety: accessible names, keyboard-only flow, script text renders as text"
+        }
+      ]
+    }
+  ]
+}

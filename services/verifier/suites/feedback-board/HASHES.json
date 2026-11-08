@@ -1,0 +1,6 @@
+{
+  "description": "manifestSha256 = sha256(manifest.json). suiteSha256 = stable tree hash of this directory excluding HASHES.json (this is the verifierSha). contractSha256 = stable tree hash of examples/feedback-board-starter/contract.",
+  "manifestSha256": "4cb4e3fffd9ee80d88bf96d0a549dd92a3513094ba7085a6c45d8ea1802fa05e",
+  "suiteSha256": "94eec12fae699b38ca10161532a4ddcea445b3f6a7c9efc75673a12a0d311853",
+  "contractSha256": "da29bca07a8d6b8d20df2beb389f57b5b2586a6cb7ec4508306c38d06e4833f0"
+}

@@ -1,8 +1,9 @@
 import type Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const MIGRATIONS_DIR = join(dirname(new URL(import.meta.url).pathname), '../migrations');
+export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 
 /**
  * Applies `migrations/*.sql` in lexical filename order, once each.

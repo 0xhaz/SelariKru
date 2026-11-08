@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+.git
+.superpowers
+.worktrees
+docs
+spikes
+infra
+examples
+tools
+apps
+packages

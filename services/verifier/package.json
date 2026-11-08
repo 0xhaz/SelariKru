@@ -1,0 +1,21 @@
+{
+  "name": "@selarikru/verifier",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Protected, independent verifier for the Feedback Board acceptance contract (FB-01..FB-08)",
+  "engines": { "node": ">=24 <25", "pnpm": ">=9.12.2 <10" },
+  "scripts": {
+    "verify": "tsx src/run.ts",
+    "hashes": "tsx scripts/hashes.ts",
+    "hashes:check": "tsx scripts/hashes.ts --check",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
