@@ -6,6 +6,17 @@ const Key = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/, 'expected 1-200 charact
 const Revision = z.number().int().min(0);
 
 /** Every request object is strict: unknown fields (including anything secret-shaped) are rejected, not stored. */
+/** The named run-level placement modes (docs/demo/benchmark-manifest.json, plus the optional L2 and C2). */
+export const PLACEMENT_MODE_NAMES = ['L1', 'L2', 'C1', 'C2', 'H2'] as const;
+export const RunPlacementSchema = z
+  .object({
+    mode: z.enum(PLACEMENT_MODE_NAMES),
+    /** Execution destination ID (the region is part of the ID). Absent means no cloud destination: cloud starts are denied. */
+    cloudDestination: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@+\/-]{0,127}$/).optional(),
+  })
+  .strict();
+export type RunPlacement = z.infer<typeof RunPlacementSchema>;
+
 export const CreateRunRequestSchema = z
   .object({
     idempotencyKey: Key,
@@ -13,6 +24,8 @@ export const CreateRunRequestSchema = z
     description: z.string().max(8000).optional(),
     /** Run budget ceiling in USD. Absent means the scheduler denies claims for this run until one is set. */
     budgetLimitUsd: z.number().finite().min(0).optional(),
+    /** Where this run's tasks may run. Absent: local-only defaults, with cloud disabled. */
+    placement: RunPlacementSchema.optional(),
   })
   .strict();
 export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;

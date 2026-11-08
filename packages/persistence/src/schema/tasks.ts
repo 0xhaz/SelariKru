@@ -30,6 +30,8 @@ export const taskStatus = pgTable(
     currentRevision: integer('current_revision').notNull(),
     status: text('status').notNull(),
     rowRevision: integer('row_revision').notNull().default(0),
+    /** Reason code of a permanent placement block (null when none); the last `placement.blocked` event's reason, for dedupe and the snapshot. */
+    placementBlock: text('placement_block'),
     updatedAt: tstz('updated_at').notNull().defaultNow(),
   },
   (t) => [

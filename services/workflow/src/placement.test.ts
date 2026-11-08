@@ -2,8 +2,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Policy } from '@selarikru/policy';
 import { createScheduler } from './index.ts';
 import { capacityForMode, place, PLACEMENT_MODES, type Capacity, type PlaceContext } from './placement.ts';
+import { schema } from '@selarikru/persistence';
 import {
-  CAPS, countRows, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, CLOUD_POLICY, type TestClock, type TestDb,
+  CAPS, PROJECT, RUN, TENANT, countRows, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, CLOUD_POLICY, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 import { sql } from 'drizzle-orm';
 
@@ -19,14 +20,18 @@ const task = (over: Parameters<typeof specFor>[1] = {}) => specFor('t1', { role:
 const cap = (mode: keyof typeof PLACEMENT_MODES, running = { local: 0, cloud: 0 }, total: number | null | undefined = 2): Capacity =>
   capacityForMode(PLACEMENT_MODES[mode], { maxConcurrentTotal: total, running });
 
+/** A mode that declares expansion: one slot each and no role mapping. */
+const OPEN = { id: 'open', localSlots: 1, cloudSlots: 1 } as const;
+const capOpen = (running = { local: 0, cloud: 0 }, total: number | null | undefined = 2): Capacity => capacityForMode(OPEN, { maxConcurrentTotal: total, running });
+
 describe('place (pure)', () => {
   it('ready task goes local when a slot is free', () => {
     expect(place(task(), cap('L2'), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
-    expect(place(task(), cap('H2'), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
+    expect(place(task(), capOpen(), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
   });
 
   it('auto expands to cloud within limits and records reason', () => {
-    const r = place(task(), cap('H2', { local: 1, cloud: 0 }), policy, ctx);
+    const r = place(task(), capOpen({ local: 1, cloud: 0 }), policy, ctx);
     expect(r).toMatchObject({
       target: 'cloud', reason: 'expanded_to_cloud:local_full',
       policy: { decision: 'allow', record: 'policy_decision', reason: 'eligible_cloud_start_within_limits', policyVersion: 'pl.1' },
@@ -56,8 +61,8 @@ describe('place (pure)', () => {
       }
     }
     // eligible_any stays local when local has room, with a stable reason; it is never moved to cloud when local is full.
-    expect(place(task({ classification: 'restricted' }), cap('H2'), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
-    expect(place(task({ classification: 'restricted' }), cap('H2', { local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'classification_not_cloud_eligible' });
+    expect(place(task({ classification: 'restricted' }), capOpen(), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
+    expect(place(task({ classification: 'restricted' }), capOpen({ local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'classification_not_cloud_eligible' });
     // A restricted source feeding a public task is refused by the policy package, not placed.
     const mixed = { ...ctx, sources: [{ id: 'repo', classification: 'restricted' as const }] };
     expect(place(task({ execution: 'cloud' }), cap('C1'), policy, mixed)).toMatchObject({ blocked: true, reason: 'policy_denied:source_not_cloud_eligible' });
@@ -76,11 +81,11 @@ describe('place (pure)', () => {
 
   it('a missing execution grant, destination or source selection blocks cloud and never falls back to local', () => {
     const t = task({ execution: 'cloud' });
-    expect(place(t, cap('H2'), { ...policy, destinations: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
-    expect(place(t, cap('H2'), policy, { ...ctx, destination: null })).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
-    expect(place(t, cap('H2'), { ...policy, selectedSources: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:source_not_selected' });
+    expect(place(t, capOpen(), { ...policy, destinations: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
+    expect(place(t, capOpen(), policy, { ...ctx, destination: null })).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
+    expect(place(t, capOpen(), { ...policy, selectedSources: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:source_not_selected' });
     // eligible_any whose local slot is full is blocked rather than moved when the cloud grant is missing.
-    expect(place(task(), cap('H2', { local: 1, cloud: 0 }), { ...policy, destinations: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
+    expect(place(task(), capOpen({ local: 1, cloud: 0 }), { ...policy, destinations: [] }, ctx)).toMatchObject({ blocked: true, reason: 'policy_denied:missing_destination:execution' });
   });
 
   it('configured require_approval is Blocked, not silently started', () => {
@@ -89,9 +94,9 @@ describe('place (pure)', () => {
   });
 
   it('execution local/cloud is honoured', () => {
-    expect(place(task({ execution: 'local' }), cap('H2'), policy, ctx)).toMatchObject({ target: 'local', reason: 'execution_local' });
-    expect(place(task({ execution: 'cloud' }), cap('H2'), policy, ctx)).toMatchObject({ target: 'cloud', reason: 'execution_cloud' });
-    expect(place(task({ execution: 'local' }), cap('H2', { local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'no_free_slot', transient: true });
+    expect(place(task({ execution: 'local' }), capOpen(), policy, ctx)).toMatchObject({ target: 'local', reason: 'execution_local' });
+    expect(place(task({ execution: 'cloud' }), capOpen(), policy, ctx)).toMatchObject({ target: 'cloud', reason: 'execution_cloud' });
+    expect(place(task({ execution: 'local' }), capOpen({ local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'no_free_slot', transient: true });
   });
 
   it('a location with zero slots in the mode is disabled with a concrete reason', () => {
@@ -99,7 +104,22 @@ describe('place (pure)', () => {
     expect(place(task({ execution: 'local' }), cap('C1'), policy, ctx)).toMatchObject({ blocked: true, reason: 'location_disabled:local' });
   });
 
+  it('a missing limit on any candidate location blocks instead of expanding', () => {
+    const c: Capacity = { maxConcurrentTotal: 2, local: { limit: null, running: 0 }, cloud: { limit: 1, running: 0 } };
+    expect(place(task(), c, policy, ctx)).toMatchObject({ blocked: true, reason: 'missing_limit:local' });
+    const c2: Capacity = { maxConcurrentTotal: 2, local: { limit: 1, running: 0 }, cloud: {  running: 0 } };
+    expect(place(task(), c2, policy, ctx)).toMatchObject({ blocked: true, reason: 'missing_limit:cloud' });
+  });
+
   describe('manifest modes', () => {
+    it('H2 fails closed on roles it does not map, even when local is full', () => {
+      for (const role of ['Backend', 'database', 'planner', 'worker', 'FRONTEND', '']) {
+        const r = place(task({ role: role || 'x' }), cap('H2', { local: 1, cloud: 0 }), policy, ctx);
+        expect(r, role).toMatchObject({ blocked: true, reason: `role_not_mapped:${role || 'x'}` });
+        expect(place(task({ role: role || 'x' }), cap('H2'), policy, ctx), role).toMatchObject({ blocked: true, reason: `role_not_mapped:${role || 'x'}` });
+      }
+    });
+
     it('L1: one local coding slot, nothing in cloud', () => {
       expect(place(task(), cap('L1'), policy, ctx)).toMatchObject({ target: 'local' });
       expect(place(task(), cap('L1', { local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'no_free_slot' });
@@ -185,7 +205,7 @@ describe('placement in claimNext', () => {
   it('with no placement configured, local runners work and cloud is denied by the missing limit', async () => {
     const s = makeScheduler(t.db, clock);
     await seedTask(t.db, specFor('c', { execution: 'cloud' }));
-    expect(await s.tryClaim(runner('l1'), CAPS)).toMatchObject({ skipped: [{ reason: 'placement_blocked:missing_limit:cloud' }] });
+    expect(await s.tryClaim(runner('l1'), CAPS)).toMatchObject({ skipped: [{ reason: 'placement_blocked:location_disabled:cloud' }] });
     await seedTask(t.db, specFor('l', { execution: 'local' }), 'ready');
     expect(await s.claimNext(runner('l1'), CAPS)).toMatchObject({ taskId: 'l' });
   });
@@ -221,5 +241,142 @@ describe('placement in claimNext', () => {
     // A free cloud slot and a second runner do not start the dependent task while its predecessor is unverified.
     expect(await s.tryClaim(cloud('c1'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 'second', reason: 'dependencies_unsatisfied' }] });
     expect(await countRows(t.db, 'attempts')).toBe(1);
+  });
+
+  describe('source labels come from stored rows, not the task', () => {
+    const SHA = 'a'.repeat(64);
+    const policyWith = (sources: string[], extra: Partial<Policy> = {}): Policy => ({ ...(CLOUD_POLICY as Policy), selectedSources: [`repo:${PROJECT}`, ...sources], ...extra });
+    const addArtifact = (artifactId: string, classification: string, sha256 = SHA) =>
+      t.db.insert(schema.artifacts).values({ tenantId: TENANT, projectId: PROJECT, artifactId, type: 'contract', sha256, classification });
+    const cloudTask = (id = 'x', over: Parameters<typeof specFor>[1] = {}) => specFor(id, { execution: 'cloud', ...over });
+    const claimCloud = (p: Policy) => sched('C1', p).tryClaim(cloud('c1'), CAPS);
+
+    it('an internal task referencing a restricted artifact never gets a cloud lease', async () => {
+      await addArtifact('a1', 'restricted');
+      await seedTask(t.db, cloudTask('x', { contractRefs: [{ artifactId: 'a1', sha256: SHA }] }));
+      expect(await claimCloud(policyWith(['artifact:a1']))).toMatchObject({ ok: false, skipped: [{ taskId: 'x', reason: 'placement_blocked:classification_not_cloud_eligible' }] });
+      expect(await countRows(t.db, 'attempts')).toBe(0);
+    });
+
+    it('an internal task in a restricted project never gets a cloud lease', async () => {
+      await t.db.update(schema.projects).set({ classification: 'restricted' });
+      await seedTask(t.db, cloudTask());
+      expect(await claimCloud(policyWith([]))).toMatchObject({ ok: false, skipped: [{ reason: 'placement_blocked:classification_not_cloud_eligible' }] });
+      expect(await countRows(t.db, 'attempts')).toBe(0);
+    });
+
+    it('a missing artifact row or a sha mismatch is unclassified and denied by policy', async () => {
+      await seedTask(t.db, cloudTask('x', { contractRefs: [{ artifactId: 'ghost', sha256: SHA }] }));
+      expect(await claimCloud(policyWith(['artifact:ghost']))).toMatchObject({ skipped: [{ reason: 'placement_blocked:policy_denied:unclassified_source' }] });
+      await addArtifact('a2', 'public', 'b'.repeat(64));
+      await seedTask(t.db, cloudTask('y', { contractRefs: [{ artifactId: 'a2', sha256: SHA }] }));
+      expect(await claimCloud(policyWith(['artifact:ghost', 'artifact:a2']))).toMatchObject({ skipped: expect.arrayContaining([{ taskId: 'y', reason: 'placement_blocked:policy_denied:unclassified_source' }]) });
+      expect(await countRows(t.db, 'attempts')).toBe(0);
+    });
+
+    it('a task fed by a restricted predecessor (its label or its artifacts) is not placed in cloud', async () => {
+      await addArtifact('a3', 'restricted');
+      await seedTask(t.db, specFor('p1', { classification: 'restricted' }), 'verified');
+      await seedTask(t.db, specFor('p2', { contractRefs: [{ artifactId: 'a3', sha256: SHA }] }), 'verified');
+      const dep = (taskId: string) => ({ taskId, revision: 1, condition: 'artifact_verified' as const });
+      await seedTask(t.db, cloudTask('s1', { dependencies: [dep('p1')] }), 'planned');
+      await seedTask(t.db, cloudTask('s2', { dependencies: [dep('p2')] }), 'planned');
+      const r = await claimCloud(policyWith(['artifact:a3']));
+      expect(r).toMatchObject({ ok: false, skipped: expect.arrayContaining([
+        { taskId: 's1', reason: 'placement_blocked:classification_not_cloud_eligible' },
+        { taskId: 's2', reason: 'placement_blocked:classification_not_cloud_eligible' },
+      ]) });
+    });
+
+    it('control: public artifact and internal project and task still place in cloud', async () => {
+      await addArtifact('a4', 'public');
+      await seedTask(t.db, cloudTask('x', { contractRefs: [{ artifactId: 'a4', sha256: SHA }] }));
+      expect(await claimCloud(policyWith(['artifact:a4']))).toMatchObject({ ok: true, lease: { location: 'cloud' } });
+    });
+  });
+
+  describe('run-level placement', () => {
+    const setRun = (runId: string, placement: { mode: string; cloudDestination: string | null } | null) =>
+      t.db.update(schema.runs).set({ placement }).where(sql`run_id = ${runId}`);
+    const plain = () => createScheduler({ db: t.db, now: clock.now, policy: CLOUD_POLICY as Policy });
+
+    it('the run row carries the mode: H2 sends backend local and frontend cloud with no scheduler-level config', async () => {
+      await setRun(RUN, { mode: 'H2', cloudDestination: 'cloud-sandbox-eu' });
+      await seedTask(t.db, specFor('be', { role: 'backend' }));
+      await seedTask(t.db, specFor('fe', { role: 'frontend' }));
+      const s = plain();
+      expect(await s.claimNext(cloud('c1'), CAPS)).toMatchObject({ taskId: 'fe', location: 'cloud' });
+      expect(await s.claimNext(runner('l1'), CAPS)).toMatchObject({ taskId: 'be', location: 'local' });
+    });
+
+    it('a run without a valid mode gets local-only defaults; an unknown mode name blocks', async () => {
+      await seedTask(t.db, specFor('c', { execution: 'cloud' }));
+      expect(await plain().tryClaim(cloud('c1'), CAPS)).toMatchObject({ skipped: [{ reason: 'placement_blocked:location_disabled:cloud' }] });
+      await setRun(RUN, { mode: 'ZZ', cloudDestination: null });
+      expect(await plain().tryClaim(runner('l1'), CAPS)).toMatchObject({ ok: false, skipped: [{ reason: 'placement_blocked:unknown_placement_mode' }] });
+    });
+
+    it('slots are counted per run while the total of 2 stays global', async () => {
+      await t.db.insert(schema.runs).values({ tenantId: TENANT, projectId: PROJECT, runId: 'run_b', lifecycle: 'running', budget: { limitUsd: 1000 } });
+      await setRun(RUN, { mode: 'L1', cloudDestination: null });
+      await setRun('run_b', { mode: 'L1', cloudDestination: null });
+      for (const id of ['a1', 'a2']) await seedTask(t.db, specFor(id));
+      for (const id of ['b1', 'b2']) await seedTask(t.db, specFor(id, { runId: 'run_b' }));
+      const s = plain();
+      const l1 = await s.claimNext(runner('l1'), CAPS);
+      const l2 = await s.claimNext(runner('l2'), CAPS);
+      expect([l1?.runId, l2?.runId].sort()).toEqual([RUN, 'run_b']); // one slot per run
+      expect(await s.claimNext(runner('l3'), CAPS)).toBeNull(); // the global total of 2 holds
+    });
+  });
+
+  describe('permanent blocks are visible, transient ones are silent', () => {
+    const blockedEvents = () => t.db.execute(sql`SELECT payload, actor_kind FROM events WHERE type = 'placement.blocked' ORDER BY sequence`);
+    const blockCol = async (id: string) => String((await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = ${id}`))[0]!['placement_block']);
+
+    it('writes one placement.blocked event per reason change and exposes the reason on task_status', async () => {
+      await seedTask(t.db, specFor('r1', { role: 'frontend', classification: 'restricted' }));
+      const s = sched('H2');
+      for (let i = 0; i < 3; i++) await s.tryClaim(cloud('c1'), CAPS);
+      await s.tryClaim(runner('l1'), CAPS);
+      const ev = await blockedEvents();
+      expect(ev).toHaveLength(1);
+      expect(ev[0]).toMatchObject({ actor_kind: 'scheduler', payload: { reason: 'classification_not_cloud_eligible', mode: 'H2' } });
+      expect(await blockCol('r1')).toBe('classification_not_cloud_eligible');
+      expect((await statusOf(t.db, 'r1')).status).toBe('ready');
+    });
+
+    it('a changed reason writes a new event; a successful placement clears the field', async () => {
+      await seedTask(t.db, specFor('x', { execution: 'cloud' }));
+      await sched('C1', { ...(CLOUD_POLICY as Policy), destinations: [] }).tryClaim(cloud('c1'), CAPS);
+      await sched('C1', { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } }).tryClaim(cloud('c1'), CAPS);
+      const ev = await blockedEvents();
+      expect(ev.map((e) => (e['payload'] as { reason: string }).reason)).toEqual([
+        'policy_denied:missing_destination:execution', 'approval_required:configured_require_approval:start_cloud_worker',
+      ]);
+      expect(await countRows(t.db, 'approvals')).toBe(0);
+      expect((await statusOf(t.db, 'x')).status).toBe('ready');
+      expect(await sched('C1').claimNext(cloud('c1'), CAPS)).not.toBeNull();
+      expect((await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 'x'`))[0]!['placement_block']).toBeNull();
+    });
+
+    it('transient blocks write no event', async () => {
+      for (const id of ['a', 'b']) await seedTask(t.db, specFor(id));
+      const s = sched('L1');
+      await s.claimNext(runner('l1'), CAPS);
+      expect(await s.tryClaim(runner('l2'), CAPS)).toMatchObject({ ok: false });
+      expect(await blockedEvents()).toHaveLength(0);
+    });
+
+    it('repair_within_limits configured require_approval is visible with its reason', async () => {
+      const s = createScheduler({ db: t.db, now: clock.now, policy: { ...(CLOUD_POLICY as Policy), operations: { repair_within_limits: 'require_approval' } } });
+      await seedTask(t.db, specFor('rp'));
+      const lease = (await s.claimNext(runner('l1'), CAPS))!;
+      await s.publishResult(lease, { outcome: 'failed', reason: 'boom' });
+      await s.tryClaim(runner('l1'), CAPS);
+      expect((await statusOf(t.db, 'rp')).status).toBe('blocked');
+      const rows = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked'`);
+      expect(rows[0]!['payload']).toMatchObject({ reason: 'configured_require_approval:repair_within_limits' });
+    });
   });
 });

@@ -38,6 +38,8 @@ export const runs = pgTable(
     lifecycle: text('lifecycle').notNull(),
     budget: jsonb('budget').$type<Record<string, unknown>>().notNull().default({}),
     workflowOwner: text('workflow_owner'),
+    /** Run-level placement: `{ mode: 'L1'|'L2'|'C1'|'C2'|'H2', cloudDestination: string|null }`. Null: local-only defaults. Validated at run acceptance. */
+    placement: jsonb('placement').$type<{ mode: string; cloudDestination: string | null }>(),
     createdAt: createdAt(),
   },
   (t) => [

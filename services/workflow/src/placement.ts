@@ -36,6 +36,8 @@ export interface Capacity {
   readonly maxConcurrentTotal?: number | null | undefined;
   readonly local: LocationCapacity;
   readonly cloud: LocationCapacity;
+  /** Running workers across every run of the tenant. Defaults to local + cloud when the table counts one scope only. */
+  readonly totalRunning?: number | undefined;
   readonly rolePlacement?: Readonly<Record<string, PlacementTarget>> | undefined;
 }
 
@@ -97,11 +99,13 @@ function slotFor(loc: LocationCapacity, total: number): Slot {
 export function place(task: TaskSpec, capacity: Capacity, policy: Policy | undefined, ctx: PlaceContext): Placement | Blocked {
   const total = capacity.maxConcurrentTotal;
   if (!isCount(total, 1)) return block('missing_limit:maxConcurrentTotal');
-  const totalRunning = capacity.local.running + capacity.cloud.running;
+  const totalRunning = capacity.totalRunning ?? capacity.local.running + capacity.cloud.running;
   if (!isCount(totalRunning, 0)) return block('invalid_running_count');
   if (totalRunning >= total) return block('concurrency_limit_reached', true);
 
-  const pin = capacity.rolePlacement !== undefined && Object.hasOwn(capacity.rolePlacement, task.role) ? capacity.rolePlacement[task.role] : undefined;
+  // A mode that maps roles fails closed: a role it does not name (case-sensitive) is blocked, never spilled to the other location.
+  if (capacity.rolePlacement !== undefined && !Object.hasOwn(capacity.rolePlacement, task.role)) return block(`role_not_mapped:${task.role}`);
+  const pin = capacity.rolePlacement !== undefined ? capacity.rolePlacement[task.role] : undefined;
   let candidates: readonly PlacementTarget[];
   let reason: string;
   if (pin !== undefined) {
@@ -125,6 +129,8 @@ export function place(task: TaskSpec, capacity: Capacity, policy: Policy | undef
   }
 
   const slots = { local: slotFor(capacity.local, total), cloud: slotFor(capacity.cloud, total) };
+  // A missing limit denies the location. It never lets the task expand to the other one.
+  for (const target of candidates) if (slots[target].state === 'missing') return block(`missing_limit:${target}`);
   const anyChoice = pin === undefined && task.execution === 'eligible_any';
   for (const target of candidates) {
     if (slots[target].state !== 'free') continue;
@@ -138,14 +144,12 @@ export function place(task: TaskSpec, capacity: Capacity, policy: Policy | undef
     if (decision.decision === 'require_approval') return block(`approval_required:${decision.reason}`);
     const cloudReason = !anyChoice ? reason
       : slots.local.state === 'disabled' ? 'cloud_only_mode'
-      : slots.local.state === 'missing' ? 'expanded_to_cloud:local_limit_missing'
       : 'expanded_to_cloud:local_full';
     return { target, reason: cloudReason, policy: decision };
   }
 
   // Nothing is free. The most concrete cause wins.
   if (cloudWanted && cloudBarred) return block('classification_not_cloud_eligible');
-  for (const target of candidates) if (slots[target].state === 'missing') return block(`missing_limit:${target}`);
   if (candidates.every((c) => slots[c].state === 'disabled')) return block(`location_disabled:${candidates[0]}`);
   return block('no_free_slot', true);
 }

@@ -55,7 +55,7 @@ export function specFor(taskId: string, over: Partial<TaskSpec> & { maxAttempts?
 
 export async function seedTask(db: Db, spec: TaskSpec, status = 'ready'): Promise<void> {
   await db.insert(schema.taskRevisions).values({
-    tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId: spec.taskId, revision: spec.revision, boardId: spec.boardId, spec,
+    tenantId: TENANT, projectId: PROJECT, runId: spec.runId, taskId: spec.taskId, revision: spec.revision, boardId: spec.boardId, spec,
   });
   await db.insert(schema.taskStatus).values({ tenantId: TENANT, projectId: PROJECT, taskId: spec.taskId, currentRevision: spec.revision, status });
   for (const d of spec.dependencies) {

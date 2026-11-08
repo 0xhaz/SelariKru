@@ -43,6 +43,13 @@
       "when": 1794156064616,
       "tag": "0005_high_shape",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794165541568,
+      "tag": "0006_chunky_thunderbolt",
+      "breakpoints": true
     }
   ]
 }

@@ -140,6 +140,36 @@ describe('runs', () => {
     expect(snap.body.runs.find((x: any) => x.runId === r.body.runId).budget.status).toBe('missing');
   });
 
+  it('stores a validated per-run placement mode and destination, and shows it in the snapshot', async () => {
+    const r = await post(h.app, `/v1/projects/${PROJECT}/runs`, { idempotencyKey: 'pm1', title: 'Hybrid', budgetLimitUsd: 5, placement: { mode: 'H2', cloudDestination: 'cloud-sandbox-eu' } });
+    expect(r.status).toBe(201);
+    const rows = await t.db.execute(sql`SELECT placement FROM runs WHERE run_id = ${r.body.runId}`);
+    expect(rows[0]!['placement']).toEqual({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' });
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.body.runs.find((x: any) => x.runId === r.body.runId).placement).toEqual({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' });
+    const none = await post(h.app, `/v1/projects/${PROJECT}/runs`, { idempotencyKey: 'pm2', title: 'Plain' });
+    expect((await t.db.execute(sql`SELECT placement FROM runs WHERE run_id = ${none.body.runId}`))[0]!['placement']).toBeNull();
+    for (const placement of [{ mode: 'H3' }, { mode: 'H2', extra: 1 }, { mode: 'L1', cloudDestination: 'a b' }, 'H2']) {
+      const bad = await post(h.app, `/v1/projects/${PROJECT}/runs`, { idempotencyKey: `bad-${JSON.stringify(placement)}`, title: 'x', placement });
+      expect(bad.status, JSON.stringify(placement)).toBe(400);
+    }
+  });
+
+  it('the protocol mode names are exactly the scheduler modes', async () => {
+    const { PLACEMENT_MODES } = await import('@selarikru/workflow');
+    const { PLACEMENT_MODE_NAMES } = await import('@selarikru/protocol');
+    expect([...PLACEMENT_MODE_NAMES].sort()).toEqual(Object.keys(PLACEMENT_MODES).sort());
+  });
+
+  it('the snapshot exposes a permanent placement block reason on the task', async () => {
+    await seedTask(t.db, specFor('blk'));
+    await t.db.execute(sql`UPDATE task_status SET placement_block = 'classification_not_cloud_eligible' WHERE task_id = 'blk'`);
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.body.tasks.find((x: any) => x.taskId === 'blk').placementBlock).toBe('classification_not_cloud_eligible');
+    await seedTask(t.db, specFor('ok1'));
+    expect((await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.tasks.find((x: any) => x.taskId === 'ok1').placementBlock).toBeNull();
+  });
+
   it('takes the actor from the principal and rejects a body that tries to set it', async () => {
     const res = await post(h.app, `/v1/projects/${PROJECT}/runs`, { idempotencyKey: 'k3', title: 'x', actor: { kind: 'scheduler', id: 'evil' } });
     expect(res.status).toBe(400);

@@ -77,7 +77,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       idempotent(tx, { tenantId: config.tenantId, projectId, key: `run.create:${body.idempotencyKey}` }, fingerprint(body), async () => {
         const runId = newId('run');
         const budget: Record<string, unknown> = body.budgetLimitUsd !== undefined ? { limitUsd: body.budgetLimitUsd } : {};
-        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget });
+        const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };
+        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement });
         await writeEvent(tx, at, {
           projectId, runId, taskId: runId, aggregateRevision: 1, type: 'run.created',
           actor: { kind: 'human', id: uid },
@@ -85,6 +86,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             title: redactSecrets(body.title),
             ...(body.description !== undefined ? { description: redactSecrets(body.description) } : {}),
             budget: budgetStatus(budget),
+            ...(placement ? { placement } : {}),
           },
         });
         return { runId, budget: budgetStatus(budget) };
@@ -345,7 +347,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           cursor,
           generatedAt: at.toISOString(),
           runs: runs.map((r) => ({
-            runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget),
+            runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null,
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);
@@ -356,6 +358,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               revision: s.currentRevision,
               aggregateRevision: s.rowRevision,
               status: s.status,
+              /** Reason code of a permanent placement block (restricted data, missing grant or limit, approval required); null when none. */
+              placementBlock: s.placementBlock ?? null,
               title: (spec?.spec as { title?: string } | undefined)?.title ?? null,
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
                 attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason,
