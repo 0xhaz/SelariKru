@@ -54,6 +54,12 @@ const systemInstruction = fixtures.systemInstruction;
 const outputSchema = fixtures.outputSchema as Record<string, unknown>;
 const validate = new Ajv({ strict: false }).compile(outputSchema);
 
+// Request schema: the fixture schema with requirementId narrowed to this fixture's allowed IDs.
+// Validation above still uses the unmodified fixture schema plus the allowed-ID check.
+const requestSchema = JSON.parse(JSON.stringify(outputSchema));
+requestSchema.properties.acceptanceCriteria.items.properties.requirementId.enum = fixture.allowedRequirementIds;
+const promptText = `${fixture.prompt}\n\nAllowed requirement IDs: ${fixture.allowedRequirementIds.join(", ")}. Use only these IDs. Several criteria may share one ID.`;
+
 // ---- Models: one distinct instance per mode ----
 // Structured output per route (see report):
 //  - cloud: inCloudParams.generationConfig { responseMimeType, responseJsonSchema } + systemInstruction
@@ -72,14 +78,14 @@ function makeModel(mode: ModeName): GenerativeModel {
       systemInstruction,
       generationConfig: {
         responseMimeType: "application/json",
-        responseJsonSchema: outputSchema,
+        responseJsonSchema: requestSchema,
       },
     },
     onDeviceParams: {
       createOptions: {
         initialPrompts: [{ role: "system", content: [{ type: "text", value: systemInstruction }] }],
       },
-      promptOptions: { responseConstraint: outputSchema },
+      promptOptions: { responseConstraint: requestSchema },
     },
   });
 }
@@ -207,7 +213,7 @@ async function run(mode: ModeName) {
     validation: null,
   };
   try {
-    const res = await models[mode].generateContent(`${fixture.prompt}\n\nAllowed requirement IDs: ${fixture.allowedRequirementIds.join(", ")}`);
+    const res = await models[mode].generateContent(promptText);
     row.elapsedMs = Math.round((performance.now() - t0) * 100) / 100;
     row.observedInferenceSource = res.response.inferenceSource ?? "UNKNOWN";
     row.rawOutput = res.response.text();
@@ -252,7 +258,7 @@ function render() {
 }
 
 $("copy").addEventListener("click", async () => {
-  const evidence = { capturedAt: new Date().toISOString(), environment: env, deviceModel: deviceInit, results };
+  const evidence = { capturedAt: new Date().toISOString(), environment: env, request: { promptText, requestRequirementIdEnum: fixture.allowedRequirementIds }, deviceModel: deviceInit, results };
   const text = JSON.stringify(evidence, null, 2);
   try {
     await navigator.clipboard.writeText(text);
