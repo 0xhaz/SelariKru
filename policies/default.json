@@ -1,0 +1,30 @@
+{
+  "policyVersion": "2026-11-08.1",
+  "operations": {
+    "read_approved_docs": "allow",
+    "run_scoped_tests": "allow",
+    "edit_scoped_dev_branch": "allow",
+    "create_draft_pr": "allow",
+    "new_domain": "require_approval",
+    "new_connector": "require_approval",
+    "broader_scope": "require_approval",
+    "breaking_api_change": "require_approval",
+    "scope_change": "require_approval",
+    "budget_increase": "require_approval",
+    "production_data": "deny",
+    "production_infrastructure": "deny",
+    "deploy": "deny",
+    "merge_protected_branch": "deny",
+    "modify_policy": "deny",
+    "modify_credentials": "deny"
+  },
+  "limits": {
+    "maxConcurrentTotal": 2,
+    "maxIntegrationWorkers": 1,
+    "maxBrowserGenerations": 1,
+    "repairAttempts": 2,
+    "attemptTimeoutSeconds": 1800
+  },
+  "destinations": [],
+  "selectedSources": []
+}
