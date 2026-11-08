@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { canonicalJson } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { API_POLICY, PROJECT, RUN, TENANT, INTRUDER_TOKEN, bearer, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+import { API_POLICY, PROJECT, RUN, TENANT, INTRUDER_TOKEN, bearer, makeHarness, owner, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 import { loadPlanConfigFile, reviewPlanProposal, type ProjectPlanConfig, type ProposalEnvelope } from '../src/proposals.ts';
 
 const CONFIG: ProjectPlanConfig = {
@@ -92,6 +92,13 @@ describe('server-side gates in reviewPlanProposal', () => {
     // A grant for different content, or any grant on a secret project, does not help.
     expect(reviewPlanProposal(plan(), { ...CONFIG, classification: 'restricted' }, { ...opts, grant: { ...grant, contentSha256: 'f'.repeat(64) } }).ok).toBe(false);
     expect(reviewPlanProposal(plan(), { ...CONFIG, classification: 'secret' }, { ...opts, grant }).ok).toBe(false);
+  });
+
+  it('declared restricted provenance needs a verified grant even when the project is internal', () => {
+    const none = reviewPlanProposal(plan(), CONFIG, { ...opts, declaredRestricted: true });
+    expect(!none.ok && none.error.code).toBe('proposal_not_acceptable');
+    const ok = reviewPlanProposal(plan(), CONFIG, { ...opts, declaredRestricted: true, grant });
+    expect(ok.ok && ok.value.tasks[0]!.classification).toBe('internal');
   });
 
   it('forbiddenMandatoryScope is required, not defaulted', () => {
@@ -205,6 +212,67 @@ describe('review and reclassification routes', () => {
       expect((await rr({ envelope: env, restricted: { draftId: 'draft-2', grantId: g.body.grant.grantId } })).status).toBe(422);
       expect((await rr({ envelope: env, restricted: { draftId: 'draft-1', grantId: 'dec_invented' } })).status).toBe(422);
       await rh.app.close();
+    });
+
+    it('declared restricted provenance is verified whatever the project classification', async () => {
+      const rr = (body: unknown) => review(body);
+      const bad = await rr({ envelope: env, restricted: { draftId: 'draft-1', grantId: 'dec_invented' } });
+      expect(bad.status).toBe(422);
+      expect(bad.body.error.code).toBe('proposal_not_acceptable');
+      const g = await ask();
+      const good = await rr({ envelope: env, restricted: { draftId: 'draft-1', grantId: g.body.grant.grantId } });
+      expect(good.status).toBe(200);
+      expect(good.body.tasks[0].classification).toBe('internal');
+    });
+
+    it('a stored grant does not outlive the policy that allowed it', async () => {
+      const g = await ask();
+      const use = (hh: Harness) => post(hh.app, `/v1/runs/${RUN}/proposals/review`, { envelope: env, restricted: { draftId: 'draft-1', grantId: g.body.grant.grantId } });
+      const denied = mk(SETTINGS, { ...API_POLICY, operations: { ...API_POLICY.operations, modify_policy: 'deny' } } as never);
+      const newer = mk(SETTINGS, { ...API_POLICY, policyVersion: 'test.2', operations: { ...API_POLICY.operations, modify_policy: 'allow' } } as never);
+      for (const hh of [denied, newer]) {
+        await hh.app.ready();
+        const r = await use(hh);
+        expect(r.status).toBe(422);
+        expect(r.body.error.code).toBe('proposal_not_acceptable');
+        await hh.app.close();
+      }
+      expect((await use(h)).status).toBe(200);
+    });
+
+    it('a grant expires after the configured lifetime', async () => {
+      const g = await ask();
+      h.clock.advance(h.config.reclassificationGrantTtlSeconds - 1);
+      expect((await review({ envelope: env, restricted: { draftId: 'draft-1', grantId: g.body.grant.grantId } })).status).toBe(200);
+      h.clock.advance(2);
+      expect((await review({ envelope: env, restricted: { draftId: 'draft-1', grantId: g.body.grant.grantId } })).status).toBe(422);
+    });
+
+    it('a newer grant for the same draft supersedes the older one', async () => {
+      const first = await ask();
+      const second = await ask({ reason: 'owner approved again' });
+      const use = (id: string) => review({ envelope: env, restricted: { draftId: 'draft-1', grantId: id } });
+      expect((await use(first.body.grant.grantId)).status).toBe(422);
+      expect((await use(second.body.grant.grantId)).status).toBe(200);
+    });
+
+    it('a grant bound to a run is not usable on another', async () => {
+      const g = await ask({ runId: 'run_other' });
+      expect((await review({ envelope: env, restricted: { draftId: 'draft-1', grantId: g.body.grant.grantId } })).status).toBe(422);
+      const own = await ask({ runId: RUN });
+      expect((await review({ envelope: env, restricted: { draftId: 'draft-1', grantId: own.body.grant.grantId } })).status).toBe(200);
+    });
+
+    it('a very deep body is refused, not a 500', async () => {
+      const deep = '['.repeat(20_000) + '1' + ']'.repeat(20_000);
+      for (const restricted of ['"restricted":{"draftId":"draft-1","grantId":"dec_x"},', '']) {
+        const res = await h.app.inject({
+          method: 'POST', url: `/v1/runs/${RUN}/proposals/review`, headers: { ...owner(), 'content-type': 'application/json' },
+          payload: `{${restricted}"envelope":{"operation":"draftTaskPlan","status":"ok","data":${deep}}}`,
+        });
+        expect(res.statusCode).toBeLessThan(500);
+        expect(res.statusCode).toBeGreaterThanOrEqual(400);
+      }
     });
 
     it('a denying policy records the decision and issues no grant; secret and empty reasons are refused', async () => {

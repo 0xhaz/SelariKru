@@ -1,7 +1,7 @@
 import { schema } from '@selarikru/persistence';
 import { evaluate } from '@selarikru/policy';
 import { redactSecrets } from '@selarikru/protocol';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from './app.ts';
@@ -30,6 +30,8 @@ const ReclassifyBodySchema = z
     sourceClassification: z.enum(['restricted', 'secret']),
     targetClassification: z.enum(['public', 'internal']),
     reason: z.string().trim().min(1).max(500),
+    /** Optional. When set, the grant is usable only on this run. */
+    runId: z.string().regex(SAFE_ID).optional(),
   })
   .strict();
 
@@ -51,7 +53,7 @@ function toAppError(e: PlanReviewError): AppError {
 }
 
 export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): void {
-  const { db, config } = ctx;
+  const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
 
   // Non-mutating: re-validates a browser proposal with server configuration and returns TaskSpec candidates. Acceptance is
@@ -69,11 +71,18 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
     let grant: VerifiedGrant | undefined;
     if (body.restricted) {
       const sha = proposalContentSha256(body.envelope.data);
-      const row = (await db.select().from(schema.decisions).where(and(
+      const row = sha === null ? undefined : (await db.select().from(schema.decisions).where(and(
         eq(schema.decisions.tenantId, config.tenantId), eq(schema.decisions.projectId, run.projectId), eq(schema.decisions.decisionId, body.restricted.grantId))))[0];
       const a = (row?.affected?.[0] ?? null) as Record<string, unknown> | null;
-      if (row && row.context === context(body.restricted.draftId, sha) && a && a['outcome'] === 'allow' && a['sourceClassification'] === 'restricted'
-        && (a['targetClassification'] === 'public' || a['targetClassification'] === 'internal')) {
+      // Re-evaluate policy now: the stored allow is not enough once policy has changed or the grant has aged out.
+      const current = evaluate({ kind: 'modify_policy', actor: 'administrator' }, ctx.policy);
+      const expiresAt = typeof a?.['expiresAt'] === 'string' ? Date.parse(a['expiresAt']) : NaN;
+      if (sha !== null && row && a && row.context === context(body.restricted.draftId, sha) && row.supersededBy === null
+        && a['outcome'] === 'allow' && a['sourceClassification'] === 'restricted'
+        && (a['targetClassification'] === 'public' || a['targetClassification'] === 'internal')
+        && current.decision === 'allow' && a['policyVersion'] === current.policyVersion
+        && Number.isFinite(expiresAt) && now().getTime() < expiresAt
+        && (a['runId'] === null || a['runId'] === run.runId)) {
         grant = { grantId: row.decisionId, draftId: body.restricted.draftId, contentSha256: sha, sourceClassification: 'restricted', targetClassification: a['targetClassification'] };
       }
     }
@@ -82,6 +91,7 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
       taskIdPrefix: newId('prop').replace(/_/g, '-'),
       ...(body.acknowledgedIssuePaths ? { acknowledgedIssuePaths: body.acknowledgedIssuePaths } : {}),
       ...(grant ? { grant } : {}),
+      ...(body.restricted ? { declaredRestricted: true } : {}),
     });
     if (!r.ok) throw toAppError(r.error);
     return reply.code(200).send({
@@ -104,18 +114,29 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
 
     const decision = evaluate({ kind: 'modify_policy', actor: 'administrator' }, ctx.policy);
     const decisionId = newId('dec');
+    const at = now();
+    const expiresAt = new Date(at.getTime() + config.reclassificationGrantTtlSeconds * 1000).toISOString();
     await db.insert(schema.decisions).values({
       tenantId: config.tenantId, projectId, decisionId, context: context(body.draftId, body.contentSha256),
       options: [], rationale: redactSecrets(body.reason), author: uid,
-      affected: [{ draftId: body.draftId, contentSha256: body.contentSha256, sourceClassification: body.sourceClassification, targetClassification: body.targetClassification, outcome: decision.decision, reason: decision.reason, policyVersion: decision.policyVersion }],
+      affected: [{ draftId: body.draftId, contentSha256: body.contentSha256, sourceClassification: body.sourceClassification, targetClassification: body.targetClassification, outcome: decision.decision, reason: decision.reason, policyVersion: decision.policyVersion, runId: body.runId ?? null, expiresAt }],
     });
+    if (decision.decision === 'allow') {
+      // A newer grant for the same draft supersedes the earlier ones.
+      const earlier = await db.select().from(schema.decisions).where(and(eq(schema.decisions.tenantId, config.tenantId), eq(schema.decisions.projectId, projectId), isNull(schema.decisions.supersededBy)));
+      for (const d of earlier) {
+        if (d.decisionId !== decisionId && d.context.startsWith(`reclassify:${body.draftId}:`)) {
+          await db.update(schema.decisions).set({ supersededBy: decisionId }).where(and(eq(schema.decisions.tenantId, config.tenantId), eq(schema.decisions.projectId, projectId), eq(schema.decisions.decisionId, d.decisionId)));
+        }
+      }
+    }
     if (decision.decision !== 'allow') {
       throw new AppError(403, 'policy_denied', 'policy does not allow this reclassification', { reason: decision.reason, decision: decision.decision, decisionId });
     }
     return reply.code(201).send({
       grant: {
         grantId: decisionId, draftId: body.draftId, contentSha256: body.contentSha256, sourceClassification: body.sourceClassification,
-        targetClassification: body.targetClassification, decision,
+        targetClassification: body.targetClassification, decision, expiresAt, runId: body.runId ?? null,
       },
     });
   });

@@ -40,6 +40,8 @@ export const ControlApiConfigSchema = z
       })
       .strict(),
     pairingCodeTtlSeconds: posInt,
+    /** How long a draft reclassification grant stays usable. Default 24 hours. */
+    reclassificationGrantTtlSeconds: posInt.default(86_400),
     expireLeasesIntervalMs: posInt,
     sse: z.object({ pollIntervalMs: posInt, keepAliveMs: posInt }).strict(),
   })
@@ -114,6 +116,7 @@ export function loadConfigFromEnv(env: Env): ControlApiConfig {
       infraRetryBackoffMaxSeconds: int(env, 'SELARIKRU_INFRA_RETRY_BACKOFF_MAX_SECONDS'),
     },
     pairingCodeTtlSeconds: int(env, 'SELARIKRU_PAIRING_CODE_TTL_SECONDS'),
+    ...(env['SELARIKRU_RECLASSIFICATION_GRANT_TTL_SECONDS'] ? { reclassificationGrantTtlSeconds: int(env, 'SELARIKRU_RECLASSIFICATION_GRANT_TTL_SECONDS') } : {}),
     expireLeasesIntervalMs: int(env, 'SELARIKRU_EXPIRE_LEASES_INTERVAL_MS'),
     sse: { pollIntervalMs: 250, keepAliveMs: 15_000 },
   });

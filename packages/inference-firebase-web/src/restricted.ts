@@ -100,9 +100,10 @@ export interface PublishedDraft {
 }
 
 /**
- * A restricted draft stays restricted. This local gate refuses unless a server grant is presented that is bound to this
- * exact draft ID and content hash, lowers the label, and carries an allow decision. The browser cannot evaluate policy;
- * the server independently verifies the same grant before it accepts anything derived from the draft.
+ * A restricted draft stays restricted. This is only a shape check on the grant the caller holds: it matches this draft ID
+ * and content hash, lowers the label and says "allow". It proves nothing about the grant, which anyone could forge in the
+ * browser. The real check is on the server, which looks the grant up, re-evaluates policy, and checks version, expiry,
+ * supersession and run before it accepts anything derived from the draft.
  */
 export async function publishDraft(draft: LocalDraft, grant: ReclassificationGrant | undefined): Promise<Result<PublishedDraft, string>> {
   if (draft.classification === 'public' || draft.classification === 'internal') return err('not_restricted: nothing to reclassify');

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, err, ok, validateProposal, MAX_ATTEMPTS_CAP, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
+import { canonicalJson, err, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
 import { readFileSync } from 'node:fs';
 import { PlanTaskSchema } from '@selarikru/protocol';
 import { z } from 'zod';
@@ -65,7 +65,16 @@ export interface VerifiedGrant {
   readonly targetClassification: 'public' | 'internal';
 }
 
-export const proposalContentSha256 = (data: unknown): string => createHash('sha256').update(canonicalJson(data)).digest('hex');
+/** Null when the data is too large or too deep to hash safely. */
+export function proposalContentSha256(data: unknown): string | null {
+  try {
+    const text = JSON.stringify(data);
+    if (text === undefined || text.length > MAX_PROPOSAL_BYTES) return null;
+    return createHash('sha256').update(canonicalJson(data)).digest('hex');
+  } catch {
+    return null;
+  }
+}
 
 /** As the browser reports it. `status` is a claim, not a fact. */
 export interface ProposalEnvelope {
@@ -93,7 +102,7 @@ export type PlanReviewError =
 export function reviewPlanProposal(
   envelope: ProposalEnvelope,
   rawConfig: ProjectPlanConfig,
-  opts: { taskIdPrefix: string; acknowledgedIssuePaths?: readonly string[]; grant?: VerifiedGrant },
+  opts: { taskIdPrefix: string; acknowledgedIssuePaths?: readonly string[]; grant?: VerifiedGrant; declaredRestricted?: boolean },
 ): Result<PlanReview, PlanReviewError> {
   if (typeof envelope?.status !== 'string' || typeof envelope.operation !== 'string') {
     return err({ code: 'proposal_not_acceptable', reason: 'malformed_envelope' });
@@ -112,13 +121,18 @@ export function reviewPlanProposal(
 
   // Restricted or secret project content never becomes a hosted plan candidate without a server-verified grant bound to this content.
   let classification: 'public' | 'internal' | 'restricted' | 'secret' = c.classification;
+  const rank = { public: 0, internal: 1, restricted: 2, secret: 3 } as const;
+  const sha = proposalContentSha256(envelope.data);
+  const grantOk = (g: VerifiedGrant | undefined): g is VerifiedGrant => !!g && sha !== null && g.sourceClassification === 'restricted' && g.contentSha256 === sha;
+  // Content declared restricted needs a verified grant whatever the project label says.
+  if (opts.declaredRestricted && !grantOk(opts.grant)) return err({ code: 'proposal_not_acceptable', reason: 'restricted_without_grant' });
   if (c.classification === 'secret') return err({ code: 'proposal_not_acceptable', reason: 'secret_content' });
   if (c.classification === 'restricted') {
     const g = opts.grant;
-    if (!g || g.sourceClassification !== 'restricted' || g.contentSha256 !== proposalContentSha256(envelope.data)) {
-      return err({ code: 'proposal_not_acceptable', reason: 'restricted_without_grant' });
-    }
+    if (!grantOk(g)) return err({ code: 'proposal_not_acceptable', reason: 'restricted_without_grant' });
     classification = g.targetClassification;
+  } else if (opts.declaredRestricted && opts.grant && rank[opts.grant.targetClassification] > rank[classification]) {
+    classification = opts.grant.targetClassification;
   }
 
   const v = validateProposal(envelope.data, {
