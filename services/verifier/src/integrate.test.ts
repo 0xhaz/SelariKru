@@ -483,4 +483,109 @@ describe('fix round 1', () => {
   });
 });
 void readFileSync;
+
+describe('fix round 2: resolutions bind to what they resolved', () => {
+  const reset = (): void => { git(repo, 'reset', '-q', '--hard', baseSha); };
+
+  /** Creates the conflict on src/shared.txt, returns the proposal's resolution spec. */
+  async function conflict(cur: string = baseSha): Promise<ReturnType<typeof TaskSpecSchema.parse>> {
+    const r = await assembleCandidate(run({ currentBaseSha: cur }), deps());
+    expect(r.ok === false && r.reason === 'conflict').toBe(true);
+    const rows = await q(`SELECT tasks FROM plan_proposals ORDER BY created_at DESC, proposal_id`);
+    return TaskSpecSchema.parse((rows[0]!['tasks'] as unknown[])[0]);
+  }
+  async function complete(spec: ReturnType<typeof TaskSpecSchema.parse>, base: string, content: Change[], widen?: string[]): Promise<void> {
+    const s2 = widen ? TaskSpecSchema.parse({ ...spec, allowedPaths: widen }) : spec;
+    await db.execute(sql`DELETE FROM task_status WHERE task_id = ${s2.taskId}`);
+    await seedTask(db, s2, 'verifying');
+    const manifest = await publish({ taskId: s2.taskId, baseSha: base }, content);
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: `att_${s2.taskId}`, taskId: s2.taskId, revision: 1, attemptNumber: 1, outcome: 'succeeded', startedAt: new Date(), endedAt: new Date(), detail: { changeManifestSha256: manifest } });
+  }
+  const twoWriters = async (): Promise<void> => {
+    await addDone('t_x', [file('src/shared.txt', 'x version\n')]);
+    await addDone('t_y', [file('src/shared.txt', 'y version\n')]);
+  };
+
+  it('a newer revision of a resolved task reopens the conflict', async () => {
+    await twoWriters();
+    const res = await conflict();
+    await complete(res, baseSha, [file('src/shared.txt', 'merged\n')]);
+    expect((await assembleCandidate(run(), deps())).ok).toBe(true);
+    // t_x moves to revision 2 with new content on the resolved path.
+    const spec2 = specFor('t_x', { baseSha, allowedPaths: ['src', 'web'], revision: 2 });
+    await db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId: 't_x', revision: 2, boardId: spec2.boardId, spec: spec2 });
+    await db.execute(sql`UPDATE task_status SET current_revision = 2 WHERE task_id = 't_x'`);
+    const m2 = await publish({ taskId: 't_x', revision: 2 }, [file('src/shared.txt', 'x v2\n')]);
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_x2', taskId: 't_x', revision: 2, attemptNumber: 1, outcome: 'succeeded', endedAt: new Date(), detail: { changeManifestSha256: m2 } });
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('conflict');
+    expect(r.conflicts![0]!.taskIds).toEqual(['t_x', 't_y']);
+    const ids = (await q(`SELECT proposal_id FROM plan_proposals`)).map((x) => x['proposal_id']);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  for (const flip of [false, true]) {
+    it(`a replacement resolution converges whatever the sort order (flip: ${flip})`, async () => {
+      await twoWriters();
+      const r1 = await conflict();
+      await complete(r1, baseSha, [file('src/shared.txt', 'merged one\n')]);
+      expect((await assembleCandidate(run(), deps())).ok).toBe(true);
+      const moved = (() => { writeFileSync(join(repo, 'src/shared.txt'), 'main edit\n'); return commitAll('main edits resolved path'); })();
+      try {
+        // R1 is stale now (main changed its path): the conflict reopens with a new resolution on the new base.
+        const r2 = await conflict(moved);
+        expect(r2.taskId).not.toBe(r1.taskId);
+        await complete(r2, moved, [file('src/shared.txt', 'merged two\n')]);
+        if (flip) await db.execute(sql`UPDATE plan_proposals SET created_at = created_at - interval '1 day' WHERE proposal_id = ${'prop_' + r2.taskId}`);
+        const ok = await assembleCandidate(run({ currentBaseSha: moved }), deps());
+        expect(ok.ok, JSON.stringify(ok)).toBe(true);
+        if (!ok.ok) return;
+        expect(show(ok.sha, 'src/shared.txt')).toBe('merged two');
+        expect(ok.parts.map((x) => x.taskId)).not.toContain(r1.taskId);
+      } finally { reset(); }
+    });
+  }
+
+  it('two valid resolutions of one conflict: the most recently created wins', async () => {
+    await twoWriters();
+    const r1 = await conflict();
+    // A second, differently-bound resolution proposal for the same conflict (as if raised again later).
+    const dup = { ...r1, taskId: 'resolve_second' };
+    await db.execute(sql`INSERT INTO plan_proposals SELECT tenant_id, project_id, 'prop_resolve_second', run_id, based_on_plan_revision, status, source, reason, candidate_id, jsonb_build_array(${JSON.stringify(dup)}::jsonb), jsonb_set(detail, '{resolves,taskId}', '"resolve_second"'), now() + interval '1 hour' FROM plan_proposals WHERE proposal_id = ${'prop_' + r1.taskId}`);
+    await complete(r1, baseSha, [file('src/shared.txt', 'older\n')]);
+    await complete(TaskSpecSchema.parse(dup), baseSha, [file('src/shared.txt', 'newer\n')]);
+    const ok = await assembleCandidate(run(), deps());
+    expect(ok.ok, JSON.stringify(ok)).toBe(true);
+    if (!ok.ok) return;
+    expect(show(ok.sha, 'src/shared.txt')).toBe('newer');
+  });
+
+  it('a rejected proposal is ignored', async () => {
+    await twoWriters();
+    const res = await conflict();
+    await complete(res, baseSha, [file('src/shared.txt', 'merged\n')]);
+    await db.execute(sql`UPDATE plan_proposals SET status = 'rejected'`);
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok === false && r.reason === 'conflict').toBe(true);
+  });
+
+  it('a resolution is limited to the paths recorded on its proposal', async () => {
+    await twoWriters();
+    const res = await conflict();
+    await complete(res, baseSha, [file('src/shared.txt', 'merged\n'), file('src/b.txt', 'smuggled\n')], ['src']);
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok === false && r.reason === 'path_rejected').toBe(true);
+  });
+
+  it('two tasks deleting the same file agree', async () => {
+    await addDone('t_a', [{ path: 'src/a.txt', status: 'deleted', kind: null }]);
+    await addDone('t_b', [{ path: 'src/a.txt', status: 'deleted', kind: null }]);
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(() => show(r.sha, 'src/a.txt')).toThrow();
+  });
+});
 void n;

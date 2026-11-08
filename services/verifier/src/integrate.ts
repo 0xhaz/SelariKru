@@ -151,7 +151,7 @@ export interface CandidateFailure {
 export type AssemblyResult = Candidate | CandidateFailure;
 
 class Fail extends Error {
-  constructor(readonly reason: FailureReason, message: string, readonly extra: { conflicts?: Conflict[] } = {}) {
+  constructor(readonly reason: FailureReason, message: string, readonly extra: { conflicts?: Conflict[]; parts?: ResolvedPartRef[] } = {}) {
     super(message);
   }
 }
@@ -203,26 +203,76 @@ interface LoadedPart extends CandidatePart {
   readonly changes: readonly ManifestChange[];
   /** The base the manifest was built on. */
   readonly baseSha: string;
-  /** Tasks this part resolves (a resolution task recorded in a plan proposal), else null. */
-  readonly resolves: ReadonlySet<string> | null;
+  /** Set when this part is a resolution task recorded in a plan proposal. */
+  readonly resolution: Resolution | null;
+}
+
+/** What a resolution was created for: one resolved part, bound by revision, manifest and path set. */
+interface ResolvedPartRef {
+  readonly taskId: string;
+  readonly revision: number;
+  readonly manifestSha256: string;
+  readonly paths: readonly string[];
 }
 
 interface Resolution {
-  readonly resolves: ReadonlySet<string>;
+  readonly taskId: string;
   readonly baseSha: string;
+  /** The only paths this resolution may touch. */
+  readonly paths: ReadonlySet<string>;
+  readonly parts: ReadonlyMap<string, ResolvedPartRef>;
+  /** Proposal creation time (ms), for "most recent wins". */
+  readonly createdAt: number;
 }
 
-/** Resolution tasks recorded in this run's integration plan proposals (database rows, not worker input). */
-async function loadResolutions(db: Db, run: IntegrationRun): Promise<Map<string, Resolution>> {
+/** Resolution tasks recorded in this run's integration plan proposals (database rows, not worker input). Rejected ones are named so their parts are skipped. */
+async function loadResolutions(db: Db, run: IntegrationRun): Promise<{ active: Map<string, Resolution>; rejected: Set<string> }> {
   const rows = await db.execute(sql`
-    SELECT detail -> 'resolves' AS resolves FROM plan_proposals
+    SELECT detail -> 'resolves' AS resolves, status, extract(epoch from created_at) * 1000 AS at FROM plan_proposals
     WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND source = 'integration' AND detail -> 'resolves' IS NOT NULL`);
-  const out = new Map<string, Resolution>();
+  const active = new Map<string, Resolution>();
+  const rejected = new Set<string>();
   for (const r of rows) {
-    const v = r['resolves'] as { taskId?: unknown; tasks?: unknown; baseSha?: unknown } | null;
-    if (v && typeof v.taskId === 'string' && Array.isArray(v.tasks) && typeof v.baseSha === 'string') out.set(v.taskId, { resolves: new Set(v.tasks.map(String)), baseSha: v.baseSha });
+    const v = r['resolves'] as { taskId?: unknown; parts?: unknown; paths?: unknown; baseSha?: unknown } | null;
+    if (!v || typeof v.taskId !== 'string' || !Array.isArray(v.parts) || !Array.isArray(v.paths) || typeof v.baseSha !== 'string') continue;
+    if (String(r['status']) === 'rejected') {
+      rejected.add(v.taskId);
+      continue;
+    }
+    const parts = new Map<string, ResolvedPartRef>();
+    for (const p of v.parts as ResolvedPartRef[]) parts.set(String(p.taskId), { taskId: String(p.taskId), revision: Number(p.revision), manifestSha256: String(p.manifestSha256), paths: (p.paths ?? []).map(String) });
+    active.set(v.taskId, { taskId: v.taskId, baseSha: v.baseSha, paths: new Set(v.paths.map(String)), parts, createdAt: Number(r['at']) });
   }
-  return out;
+  for (const id of rejected) active.delete(id);
+  return { active, rejected };
+}
+
+/**
+ * A resolution applies only while it matches exactly what it was created for: every resolved part still has the same revision,
+ * manifest and path set, and main has not changed any path the resolution touches since its base. Otherwise it is stale and
+ * dropped entirely. Of valid resolutions that share a path, the most recently created wins (ties by task id).
+ */
+function activeResolutions(ordered: readonly LoadedPart[], moved: ReadonlyMap<string, ReadonlySet<string>>): LoadedPart[] {
+  const workers = new Map(ordered.filter((p) => p.resolution === null).map((p) => [p.taskId, p]));
+  const valid = ordered.filter((p) => {
+    const r = p.resolution;
+    if (r === null) return false;
+    for (const ref of r.parts.values()) {
+      const w = workers.get(ref.taskId);
+      if (!w || w.revision !== ref.revision || w.manifestSha256 !== ref.manifestSha256 || [...w.paths].sort(cmp).join('\0') !== [...ref.paths].sort(cmp).join('\0')) return false;
+    }
+    const mv = moved.get(p.baseSha);
+    return !p.paths.some((x) => mv?.has(canon(x)));
+  });
+  valid.sort((a, b) => b.resolution!.createdAt - a.resolution!.createdAt || cmp(b.taskId, a.taskId));
+  const claimed = new Set<string>();
+  const keep = new Set<string>();
+  for (const p of valid) {
+    if (p.paths.some((x) => claimed.has(x))) continue;
+    keep.add(p.taskId);
+    for (const x of p.paths) claimed.add(x);
+  }
+  return ordered.filter((p) => p.resolution === null || keep.has(p.taskId));
 }
 
 function parseManifest(raw: unknown): { taskId: string; revision: number; baseSha: string; changes: ManifestChange[] } {
@@ -322,6 +372,7 @@ async function loadPart(done: CompletedTask, run: IntegrationRun, store: Artifac
   if (m.revision !== spec.revision) throw new Fail('manifest_identity', `task ${id}: manifest is for revision ${m.revision}, current is ${spec.revision}`);
   // A worker manifest names the run's pinned base. A resolution task is created later, on the tip at that time, and names that.
   const expectedBase = resolution ? resolution.baseSha : run.pinnedBaseSha;
+
   if (m.baseSha !== spec.baseSha || m.baseSha !== expectedBase) throw new Fail('manifest_identity', `task ${id}: manifest base ${clip(m.baseSha, 12)} is not the pinned base`);
 
   for (const c of m.changes) {
@@ -330,6 +381,7 @@ async function loadPart(done: CompletedTask, run: IntegrationRun, store: Artifac
     // Attributes and submodule maps change how git treats other files; only the trusted base may define them.
     const leaf = canon(c.path.split('/').pop()!);
     if (leaf === '.gitattributes' || leaf === '.gitmodules') throw new Fail('path_rejected', `task ${id}: ${clip(c.path, 80)} may not be changed by a worker`);
+    if (resolution && !resolution.paths.has(c.path)) throw new Fail('path_rejected', `task ${id}: ${clip(c.path, 80)} is outside the paths its resolution proposal recorded`);
     if (isProtected(c.path, prefixes)) throw new Fail('protected_path', `task ${id}: ${clip(c.path, 80)} is a verifier or contract path`);
   }
   const asChanges: FileChange[] = m.changes.map((c) => ({ path: c.path, status: c.status, kind: c.kind, sha256: c.sha256, linkTarget: c.linkTarget }));
@@ -351,7 +403,7 @@ async function loadPart(done: CompletedTask, run: IntegrationRun, store: Artifac
     if (c.kind !== 'file' || c.sha256 === null) throw new Fail('manifest_invalid', `task ${id}: ${clip(c.path, 60)} is not a regular file with a hash`);
     c.bytes = await readVerified(store, c.sha256, 'content_missing');
   }
-  return { taskId: id, revision: spec.revision, attemptId: done.attemptId, manifestSha256: done.manifest, paths: m.changes.map((c) => c.path), spec, changes: m.changes, baseSha: m.baseSha, resolves: resolution ? resolution.resolves : null };
+  return { taskId: id, revision: spec.revision, attemptId: done.attemptId, manifestSha256: done.manifest, paths: m.changes.map((c) => c.path), spec, changes: m.changes, baseSha: m.baseSha, resolution: resolution ?? null };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -586,6 +638,11 @@ async function plan(root: string, ordered: readonly LoadedPart[], ctx: PlanConte
     if (ws && [...ws].some(([t, sh]) => t !== part.taskId && sh !== finalSha)) return note(c.path, 'overlap', ...ws.keys(), part.taskId);
 
     const prior = overlay.get(c.path);
+    if (prior && prior.taskId !== part.taskId && prior.sha === finalSha) {
+      // Both tasks reach the same result (including two deletes of one file): they agree.
+      ws!.set(part.taskId, finalSha);
+      return;
+    }
     const cur = prior ? (prior.sha === null ? ({ exists: false } as const) : ({ exists: true, sha: prior.sha } as const)) : await baseState(root, c.path);
     const applies = c.status === 'added' ? !cur.exists || prior !== undefined || cur.sha === finalSha : cur.exists;
     if (!applies) return note(c.path, 'does_not_apply', part.taskId);
@@ -595,19 +652,14 @@ async function plan(root: string, ordered: readonly LoadedPart[], ctx: PlanConte
     writers.set(c.path, w);
   };
 
-  for (const part of ordered.filter((p) => p.resolves === null)) for (const c of part.changes) await handle(part, c);
+  for (const part of ordered.filter((p) => p.resolution === null)) for (const c of part.changes) await handle(part, c);
 
-  for (const part of ordered.filter((p) => p.resolves !== null)) {
+  for (const part of ordered.filter((p) => p.resolution !== null)) {
     for (const c of part.changes) {
       const cf = conflicts.get(c.path);
-      const resolvable = cf !== undefined && cf.kind !== 'path_collision' && [...cf.ids].every((i) => part.resolves!.has(i));
+      const resolvable = cf !== undefined && cf.kind !== 'path_collision' && [...cf.ids].every((i) => part.resolution!.parts.has(i));
       if (!resolvable) {
         await handle(part, c);
-        continue;
-      }
-      // The resolution itself must still be current against main.
-      if (ctx.moved.get(part.baseSha)?.has(canon(c.path))) {
-        note(c.path, 'base_moved', part.taskId);
         continue;
       }
       conflicts.delete(c.path);
@@ -627,7 +679,7 @@ async function plan(root: string, ordered: readonly LoadedPart[], ctx: PlanConte
     const list: Conflict[] = [...conflicts.entries()]
       .sort(([a], [b]) => cmp(a, b))
       .map(([path, v]) => ({ path, kind: v.kind, taskIds: [...v.ids].sort(cmp) }));
-    throw new Fail('conflict', `${list.length} conflicting path(s): ${list.slice(0, 5).map((x) => x.path).join(', ')}`, { conflicts: list });
+    throw new Fail('conflict', `${list.length} conflicting path(s): ${list.slice(0, 5).map((x) => x.path).join(', ')}`, { conflicts: list, parts: ordered.map((p) => ({ taskId: p.taskId, revision: p.revision, manifestSha256: p.manifestSha256, paths: [...p.paths].sort(cmp) })) });
   }
   return overlay;
 }
@@ -742,10 +794,10 @@ async function emitCandidate(tx: Tx, run: IntegrationRun, now: Date, type: 'cand
 const CLASSIFICATION_RANK = ['public', 'internal', 'restricted', 'secret'] as const;
 
 /** One targeted task that owns exactly the conflicting paths, proposed as a plan revision. Never applied here. */
-function buildResolution(run: IntegrationRun, conflicts: readonly Conflict[], specs: ReadonlyMap<string, TaskSpec>): TaskSpec {
+function buildResolution(run: IntegrationRun, conflicts: readonly Conflict[], specs: ReadonlyMap<string, TaskSpec>, parts: readonly ResolvedPartRef[]): TaskSpec {
   const involved = [...new Set(conflicts.flatMap((c) => c.taskIds))].sort(cmp).map((id) => specs.get(id)!);
   const template = involved[0]!;
-  const taskId = `resolve_${sha256(JSON.stringify([run.runId, run.currentBaseSha, conflicts])).slice(0, 12)}`;
+  const taskId = `resolve_${sha256(JSON.stringify([run.runId, run.currentBaseSha, conflicts, parts])).slice(0, 12)}`;
   const classification = involved.reduce<TaskSpec['classification']>((hi, s) => (CLASSIFICATION_RANK.indexOf(s.classification) > CLASSIFICATION_RANK.indexOf(hi) ? s.classification : hi), 'public');
   const paths = conflicts.map((c) => c.path);
   const contractRefs = new Map(involved.flatMap((s) => s.contractRefs).map((r) => [`${r.artifactId}:${r.sha256}`, r]));
@@ -806,11 +858,11 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       }
       const { specs, completed } = await loadTasks(deps.db, run);
       if (completed.length === 0) throw new Fail('no_parts', 'no completed task has a published change set');
-      const resolutions = await loadResolutions(deps.db, run);
+      const { active: resolutions, rejected } = await loadResolutions(deps.db, run);
       const prefixes = protectedPrefixes(deps.protectedPaths);
       const loaded: LoadedPart[] = [];
-      for (const done of completed) loaded.push(await loadPart(done, run, deps.artifacts, prefixes, resolutions.get(done.spec.taskId)));
-      const { ordered } = orderParts(loaded, specs);
+      for (const done of completed.filter((d) => !rejected.has(d.spec.taskId))) loaded.push(await loadPart(done, run, deps.artifacts, prefixes, resolutions.get(done.spec.taskId)));
+      const { ordered: allOrdered } = orderParts(loaded, specs);
       alive();
 
       const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-integrate');
@@ -819,11 +871,12 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       const home = join(workDir, 'home');
       const tree = join(workDir, 'tree');
       await mkdir(home);
-      const otherBases = [...new Set(ordered.map((p) => p.baseSha))].filter((b) => b !== run.currentBaseSha).sort(cmp);
+      const otherBases = [...new Set(allOrdered.map((p) => p.baseSha))].filter((b) => b !== run.currentBaseSha).sort(cmp);
       await cloneAtBase(run.repoPath, run.currentBaseSha, tree, home, otherBases);
       alive();
       const moved = new Map<string, Set<string>>();
       for (const b of otherBases) moved.set(b, await changedBetween(tree, home, b, run.currentBaseSha));
+      const ordered = activeResolutions(allOrdered, moved);
       const base = parseTree(await git(tree, home, ['ls-tree', '-r', '-z', 'HEAD']));
       const overlay = await plan(tree, ordered, { base, moved, baseSpellings: spellingsOf(base) });
       alive();
@@ -885,13 +938,15 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
       await fence(tx, run, holder);
       if (conflicts) {
         const { specs } = await loadTasks(deps.db, run);
-        const resolution = buildResolution(run, conflicts, specs);
+        const involved = new Set(conflicts.flatMap((c) => c.taskIds));
+        const refs = (fail.extra.parts ?? []).filter((p) => involved.has(p.taskId));
+        const resolution = buildResolution(run, conflicts, specs, refs);
         const runRow = (await tx.execute(sql`SELECT plan_revision FROM runs WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId}`))[0];
         const basedOn = Number(runRow?.['plan_revision'] ?? 0);
         const valid = validatePlanRevision({ projectId: run.projectId, runId: run.runId, revision: basedOn + 1, tasks: [resolution] }, { projectId: run.projectId, runId: run.runId });
         if (!valid.ok) throw new Fail('resolution_invalid', `the resolution task is not a valid plan: ${JSON.stringify(valid.errors).slice(0, 200)}`);
         proposalId = `prop_${resolution.taskId}`;
-        const resolves = { taskId: resolution.taskId, tasks: [...new Set(conflicts.flatMap((c) => c.taskIds))].sort(cmp), baseSha: run.currentBaseSha };
+        const resolves = { taskId: resolution.taskId, baseSha: run.currentBaseSha, paths: conflicts.map((c) => c.path).sort(cmp), parts: refs };
         await tx.insert(schema.planProposals).values({
           tenantId: run.tenantId, projectId: run.projectId, proposalId, runId: run.runId, basedOnPlanRevision: basedOn, status: 'proposed', source: 'integration',
           reason: clip(fail.message, 300), candidateId, tasks: [resolution], detail: { conflicts, baseSha: run.currentBaseSha, resolves },
