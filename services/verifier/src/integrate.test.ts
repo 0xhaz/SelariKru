@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSyn
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
+import { TaskSpecSchema } from '../../../packages/domain/src/index.ts';
 import { schema, type Db } from '../../../packages/persistence/src/index.ts';
 import { sql } from '../../../packages/persistence/src/index.ts';
 import { RUN, PROJECT, TENANT, resetDb, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
@@ -108,17 +109,16 @@ beforeEach(async () => {
 
 describe('assembleCandidate', () => {
   it('applies worker patches in dependency order deterministically', async () => {
-    // Inserted in reverse order on purpose: b depends on a, so a applies first and b's edit of the shared file wins.
-    // The dependency order (t_z before t_b) differs from the id order, so a sort by id would get it wrong.
+        // The dependency order (t_z before t_b) differs from the id order, so a sort by id would get it wrong.
     await addDone('t_z', [file('src/shared.txt', 'from a\n'), file('src/new.txt', 'new\n', 'added'), { path: 'src/a.txt', status: 'deleted', kind: null }]);
-    await addDone('t_b', [file('src/shared.txt', 'from b\n'), file('src/b.txt', 'b changed\n')], { dependsOn: ['t_z'] });
+    await addDone('t_b', [file('src/b.txt', 'b changed\n')], { dependsOn: ['t_z'] });
     const r = await assembleCandidate(run(), deps());
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.baseSha).toBe(baseSha);
     expect(r.parts.map((p) => p.taskId)).toEqual(['t_z', 't_b']);
     expect(r.parts[0]!.paths).toEqual(['src/a.txt', 'src/new.txt', 'src/shared.txt']);
-    expect(show(r.sha, 'src/shared.txt')).toBe('from b');
+    expect(show(r.sha, 'src/shared.txt')).toBe('from a');
     expect(show(r.sha, 'src/new.txt')).toBe('new');
     expect(show(r.sha, 'src/b.txt')).toBe('b changed');
     expect(() => show(r.sha, 'src/a.txt')).toThrow();
@@ -310,6 +310,176 @@ describe('assembleCandidate', () => {
     for (const r of both) expect(r.ok || r.reason === 'lease_held').toBe(true);
     expect(both.some((r) => r.ok)).toBe(true);
     expect(await q(`SELECT 1 FROM integration_leases`)).toHaveLength(0);
+  });
+});
+
+describe('fix round 1', () => {
+  const blob = (sha: string, path: string): string => git(repo, 'rev-parse', `${sha}:${path}`);
+  const gitBlob = (content: string): string => createHash('sha1').update(`blob ${Buffer.byteLength(content)}\0`).update(content).digest('hex');
+  const moveMain = (path: string, content: string | null): string => {
+    if (content === null) rmSync(join(repo, path));
+    else writeFileSync(join(repo, path), content);
+    return commitAll('main moved');
+  };
+  const reset = (): void => {
+    git(repo, 'reset', '-q', '--hard', baseSha);
+  };
+
+  it('a rebuild on a moved base conflicts when main changed a path the worker changed (edit/edit)', async () => {
+    await addDone('t_a', [file('src/a.txt', 'by worker\n')]);
+    const moved = moveMain('src/a.txt', 'by main\n');
+    try {
+      const r = await assembleCandidate(run({ currentBaseSha: moved }), deps());
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe('conflict');
+      expect(r.conflicts).toEqual([{ path: 'src/a.txt', kind: 'base_moved', taskIds: ['t_a'] }]);
+    } finally { reset(); }
+  });
+
+  it('a rebuild on a moved base conflicts when the worker deletes what main edited (delete/edit)', async () => {
+    await addDone('t_a', [{ path: 'src/a.txt', status: 'deleted', kind: null }]);
+    const moved = moveMain('src/a.txt', 'by main\n');
+    try {
+      const r = await assembleCandidate(run({ currentBaseSha: moved }), deps());
+      expect(r.ok === false && r.reason === 'conflict').toBe(true);
+      if (r.ok) return;
+      expect(r.conflicts).toEqual([{ path: 'src/a.txt', kind: 'base_moved', taskIds: ['t_a'] }]);
+    } finally { reset(); }
+  });
+
+  it('dependency-ordered edits of the same path conflict, and a third unordered writer is not missed', async () => {
+    await addDone('t_a', [file('src/shared.txt', 'one\n')]);
+    await addDone('t_b', [file('src/shared.txt', 'two\n')], { dependsOn: ['t_a'] });
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok === false && r.reason === 'conflict').toBe(true);
+    if (r.ok) return;
+    expect(r.conflicts).toEqual([{ path: 'src/shared.txt', kind: 'overlap', taskIds: ['t_a', 't_b'] }]);
+
+    await resetDb(db);
+    await db.execute(sql`TRUNCATE candidates, plan_proposals CASCADE`);
+    await addDone('t_a', [file('src/shared.txt', 'same\n')]);
+    await addDone('t_b', [file('src/shared.txt', 'same\n')]);
+    await addDone('t_c', [file('src/shared.txt', 'other\n')]);
+    const r3 = await assembleCandidate(run(), deps());
+    expect(r3.ok === false && r3.reason === 'conflict').toBe(true);
+    if (r3.ok) return;
+    expect(r3.conflicts![0]!.taskIds).toEqual(['t_a', 't_b', 't_c']);
+  });
+
+  for (const moved of [false, true]) {
+    it(`the full loop: conflict, resolution task completes, candidate assembles (moved base: ${moved})`, async () => {
+      await addDone('t_x', [file('src/shared.txt', 'x version\n')]);
+      await addDone('t_y', [file('src/shared.txt', 'y version\n')]);
+      const cur = moved ? moveMain('README.md', 'main moved\n') : baseSha;
+      try {
+        const r = await assembleCandidate(run({ currentBaseSha: cur }), deps());
+        expect(r.ok === false && r.reason === 'conflict').toBe(true);
+        if (r.ok) return;
+        const [p] = await q(`SELECT tasks FROM plan_proposals`);
+        const resolution = TaskSpecSchema.parse((p!['tasks'] as unknown[])[0]);
+        expect(resolution.baseSha).toBe(cur);
+        await seedTask(db, resolution, 'verifying');
+        const manifest = await publish({ taskId: resolution.taskId, baseSha: cur }, [file('src/shared.txt', 'merged by a human\n')]);
+        await db.insert(schema.attempts).values({
+          tenantId: TENANT, projectId: PROJECT, attemptId: `att_${resolution.taskId}`, taskId: resolution.taskId, revision: 1, attemptNumber: 1,
+          outcome: 'succeeded', startedAt: new Date(), endedAt: new Date(), detail: { changeManifestSha256: manifest },
+        });
+        const ok = await assembleCandidate(run({ currentBaseSha: cur }), deps());
+        expect(ok.ok, JSON.stringify(ok)).toBe(true);
+        if (!ok.ok) return;
+        expect(show(ok.sha, 'src/shared.txt')).toBe('merged by a human');
+        expect(ok.parts.map((x) => x.taskId)).toContain(resolution.taskId);
+      } finally { reset(); }
+    });
+  }
+
+  it('a resolution does not hide a conflict it did not resolve', async () => {
+    await addDone('t_x', [file('src/shared.txt', 'x\n')]);
+    await addDone('t_y', [file('src/shared.txt', 'y\n')]);
+    const r = await assembleCandidate(run(), deps());
+    expect(r.ok).toBe(false);
+    const [p] = await q(`SELECT tasks FROM plan_proposals`);
+    const resolution = TaskSpecSchema.parse((p!['tasks'] as unknown[])[0]);
+    await seedTask(db, resolution, 'verifying');
+    await addDone('t_z', [file('src/shared.txt', 'z\n')]);
+    const manifest = await publish({ taskId: resolution.taskId }, [file('src/shared.txt', 'merged\n')]);
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_res', taskId: resolution.taskId, revision: 1, attemptNumber: 1, outcome: 'succeeded', endedAt: new Date(), detail: { changeManifestSha256: manifest } });
+    const again = await assembleCandidate(run(), deps());
+    expect(again.ok).toBe(false);
+  });
+
+  it('committed bytes are exactly the manifest bytes, whatever .gitattributes says', async () => {
+    writeFileSync(join(repo, '.gitattributes'), '* text eol=lf\n*.txt filter=lfs\n');
+    const attr = commitAll('attributes in base');
+    try {
+      await addDone('t_a', [file('src/crlf.txt', 'line1\r\nline2\r\n', 'added')]);
+      const r = await assembleCandidate(run({ pinnedBaseSha: attr, currentBaseSha: attr }), deps({ }));
+      // manifests name baseSha = original base, so identity fails; build a manifest on the new base instead
+      expect(r.ok).toBe(false);
+      await resetDb(db);
+      await db.execute(sql`TRUNCATE candidates, plan_proposals CASCADE`);
+      const spec = specFor('t_a', { baseSha: attr, allowedPaths: ['src'] });
+      await seedTask(db, spec, 'verifying');
+      const m = await publish({ taskId: 't_a', baseSha: attr }, [file('src/crlf.txt', 'line1\r\nline2\r\n', 'added')]);
+      await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_a', taskId: 't_a', revision: 1, attemptNumber: 1, outcome: 'succeeded', endedAt: new Date(), detail: { changeManifestSha256: m } });
+      const ok = await assembleCandidate(run({ pinnedBaseSha: attr, currentBaseSha: attr }), deps());
+      expect(ok.ok, JSON.stringify(ok)).toBe(true);
+      if (!ok.ok) return;
+      expect(blob(ok.sha, 'src/crlf.txt')).toBe(gitBlob('line1\r\nline2\r\n'));
+    } finally { reset(); }
+  });
+
+  it('workers cannot add or edit .gitattributes or .gitmodules', async () => {
+    for (const p of ['src/.gitattributes', 'src/sub/.GitModules']) {
+      await resetDb(db);
+      await db.execute(sql`TRUNCATE candidates, plan_proposals CASCADE`);
+      await addDone('t_a', [file(p, '* text\n', 'added')]);
+      const r = await assembleCandidate(run(), deps());
+      expect(r.ok === false && r.reason === 'path_rejected', p).toBe(true);
+    }
+  });
+
+  it('case and Unicode collisions are conflicts', async () => {
+    const cases: [string, Change[], Change[]][] = [
+      ['case, across tasks', [file('src/Foo.txt', '1', 'added')], [file('src/foo.txt', '2', 'added')]],
+      ['NFC vs NFD', [file('src/café.txt', '1', 'added')], [file('src/café.txt', '2', 'added')]],
+      ['case, directory spelling', [file('src/Dir/x.txt', '1', 'added')], [file('src/dir/y.txt', '2', 'added')]],
+      ['against the base tree', [file('src/A.txt', '1', 'added')], []],
+      ['within one manifest', [file('src/Foo.txt', '1', 'added'), file('src/foo.txt', '2', 'added')], []],
+    ];
+    for (const [name, one, two] of cases) {
+      await resetDb(db);
+      await db.execute(sql`TRUNCATE candidates, plan_proposals CASCADE`);
+      await addDone('t_one', one);
+      if (two.length > 0) await addDone('t_two', two);
+      const r = await assembleCandidate(run(), deps());
+      expect(r.ok, name).toBe(false);
+      if (r.ok) continue;
+      expect(r.reason, name).toBe('conflict');
+      expect(r.conflicts!.some((c) => c.kind === 'path_collision'), name).toBe(true);
+    }
+  });
+
+  it('a holder that lost its lease cannot publish or invalidate newer evidence', async () => {
+    await addDone('t_a', [file('src/a.txt', 'a2\n')]);
+    const first = await assembleCandidate(run(), deps());
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    await addDone('t_b', [file('src/b.txt', 'b2\n')]);
+    await db.insert(schema.checkRuns).values({ tenantId: TENANT, projectId: PROJECT, checkRunId: 'cr_f', taskId: 't_a', revision: 1, checkId: 'FB-01', checkVersion: '1', candidateSha: first.sha, result: 'passed' });
+    const steal = async (): Promise<void> => {
+      await db.execute(sql`UPDATE integration_leases SET holder = 'newer-holder'`);
+    };
+    const r = await assembleCandidate(run(), deps({ beforePublish: steal }));
+    expect(r.ok === false && r.reason === 'lease_lost').toBe(true);
+    expect(await q(`SELECT status FROM candidates ORDER BY candidate_id`)).toEqual([{ status: 'assembled' }]);
+    expect(await q(`SELECT result FROM check_runs`)).toEqual([{ result: 'passed' }]);
+    expect(await q(`SELECT 1 FROM events WHERE type = 'candidate.failed'`)).toHaveLength(0);
+    // Expired (rather than stolen) counts as lost too.
+    await db.execute(sql`DELETE FROM integration_leases`);
+    const r2 = await assembleCandidate(run(), deps({ beforePublish: async () => { await db.execute(sql`UPDATE integration_leases SET expires_at = now() - interval '1 second'`); } }));
+    expect(r2.ok === false && r2.reason === 'lease_lost').toBe(true);
   });
 });
 void readFileSync;

@@ -16,7 +16,7 @@
  * Imports are relative on purpose: the verifier image installs only this package, so a workspace dependency here would
  * break its frozen-lockfile install. This file is never loaded by the verifier runner.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,9 +44,16 @@ export interface IntegrationRun {
   readonly runId: string;
   /** The target branch the single integration lease is held for. */
   readonly target: string;
-  /** The base the run was planned on; every manifest must name it. */
+  /**
+   * The base the run was planned on; every worker manifest must name it. The caller KEEPS this original value for the life of the
+   * run, even after the target moves: workers built against it, and replay protection compares against it.
+   */
   readonly pinnedBaseSha: string;
-  /** The target's tip when assembly is requested. When it differs from `pinnedBaseSha` the candidate is rebuilt on it. */
+  /**
+   * The target's tip when assembly is requested. When it differs from `pinnedBaseSha` the candidate is rebuilt on it (the caller
+   * passes the new tip here, not in `pinnedBaseSha`). Any path a part changed that main also changed since the part's base is a
+   * conflict: change sets hold post-images only, and no three-way merge is attempted.
+   */
   readonly currentBaseSha: string;
   /** Local source repository holding both SHAs. */
   readonly repoPath: string;
@@ -63,6 +70,8 @@ export interface IntegrationDeps {
   readonly leaseSeconds?: number;
   /** Keep the clone (and return its path) after success. The caller then owns its removal. Failed assemblies always clean up. */
   readonly keepClone?: boolean;
+  /** Test seam: runs just before the final transaction, while the lease is still held. */
+  readonly beforePublish?: () => Promise<void>;
 }
 
 export interface CandidatePart {
@@ -99,6 +108,7 @@ export interface Candidate {
 export type FailureReason =
   | 'invalid_request'
   | 'lease_held'
+  | 'lease_lost'
   | 'no_parts'
   | 'task_spec_invalid'
   | 'manifest_missing'
@@ -117,8 +127,13 @@ export type FailureReason =
 
 export interface Conflict {
   readonly path: string;
-  /** overlap: unordered tasks changed the same file differently. does_not_apply: the change does not apply to the tree it lands on. */
-  readonly kind: 'overlap' | 'does_not_apply';
+  /**
+   * overlap: different tasks changed the same file differently (ordered or not: a worker never saw its predecessor's edits).
+   * does_not_apply: the change does not apply to the tree it lands on.
+   * base_moved: main changed the same path since the part's base.
+   * path_collision: paths that differ only in case or Unicode normalisation (one file on a case-insensitive disk).
+   */
+  readonly kind: 'overlap' | 'does_not_apply' | 'base_moved' | 'path_collision';
   readonly taskIds: readonly string[];
 }
 
@@ -186,6 +201,28 @@ interface ManifestChange {
 interface LoadedPart extends CandidatePart {
   readonly spec: TaskSpec;
   readonly changes: readonly ManifestChange[];
+  /** The base the manifest was built on. */
+  readonly baseSha: string;
+  /** Tasks this part resolves (a resolution task recorded in a plan proposal), else null. */
+  readonly resolves: ReadonlySet<string> | null;
+}
+
+interface Resolution {
+  readonly resolves: ReadonlySet<string>;
+  readonly baseSha: string;
+}
+
+/** Resolution tasks recorded in this run's integration plan proposals (database rows, not worker input). */
+async function loadResolutions(db: Db, run: IntegrationRun): Promise<Map<string, Resolution>> {
+  const rows = await db.execute(sql`
+    SELECT detail -> 'resolves' AS resolves FROM plan_proposals
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND source = 'integration' AND detail -> 'resolves' IS NOT NULL`);
+  const out = new Map<string, Resolution>();
+  for (const r of rows) {
+    const v = r['resolves'] as { taskId?: unknown; tasks?: unknown; baseSha?: unknown } | null;
+    if (v && typeof v.taskId === 'string' && Array.isArray(v.tasks) && typeof v.baseSha === 'string') out.set(v.taskId, { resolves: new Set(v.tasks.map(String)), baseSha: v.baseSha });
+  }
+  return out;
 }
 
 function parseManifest(raw: unknown): { taskId: string; revision: number; baseSha: string; changes: ManifestChange[] } {
@@ -261,7 +298,7 @@ async function loadTasks(db: Db, run: IntegrationRun): Promise<{ specs: Map<stri
   return { specs, completed };
 }
 
-async function loadPart(done: CompletedTask, run: IntegrationRun, store: ArtifactStore, prefixes: readonly string[]): Promise<LoadedPart> {
+async function loadPart(done: CompletedTask, run: IntegrationRun, store: ArtifactStore, prefixes: readonly string[], resolution: Resolution | undefined): Promise<LoadedPart> {
   const { spec } = done;
   const id = spec.taskId;
   if (!HEX64.test(done.manifest)) throw new Fail('manifest_invalid', `task ${id}: change manifest id is malformed`);
@@ -283,11 +320,16 @@ async function loadPart(done: CompletedTask, run: IntegrationRun, store: Artifac
   // Replay protection: this manifest must be for exactly this task, this revision and the run's pinned base.
   if (m.taskId !== spec.taskId) throw new Fail('manifest_identity', `task ${id}: manifest is for task ${clip(m.taskId, 60)}`);
   if (m.revision !== spec.revision) throw new Fail('manifest_identity', `task ${id}: manifest is for revision ${m.revision}, current is ${spec.revision}`);
-  if (m.baseSha !== spec.baseSha || m.baseSha !== run.pinnedBaseSha) throw new Fail('manifest_identity', `task ${id}: manifest base ${clip(m.baseSha, 12)} is not the pinned base`);
+  // A worker manifest names the run's pinned base. A resolution task is created later, on the tip at that time, and names that.
+  const expectedBase = resolution ? resolution.baseSha : run.pinnedBaseSha;
+  if (m.baseSha !== spec.baseSha || m.baseSha !== expectedBase) throw new Fail('manifest_identity', `task ${id}: manifest base ${clip(m.baseSha, 12)} is not the pinned base`);
 
   for (const c of m.changes) {
     const problem = unsafePathProblem(c.path);
     if (problem !== null) throw new Fail('path_rejected', `task ${id}: ${clip(c.path, 80)}: ${problem}`);
+    // Attributes and submodule maps change how git treats other files; only the trusted base may define them.
+    const leaf = canon(c.path.split('/').pop()!);
+    if (leaf === '.gitattributes' || leaf === '.gitmodules') throw new Fail('path_rejected', `task ${id}: ${clip(c.path, 80)} may not be changed by a worker`);
     if (isProtected(c.path, prefixes)) throw new Fail('protected_path', `task ${id}: ${clip(c.path, 80)} is a verifier or contract path`);
   }
   const asChanges: FileChange[] = m.changes.map((c) => ({ path: c.path, status: c.status, kind: c.kind, sha256: c.sha256, linkTarget: c.linkTarget }));
@@ -309,7 +351,7 @@ async function loadPart(done: CompletedTask, run: IntegrationRun, store: Artifac
     if (c.kind !== 'file' || c.sha256 === null) throw new Fail('manifest_invalid', `task ${id}: ${clip(c.path, 60)} is not a regular file with a hash`);
     c.bytes = await readVerified(store, c.sha256, 'content_missing');
   }
-  return { taskId: id, revision: spec.revision, attemptId: done.attemptId, manifestSha256: done.manifest, paths: m.changes.map((c) => c.path), spec, changes: m.changes };
+  return { taskId: id, revision: spec.revision, attemptId: done.attemptId, manifestSha256: done.manifest, paths: m.changes.map((c) => c.path), spec, changes: m.changes, baseSha: m.baseSha, resolves: resolution ? resolution.resolves : null };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -363,7 +405,7 @@ const baseEnv = (home: string): NodeJS.ProcessEnv => ({
   GIT_COMMITTER_EMAIL: 'integration@selarikru.invalid',
   GIT_COMMITTER_DATE: FIXED_DATE,
 });
-const SAFE_CONFIG = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', '-c', 'core.symlinks=true', '-c', 'core.excludesFile=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'protocol.file.allow=never'];
+const SAFE_CONFIG = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.autocrlf=false', '-c', 'core.fsmonitor=false', '-c', 'core.symlinks=true', '-c', 'core.ignorecase=false', '-c', 'core.precomposeunicode=false', '-c', 'core.excludesFile=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'protocol.file.allow=never'];
 
 async function git(cwd: string, home: string, args: readonly string[], opts: { allowFile?: boolean } = {}): Promise<string> {
   const config = opts.allowFile ? SAFE_CONFIG.map((v) => (v === 'protocol.file.allow=never' ? 'protocol.file.allow=always' : v)) : SAFE_CONFIG;
@@ -376,11 +418,11 @@ async function git(cwd: string, home: string, args: readonly string[], opts: { a
   }
 }
 
-async function cloneAtBase(repoPath: string, baseSha: string, dir: string, home: string): Promise<void> {
+async function cloneAtBase(repoPath: string, baseSha: string, dir: string, home: string, otherBases: readonly string[] = []): Promise<void> {
   await mkdir(dir, { recursive: true });
   await git(dir, home, ['init', '--quiet', '--template=', '.']);
   try {
-    await git(dir, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', repoPath, baseSha], { allowFile: true });
+    await git(dir, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', repoPath, baseSha, ...otherBases], { allowFile: true });
     await git(dir, home, ['checkout', '--quiet', '--detach', baseSha]);
     const head = await git(dir, home, ['rev-parse', 'HEAD']);
     if (head !== baseSha) throw new Fail('base_unavailable', `base ${baseSha.slice(0, 12)} resolved to a different commit`);
@@ -391,12 +433,57 @@ async function cloneAtBase(repoPath: string, baseSha: string, dir: string, home:
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Simulation and application
+// Simulation and exact-byte commit
 
 interface Planned {
   taskId: string;
   sha: string | null;
   bytes: Uint8Array | null;
+}
+
+interface BaseEntry {
+  readonly mode: string;
+  readonly blob: string;
+}
+
+async function gitIn(cwd: string, home: string, args: readonly string[], input: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn('git', [...SAFE_CONFIG, ...args], { cwd, env: baseEnv(home) });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on('data', (d: Buffer) => out.push(d));
+    child.stderr.on('data', (d: Buffer) => err.push(d));
+    child.stdin.on('error', () => undefined);
+    child.on('error', (e) => reject(new Fail('git_failed', `git ${args[0]} could not start: ${clip(e.message, 120)}`)));
+    child.on('close', (code) => {
+      if (code === 0) resolve(Buffer.concat(out).toString('utf8').trim());
+      else reject(new Fail('git_failed', `git ${args[0]} failed: ${clip(Buffer.concat(err).toString('utf8').trim(), 200)}`));
+    });
+    child.stdin.end(input);
+  });
+}
+
+function parseTree(out: string): Map<string, BaseEntry> {
+  const m = new Map<string, BaseEntry>();
+  for (const rec of out.split('\0')) {
+    if (rec === '') continue;
+    const tab = rec.indexOf('\t');
+    const [mode, , blob] = rec.slice(0, tab).split(' ');
+    m.set(rec.slice(tab + 1), { mode: mode!, blob: blob! });
+  }
+  return m;
+}
+
+const gitBlobSha = (bytes: Uint8Array): string => createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
+
+/** Paths (canonical) that differ between two commits on the target. */
+async function changedBetween(tree: string, home: string, from: string, to: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (from === to) return out;
+  const raw = await git(tree, home, ['diff', '--name-status', '-z', '--no-renames', from, to]);
+  const toks = raw.split('\0').filter((t) => t !== '');
+  for (let i = 0; i + 1 < toks.length; i += 2) out.add(canon(toks[i + 1]!));
+  return out;
 }
 
 async function assertNoLinkAncestors(root: string, path: string): Promise<void> {
@@ -431,41 +518,111 @@ async function baseState(root: string, path: string): Promise<{ exists: false } 
   return { exists: true, sha: sha256(await readFile(join(root, path))) };
 }
 
-async function plan(root: string, ordered: readonly LoadedPart[], reaches: (a: string, b: string) => boolean): Promise<Map<string, Planned>> {
+interface PlanContext {
+  readonly base: ReadonlyMap<string, BaseEntry>;
+  /** For each part base other than the clone's: canonical paths main changed since. */
+  readonly moved: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Every prefix of every base path, canonical key to the spellings the base uses. */
+  readonly baseSpellings: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+function spellingsOf(base: ReadonlyMap<string, BaseEntry>): Map<string, Set<string>> {
+  const m = new Map<string, Set<string>>();
+  for (const path of base.keys()) {
+    const segs = path.split('/');
+    for (let i = 1; i <= segs.length; i++) {
+      const pre = segs.slice(0, i).join('/');
+      const key = canon(pre);
+      const set = m.get(key) ?? new Set<string>();
+      set.add(pre);
+      m.set(key, set);
+    }
+  }
+  return m;
+}
+
+/**
+ * Decides, without writing, what the tree becomes. Change sets are post-images only, built against the task's own base by a
+ * worker that never saw anyone else's edits, so two tasks changing one path to different content is a conflict (ordered or not),
+ * and so is a path main changed since the part's base. A completed resolution task (recorded in a plan proposal) wins only the
+ * conflicts it was created for.
+ */
+async function plan(root: string, ordered: readonly LoadedPart[], ctx: PlanContext): Promise<Map<string, Planned>> {
   const overlay = new Map<string, Planned>();
+  const writers = new Map<string, Map<string, string | null>>();
   const conflicts = new Map<string, { kind: Conflict['kind']; ids: Set<string> }>();
+  const spelled = new Map<string, { names: Set<string>; tasks: Set<string> }>();
   const note = (path: string, kind: Conflict['kind'], ...ids: string[]): void => {
     const hit = conflicts.get(path);
     if (hit) for (const i of ids) hit.ids.add(i);
     else conflicts.set(path, { kind, ids: new Set(ids) });
   };
-  for (const part of ordered) {
+
+  const handle = async (part: LoadedPart, c: ManifestChange): Promise<void> => {
+    const finalSha = c.status === 'deleted' ? null : c.sha256;
+    if (conflicts.has(c.path)) {
+      conflicts.get(c.path)!.ids.add(part.taskId);
+      return;
+    }
+    // Case and Unicode collisions: every prefix, against the base tree and against other changes.
+    const segs = c.path.split('/');
+    const collided = new Set<string>();
+    for (let i = 1; i <= segs.length; i++) {
+      const pre = segs.slice(0, i).join('/');
+      const key = canon(pre);
+      const b = ctx.baseSpellings.get(key);
+      if (b && [...b].some((n) => n !== pre)) collided.add(part.taskId);
+      let r = spelled.get(key);
+      if (!r) spelled.set(key, (r = { names: new Set(), tasks: new Set() }));
+      if ([...r.names].some((n) => n !== pre)) for (const t of r.tasks) collided.add(t);
+      if ([...r.names].some((n) => n !== pre)) collided.add(part.taskId);
+      r.names.add(pre);
+      r.tasks.add(part.taskId);
+    }
+    if (collided.size > 0) return note(c.path, 'path_collision', ...collided, part.taskId);
+    if (ctx.moved.get(part.baseSha)?.has(canon(c.path))) return note(c.path, 'base_moved', part.taskId);
+
+    const ws = writers.get(c.path);
+    if (ws && [...ws].some(([t, sh]) => t !== part.taskId && sh !== finalSha)) return note(c.path, 'overlap', ...ws.keys(), part.taskId);
+
+    const prior = overlay.get(c.path);
+    const cur = prior ? (prior.sha === null ? ({ exists: false } as const) : ({ exists: true, sha: prior.sha } as const)) : await baseState(root, c.path);
+    const applies = c.status === 'added' ? !cur.exists || prior !== undefined || cur.sha === finalSha : cur.exists;
+    if (!applies) return note(c.path, 'does_not_apply', part.taskId);
+    overlay.set(c.path, { taskId: part.taskId, sha: finalSha, bytes: c.bytes });
+    const w = ws ?? new Map<string, string | null>();
+    w.set(part.taskId, finalSha);
+    writers.set(c.path, w);
+  };
+
+  for (const part of ordered.filter((p) => p.resolves === null)) for (const c of part.changes) await handle(part, c);
+
+  for (const part of ordered.filter((p) => p.resolves !== null)) {
     for (const c of part.changes) {
-      const finalSha = c.status === 'deleted' ? null : c.sha256;
-      const prior = overlay.get(c.path);
-      const cur = prior ? (prior.sha === null ? ({ exists: false } as const) : ({ exists: true, sha: prior.sha } as const)) : await baseState(root, c.path);
-      let skip = false;
-      if (prior && prior.taskId !== part.taskId) {
-        if (prior.sha === finalSha) skip = true; // both tasks reached the same content: nothing to decide
-        else if (!reaches(prior.taskId, part.taskId)) {
-          note(c.path, 'overlap', prior.taskId, part.taskId);
-          skip = true;
-        }
-      } else if (conflicts.has(c.path)) skip = true;
-      if (!skip) {
-        const applies = c.status === 'added' ? !cur.exists || prior !== undefined || cur.sha === finalSha : cur.exists;
-        if (!applies) {
-          note(c.path, 'does_not_apply', part.taskId);
-          skip = true;
-        }
-      }
-      if (skip) {
-        if (conflicts.has(c.path)) conflicts.get(c.path)!.ids.add(part.taskId);
+      const cf = conflicts.get(c.path);
+      const resolvable = cf !== undefined && cf.kind !== 'path_collision' && [...cf.ids].every((i) => part.resolves!.has(i));
+      if (!resolvable) {
+        await handle(part, c);
         continue;
       }
-      overlay.set(c.path, { taskId: part.taskId, sha: finalSha, bytes: c.bytes });
+      // The resolution itself must still be current against main.
+      if (ctx.moved.get(part.baseSha)?.has(canon(c.path))) {
+        note(c.path, 'base_moved', part.taskId);
+        continue;
+      }
+      conflicts.delete(c.path);
+      writers.delete(c.path);
+      if (c.status === 'deleted') {
+        if (ctx.base.has(c.path)) overlay.set(c.path, { taskId: part.taskId, sha: null, bytes: null });
+        else overlay.delete(c.path);
+      } else {
+        await baseState(root, c.path);
+        overlay.set(c.path, { taskId: part.taskId, sha: c.sha256, bytes: c.bytes });
+        writers.set(c.path, new Map([[part.taskId, c.sha256]]));
+      }
     }
   }
+
   if (conflicts.size > 0) {
     const list: Conflict[] = [...conflicts.entries()]
       .sort(([a], [b]) => cmp(a, b))
@@ -475,41 +632,69 @@ async function plan(root: string, ordered: readonly LoadedPart[], reaches: (a: s
   return overlay;
 }
 
-async function applyPlan(root: string, overlay: ReadonlyMap<string, Planned>): Promise<void> {
-  for (const path of [...overlay.keys()].sort(cmp)) {
-    const p = overlay.get(path)!;
-    await assertNoLinkAncestors(root, path);
-    const abs = join(root, path);
-    try {
-      if (p.sha === null) await rm(abs, { force: false });
-      else {
-        await mkdir(dirname(abs), { recursive: true });
-        try {
-          if ((await lstat(abs)).isSymbolicLink()) throw new Fail('apply_failed', `${clip(path, 80)} is a symbolic link in the base tree`);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-        await writeFile(abs, p.bytes!, { mode: 0o644 });
-      }
-    } catch (err) {
-      if (err instanceof Fail) throw err;
-      throw new Fail('apply_failed', `${clip(path, 80)} could not be written: ${(err as NodeJS.ErrnoException).code ?? 'error'}`);
-    }
+/**
+ * Builds the commit with filter-free plumbing so the committed blobs are byte-for-byte the manifest contents, whatever
+ * `.gitattributes` or filters say, then verifies the whole resulting tree against the base plus the planned changes.
+ */
+async function commitOverlay(tree: string, home: string, workDir: string, base: ReadonlyMap<string, BaseEntry>, overlay: ReadonlyMap<string, Planned>, baseSha: string, msgFile: string): Promise<{ sha: string; treeSha: string }> {
+  const paths = [...overlay.keys()].sort(cmp);
+  const files = paths.filter((p) => overlay.get(p)!.sha !== null);
+  const blobDir = join(workDir, 'blobs');
+  await mkdir(blobDir);
+  for (const [i, p] of files.entries()) await writeFile(join(blobDir, String(i)), overlay.get(p)!.bytes!);
+  const hashes = files.length > 0 ? (await gitIn(tree, home, ['hash-object', '-w', '--no-filters', '--stdin-paths'], `${files.map((_, i) => join(blobDir, String(i))).join('\n')}\n`)).split('\n') : [];
+  const blobOf = new Map<string, string>();
+  for (const [i, p] of files.entries()) {
+    if (hashes[i] !== gitBlobSha(overlay.get(p)!.bytes!)) throw new Fail('git_failed', `blob for ${clip(p, 80)} does not match its content`);
+    blobOf.set(p, hashes[i]!);
   }
+  const lines = paths.map((p) => (overlay.get(p)!.sha === null ? `0 ${'0'.repeat(40)} 0\t${p}\0` : `${base.get(p)?.mode ?? '100644'} ${blobOf.get(p)!} 0\t${p}\0`));
+  if (lines.length > 0) await gitIn(tree, home, ['update-index', '--add', '--remove', '-z', '--index-info'], lines.join(''));
+  const treeSha = await git(tree, home, ['write-tree']);
+  const expected = new Map([...base].map(([p, e]) => [p, `${e.mode} ${e.blob}`]));
+  for (const p of paths) {
+    if (overlay.get(p)!.sha === null) expected.delete(p);
+    else expected.set(p, `${base.get(p)?.mode ?? '100644'} ${blobOf.get(p)!}`);
+  }
+  const actual = parseTree(await git(tree, home, ['ls-tree', '-r', '-z', treeSha]));
+  if (actual.size !== expected.size || [...expected].some(([p, v]) => { const a = actual.get(p); return a === undefined || `${a.mode} ${a.blob}` !== v; })) {
+    throw new Fail('git_failed', 'the committed tree differs from the base plus the manifests');
+  }
+  const sha = await git(tree, home, ['commit-tree', treeSha, '-p', baseSha, '-F', msgFile]);
+  await git(tree, home, ['update-ref', 'refs/selarikru/candidate', sha]);
+  return { sha, treeSha };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Database
 
-async function acquireLease(db: Db, run: IntegrationRun, holder: string, now: Date, seconds: number): Promise<boolean> {
+async function acquireLease(db: Db, run: IntegrationRun, holder: string, seconds: number): Promise<boolean> {
+  // The database clock decides expiry, so hosts with skewed clocks cannot both believe they hold the lease.
   const rows = await db.execute(sql`
     INSERT INTO integration_leases (tenant_id, project_id, target, holder, acquired_at, expires_at)
-    VALUES (${run.tenantId}, ${run.projectId}, ${run.target}, ${holder}, ${now.toISOString()}::timestamptz, ${new Date(now.getTime() + seconds * 1000).toISOString()}::timestamptz)
+    VALUES (${run.tenantId}, ${run.projectId}, ${run.target}, ${holder}, now(), now() + make_interval(secs => ${seconds}))
     ON CONFLICT (tenant_id, project_id, target) DO UPDATE
       SET holder = EXCLUDED.holder, acquired_at = EXCLUDED.acquired_at, expires_at = EXCLUDED.expires_at
-      WHERE integration_leases.expires_at <= ${now.toISOString()}::timestamptz
+      WHERE integration_leases.expires_at <= now()
     RETURNING holder`);
   return rows.length === 1 && String(rows[0]!['holder']) === holder;
+}
+
+/** Extends the lease only while this holder still owns an unexpired one. */
+async function renewLease(db: Db, run: IntegrationRun, holder: string, seconds: number): Promise<boolean> {
+  const rows = await db.execute(sql`
+    UPDATE integration_leases SET expires_at = now() + make_interval(secs => ${seconds})
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND target = ${run.target} AND holder = ${holder} AND expires_at > now()
+    RETURNING holder`);
+  return rows.length === 1;
+}
+
+/** Fences a write: locks this holder's unexpired lease row for the rest of the transaction, or throws `lease_lost`. */
+async function fence(tx: Tx, run: IntegrationRun, holder: string): Promise<void> {
+  const rows = await tx.execute(sql`
+    SELECT holder FROM integration_leases
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND target = ${run.target} AND holder = ${holder} AND expires_at > now() FOR UPDATE`);
+  if (rows.length !== 1) throw new Fail('lease_lost', 'the integration lease was lost or expired before the result could be published');
 }
 
 async function releaseLease(db: Db, run: IntegrationRun, holder: string): Promise<void> {
@@ -587,7 +772,8 @@ function buildResolution(run: IntegrationRun, conflicts: readonly Conflict[], sp
  * Assembles the candidate for `run` under the single integration lease for (project, target). Returns the candidate, or a
  * failure with a named reason. A failure leaves no commit and no partial tree; it is recorded as a `candidates` row
  * and a `candidate.failed` event. If the pinned base differs from the target's current tip, the earlier candidate and its
- * evidence are invalidated first and the candidate is rebuilt on the current tip.
+ * evidence are invalidated first and the candidate is rebuilt on the current tip (paths main changed become conflicts).
+ * Every write is fenced on the lease: a holder that lost or outlived it publishes nothing.
  */
 export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDeps): Promise<AssemblyResult> {
   const now = deps.now ?? (() => new Date());
@@ -595,23 +781,37 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
     return { ok: false, reason: 'invalid_request', message: 'pinned and current base must be full commit ids and a target is required' };
   }
   const holder = `integration:${randomUUID()}`;
-  if (!(await acquireLease(deps.db, run, holder, now(), deps.leaseSeconds ?? LEASE_SECONDS))) {
+  const leaseSeconds = deps.leaseSeconds ?? LEASE_SECONDS;
+  if (!(await acquireLease(deps.db, run, holder, leaseSeconds))) {
     return { ok: false, reason: 'lease_held', message: `another assembly holds the integration lease for ${run.target}` };
   }
+  let lost = false;
+  const renewer = setInterval(() => {
+    renewLease(deps.db, run, holder, leaseSeconds).then((ok) => { if (!ok) lost = true; }, () => undefined);
+  }, Math.max(100, (leaseSeconds * 1000) / 3));
+  renewer.unref();
+  const alive = (): void => {
+    if (lost) throw new Fail('lease_lost', 'the integration lease was lost during assembly');
+  };
   let workDir: string | null = null;
   let keep = false;
   let invalidated: Invalidation | undefined;
   try {
-    if (run.pinnedBaseSha !== run.currentBaseSha) {
-      invalidated = await withTx(deps.db, (tx) => invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now()));
-    }
     try {
+      if (run.pinnedBaseSha !== run.currentBaseSha) {
+        invalidated = await withTx(deps.db, async (tx) => {
+          await fence(tx, run, holder);
+          return await invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now());
+        });
+      }
       const { specs, completed } = await loadTasks(deps.db, run);
       if (completed.length === 0) throw new Fail('no_parts', 'no completed task has a published change set');
+      const resolutions = await loadResolutions(deps.db, run);
       const prefixes = protectedPrefixes(deps.protectedPaths);
       const loaded: LoadedPart[] = [];
-      for (const done of completed) loaded.push(await loadPart(done, run, deps.artifacts, prefixes));
-      const { ordered, reaches } = orderParts(loaded, specs);
+      for (const done of completed) loaded.push(await loadPart(done, run, deps.artifacts, prefixes, resolutions.get(done.spec.taskId)));
+      const { ordered } = orderParts(loaded, specs);
+      alive();
 
       const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-integrate');
       await mkdir(parent, { recursive: true });
@@ -619,9 +819,14 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       const home = join(workDir, 'home');
       const tree = join(workDir, 'tree');
       await mkdir(home);
-      await cloneAtBase(run.repoPath, run.currentBaseSha, tree, home);
-      const overlay = await plan(tree, ordered, reaches);
-      await applyPlan(tree, overlay);
+      const otherBases = [...new Set(ordered.map((p) => p.baseSha))].filter((b) => b !== run.currentBaseSha).sort(cmp);
+      await cloneAtBase(run.repoPath, run.currentBaseSha, tree, home, otherBases);
+      alive();
+      const moved = new Map<string, Set<string>>();
+      for (const b of otherBases) moved.set(b, await changedBetween(tree, home, b, run.currentBaseSha));
+      const base = parseTree(await git(tree, home, ['ls-tree', '-r', '-z', 'HEAD']));
+      const overlay = await plan(tree, ordered, { base, moved, baseSpellings: spellingsOf(base) });
+      alive();
 
       const message = [
         'integration candidate', '', `run: ${run.runId}`, `target: ${run.target}`, `base: ${run.currentBaseSha}`, 'parts:',
@@ -629,17 +834,17 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       ].join('\n');
       const msgFile = join(workDir, 'message.txt');
       await writeFile(msgFile, message);
-      await git(tree, home, ['add', '--all', '--force']);
-      await git(tree, home, ['commit', '--quiet', '--no-verify', '--no-gpg-sign', '--allow-empty', '-F', msgFile]);
-      const sha = await git(tree, home, ['rev-parse', 'HEAD']);
-      const treeSha = await git(tree, home, ['rev-parse', 'HEAD^{tree}']);
+      const { sha, treeSha } = await commitOverlay(tree, home, workDir, base, overlay, run.currentBaseSha, msgFile);
       // The clone is temporary, so the commit is exported to a local ref in the source repository, where verification and a later
       // push step can reach it. Nothing is pushed anywhere else, and no branch moves.
-      await git(run.repoPath, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', tree, `${sha}:refs/selarikru/candidates/${sha}`], { allowFile: true });
+      await git(run.repoPath, home, ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', tree, `refs/selarikru/candidate:refs/selarikru/candidates/${sha}`], { allowFile: true });
       const parts: CandidatePart[] = ordered.map((p) => ({ taskId: p.taskId, revision: p.revision, attemptId: p.attemptId, manifestSha256: p.manifestSha256, paths: p.paths }));
       const candidateId = `cand_${sha}`;
+      alive();
+      await deps.beforePublish?.();
 
       const superseded = await withTx(deps.db, async (tx) => {
+        await fence(tx, run, holder);
         const at = now();
         await tx.execute(sql`
           INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
@@ -659,15 +864,17 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       };
     } catch (err) {
       const fail = err instanceof Fail ? err : new Fail('git_failed', `unexpected error: ${err instanceof Error ? clip(err.message, 160) : 'error'}`);
-      return await recordFailure(deps, run, now(), fail, invalidated);
+      if (fail.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: fail.message, ...(invalidated ? { invalidated } : {}) };
+      return await recordFailure(deps, run, holder, now(), fail, invalidated);
     }
   } finally {
+    clearInterval(renewer);
     if (workDir !== null && !keep) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     await releaseLease(deps.db, run, holder).catch(() => undefined);
   }
 }
 
-async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, at: Date, fail: Fail, invalidated: Invalidation | undefined): Promise<CandidateFailure> {
+async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder: string, at: Date, fail: Fail, invalidated: Invalidation | undefined): Promise<CandidateFailure> {
   const conflicts = fail.extra.conflicts;
   const status = fail.reason === 'conflict' ? 'conflicted' : 'failed';
   const candidateId = `cand_${fail.reason}_${sha256(JSON.stringify([run.runId, run.target, run.currentBaseSha, fail.message])).slice(0, 16)}`;
@@ -675,8 +882,8 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, at: Dat
   let proposalError: Fail | undefined;
   try {
     await withTx(deps.db, async (tx) => {
+      await fence(tx, run, holder);
       if (conflicts) {
-        // Only the stored task specs are needed here, and they were already validated when the conflict was found.
         const { specs } = await loadTasks(deps.db, run);
         const resolution = buildResolution(run, conflicts, specs);
         const runRow = (await tx.execute(sql`SELECT plan_revision FROM runs WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId}`))[0];
@@ -684,9 +891,10 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, at: Dat
         const valid = validatePlanRevision({ projectId: run.projectId, runId: run.runId, revision: basedOn + 1, tasks: [resolution] }, { projectId: run.projectId, runId: run.runId });
         if (!valid.ok) throw new Fail('resolution_invalid', `the resolution task is not a valid plan: ${JSON.stringify(valid.errors).slice(0, 200)}`);
         proposalId = `prop_${resolution.taskId}`;
+        const resolves = { taskId: resolution.taskId, tasks: [...new Set(conflicts.flatMap((c) => c.taskIds))].sort(cmp), baseSha: run.currentBaseSha };
         await tx.insert(schema.planProposals).values({
           tenantId: run.tenantId, projectId: run.projectId, proposalId, runId: run.runId, basedOnPlanRevision: basedOn, status: 'proposed', source: 'integration',
-          reason: clip(fail.message, 300), candidateId, tasks: [resolution], detail: { conflicts, baseSha: run.currentBaseSha },
+          reason: clip(fail.message, 300), candidateId, tasks: [resolution], detail: { conflicts, baseSha: run.currentBaseSha, resolves },
         }).onConflictDoNothing();
       }
       await tx.execute(sql`
@@ -701,9 +909,10 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, at: Dat
     });
   } catch (err) {
     if (!(err instanceof Fail)) throw err;
+    if (err.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: err.message, ...(invalidated ? { invalidated } : {}) };
     proposalError = err;
   }
-  if (proposalError) return await recordFailure(deps, run, at, new Fail(proposalError.reason, proposalError.message), invalidated);
+  if (proposalError) return await recordFailure(deps, run, holder, at, new Fail(proposalError.reason, proposalError.message), invalidated);
   return {
     ok: false, reason: fail.reason, message: fail.message, candidateId,
     ...(conflicts ? { conflicts } : {}), ...(proposalId ? { proposalId } : {}), ...(invalidated ? { invalidated } : {}),
