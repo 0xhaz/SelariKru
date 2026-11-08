@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { Id, SchemaVersion, Timestamp } from './common.ts';
 
-export const ATTEMPT_OUTCOMES = ['running', 'succeeded', 'failed', 'cancelled'] as const;
+export const ATTEMPT_OUTCOMES = ['running', 'succeeded', 'failed', 'cancelled', 'interrupted'] as const;
 
 /** Attempts are separate, append-only records; a failed attempt is never rewritten. */
 export const AttemptSchema = z

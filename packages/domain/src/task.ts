@@ -9,6 +9,9 @@ export const TASK_STATUSES = [
 export const TaskStatusSchema = z.enum(TASK_STATUSES);
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
+/** 1 initial attempt plus 2 repairs per task revision. */
+export const MAX_ATTEMPTS_CAP = 3;
+
 export const DEPENDENCY_CONDITIONS = ['artifact_verified', 'candidate_verified', 'change_merged'] as const;
 
 export const TaskSpecSchema = z
@@ -37,7 +40,7 @@ export const TaskSpecSchema = z
     inferencePolicyId: Id,
     limits: z
       .object({
-        maxAttempts: z.number().int().min(1),
+        maxAttempts: z.number().int().min(1).max(MAX_ATTEMPTS_CAP),
         timeoutSeconds: z.number().int().min(1),
         maxCostUsd: z.number().min(0),
       })
@@ -52,7 +55,7 @@ export type TaskKind = 'repository' | 'artifact';
 export interface AttemptRecord {
   readonly attemptId: string;
   readonly number: number;
-  readonly outcome: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  readonly outcome: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
   readonly reason?: string;
 }
 
@@ -97,8 +100,29 @@ export interface IllegalTransition {
   readonly reason: string;
 }
 
+export function isValidMaxAttempts(n: number): boolean {
+  return Number.isInteger(n) && n >= 1 && n <= MAX_ATTEMPTS_CAP;
+}
+
+/** Throws RangeError if maxAttempts is not an integer in 1..MAX_ATTEMPTS_CAP. Prefer `newTaskStateFromSpec`. */
 export function newTaskState(init: { taskId: string; revision: number; kind: TaskKind; maxAttempts: number }): TaskState {
+  if (!isValidMaxAttempts(init.maxAttempts)) {
+    throw new RangeError(`maxAttempts must be an integer in 1..${MAX_ATTEMPTS_CAP}`);
+  }
   return { ...init, status: 'planned', attempts: [], history: [] };
+}
+
+/** Creates the initial state from a validated spec; maxAttempts is derived from `limits.maxAttempts`. */
+export function newTaskStateFromSpec(spec: TaskSpec, kind: TaskKind): Result<TaskState, { kind: 'invalid_spec'; issues: string[] }> {
+  const parsed = TaskSpecSchema.safeParse(spec);
+  if (!parsed.success) return err({ kind: 'invalid_spec', issues: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) });
+  const v = parsed.data;
+  return ok(newTaskState({ taskId: v.taskId, revision: v.revision, kind, maxAttempts: v.limits.maxAttempts }));
+}
+
+/** Interrupted attempts (approval/blocked pauses) do not consume the repair budget. */
+function budgetUsed(attempts: readonly AttemptRecord[]): number {
+  return attempts.filter((a) => a.outcome !== 'interrupted').length;
 }
 
 const ACTIVE: readonly TaskStatus[] = ['planned', 'ready', 'running', 'awaiting_approval', 'blocked', 'verifying'];
@@ -145,11 +169,16 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
   switch (event.type) {
     case 'attempt_started': {
       if (state.status !== 'ready') return bad('attempt can start only from ready');
-      if (state.attempts.length >= state.maxAttempts) return bad('attempt budget exhausted');
+      if (budgetUsed(state.attempts) >= state.maxAttempts) return bad('attempt budget exhausted');
       if (state.attempts.some((a) => a.attemptId === event.attemptId)) return bad('attempt id already used');
       if (lastIsRunning(state.attempts)) return bad('previous attempt still running');
       const rec: AttemptRecord = { attemptId: event.attemptId, number: state.attempts.length + 1, outcome: 'running' };
       return move('running', [...state.attempts, rec]);
+    }
+    case 'approval_requested':
+    case 'blocked': {
+      if (state.status !== 'running') return bad(`${event.type} applies only to a running task`);
+      return move(event.type === 'blocked' ? 'blocked' : 'awaiting_approval', closeLast(state.attempts, 'interrupted', event.type === 'blocked' ? event.reason : undefined));
     }
     case 'attempt_failed':
       if (state.status !== 'running') return bad('only a running task can fail an attempt');
@@ -159,7 +188,7 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
       return move('failed', closeLast(state.attempts, 'failed', event.reason));
     case 'retry_requested':
       if (state.status !== 'failed') return bad('retry applies only to a failed task');
-      if (state.attempts.length >= state.maxAttempts) return bad('attempt budget exhausted');
+      if (budgetUsed(state.attempts) >= state.maxAttempts) return bad('attempt budget exhausted');
       return move('ready');
     case 'change_merged':
       if (state.status !== 'verified') return bad('merge requires verified');

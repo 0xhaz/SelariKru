@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EventEnvelopeSchema, checkWorkerAuthority, type EventEnvelope } from './index.ts';
+import { EVENT_ACTOR_ALLOWLIST, EVENT_TYPES, EventEnvelopeSchema, checkEventAuthority, type EventEnvelope } from './index.ts';
 
 const envelope = {
   schemaVersion: 1,
@@ -43,22 +43,45 @@ describe('EventEnvelopeSchema', () => {
   });
 });
 
-describe('checkWorkerAuthority', () => {
+describe('checkEventAuthority', () => {
   const as = (kind: string, type: string): EventEnvelope =>
     EventEnvelopeSchema.parse({ ...envelope, type, actor: { kind, id: 'x' } });
+  const denied = (kind: string, type: string) => {
+    const r = checkEventAuthority(as(kind, type));
+    expect(r.ok, `${kind} ${type}`).toBe(false);
+    if (!r.ok) expect(r.error).toMatchObject({ kind: 'actor_not_permitted', eventType: type, actorKind: kind });
+  };
 
   it('worker-sourced approval.granted, change.merged, verification.passed rejected', () => {
-    for (const type of ['approval.granted', 'change.merged', 'verification.passed']) {
-      const r = checkWorkerAuthority(as('worker', type));
-      expect(r.ok, type).toBe(false);
-      if (!r.ok) expect(r.error).toMatchObject({ kind: 'worker_not_authoritative', eventType: type });
-    }
+    for (const t of ['approval.granted', 'change.merged', 'verification.passed']) denied('worker', t);
   });
-  it('allows worker progress events and authoritative events from proper actors', () => {
-    expect(checkWorkerAuthority(as('worker', 'attempt.started')).ok).toBe(true);
-    expect(checkWorkerAuthority(as('worker', 'verification.failed')).ok).toBe(true);
-    expect(checkWorkerAuthority(as('verifier', 'verification.passed')).ok).toBe(true);
-    expect(checkWorkerAuthority(as('human', 'approval.granted')).ok).toBe(true);
-    expect(checkWorkerAuthority(as('integration', 'change.merged')).ok).toBe(true);
+  it('workers cannot emit scheduler, plan, denial or verification verdict events', () => {
+    for (const t of ['task.ready', 'task.cancelled', 'task.superseded', 'plan.accepted', 'approval.denied', 'verification.failed']) denied('worker', t);
+  });
+  it('verifier and scheduler cannot merge or grant approvals', () => {
+    for (const k of ['verifier', 'scheduler', 'system']) {
+      denied(k, 'change.merged');
+      denied(k, 'approval.granted');
+    }
+    denied('human', 'change.merged');
+    denied('integration', 'approval.granted');
+    denied('human', 'verification.passed');
+  });
+  it('allows each event from its designated actor', () => {
+    for (const [type, kinds] of Object.entries(EVENT_ACTOR_ALLOWLIST)) {
+      for (const k of kinds!) expect(checkEventAuthority(as(k, type)).ok, `${k} ${type}`).toBe(true);
+    }
+    expect(checkEventAuthority(as('worker', 'attempt.started')).ok).toBe(true);
+    expect(checkEventAuthority(as('verifier', 'verification.passed')).ok).toBe(true);
+    expect(checkEventAuthority(as('human', 'approval.granted')).ok).toBe(true);
+    expect(checkEventAuthority(as('integration', 'change.merged')).ok).toBe(true);
+  });
+  it('every event type has an allowlist entry, and a missing entry is denied', () => {
+    for (const t of EVENT_TYPES) expect(EVENT_ACTOR_ALLOWLIST[t], t).toBeDefined();
+    const ev = as('system', 'run.created');
+    const saved = EVENT_ACTOR_ALLOWLIST['run.created'];
+    delete (EVENT_ACTOR_ALLOWLIST as Record<string, unknown>)['run.created'];
+    try { expect(checkEventAuthority(ev).ok).toBe(false); }
+    finally { (EVENT_ACTOR_ALLOWLIST as Record<string, unknown>)['run.created'] = saved; }
   });
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_ATTEMPTS_CAP,
   TASK_STATUSES,
+  newTaskStateFromSpec,
   TaskSpecSchema,
   newTaskState,
   transition,
@@ -140,6 +142,48 @@ describe('task state machine', () => {
     const blocked = run(running, [{ type: 'blocked', reason: 'missing limit' }]);
     expect(blocked.status).toBe('blocked');
     expect(run(blocked, [{ type: 'unblocked' }]).status).toBe('ready');
+  });
+
+  it('approval then grant then attempt_started keeps history; interrupted does not consume budget', () => {
+    const base = newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 });
+    let s = run(base, [{ type: 'dependencies_satisfied' }, start(1), { type: 'approval_requested' }]);
+    expect(s.attempts).toEqual([{ attemptId: 'attempt_1', number: 1, outcome: 'interrupted' }]);
+    s = run(s, [{ type: 'approval_granted' }, start(2)]);
+    expect(s.status).toBe('running');
+    expect(s.attempts.map((a) => [a.attemptId, a.outcome])).toEqual([['attempt_1', 'interrupted'], ['attempt_2', 'running']]);
+  });
+
+  it('blocked then unblocked then attempt_started; denied then unblocked also runs', () => {
+    const base = newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 });
+    let s = run(base, [{ type: 'dependencies_satisfied' }, start(1), { type: 'blocked', reason: 'limit' }, { type: 'unblocked' }, start(2)]);
+    expect(s.status).toBe('running');
+    expect(s.attempts[0]).toMatchObject({ outcome: 'interrupted', reason: 'limit' });
+    s = run(base, [{ type: 'dependencies_satisfied' }, start(1), { type: 'approval_requested' }, { type: 'approval_denied' }, { type: 'unblocked' }, start(2)]);
+    expect(s.status).toBe('running');
+    expect(s.attempts).toHaveLength(2);
+  });
+
+  it('interrupted attempts leave the repair budget intact for real failures', () => {
+    let s = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 2 }), [
+      { type: 'dependencies_satisfied' }, start(1), { type: 'approval_requested' }, { type: 'approval_granted' }, start(2),
+      { type: 'attempt_failed', reason: 'x' }, { type: 'retry_requested' }, start(3), { type: 'attempt_failed', reason: 'y' },
+    ]);
+    expect(s.attempts.map((a) => a.outcome)).toEqual(['interrupted', 'failed', 'failed']);
+    expect(transition(s, { type: 'retry_requested' }).ok).toBe(false);
+  });
+
+  it('maxAttempts is bounded and derived from the spec', () => {
+    expect(MAX_ATTEMPTS_CAP).toBe(3);
+    for (const bad of [0, -1, 1.5, 4, 1000, Number.NaN, Infinity]) {
+      expect(() => newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: bad }), String(bad)).toThrow(RangeError);
+    }
+    for (const good of [1, 2, 3]) expect(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: good }).maxAttempts).toBe(good);
+    const okRes = newTaskStateFromSpec(spec as never, 'artifact');
+    expect(okRes.ok && okRes.value).toMatchObject({ taskId: 'task1', revision: 1, kind: 'artifact', maxAttempts: 3, status: 'planned' });
+    const over = newTaskStateFromSpec({ ...spec, limits: { ...spec.limits, maxAttempts: 4 } } as never, 'repository');
+    expect(over.ok).toBe(false);
+    expect(TaskSpecSchema.safeParse({ ...spec, limits: { ...spec.limits, maxAttempts: 0 } }).success).toBe(false);
+    expect(TaskSpecSchema.safeParse({ ...spec, limits: { ...spec.limits, maxAttempts: 2.5 } }).success).toBe(false);
   });
 
   it('cancel and supersede legality for every non-merged status', () => {

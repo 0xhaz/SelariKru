@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ActorSchema, Id, SchemaVersion, Timestamp } from './common.ts';
+import { ActorSchema, type ActorKind, Id, SchemaVersion, Timestamp } from './common.ts';
 import { err, ok, type Result } from './result.ts';
 
 export const EVENT_TYPES = [
@@ -34,19 +34,49 @@ export const EventEnvelopeSchema = z
   .strict();
 export type EventEnvelope = z.infer<typeof EventEnvelopeSchema>;
 
-/** Event types a worker-kind actor can never emit as authoritative (architecture section 7). */
-export const WORKER_FORBIDDEN_EVENT_TYPES: readonly EventType[] = ['approval.granted', 'change.merged', 'verification.passed'];
+const { worker: W, verifier: V, human: H, scheduler: S, integration: I, system: Y } = {
+  worker: 'worker', verifier: 'verifier', human: 'human', scheduler: 'scheduler', integration: 'integration', system: 'system',
+} as const;
 
-export interface WorkerNotAuthoritative {
-  readonly kind: 'worker_not_authoritative';
+/** Event type -> actor kinds permitted to emit it. A type with no entry is denied for every actor. */
+export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly ActorKind[]>>> = {
+  'run.created': [H, S, Y],
+  'plan.accepted': [S, Y],
+  'task.ready': [S],
+  'task.cancelled': [H, S, Y],
+  'task.superseded': [S, Y],
+  'task.blocked': [S, Y],
+  'attempt.started': [W, S],
+  'attempt.heartbeat': [W],
+  'attempt.completed': [W],
+  'attempt.failed': [W, S, Y],
+  'approval.requested': [W, S, Y],
+  'approval.granted': [H],
+  'approval.denied': [H],
+  'verification.started': [V, S],
+  'verification.passed': [V],
+  'verification.failed': [V],
+  'change.proposed': [W, I],
+  'change.merged': [I],
+};
+
+export interface ActorNotPermitted {
+  readonly kind: 'actor_not_permitted';
   readonly eventType: EventType;
+  readonly actorKind: ActorKind;
   readonly actorId: string;
 }
 
-/** Called by the API before accepting an event. Schemas alone can't express this cross-field rule. */
-export function checkWorkerAuthority(event: EventEnvelope): Result<EventEnvelope, WorkerNotAuthoritative> {
-  if (event.actor.kind === 'worker' && WORKER_FORBIDDEN_EVENT_TYPES.includes(event.type)) {
-    return err({ kind: 'worker_not_authoritative', eventType: event.type, actorId: event.actor.id });
+/**
+ * Allowlist check: may this actor kind emit this event type?
+ * SECURITY: `event.actor` must be set by the API from the authenticated principal (runner identity,
+ * user session, service credential), never copied from the submitted body. Otherwise the check is
+ * meaningless because a caller can claim any kind.
+ */
+export function checkEventAuthority(event: EventEnvelope): Result<EventEnvelope, ActorNotPermitted> {
+  const allowed = EVENT_ACTOR_ALLOWLIST[event.type];
+  if (!allowed || !allowed.includes(event.actor.kind)) {
+    return err({ kind: 'actor_not_permitted', eventType: event.type, actorKind: event.actor.kind, actorId: event.actor.id });
   }
   return ok(event);
 }
