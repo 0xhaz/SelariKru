@@ -5,6 +5,20 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: selarikru_test
+          POSTGRES_PASSWORD: selarikru_test
+          POSTGRES_DB: selarikru_test
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U selarikru_test -d selarikru_test"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgres://selarikru_test:selarikru_test@127.0.0.1:54329/selarikru_test
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
