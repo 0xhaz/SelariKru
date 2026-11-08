@@ -113,6 +113,7 @@ const env = {
   cloudModel: CLOUD_MODEL,
   appCheck: appCheckState,
   buildMode: import.meta.env.DEV ? "dev" : "production",
+  buildId: "narrowed-ids-3",
   fixtureId: fixture.id,
 };
 
