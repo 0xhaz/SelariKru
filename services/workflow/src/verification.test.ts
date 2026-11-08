@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { applyVerification, type Scheduler } from './index.ts';
+import { withTx } from '@selarikru/persistence';
+import { applyVerification, markRunReadyForReview, type Scheduler } from './index.ts';
 import {
   CAPS, PROJECT, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
@@ -75,12 +76,45 @@ describe('applyVerification', () => {
     expect(await countRows(t.db, 'events')).toBe(events);
   });
 
-  it('the run becomes ready_for_review only when every live task is verified', async () => {
+  it('a verdict only applies to the attempt and revision the candidate part carried', async () => {
+    await toVerifying('t1', { maxAttempts: 3 });
+    const first = String((await t.db.execute(sql`SELECT attempt_id FROM attempts ORDER BY attempt_number`))[0]!['attempt_id']);
+    expect(await apply('t1', 'failed')).toMatchObject({ applied: true, repair: 'scheduled' });
+    const second = (await s.claimNext(runner('r1'), CAPS))!;
+    await s.publishResult(second, { outcome: 'completed' });
+    // The old candidate carried attempt 1; the task is verifying a different attempt now.
+    const stale = await applyVerification({ db: t.db, now: clock.now }, key('t1'), { actor: VERIFIER, outcome: 'passed', detail: {}, expect: { revision: 1, attemptId: first } });
+    expect(stale).toMatchObject({ applied: false, taskStatus: 'verifying', reason: 'stale_candidate' });
+    expect((await statusOf(t.db, 't1')).status).toBe('verifying');
+    const wrongRevision = await applyVerification({ db: t.db, now: clock.now }, key('t1'), { actor: VERIFIER, outcome: 'passed', detail: {}, expect: { revision: 2, attemptId: second.attemptId } });
+    expect(wrongRevision).toMatchObject({ applied: false, reason: 'stale_candidate' });
+    const fresh = await applyVerification({ db: t.db, now: clock.now }, key('t1'), { actor: VERIFIER, outcome: 'passed', detail: {}, expect: { revision: 1, attemptId: second.attemptId } });
+    expect(fresh).toMatchObject({ applied: true, taskStatus: 'verified' });
+  });
+});
+
+describe('markRunReadyForReview', () => {
+  const ready = (expected: string[]) => withTx(t.db, (tx) => markRunReadyForReview(tx, { tenantId: TENANT, projectId: PROJECT, taskId: expected[0]! }, 'run_a', expected));
+  const lifecycle = async () => String((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]!['lifecycle']);
+
+  it('needs the verified set to be exactly the run\'s live tasks', async () => {
     await toVerifying('a');
     await toVerifying('b');
     await apply('a', 'passed');
-    expect((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+    expect(await ready(['a'])).toBe(false);
     await apply('b', 'passed');
-    expect((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
+    expect(await ready(['a'])).toBe(false); // b is live and not covered
+    expect(await lifecycle()).toBe('running');
+    expect(await ready(['a', 'b'])).toBe(true);
+    expect(await lifecycle()).toBe('ready_for_review');
+  });
+
+  it('a covered task that is cancelled does not count as verified', async () => {
+    await toVerifying('a');
+    await toVerifying('b');
+    await apply('a', 'passed');
+    await t.db.execute(sql`UPDATE task_status SET status = 'cancelled' WHERE task_id = 'b'`);
+    expect(await ready(['a', 'b'])).toBe(false);
+    expect(await lifecycle()).toBe('running');
   });
 });

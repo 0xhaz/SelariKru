@@ -28,19 +28,27 @@ export async function releaseTaskClaims(tx: Tx, key: TaskKey, revision: number, 
  * `verifying` (cancelled, superseded, ...) keeps its state: the late verdict is history only. `error` and `skipped` are not
  * verdicts: the task stays `verifying` with its claims held, so it can be verified again.
  *
- * passed -> `verified`, claims released, and the run becomes `ready_for_review` once every live task is verified.
+ * passed -> `verified`, claims released. (Readiness of the run is decided by `markRunReadyForReview`, which needs live evidence.)
  * failed -> `failed`, claims released, then a bounded repair through the retry transition (`ready`), or `blocked` when the
  *           attempt budget is spent. The trusted suite is never touched.
  */
 export async function applyVerification(
   ctx: { readonly db: Db; readonly now: () => Date }, key: TaskKey,
-  input: { readonly actor: Actor; readonly outcome: VerificationVerdict; readonly detail: Record<string, unknown> }, tx?: Tx,
+  input: {
+    readonly actor: Actor; readonly outcome: VerificationVerdict; readonly detail: Record<string, unknown>;
+    /** The revision and attempt the verified candidate part carried. A verdict on anything else is stale and changes nothing. */
+    readonly expect?: { readonly revision: number; readonly attemptId: string };
+  }, tx?: Tx,
 ): Promise<VerificationApplication> {
   if (input.actor.kind !== 'verifier') throw new Error('only the verifier identity may apply a verification outcome');
   const run = async (t: Tx): Promise<VerificationApplication> => {
     const row = await lockStatusRow(t, key);
     if (!row) return { applied: false, taskStatus: 'unknown', reason: 'task_not_found' };
     if (row.status !== 'verifying') return { applied: false, taskStatus: row.status, reason: 'not_verifying' };
+    if (input.expect) {
+      const latest = (await loadAttempts(t, key, row.currentRevision)).at(-1);
+      if (row.currentRevision !== input.expect.revision || latest?.attemptId !== input.expect.attemptId) return { applied: false, taskStatus: row.status, reason: 'stale_candidate' };
+    }
     if (input.outcome === 'error' || input.outcome === 'skipped') return { applied: false, taskStatus: row.status, reason: `no_verdict:${input.outcome}` };
 
     const revisions = await t.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).where(and(
@@ -84,23 +92,28 @@ export async function applyVerification(
       type: input.outcome === 'passed' ? 'verification.passed' : 'verification.failed', attemptId, actor: input.actor, payload: { ...input.detail },
     });
     if (follow) await emit(t, scope, now, { type: follow.type, attemptId, actor: SCHEDULER_ACTOR, payload: { reason: follow.reason } });
-    if (input.outcome === 'passed') await markReadyForReview(t, key, spec.runId);
     return { applied: true, taskStatus: state.status, reason: input.outcome, ...(repair ? { repair } : {}) };
   };
   return tx ? run(tx) : withTx(ctx.db, run);
 }
 
-/** Evidence is complete when every live (not cancelled or superseded) task of the run is verified or merged, and at least one is. */
-async function markReadyForReview(tx: Tx, key: TaskKey, runId: string): Promise<void> {
+/**
+ * Sets the run `ready_for_review` only when the tasks covered by one live passing verdict are exactly the run's live tasks (current
+ * revisions that are not cancelled or superseded) and every one of them is verified or merged. Returns whether the run is ready.
+ */
+export async function markRunReadyForReview(tx: Tx, key: TaskKey, runId: string, coveredTaskIds: readonly string[]): Promise<boolean> {
   const tasks = await tx
-    .select({ status: schema.taskStatus.status })
+    .select({ taskId: schema.taskStatus.taskId, status: schema.taskStatus.status })
     .from(schema.taskStatus)
     .innerJoin(schema.taskRevisions, and(
       eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId),
       eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
     .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskRevisions.runId, runId),
       ne(schema.taskStatus.status, 'cancelled'), ne(schema.taskStatus.status, 'superseded')));
-  if (tasks.length === 0 || !tasks.every((t) => t.status === 'verified' || t.status === 'merged')) return;
+  const covered = new Set(coveredTaskIds);
+  const exact = tasks.length > 0 && tasks.length === covered.size && tasks.every((t) => covered.has(t.taskId) && (t.status === 'verified' || t.status === 'merged'));
+  if (!exact) return false;
   await tx.update(schema.runs).set({ lifecycle: 'ready_for_review' }).where(and(
     eq(schema.runs.tenantId, key.tenantId), eq(schema.runs.projectId, key.projectId), eq(schema.runs.runId, runId), inArray(schema.runs.lifecycle, ['running', 'blocked'])));
+  return true;
 }

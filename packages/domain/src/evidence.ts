@@ -90,3 +90,36 @@ export const VerificationRecordSchema = z
   })
   .strict();
 export type VerificationRecord = z.infer<typeof VerificationRecordSchema>;
+
+/**
+ * What the trusted runner writes (services/verifier/src/run.ts). The criteria subtree is strict: an unknown field or a malformed
+ * entry makes the whole result unusable instead of being filtered out. Envelope objects tolerate extra fields the runner adds.
+ */
+export const RunnerResultSchema = z
+  .object({
+    verifier: z
+      .object({
+        manifestSha256: Sha256, verifierSha256: Sha256, image: z.string().min(1),
+        tools: z.record(z.string(), z.string().nullable()).default({}),
+      })
+      .passthrough(),
+    candidate: z.object({ treeSha256: Sha256 }).passthrough(),
+    quality: z
+      .object({
+        allRequiredChecksPassed: z.boolean(),
+        criteria: z.array(
+          z
+            .object({
+              id: Id,
+              status: CheckStatusSchema,
+              evidenceReferences: z.array(z.string()),
+              failures: z.array(z.object({ test: z.string(), status: CheckStatusSchema, message: z.string() }).strict()),
+              tests: z.array(z.object({ runner: z.enum(['vitest', 'playwright']), title: z.string(), status: CheckStatusSchema }).strict()),
+            })
+            .strict(),
+        ),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+export type RunnerResult = z.infer<typeof RunnerResultSchema>;

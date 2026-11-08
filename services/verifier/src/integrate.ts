@@ -88,6 +88,8 @@ export interface Invalidation {
   readonly candidates: readonly string[];
   readonly checkRuns: readonly string[];
   readonly approvals: readonly string[];
+  /** Verified tasks whose evidence was invalidated; they are `verifying` again and need a new verdict. */
+  readonly reopenedTasks?: readonly string[];
 }
 
 export interface Candidate {
@@ -763,8 +765,8 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
   const where = keep.baseNot !== undefined ? sql`base_sha <> ${keep.baseNot}` : sql`sha <> ${keep.shaNot!}`;
   const rows = await tx.execute(sql`
     UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now.toISOString()}::timestamptz
-    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND target = ${run.target} AND status = 'assembled' AND sha IS NOT NULL AND ${where}
-    RETURNING candidate_id, sha`);
+    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND target = ${run.target} AND status IN ('assembled', 'rejected') AND sha IS NOT NULL AND ${where}
+    RETURNING candidate_id, sha, parts`);
   if (rows.length === 0) return undefined;
   const shas = rows.map((r) => String(r['sha']));
   const checks = await tx.execute(sql`
@@ -775,11 +777,25 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
     UPDATE approvals SET outcome = 'invalidated'
     WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND outcome IN ('pending', 'granted') AND expected_revisions ->> 'candidateSha' IN (${inList(shas)})
     RETURNING approval_id`);
+  // Evidence is gone, so readiness is too: the run leaves review and every part this evidence had verified goes back to `verifying`.
+  const reopened: string[] = [];
+  for (const r of rows) {
+    for (const part of (r['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? []) {
+      const moved = await tx.execute(sql`
+        UPDATE task_status SET status = 'verifying', row_revision = row_revision + 1, updated_at = ${now.toISOString()}::timestamptz
+        WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND task_id = ${part.taskId} AND current_revision = ${part.revision} AND status = 'verified'
+        RETURNING task_id`);
+      if (moved.length > 0) reopened.push(part.taskId);
+    }
+  }
+  await tx.execute(sql`
+    UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review'`);
   return {
     reason,
     candidates: rows.map((r) => String(r['candidate_id'])).sort(cmp),
     checkRuns: checks.map((r) => String(r['check_run_id'])).sort(cmp),
     approvals: approvals.map((r) => String(r['approval_id'])).sort(cmp),
+    ...(reopened.length > 0 ? { reopenedTasks: [...new Set(reopened)].sort(cmp) } : {}),
   };
 }
 

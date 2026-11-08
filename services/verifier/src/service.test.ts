@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { chmodSync as chmod } from 'node:fs';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -11,7 +12,7 @@ import { schema, sql, type Db } from '../../../packages/persistence/src/index.ts
 import { PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
 import { verifierHashes } from './hashing.ts';
 import { assembleCandidate } from './integrate.ts';
-import { CandidateNotVerifiable, candidateContentHash, loadValidRecord, verifyCandidate, type RunnerInput, type RunnerOutput, type VerificationDeps } from './service.ts';
+import { CandidateNotVerifiable, candidateContentHash, dockerRunner, loadValidRecord, verifyCandidate, type RunnerInput, type RunnerOutput, type VerificationDeps } from './service.ts';
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(pkgRoot, '../..');
@@ -63,7 +64,9 @@ function resultFor(input: RunnerInput, statuses: Record<string, 'passed' | 'fail
     verifier: { suiteId: manifest.suiteId, suiteVersion: manifest.version, ...hashes, image: manifest.tools.playwrightImage, tools: { node: 'v24.0.0', vitest: '5.1.0', playwright: '1.65.0' } },
     candidate: { treeSha256: candidateContentHash(input.candidateDir) },
     startedAtUtc: '2026-11-09T01:00:00.000Z', endedAtUtc: '2026-11-09T01:01:00.000Z',
+    setup: {},
     quality: {
+      allRequiredChecksPassed: Object.values(statuses).every((x) => x === 'passed'),
       criteria: manifest.criteria.map((c: { id: string; tests: { runner: string; title: string }[] }) => {
         const st = statuses[c.id] ?? 'passed';
         return {
@@ -288,5 +291,167 @@ describe('verifyCandidate', () => {
     const text = Buffer.from((await artifacts.get(String(row['sha256'])))!).toString();
     expect(text).not.toContain(secret);
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096 + 200);
+  });
+});
+
+const loadKey = (c: { sha: string }) => ({ tenantId: TENANT, projectId: PROJECT, sha: c.sha });
+
+describe('verdicts are bound to the attempt they judged', () => {
+  it('repair then re-verify: the failed candidate is consumed and cannot verify the repair attempt', async () => {
+    await addDone('t1', { 'src/a.txt': 'a1\n' }, { maxAttempts: 2 });
+    const a = await assemble();
+    const failed = await verifyCandidate(ref(a), deps(async (i) => ok(i, { 'FB-02': 'failed' })));
+    expect(failed.taskOutcomes[0]).toMatchObject({ applied: true, taskStatus: 'ready' });
+    // The candidate that failed is consumed.
+    expect((await q(`SELECT status FROM candidates WHERE sha = '${a.sha}'`))[0]).toMatchObject({ status: 'rejected' });
+    await expect(verifyCandidate(ref(a), deps(async (i) => ok(i)))).rejects.toBeInstanceOf(CandidateNotVerifiable);
+    // Attempt 2 publishes a different change and the task is verifying again.
+    await db.execute(sql`UPDATE task_status SET status = 'verifying', row_revision = row_revision + 1 WHERE task_id = 't1'`);
+    const body = JSON.stringify({ schema: 1, taskId: 't1', revision: 1, baseSha, changes: [{ path: 'src/a.txt', status: 'added', kind: 'file', sha256: (await artifacts.put(Buffer.from('a2\n'))).sha256, linkTarget: null, size: 3 }] });
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_t1_2', taskId: 't1', revision: 1, attemptNumber: 2, outcome: 'running', startedAt: new Date(), endedAt: new Date(), detail: { changeManifestSha256: (await artifacts.put(Buffer.from(body))).sha256 } });
+    // Even if the old candidate were still assembled, its verdict must not land on attempt 2.
+    await db.execute(sql`UPDATE candidates SET status = 'assembled' WHERE sha = '${sql.raw(a.sha)}'`);
+    const stale = await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    expect(stale.taskOutcomes[0]).toMatchObject({ applied: false, taskStatus: 'verifying', reason: 'stale_candidate' });
+    expect(await status('t1')).toBe('verifying');
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+    expect((await loadValidRecord(db, artifacts, loadKey(a)))?.result).toBe('failed'); // the applied verdict stays the only evidence for A
+    // The new candidate for attempt 2 verifies normally.
+    await db.execute(sql`UPDATE candidates SET status = 'invalidated' WHERE sha = '${sql.raw(a.sha)}'`);
+    const b = await assemble();
+    expect(b.sha).not.toBe(a.sha);
+    const passed = await verifyCandidate(ref(b), deps(async (i) => ok(i)));
+    expect(passed.taskOutcomes[0]).toMatchObject({ applied: true, taskStatus: 'verified' });
+  });
+
+  it('a part cancelled mid-suite keeps the run out of ready_for_review', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    await addDone('t2', { 'src/b.txt': 'b\n' });
+    const c = await assemble();
+    const rec = await verifyCandidate(ref(c), deps(async (i) => {
+      await db.execute(sql`UPDATE task_status SET status = 'cancelled', row_revision = row_revision + 1 WHERE task_id = 't2'`);
+      return ok(i);
+    }));
+    expect(rec.taskOutcomes.find((o) => o.taskId === 't2')).toMatchObject({ applied: false, reason: 'not_verifying' });
+    expect(await status('t1')).toBe('verified');
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+  });
+});
+
+describe('readiness stays tied to live evidence', () => {
+  it('invalidating the candidate reverts the run and reopens the verified parts for re-verification', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const a = await assemble();
+    await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
+    await addDone('t2', { 'src/b.txt': 'b\n' });
+    const b = await assemble();
+    expect(await loadValidRecord(db, artifacts, loadKey(a))).toBeNull();
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+    expect(await status('t1')).toBe('verifying');
+    const rec = await verifyCandidate(ref(b), deps(async (i) => ok(i)));
+    expect(rec.taskOutcomes.map((o) => [o.taskId, o.applied])).toEqual([['t1', true], ['t2', true]]);
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
+  });
+});
+
+describe('authoritative records', () => {
+  it('only the applied record is evidence: error and late records never shadow or contradict it', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const c = await assemble();
+    const crashed = await verifyCandidate(ref(c), deps(async () => ({ exitCode: 2, result: null, log: 'boom' })));
+    expect(crashed.result).toBe('error');
+    expect(await loadValidRecord(db, artifacts, loadKey(c))).toBeNull();
+    const passed = await verifyCandidate(ref(c), deps(async (i) => ok(i)));
+    expect(await loadValidRecord(db, artifacts, loadKey(c))).toEqual(passed);
+    // A later error or failed run on the same SHA is history: the task stays verified and the loader still returns the applied record.
+    await verifyCandidate(ref(c), deps(async () => ({ exitCode: 2, result: null, log: 'boom again' })));
+    const late = await verifyCandidate(ref(c), deps(async (i) => ok(i, { 'FB-01': 'failed' })));
+    expect(late.taskOutcomes[0]).toMatchObject({ applied: false, reason: 'not_verifying' });
+    expect(await status('t1')).toBe('verified');
+    expect(await loadValidRecord(db, artifacts, loadKey(c))).toEqual(passed);
+  });
+
+  it('a second verification of the same candidate cannot run while one holds the lease', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const c = await assemble();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const started = new Promise<void>((r) => { entered = r; });
+    const slow = verifyCandidate(ref(c), deps(async (i) => { entered(); await gate; return ok(i); }));
+    await started;
+    await expect(verifyCandidate(ref(c), deps(async (i) => ok(i, { 'FB-01': 'failed' })))).rejects.toMatchObject({ reason: 'lease_held' });
+    release();
+    expect((await slow).result).toBe('passed');
+    expect(await status('t1')).toBe('verified');
+    // The lease is released afterwards.
+    expect((await q(`SELECT detail FROM candidates WHERE sha = '${c.sha}'`))[0]!['detail']).not.toHaveProperty('verification');
+  });
+
+  it('the loader checks candidate SHA, manifest hash and verifier hash against current trusted values', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const c = await assemble();
+    const rec = await verifyCandidate(ref(c), deps(async (i) => ok(i)));
+    const trusted = { checkManifestSha256: rec.checkManifestSha256, verifierSha256: rec.verifierSha256 };
+    expect(await loadValidRecord(db, artifacts, loadKey(c), { trusted })).toEqual(rec);
+    // The suite changed since the record was made: it is no longer evidence.
+    expect(await loadValidRecord(db, artifacts, loadKey(c), { trusted: { ...trusted, checkManifestSha256: 'f'.repeat(64) } })).toBeNull();
+    expect(await loadValidRecord(db, artifacts, loadKey(c), { trusted: { ...trusted, verifierSha256: 'f'.repeat(64) } })).toBeNull();
+    // A stored record whose candidate does not match the requested SHA is refused.
+    const other = '1'.repeat(40);
+    await db.execute(sql`UPDATE artifacts SET source_revision = ${other} WHERE type = 'verification_record'`);
+    await db.execute(sql`UPDATE candidates SET sha = ${other}, candidate_id = 'cand_other' WHERE sha = ${c.sha}`);
+    expect(await loadValidRecord(db, artifacts, { ...loadKey(c), sha: other })).toBeNull();
+  });
+});
+
+describe('runner results are strict', () => {
+  it('malformed entries are an infrastructure error, never silently filtered', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const c = await assemble();
+    const bad = await verifyCandidate(ref(c), deps(async (i) => {
+      const r = resultFor(i) as any;
+      r.quality.criteria[0].tests.push({ runner: 'vitest', title: 'x', status: 'weird' });
+      return { exitCode: 0, result: r, log: '' };
+    }));
+    expect(bad.result).toBe('error');
+    expect(bad.runs[0]!.infrastructureError).toMatch(/malformed/i);
+    const missing = await verifyCandidate(ref(c), deps(async (i) => {
+      const r = resultFor(i) as any;
+      delete r.quality.criteria[1].failures;
+      return { exitCode: 0, result: r, log: '' };
+    }));
+    expect(missing.result).toBe('error');
+    expect(await status('t1')).toBe('verifying');
+  });
+
+  it('passed requires exit code 0', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const c = await assemble();
+    const rec = await verifyCandidate(ref(c), deps(async (i) => ({ exitCode: 1, result: resultFor(i), log: '' })));
+    expect(rec.result).toBe('error');
+    expect(rec.runs[0]!.infrastructureError).toMatch(/exit/i);
+    expect(await status('t1')).toBe('verifying');
+  });
+});
+
+describe('dockerRunner', () => {
+  it('kills the named container on timeout', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'docker-stub-'));
+    const calls = join(dir, 'calls.txt');
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${calls}\n`);
+    chmod(stub, 0o755);
+    const script = join(dir, 'verify.sh');
+    writeFileSync(script, `#!/bin/sh\necho "$VERIFY_CONTAINER_NAME" > ${join(dir, 'name.txt')}\nexec sleep 30\n`);
+    chmod(script, 0o755);
+    const out = await dockerRunner({ script, timeoutMs: 1500, dockerCommand: stub })({ candidateDir: dir, resultsPath: join(dir, 'r.json') });
+    const name = readFileSync(join(dir, 'name.txt'), 'utf8').trim();
+    expect(name).toMatch(/^selarikru-verify-/);
+    for (let i = 0; i < 50 && !existsSync(calls); i += 1) await new Promise((r) => setTimeout(r, 50)); // the kill is issued asynchronously
+    expect(readFileSync(calls, 'utf8')).toContain(`kill ${name}`);
+    expect(out.log).toMatch(/timed out/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

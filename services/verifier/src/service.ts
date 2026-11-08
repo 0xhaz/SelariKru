@@ -17,15 +17,16 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ArtifactStore } from '../../../packages/artifacts/src/index.ts';
-import { VerificationRecordSchema, TaskSpecSchema, type Actor, type CheckResult, type CheckStatus, type TaskOutcome, type VerificationRecord, type VerificationRun } from '../../../packages/domain/src/index.ts';
+import { RunnerResultSchema, VerificationRecordSchema, TaskSpecSchema, type Actor, type CheckResult, type CheckStatus, type TaskOutcome, type VerificationRecord, type VerificationRun } from '../../../packages/domain/src/index.ts';
 import { schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
-import { applyVerification } from '../../workflow/src/verification.ts';
+import { applyVerification, markRunReadyForReview } from '../../workflow/src/verification.ts';
 import { hashTree, sha256, verifierHashes } from './hashing.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,11 +37,10 @@ const suiteDir = join(pkgRoot, 'suites/feedback-board');
 const DEFAULT_LOG_LIMIT = 64 * 1024;
 const MESSAGE_LIMIT = 2000;
 const FULL_SHA = /^[0-9a-f]{40}$/;
-const STATUSES: readonly CheckStatus[] = ['passed', 'failed', 'skipped', 'error'];
 const gitEnv = { PATH: process.env['PATH'] ?? '', HOME: tmpdir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
 
 export class CandidateNotVerifiable extends Error {
-  constructor(readonly reason: 'not_found' | 'not_assembled' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
+  constructor(readonly reason: 'not_found' | 'not_assembled' | 'lease_held' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
     super(message);
   }
 }
@@ -83,6 +83,8 @@ export interface VerificationDeps {
   /** Extra runs after a run with failed checks. Every run is kept. Default 0. */
   readonly flakyRetries?: number;
   readonly logLimitBytes?: number;
+  /** How long the per-candidate verification lease lasts. It must exceed the runner timeout. Default 2 h. */
+  readonly leaseSeconds?: number;
 }
 
 /** The host this build verifies on until the cloud backend exists. */
@@ -155,28 +157,31 @@ function evaluate(out: RunnerOutput, want: Expected): Evaluated {
     status: 'error', infrastructureError: clip(reason), tools: {},
     results: want.criteria.map((checkId) => ({ checkId, status: 'error', tests: [], failures: [{ test: '(verifier)', status: 'error', message: clip(reason) }], evidenceReferences: [] })),
   });
-  const r = out.result as any;
-  if (r === null || typeof r !== 'object') return unusable(`the runner produced no result (exit ${out.exitCode ?? 'none'})`);
-  const v = r.verifier ?? {};
-  if (v.manifestSha256 !== want.manifestSha) return unusable('the result names a different trusted manifest hash');
-  if (v.verifierSha256 !== want.verifierSha) return unusable('the result names a different verifier hash');
-  if (v.image !== want.image) return unusable('the result was not produced in the pinned verifier image');
-  if (r.candidate?.treeSha256 !== want.contentSha) return unusable('the result judged a different candidate tree than the one exported');
-  const criteria: any[] = r.quality?.criteria;
-  if (!Array.isArray(criteria) || criteria.length !== want.criteria.length || !want.criteria.every((id) => criteria.some((c) => c?.id === id))) return unusable('the result does not cover exactly the trusted criteria');
-  if (criteria.some((c) => !STATUSES.includes(c.status))) return unusable('the result has an unknown check status');
+  if (out.result === null || typeof out.result !== 'object') return unusable(`the runner produced no result (exit ${out.exitCode ?? 'none'})`);
+  const parsed = RunnerResultSchema.safeParse(out.result);
+  if (!parsed.success) return unusable(`the result is malformed: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  const r = parsed.data;
+  if (r.verifier.manifestSha256 !== want.manifestSha) return unusable('the result names a different trusted manifest hash');
+  if (r.verifier.verifierSha256 !== want.verifierSha) return unusable('the result names a different verifier hash');
+  if (r.verifier.image !== want.image) return unusable('the result was not produced in the pinned verifier image');
+  if (r.candidate.treeSha256 !== want.contentSha) return unusable('the result judged a different candidate tree than the one exported');
+  const criteria = r.quality.criteria;
+  const ids = criteria.map((c) => c.id);
+  if (ids.length !== want.criteria.length || new Set(ids).size !== ids.length || !want.criteria.every((id) => ids.includes(id))) return unusable('the result does not cover exactly the trusted criteria');
   const results: CheckResult[] = want.criteria.map((id) => {
-    const c = criteria.find((x) => x.id === id);
+    const c = criteria.find((x) => x.id === id)!;
     return {
-      checkId: id, status: c.status,
-      tests: (Array.isArray(c.tests) ? c.tests : []).filter((t: any) => STATUSES.includes(t?.status)).map((t: any) => ({ runner: String(t.runner), title: String(t.title), status: t.status })),
-      failures: (Array.isArray(c.failures) ? c.failures : []).filter((f: any) => STATUSES.includes(f?.status)).map((f: any) => ({ test: String(f.test), status: f.status, message: clip(redactSecrets(String(f.message ?? ''))) })),
-      evidenceReferences: (Array.isArray(c.evidenceReferences) ? c.evidenceReferences : []).map(String),
+      checkId: id, status: c.status, tests: c.tests,
+      failures: c.failures.map((f) => ({ ...f, message: clip(redactSecrets(f.message)) })),
+      evidenceReferences: c.evidenceReferences,
     };
   });
-  const has = (s: CheckStatus) => results.some((x) => x.status === s);
+  const has = (x: CheckStatus) => results.some((y) => y.status === x);
   const status: CheckStatus = has('error') ? 'error' : has('failed') ? 'failed' : has('skipped') ? 'skipped' : 'passed';
-  const tools = Object.fromEntries(Object.entries(v.tools ?? {}).filter(([, x]) => typeof x === 'string')) as Record<string, string>;
+  // The runner exits 0 exactly when every required check passed. A disagreement is a broken run, not a verdict.
+  if (status === 'passed' && (out.exitCode !== 0 || !r.quality.allRequiredChecksPassed)) return unusable(`all checks report passed but the run exited ${out.exitCode ?? 'without a code'} (allRequiredChecksPassed=${r.quality.allRequiredChecksPassed})`);
+  if (status !== 'passed' && out.exitCode === 0) return unusable('the run exited 0 although a check did not pass');
+  const tools = Object.fromEntries(Object.entries(r.verifier.tools).filter((e): e is [string, string] => typeof e[1] === 'string'));
   return { status, results, infrastructureError: null, tools };
 }
 
@@ -203,10 +208,20 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
   const row = rows[0];
   if (!row) throw new CandidateNotVerifiable('not_found', 'no such candidate');
   if (row['status'] !== 'assembled') throw new CandidateNotVerifiable('not_assembled', `the candidate is ${String(row['status'])}`);
-  const parts = (row['parts'] as { taskId: string; revision: number }[]) ?? [];
+  const parts = (row['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? [];
   if (!parts.some((p) => p.taskId === candidate.taskId)) throw new CandidateNotVerifiable('task_not_in_candidate', 'the task is not a part of this candidate');
   const baseSha = String(row['base_sha']);
   const treeSha = String(row['tree_sha']);
+  const holder = `verify:${randomUUID()}`;
+  const leaseSeconds = deps.leaseSeconds ?? 7200;
+  const candKey = sql`tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha}`;
+  // One verification per candidate at a time: otherwise two runs can disagree about the same SHA.
+  const taken = await deps.db.execute(sql`
+    UPDATE candidates SET detail = jsonb_set(detail, '{verification}', jsonb_build_object('holder', ${holder}::text, 'expiresAt', ${new Date(now().getTime() + leaseSeconds * 1000).toISOString()}::text))
+    WHERE ${candKey} AND status = 'assembled'
+      AND (detail -> 'verification' IS NULL OR (detail -> 'verification' ->> 'expiresAt')::timestamptz <= ${now().toISOString()}::timestamptz)
+    RETURNING 1`);
+  if (taken.length === 0) throw new CandidateNotVerifiable('lease_held', 'another verification holds this candidate');
 
   const manifestBytes = await readFile(join(suiteDir, 'manifest.json'));
   const manifest = JSON.parse(manifestBytes.toString());
@@ -278,10 +293,19 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
         }
         const failedChecks = last.results.filter((r) => r.status !== 'passed').map((r) => r.checkId);
         const applied = await applyVerification({ db: deps.db, now }, key, {
-          actor: deps.verifier, outcome: overall,
+          actor: deps.verifier, outcome: overall, expect: { revision: p.revision, attemptId: p.attemptId },
           detail: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, verifierSha256: want.verifierSha, host: deps.host, result: overall, failedChecks, flaky },
         }, tx);
         taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: applied.applied, taskStatus: applied.taskStatus, reason: applied.reason });
+      }
+
+      const anyApplied = taskOutcomes.some((o) => o.applied);
+      if (live && overall === 'failed' && anyApplied) {
+        // The candidate that failed is consumed: a repair attempt gets a new candidate, never this verdict's SHA.
+        await tx.execute(sql`UPDATE candidates SET status = 'rejected', reason = 'verification_failed', updated_at = ${now().toISOString()}::timestamptz WHERE ${candKey}`);
+      }
+      if (live && overall === 'passed' && taskOutcomes.every((o) => o.applied)) {
+        await markRunReadyForReview(tx, { tenantId: candidate.tenantId, projectId: candidate.projectId, taskId: candidate.taskId }, candidate.runId, parts.map((p) => p.taskId));
       }
 
       const record = VerificationRecordSchema.parse({
@@ -320,25 +344,35 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
       }
       await tx.insert(schema.artifacts).values({
         tenantId: candidate.tenantId, projectId: candidate.projectId, artifactId: recordId, runId: candidate.runId, type: 'verification_record', sha256: recordRef.sha256,
-        sourceRevision: candidate.sha, classification: 'internal', locator: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, host: deps.host, checkRunIds },
+        sourceRevision: candidate.sha, classification: 'internal', locator: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, host: deps.host, applied: anyApplied, checkRunIds },
       });
       return record;
     });
   } finally {
     await rm(candidateDir, { recursive: true, force: true });
     await rm(outDir, { recursive: true, force: true });
+    await deps.db.execute(sql`UPDATE candidates SET detail = detail - 'verification' WHERE ${candKey} AND detail -> 'verification' ->> 'holder' = ${holder}`);
   }
 }
 
+/** Values the trusted verifier has right now. A record made under different ones is no longer evidence. */
+export function currentTrusted(): { checkManifestSha256: string; verifierSha256: string } {
+  return { checkManifestSha256: sha256(readFileSync(join(suiteDir, 'manifest.json'))), verifierSha256: verifierHashes(pkgRoot, repoRoot).verifierSha256 };
+}
+
 /**
- * The stored record for a candidate SHA, only while it is still evidence: the candidate is still `assembled` and none of the
- * record's check runs has been invalidated. Null otherwise.
+ * The authoritative record for a candidate SHA: the latest one that was applied to task state (a non-applied, `error` or `skipped`
+ * record is history, never evidence). It is returned only while the candidate is still live (`assembled`, or `rejected` for a failed
+ * verdict), none of its check runs is invalidated, and it names this SHA and the current trusted manifest and verifier hashes.
  */
-export async function loadValidRecord(db: Db, artifacts: ArtifactStore, key: { tenantId: string; projectId: string; sha: string }): Promise<VerificationRecord | null> {
-  const cand = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND sha = ${key.sha} AND status = 'assembled'`);
+export async function loadValidRecord(
+  db: Db, artifacts: ArtifactStore, key: { tenantId: string; projectId: string; sha: string }, opts: { trusted?: { checkManifestSha256: string; verifierSha256: string } } = {},
+): Promise<VerificationRecord | null> {
+  const cand = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND sha = ${key.sha} AND status IN ('assembled', 'rejected')`);
   if (cand.length === 0) return null;
   const rows = await db.execute(sql`
     SELECT sha256, locator FROM artifacts WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND type = 'verification_record' AND source_revision = ${key.sha}
+      AND locator ->> 'applied' = 'true'
     ORDER BY created_at DESC, artifact_id DESC LIMIT 1`);
   const row = rows[0];
   if (!row) return null;
@@ -348,23 +382,37 @@ export async function loadValidRecord(db: Db, artifacts: ArtifactStore, key: { t
       AND check_run_id = ANY(${sql.raw(`ARRAY[${ids.map((i) => `'${i.replace(/'/g, "''")}'`).join(',') || "''"}]::text[]`)})`);
   if (Number(live[0]?.['n']) !== ids.length) return null;
   const bytes = await artifacts.get(String(row['sha256']));
-  return bytes ? VerificationRecordSchema.parse(JSON.parse(Buffer.from(bytes).toString())) : null;
+  if (!bytes) return null;
+  const record = VerificationRecordSchema.parse(JSON.parse(Buffer.from(bytes).toString()));
+  const trusted = opts.trusted ?? currentTrusted();
+  if (record.candidateSha !== key.sha || record.checkManifestSha256 !== trusted.checkManifestSha256 || record.verifierSha256 !== trusted.verifierSha256) return null;
+  return record;
 }
 
 /**
  * Runs `scripts/docker-verify.sh` (the hardened image) against `candidateDir`. The script mounts the candidate read-only and copies the
  * result out with `docker cp` after the container exits. Only the last 256 KiB of its output is kept.
  */
-export function dockerRunner(opts: { script?: string; timeoutMs?: number } = {}): VerifierRunner {
+export function dockerRunner(opts: { script?: string; timeoutMs?: number; dockerCommand?: string } = {}): VerifierRunner {
   const script = opts.script ?? join(pkgRoot, 'scripts/docker-verify.sh');
   const timeoutMs = opts.timeoutMs ?? 45 * 60_000;
+  const docker = opts.dockerCommand ?? 'docker';
   return ({ candidateDir, resultsPath }) => new Promise((res, rej) => {
-    const p = spawn(script, [candidateDir, resultsPath], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? tmpdir(), DOCKER_HOST: process.env['DOCKER_HOST'] ?? '' } });
+    const name = `selarikru-verify-${randomUUID()}`;
+    const p = spawn(script, [candidateDir, resultsPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { PATH: process.env['PATH'] ?? '', HOME: process.env['HOME'] ?? tmpdir(), DOCKER_HOST: process.env['DOCKER_HOST'] ?? '', VERIFY_CONTAINER_NAME: name },
+    });
     let log = '';
     const add = (b: Buffer) => { log = (log + b.toString()).slice(-256 * 1024); };
     p.stdout.on('data', add);
     p.stderr.on('data', add);
-    const timer = setTimeout(() => { log += `\n[verifier] docker run timed out after ${timeoutMs / 1000}s`; p.kill('SIGKILL'); }, timeoutMs);
+    const timer = setTimeout(() => {
+      log += `\n[verifier] docker run timed out after ${timeoutMs / 1000}s`;
+      // Killing the script alone would leave the container running: stop it by name, then the script (its trap removes the container).
+      spawn(docker, ['kill', name], { stdio: 'ignore' }).on('error', () => undefined);
+      p.kill('SIGKILL');
+    }, timeoutMs);
     p.once('error', (e) => { clearTimeout(timer); rej(e); });
     p.once('close', async (code) => {
       clearTimeout(timer);

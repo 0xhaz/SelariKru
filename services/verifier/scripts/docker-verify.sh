@@ -10,7 +10,7 @@ mkdir -p "$(dirname "$RESULTS")"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 IMAGE="selarikru-verifier:playwright-1.65.0"
 docker build -q -f "$ROOT/services/verifier/Dockerfile" -t "$IMAGE" "$ROOT" >/dev/null
-NAME="selarikru-verify-$$-$RANDOM"
+NAME="${VERIFY_CONTAINER_NAME:-selarikru-verify-$$-$RANDOM}"
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 rm -f "$RESULTS"
 set +e
