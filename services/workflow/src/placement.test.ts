@@ -62,7 +62,9 @@ describe('place (pure)', () => {
     }
     // eligible_any stays local when local has room, with a stable reason; it is never moved to cloud when local is full.
     expect(place(task({ classification: 'restricted' }), capOpen(), policy, ctx)).toMatchObject({ target: 'local', reason: 'local_slot_free' });
-    expect(place(task({ classification: 'restricted' }), capOpen({ local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'classification_not_cloud_eligible' });
+    // Only waiting for the local slot is a transient wait, never a permanent classification block; cloud is not used.
+    expect(place(task({ classification: 'restricted' }), capOpen({ local: 1, cloud: 0 }), policy, ctx)).toMatchObject({ blocked: true, reason: 'no_free_slot', transient: true });
+    expect(place(task({ classification: 'restricted' }), cap('C1'), policy, ctx)).toMatchObject({ blocked: true, reason: 'classification_not_cloud_eligible', transient: false });
     // A restricted source feeding a public task is refused by the policy package, not placed.
     const mixed = { ...ctx, sources: [{ id: 'repo', classification: 'restricted' as const }] };
     expect(place(task({ execution: 'cloud' }), cap('C1'), policy, mixed)).toMatchObject({ blocked: true, reason: 'policy_denied:source_not_cloud_eligible' });
@@ -288,6 +290,29 @@ describe('placement in claimNext', () => {
       ]) });
     });
 
+    it('a restricted label propagates through a multi-hop chain, a diamond and a cycle', async () => {
+      const dep = (taskId: string) => ({ taskId, revision: 1, condition: 'artifact_verified' as const });
+      // A (restricted) -> B (internal) -> C (cloud, internal)
+      await seedTask(t.db, specFor('A', { classification: 'restricted' }), 'verified');
+      await seedTask(t.db, specFor('B', { dependencies: [dep('A')] }), 'verified');
+      await seedTask(t.db, cloudTask('C', { dependencies: [dep('B')] }), 'planned');
+      // diamond: R (restricted) -> L, M (internal) -> D (cloud)
+      await seedTask(t.db, specFor('R', { classification: 'restricted' }), 'verified');
+      await seedTask(t.db, specFor('L', { dependencies: [dep('R')] }), 'verified');
+      await seedTask(t.db, specFor('M', { dependencies: [dep('R')] }), 'verified');
+      await seedTask(t.db, cloudTask('D', { dependencies: [dep('L'), dep('M')] }), 'planned');
+      // a dependency cycle among verified tasks terminates, and a clean chain still places
+      await seedTask(t.db, specFor('X'), 'verified');
+      await seedTask(t.db, specFor('Y', { dependencies: [dep('X')] }), 'verified');
+      await t.db.insert(schema.dependencies).values({ tenantId: TENANT, projectId: PROJECT, taskId: 'X', revision: 1, dependsOnTaskId: 'Y', dependsOnRevision: 1, condition: 'artifact_verified' });
+      await seedTask(t.db, cloudTask('Z', { dependencies: [dep('X')] }), 'planned');
+      const r = await claimCloud(policyWith([]));
+      expect(r).toMatchObject({ ok: true, lease: { taskId: 'Z', location: 'cloud' }, skipped: expect.arrayContaining([
+        { taskId: 'C', reason: 'placement_blocked:classification_not_cloud_eligible' },
+        { taskId: 'D', reason: 'placement_blocked:classification_not_cloud_eligible' },
+      ]) });
+    });
+
     it('control: public artifact and internal project and task still place in cloud', async () => {
       await addArtifact('a4', 'public');
       await seedTask(t.db, cloudTask('x', { contractRefs: [{ artifactId: 'a4', sha256: SHA }] }));
@@ -358,6 +383,31 @@ describe('placement in claimNext', () => {
       expect((await statusOf(t.db, 'x')).status).toBe('ready');
       expect(await sched('C1').claimNext(cloud('c1'), CAPS)).not.toBeNull();
       expect((await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 'x'`))[0]!['placement_block']).toBeNull();
+    });
+
+    it('a restricted task only waiting for the local slot is a transient wait: no event, no field', async () => {
+      for (const id of ['r1', 'r2']) await seedTask(t.db, specFor(id, { classification: 'restricted' }));
+      const s = sched('L1');
+      expect(await s.claimNext(runner('l1'), CAPS)).toMatchObject({ taskId: 'r1' });
+      expect(await s.tryClaim(runner('l2'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 'r2', reason: 'placement_blocked:no_free_slot' }] });
+      expect(await blockedEvents()).toHaveLength(0);
+      expect((await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 'r2'`))[0]!['placement_block']).toBeNull();
+    });
+
+    it('a transient wait does not clear the field, so a repeated permanent reason writes one event', async () => {
+      const SHA = 'a'.repeat(64);
+      const s = sched('H2', { ...(CLOUD_POLICY as Policy), selectedSources: [`repo:${PROJECT}`, 'artifact:ghost'] });
+      await seedTask(t.db, specFor('f1', { role: 'frontend', contractRefs: [{ artifactId: 'ghost', sha256: SHA }] }));
+      await s.tryClaim(cloud('c1'), CAPS); // permanently denied: unlabelled source
+      await seedTask(t.db, specFor('f2', { role: 'frontend' }));
+      const lease = (await s.claimNext(cloud('c1'), CAPS))!; // f2 takes the one cloud slot
+      expect(lease.taskId).toBe('f2');
+      expect(await s.tryClaim(cloud('c2'), CAPS)).toMatchObject({ skipped: [{ taskId: 'f1', reason: 'placement_blocked:no_free_slot' }] }); // transient
+      await s.publishResult(lease, { outcome: 'completed' });
+      await s.tryClaim(cloud('c2'), CAPS); // denied again, same reason
+      const ev = await blockedEvents();
+      expect(ev).toHaveLength(1);
+      expect(ev[0]).toMatchObject({ payload: { reason: 'policy_denied:unclassified_source' } });
     });
 
     it('transient blocks write no event', async () => {

@@ -148,7 +148,8 @@ export function place(task: TaskSpec, capacity: Capacity, policy: Policy | undef
     return { target, reason: cloudReason, policy: decision };
   }
 
-  // Nothing is free. The most concrete cause wins.
+  // Nothing is free. A task that could run locally and only waits for the slot is a transient wait, not a block.
+  if (candidates.includes('local') && slots.local.state === 'full') return block('no_free_slot', true);
   if (cloudWanted && cloudBarred) return block('classification_not_cloud_eligible');
   if (candidates.every((c) => slots[c].state === 'disabled')) return block(`location_disabled:${candidates[0]}`);
   return block('no_free_slot', true);

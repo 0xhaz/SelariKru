@@ -183,6 +183,18 @@ interface ResolvedSources {
   readonly classification: Classification;
 }
 
+const MAX_PREDECESSORS = 500;
+
+/** Relational dependency edges for the given task revisions, in one query. */
+async function edgeRowsFor(tx: Tx, key: TaskKey, nodes: readonly { taskId: string; revision: number }[]): Promise<{ taskId: string; revision: number }[]> {
+  if (nodes.length === 0) return [];
+  const rows = await tx
+    .select({ owner: schema.dependencies.taskId, ownerRevision: schema.dependencies.revision, taskId: schema.dependencies.dependsOnTaskId, revision: schema.dependencies.dependsOnRevision })
+    .from(schema.dependencies)
+    .where(and(eq(schema.dependencies.tenantId, key.tenantId), eq(schema.dependencies.projectId, key.projectId), inArray(schema.dependencies.taskId, [...new Set(nodes.map((n) => n.taskId))])));
+  return rows.filter((r) => nodes.some((n) => n.taskId === r.owner && n.revision === r.ownerRevision)).map((r) => ({ taskId: r.taskId, revision: r.revision }));
+}
+
 /**
  * Source labels come from stored rows, never from the task's own claim: the project label, each contract artifact's stored
  * label (matched by id and sha256; no match is unlabelled, which the policy denies), and the labels feeding from predecessors.
@@ -192,20 +204,34 @@ async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<Res
     .where(and(eq(schema.projects.tenantId, key.tenantId), eq(schema.projects.projectId, key.projectId))).limit(1))[0];
   let repo = strongest(spec.classification, (project?.c ?? 'secret') as Classification);
 
-  const edgeRows = await tx
-    .select({ taskId: schema.dependencies.dependsOnTaskId, revision: schema.dependencies.dependsOnRevision })
-    .from(schema.dependencies)
-    .where(and(eq(schema.dependencies.tenantId, key.tenantId), eq(schema.dependencies.projectId, key.projectId), eq(schema.dependencies.taskId, key.taskId), eq(schema.dependencies.revision, spec.revision)));
-  const edges = [...spec.dependencies.map((d) => ({ taskId: d.taskId, revision: d.revision })), ...edgeRows];
+  // Walk every transitive predecessor, level by level, so a label cannot be laundered through a middle task.
+  // A visited set guards cycles, and the walk is bounded: exceeding the bound or an unreadable predecessor fails closed.
   const preds: TaskSpec['contractRefs'][] = [];
-  for (const e of edges) {
-    const row = (await tx.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions)
-      .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, e.taskId), eq(schema.taskRevisions.revision, e.revision))).limit(1))[0];
-    const p = TaskSpecSchema.safeParse(row?.spec);
-    // A predecessor that cannot be read is unlabelled data feeding this task: fail closed.
-    if (!p.success) { repo = 'secret'; continue; }
-    repo = strongest(repo, p.data.classification);
-    preds.push(p.data.contractRefs);
+  const visited = new Set<string>([`${spec.taskId}`]);
+  let frontier = [
+    ...spec.dependencies.map((d) => ({ taskId: d.taskId, revision: d.revision })),
+    ...(await edgeRowsFor(tx, key, [{ taskId: spec.taskId, revision: spec.revision }])),
+  ];
+  while (frontier.length > 0) {
+    const level = frontier.filter((e, i) => frontier.findIndex((o) => o.taskId === e.taskId && o.revision === e.revision) === i && !visited.has(`${e.taskId}@${e.revision}`));
+    frontier = [];
+    if (level.length === 0) break;
+    for (const e of level) visited.add(`${e.taskId}@${e.revision}`);
+    if (visited.size > MAX_PREDECESSORS) { repo = 'secret'; break; }
+    const rows = await tx.select({ taskId: schema.taskRevisions.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec }).from(schema.taskRevisions)
+      .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), inArray(schema.taskRevisions.taskId, [...new Set(level.map((e) => e.taskId))])));
+    const found: TaskSpec[] = [];
+    for (const e of level) {
+      const row = rows.find((r) => r.taskId === e.taskId && r.revision === e.revision);
+      const p = TaskSpecSchema.safeParse(row?.spec);
+      // A predecessor that cannot be read is unlabelled data feeding this task: fail closed.
+      if (!p.success) { repo = 'secret'; continue; }
+      found.push(p.data);
+      repo = strongest(repo, p.data.classification);
+      preds.push(p.data.contractRefs);
+      frontier.push(...p.data.dependencies.map((d) => ({ taskId: d.taskId, revision: d.revision })));
+    }
+    frontier.push(...(await edgeRowsFor(tx, key, found.map((f) => ({ taskId: f.taskId, revision: f.revision })))));
   }
 
   const refs = [...spec.contractRefs, ...preds.flat()];
@@ -326,9 +352,9 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position),
   });
   if (isBlocked(placed)) {
-    // A permanent block is recorded once per reason so the owner can see why the task never starts; a transient one is silent.
+    // A permanent block is recorded once per reason so the owner can see why the task never starts. A transient one is silent and
+    // leaves the field alone, so a wait cannot make the same permanent reason write a new event.
     if (!placed.transient) await recordBlock(tx, key, c, statusRow, placed.reason, cfg !== null && !('blocked' in cfg) ? cfg.mode.id : null, now);
-    else if (statusRow.placementBlock !== null) await clearBlock(tx, key);
     return { reason: `placement_blocked:${placed.reason}` };
   }
   if (statusRow.placementBlock !== null) await clearBlock(tx, key);
