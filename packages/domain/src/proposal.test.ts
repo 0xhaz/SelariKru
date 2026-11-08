@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateProposal, type FixtureCtx } from './index.ts';
+import { canonicalJson, validateProposal, type FixtureCtx } from './index.ts';
 
 const brief01: FixtureCtx = {
   operation: 'draftBrief',
@@ -95,5 +95,39 @@ describe('validateProposal', () => {
     const plan: FixtureCtx = { operation: 'draftTaskPlan', allowedRequirementIds: ['FB-01'] };
     const v = validateProposal({ tasks: [{ title: 'T', description: 'D', requirementIds: ['FB-01', 'FB-07'] }] }, plan);
     expect(kinds(v)).toEqual(['requirement_not_allowed']);
+  });
+
+  it('bounds work on hostile input: oversized input is refused up front, long strings are never scanned', () => {
+    const t0 = performance.now();
+    const long = validateProposal({ ...GOOD, summary: '\n '.repeat(30_000) }, brief01);
+    const long2 = validateProposal({ ...GOOD, summary: '`' + 'a '.repeat(30_000) }, brief01);
+    expect(kinds(long2)).toContain('schema_invalid');
+    const huge = validateProposal('x'.repeat(70_000), brief01);
+    const hugeObj = validateProposal({ ...GOOD, summary: 'b'.repeat(70_000) }, brief01);
+    expect(performance.now() - t0).toBeLessThan(250);
+    expect(kinds(long)).toContain('schema_invalid');
+    expect(long.status).toBe('rejected');
+    expect(kinds(huge)).toEqual(['malformed_json']);
+    expect(kinds(hugeObj)).toEqual(['schema_invalid']);
+  });
+
+  it('issue messages and paths never echo model output', () => {
+    const raw = {
+      summary: 'ok',
+      acceptanceCriteria: [{ requirementId: 'LEAK-ID-9', text: 'fine', leakKey: 1 }],
+      toolsLEAK: 1,
+      command: 'x',
+    };
+    const plan: FixtureCtx = { operation: 'draftTaskPlan', allowedRequirementIds: ['FB-01'], knownResourceKeys: [] };
+    const p = validateProposal({ tasks: [{ title: 'T', description: 'D', requirementIds: ['FB-01'], resourceClaims: [{ key: 'leak:res', mode: 'shared' }] }], weirdLEAKkey: 1 }, plan);
+    for (const v of [validateProposal(raw, brief01), p]) {
+      const text = JSON.stringify(v.issues);
+      expect(v.issues.length).toBeGreaterThan(0);
+      for (const leak of ['LEAK', 'leak']) expect(text).not.toContain(leak);
+    }
+  });
+
+  it('canonicalJson ignores key order', () => {
+    expect(canonicalJson({ b: 1, a: { d: [2, { y: 1, x: 2 }], c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: [2, { x: 2, y: 1 }] }, b: 1 }));
   });
 });

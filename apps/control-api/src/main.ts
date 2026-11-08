@@ -9,6 +9,7 @@ try {
     config,
     databaseUrl,
     policyFile: process.env['SELARIKRU_POLICY_FILE'] || undefined,
+    planConfigFile: process.env['SELARIKRU_PLAN_CONFIG_FILE'] || undefined,
     onError: (e) => console.error('lease expiry pass failed:', e instanceof Error ? e.message : e),
   });
   console.log(`control API listening on ${server.address}`);

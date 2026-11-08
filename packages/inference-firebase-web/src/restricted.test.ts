@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { validateProposal } from '@selarikru/domain';
 import { FirebaseHybridAssistantAdapter, type TelemetryEvent } from './adapter.ts';
 import fixtureJson from '../../../fixtures/assistant/restricted-brief.json' with { type: 'json' };
-import { RestrictedDraftHold, publishDraft } from './restricted.ts';
+import { RestrictedDraftHold, draftContentSha256, publishDraft, reclassificationRequest, type ReclassificationGrant } from './restricted.ts';
 import type { AssistantSdk, SdkModel } from './sdk.ts';
 
 const fixture = fixtureJson as {
   classification: string; canary: string; taskText: string; allowedRequirementIds: string[]; forbiddenMandatoryScope: string[];
 };
-const OUT = JSON.stringify({ summary: 'Feedback form.', acceptanceCriteria: [{ requirementId: 'FB-01', text: 'Title is 3 to 120 code points.' }] });
+const OUT = JSON.stringify({ summary: 'Feedback form.', acceptanceCriteria: [{ requirementId: 'FB-01', text: `Title is 3 to 120 code points. ${fixtureJson.canary}` }] });
 
 const policy = (over: Record<string, unknown> = {}) =>
   ({ policyVersion: 'p1', preferredMode: 'ONLY_ON_DEVICE', selectedSources: ['s1'], destinations: [], ...over }) as never;
@@ -53,6 +53,8 @@ describe('restricted draft never reaches network, storage, analytics or checkpoi
     expect(proposal.status).toBe('ok');
     expect(proposal.observedSource).toBe('ON_DEVICE');
     expect(prompts[0]).toContain(fixture.canary); // the device model sees it; nothing else does
+    // Controls: the canary really is in the output and in the proposal, so the absence checks below mean something.
+    expect(JSON.stringify(proposal.data)).toContain(fixture.canary);
 
     const hold = new RestrictedDraftHold();
     const draft = hold.hold({ id: 'd1', sourceClassifications: ['restricted'], proposal });
@@ -63,6 +65,8 @@ describe('restricted draft never reaches network, storage, analytics or checkpoi
     // Serializing the hold or the draft cannot leak content.
     expect(JSON.stringify(hold)).not.toContain(fixture.canary);
     expect(JSON.stringify(draft)).not.toContain('Feedback form');
+    expect(JSON.stringify(draft)).not.toContain(fixture.canary);
+    expect(Object.isFrozen(draft)).toBe(true);
     expect(String(draft)).not.toContain(fixture.canary);
 
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -74,6 +78,7 @@ describe('restricted draft never reaches network, storage, analytics or checkpoi
     expect(events.length).toBe(1);
     expect(JSON.stringify(events)).not.toContain(fixture.canary);
     expect(JSON.stringify(events)).not.toContain('Feedback form');
+    expect(JSON.stringify(reclassificationRequest(draft, await draftContentSha256(draft), 'share with owner'))).not.toContain(fixture.canary);
 
     hold.discard('d1');
     expect(hold.get('d1')).toBeUndefined();
@@ -90,32 +95,48 @@ describe('restricted draft never reaches network, storage, analytics or checkpoi
 
 describe('publishing a restricted draft requires a separate permitted policy change', () => {
   const hold = new RestrictedDraftHold();
-  const draft = hold.hold({ id: 'd', sourceClassifications: ['restricted'], proposal: { data: {} } as never });
-  const admin = { actor: 'administrator' as const, targetClassification: 'internal' as const, reason: 'owner approved sharing' };
-
-  it('denies while the source stays restricted, whatever the policy says', () => {
-    const allow = policy({ operations: { modify_policy: 'allow' } });
-    expect(publishDraft(draft, allow).ok).toBe(false);
-    expect(publishDraft(draft, undefined, admin).ok).toBe(false);
-    expect(publishDraft(draft, policy(), admin).ok).toBe(false); // modify_policy not configured
-    expect(publishDraft(draft, policy({ operations: { modify_policy: 'deny' } }), admin).ok).toBe(false);
-    expect(publishDraft(draft, allow, { ...admin, actor: 'agent' }).ok).toBe(false);
-    expect(publishDraft(draft, allow, { ...admin, targetClassification: 'restricted' as never }).ok).toBe(false);
+  const draft = hold.hold({ id: 'd', sourceClassifications: ['restricted'], proposal: { data: { a: 1 } } as never });
+  const decision = { decision: 'allow', reason: 'administrator_authorized:modify_policy', policyVersion: 'p1', record: 'policy_decision' } as const;
+  const grantFor = async (over: Partial<ReclassificationGrant> = {}): Promise<ReclassificationGrant> => ({
+    grantId: 'dec_1', draftId: 'd', contentSha256: await draftContentSha256(draft), sourceClassification: 'restricted',
+    targetClassification: 'internal', decision, ...over,
   });
 
-  it('succeeds only on an explicit reclassification under evaluate, with a recorded decision', () => {
-    const allow = policy({ operations: { modify_policy: 'allow' } });
-    const r = publishDraft(draft, allow, admin);
+  it('denies while the source stays restricted: no grant, wrong draft, wrong content, wrong or non-lowering target, denied decision', async () => {
+    expect((await publishDraft(draft, undefined)).ok).toBe(false);
+    for (const over of [
+      { draftId: 'other' }, { contentSha256: 'f'.repeat(64) }, { sourceClassification: 'internal' as const },
+      { targetClassification: 'restricted' as never }, { decision: { ...decision, decision: 'deny' as const } },
+      { decision: { ...decision, decision: 'require_approval' as const } },
+    ]) expect((await publishDraft(draft, await grantFor(over))).ok, JSON.stringify(over)).toBe(false);
+  });
+
+  it('a content change after the grant invalidates it', async () => {
+    const grant = await grantFor();
+    const edited = hold.hold({ id: 'd', sourceClassifications: ['restricted'], proposal: { data: { a: 2 } } as never });
+    expect((await publishDraft(edited, grant)).ok).toBe(false);
+    hold.hold({ id: 'd', sourceClassifications: ['restricted'], proposal: { data: { a: 1 } } as never });
+  });
+
+  it('succeeds only with a matching server grant carrying a recorded evaluate decision', async () => {
+    const r = await publishDraft(draft, await grantFor());
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.value.classification).toBe('internal');
-      expect(r.value.reclassifiedFrom).toBe('restricted');
-      expect(r.value.decision).toMatchObject({ decision: 'allow', record: 'policy_decision', policyVersion: 'p1' });
+      expect(r.value).toMatchObject({ classification: 'internal', reclassifiedFrom: 'restricted', grantId: 'dec_1' });
+      expect(r.value.decision).toMatchObject({ decision: 'allow', record: 'policy_decision' });
     }
   });
 
-  it('never publishes a secret draft', () => {
+  it('never publishes a secret draft, and the request needs a real reason', async () => {
     const secret = hold.hold({ id: 's', sourceClassifications: ['secret'], proposal: { data: {} } as never });
-    expect(publishDraft(secret, policy({ operations: { modify_policy: 'allow' } }), admin).ok).toBe(false);
+    const g = { ...(await grantFor()), draftId: 's', contentSha256: await draftContentSha256(secret), sourceClassification: 'secret' as never };
+    expect((await publishDraft(secret, g)).ok).toBe(false);
+    expect(() => reclassificationRequest(draft, 'a'.repeat(64), '   ')).toThrow();
+    expect(() => reclassificationRequest(secret, 'a'.repeat(64), 'why')).toThrow();
+  });
+
+  it('the request carries only the draft id, hash, labels and reason', async () => {
+    const req = reclassificationRequest(draft, await draftContentSha256(draft), 'owner approved');
+    expect(Object.keys(req).sort()).toEqual(['contentSha256', 'draftId', 'reason', 'sourceClassification', 'targetClassification']);
   });
 });

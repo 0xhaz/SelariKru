@@ -1,5 +1,5 @@
-import { err, ok, type Result } from '@selarikru/domain';
-import { deriveClassification, evaluate, type Classification, type Policy, type PolicyDecision } from '@selarikru/policy';
+import { canonicalJson, err, ok, type Result } from '@selarikru/domain';
+import { deriveClassification, type Classification, type PolicyDecision } from '@selarikru/policy';
 import type { AssistantProposal } from './adapter.ts';
 
 /**
@@ -31,6 +31,7 @@ export class RestrictedDraftHold {
     const draft = { id: input.id, classification } as { id: string; classification: Classification; proposal?: AssistantProposal };
     Object.defineProperty(draft, 'proposal', { value: input.proposal, enumerable: false });
     Object.defineProperty(draft, 'toString', { value: () => `[LocalDraft ${input.id} ${classification}]`, enumerable: false });
+    Object.freeze(draft);
     this.#drafts.set(input.id, draft as LocalDraft);
     return draft as LocalDraft;
   }
@@ -52,35 +53,65 @@ export class RestrictedDraftHold {
   }
 }
 
-/** Supplied by the authenticated administrator flow, never derived from model output. */
-export interface PolicyChange {
-  readonly actor: 'agent' | 'administrator' | 'unknown';
-  readonly targetClassification: Exclude<Classification, 'secret'>;
+/** What the browser sends to ask for a reclassification: identifiers, labels and a reason. Never draft text. */
+export interface ReclassificationRequest {
+  readonly draftId: string;
+  readonly contentSha256: string;
+  readonly sourceClassification: Classification;
+  readonly targetClassification: 'public' | 'internal';
   readonly reason: string;
+}
+
+export function reclassificationRequest(
+  draft: LocalDraft,
+  contentSha256: string,
+  reason: string,
+  targetClassification: 'public' | 'internal' = 'internal',
+): ReclassificationRequest {
+  if (draft.classification === 'secret') throw new Error('secret drafts are never published');
+  if (reason.trim() === '') throw new Error('a reclassification needs a reason');
+  return { draftId: draft.id, contentSha256, sourceClassification: draft.classification, targetClassification, reason: reason.trim() };
+}
+
+/** SHA-256 over the canonical JSON of the draft's data. The server computes the same over what it is shown. */
+export async function draftContentSha256(draft: LocalDraft): Promise<string> {
+  const bytes = new TextEncoder().encode(canonicalJson(draft.proposal.data));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Returned by the server after it evaluated `modify_policy` for the authenticated owner and persisted the decision. */
+export interface ReclassificationGrant {
+  readonly grantId: string;
+  readonly draftId: string;
+  readonly contentSha256: string;
+  readonly sourceClassification: Classification;
+  readonly targetClassification: 'public' | 'internal';
+  readonly decision: PolicyDecision;
 }
 
 export interface PublishedDraft {
   readonly id: string;
   readonly classification: Classification;
   readonly reclassifiedFrom: Classification;
-  readonly reason: string;
-  /** The recorded `evaluate` decision that permitted it. */
+  readonly grantId: string;
+  /** The recorded server `evaluate` decision that permitted it. */
   readonly decision: PolicyDecision;
 }
 
 /**
- * A restricted draft stays restricted. It can be published to hosted coordination only after a separate,
- * explicit reclassification that `evaluate` allows for the administrator (`modify_policy`). Without that change,
- * with a secret source, or with a target that is not lower than the source label, this denies.
+ * A restricted draft stays restricted. This local gate refuses unless a server grant is presented that is bound to this
+ * exact draft ID and content hash, lowers the label, and carries an allow decision. The browser cannot evaluate policy;
+ * the server independently verifies the same grant before it accepts anything derived from the draft.
  */
-export function publishDraft(draft: LocalDraft, policy: Policy | undefined, change?: PolicyChange): Result<PublishedDraft, string> {
-  if (draft.classification === 'public' || draft.classification === 'internal') {
-    return err('not_restricted: nothing to reclassify');
-  }
+export async function publishDraft(draft: LocalDraft, grant: ReclassificationGrant | undefined): Promise<Result<PublishedDraft, string>> {
+  if (draft.classification === 'public' || draft.classification === 'internal') return err('not_restricted: nothing to reclassify');
   if (draft.classification === 'secret') return err('secret drafts are never published');
-  if (!change) return err('source_restricted: publishing needs a separate permitted policy change');
-  if (change.targetClassification !== 'public' && change.targetClassification !== 'internal') return err('invalid_target_classification');
-  const decision = evaluate({ kind: 'modify_policy', actor: change.actor }, policy);
-  if (decision.decision !== 'allow') return err(`policy_${decision.decision}: ${decision.reason}`);
-  return ok({ id: draft.id, classification: change.targetClassification, reclassifiedFrom: draft.classification, reason: change.reason, decision });
+  if (!grant) return err('source_restricted: publishing needs a separate permitted policy change');
+  if (grant.draftId !== draft.id) return err('grant_not_for_this_draft');
+  if (grant.sourceClassification !== draft.classification) return err('grant_source_mismatch');
+  if (grant.targetClassification !== 'public' && grant.targetClassification !== 'internal') return err('invalid_target_classification');
+  if (grant.contentSha256 !== (await draftContentSha256(draft))) return err('grant_content_mismatch');
+  if (grant.decision?.decision !== 'allow' || grant.decision.record !== 'policy_decision') return err('grant_decision_not_allow');
+  return ok({ id: draft.id, classification: grant.targetClassification, reclassifiedFrom: draft.classification, grantId: grant.grantId, decision: grant.decision });
 }

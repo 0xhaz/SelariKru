@@ -7,6 +7,8 @@ import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type Token
 import { type ControlApiConfig } from './config.ts';
 import { AppError, unauthenticated } from './errors.ts';
 import { registerOwnerRoutes } from './routes-owner.ts';
+import { registerProposalRoutes } from './routes-proposals.ts';
+import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerEventStream } from './sse.ts';
 
@@ -29,6 +31,8 @@ export interface AppDeps {
   readonly scheduler: Scheduler;
   /** Project policy, already loaded. Absent policy denies every policy-gated command. */
   readonly policy: Policy | undefined;
+  /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
+  readonly planConfig?: PlanConfigSource | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -141,6 +145,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set() };
   registerOwnerRoutes(app, ctx);
+  registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
 

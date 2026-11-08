@@ -2,6 +2,7 @@ import { createDb } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
 import { createScheduler } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
+import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import type { ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
@@ -17,6 +18,8 @@ export async function startServer(options: {
   config: ControlApiConfig;
   databaseUrl: string;
   policyFile?: string | undefined;
+  /** JSON file of per-project plan settings (see loadPlanConfigFile). Without it, proposal review is blocked. */
+  planConfigFile?: string | undefined;
   verifier?: TokenVerifier | undefined;
   now?: (() => Date) | undefined;
   onError?: ((e: unknown) => void) | undefined;
@@ -27,7 +30,7 @@ export async function startServer(options: {
   const policy = options.policyFile ? loadPolicyFile(options.policyFile) : loadDefaultPolicy();
   const scheduler = createScheduler({ db, now, policy });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
-  const app = buildApp({ config, db, verifier, now, scheduler, policy });
+  const app = buildApp({ config, db, verifier, now, scheduler, policy, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined });
   const driver = startLeaseExpiryDriver({
     scheduler, now, intervalMs: config.expireLeasesIntervalMs,
     ...(options.onError ? { onError: options.onError } : {}),

@@ -5,4 +5,4 @@ export { ConfigError, ControlApiConfigSchema, loadConfigFromEnv, parseConfig, ty
 export { type TokenVerifier, type Principal } from './auth.ts';
 export { AppError } from './errors.ts';
 export { startServer, type RunningServer } from './server.ts';
-export { reviewPlanProposal, ProjectPlanConfigSchema, type ProjectPlanConfig, type ProposalEnvelope, type PlanReview, type PlanReviewError } from './proposals.ts';
+export { reviewPlanProposal, loadPlanConfigFile, ProjectPlanConfigSchema, ProjectPlanSettingsSchema, type PlanConfigSource, type ProjectPlanConfig, type ProjectPlanSettings, type ProposalEnvelope, type PlanReview, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
