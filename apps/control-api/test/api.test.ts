@@ -242,6 +242,27 @@ describe('task commands', () => {
     expect(snap.body.tasks.find((x: any) => x.taskId === 't1')).toMatchObject({ status: 'running', cancel: { state: 'cancel_requested', operationId: res.body.operationId } });
   });
 
+  it('cancel while verifying has no live attempt, so it cancels at once and leaves no open request', async () => {
+    await seedTask(t.db, specFor('t1'), 'verifying');
+    const res = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: 0, idempotencyKey: 'cv1' });
+    expect(res.status).toBe(202);
+    expect(res.body.state).toBe('applied');
+    expect((await taskStatus('t1'))['status']).toBe('cancelled');
+    const types = (await t.db.execute(sql`SELECT type FROM events ORDER BY sequence`)).map((r) => r['type']);
+    expect(types).toEqual(['task.cancelled']);
+    expect(await t.db.execute(sql`SELECT 1 FROM task_commands WHERE state = 'cancel_requested'`)).toHaveLength(0);
+  });
+
+  it('retry refuses a task with an open cancel request, with a clear code', async () => {
+    await seedTask(t.db, specFor('t1'), 'failed');
+    await t.db.execute(sql`INSERT INTO task_commands (tenant_id, project_id, operation_id, task_id, revision, command, state, requested_by, requested_at)
+      VALUES ('tenant_a', ${PROJECT}, 'op_x', 't1', 1, 'cancel', 'cancel_requested', 'o', now())`);
+    const res = await post(h.app, '/v1/tasks/t1/commands', { command: 'retry', expectedRevision: 0, idempotencyKey: 'cr1' });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('cancel_pending');
+    expect((await taskStatus('t1'))['status']).toBe('failed');
+  });
+
   it('a disallowed command is 403 with a stable code', async () => {
     await seedTask(t.db, specFor('t1'), 'merged');
     const res = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: 0, idempotencyKey: 'c5' });

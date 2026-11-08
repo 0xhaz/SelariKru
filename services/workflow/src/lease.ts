@@ -155,8 +155,15 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
   // An open cancel request wins over whatever the worker reports: the attempt ends, the task is cancelled.
   if (await hasCancelRequest(tx, key, lease.revision)) {
     await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
-    await closeLease(tx, key, lease.attemptId, now, { outcome: 'cancelled', exitReason: 'cancel_requested' });
-    await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
+    // History is kept: the reported head commit (the only pointer to pushed work), the worker's own reason and its cost.
+    const reportedReason = result.outcome === 'completed' ? null : result.reason;
+    await closeLease(tx, key, lease.attemptId, now, {
+      outcome: 'cancelled', exitReason: reportedReason ?? 'completed', headSha: result.outcome === 'completed' ? result.headSha : undefined,
+    });
+    await tx.update(schema.attempts)
+      .set({ detail: { ...(live.detail ?? {}), cancelRequested: true, reportedOutcome: result.outcome, reportedReason, reportedCostUsd: result.reportedCostUsd ?? null } })
+      .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
+    await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, lease.attemptId, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
     return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: 'cancelled' };
   }
   let event: { type: 'attempt.completed' | 'attempt.failed' | 'task.blocked' | 'approval.requested'; actor: typeof runner | typeof SCHEDULER_ACTOR; payload: Record<string, unknown> };

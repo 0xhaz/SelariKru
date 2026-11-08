@@ -140,6 +140,39 @@ describe('cancel request is honoured by the scheduler', () => {
     expect((await t.db.execute(sql`SELECT state FROM task_commands WHERE command = 'cancel'`))[0]!['state']).toBe('cancelled');
   });
 
+  it('a cancelled attempt keeps the reported headSha, reason and its id on the events', async () => {
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const { token } = await enrolRunner(h.app);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    await cancel('t1', Number((await taskRow())['row_revision']), 'k5');
+    const sha = 'd'.repeat(40);
+    await post(h.app, '/v1/runners/result', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'completed', headSha: sha, reportedCostUsd: 0.5 } }, bearer(token));
+    const a = (await t.db.execute(sql`SELECT head_sha, outcome, exit_reason, detail FROM attempts`))[0]!;
+    expect(a).toMatchObject({ head_sha: sha, outcome: 'cancelled', exit_reason: 'completed' });
+    expect(a['detail']).toMatchObject({ cancelRequested: true, reportedOutcome: 'completed', reportedCostUsd: 0.5 });
+    const ev = (await t.db.execute(sql`SELECT attempt_id FROM events WHERE type = 'task.cancelled'`))[0]!;
+    expect(ev['attempt_id']).toBe(lease.attemptId);
+  });
+
+  it('a failure reason reported after a cancel request is kept, and expiry keeps the attempt id too', async () => {
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const { token } = await enrolRunner(h.app);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    await cancel('t1', Number((await taskRow())['row_revision']), 'k6');
+    await post(h.app, '/v1/runners/result', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'failed', reason: 'unit tests failed' } }, bearer(token));
+    const a = (await t.db.execute(sql`SELECT exit_reason, detail FROM attempts`))[0]!;
+    expect(a['exit_reason']).toBe('unit tests failed');
+    expect(a['detail']).toMatchObject({ reportedOutcome: 'failed', reportedReason: 'unit tests failed' });
+
+    await resetDb(t.db);
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const l2 = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    await cancel('t1', Number((await taskRow())['row_revision']), 'k7');
+    h.clock.advance(61);
+    await sched().expireLeases(h.clock.now());
+    expect((await t.db.execute(sql`SELECT attempt_id FROM events WHERE type = 'task.cancelled'`))[0]!['attempt_id']).toBe(l2.attemptId);
+  });
+
   it('a normal completion with no cancel request leaves no stale request behind', async () => {
     await seedTask(t.db, specFor('t1'), 'ready');
     const { token } = await enrolRunner(h.app);

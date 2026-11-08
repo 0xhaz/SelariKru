@@ -22,6 +22,11 @@ describe('plan task fields', () => {
     expect(plan(spec({ acceptanceCheckIds: ['bad id with spaces'] })).success).toBe(false);
     expect(plan(spec({ taskId: 'a'.repeat(200) })).success).toBe(false);
   });
+  it('rejects prefixed secret forms in identifiers and accepts look-alike words', () => {
+    expect(plan(spec({ taskId: `task_${CANARY}` })).success).toBe(false);
+    expect(plan(spec({ role: 'x_ghp_abcdefghijklmnopqrstuvwxyz0123' })).success).toBe(false);
+    expect(plan(spec({ allowedPaths: ['src/sk-button-component-variants.tsx'], requirementIds: ['token:refresh', 'pk-migration-for-feedback-table'], acceptanceCheckIds: ['credentials:store'] })).success).toBe(true);
+  });
   it('lets the title through, because the API redacts it', () => {
     expect(plan(spec({ title: `use ${CANARY}` })).success).toBe(true);
   });

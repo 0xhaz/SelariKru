@@ -1,6 +1,7 @@
 import { TaskSpecSchema, err, ok, transition, type AttemptRecord, type Result, type TaskStatus } from '@selarikru/domain';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq } from 'drizzle-orm';
+import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR } from './events.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type TaskKey } from './taskstate.ts';
 import type { RetryReceipt, RetryRefusal, SchedulerContext } from './types.ts';
@@ -14,6 +15,8 @@ export async function retryTask(ctx: SchedulerContext, key: TaskKey, requestedBy
   const run = async (t: Tx): Promise<Result<RetryReceipt, RetryRefusal>> => {
     const row = await lockStatusRow(t, key);
     if (!row) return err({ kind: 'retry_refused', reason: 'task_not_found' });
+    // A task the owner asked to cancel is not retried until that request is resolved.
+    if (await hasCancelRequest(t, key, row.currentRevision)) return err({ kind: 'retry_refused', reason: 'cancel_requested', status: row.status });
     const revisions = await t
       .select({ spec: schema.taskRevisions.spec, runId: schema.taskRevisions.runId })
       .from(schema.taskRevisions)

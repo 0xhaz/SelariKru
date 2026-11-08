@@ -38,8 +38,9 @@ const idParam = (req: FastifyRequest): string => (req.params as { id: string }).
 
 const SYSTEM_ACTOR = { kind: 'system', id: 'control-api' } as const;
 const REPLANNABLE: readonly string[] = ['planned', 'ready'];
-const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked'];
-const CANCEL_REQUEST: readonly string[] = ['running', 'verifying'];
+// Only a running task has a live attempt to stop. Every other active status has none, so cancel is immediate.
+const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
+const CANCEL_REQUEST: readonly string[] = ['running'];
 
 /**
  * `approvals.expected_revisions` maps what the approver saw to its revision: `planRevision` for the run's plan, any other
@@ -216,6 +217,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           }
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });
+          // Nothing is left to reap, so any request still open for this revision is closed with it.
+          await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(and(
+            eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.taskId, taskId),
+            eq(schema.taskCommands.command, 'cancel'), eq(schema.taskCommands.state, 'cancel_requested'), eq(schema.taskCommands.revision, row.currentRevision)));
           await tx.insert(schema.taskCommands).values({
             tenantId: config.tenantId, projectId: row.projectId, operationId, taskId, revision: row.currentRevision,
             command: 'cancel', state: 'applied', requestedBy: uid, requestedAt: at,
@@ -228,6 +233,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow retrying', { reason: gate.reason, decision: gate.decision });
         // The scheduler owns the transition and emits `task.ready` under its own actor; we only say who asked.
         const retried = await ctx.scheduler.retry(key, uid, operationId, tx);
+        if (!retried.ok && retried.error.reason === 'cancel_requested') throw new AppError(403, 'cancel_pending', 'a cancel request is open for this task; retry is refused until it resolves', { status: row.status });
         if (!retried.ok) throw new AppError(403, 'command_not_allowed', retried.error.reason, { status: row.status, attemptsUsed: retried.error.attemptsUsed });
         await tx.insert(schema.taskCommands).values({
           tenantId: config.tenantId, projectId: row.projectId, operationId, taskId, revision: row.currentRevision,

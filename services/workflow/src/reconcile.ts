@@ -82,7 +82,7 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
     // An open cancel request makes the end of this attempt final: the task is cancelled, never re-dispatched.
     if (await hasCancelRequest(tx, key, attempt.revision)) {
       await closeLease(tx, key, attemptId, now, { outcome: 'cancelled', exitReason: reason });
-      await confirmCancel(tx, key, state, statusRow.rowRevision, eventScope, now, { attemptId, cause: reason });
+      await confirmCancel(tx, key, state, statusRow.rowRevision, eventScope, now, attemptId, { attemptId, cause: reason });
       return reason;
     }
 

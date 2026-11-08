@@ -21,12 +21,12 @@ export async function hasCancelRequest(tx: Tx, key: TaskKey, revision: number): 
  * `task.cancelled` is recorded. The caller has locked the status row and has already closed the attempt's lease.
  */
 export async function confirmCancel(
-  tx: Tx, key: TaskKey, state: TaskState, rowRevision: number, scope: Omit<EventScope, 'aggregateRevision'>, now: Date, cause: Record<string, unknown>,
+  tx: Tx, key: TaskKey, state: TaskState, rowRevision: number, scope: Omit<EventScope, 'aggregateRevision'>, now: Date, attemptId: string | null, cause: Record<string, unknown>,
 ): Promise<number> {
   const moved = transition(state, { type: 'cancel' });
   if (!moved.ok) throw new Error(`illegal cancel transition: ${JSON.stringify(moved.error)}`);
   const aggregateRevision = await setStatus(tx, key, rowRevision, moved.value.status, now);
   await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(requested(key, state.revision));
-  await emit(tx, { ...scope, aggregateRevision }, now, { type: 'task.cancelled', attemptId: null, actor: SYSTEM_ACTOR, payload: { reason: 'cancel_requested', ...cause } });
+  await emit(tx, { ...scope, aggregateRevision }, now, { type: 'task.cancelled', attemptId, actor: SYSTEM_ACTOR, payload: { reason: 'cancel_requested', ...cause } });
   return aggregateRevision;
 }

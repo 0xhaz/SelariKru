@@ -22,6 +22,7 @@ export const ERROR_CODES = [
   'task_not_replannable',
   'command_not_allowed',
   'command_not_supported',
+  'cancel_pending',
   'policy_denied',
   'idempotency_key_conflict',
   'scope_mismatch',
