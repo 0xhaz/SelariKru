@@ -4,4 +4,5 @@ packages:
   - "packages/*"
   - "tools/*"
   - "examples/*"
+  - "tests/*"
   - '!examples/feedback-board-starter'

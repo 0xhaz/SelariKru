@@ -1,4 +1,4 @@
-import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text } from 'drizzle-orm/pg-core';
+import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { runs } from './projects.ts';
@@ -75,9 +75,15 @@ export const attempts = pgTable(
     runner: text('runner'),
     harness: text('harness'),
     leaseFence: integer('lease_fence'),
+    /** Credential the holder presents with its fence. Never copied into events. */
+    leaseToken: text('lease_token'),
+    lastHeartbeatAt: tstz('last_heartbeat_at'),
+    leaseExpiresAt: tstz('lease_expires_at'),
     modelRoute: text('model_route'),
     baseSha: text('base_sha'),
     headSha: text('head_sha'),
+    /** Domain AttemptRecord outcome. Null only for rows written before the scheduler owned attempts. */
+    outcome: text('outcome'),
     exitReason: text('exit_reason'),
     startedAt: tstz('started_at'),
     endedAt: tstz('ended_at'),
@@ -89,6 +95,9 @@ export const attempts = pgTable(
       columns: [t.tenantId, t.projectId, t.taskId, t.revision],
       foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
     }),
+    // Database-level backstops for the scheduler's locking: fences never repeat, one live lease per task.
+    uniqueIndex('attempts_task_revision_fence_key').on(t.tenantId, t.projectId, t.taskId, t.revision, t.leaseFence).where(sql`lease_fence IS NOT NULL`),
+    uniqueIndex('attempts_one_active_lease').on(t.tenantId, t.projectId, t.taskId).where(sql`lease_token IS NOT NULL AND ended_at IS NULL`),
   ],
 );
 
@@ -111,6 +120,7 @@ export const resourceClaims = pgTable(
       foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
     }),
     foreignKey({ columns: [t.tenantId, t.projectId, t.attemptId], foreignColumns: [attempts.tenantId, attempts.projectId, attempts.attemptId] }),
+    uniqueIndex('resource_claims_one_active_exclusive').on(t.tenantId, t.projectId, t.resourceKey).where(sql`mode = 'exclusive' AND released_at IS NULL`),
   ],
 );
 

@@ -1,0 +1,21 @@
+{
+  "name": "@selarikru/fault-injection-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fault-injection suites that need real PostgreSQL through DATABASE_URL (compose defaults in test setup).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@selarikru/persistence": "workspace:*",
+    "@selarikru/workflow": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "drizzle-orm": "0.45.4",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

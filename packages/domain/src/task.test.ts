@@ -235,3 +235,31 @@ describe('task state machine', () => {
     expect(transition(failed, start(1)).ok).toBe(false);
   });
 });
+
+describe('repair_refused', () => {
+  const failedThrice = (): TaskState => run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 3 }), [
+    { type: 'dependencies_satisfied' }, start(1), { type: 'attempt_failed', reason: 'x' }, { type: 'retry_requested' },
+    start(2), { type: 'attempt_failed', reason: 'y' }, { type: 'retry_requested' }, start(3), { type: 'attempt_failed', reason: 'z' },
+  ]);
+
+  it('moves a failed task to blocked and keeps its failures as failures', () => {
+    const r = transition(failedThrice(), { type: 'repair_refused', reason: 'repair_budget_exhausted' });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.status).toBe('blocked');
+      expect(r.value.attempts.map((a) => a.outcome)).toEqual(['failed', 'failed', 'failed']);
+    }
+  });
+
+  it('a refused task that is unblocked still cannot start another attempt', () => {
+    const s = run(failedThrice(), [{ type: 'repair_refused', reason: 'x' }, { type: 'unblocked' }]);
+    expect(s.status).toBe('ready');
+    expect(transition(s, { type: 'attempt_started', attemptId: 'a4' }).ok).toBe(false);
+    expect(transition(s, { type: 'repair_refused', reason: 'x' }).ok).toBe(true);
+  });
+
+  it('is not allowed from running', () => {
+    const s = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 3 }), [{ type: 'dependencies_satisfied' }, start(1)]);
+    expect(transition(s, { type: 'repair_refused', reason: 'x' }).ok).toBe(false);
+  });
+});

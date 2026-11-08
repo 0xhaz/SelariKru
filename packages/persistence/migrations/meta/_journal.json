@@ -22,6 +22,13 @@
       "when": 1794153766472,
       "tag": "0002_hesitant_johnny_storm",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794154535527,
+      "tag": "0003_marvelous_titanium_man",
+      "breakpoints": true
     }
   ]
 }

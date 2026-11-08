@@ -89,6 +89,8 @@ export type TaskEvent =
   | { type: 'verification_passed' }
   | { type: 'verification_failed'; reason: string }
   | { type: 'retry_requested' }
+  /** The scheduler refused a further repair: the task stops at `blocked`, keeping the reason on the event. */
+  | { type: 'repair_refused'; reason: string }
   | { type: 'change_merged' }
   | { type: 'cancel' }
   | { type: 'superseded' };
@@ -121,7 +123,7 @@ export function newTaskStateFromSpec(spec: TaskSpec, kind: TaskKind): Result<Tas
 }
 
 /** Interrupted attempts (approval/blocked pauses) do not consume the repair budget. */
-function budgetUsed(attempts: readonly AttemptRecord[]): number {
+export function budgetUsed(attempts: readonly AttemptRecord[]): number {
   return attempts.filter((a) => a.outcome !== 'interrupted').length;
 }
 
@@ -136,6 +138,8 @@ const SIMPLE: Partial<Record<TaskEvent['type'], { from: readonly TaskStatus[]; t
   approval_denied: { from: ['awaiting_approval'], to: 'blocked' },
   blocked: { from: ['running'], to: 'blocked' },
   unblocked: { from: ['blocked'], to: 'ready' },
+  // Attempts stay as they are: a refused repair never rewrites a failure into an interruption.
+  repair_refused: { from: ['failed', 'ready'], to: 'blocked' },
   verification_passed: { from: ['verifying'], to: 'verified' },
   cancel: { from: ACTIVE, to: 'cancelled' },
   // Any non-merged revision can be superseded (not already superseded).
