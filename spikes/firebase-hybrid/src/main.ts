@@ -207,7 +207,7 @@ async function run(mode: ModeName) {
     validation: null,
   };
   try {
-    const res = await models[mode].generateContent(fixture.prompt);
+    const res = await models[mode].generateContent(`${fixture.prompt}\n\nAllowed requirement IDs: ${fixture.allowedRequirementIds.join(", ")}`);
     row.elapsedMs = Math.round((performance.now() - t0) * 100) / 100;
     row.observedInferenceSource = res.response.inferenceSource ?? "UNKNOWN";
     row.rawOutput = res.response.text();
