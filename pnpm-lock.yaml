@@ -76,6 +76,9 @@ importers:
 
   packages/inference-firebase-web:
     dependencies:
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@selarikru/policy':
         specifier: workspace:*
         version: link:../policy

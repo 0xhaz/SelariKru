@@ -1,0 +1,11 @@
+{
+  "version": "0.1",
+  "id": "restricted-brief",
+  "note": "Synthetic content only. The canary is obviously fake and exists so tests can prove it never leaves the device.",
+  "classification": "restricted",
+  "canary": "CANARY-RESTRICTED-FAKE-0000-DO-NOT-EXPORT",
+  "operation": "draftBrief",
+  "taskText": "Draft criteria for submitting feedback. Internal note (fake): CANARY-RESTRICTED-FAKE-0000-DO-NOT-EXPORT. Require a trimmed title of 3-120 code points.",
+  "allowedRequirementIds": ["FB-01", "FB-02"],
+  "forbiddenMandatoryScope": ["login", "payments", "external database account", "production deployment"]
+}

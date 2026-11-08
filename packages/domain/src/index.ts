@@ -6,3 +6,4 @@ export * from './attempt.ts';
 export * from './evidence.ts';
 export * from './events.ts';
 export * from './plan.ts';
+export * from './proposal.ts';

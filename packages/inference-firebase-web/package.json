@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@selarikru/domain": "workspace:*",
     "@selarikru/policy": "workspace:*",
     "ajv": "8.20.0",
     "firebase": "13.1.0"
