@@ -46,6 +46,8 @@ export interface SbxRuntimeOptions {
 const PID_FILE = '/tmp/selarikru-attempt.pid';
 /** Records the agent's pid, then becomes the agent, so the pid is the agent's (observed need: spike section 5). */
 export const PID_WRAPPER = `echo $$ > ${PID_FILE}; exec "$@"`;
+/** As `PID_WRAPPER`, plus an in-guest hard limit: `timeout` sends TERM to the agent's process group, then KILL 10 s later. */
+export const timedWrapper = (seconds: number): string => `echo $$ > ${PID_FILE}; exec timeout -k 10 ${Math.max(1, Math.floor(seconds))} "$@"`;
 /**
  * Signals the agent and its children from inside the sandbox. Killing the host `sbx exec` client does not stop the agent
  * (spike section 5); this does (observed, one sample). Exits 0 whether or not a process was found.
@@ -144,7 +146,8 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   }
 
   async start(handle: SandboxHandle, task: TaskBundle): Promise<AttemptHandle> {
-    const stream = this.sbx.stream(['exec', '-w', task.cwd, handle.sandboxId, 'sh', '-c', PID_WRAPPER, 'sh', ...task.command]);
+    const wrapper = task.timeoutSeconds !== undefined ? timedWrapper(task.timeoutSeconds) : PID_WRAPPER;
+    const stream = this.sbx.stream(['exec', '-w', task.cwd, handle.sandboxId, 'sh', '-c', wrapper, 'sh', ...task.command]);
     const attempt: AttemptHandle = {
       attemptId: task.attemptId,
       sandboxId: handle.sandboxId,
@@ -200,10 +203,10 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
     } catch (err) {
       detail = err instanceof Error ? err.message : 'signal failed';
     }
-    // The run ending is evidence only if we did not end the host client ourselves.
-    if (!this.clientKilled.has(attempt) && (await raceExit(this.t.graceMs))) return ack('stopped', true, false, detail);
-
-    // The agent ignored the signal or the signal never ran: stop the whole sandbox, then confirm from sbx itself.
+    // The run ending is not evidence the sandbox is quiet: a background process (a daemon that outlived the agent) can keep
+    // writing to the bind mount. So the sandbox is ALWAYS stopped and confirmed by sbx before anyone reads the workspace.
+    // `escalated` records whether the signal alone had ended the run (and the host client was not killed by us).
+    const endedBySignal = !this.clientKilled.has(attempt) && (await raceExit(this.t.graceMs));
     let stopDetail: string | null = null;
     try {
       const r = await this.sbx.run(['stop', id], { timeoutMs: this.t.stopMs });
@@ -213,8 +216,8 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
       stopDetail = err instanceof Error ? err.message : 'sbx stop failed';
     }
     const after = await this.stateNow(id);
-    if (after === 'stopped' || after === 'absent') return ack('stopped', true, true, stopDetail ?? detail);
-    return ack('stop_failed', false, true, `sandbox still ${after} after sbx stop${stopDetail ? `: ${stopDetail}` : ''}`);
+    if (after === 'stopped' || after === 'absent') return ack('stopped', true, !endedBySignal, stopDetail ?? detail);
+    return ack('stop_failed', false, !endedBySignal, `sandbox still ${after} after sbx stop${stopDetail ? `: ${stopDetail}` : ''}`);
   }
 
   async inspect(handle: SandboxHandle): Promise<RuntimeSnapshot> {

@@ -63,6 +63,16 @@ describe('publishResult', () => {
     expect(await statusOf(t.db, 't1')).toEqual(before);
   });
 
+  it('completed keeps the change-set reference in the attempt state and the event', async () => {
+    const lease = await claim();
+    const manifest = 'd'.repeat(64);
+    expect((await s.publishResult(lease, { outcome: 'completed', changeManifestSha256: manifest })).ok).toBe(true);
+    const rows = await t.db.execute(sql`SELECT detail FROM attempts`);
+    expect(rows[0]!['detail']).toMatchObject({ changeManifestSha256: manifest });
+    const ev = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'attempt.completed'`);
+    expect(ev[0]!['payload']).toMatchObject({ changeManifestSha256: manifest });
+  });
+
   it('completed moves to verifying and releases the lease', async () => {
     const lease = await claim();
     const r = await s.publishResult(lease, { outcome: 'completed', headSha: 'head1', reportedCostUsd: 0.25 });

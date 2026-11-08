@@ -29,6 +29,10 @@ export interface HarnessInput {
   readonly requires?: readonly HarnessCapabilityName[];
   readonly acceptPartial?: readonly HarnessCapabilityName[];
   /** Off by default: assistant text and tool arguments are not forwarded. When on, previews are bounded. */
+  /** `none`: launch with an empty, strict MCP configuration so no owner connector is reachable. */
+  readonly mcp?: 'none';
+  /** Explicit built-in tool list. Anything not listed (WebFetch, WebSearch, Task...) is unavailable. */
+  readonly tools?: readonly string[];
   readonly previews?: { readonly enabled: boolean; readonly maxChars?: number };
 }
 
@@ -59,6 +63,8 @@ export type NormalizedHarnessEvent = EventBase &
         /** As observed in the stream; null if the stream never said. Never assumed. */
         readonly permissionMode: string | null;
         readonly model: string | null;
+        /** Names of MCP servers the init event reports as connected; null when the stream never said. */
+        readonly connectedMcpServers: readonly string[] | null;
       }
     | { readonly type: 'launch_refused'; readonly reason: 'capability_unavailable'; readonly capability: string; readonly status: CapabilityStatus }
     | { readonly type: 'system'; readonly subtype: string | null }

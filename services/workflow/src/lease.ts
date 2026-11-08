@@ -175,7 +175,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
     case 'completed':
       state = must(state, { type: 'attempt_completed' });
       exitReason = 'completed';
-      event = { type: 'attempt.completed', actor: runner, payload: { fence: lease.fence, headSha: result.headSha ?? null } };
+      event = { type: 'attempt.completed', actor: runner, payload: { fence: lease.fence, headSha: result.headSha ?? null, changeManifestSha256: result.changeManifestSha256 ?? null } };
       break;
     case 'failed': {
       const failure = failAttempt(state, result.reason);
@@ -200,6 +200,11 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
 
   await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
   await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined });
+  if (result.outcome === 'completed' && result.changeManifestSha256) {
+    await tx.update(schema.attempts)
+      .set({ detail: { ...(live.detail ?? {}), changeManifestSha256: result.changeManifestSha256 } })
+      .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
+  }
   const aggregateRevision = await setStatus(tx, key, statusRow.rowRevision, state.status, now);
   const scope: EventScope = { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId, aggregateRevision };
   await emit(tx, scope, now, { type: event.type, attemptId: lease.attemptId, actor: event.actor, payload: event.payload });

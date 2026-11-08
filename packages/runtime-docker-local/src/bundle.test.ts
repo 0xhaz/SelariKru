@@ -106,6 +106,28 @@ describe('task input bundle', () => {
   });
 });
 
+describe('git isolation while building', () => {
+  it('ignores the user and system git config and templates: no hook from them lands in or runs for the workspace', async () => {
+    const tpl = join(root, 'tpl');
+    await mkdir(join(tpl, 'hooks'), { recursive: true });
+    const marker = join(root, 'HOOK-RAN');
+    await writeFile(join(tpl, 'hooks', 'post-commit'), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+    const gcfg = join(root, 'gitconfig');
+    await writeFile(gcfg, `[init]\n\ttemplateDir = ${tpl}\n[core]\n\thooksPath = ${join(tpl, 'hooks')}\n`);
+    const saved = { g: process.env['GIT_CONFIG_GLOBAL'], s: process.env['GIT_CONFIG_NOSYSTEM'] };
+    process.env['GIT_CONFIG_GLOBAL'] = gcfg;
+    try {
+      const dest = join(root, 'w');
+      await buildTaskBundle({ repoPath: repo, baseSha: sha, destDir: dest });
+      expect((await readdir(join(dest, '.git', 'hooks')).catch(() => [] as string[])).filter((n) => !n.endsWith('.sample'))).toEqual([]);
+      await expect(lstat(marker)).rejects.toThrow();
+    } finally {
+      if (saved.g === undefined) delete process.env['GIT_CONFIG_GLOBAL'];
+      else process.env['GIT_CONFIG_GLOBAL'] = saved.g;
+    }
+  });
+});
+
 describe('isExcludedPath', () => {
   it('matches the calibration directory in any case and at any depth', () => {
     for (const p of ['tools/verifier-calibration/a', 'Tools/Verifier-Calibration', 'a/b/verifier-calibration/c.ts', 'verifier-calibration'])

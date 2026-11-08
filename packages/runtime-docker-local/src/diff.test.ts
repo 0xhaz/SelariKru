@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile, unlink } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { checkAllowedPaths, computeChanges, snapshotTree } from './diff.ts';
+import { checkAllowedPaths, computeChanges, readRegularFile, snapshotTree, validateAllowedPaths } from './diff.ts';
 
 let dir: string;
 const put = async (rel: string, body: string) => {
@@ -60,15 +60,46 @@ describe('post-run diff', () => {
     expect(checkAllowedPaths(await computeChanges(base, dir), ['src']).violations.length).toBe(2);
   });
 
-  it('a symlink that escapes the workspace, or a special file, is a violation even inside an allowed path; links are not followed', async () => {
+  it('every added or modified symlink is a violation, however harmless it looks; the two-hop escape no longer slips through', async () => {
     const base = await snapshotTree(dir);
     await symlink('/etc/passwd', join(dir, 'src/passwd'));
-    await symlink('../../../../etc/hosts', join(dir, 'src/up'));
     await symlink('b.ts', join(dir, 'src/ok-link'));
-    const changes = await computeChanges(base, dir);
-    const res = checkAllowedPaths(changes, ['src']);
-    expect(res.violations.map((v) => v.path).sort()).toEqual(['src/passwd', 'src/up']);
-    expect(res.violations.every((v) => v.reason === 'symlink_escape')).toBe(true);
+    await symlink('..', join(dir, 'src/d'));
+    await symlink('d/../canary', join(dir, 'src/x'));
+    const res = checkAllowedPaths(await computeChanges(base, dir), ['src']);
+    expect(res.ok).toBe(false);
+    expect(res.violations.map((v) => v.path).sort()).toEqual(['src/d', 'src/ok-link', 'src/passwd', 'src/x']);
+    expect(res.violations.every((v) => v.reason === 'symlink')).toBe(true);
+  });
+
+  it('a file replaced by a symlink is a modified symlink and is rejected', async () => {
+    const base = await snapshotTree(dir);
+    await unlink(join(dir, 'src/a.ts'));
+    await symlink('/etc/hosts', join(dir, 'src/a.ts'));
+    expect(checkAllowedPaths(await computeChanges(base, dir), ['src']).violations.map((v) => v.reason)).toEqual(['symlink']);
+  });
+
+  it('readRegularFile never follows a symlink and only reads regular files', async () => {
+    await symlink('/etc/hosts', join(dir, 'src/l'));
+    await expect(readRegularFile(join(dir, 'src/l'))).rejects.toThrow();
+    await expect(readRegularFile(join(dir, 'src'))).rejects.toThrow();
+    expect((await readRegularFile(join(dir, 'src/a.ts'))).toString()).toBe('a');
+  });
+
+  it('a .git segment in any case is a violation, never silently ignored; the real .git is still ignored', async () => {
+    const base = await snapshotTree(dir);
+    await put('src/.GIT/config', 'x');
+    await put('.Git/hooks/p', 'x');
+    await put('.git/hooks/p', 'x');
+    const res = checkAllowedPaths(await computeChanges(base, dir), ['src']);
+    expect(res.violations.map((v) => v.path).sort()).toEqual(['.Git', 'src/.GIT']);
+    expect(res.violations.every((v) => v.reason === 'forbidden_path')).toBe(true);
+  });
+
+  it('validateAllowedPaths accepts plain prefixes and rejects absolute, parent, glob, empty, backslash and .git entries', () => {
+    expect(validateAllowedPaths(['src', 'docs/a.md', './lib/', 'fixtures/feedback-board'])).toEqual({ ok: true, normalized: ['src', 'docs/a.md', 'lib', 'fixtures/feedback-board'] });
+    for (const bad of ['/abs', '../x', 'a/../b', 'src/**', '*.ts', 'a?b', 'a[1]', 'a{b,c}', '', '.', 'a\\b', '.git', 'x/.GIT/y', 'a//b'])
+      expect(validateAllowedPaths([bad]).ok, bad).toBe(false);
   });
 
   it('refuses allowedPaths entries that traverse or are absolute', () => {

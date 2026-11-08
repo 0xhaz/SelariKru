@@ -1,7 +1,7 @@
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runAttempt, type AttemptDeps } from '../src/attempt.ts';
+import { runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
 import { LeaseLostError } from '../src/api.ts';
 import { sandboxName } from '@selarikru/runtime-docker-local';
 import { makeWorld, type World, type WorldOptions } from './world.ts';
@@ -24,11 +24,100 @@ async function setup(o: WorldOptions = {}, over: Partial<AttemptDeps> = {}) {
 const started = () => (w?.sbx.streams.length ?? 0) > 0;
 const exists = (p: string) => stat(p).then(() => true, () => false);
 
+describe('completion gate hardening', () => {
+  it('invalid allowedPaths (absolute, parent, glob) block the task before any sandbox exists', async () => {
+    for (const bad of ['/etc', '../x', 'src/**']) {
+      const { w, deps } = await setup({ task: { allowedPaths: [bad] } });
+      const report = await runAttempt(deps, w.lease);
+      expect(report.outcome, bad).toBe('blocked');
+      expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
+      expect((w.api.published[0] as { reason: string }).reason).toMatch(/allowedPaths/);
+      await w.cleanup();
+    }
+  });
+
+  it('a symlink in the workspace is a failed verdict, not a thrown error and not a host file read', async () => {
+    const { w, deps } = await setup({ agent: async ({ cwd }) => void (await symlink('/etc/hosts', join(cwd, 'src/evil'))) });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('failed');
+    expect(w.api.published).toHaveLength(1);
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/symlink/);
+    expect(JSON.stringify(await w.artifacts.get(report.changeManifest ?? 'a'.repeat(64)).catch(() => null))).toBe('null');
+  });
+
+  it('an artifact-store failure at completion publishes failed instead of leaving the lease to expire', async () => {
+    const { w, deps } = await setup({ agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
+    const broken = { ...w.artifacts, put: async () => { throw new Error('disk full'); }, get: w.artifacts.get.bind(w.artifacts), has: w.artifacts.has.bind(w.artifacts) };
+    const report = await runAttempt({ ...deps, artifacts: broken }, w.lease);
+    expect(report.outcome).toBe('failed');
+    expect(w.api.published).toHaveLength(1);
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/store/i);
+  });
+
+  it('storeChanges refuses a file whose bytes no longer match the checked hash, and a file that became a symlink', async () => {
+    const { w } = await setup({});
+    const ws = join(w.root, 'ws');
+    await mkdir(ws, { recursive: true });
+    await writeFile(join(ws, 'a.txt'), 'changed-after-check');
+    const task = w.task;
+    await expect(storeChanges(w.artifacts, ws, [{ path: 'a.txt', status: 'modified', kind: 'file', sha256: 'f'.repeat(64), linkTarget: null }], task)).rejects.toThrow(/changed/);
+    await symlink('/etc/hosts', join(ws, 'l.txt'));
+    await expect(storeChanges(w.artifacts, ws, [{ path: 'l.txt', status: 'added', kind: 'file', sha256: 'f'.repeat(64), linkTarget: null }], task)).rejects.toThrow();
+  });
+});
+
+describe('MCP and tool restriction', () => {
+  it('launches the agent with an empty strict MCP config and the explicit tool list', async () => {
+    const { w, deps } = await setup({});
+    await runAttempt(deps, w.lease);
+    const exec = w.sbx.calls.find((c) => c[0] === 'exec' && c.includes('claude'))!.join(' ');
+    expect(exec).toContain('--strict-mcp-config');
+    expect(exec).toContain('--mcp-config={"mcpServers":{}}');
+    expect(exec).toMatch(/--tools=Bash,Read,Write,Edit,Glob,Grep/);
+    expect(exec).not.toMatch(/WebFetch|WebSearch/);
+  });
+
+  it('fails the attempt, stopping the agent, when the init event reports a connected MCP server', async () => {
+    const { w, deps } = await setup({ initMcp: [{ name: 'mcp-gateway', status: 'connected' }], agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/MCP server.*mcp-gateway/);
+  });
+
+  it('a server that is merely listed as needing auth is not treated as connected', async () => {
+    const { w, deps } = await setup({ initMcp: [{ name: 'gmail', status: 'needs-auth' }], agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+  });
+});
+
+describe('in-guest limit and runner shutdown', () => {
+  it('passes the attempt timeout to the sandbox as an in-guest limit', async () => {
+    const { w, deps } = await setup({ task: { limits: { maxAttempts: 3, timeoutSeconds: 600, maxCostUsd: 1 } } });
+    await runAttempt(deps, w.lease);
+    const exec = w.sbx.calls.find((c) => c[0] === 'exec' && c.includes('claude'))!.join(' ');
+    expect(exec).toMatch(/timeout -k 10 (\d+) /);
+    expect(Number(/timeout -k 10 (\d+) /.exec(exec)![1])).toBeLessThanOrEqual(600);
+  });
+
+  it('an abort signal (SIGTERM/SIGINT) stops the agent with a bounded stop, destroys the sandbox, and publishes nothing', async () => {
+    const ctl = new AbortController();
+    const { w, deps } = await setup({ agent: async () => { setTimeout(() => ctl.abort(), 50); return false; } }, { signal: ctl.signal });
+    const t0 = Date.now();
+    const report = await runAttempt(deps, w.lease);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(report.outcome).toBe('aborted');
+    expect(w.api.published).toHaveLength(0);
+    expect(w.sbx.streams[0]!.isEnded).toBe(true);
+    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+  });
+});
+
 describe('runAttempt', () => {
   it('runs the agent in a sandbox, accepts a diff inside allowedPaths, publishes completed once, and cleans up', async () => {
     const { w, deps } = await setup({ agent: async ({ write }) => void (await write('src/new.ts', 'export const b = 2;\n')) });
     const report = await runAttempt(deps, w.lease);
-    expect(w.api.published).toEqual([{ outcome: 'completed', reportedCostUsd: 0.05 }]);
+    expect(w.api.published).toEqual([{ outcome: 'completed', reportedCostUsd: 0.05, changeManifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+    expect((w.api.published[0] as { changeManifestSha256: string }).changeManifestSha256).toBe(report.changeManifest);
     expect(report.outcome).toBe('completed');
     // the sandbox was created with a stable name, its workspace holds the pinned source, and calibration material is absent
     const name = sandboxName('task1', 'att_1');

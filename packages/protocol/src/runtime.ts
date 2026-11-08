@@ -36,6 +36,8 @@ export interface TaskBundle {
   readonly command: readonly string[];
   /** Working directory inside the sandbox. */
   readonly cwd: string;
+  /** In-guest hard limit in seconds (SIGTERM, then SIGKILL 10 s later). The host timer alone cannot stop a guest process. */
+  readonly timeoutSeconds?: number;
 }
 
 export interface AttemptExit {

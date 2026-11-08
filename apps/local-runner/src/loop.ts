@@ -15,14 +15,24 @@ export interface LoopDeps {
   readonly log: (line: string) => void;
 }
 
-const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+const sleepUnlessAborted = (ms: number, signal: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(t);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
 
 /** Claims one task at a time over outbound HTTPS, runs it, and repeats. Opens no port. */
 export class RunnerLoop {
   constructor(private readonly d: LoopDeps) {}
 
   async run(signal: AbortSignal): Promise<void> {
-    const sleep = this.d.sleep ?? realSleep;
+    const sleep = this.d.sleep ?? ((ms: number) => sleepUnlessAborted(ms, signal));
     // Reconcile first: a crash or sleep may have left a worker from a lease that has since expired.
     try {
       const removed = await this.d.runtime.sweepOrphans(new Set());
@@ -37,7 +47,7 @@ export class RunnerLoop {
         failures = 0;
         if (claim.lease) {
           this.d.log(`claimed ${claim.lease.taskId} as ${claim.lease.attemptId}`);
-          const report = await runAttempt(this.d.attempt, claim.lease);
+          const report = await runAttempt({ ...this.d.attempt, signal }, claim.lease);
           this.d.log(`attempt ${claim.lease.attemptId} ended: ${report.outcome}`);
           continue;
         }

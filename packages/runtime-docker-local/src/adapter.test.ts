@@ -120,14 +120,51 @@ describe('SbxRuntimeAdapter start/stop/inspect/destroy', () => {
     expect(await a.exited).toEqual({ code: 0, signal: null });
   });
 
-  it('stop signals inside the sandbox first and confirms from the run ending, with no sandbox stop needed', async () => {
+  it('stop signals inside the sandbox first, and even when the run ends it still stops the sandbox and confirms by sbx ls (a daemon may survive the agent)', async () => {
     const { sbx, rt } = make();
     const h = await rt.create(spec());
     const a = await rt.start(h, bundle);
     const ack = await rt.stop(a);
     expect(ack).toMatchObject({ status: 'stopped', terminationConfirmed: true, escalated: false });
     expect(sbx.calls.some((c) => c.join(' ').includes(STOP_SCRIPT))).toBe(true);
-    expect(sbx.calls.some((c) => c[0] === 'stop')).toBe(false);
+    const verbs = sbx.calls.map((c) => c[0]);
+    expect(verbs).toContain('stop');
+    expect(verbs.lastIndexOf('stop')).toBeLessThan(verbs.lastIndexOf('ls'));
+    expect(sbx.sandboxes.get(h.sandboxId)!.status).toBe('stopped');
+  });
+
+  it('after a NORMAL exit the sandbox is still stopped before anyone reads the workspace', async () => {
+    const { sbx, rt } = make();
+    const h = await rt.create(spec());
+    const a = await rt.start(h, bundle);
+    sbx.streams[0]!.end(0);
+    await a.exited;
+    // a surviving background process: the sandbox is still running although the agent exited
+    expect(sbx.sandboxes.get(h.sandboxId)!.status).toBe('running');
+    const ack = await rt.stop(a);
+    expect(ack).toMatchObject({ status: 'stopped', terminationConfirmed: true });
+    expect(sbx.sandboxes.get(h.sandboxId)!.status).toBe('stopped');
+  });
+
+  it('a normal exit with a sandbox that will not stop is not confirmed', async () => {
+    const { sbx, rt } = make({ stopDoesNotStop: true });
+    const h = await rt.create(spec());
+    const a = await rt.start(h, bundle);
+    sbx.streams[0]!.end(0);
+    expect(await rt.stop(a)).toMatchObject({ status: 'stop_failed', terminationConfirmed: false });
+  });
+
+  it('start wraps the command in an in-guest time limit with kill escalation when the bundle sets one', async () => {
+    const { sbx, rt } = make();
+    const h = await rt.create(spec());
+    await rt.start(h, { ...bundle, timeoutSeconds: 120 });
+    const exec = sbx.calls.find((c) => c[0] === 'exec')!;
+    expect(exec.join(' ')).toMatch(/timeout -k 10 120/);
+    expect(exec.slice(-3)).toEqual(['claude', '-p', 'hi']);
+    const none = make();
+    const h2 = await none.rt.create(spec({ attemptId: 'z', taskId: 'tz', workspacePath: ws }));
+    await none.rt.start(h2, bundle);
+    expect(none.sbx.calls.find((c) => c[0] === 'exec')!.join(' ')).not.toContain('timeout -k');
   });
 
   it('stop escalates to sbx stop when the signal does not end the agent, then confirms by sbx ls', async () => {

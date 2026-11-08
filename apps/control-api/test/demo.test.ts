@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp, createFirebaseVerifier, loadPlanConfigFile } from '../src/index.ts';
 import { DEMO, assertEmulatorHost, ensureEmulatorAccount, seedDemo, writeDemoFiles } from '../src/demo.ts';
 import { resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
+
+describe('demo plan config', () => {
+  it('uses plain allowedPaths prefixes, no globs, so the local runner accepts them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'demo-cfg-'));
+    const { planConfigFile } = writeDemoFiles(dir, { tenantId: 'tenant_local' });
+    const cfg = JSON.parse(readFileSync(planConfigFile, 'utf8')) as { projects: Record<string, { allowedPaths: string[] }> };
+    for (const p of Object.values(cfg.projects)) for (const a of p.allowedPaths) expect(a).not.toMatch(/[*?[\]{}]/);
+  });
+});
 
 describe('demo seed', () => {
   let t: TestDb;

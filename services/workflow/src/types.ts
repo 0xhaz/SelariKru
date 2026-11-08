@@ -89,7 +89,7 @@ export interface HeartbeatReceipt {
 export type ReportedCost = { readonly reportedCostUsd?: number | null };
 
 export type PublishResult =
-  | ({ readonly outcome: 'completed'; readonly headSha?: string } & ReportedCost)
+  | ({ readonly outcome: 'completed'; readonly headSha?: string; readonly changeManifestSha256?: string } & ReportedCost)
   | ({ readonly outcome: 'failed'; readonly reason: string } & ReportedCost)
   | ({ readonly outcome: 'blocked'; readonly reason: string } & ReportedCost)
   | ({ readonly outcome: 'approval_requested'; readonly reason: string } & ReportedCost);

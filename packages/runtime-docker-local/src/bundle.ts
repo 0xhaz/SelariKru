@@ -6,6 +6,9 @@ import { snapshotTree, type TreeSnapshot } from './diff.ts';
 
 const execFileP = promisify(execFile);
 
+/** Git sees no user or system config and no templates while building: nothing outside the repo can inject a hook or filter. */
+const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' });
+
 export const REQUIRED_CONTRACT_PATH = 'contract/runtime.md';
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
@@ -47,7 +50,7 @@ interface TreeItem {
 }
 
 async function listTree(repo: string, sha: string): Promise<TreeItem[]> {
-  const { stdout } = await execFileP('git', ['-C', repo, 'ls-tree', '-r', '-z', '--full-tree', sha], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024 });
+  const { stdout } = await execFileP('git', ['-C', repo, 'ls-tree', '-r', '-z', '--full-tree', sha], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, env: gitEnv() });
   const items: TreeItem[] = [];
   for (const rec of stdout.toString('utf8').split('\0')) {
     if (!rec) continue;
@@ -66,7 +69,7 @@ async function readBlobs(repo: string, oids: readonly string[]): Promise<Map<str
   const unique = [...new Set(oids)];
   const chunks: Buffer[] = [];
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('git', ['-C', repo, 'cat-file', '--batch'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const child = spawn('git', ['-C', repo, 'cat-file', '--batch'], { stdio: ['pipe', 'pipe', 'ignore'], env: gitEnv() });
     child.stdout.on('data', (c: Buffer) => chunks.push(c));
     child.on('error', reject);
     child.on('close', (code) => (code === 0 ? resolve() : reject(new BundleError(`git cat-file exited ${code}`))));
@@ -115,7 +118,7 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
   const { repoPath, baseSha, destDir } = input;
   if (!SHA.test(baseSha)) throw new BundleError('base must be a full lowercase commit id');
   try {
-    await execFileP('git', ['-C', repoPath, 'cat-file', '-e', `${baseSha}^{commit}`]);
+    await execFileP('git', ['-C', repoPath, 'cat-file', '-e', `${baseSha}^{commit}`], { env: gitEnv() });
   } catch {
     throw new BundleError('base commit is not in the source repository');
   }
@@ -180,8 +183,8 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
   if (!written.has(REQUIRED_CONTRACT_PATH)) throw new BundleError(`${REQUIRED_CONTRACT_PATH} is missing from the source and the task files`);
 
   // A fresh single-commit repository so the agent has a usable `git diff`. Nothing from the source history is carried.
-  const git = (...a: string[]) => execFileP('git', ['-C', destDir, '-c', 'user.name=selarikru', '-c', 'user.email=runner@selarikru.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...a]);
-  await git('init', '-q');
+  const git = (...a: string[]) => execFileP('git', ['-C', destDir, '-c', 'user.name=selarikru', '-c', 'user.email=runner@selarikru.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...a], { env: gitEnv() });
+  await git('init', '-q', '--template=');
   await git('add', '-A');
   await git('commit', '-q', '--no-verify', '--allow-empty', '-m', 'task base');
 

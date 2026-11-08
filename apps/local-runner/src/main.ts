@@ -54,11 +54,14 @@ async function main(): Promise<void> {
     log(`sbx ${caps.runtimeVersion}; ${Object.keys(repos).length} project source(s) configured; outbound connections only`);
     const api = new HttpRunnerApi(creds.apiBaseUrl, creds.token);
     const ctl = new AbortController();
-    process.on('SIGINT', () => {
-      log('stopping after the current attempt');
+    // First signal: stop the running agent with a bounded stop, destroy its sandbox, exit. A second one exits at once.
+    const shutdown = (): void => {
+      if (ctl.signal.aborted) process.exit(130);
+      log('shutting down: stopping the running agent and removing its sandbox');
       ctl.abort();
-    });
-    process.on('SIGTERM', () => ctl.abort());
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
     const loop = new RunnerLoop({
       api,
       runtime,

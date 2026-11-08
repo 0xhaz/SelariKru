@@ -76,6 +76,19 @@ describe('RunnerLoop', () => {
     expect(logs.join('\n')).toContain('removed 1 orphaned');
   });
 
+  it('aborting the loop reaches the running attempt, which stops and cleans up, and the loop ends promptly', async () => {
+    const ctl = new AbortController();
+    w = await makeWorld({ agent: async () => { setTimeout(() => ctl.abort(), 50); return false; } });
+    w.api.claim = vi.fn(async () => ({ lease: w!.lease, reason: null }));
+    const loop = new RunnerLoop({ api: w.api, runtime: w.runtime, attempt: deps(w), pollMs: 10, log: () => undefined });
+    const t0 = Date.now();
+    await loop.run(ctl.signal);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(w.sbx.streams[0]!.isEnded).toBe(true);
+    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.api.published).toHaveLength(0);
+  });
+
   it('runs one attempt at a time and backs off after a claim error without crashing', async () => {
     w = await makeWorld({});
     let calls = 0;

@@ -37,6 +37,11 @@ describe('runner result fields', () => {
   it('requires headSha to be a hex commit id', () => {
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: 'a'.repeat(40) } }).success).toBe(true);
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: CANARY } }).success).toBe(false);
+    const manifest = 'c'.repeat(64);
+    expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', changeManifestSha256: manifest } }).success).toBe(true);
+    for (const bad of [CANARY, 'abc', 'C'.repeat(64), `../${'c'.repeat(61)}`])
+      expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', changeManifestSha256: bad } }).success).toBe(false);
+    expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'failed', reason: 'x', changeManifestSha256: manifest } }).success).toBe(false);
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: 'abc123' } }).success).toBe(false);
   });
 });

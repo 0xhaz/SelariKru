@@ -71,6 +71,19 @@ describe('runner routes', () => {
     expect((await post(h.app, '/v1/runners/task', { lease: ref }, bearer(other.token))).status).toBe(409);
   });
 
+  it('a completed result carries the change-set reference into the attempt and its event', async () => {
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const { token } = await enrolRunner(h.app, 'local');
+    const as = bearer(token);
+    const claim = await post(h.app, '/v1/runners/claim', {}, as);
+    const ref = { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken };
+    const manifest = 'e'.repeat(64);
+    const done = await post(h.app, '/v1/runners/result', { lease: ref, result: { outcome: 'completed', changeManifestSha256: manifest } }, as);
+    expect(done.status).toBe(200);
+    const rows = await t.db.execute(sql`SELECT detail FROM attempts WHERE attempt_id = ${ref.attemptId}`);
+    expect(rows[0]!['detail']).toMatchObject({ changeManifestSha256: manifest });
+  });
+
   it('a run with no budget limit is not claimable, and the claim says why', async () => {
     await resetDb(t.db, {});
     await seedTask(t.db, specFor('t1'), 'ready');

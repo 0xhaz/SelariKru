@@ -88,7 +88,7 @@ export function writeDemoFiles(dir: string, _opts: { tenantId: string }): { plan
   const planConfig = {
     projects: {
       [DEMO.projectId]: {
-        boardId: 'feedback-board', role: 'backend', baseSha: 'demo-local-base', allowedPaths: ['fixtures/feedback-board/**'],
+        boardId: 'feedback-board', role: 'backend', baseSha: 'demo-local-base', allowedPaths: ['fixtures/feedback-board'],
         classification: 'internal', policyVersion: DEMO.policyVersion, execution: 'local', inferencePolicyId: 'demo-local',
         limits: { maxAttempts: 3, timeoutSeconds, maxCostUsd: 1 },
         allowedRequirementIds: [...DEMO.requirementIds],

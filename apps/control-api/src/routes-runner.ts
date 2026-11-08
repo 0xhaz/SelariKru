@@ -119,7 +119,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const r = body.result;
     const result: PublishResult =
       r.outcome === 'completed'
-        ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}) }
+        ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.changeManifestSha256 !== undefined ? { changeManifestSha256: r.changeManifestSha256 } : {}), ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}) }
         : { outcome: r.outcome, reason: redactSecrets(r.reason), ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}) };
     const published = await scheduler.publishResult(await leaseFor(runner, body.lease), result);
     if (!published.ok) throw conflict(published.error);

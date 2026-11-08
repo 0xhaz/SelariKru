@@ -30,6 +30,32 @@ async function collect(it: AsyncIterable<NormalizedHarnessEvent>): Promise<Norma
 const base = { attemptId: 'a1', prompt: 'do it', workspacePath: '/w' };
 const lines = (xs: string[]): string[] => xs.map((x) => `${x}\n`);
 
+describe('ClaudeHarnessAdapter tool and MCP restriction', () => {
+  it('launches with an empty strict MCP config and an explicit tool list, using the equals form so variadic flags cannot swallow the prompt', async () => {
+    const { launcher, launch } = fakeLauncher(lines(fullRun), { code: 0 });
+    await collect(new ClaudeHarnessAdapter(launcher).run({ ...base, mcp: 'none', tools: ['Bash', 'Read', 'Write', 'Edit'] }));
+    const cmd = (launch.mock.calls[0] as unknown as [{ command: string[] }])[0].command;
+    expect(cmd).toEqual(expect.arrayContaining(['--strict-mcp-config', '--mcp-config={"mcpServers":{}}', '--tools=Bash,Read,Write,Edit']));
+    expect(cmd.slice(0, 3)).toEqual(['claude', '-p', 'do it']);
+  });
+
+  it('without the restriction fields it adds neither flag (the default stays as the spike observed)', async () => {
+    const { launcher, launch } = fakeLauncher(lines(fullRun), { code: 0 });
+    await collect(new ClaudeHarnessAdapter(launcher).run(base));
+    const cmd = (launch.mock.calls[0] as unknown as [{ command: string[] }])[0].command;
+    expect(cmd.join(' ')).not.toMatch(/mcp|--tools/);
+  });
+
+  it('reports only the connected MCP server names from the init event, and null when the stream never said', async () => {
+    const init = JSON.stringify({ type: 'system', subtype: 'init', mcp_servers: [{ name: 'mcp-gateway', status: 'connected' }, { name: 'gmail', status: 'needs-auth' }] });
+    const { launcher } = fakeLauncher(lines([init, ...fullRun.slice(-1)]), { code: 0 });
+    const events = await collect(new ClaudeHarnessAdapter(launcher).run(base));
+    expect(events[0]).toMatchObject({ type: 'session_started', connectedMcpServers: ['mcp-gateway'] });
+    const none = await collect(new ClaudeHarnessAdapter(fakeLauncher([], { code: 0 }).launcher).run(base));
+    expect(none[0]).toMatchObject({ type: 'session_started', connectedMcpServers: null });
+  });
+});
+
 describe('ClaudeHarnessAdapter', () => {
   it('normalizes tool, usage and exit events', async () => {
     const { launcher, launch } = fakeLauncher(lines(fullRun), { code: 0 });

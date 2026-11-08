@@ -10,6 +10,8 @@ export class RuntimeHarnessLauncher implements HarnessLauncher {
   constructor(
     private readonly runtime: RuntimeAdapter,
     private readonly sandbox: SandboxHandle,
+    /** In-guest hard limit for the agent process, in seconds. */
+    private readonly timeoutSeconds?: number,
   ) {}
 
   get current(): AttemptHandle | null {
@@ -17,7 +19,7 @@ export class RuntimeHarnessLauncher implements HarnessLauncher {
   }
 
   async launch(spec: LaunchSpec): Promise<LaunchedProcess> {
-    const a = await this.runtime.start(this.sandbox, { attemptId: spec.attemptId, command: spec.command, cwd: spec.cwd });
+    const a = await this.runtime.start(this.sandbox, { attemptId: spec.attemptId, command: spec.command, cwd: spec.cwd, ...(this.timeoutSeconds !== undefined ? { timeoutSeconds: this.timeoutSeconds } : {}) });
     this.attempt = a;
     return { lines: a.output, stdin: a.stdin, kill: a.killClient, exited: a.exited };
   }

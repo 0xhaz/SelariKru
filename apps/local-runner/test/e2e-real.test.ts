@@ -82,6 +82,7 @@ describe.skipIf(!enabled)('real end-to-end attempt', () => {
       await note(`changes ${JSON.stringify(manifest.changes.map((c: { path: string; status: string }) => `${c.status}:${c.path}`))}`);
       expect(manifest.changes.map((c: { path: string }) => c.path).sort()).toEqual(['greet.py', 'test_greet.py']);
       expect(logs.join('\n')).not.toContain('CALIBRATION');
+      expect(logs.join('\n')).toContain('connectedMcp=[]');
     } finally {
       await app.close();
       await t.close();

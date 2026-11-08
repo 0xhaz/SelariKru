@@ -36,6 +36,7 @@ export interface WorldOptions {
   heartbeat?: (n: number) => Promise<{ cancelRequested: boolean }>;
   task?: Partial<TaskSpec>;
   publishThrows?: boolean;
+  initMcp?: Array<{ name: string; status: string }>;
 }
 
 export async function makeWorld(o: WorldOptions = {}): Promise<World> {
@@ -65,7 +66,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
         await writeFile(join(cwd, rel), body);
       };
       void (async () => {
-        stream.push(`${initEvent}\n`);
+        stream.push(`${o.initMcp ? JSON.stringify({ ...JSON.parse(initEvent), mcp_servers: o.initMcp }) : initEvent}\n`);
         const keepOpen = o.agent ? (await o.agent({ stream, cwd, write })) === false : false;
         if (keepOpen) return;
         stream.push(`${resultLine()}\n`);

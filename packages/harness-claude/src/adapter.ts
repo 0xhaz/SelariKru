@@ -128,6 +128,9 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
 
     const command = ['claude', '-p', input.prompt, '--output-format', 'stream-json', '--verbose'];
     if (input.maxTurns !== undefined) command.push('--max-turns', String(input.maxTurns));
+    // `=` forms: both flags take variadic values and would otherwise swallow whatever follows.
+    if (input.mcp === 'none') command.push('--strict-mcp-config', '--mcp-config={"mcpServers":{}}');
+    if (input.tools !== undefined) command.push(`--tools=${input.tools.join(',')}`);
     const proc = await this.launcher.launch({ attemptId: input.attemptId, command, cwd: input.workspacePath });
     // Without a closed stdin, claude waits and warns (spike section 2).
     proc.stdin.end();
@@ -149,6 +152,9 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
       harnessVersion: init ? str(init['claude_code_version']) : null,
       permissionMode: init ? str(init['permissionMode']) : null,
       model: init ? str(init['model']) : null,
+      connectedMcpServers: init && Array.isArray(init['mcp_servers'])
+        ? init['mcp_servers'].filter(isObj).filter((s) => s['status'] === 'connected').map((s) => str(s['name']) ?? 'unknown')
+        : null,
     });
 
     const handle = (obj: Json): Draft[] => {
