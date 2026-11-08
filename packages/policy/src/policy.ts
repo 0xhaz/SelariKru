@@ -31,19 +31,41 @@ export const OPERATION_KINDS = [
   'merge_protected_branch',
   'modify_policy',
   'modify_credentials',
+  'modify_org_permissions',
+  'append_artifacts',
+  'assign_replan_tasks',
+  'destructive_data_migration',
 ] as const;
+
+/** Kinds needing a human decision: configurable to `require_approval` or `deny`, never `allow`. */
+export const HUMAN_DECISION_KINDS = [
+  'new_domain',
+  'new_connector',
+  'broader_scope',
+  'breaking_api_change',
+  'scope_change',
+  'budget_increase',
+  'destructive_data_migration',
+] as const;
+
+/** Administrator-only kinds. */
+export const ADMIN_KINDS = ['modify_policy', 'modify_credentials', 'modify_org_permissions'] as const;
 export type OperationKind = (typeof OPERATION_KINDS)[number];
 
 export const PURPOSES = ['execution', 'inference', 'storage', 'telemetry', 'integration'] as const;
 export const PurposeSchema = z.enum(PURPOSES);
 export type Purpose = z.infer<typeof PurposeSchema>;
 
-/** A grant for one destination and one purpose. It never implies another purpose. */
+/**
+ * A grant for one destination and one purpose. It never implies another purpose.
+ * Region is encoded in the destination ID (e.g. `cloud-sandbox-eu`); there is no separate region field.
+ * `secret` cannot appear in a grant.
+ */
 export const DestinationGrantSchema = z
   .object({
     destination: z.string().min(1),
     purpose: PurposeSchema,
-    classifications: z.array(ClassificationSchema),
+    classifications: z.array(ClassificationSchema.exclude(['secret'])),
   })
   .strict();
 export type DestinationGrant = z.infer<typeof DestinationGrantSchema>;
@@ -73,6 +95,11 @@ export const PolicySchema = z
     for (const k of Object.keys(p.operations ?? {})) {
       if (!(OPERATION_KINDS as readonly string[]).includes(k)) {
         ctx.addIssue({ code: 'custom', message: `unknown operation ${k}`, path: ['operations', k] });
+      }
+    }
+    for (const k of HUMAN_DECISION_KINDS) {
+      if (p.operations?.[k] === 'allow') {
+        ctx.addIssue({ code: 'custom', message: `${k} needs a human decision`, path: ['operations', k] });
       }
     }
     for (const k of HARD_DENY_KINDS) {

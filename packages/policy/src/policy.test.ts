@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyApproval, applyProposedClassification, checkReservation, checkWithinLimit, deriveClassification,
-  evaluate, FIREBASE_CLOUD_ROUTE, loadDefaultPolicy, parsePolicy, resolveInferenceMode, type Policy,
+  evaluate, FIREBASE_CLOUD_ROUTE, isDestinationGranted, parsePolicy, resolveInferenceMode, strongest, type Policy,
 } from './index.ts';
+import { loadDefaultPolicy } from './load.ts';
+import * as barrel from './index.ts';
 
 const base = loadDefaultPolicy();
 const cloudPolicy = (over: Partial<Policy> = {}): Policy => ({
@@ -19,8 +21,15 @@ describe('classification', () => {
     expect(deriveClassification(['public', 'secret'])).toBe('secret');
     expect(deriveClassification([])).toBeUndefined();
   });
+  it('unknown labels never lower or launder a classification', () => {
+    expect(applyProposedClassification('restricted', 'none' as never).label).toBe('restricted');
+    expect(applyProposedClassification('restricted', undefined as never).label).toBe('restricted');
+    expect(deriveClassification(['restricted', undefined, 'public'] as never)).toBeUndefined();
+    expect(deriveClassification(['restricted', 'bogus', 'public'] as never)).toBeUndefined();
+    expect(strongest('restricted', 'bogus' as never)).toBe('secret');
+  });
   it('model cannot lower classification', () => {
-    expect(applyProposedClassification('restricted', 'public')).toEqual({ label: 'restricted', loweringIgnored: true });
+    expect(applyProposedClassification('restricted', 'public')).toMatchObject({ label: 'restricted', loweringIgnored: true });
     expect(applyProposedClassification('internal', 'restricted').label).toBe('restricted');
   });
 });
@@ -60,6 +69,9 @@ describe('resolveInferenceMode', () => {
     expect(resolveInferenceMode(src, cloudPolicy({ preferredMode: 'ONLY_IN_CLOUD' }))).toMatchObject({ mode: 'ONLY_IN_CLOUD', allowFallback: false });
     expect(resolveInferenceMode(src, cloudPolicy({ preferredMode: 'PREFER_IN_CLOUD' }))).toMatchObject({ mode: 'PREFER_IN_CLOUD', policyVersion: base.policyVersion });
   });
+  it('invalid mode blocks', () => {
+    expect(resolveInferenceMode([{ id: 'a', classification: 'public' }], cloudPolicy({ preferredMode: 'WAT' as never }))).toMatchObject({ blocked: true, reason: 'invalid_mode' });
+  });
   it('cloud worker grant does not imply inference grant', () => {
     const p = cloudPolicy({ destinations: [{ destination: FIREBASE_CLOUD_ROUTE, purpose: 'execution', classifications: ['public', 'internal'] }], preferredMode: 'ONLY_IN_CLOUD' });
     expect(resolveInferenceMode([{ id: 'a', classification: 'public' }], p)).toMatchObject({ blocked: true });
@@ -71,18 +83,56 @@ describe('resolveInferenceMode', () => {
 });
 
 describe('evaluate', () => {
-  const start = { kind: 'start_cloud_worker', totalRunning: 1, executionGranted: true, estimatedCost: 1, remainingBudget: 5 } as const;
+  const grantPolicy: Policy = {
+    ...base,
+    selectedSources: ['a'],
+    destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'execution', classifications: ['public', 'internal'] }],
+  };
+  const start = {
+    kind: 'start_cloud_worker', destination: 'cloud-sandbox-eu', sources: [{ id: 'a', classification: 'internal' }],
+    totalRunning: 1, estimatedCost: 1, remainingBudget: 5,
+  } as const;
   it('eligible cloud start within limits → allow, recorded as policy decision', () => {
-    const d = evaluate(start, base);
+    const d = evaluate(start, grantPolicy);
     expect(d).toMatchObject({ decision: 'allow', record: 'policy_decision', policyVersion: base.policyVersion });
     expect(d.record).not.toBe('approval.granted');
   });
-  it('cloud start denied on missing destination, limits, budget', () => {
-    expect(evaluate({ ...start, executionGranted: false }, base).decision).toBe('deny');
-    expect(evaluate({ ...start, totalRunning: 2 }, base).reason).toBe('concurrency_limit_reached');
-    expect(evaluate({ ...start, estimatedCost: null }, base).reason).toBe('budget:unknown_cost');
-    expect(evaluate({ ...start, remainingBudget: null }, base).reason).toBe('budget:missing_limit');
-    expect(evaluate(start, { policyVersion: 'x' })).toMatchObject({ decision: 'deny', reason: 'missing_limit:maxConcurrentTotal' });
+  it('destinations: [] denies cloud start', () => {
+    expect(evaluate(start, { ...base, selectedSources: ['a'] })).toMatchObject({ decision: 'deny', reason: 'missing_destination:execution' });
+  });
+  it('cloud start denied for bad sources, destinations, limits, budget', () => {
+    const deny = (op: object, why: string, p: Policy = grantPolicy) => expect(evaluate({ ...start, ...op } as never, p)).toMatchObject({ decision: 'deny', reason: why });
+    deny({ sources: [] }, 'no_sources');
+    deny({ sources: [{ id: 'a' }] }, 'unclassified_source');
+    deny({ sources: [{ id: 'a', classification: 'restricted' }] }, 'source_not_cloud_eligible');
+    deny({ sources: [{ id: 'a', classification: 'secret' }] }, 'source_not_cloud_eligible');
+    deny({ sources: [{ id: 'zz', classification: 'public' }] }, 'source_not_selected');
+    deny({ sources: [{ id: 'a', classification: 'public' }], destination: 'other' }, 'missing_destination:execution');
+    deny({ destination: undefined }, 'missing_destination:execution');
+    deny({ totalRunning: 2 }, 'concurrency_limit_reached');
+    deny({ estimatedCost: null }, 'budget:unknown_cost');
+    deny({ remainingBudget: null }, 'budget:missing_limit');
+    deny({}, 'missing_limit:maxConcurrentTotal', { ...grantPolicy, limits: {} });
+    deny({}, 'configured_deny:start_cloud_worker', { ...grantPolicy, operations: { start_cloud_worker: 'deny' } });
+  });
+  it('a grant for another purpose does not cover execution', () => {
+    const p = { ...grantPolicy, destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'inference' as const, classifications: ['internal' as const] }] };
+    expect(evaluate(start, p).reason).toBe('missing_destination:execution');
+  });
+  it('isDestinationGranted is per purpose and never grants secret', () => {
+    expect(isDestinationGranted('execution', 'cloud-sandbox-eu', 'internal', grantPolicy)).toBe(true);
+    for (const purpose of ['inference', 'storage', 'telemetry', 'integration'] as const) {
+      expect(isDestinationGranted(purpose, 'cloud-sandbox-eu', 'internal', grantPolicy)).toBe(false);
+    }
+    expect(isDestinationGranted('execution', 'cloud-sandbox-eu', 'restricted', grantPolicy)).toBe(false);
+    expect(isDestinationGranted('execution', 'cloud-sandbox-eu', 'secret', grantPolicy)).toBe(false);
+    expect(isDestinationGranted('execution', 'x', 'public', undefined)).toBe(false);
+    expect(() => parsePolicy({ ...base, destinations: [{ destination: 'd', purpose: 'storage', classifications: ['secret'] }] })).toThrow();
+  });
+  it('totalRunning must be a non-negative integer', () => {
+    for (const totalRunning of [NaN, undefined, -5, 1.5, '0']) {
+      expect(evaluate({ ...start, totalRunning } as never, grantPolicy).reason).toBe('invalid_running_count');
+    }
   });
   it('new domain → require_approval', () => {
     expect(evaluate({ kind: 'new_domain' }, base)).toMatchObject({ decision: 'require_approval' });
@@ -93,8 +143,12 @@ describe('evaluate', () => {
     for (const kind of ['read_approved_docs', 'run_scoped_tests', 'edit_scoped_dev_branch', 'create_draft_pr'] as const) {
       expect(evaluate({ kind }, base).decision).toBe('allow');
     }
-    expect(evaluate({ kind: 'repair_within_limits', attempt: 2 }, base).decision).toBe('allow');
-    expect(evaluate({ kind: 'repair_within_limits', attempt: 3 }, base).decision).toBe('deny');
+    const r = { kind: 'repair_within_limits', estimatedCost: 1, remainingBudget: 5 } as const;
+    expect(evaluate({ ...r, attempt: 2 }, base).decision).toBe('allow');
+    expect(evaluate({ ...r, attempt: 3 }, base).decision).toBe('deny');
+    expect(evaluate({ ...r, attempt: 1, estimatedCost: null }, base).reason).toBe('budget:unknown_cost');
+    expect(evaluate({ ...r, attempt: 1, remainingBudget: 0 }, base).reason).toBe('budget:exceeds_limit');
+    expect(evaluate({ ...r, attempt: 1 }, { ...base, operations: { repair_within_limits: 'deny' } }).reason).toBe('configured_deny:repair_within_limits');
   });
   it('production action deny has no approval path', () => {
     for (const kind of ['production_data', 'production_infrastructure', 'deploy', 'merge_protected_branch'] as const) {
@@ -105,9 +159,36 @@ describe('evaluate', () => {
     expect(() => parsePolicy({ ...base, operations: { ...base.operations, deploy: 'allow' } })).toThrow();
     expect(evaluate({ kind: 'deploy' }, { ...base, operations: {} }).decision).toBe('deny');
   });
-  it('agents cannot modify policy or credentials', () => {
-    expect(evaluate({ kind: 'modify_policy', actor: 'agent' }, base).decision).toBe('deny');
-    expect(evaluate({ kind: 'modify_credentials', actor: 'unknown' }, base).decision).toBe('deny');
+  it('only an administrator with configured allow can modify policy, credentials, org permissions', () => {
+    for (const kind of ['modify_policy', 'modify_credentials', 'modify_org_permissions'] as const) {
+      expect(evaluate({ kind, actor: 'agent' }, base).reason).toBe(`not_administrator:${kind}`);
+      expect(evaluate({ kind, actor: 'unknown' }, { ...base, operations: { [kind]: 'allow' } }).decision).toBe('deny');
+      expect(evaluate({ kind, actor: 'administrator' }, base).decision).toBe('deny');
+      expect(evaluate({ kind, actor: 'administrator' }, { ...base, operations: {} }).reason).toBe(`missing_operation_config:${kind}`);
+      expect(evaluate({ kind, actor: 'administrator' }, { ...base, operations: { [kind]: 'allow' } }).decision).toBe('allow');
+    }
+  });
+  it('human-decision kinds cannot be configured to allow', () => {
+    for (const kind of ['budget_increase', 'breaking_api_change', 'scope_change', 'new_domain', 'destructive_data_migration']) {
+      expect(() => parsePolicy({ ...base, operations: { ...base.operations, [kind]: 'allow' } })).toThrow();
+      expect(evaluate({ kind } as never, { ...base, operations: { [kind]: 'allow' } } as never).decision).not.toBe('allow');
+    }
+    expect(evaluate({ kind: 'destructive_data_migration' }, base).decision).toBe('require_approval');
+  });
+  it('section 11 routine operations exist', () => {
+    expect(evaluate({ kind: 'append_artifacts' }, base).decision).toBe('allow');
+    expect(evaluate({ kind: 'assign_replan_tasks' }, base).decision).toBe('allow');
+  });
+  it('unknown operation kinds deny, even via the prototype chain', () => {
+    for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'bogus', 42]) {
+      expect(evaluate({ kind } as never, base)).toMatchObject({ decision: 'deny', reason: 'unknown_operation' });
+    }
+  });
+  it('invalid configured treatment denies', () => {
+    expect(evaluate({ kind: 'create_draft_pr' }, { ...base, operations: { create_draft_pr: 'yes' } } as never).decision).toBe('deny');
+  });
+  it('barrel has no node:fs loader', () => {
+    expect('loadDefaultPolicy' in barrel).toBe(false);
   });
   it('approval resolves require_approval only', () => {
     const d = evaluate({ kind: 'new_domain' }, base);

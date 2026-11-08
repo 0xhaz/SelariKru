@@ -1,5 +1,10 @@
 import { checkReservation } from './budget.ts';
-import { HARD_DENY_KINDS, type OperationKind, type Policy, type Treatment } from './policy.ts';
+import { ClassificationSchema } from './classification.ts';
+import { isDestinationGranted, type Source } from './destinations.ts';
+import {
+  ADMIN_KINDS, HARD_DENY_KINDS, HUMAN_DECISION_KINDS, OPERATION_KINDS, TREATMENTS,
+  type OperationKind, type Policy, type Treatment,
+} from './policy.ts';
 
 export interface PolicyDecision {
   readonly decision: Treatment;
@@ -11,72 +16,101 @@ export interface PolicyDecision {
 }
 
 export type Operation =
-  | { kind: 'read_approved_docs' | 'run_scoped_tests' | 'edit_scoped_dev_branch' | 'create_draft_pr' }
-  | { kind: 'repair_within_limits'; attempt: number }
+  | { kind: 'read_approved_docs' | 'run_scoped_tests' | 'edit_scoped_dev_branch' | 'create_draft_pr' | 'append_artifacts' | 'assign_replan_tasks' }
+  | { kind: 'repair_within_limits'; attempt: number; estimatedCost: number | null; remainingBudget: number | null }
   | {
       kind: 'start_cloud_worker';
+      /** Execution destination ID (region is part of the ID). */
+      destination: string;
+      /** Every source feeding the worker's input bundle. */
+      sources: readonly Source[];
       totalRunning: number;
-      /** Execution destination grant and data scope already approved for this worker. */
-      executionGranted: boolean;
       estimatedCost: number | null;
       remainingBudget: number | null;
     }
-  | { kind: 'new_domain' | 'new_connector' | 'broader_scope' | 'breaking_api_change' | 'scope_change' | 'budget_increase' }
+  | { kind: (typeof HUMAN_DECISION_KINDS)[number] }
   | { kind: 'production_data' | 'production_infrastructure' | 'deploy' | 'merge_protected_branch' }
-  | { kind: 'modify_policy' | 'modify_credentials'; actor: 'agent' | 'administrator' | 'unknown' };
-
-const NO_POLICY = 'missing_policy';
+  | {
+      kind: (typeof ADMIN_KINDS)[number];
+      /** Must come from the authenticated principal, never from operation arguments or model output. */
+      actor: 'agent' | 'administrator' | 'unknown';
+    };
 
 function decide(decision: Treatment, reason: string, policyVersion: string): PolicyDecision {
   return { decision, reason, policyVersion, record: 'policy_decision' };
 }
 
+const has = (o: object | undefined, k: string): boolean => o !== undefined && Object.hasOwn(o, k);
+const isTreatment = (t: unknown): t is Treatment => typeof t === 'string' && (TREATMENTS as readonly string[]).includes(t);
+
 export function evaluate(op: Operation, policy: Policy | undefined): PolicyDecision {
-  if (!policy) return decide('deny', NO_POLICY, 'unknown');
+  if (!policy) return decide('deny', 'missing_policy', 'unknown');
   const v = policy.policyVersion;
-  const kind: OperationKind = op.kind;
-
-  if ((HARD_DENY_KINDS as readonly string[]).includes(kind)) return decide('deny', `hard_deny:${kind}`, v);
-
-  switch (op.kind) {
-    case 'modify_policy':
-    case 'modify_credentials':
-      return op.actor === 'administrator'
-        ? decide('allow', `administrator_authorized:${op.kind}`, v)
-        : decide('deny', `agent_cannot_modify:${op.kind}`, v);
-
-    case 'repair_within_limits': {
-      const max = policy.limits?.repairAttempts;
-      if (max === undefined) return decide('deny', 'missing_limit:repairAttempts', v);
-      if (!Number.isInteger(op.attempt) || op.attempt < 1) return decide('deny', 'invalid_attempt', v);
-      return op.attempt <= max ? decide('allow', 'repair_within_limits', v) : decide('deny', 'repair_limit_exhausted', v);
-    }
-
-    case 'start_cloud_worker': {
-      const max = policy.limits?.maxConcurrentTotal;
-      if (max === undefined) return decide('deny', 'missing_limit:maxConcurrentTotal', v);
-      if (!op.executionGranted) return decide('deny', 'missing_destination:execution', v);
-      if (op.totalRunning >= max) return decide('deny', 'concurrency_limit_reached', v);
-      const b = checkReservation(op.estimatedCost, op.remainingBudget);
-      if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
-      return decide('allow', 'eligible_cloud_start_within_limits', v);
-    }
-
-    default: {
-      const t = policy.operations?.[kind];
-      if (t === undefined) return decide('deny', `missing_operation_config:${kind}`, v);
-      return decide(t, `configured:${kind}`, v);
-    }
+  const kind = op?.kind;
+  if (typeof kind !== 'string' || !(OPERATION_KINDS as readonly string[]).includes(kind)) {
+    return decide('deny', 'unknown_operation', v);
   }
+  const k = kind as OperationKind;
+  const ops = policy.operations;
+  const configured: unknown = has(ops, k) ? ops?.[k] : undefined;
+
+  if ((HARD_DENY_KINDS as readonly string[]).includes(k)) return decide('deny', `hard_deny:${k}`, v);
+
+  if ((ADMIN_KINDS as readonly string[]).includes(k)) {
+    if ((op as { actor?: unknown }).actor !== 'administrator') return decide('deny', `not_administrator:${k}`, v);
+    if (configured === undefined) return decide('deny', `missing_operation_config:${k}`, v);
+    if (!isTreatment(configured)) return decide('deny', `invalid_operation_config:${k}`, v);
+    return decide(configured, configured === 'deny' ? `configured_deny:${k}` : `administrator_authorized:${k}`, v);
+  }
+
+  if (k === 'repair_within_limits' || k === 'start_cloud_worker') {
+    if (configured === 'deny') return decide('deny', `configured_deny:${k}`, v);
+    const limits = policy.limits;
+    if (k === 'repair_within_limits') {
+      const r = op as Extract<Operation, { kind: 'repair_within_limits' }>;
+      const max = limits?.repairAttempts;
+      if (max === undefined) return decide('deny', 'missing_limit:repairAttempts', v);
+      if (!Number.isInteger(r.attempt) || r.attempt < 1) return decide('deny', 'invalid_attempt', v);
+      if (r.attempt > max) return decide('deny', 'repair_limit_exhausted', v);
+      const b = checkReservation(r.estimatedCost, r.remainingBudget);
+      if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
+      return decide('allow', 'repair_within_limits', v);
+    }
+    const w = op as Extract<Operation, { kind: 'start_cloud_worker' }>;
+    const max = limits?.maxConcurrentTotal;
+    if (max === undefined) return decide('deny', 'missing_limit:maxConcurrentTotal', v);
+    if (!Number.isInteger(w.totalRunning) || w.totalRunning < 0) return decide('deny', 'invalid_running_count', v);
+    if (!Array.isArray(w.sources) || w.sources.length === 0) return decide('deny', 'no_sources', v);
+    for (const s of w.sources) {
+      const c = ClassificationSchema.safeParse(s?.classification);
+      if (!c.success) return decide('deny', 'unclassified_source', v);
+      if (c.data === 'restricted' || c.data === 'secret') return decide('deny', 'source_not_cloud_eligible', v);
+      if (!policy.selectedSources?.includes(s.id)) return decide('deny', 'source_not_selected', v);
+    }
+    for (const s of w.sources) {
+      if (!isDestinationGranted('execution', w.destination, s.classification, policy)) {
+        return decide('deny', 'missing_destination:execution', v);
+      }
+    }
+    if (w.totalRunning >= max) return decide('deny', 'concurrency_limit_reached', v);
+    const b = checkReservation(w.estimatedCost, w.remainingBudget);
+    if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
+    return decide('allow', 'eligible_cloud_start_within_limits', v);
+  }
+
+  if (configured === undefined) return decide('deny', `missing_operation_config:${k}`, v);
+  if (!isTreatment(configured)) return decide('deny', `invalid_operation_config:${k}`, v);
+  if (configured === 'allow' && (HUMAN_DECISION_KINDS as readonly string[]).includes(k)) {
+    return decide('require_approval', `human_decision_required:${k}`, v);
+  }
+  return decide(configured, `configured:${k}`, v);
 }
 
 /**
  * Combine a decision with a human approval. A deny is final: approvals only
- * resolve `require_approval`. The result is never recorded as `approval.granted`
- * by this function; persistence of the human grant is the caller's concern.
+ * resolve `require_approval`. Persistence of the human grant is the caller's concern.
  */
 export function applyApproval(d: PolicyDecision, approved: boolean): PolicyDecision {
-  if (d.decision === 'deny') return d;
-  if (d.decision === 'allow') return d;
+  if (d.decision !== 'require_approval') return d;
   return approved ? { ...d, decision: 'allow', reason: `approved:${d.reason}` } : d;
 }

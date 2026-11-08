@@ -1,14 +1,13 @@
 import { deriveClassification, ClassificationSchema, type Classification } from './classification.ts';
+import { isDestinationGranted, type Source } from './destinations.ts';
 import type { Policy } from './policy.ts';
+
+export type { Source };
 
 export const FIREBASE_CLOUD_ROUTE = 'firebase-ai-logic-cloud';
 export const INFERENCE_MODES = ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const;
 export type InferenceMode = (typeof INFERENCE_MODES)[number];
 
-export interface Source {
-  readonly id: string;
-  readonly classification?: Classification | undefined;
-}
 export interface Routed {
   readonly blocked: false;
   readonly mode: InferenceMode;
@@ -26,9 +25,7 @@ export interface Blocked {
 function cloudApproved(src: { id: string; classification: Classification }, policy: Policy): boolean {
   if (src.classification === 'restricted' || src.classification === 'secret') return false;
   if (!policy.selectedSources?.includes(src.id)) return false;
-  return (policy.destinations ?? []).some(
-    (g) => g.destination === FIREBASE_CLOUD_ROUTE && g.purpose === 'inference' && g.classifications.includes(src.classification),
-  );
+  return isDestinationGranted('inference', FIREBASE_CLOUD_ROUTE, src.classification, policy);
 }
 
 export function resolveInferenceMode(sources: readonly Source[], policy: Policy | undefined): Routed | Blocked {
@@ -63,5 +60,7 @@ export function resolveInferenceMode(sources: readonly Source[], policy: Policy 
       return cloudOk ? ok(false, 'cloud_approved') : blocked('missing_destination:firebase_cloud_inference');
     case 'PREFER_IN_CLOUD':
       return cloudOk ? ok(true, 'cloud_approved') : blocked('missing_destination:firebase_cloud_inference');
+    default:
+      return blocked('invalid_mode');
   }
 }
