@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BlueprintContentSchema, EXECUTION_CHOICES, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
+import { BlueprintContentSchema, EXECUTION_CHOICES, pilotCriteriaProblem, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
 import { recordOnboardingOperation, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import {
@@ -129,6 +129,7 @@ export async function onboardingPlanSettings(db: Executor, tenantId: string, pro
     classification: goal.success ? goal.data.classification : 'internal', policyVersion: policy.policyVersion, execution: execution === 'hybrid' ? 'eligible_any' : execution, inferencePolicyId: 'onboarding',
     limits: { maxAttempts: (policy.limits?.repairAttempts ?? 0) + 1, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: budget },
     allowedRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), forbiddenMandatoryScope: blueprint.nonGoals,
+    ...(templateSupport(blueprint.tracks).executable ? { requiredRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id) } : {}),
   };
 }
 
@@ -252,6 +253,8 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
       if (row.state !== 'discovering') return;
     }
     const content = body.content ?? blueprintFromAnswers({ goal: row.answers['goal'], source: row.answers['source'], focus: row.answers['focus'] } as Parameters<typeof blueprintFromAnswers>[0]);
+    const criteriaProblem = pilotCriteriaProblem(content);
+    if (criteriaProblem !== null) throw new AppError(422, 'pilot_criteria_fixed', criteriaProblem);
     const contentSha256 = hashContent(content);
     if (row.currentBlueprintVersion !== null) {
       const current = await loadBlueprint(tx, row, row.currentBlueprintVersion);
@@ -393,6 +396,8 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
       const blueprint = await currentBlueprint(tx, row);
       const support = templateSupport(blueprint.tracks);
       if (!support.executable) throw new AppError(422, 'template_not_supported', 'This project is a plan only: its template cannot start a run yet.', { unsupported: support.unsupported });
+      const criteriaProblem = pilotCriteriaProblem(blueprint);
+      if (criteriaProblem !== null) throw new AppError(422, 'pilot_criteria_fixed', criteriaProblem);
       if (body.expectedRevision !== row.revision) throw staleRevision(row.revision, 'this setup');
       if (row.state !== 'ready' || !fresh) throw new AppError(409, 'not_ready', 'Readiness has not passed for the current blueprint.', { state: row.state });
       if (row.currentBlueprintVersion !== body.blueprintVersion) throw new AppError(409, 'stale_revision', 'The blueprint changed since you reviewed it.', { currentVersion: row.currentBlueprintVersion });

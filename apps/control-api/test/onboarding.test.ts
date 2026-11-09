@@ -2,10 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { VerificationRecordSchema } from '@selarikru/domain';
 import { schema } from '@selarikru/persistence';
 import { OnboardingViewSchema } from '@selarikru/protocol';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { FakeGitHub } from '@selarikru/integrations-github/testing';
+import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
+import { loadValidRecord } from '../../../services/verifier/src/service.ts';
 import { createGitProbes, ghRepoAccess, readinessProbesFromEnv, seedDemo, type ReadinessProbes } from '../src/index.ts';
 import { hashTree } from '../../../services/verifier/src/hashing.ts';
 import { API_POLICY, ORIGIN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
@@ -780,11 +784,105 @@ describe('controller', () => {
     v = (await check(h, v)).body;
     v = (await activate(h, v)).body;
     const review = await post(h.app, `/v1/runs/${v.firstRunId}/proposals/review`, {
-      envelope: { operation: 'draftTaskPlan', status: 'ok', data: { tasks: [{ title: 'Queue screen', description: 'Show position', requirementIds: ['AC-1'] }] } },
+      envelope: { operation: 'draftTaskPlan', status: 'ok', data: { tasks: [{ title: 'Queue screen', description: 'Show position', requirementIds: ['FB-01'] }] } },
     });
     expect(review.status, JSON.stringify(review.body)).toBe(200);
     expect(review.body.tasks[0].baseSha).toBe(SHA);
-    expect(review.body.tasks[0].allowedPaths).toEqual(['src', 'tests']);
+    expect(review.body.tasks[0].allowedPaths).toEqual(['src', 'server', 'migrations', 'tests']);
+    expect(review.body.tasks[0].requirementIds).toEqual(['FB-01']);
+    expect(review.body.tasks[0].acceptanceCheckIds).toEqual(['FB-01']);
+  });
+
+  describe('a run on the pilot stack is judged on FB-01 to FB-08', () => {
+    const CRITERIA = ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-05', 'FB-06', 'FB-07', 'FB-08'];
+    const TRUSTED = { checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64) };
+    const CANDIDATE = 'c'.repeat(40);
+    const planOf = (tasks: readonly { title: string; requirementIds: readonly string[] }[]) => ({ operation: 'draftTaskPlan', status: 'ok', data: { tasks: tasks.map((x) => ({ ...x, description: 'Build it' })) } });
+
+    /** What the verifier writes once it has passed a candidate: a stored record with all eight results and one check run per criterion per task. */
+    async function recordVerified(artifacts: LocalDiskArtifactStore, projectId: string, runId: string, taskIds: readonly string[]) {
+      await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES (${TENANT}, ${projectId}, 'cand_pilot', ${runId}, 'main', ${CANDIDATE}, ${SHA}, ${'d'.repeat(40)}, ${JSON.stringify(taskIds.map((taskId) => ({ taskId })))}::jsonb, 'assembled')`);
+      const record = VerificationRecordSchema.parse({
+        schemaVersion: 1, recordId: 'rec_pilot', taskId: taskIds[0], runId, partTaskIds: [...taskIds], candidateSha: CANDIDATE, candidateTreeSha: 'd'.repeat(40), candidateContentSha256: 'd'.repeat(64), baseSha: SHA, contractRevisions: [],
+        ...TRUSTED, toolVersions: {}, configVersions: {}, environmentImageDigest: 'sha256:img', host: 'local-docker', fixtures: [], startedAt: '2026-11-09T01:00:00Z', finishedAt: '2026-11-09T01:01:00Z', result: 'passed', exitCode: 0,
+        results: CRITERIA.map((checkId) => ({ checkId, status: 'passed', tests: [{ runner: 'vitest', title: `${checkId} holds`, status: 'passed' }], failures: [], evidenceReferences: [] })),
+        runs: [{ attempt: 1, startedAt: '2026-11-09T01:00:00Z', finishedAt: '2026-11-09T01:01:00Z', exitCode: 0, infrastructureError: null, results: [], resultArtifactId: null, logArtifactId: null }],
+        flaky: [], taskOutcomes: [], artifactIds: [], verifier: { kind: 'verifier', id: 'verifier-local-1' },
+      });
+      const ref = await artifacts.put(Buffer.from(JSON.stringify(record)));
+      const checkRunIds = taskIds.flatMap((taskId) => CRITERIA.map((checkId) => `chk_${taskId}_${checkId}`));
+      for (const taskId of taskIds) for (const checkId of CRITERIA) {
+        await t.db.execute(sql`INSERT INTO check_runs (tenant_id, project_id, check_run_id, task_id, revision, attempt_id, check_id, check_version, candidate_sha, result) VALUES (${TENANT}, ${projectId}, ${`chk_${taskId}_${checkId}`}, ${taskId}, 1, NULL, ${checkId}, '0.1', ${CANDIDATE}, 'passed')`);
+      }
+      await t.db.execute(sql`INSERT INTO artifacts (tenant_id, project_id, artifact_id, run_id, type, sha256, source_revision, classification, locator) VALUES (${TENANT}, ${projectId}, 'rec_pilot', ${runId}, 'verification_record', ${ref.sha256}, ${CANDIDATE}, 'internal', ${JSON.stringify({ recordId: 'rec_pilot', candidateSha: CANDIDATE, applied: true, checkRunIds })}::jsonb)`);
+      await t.db.execute(sql`UPDATE task_status SET status = 'verified' WHERE project_id = ${projectId}`);
+      await t.db.execute(sql`UPDATE runs SET lifecycle = 'ready_for_review' WHERE run_id = ${runId}`);
+    }
+
+    it('from activation through plan, verdict, per-criterion evidence and the pull request body', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'pilot-criteria-'));
+      const artifacts = new LocalDiskArtifactStore(dir);
+      const gh = new FakeGitHub();
+      const loadRecord = (key: { tenantId: string; projectId: string; sha: string }) => loadValidRecord(t.db, artifacts, key, { trusted: TRUSTED });
+      const h = makeHarness(t, {}, POLICY_WITH_PR, { readiness: goodProbes(), drivers: DRIVERS_ON, evidence: { trusted: () => TRUSTED, artifacts, loadRecord }, github: { pullRequests: { port: gh, repoPath: CHECKOUT, loadRecord } } });
+      try {
+        let v = await configuredWithRunner(h);
+        expect(v.blueprint.content.acceptanceCriteria.map((c: { id: string }) => c.id)).toEqual(CRITERIA);
+        v = (await check(h, v)).body;
+        v = (await activate(h, v)).body;
+        const runId = v.firstRunId as string;
+
+        // The plan the assistant drafts from a brief naming these ids is the one the server accepts.
+        const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'API and storage', requirementIds: ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-06'] }, { title: 'Form, list and filters', requirementIds: ['FB-05', 'FB-07', 'FB-08'] }]) });
+        expect(review.status, JSON.stringify(review.body)).toBe(200);
+        expect(review.body.tasks.map((x: { acceptanceCheckIds: string[] }) => x.acceptanceCheckIds)).toEqual([['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-06'], ['FB-05', 'FB-07', 'FB-08']]);
+
+        // A plan that left a criterion out would shrink the denominator, so it is refused and says which.
+        const partialReview = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'Only the form', requirementIds: ['FB-01'] }]) });
+        expect(partialReview.status).toBe(200);
+        const partial = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('partial'), tasks: partialReview.body.tasks });
+        expect(partial.status).toBe(422);
+        expect(partial.body.error.code).toBe('criteria_not_covered');
+        expect(partial.body.error.details.missing).toEqual(CRITERIA.slice(1));
+
+        const accepted = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('plan'), tasks: review.body.tasks });
+        expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
+        await recordVerified(artifacts, v.projectId, runId, accepted.body.taskIds);
+
+        const snapshot = await get(h.app, `/v1/projects/${v.projectId}/snapshot`, owner());
+        const run = snapshot.body.runs.find((r: { runId: string }) => r.runId === runId);
+        expect(run.criteria).toEqual({ verified: 8, total: 8 });
+        expect(run.evidence.criteria.map((c: { criterionId: string; state: string; verified: boolean }) => [c.criterionId, c.state, c.verified])).toEqual(CRITERIA.map((id) => [id, 'passed', true]));
+
+        const pr = await h.app.inject({ method: 'POST', url: `/v1/runs/${runId}/pull-request`, payload: {}, headers: owner() });
+        expect(pr.statusCode, pr.body).toBe(200);
+        const body = gh.prs[0]!.body;
+        for (const id of CRITERIA) expect(body).toContain(`| ${id} | passed |`);
+        expect(body).not.toContain('untested');
+      } finally {
+        await h.app.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses an owner edit that would replace the criteria, and an older blueprint that already did', async () => {
+      const h = harness();
+      let v = await configuredWithRunner(h);
+      const content = { ...v.blueprint.content, acceptanceCriteria: [{ id: 'AC-1', text: 'A patient sees their position' }] };
+      const edit = await write(h, v.projectId, 'blueprints', { content }, v.revision);
+      expect(edit.status).toBe(422);
+      expect(edit.body.error.code).toBe('pilot_criteria_fixed');
+
+      // A blueprint drafted before the pilot criteria were fixed: versions are immutable, so it arrives as a later version the owner already accepted.
+      await t.db.execute(sql`INSERT INTO project_blueprints (tenant_id, project_id, version, content, content_sha256, origin, created_by) VALUES (${TENANT}, ${v.projectId}, ${v.blueprint.version + 1}, ${JSON.stringify(content)}::jsonb, ${'f'.repeat(64)}, 'owner', 'owner')`);
+      await t.db.execute(sql`UPDATE project_onboardings SET current_blueprint_version = ${v.blueprint.version + 1}, accepted_blueprint_version = ${v.blueprint.version + 1}, cost_confirmed_for_version = ${v.blueprint.version + 1} WHERE project_id = ${v.projectId}`);
+      v = (await get(h.app, `/v1/onboarding/${v.projectId}`, owner())).body;
+      v = (await check(h, v)).body;
+      const started = await activate(h, v);
+      expect(started.status).toBe(422);
+      expect(started.body.error.code).toBe('pilot_criteria_fixed');
+      expect(await countRuns(v.projectId)).toBe(0);
+    });
   });
 
   it('owner routes never expose the source checkout to a non-owner', async () => {
@@ -792,5 +890,23 @@ describe('controller', () => {
     const v = await start(h);
     const stranger = await get(h.app, `/v1/onboarding/${v.projectId}`, owner({ authorization: 'Bearer firebase-intruder-token' }));
     expect(stranger.status).toBe(403);
+  });
+});
+
+describe('runner_has_project', () => {
+  it('needs every recent runner at the location to hold the project, because the scheduler does not filter by it', async () => {
+    const h = harness();
+    const holder = await enrolRunner(h.app);
+    const other = await enrolRunner(h.app);
+    const v = await configured(h);
+    await reportProjects(h, holder.token, [v.projectId]);
+    await reportProjects(h, other.token, ['some-other-project']);
+    const result = await check(h, v);
+    expect(statusOf(result.body, 'runner_has_project')).toBe('failed');
+    expect(result.body.readiness.checks.find((c: any) => c.id === 'runner_has_project').reason).toContain(other.runnerId);
+
+    await reportProjects(h, other.token, [v.projectId]);
+    const fixed = await check(h, result.body);
+    expect(statusOf(fixed.body, 'runner_has_project')).toBe('passed');
   });
 });

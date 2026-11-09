@@ -49,7 +49,8 @@ export const hasStaleRecord = (run: RunView): boolean => !isClosedRun(run) && ru
 export const atFailedGate = (t: Pick<TaskView, 'status'>, latest: CheckView | undefined): boolean => t.status === 'failed' || (t.status === 'ready' && latest?.state === 'failed');
 const titleOf = (t: TaskView): string => t.title ?? t.taskId;
 export const sentence = (code: string): string => {
-  const words = code.replace(/[_:]+/g, ' ').trim();
+  // A free-text reason (a runner's own words, punctuation included) is already a sentence; only a code gets spelled out.
+  const words = /\s/.test(code.trim()) ? code.trim() : code.replace(/[_:]+/g, ' ').trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 const stripPrefix = (code: string): string => code.replace(/^(policy_denied|approval_required):/, '');
@@ -168,7 +169,7 @@ export function requestText(a: Pick<ApprovalView, 'operation' | 'reason'>): stri
 export const reducedScopeCovers = (run: RunView | undefined, task: Pick<TaskView, 'taskId' | 'revision'>): boolean =>
   run?.reducedScope?.notDelivered.tasks.some((t) => t.taskId === task.taskId && t.revision === task.revision) ?? false;
 
-export function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
+export function blockItem(task: TaskView, code: string, hit: readonly string[], lastFailure: string | null = null): AttentionItem {
   const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You', decisionId: decisionIdForBlock(task, code) };
   const name = titleOf(task);
   switch (classifyBlock(code)) {
@@ -181,7 +182,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[]):
     }
     case 'repair':
       return make({
-        ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: 'Its repair attempts are used up, so no further attempt will start.',
+        ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: `Its repair attempts are used up, so no further attempt will start.${lastFailure ? ` The last attempt ended with: ${explain(lastFailure)}` : ''}`,
         consequence: `${whoWaits(hit)} It stays blocked until a person changes the plan.`, nextAction: 'Inspect the failing check, then replan or cancel the task.',
       });
     case 'budget': {
@@ -229,7 +230,9 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     // The expiry sweep blocks the task with this reason, and the expired approval below already says so.
     const expiredRequestShown = blockCode === 'approval_expired' && Object.values(snapshot.approvals).some((a) => a.taskId === task.taskId && approvalStateAt(a, nowMs) === 'expired');
     if (blockCode !== null && !expiredRequestShown) {
-      const item = blockItem(task, blockCode, affected(task));
+      // The block only says the repairs ran out. What stopped them is on the last attempt, and it is what the operator has to fix.
+      const lastFailure = Object.values(snapshot.attempts).filter((a) => a.taskId === task.taskId && a.outcome === 'failed' && a.exitReason !== null).sort((a, b) => b.number - a.number)[0]?.exitReason ?? null;
+      const item = blockItem(task, blockCode, affected(task), lastFailure);
       // Only then does the Decisions card for this block exist.
       items.push(blockCode === 'reverification_failed' && snapshot.runs[task.runId]?.failedRebuildMainMoved === true ? { ...item, decisionId: `reverify:${task.runId}` } : item);
     }

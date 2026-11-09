@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from 'react';
-import { COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
+import { COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, templateSupport, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
 import type { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import type { AssistantPort } from '../assistant/types.ts';
@@ -117,7 +117,7 @@ export function SourceStep(p: StepProps) {
       footer={<>{backTo(onGo, 'goal')}<button type="button" className={buttonPrimary} disabled={busy || !view} onClick={() => void save()}>Save and continue</button></>}>
       <Failure error={error} />
       <div className="grid gap-3 sm:grid-cols-2">
-        {([['new', 'A new project', 'Start from an empty repository you create yourself.'], ['existing', 'An existing app or repository', 'Work on code you already have. Its conventions come first.']] as const).map(([value, label, hint]) => (
+        {([['new', 'A new project', 'Start from the Feedback Board starter: push a copy of examples/feedback-board-starter to a repository you create. An empty repository cannot pass the checks.'], ['existing', 'An existing app or repository', 'Work on code you already have. Its conventions come first.']] as const).map(([value, label, hint]) => (
           <label key={value} className={`cursor-pointer rounded-card border p-3 ${kind === value ? 'border-active bg-active-tint' : 'border-line bg-panel hover:border-line-strong'}`}>
             <span className="flex items-center gap-2 font-medium"><input type="radio" name="source-kind" checked={kind === value} onChange={() => setKind(value)} />{label}</span>
             <span className="mt-1 block text-sm text-muted">{hint}</span>
@@ -216,7 +216,8 @@ export function BlueprintStep(p: StepProps) {
     const content: BlueprintContent = {
       ...c,
       nonGoals: lines(nonGoals), assumptions: lines(assumptions), allowedPaths: lines(paths),
-      acceptanceCriteria: criteriaLines.map((text, i) => ({ id: `AC-${i + 1}`, text })),
+      // The pilot stack's criteria belong to the verifier's suite; renumbering them here would leave a run judged on nothing.
+      acceptanceCriteria: templateSupport(c.tracks).executable ? c.acceptanceCriteria : criteriaLines.map((text, i) => ({ id: `AC-${i + 1}`, text })),
     };
     if (await run(() => api.createBlueprint(view.projectId, { idempotencyKey: keys.keyFor('edit-blueprint'), expectedRevision: view.revision, content }))) {
       keys.settle('edit-blueprint');
@@ -256,7 +257,7 @@ export function BlueprintStep(p: StepProps) {
       ) : null}
       {editing ? (
         <div className="space-y-4 rounded-card border border-active bg-panel p-4">
-          <Field id="edit-criteria" label="Acceptance criteria" hint="One per line. Each becomes something a run must pass."><textarea id="edit-criteria" className={inputClass} rows={4} value={criteria} onChange={(e) => setCriteria(e.target.value)} /></Field>
+          {templateSupport(c.tracks).executable ? <Notice tone="neutral" title="Acceptance criteria">These are fixed by the verification suite, FB-01 to FB-08, so they cannot be edited here.</Notice> : <Field id="edit-criteria" label="Acceptance criteria" hint="One per line. Each becomes something a run must pass."><textarea id="edit-criteria" className={inputClass} rows={4} value={criteria} onChange={(e) => setCriteria(e.target.value)} /></Field>}
           <Field id="edit-paths" label="Paths workers may change" hint="One per line, relative to the repository."><textarea id="edit-paths" className={`${inputClass} font-mono text-mono`} rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} /></Field>
           <Field id="edit-nongoals" label="Non-goals" hint="One per line. Agents treat these as out of scope."><textarea id="edit-nongoals" className={inputClass} rows={3} value={nonGoals} onChange={(e) => setNonGoals(e.target.value)} /></Field>
           <Field id="edit-assumptions" label="Assumptions" hint="One per line."><textarea id="edit-assumptions" className={inputClass} rows={3} value={assumptions} onChange={(e) => setAssumptions(e.target.value)} /></Field>

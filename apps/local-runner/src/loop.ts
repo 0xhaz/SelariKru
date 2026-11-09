@@ -13,6 +13,8 @@ export interface LoopDeps {
   readonly pollMs: number;
   /** What this machine can launch, sent with every claim so the scheduler never hands it a model it cannot run. */
   readonly harnessReport?: () => Promise<readonly RunnerHarnessReport[]>;
+  /** Project ids to report to the server as having a checkout. Defaults to every configured repo. */
+  readonly projects?: readonly string[];
   readonly sleep?: (ms: number) => Promise<void>;
   readonly log: (line: string) => void;
 }
@@ -45,7 +47,7 @@ export class RunnerLoop {
     let failures = 0;
     while (!signal.aborted) {
       try {
-        const claim = await this.d.api.claim(await this.d.harnessReport?.(), Object.keys(this.d.attempt.repos));
+        const claim = await this.d.api.claim(await this.d.harnessReport?.(), this.d.projects ?? Object.keys(this.d.attempt.repos));
         failures = 0;
         if (claim.lease) {
           this.d.log(`claimed ${claim.lease.taskId} as ${claim.lease.attemptId}`);

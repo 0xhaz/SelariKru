@@ -236,6 +236,30 @@
         "external database account",
         "production deployment"
       ]
+    },
+    {
+      "id": "brief-11",
+      "prompt": "Draft a task plan for the whole one-screen Feedback Board, split between a backend worker and a frontend worker. Together the tasks must cover every acceptance criterion: FB-01 to FB-08.",
+      "allowedRequirementIds": [
+        "FB-01",
+        "FB-02",
+        "FB-03",
+        "FB-04",
+        "FB-05",
+        "FB-06",
+        "FB-07",
+        "FB-08"
+      ],
+      "humanReviewFacts": [
+        "all eight criteria appear on at least one task",
+        "backend and frontend split the work"
+      ],
+      "forbiddenMandatoryScope": [
+        "login",
+        "payments",
+        "external database account",
+        "production deployment"
+      ]
     }
   ],
   "reviewMethod": "Schema validation plus route-blinded human fact/scope review; no measured results included"

@@ -1,6 +1,8 @@
+import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { CRITERION_DESCRIPTIONS } from './evidence.ts';
 import {
-  BlueprintContentSchema, COST_REFERENCES, CostLineSchema, ONBOARDING_STATES, advanceOnboarding, blueprintFromAnswers, costPlanFor, ledgerTotals, routeHonoursRecorded, TEMPLATE_CATALOG, templateSupport,
+  BlueprintContentSchema, COST_REFERENCES, CostLineSchema, ONBOARDING_STATES, advanceOnboarding, blueprintFromAnswers, costPlanFor, ledgerTotals, pilotCriteriaProblem, routeHonoursRecorded, TEMPLATE_CATALOG, templateSupport,
   type CostLine, type OnboardingAnswers,
 } from './onboarding.ts';
 
@@ -67,6 +69,50 @@ describe('blueprint', () => {
     expect(c.goals.idea).toBe('Patients see their place in the queue');
     expect(c.tracks).toEqual(['saas_web']);
     expect(c.acceptanceCriteria.length).toBeGreaterThan(0);
+  });
+
+  describe('the pilot stack', () => {
+    const starter = new URL('../../../examples/feedback-board-starter/', import.meta.url);
+    /** Generated or runtime directories, the frozen contract, and the frozen test fixtures: everything a worker may not change. */
+    const READ_ONLY = new Set(['node_modules', 'dist', 'data', 'contract', 'fixtures']);
+
+    it('lets workers change every writable directory of the starter shell, and never the contract', () => {
+      const writable = readdirSync(starter, { withFileTypes: true }).filter((e) => e.isDirectory() && !READ_ONLY.has(e.name)).map((e) => e.name).sort();
+      expect(writable).toEqual(expect.arrayContaining(['migrations', 'server', 'src', 'tests']));
+      const { allowedPaths } = blueprintFromAnswers(answers());
+      expect([...allowedPaths].sort()).toEqual(writable);
+      expect(allowedPaths).not.toContain('contract');
+      expect(allowedPaths).not.toContain('fixtures');
+    });
+
+    it('is judged on the criteria of the frozen suite, FB-01 to FB-08', () => {
+      const manifest = JSON.parse(readFileSync(new URL('../../../services/verifier/suites/feedback-board/manifest.json', import.meta.url), 'utf8')) as { criteria: { id: string }[] };
+      const c = blueprintFromAnswers(answers());
+      expect(c.acceptanceCriteria.map((a) => a.id)).toEqual(manifest.criteria.map((a) => a.id));
+      expect(c.acceptanceCriteria.map((a) => a.text)).toEqual(manifest.criteria.map((a) => CRITERION_DESCRIPTIONS[a.id]));
+      expect(BlueprintContentSchema.safeParse(c).success).toBe(true);
+      expect(pilotCriteriaProblem(c)).toBeNull();
+    });
+
+    it('cannot have its criteria replaced, reworded or removed', () => {
+      const c = blueprintFromAnswers(answers());
+      expect(pilotCriteriaProblem({ ...c, acceptanceCriteria: [{ id: 'AC-1', text: 'A patient sees their position' }] })).toMatch(/FB-01/);
+      expect(pilotCriteriaProblem({ ...c, acceptanceCriteria: c.acceptanceCriteria.slice(1) })).toMatch(/FB-01/);
+      expect(pilotCriteriaProblem({ ...c, acceptanceCriteria: c.acceptanceCriteria.map((a, i) => (i === 0 ? { ...a, text: 'Something else' } : a)) })).toMatch(/FB-01/);
+    });
+
+    it('a plan-only track keeps its own outcome as its criterion, and no suite claims to judge it', () => {
+      const c = blueprintFromAnswers(answers({ focus: { tracks: ['mobile'] } }));
+      expect(c.acceptanceCriteria).toEqual([{ id: 'AC-1', text: 'A patient can see their position' }]);
+      expect(c.allowedPaths).toEqual(['src', 'tests']);
+      expect(pilotCriteriaProblem(c)).toBeNull();
+    });
+
+    it('tells a new project to start from the starter shell, not an empty repository', () => {
+      const [assumption] = blueprintFromAnswers(answers()).assumptions;
+      expect(assumption).toMatch(/examples\/feedback-board-starter/);
+      expect(assumption).not.toMatch(/empty/i);
+    });
   });
 
   it('refuses paths that climb out of the repository', () => {

@@ -27,6 +27,7 @@ const TITLES: Record<string, string> = {
   'brief-08': 'Newest-first ordering',
   'brief-09': 'Input rejection',
   'brief-10': 'One-screen Feedback Board',
+  'brief-11': 'Whole Feedback Board (FB-01 to FB-08)',
 };
 
 export const BRIEFS: readonly BriefOption[] = [

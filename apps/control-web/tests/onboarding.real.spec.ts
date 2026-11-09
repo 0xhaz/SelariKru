@@ -20,7 +20,11 @@ let app: ReturnType<typeof makeHarness>['app'];
 let baseUrl: string;
 
 test.beforeAll(async () => {
-  t = await setupTestDb(10);
+  try {
+    t = await setupTestDb(10);
+  } catch (e) {
+    throw new Error(`Could not reach the test Postgres. Start it with \`pnpm db:up\` (Compose), then run this spec again. Original error: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const policy = { ...API_POLICY, operations: { ...API_POLICY.operations, create_draft_pr: 'allow' } } as const;
   ({ app } = makeHarness(t, { allowedOrigins: testConfig().allowedOrigins.concat(WEB_ORIGIN) }, policy, { readiness: probes, drivers: () => ({ assembly: true, verification: true }), github: { pullRequests: { port: {} as never, repoPath: '/srv/source', loadRecord: async () => null } } }));
   baseUrl = await app.listen({ host: '127.0.0.1', port: 0 });

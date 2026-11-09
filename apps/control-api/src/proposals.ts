@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, err, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
+import { canonicalJson, CRITERION_DESCRIPTIONS, err, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
 import { readFileSync } from 'node:fs';
 import { PlanTaskSchema } from '@selarikru/protocol';
 import { z } from 'zod';
@@ -33,6 +33,8 @@ export const ProjectPlanSettingsSchema = z
     allowedRequirementIds: z.array(z.string().min(1)).min(1),
     /** Required. An empty list is an explicit statement that no phrase is checked. */
     forbiddenMandatoryScope: z.array(z.string().min(1)),
+    /** Criteria a run's plan as a whole must carry: the denominator it is judged against. Absent means this configuration fixes none. */
+    requiredRequirementIds: z.array(z.string().min(1)).min(1).optional(),
   })
   .strict();
 export type ProjectPlanSettings = z.input<typeof ProjectPlanSettingsSchema>;
@@ -149,7 +151,7 @@ export function reviewPlanProposal(
     const parsed = PlanTaskSchema.safeParse({
       schemaVersion: 1, tenantId: c.tenantId, projectId: c.projectId, runId: c.runId, taskId: `${opts.taskIdPrefix}-${i + 1}`,
       boardId: c.boardId, revision: 1, role: c.role, title: t.title, baseSha: c.baseSha, requirementIds: [...t.requirementIds],
-      dependencies: [], contractRefs: [], allowedPaths: c.allowedPaths, resourceClaims: [], acceptanceCheckIds: [],
+      dependencies: [], contractRefs: [], allowedPaths: c.allowedPaths, resourceClaims: [], acceptanceCheckIds: t.requirementIds.filter((id) => Object.hasOwn(CRITERION_DESCRIPTIONS, id)),
       classification, policyVersion: c.policyVersion, execution: c.execution, inferencePolicyId: c.inferencePolicyId,
       limits: c.limits,
     });

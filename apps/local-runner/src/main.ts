@@ -8,6 +8,7 @@ import { cachedHarnessReport } from '@selarikru/harness-claude';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { redactSecrets } from '@selarikru/protocol';
 import { HttpRunnerApi } from './api.ts';
+import { gitBackedProjects } from './repos.ts';
 import { wsControlConnector } from './control.ts';
 import { loadCredentials, pair } from './credentials.ts';
 import { RunnerLoop } from './loop.ts';
@@ -72,6 +73,8 @@ async function main(): Promise<void> {
       pollMs: Number(values.poll ?? 5000),
       // Probed on this machine's host. The CLI inside the sandbox image can differ; the init-event check is what proves the model that actually ran.
       harnessReport: cachedHarnessReport(),
+      // A path that is not a git repository is not a checkout: say so here, and the server's readiness check will not count it.
+      projects: await gitBackedProjects(repos, log),
       log,
       attempt: {
         api, runtime, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot, repos,

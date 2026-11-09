@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskView } from '@selarikru/view-protocol';
-import { ATTENTION_ORDER, blockItem, buildAttention } from './attention.ts';
+import { ATTENTION_ORDER, blockItem, buildAttention, explain, sentence } from './attention.ts';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task, worker } from './testing.ts';
 
 const placed = (code: string) => snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: code })] });
@@ -368,5 +368,29 @@ describe('next action for model blocks', () => {
 
   it('a restricted task is told no device model exists', () => {
     expect(next('restricted_requires_device_model:anthropic/x')).toMatch(/No device model is available yet/);
+  });
+});
+
+describe('a worker\'s failure reason, in its own words', () => {
+  const REASON = 'could not build the task bundle: base commit is not in the source repository';
+
+  it('is kept as written instead of being read as a code', () => {
+    expect(sentence(REASON)).toBe('Could not build the task bundle: base commit is not in the source repository');
+    expect(explain(REASON)).toBe('Could not build the task bundle: base commit is not in the source repository.');
+    expect(sentence('verification_failed')).toBe('Verification failed');
+  });
+
+  it('reaches Mission Control while the task is failed', () => {
+    const [item] = buildAttention(snapshotOf({ tasks: [task('t', { status: 'failed', statusReason: REASON })] }), NOW, NOW);
+    expect(item!.detail).toContain('base commit is not in the source repository');
+    expect(item!.detail).toContain('bundle: base');
+  });
+
+  it('reaches Mission Control after the repair attempts run out, when the task only says the budget is used up', () => {
+    const snapshot = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_budget_exhausted' })] });
+    snapshot.attempts['att'] = { attemptId: 'att', taskId: 't', number: 3, fence: 3, outcome: 'failed', exitReason: REASON, runnerId: 'r', startedAt: iso(10), endedAt: iso(5), lastHeartbeatAt: iso(6), assignment: null };
+    const [item] = buildAttention(snapshot, NOW, NOW);
+    expect(item).toMatchObject({ kind: 'failed_gate', code: 'repair_budget_exhausted' });
+    expect(item!.detail).toContain('base commit is not in the source repository');
   });
 });

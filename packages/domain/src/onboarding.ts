@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CRITERION_DESCRIPTIONS } from './evidence.ts';
 import { err, ok, type Result } from './result.ts';
 
 /**
@@ -153,7 +154,8 @@ export type GoalAssist = z.infer<typeof GoalAssistSchema>;
 export const OnboardingAnswersSchema = z.strictObject({ goal: GoalAnswersSchema, source: SourceAnswersSchema, focus: FocusAnswersSchema });
 export type OnboardingAnswers = z.input<typeof OnboardingAnswersSchema>;
 
-const criterionId = z.string().regex(/^AC-\d{1,2}$/);
+/** `AC-n` for a project's own outcomes; `FB-nn` for the pilot stack, whose criteria belong to the verifier's suite. */
+const criterionId = z.string().regex(/^(?:AC-\d{1,2}|FB-\d{2})$/);
 export const BlueprintContentSchema = z.strictObject({
   schemaVersion: z.literal(1),
   goals: z.strictObject({ idea: Text(800), audience: Text(300), firstOutcome: Text(300) }),
@@ -180,6 +182,19 @@ export const BlueprintContentSchema = z.strictObject({
 });
 export type BlueprintContent = z.infer<typeof BlueprintContentSchema>;
 
+/** The repository paths of the Feedback Board starter shell a worker may change. Its contract and frozen test fixtures stay out. */
+export const PILOT_ALLOWED_PATHS = ['src', 'server', 'migrations', 'tests'] as const;
+/** The pilot stack's criteria are the ones the verifier's suite judges: an id or text of any other kind would never be checked. */
+export const PILOT_CRITERIA: readonly { readonly id: string; readonly text: string }[] = Object.entries(CRITERION_DESCRIPTIONS).sort(([a], [b]) => a.localeCompare(b)).map(([id, text]) => ({ id, text }));
+const PILOT_CRITERIA_REFUSAL = `The pilot stack is judged on the verification suite's fixed criteria, ${PILOT_CRITERIA[0]!.id} to ${PILOT_CRITERIA.at(-1)!.id}, so they cannot be changed.`;
+
+/** Why this blueprint's criteria would leave a run judged on something else, or null when they are right. Only an executable template has a suite to agree with. */
+export function pilotCriteriaProblem(content: Pick<BlueprintContent, 'tracks' | 'acceptanceCriteria'>): string | null {
+  if (!templateSupport(content.tracks).executable) return null;
+  const same = content.acceptanceCriteria.length === PILOT_CRITERIA.length && PILOT_CRITERIA.every((c, i) => content.acceptanceCriteria[i]?.id === c.id && content.acceptanceCriteria[i]?.text === c.text);
+  return same ? null : PILOT_CRITERIA_REFUSAL;
+}
+
 /** The controller's own first draft. Deterministic: the same answers give the same blueprint, and no model is involved. */
 export function blueprintFromAnswers(answers: OnboardingAnswers): BlueprintContent {
   const a = OnboardingAnswersSchema.parse(answers);
@@ -190,12 +205,12 @@ export function blueprintFromAnswers(answers: OnboardingAnswers): BlueprintConte
     goals: { idea: a.goal.idea, audience: a.goal.audience, firstOutcome: a.goal.firstOutcome },
     tracks: a.focus.tracks,
     stack: [],
-    allowedPaths: ['src', 'tests'],
-    acceptanceCriteria: [{ id: 'AC-1', text: a.goal.firstOutcome }],
+    allowedPaths: executable.executable ? [...PILOT_ALLOWED_PATHS] : ['src', 'tests'],
+    acceptanceCriteria: executable.executable ? PILOT_CRITERIA.map((c) => ({ ...c })) : [{ id: 'AC-1', text: a.goal.firstOutcome }],
     roles: [...new Map(a.focus.tracks.flatMap((t) => TEMPLATE_CATALOG[t].roles).map((r) => [r.role, r])).values()],
     requiredConnections: ['GitHub repository'],
     nonGoals: [],
-    assumptions: [a.source.kind === 'new' ? 'You will create an empty repository and connect it.' : 'The existing repository stays the source of truth; detected conventions outrank the template.'],
+    assumptions: [a.source.kind === 'new' ? (executable.executable ? 'You will push a copy of the starter shell (examples/feedback-board-starter) to your own repository and connect it.' : 'You will create a repository and connect it.') : 'The existing repository stays the source of truth; detected conventions outrank the template.'],
     firstMilestone: { title: lead.milestone, tasks: [{ id: 'T1', title: `Deliver: ${a.goal.firstOutcome}`.slice(0, 120), dependsOn: [] }] },
     pendingDecisions: [
       ...executable.unsupported.map((u) => `${TEMPLATE_CATALOG[u.track].label}: ${u.reason}`.slice(0, 240)),

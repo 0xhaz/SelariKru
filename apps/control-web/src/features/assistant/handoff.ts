@@ -25,6 +25,10 @@ export function apiErrorText(code: string, details: unknown): string {
     case 'stale_revision': return 'The plan changed since you reviewed it. Review again before accepting.';
     case 'acknowledgement_required': return 'Acknowledge each listed issue to continue.';
     case 'proposal_rejected': return 'The server rejected this proposal. It is not accepted and nothing was created.';
+    case 'criteria_not_covered': {
+      const missing = (details as { missing?: unknown } | null)?.missing;
+      return `This plan leaves out ${Array.isArray(missing) ? missing.join(', ') : 'required criteria'}. A run on this project is judged on every criterion, so the plan must cover them all.`;
+    }
     case 'plan_invalid': return 'The candidate tasks are not a valid plan. Nothing was created.';
     case 'missing_server_config': return 'This project has no plan settings on the server, so review is blocked.';
     case 'policy_denied': return 'Policy does not allow planning here.';

@@ -213,7 +213,7 @@ export async function performReadiness(input: ReadinessInput): Promise<Readiness
     checks.push(check('runner_has_project', HAS_PROJECT, 'unknown', 'Execution has not been chosen yet.', null));
   } else {
     const since = new Date(input.now.getTime() - RUNNER_RECENT_SECONDS * 1000);
-    const seen = await input.db.select({ location: schema.runners.location, report: schema.runners.harnessReport, projects: schema.runners.configuredProjects }).from(schema.runners)
+    const seen = await input.db.select({ runnerId: schema.runners.runnerId, label: schema.runners.label, location: schema.runners.location, report: schema.runners.harnessReport, projects: schema.runners.configuredProjects }).from(schema.runners)
       .where(and(eq(schema.runners.tenantId, input.tenantId), isNull(schema.runners.revokedAt), inArray(schema.runners.location, locations), gte(schema.runners.lastSeenAt, since)));
     const at = (l: string) => seen.filter((r) => r.location === l);
     const missing = locations.filter((l) => at(l).length === 0);
@@ -222,14 +222,16 @@ export async function performReadiness(input: ReadinessInput): Promise<Readiness
     else if (noModel.length > 0) checks.push(check('runner_enrolled', ENROLLED, 'failed', `The ${noModel.join(' and ')} runner reports no model this build can launch.`, 'Install a supported harness on that runner.'));
     else checks.push(check('runner_enrolled', ENROLLED, 'passed', `A ${locations.join(' and a ')} runner reported in recently, with a model it can launch.`, null));
 
+    // The scheduler does not filter claims by project, so any recent runner at a location may be handed this work: one without the checkout fails the attempt.
+    const lacking = seen.filter((r) => r.projects !== null && !r.projects.includes(input.projectId)).map((r) => r.label ?? r.runnerId);
     const verdicts = locations.map((l) => {
       const here = at(l);
-      if (here.some((r) => r.projects?.includes(input.projectId))) return 'has';
-      return here.some((r) => r.projects !== null) ? 'lacks' : 'unsaid';
+      if (here.length > 0 && here.every((r) => r.projects?.includes(input.projectId))) return 'has';
+      return here.some((r) => r.projects !== null && !r.projects.includes(input.projectId)) ? 'lacks' : 'unsaid';
     });
     const next = `Restart the runner with \`${runCommand}\`.`;
-    if (verdicts.every((v) => v === 'has')) checks.push(check('runner_has_project', HAS_PROJECT, 'passed', 'The runner reports a source checkout for this project.', null));
-    else if (verdicts.includes('lacks')) checks.push(check('runner_has_project', HAS_PROJECT, 'failed', 'The runner has not been given a source checkout for this project, so it could not build it.', next));
+    if (verdicts.every((v) => v === 'has')) checks.push(check('runner_has_project', HAS_PROJECT, 'passed', 'Every recent runner reports a source checkout for this project.', null));
+    else if (verdicts.includes('lacks')) checks.push(check('runner_has_project', HAS_PROJECT, 'failed', `${lacking.join(', ')} ${lacking.length === 1 ? 'has' : 'have'} no source checkout for this project, and the scheduler can hand this work to any runner at that location, so its attempts would fail.`, next));
     else checks.push(check('runner_has_project', HAS_PROJECT, 'unknown', 'No runner has said which projects it has a checkout for.', next));
   }
 
