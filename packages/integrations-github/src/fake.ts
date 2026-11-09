@@ -1,4 +1,4 @@
-import type { GitHubPort, PullRequestInfo } from './port.ts';
+import { PushRejectedError, type GitHubPort, type PullRequestInfo } from './port.ts';
 
 /** In-memory GitHub for tests. It records every call and can lose the response of a create. */
 export class FakeGitHub implements GitHubPort {
@@ -15,7 +15,7 @@ export class FakeGitHub implements GitHubPort {
   async pushBranch(i: { repository: string; repoPath: string; sha: string; branch: string }): Promise<void> {
     this.calls.push('pushBranch');
     const old = this.branches.get(i.branch);
-    if (old !== undefined && old !== i.sha && !this.fastForwards.has(`${old}>${i.sha}`)) throw new Error('! [rejected] (non-fast-forward)');
+    if (old !== undefined && old !== i.sha && !this.fastForwards.has(`${old}>${i.sha}`)) throw new PushRejectedError('! [rejected] (non-fast-forward)');
     this.pushes.push({ branch: i.branch, sha: i.sha });
     this.branches.set(i.branch, i.sha);
   }

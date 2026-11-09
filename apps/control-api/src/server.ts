@@ -18,11 +18,14 @@ export interface GithubOptions {
   loadRecord?: ((db: Db, key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>) | undefined;
 }
 
+/** Longest delay `setTimeout` accepts; a larger interval would fire immediately and spin. */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 /** Fails startup clearly on an unusable GitHub setting instead of running half-configured. */
 export function validateGithubOptions(g: GithubOptions | undefined): void {
   if (!g) return;
-  if (g.pollIntervalMs !== undefined && (!Number.isSafeInteger(g.pollIntervalMs) || g.pollIntervalMs < 1)) {
-    throw new ConfigError('invalid configuration: SELARIKRU_GITHUB_POLL_INTERVAL_MS must be a positive integer of milliseconds', [], ['githubPollIntervalMs']);
+  if (g.pollIntervalMs !== undefined && (!Number.isSafeInteger(g.pollIntervalMs) || g.pollIntervalMs < 1 || g.pollIntervalMs > MAX_TIMER_MS)) {
+    throw new ConfigError('invalid configuration: SELARIKRU_GITHUB_POLL_INTERVAL_MS must be a positive integer of milliseconds, at most 2147483647', [], ['githubPollIntervalMs']);
   }
   if (g.pollIntervalMs !== undefined && !g.port) throw new ConfigError('invalid configuration: a GitHub poll interval needs a GitHub port', [], ['githubPort']);
   if (g.webhookSecret && g.pollIntervalMs === undefined) {
@@ -48,6 +51,8 @@ export async function startServer(options: {
   verifier?: TokenVerifier | undefined;
   now?: (() => Date) | undefined;
   onError?: ((e: unknown) => void) | undefined;
+  /** Receives GitHub reconciler failures, so they can carry their own log label. Defaults to `onError`. */
+  onReconcileError?: ((e: unknown) => void) | undefined;
   /**
    * GitHub review integration. `webhookSecret` registers the webhook route and needs `port` and `pollIntervalMs` (the reconciler processes its
    * hints). `port` + `pollIntervalMs` start the polling reconciler, the local path. `sourceRepoPath` + `loadRecord` register the owner route that
@@ -74,7 +79,7 @@ export async function startServer(options: {
     ...(options.onError ? { onError: options.onError } : {}),
   });
   const reconciler = options.github?.port && options.github.pollIntervalMs
-    ? startReconciler({ db, port: options.github.port, now, intervalMs: options.github.pollIntervalMs, ...(options.onError ? { onError: options.onError } : {}) })
+    ? startReconciler({ db, port: options.github.port, now, intervalMs: options.github.pollIntervalMs, ...((options.onReconcileError ?? options.onError) ? { onError: (options.onReconcileError ?? options.onError)! } : {}) })
     : undefined;
   const address = await app.listen({ host: config.host, port: config.port });
   return {

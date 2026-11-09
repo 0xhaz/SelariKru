@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
 import { redactSecrets } from '@selarikru/protocol';
-import type { GitHubPort, PullRequestInfo, PullRequestState } from './port.ts';
+import { PushRejectedError, type GitHubPort, type PullRequestInfo, type PullRequestState } from './port.ts';
 
 /** Runs a program with an argument array. No shell is ever involved. */
 export type Exec = (file: string, args: readonly string[], opts?: { cwd?: string; input?: string }) => Promise<string>;
 
+/** Exported from this module for its redaction test only; `index.ts` does not re-export it. */
 export const defaultExec: Exec = (file, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const child = execFile(file, [...args], { cwd: opts.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }, maxBuffer: 8 * 1024 * 1024, timeout: 120_000 }, (error, stdout, stderr) => {
@@ -64,7 +65,12 @@ export function createGhCliPort(options: GhCliOptions = {}): GitHubPort {
       await exec('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: repoPath });
       if ((await branchHead(repository, name)) === sha) return;
       // No force: a branch that moved elsewhere makes this fail rather than being overwritten.
-      await exec('git', ['push', '--no-verify', url, `${sha}:refs/heads/${name}`], { cwd: repoPath });
+      try {
+        await exec('git', ['push', '--no-verify', url, `${sha}:refs/heads/${name}`], { cwd: repoPath });
+      } catch (e) {
+        if (/rejected|non-fast-forward|fetch first/i.test(String((e as Error).message))) throw new PushRejectedError(redactSecrets(String((e as Error).message)).slice(0, 500));
+        throw e;
+      }
     },
     async findPullRequests(repository, branch) {
       const out = await exec('gh', ['pr', 'list', '--repo', repo(repository), '--head', branchOf(branch), '--state', 'all', '--limit', '20', '--json', FIELDS]);

@@ -1,7 +1,7 @@
 import { schema, withTx, type Db } from '@selarikru/persistence';
 import { redactSecrets } from '@selarikru/protocol';
 import { markTaskMerged } from '@selarikru/workflow';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { emitIntegration, INTEGRATION_ACTOR } from './events.ts';
 import type { GitHubPort } from './port.ts';
 import { INTEGRATION } from './webhook.ts';
@@ -44,7 +44,10 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
     const live = (await tx.select({ id: schema.candidates.candidateId, parts: schema.candidates.parts }).from(schema.candidates).where(and(
       eq(schema.candidates.tenantId, key.tenantId), eq(schema.candidates.projectId, key.projectId), eq(schema.candidates.runId, key.runId),
       eq(schema.candidates.sha, locked.candidateSha), eq(schema.candidates.status, 'assembled'))))[0];
-    if (!live) {
+    const lifecycle = (await tx.select({ lifecycle: schema.runs.lifecycle }).from(schema.runs).where(and(
+      eq(schema.runs.tenantId, key.tenantId), eq(schema.runs.projectId, key.projectId), eq(schema.runs.runId, key.runId))))[0]?.lifecycle;
+    // A run that left `ready_for_review` (its evidence was invalidated) is not finished by a merge, even of the same SHA.
+    if (!live || lifecycle !== 'ready_for_review') {
       await tx.update(schema.changeRequests).set({ ...observed, status: 'stale_candidate', mergeCommitSha: pr.mergeCommitSha }).where(where);
       return { status: 'stale' };
     }
@@ -111,14 +114,15 @@ export async function processPendingDeliveries(deps: ReconcileDeps): Promise<Pic
   return out;
 }
 
-/** Closed PRs are polled too (they can be reopened and merged), bounded to the most recently observed ones. */
+/** Closed and stale PRs are polled too (they can be reopened and merged), bounded to the least recently observed ones. */
 export const CLOSED_POLL_LIMIT = 50;
 
 /** Reads every open PR, and the most recently observed closed ones, once. This is the local path (GitHub cannot reach localhost) and also catches missed or delayed webhooks. */
 export async function pollOpenChangeRequests(deps: ReconcileDeps): Promise<Pick<PassResult, 'polled' | 'failed' | 'errors'>> {
   const open = await deps.db.select().from(schema.changeRequests).where(eq(schema.changeRequests.status, 'open'));
-  const closed = await deps.db.select().from(schema.changeRequests).where(eq(schema.changeRequests.status, 'closed'))
-    .orderBy(desc(schema.changeRequests.observedAt)).limit(CLOSED_POLL_LIMIT);
+  // Least recently observed first, so the bound can never starve an older row behind newer ones.
+  const closed = await deps.db.select().from(schema.changeRequests).where(inArray(schema.changeRequests.status, ['closed', 'stale_candidate']))
+    .orderBy(sql`${schema.changeRequests.observedAt} ASC NULLS FIRST`).limit(CLOSED_POLL_LIMIT);
   const errors: string[] = [];
   for (const cr of [...open, ...closed]) {
     try { await reconcileRun({ tenantId: cr.tenantId, projectId: cr.projectId, runId: cr.runId }, deps); } catch (e) { errors.push(redactSecrets(String((e as Error).message)).slice(0, 500)); }

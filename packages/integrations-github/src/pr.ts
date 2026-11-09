@@ -3,13 +3,13 @@ import { recordOperation, schema, sql, withTx, type Db } from '@selarikru/persis
 import { and, desc, eq } from 'drizzle-orm';
 import { buildPrBody, type UsageLine } from './body.ts';
 import { emitIntegration } from './events.ts';
-import type { GitHubPort, PullRequestInfo } from './port.ts';
+import { PushRejectedError, type GitHubPort, type PullRequestInfo } from './port.ts';
 
 
-export type PrRefusal = 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open' | 'candidate_changed' | 'foreign_pr' | 'target_mismatch';
+export type PrRefusal = 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open' | 'candidate_changed' | 'foreign_pr' | 'target_mismatch' | 'run_already_merged' | 'push_rejected';
 
 export class PrNotAllowed extends Error {
-  constructor(readonly reason: PrRefusal, message: string) {
+  constructor(readonly reason: PrRefusal, message: string, /** Reason-specific facts, e.g. the open PR to close for `candidate_changed`. */ readonly detail: Readonly<Record<string, unknown>> = {}) {
     super(message);
     this.name = 'PrNotAllowed';
   }
@@ -41,63 +41,74 @@ export type OpenPrResult =
 
 const SAFE_BRANCH = /^[A-Za-z0-9._-]{1,100}$/;
 
-/** The branch a run's candidate is pushed to. Derived from the run id only. */
-export function branchForRun(runId: string): string {
-  return `selarikru/${runId}`;
+/** The branch a candidate is pushed to: per run and per candidate, so a rebuilt candidate never moves or reuses an earlier PR's branch. */
+export function branchForCandidate(runId: string, sha: string): string {
+  return `selarikru/${runId}/${sha.slice(0, 12)}`;
 }
 
 /**
- * Pushes the run's exact verified candidate to `selarikru/<runId>` and opens a DRAFT pull request into the project's default branch.
+ * Pushes the run's exact verified candidate to `selarikru/<runId>/<sha12>` and opens a DRAFT pull request into the project's default branch.
  *
  * - Needs a run in `ready_for_review`, an assembled candidate, and a live passing record for that candidate SHA (`loadRecord`).
  * - The repository and base branch come from the project row, never from the caller.
+ * - The run row is locked for the whole operation, and the candidate and the run's recorded PR are read under that lock, so concurrent
+ *   opens for different candidates cannot both reach the push.
+ * - One PR row per run. A different candidate while the recorded PR is `open` is refused (`candidate_changed`, naming the PR to close);
+ *   after it is `closed` or `stale_candidate` the new candidate opens its own PR on its own branch and replaces the row; after a merge it is refused.
  * - Idempotent through `recordOperation`. If a create's response was lost, the retry queries the repository for a PR on the branch
- *   and adopts it, so there is never a duplicate. A completed operation replays its receipt without touching GitHub.
+ *   and adopts it only if it is ours. A completed operation replays its receipt without touching GitHub.
  * - A run flagged `trial` never reaches GitHub.
  */
 export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promise<OpenPrResult> {
   const now = deps.now ?? (() => new Date());
   const { db, port } = deps;
-  const projects = await db.select().from(schema.projects).where(and(eq(schema.projects.tenantId, run.tenantId), eq(schema.projects.projectId, run.projectId)));
-  const project = projects[0];
-  if (!project) throw new PrNotAllowed('project_missing', 'unknown project');
-  const runs = await db.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)));
-  const row = runs[0];
-  if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
-  if (row.trial) return { status: 'skipped', reason: 'trial' };
-  if (row.lifecycle !== 'ready_for_review') throw new PrNotAllowed('run_not_ready', `run is ${row.lifecycle}, not ready_for_review`);
+  return withTx(db, async (tx): Promise<OpenPrResult> => {
+    const runs = await tx.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)))
+      .for('no key update');
+    const row = runs[0];
+    if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
+    const project = (await tx.select().from(schema.projects).where(and(eq(schema.projects.tenantId, run.tenantId), eq(schema.projects.projectId, run.projectId))))[0];
+    if (!project) throw new PrNotAllowed('project_missing', 'unknown project');
+    if (row.trial) return { status: 'skipped', reason: 'trial' };
+    if (row.lifecycle !== 'ready_for_review') throw new PrNotAllowed('run_not_ready', `run is ${row.lifecycle}, not ready_for_review`);
 
-  const cands = await db.select().from(schema.candidates).where(and(
-    eq(schema.candidates.tenantId, run.tenantId), eq(schema.candidates.projectId, run.projectId), eq(schema.candidates.runId, run.runId), eq(schema.candidates.status, 'assembled')))
-    .orderBy(desc(schema.candidates.createdAt));
-  const candidate = cands[0];
-  if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
-  if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
-  const sha = candidate.sha;
+    const candidate = (await tx.select().from(schema.candidates).where(and(
+      eq(schema.candidates.tenantId, run.tenantId), eq(schema.candidates.projectId, run.projectId), eq(schema.candidates.runId, run.runId), eq(schema.candidates.status, 'assembled')))
+      .orderBy(desc(schema.candidates.createdAt)))[0];
+    if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
+    if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
+    const sha = candidate.sha;
 
-  const record = await deps.loadRecord(sha);
-  if (!record || record.candidateSha !== sha || record.runId !== run.runId) throw new PrNotAllowed('no_valid_record', 'no live verification record for the run candidate');
-  if (record.result !== 'passed' || record.results.length === 0 || record.results.some((r) => r.status !== 'passed')) {
-    throw new PrNotAllowed('record_not_passing', 'the verification record is not a full pass');
-  }
+    const record = await deps.loadRecord(sha);
+    if (!record || record.candidateSha !== sha || record.runId !== run.runId) throw new PrNotAllowed('no_valid_record', 'no live verification record for the run candidate');
+    if (record.result !== 'passed' || record.results.length === 0 || record.results.some((r) => r.status !== 'passed')) {
+      throw new PrNotAllowed('record_not_passing', 'the verification record is not a full pass');
+    }
 
-  const branch = branchForRun(run.runId);
-  if (!SAFE_BRANCH.test(run.runId)) throw new PrNotAllowed('unsafe_branch', 'run id cannot form a branch name');
-  if (branch === project.defaultBranch || project.defaultBranch === `refs/heads/${branch}`) throw new PrNotAllowed('branch_is_default', 'refusing to push to the default branch');
-  const repository = project.repository;
+    if (!SAFE_BRANCH.test(run.runId)) throw new PrNotAllowed('unsafe_branch', 'run id cannot form a branch name');
+    const branch = branchForCandidate(run.runId, sha);
+    if (branch === project.defaultBranch || project.defaultBranch === `refs/heads/${branch}`) throw new PrNotAllowed('branch_is_default', 'refusing to push to the default branch');
+    const repository = project.repository;
 
-  const usage = deps.loadUsage ? await deps.loadUsage(run.runId) : [];
-  const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage });
-  const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
+    const prior = (await tx.select().from(schema.changeRequests).where(and(
+      eq(schema.changeRequests.tenantId, run.tenantId), eq(schema.changeRequests.projectId, run.projectId), eq(schema.changeRequests.runId, run.runId))))[0];
+    if (prior && prior.candidateSha !== sha) {
+      if (prior.status === 'open') throw new PrNotAllowed('candidate_changed', `pull request #${prior.prNumber} is still open for candidate ${prior.candidateSha}; close it to open one for the rebuilt candidate`, { prNumber: prior.prNumber, url: prior.url, candidateSha: prior.candidateSha });
+      if (prior.status !== 'closed' && prior.status !== 'stale_candidate') throw new PrNotAllowed('run_already_merged', `pull request #${prior.prNumber} for this run is ${prior.status}`, { prNumber: prior.prNumber });
+    }
 
-  return withTx(db, (tx) =>
-    recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {
-      // One PR per run, for one candidate. A rebuilt candidate (even a fast-forward of the old one) never reuses or moves the old PR's branch.
-      const prior = (await tx.select().from(schema.changeRequests).where(and(
-        eq(schema.changeRequests.tenantId, run.tenantId), eq(schema.changeRequests.projectId, run.projectId), eq(schema.changeRequests.runId, run.runId))))[0];
-      if (prior && prior.candidateSha !== sha) throw new PrNotAllowed('candidate_changed', `a pull request is already open for candidate ${prior.candidateSha}`);
+    const usage = deps.loadUsage ? await deps.loadUsage(run.runId) : [];
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage });
+    const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
+
+    const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {
       // Pushing the same commit again is a no-op, so this is safe on every retry. Never forced.
-      await port.pushBranch({ repository, repoPath: run.repoPath, sha, branch });
+      try {
+        await port.pushBranch({ repository, repoPath: run.repoPath, sha, branch });
+      } catch (e) {
+        if (e instanceof PushRejectedError) throw new PrNotAllowed('push_rejected', `the remote branch ${branch} already holds other commits`);
+        throw e;
+      }
       // Query before creating: a previous attempt may have created the PR and lost the response.
       const found = await port.findPullRequests(repository, branch);
       let pr: PullRequestInfo;
@@ -113,12 +124,21 @@ export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promis
       } else {
         pr = await port.createDraftPullRequest({ repository, branch, base: project.defaultBranch, title, body });
       }
+      // Inserts the row, or replaces a closed or stale one that belonged to a different candidate (guarded above).
       await tx.execute(sql`
-        INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, base_ref, pr_number, url, status, observed_head_sha, observed_at)
-        VALUES (${run.tenantId}, ${run.projectId}, ${run.runId}, ${repository}, ${sha}, ${branch}, ${project.defaultBranch}, ${pr.number}, ${pr.url}, 'open', ${pr.headSha || null}, ${now().toISOString()}::timestamptz)
-        ON CONFLICT (tenant_id, project_id, run_id) DO NOTHING`);
+        INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, base_ref, pr_number, url, status, observed_head_sha, merge_commit_sha, observed_at)
+        VALUES (${run.tenantId}, ${run.projectId}, ${run.runId}, ${repository}, ${sha}, ${branch}, ${project.defaultBranch}, ${pr.number}, ${pr.url}, 'open', ${pr.headSha || null}, NULL, ${now().toISOString()}::timestamptz)
+        ON CONFLICT (tenant_id, project_id, run_id) DO UPDATE SET
+          repository = EXCLUDED.repository, candidate_sha = EXCLUDED.candidate_sha, branch = EXCLUDED.branch, base_ref = EXCLUDED.base_ref, pr_number = EXCLUDED.pr_number,
+          url = EXCLUDED.url, status = 'open', observed_head_sha = EXCLUDED.observed_head_sha, merge_commit_sha = NULL, observed_at = EXCLUDED.observed_at
+          WHERE change_requests.candidate_sha <> EXCLUDED.candidate_sha`);
       await emitIntegration(tx, { projectId: run.projectId, runId: run.runId }, now(), 'change.proposed', { prNumber: pr.number, url: pr.url, branch, candidateSha: sha, draft: true, adopted });
       return { status: 'opened' as const, number: pr.number, url: pr.url, branch, candidateSha: sha, adopted };
-    }),
-  );
+    });
+    // A receipt from an earlier open of this same candidate must still describe the run's current PR.
+    const current = (await tx.select().from(schema.changeRequests).where(and(
+      eq(schema.changeRequests.tenantId, run.tenantId), eq(schema.changeRequests.projectId, run.projectId), eq(schema.changeRequests.runId, run.runId))))[0];
+    if (!current || current.candidateSha !== sha) throw new PrNotAllowed('candidate_changed', 'the run now has a pull request for another candidate', { prNumber: current?.prNumber ?? null });
+    return result;
+  });
 }

@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createGhCliPort, type Exec } from './gh-cli.ts';
+import { PushRejectedError } from './port.ts';
+import { createGhCliPort, defaultExec, type Exec } from './gh-cli.ts';
 import { FakeGitHub } from './fake.ts';
 import type { GitHubPort } from './port.ts';
 
@@ -55,7 +56,7 @@ describe('gh CLI port', () => {
     await expect(port.pushBranch({ repository: 'acme/r', repoPath: src, sha: sha, branch: 'selarikru/run_b' })).resolves.toBeUndefined();
     git(src, 'checkout', '-q', '--orphan', 'x'); writeFileSync(join(src, 'b.txt'), 'x'); git(src, 'add', '.'); git(src, 'commit', '-qm', 'unrelated');
     const unrelated = git(src, 'rev-parse', 'HEAD');
-    await expect(port.pushBranch({ repository: 'acme/r', repoPath: src, sha: unrelated, branch: 'selarikru/run_b' })).rejects.toThrow();
+    await expect(port.pushBranch({ repository: 'acme/r', repoPath: src, sha: unrelated, branch: 'selarikru/run_b' })).rejects.toBeInstanceOf(PushRejectedError);
     expect(git(bare, 'rev-parse', 'refs/heads/selarikru/run_b')).toBe(sha);
     expect(other).not.toBe(sha);
   });
@@ -95,6 +96,15 @@ describe('gh CLI port', () => {
     expect(create.args).toContain('--draft');
     expect(create.input).toBe('BODY');
     expect(create.args.join(' ')).not.toContain('BODY');
+  });
+
+  it('subprocess failure text is redacted before it becomes an error message', async () => {
+    const leak = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+    // A harmless local program stands in for gh: nothing here contacts GitHub.
+    const err = await defaultExec(process.execPath, ['-e', `console.error('auth failed token=${leak}'); process.exit(1)`]).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('auth failed');
+    expect((err as Error).message).not.toContain(leak);
   });
 
   it('no API path can merge', async () => {

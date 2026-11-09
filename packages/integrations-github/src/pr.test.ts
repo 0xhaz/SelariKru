@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-helpers';
-import { PrNotAllowed, openReviewablePr, type OpenPrDeps } from './pr.ts';
+import { PrNotAllowed, branchForCandidate, openReviewablePr, type OpenPrDeps } from './pr.ts';
+import { reconcileRun } from './reconcile.ts';
 import { buildPrBody } from './body.ts';
 import { FakeGitHub } from './fake.ts';
 import { PROJECT, REPO, RUN, SHA, T0, TENANT, SHA2, q, record, seedReadyRun, setDefaultBranch, setRun, supersedeCandidate } from './test-fixtures.ts';
@@ -18,9 +19,9 @@ describe('openReviewablePr', () => {
   it('pushes the exact candidate to a branch named from the run and opens a draft PR into the default branch', async () => {
     const r = await openReviewablePr(run, deps());
     expect(r.status).toBe('opened');
-    expect(gh.pushes).toEqual([{ branch: `selarikru/${RUN}`, sha: SHA }]);
+    expect(gh.pushes).toEqual([{ branch: branchForCandidate(RUN, SHA), sha: SHA }]);
     expect(gh.prs).toHaveLength(1);
-    expect(gh.prs[0]).toMatchObject({ draft: true, headRef: `selarikru/${RUN}`, baseRef: 'main' });
+    expect(gh.prs[0]).toMatchObject({ draft: true, headRef: branchForCandidate(RUN, SHA), baseRef: 'main' });
     const rows = await q(tdb.db, 'SELECT * FROM change_requests');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ run_id: RUN, candidate_sha: SHA, pr_number: 1, status: 'open', repository: REPO, base_ref: 'main' });
@@ -109,7 +110,7 @@ describe('openReviewablePr', () => {
   });
 
   it('never targets the default branch', async () => {
-    await setDefaultBranch(tdb.db, `selarikru/${RUN}`);
+    await setDefaultBranch(tdb.db, branchForCandidate(RUN, SHA));
     await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'branch_is_default' });
     expect(gh.pushes).toEqual([]);
   });
@@ -154,7 +155,7 @@ describe('candidate identity', () => {
     gh.fastForwards.add(`${SHA}>${SHA2}`);
     await supersedeCandidate(tdb.db);
     await expect(openReviewablePr(run, deps(rebuilt()))).rejects.toMatchObject({ reason: 'candidate_changed' });
-    expect(gh.branches.get(`selarikru/${RUN}`)).toBe(SHA);
+    expect(gh.branches.get(branchForCandidate(RUN, SHA))).toBe(SHA);
     expect(await q(tdb.db, 'SELECT candidate_sha, status FROM change_requests')).toEqual([{ candidate_sha: SHA, status: 'open' }]);
   });
 
@@ -170,8 +171,92 @@ describe('candidate identity', () => {
   });
 });
 
+describe('successor candidates', () => {
+  const rebuilt = (): Partial<OpenPrDeps> => ({ loadRecord: async (sha) => record({ candidateSha: sha }) });
+  const tid = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+
+  it('a rebuilt candidate while the prior PR is open is refused and names the PR to close', async () => {
+    await openReviewablePr(run, deps());
+    await supersedeCandidate(tdb.db);
+    const err = await openReviewablePr(run, deps(rebuilt())).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PrNotAllowed);
+    expect(err).toMatchObject({ reason: 'candidate_changed', detail: { prNumber: 1 } });
+    expect((err as Error).message).toContain('#1');
+    expect(gh.pushes).toHaveLength(1);
+  });
+
+  it('after the prior PR is closed the rebuilt candidate opens its own PR on its own branch and replaces the row', async () => {
+    await openReviewablePr(run, deps());
+    gh.humanCloses(1);
+    await reconcileRun(tid, { db: tdb.db, port: gh, now: () => T0 });
+    await supersedeCandidate(tdb.db);
+    const r = await openReviewablePr(run, deps(rebuilt()));
+    expect(r).toMatchObject({ status: 'opened', number: 2, candidateSha: SHA2, branch: branchForCandidate(RUN, SHA2), adopted: false });
+    expect(branchForCandidate(RUN, SHA2)).not.toBe(branchForCandidate(RUN, SHA));
+    expect(gh.prs).toHaveLength(2);
+    expect(await q(tdb.db, 'SELECT candidate_sha, pr_number, status, branch, base_ref, merge_commit_sha FROM change_requests')).toEqual([
+      { candidate_sha: SHA2, pr_number: 2, status: 'open', branch: branchForCandidate(RUN, SHA2), base_ref: 'main', merge_commit_sha: null }]);
+    expect(await q(tdb.db, "SELECT 1 FROM events WHERE type = 'change.proposed'")).toHaveLength(2);
+    // Retrying the same open replays; nothing new happens.
+    const calls = gh.calls.length;
+    expect((await openReviewablePr(run, deps(rebuilt()))).status).toBe('opened');
+    expect(gh.calls.length).toBe(calls);
+  });
+
+  it('after a stale_candidate row the rebuilt candidate opens a new PR, and its merge finishes the run', async () => {
+    await openReviewablePr(run, deps());
+    await supersedeCandidate(tdb.db);
+    gh.humanMerges(1);
+    expect((await reconcileRun(tid, { db: tdb.db, port: gh, now: () => T0 })).status).toBe('stale');
+    expect(await q(tdb.db, 'SELECT status FROM change_requests')).toEqual([{ status: 'stale_candidate' }]);
+
+    const r = await openReviewablePr(run, deps(rebuilt()));
+    expect(r).toMatchObject({ status: 'opened', number: 2, candidateSha: SHA2 });
+    expect(await q(tdb.db, 'SELECT candidate_sha, status FROM change_requests')).toEqual([{ candidate_sha: SHA2, status: 'open' }]);
+
+    gh.humanMerges(2);
+    expect((await reconcileRun(tid, { db: tdb.db, port: gh, now: () => T0 })).status).toBe('merged');
+    const tasks = await q(tdb.db, "SELECT task_id, status FROM task_status ORDER BY task_id");
+    expect(tasks).toEqual([{ task_id: 'task_a', status: 'merged' }, { task_id: 'task_b', status: 'merged' }]);
+    expect(await q(tdb.db, 'SELECT lifecycle FROM runs')).toEqual([{ lifecycle: 'merged' }]);
+    expect(await q(tdb.db, "SELECT 1 FROM events WHERE type = 'change.merged'")).toHaveLength(3);
+  });
+
+  it('refuses a rebuilt candidate once the run PR was merged', async () => {
+    await openReviewablePr(run, deps());
+    await supersedeCandidate(tdb.db);
+    await tdb.db.execute(await import('drizzle-orm').then((m) => m.sql`UPDATE change_requests SET status = 'merged'`));
+    await expect(openReviewablePr(run, deps(rebuilt()))).rejects.toMatchObject({ reason: 'run_already_merged' });
+    expect(gh.pushes).toHaveLength(1);
+  });
+
+  it('a remote branch that holds other commits is a typed push_rejected refusal', async () => {
+    gh.branches.set(branchForCandidate(RUN, SHA), 'f'.repeat(40));
+    await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'push_rejected' });
+    expect(gh.prs).toHaveLength(0);
+  });
+
+  it('opens for different candidates cannot both reach the push: the run row is locked and the candidate re-read', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => { entered = r; });
+    const first = openReviewablePr(run, deps({ loadRecord: async (sha) => { entered(); await gate; return record({ candidateSha: sha }); } }));
+    await inside;
+    await supersedeCandidate(tdb.db); // the rebuild lands while the first open holds the lock
+    const second = openReviewablePr(run, deps(rebuilt())).then(() => 'opened', (e: PrNotAllowed) => e.reason);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(gh.pushes).toEqual([]); // the second is waiting on the lock; the first has not pushed yet
+    release();
+    expect((await first).status).toBe('opened');
+    expect(await second).toBe('candidate_changed');
+    expect(gh.pushes).toEqual([{ branch: branchForCandidate(RUN, SHA), sha: SHA }]);
+    expect(gh.prs).toHaveLength(1);
+  });
+});
+
 describe('adoption', () => {
-  const branch = `selarikru/${RUN}`;
+  const branch = branchForCandidate(RUN, SHA);
   for (const [name, over] of [
     ['a different head SHA', { headSha: '9'.repeat(40) }],
     ['a different base', { headSha: SHA, baseRef: 'develop' }],

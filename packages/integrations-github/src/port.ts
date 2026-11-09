@@ -33,3 +33,11 @@ export interface GitHubPort {
   /** Reads a pull request's current state from GitHub. */
   getPullRequest(repository: string, number: number): Promise<PullRequestInfo | null>;
 }
+
+/** `git push` was refused because the remote branch holds commits the push would not contain (non-fast-forward). Never retried with force. */
+export class PushRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PushRejectedError';
+  }
+}

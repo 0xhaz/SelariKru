@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-helpers';
 import { openReviewablePr } from './pr.ts';
@@ -171,6 +172,31 @@ describe('reconciliation', () => {
     const row = (await q(tdb.db, "SELECT last_error, status FROM integration_deliveries WHERE delivery_id = 'fail-1'"))[0]!;
     expect(row['status']).toBe('received');
     expect(String(row['last_error'])).not.toContain(leak);
+  });
+
+  it('the least recently observed closed row is polled first, so the bound cannot starve it', async () => {
+    const { CLOSED_POLL_LIMIT } = await import('./reconcile.ts');
+    await tdb.db.execute(sql`UPDATE change_requests SET status = 'closed', observed_at = ${new Date(T0.getTime() - 86_400_000).toISOString()}::timestamptz`);
+    for (let i = 0; i < CLOSED_POLL_LIMIT; i++) {
+      const run = `run_x${i}`;
+      await tdb.db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle) VALUES (${TENANT}, ${PROJECT}, ${run}, 'merged')`);
+      await tdb.db.execute(sql`INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, base_ref, pr_number, url, status, observed_at)
+        VALUES (${TENANT}, ${PROJECT}, ${run}, ${REPO}, ${SHA}, 'b', 'main', ${1000 + i}, 'u', 'closed', ${T0.toISOString()}::timestamptz)`);
+    }
+    gh.humanReopens(1);
+    gh.humanMerges(1);
+    const r = await pollOpenChangeRequests(rdeps());
+    expect(r.polled).toBe(CLOSED_POLL_LIMIT);
+    expect(await status('task_a')).toBe('merged');
+  });
+
+  it('a merge of the same SHA while the run is no longer ready_for_review records nothing', async () => {
+    await tdb.db.execute(sql`UPDATE runs SET lifecycle = 'running'`);
+    gh.humanMerges(1);
+    expect((await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps())).status).toBe('stale');
+    expect(await mergedEvents()).toHaveLength(0);
+    expect(await status('task_a')).toBe('verified');
+    expect(await lifecycle()).toBe('running');
   });
 
   it('a PR closed without merging leaves tasks verified', async () => {
