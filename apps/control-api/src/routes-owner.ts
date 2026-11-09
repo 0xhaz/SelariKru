@@ -446,6 +446,14 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           ORDER BY task_id, sequence DESC`);
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
+        // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
+        const assessments = new Map<string, { notDelivered: unknown; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
+        for (const r of runs) {
+          const assessed = await assessRunScope(tx, { tenantId: config.tenantId, projectId, runId: r.runId }).catch(() => null);
+          assessments.set(r.runId, assessed && assessed.stopped.length + assessed.stopping.length > 0
+            ? { notDelivered: assessed.notDelivered, deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
+            : null);
+        }
         return {
           projectId,
           cursor,
@@ -454,6 +462,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null,
             /** Set once the owner accepted a budget stop. `notDelivered` lists what was stopped and is never counted as verified. */
             reducedScope: reducedScopes.filter((d) => d.context === reducedScopeContext(r.runId)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.affected[0] ?? null,
+            /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
+            scopeAssessment: assessments.get(r.runId) ?? null,
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);

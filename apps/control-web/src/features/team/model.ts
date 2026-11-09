@@ -354,7 +354,7 @@ function artifactsOf(w: WorkerView, focus: TaskView | undefined, snapshot: Proje
 }
 
 const APPROVAL: Readonly<Record<string, { label: string; tone: Tone }>> = {
-  pending: { label: 'Pending', tone: 'warning' }, granted: { label: 'Granted', tone: 'success' }, denied: { label: 'Denied', tone: 'danger' }, expired: { label: 'Expired', tone: 'danger' },
+  pending: { label: 'Pending', tone: 'warning' }, granted: { label: 'Granted', tone: 'success' }, denied: { label: 'Denied', tone: 'danger' }, expired: { label: 'Expired', tone: 'danger' }, superseded: { label: 'Superseded', tone: 'neutral' },
 };
 
 function permissionsOf(focus: TaskView | undefined, snapshot: ProjectViewSnapshot, nowMs: number): PermissionEntry[] {

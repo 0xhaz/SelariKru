@@ -3,6 +3,7 @@ import { Chip, buttonQuiet, formatExact } from '@selarikru/ui';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { roleName } from '../team/TeamSignals.tsx';
 import { Note } from './ui.tsx';
+import { decisionHref } from '../../shell/route.ts';
 import { stageLabel, type BlockCause, type PipelineRow, type TaskLink } from './model.ts';
 
 const Exact = ({ iso }: { iso: string }) => <time dateTime={iso}>{formatExact(iso)}</time>;
@@ -108,10 +109,10 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 text-sm text-muted">Next: <span className="text-fg">{row.nextAction}</span></p>
+              <p className="mt-2 text-sm text-muted">Next: <span className="text-fg">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</p>
             </section>
           ) : (
-            <Section title="Status"><p className="text-fg">{row.reason ?? 'Nothing is holding this task.'} <span className="text-muted">{row.nextAction}</span></p></Section>
+            <Section title="Status"><p className="text-fg">{row.reason ?? 'Nothing is holding this task.'} <span className="text-muted">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</p></Section>
           )}
 
           {row.ifApproved ? (

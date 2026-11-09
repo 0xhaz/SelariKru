@@ -37,6 +37,12 @@ interface Scenario {
   dependsOn?: Record<string, string[] | null>;
   /** Field overrides by task id in that fixture's snapshots, for states fixtures do not reach, such as a superseded dependency. */
   taskPatch?: Record<string, Record<string, unknown>>;
+  /** Simulates a transport fault on the spied source, e.g. 'reconnecting'. */
+  fault?: 'reconnecting' | 'dead';
+  /** Refuses commands with this rejection, to exercise a server refusal. */
+  rejectWith?: string;
+  /** Reports the fixture as observed live data, so real links are shown. */
+  observed?: boolean;
 }
 
 declare global {
@@ -165,18 +171,20 @@ const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: 
 
 /** The demo source with `execute` and `openTerminal` spied. Everything else passes through. */
 async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; label: string }> {
-  const session = (await loadDemoSession(null))!;
+  const session = (await loadDemoSession(sc.fault ?? null))!;
   const project = session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!;
   const source: EngineeringDataSource = {
     ...session.source,
     getSnapshot: async (projectId) => {
-      const base = await session.source.getSnapshot(projectId);
+      const loaded = await session.source.getSnapshot(projectId);
+      const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
       if (!sc.dependsOn && !sc.taskPatch) return base;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
       return { ...base, tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
+      if (sc.rejectWith) return Promise.resolve({ idempotencyKey: command.idempotencyKey, operationId: null, accepted: false, execution: 'rejected', rejection: sc.rejectWith as never, replayed: false, simulated: true });
       return session.source.execute(command);
     },
     openTerminal: (request) => {
@@ -195,7 +203,7 @@ if (sc.spiedFixture) {
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>
-        <AppShell store={spied} mode="mock" projectLabel={label} assistant={null} />
+        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} />
       </StrictMode>,
     );
   });

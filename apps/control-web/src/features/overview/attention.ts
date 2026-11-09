@@ -1,4 +1,4 @@
-import { approvalStateAt, effectiveWorkerHealth, type CheckView, type ProjectViewSnapshot, type TaskView } from '@selarikru/view-protocol';
+import { approvalStateAt, effectiveWorkerHealth, isReverifiableReason, type CheckView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge } from '@selarikru/ui';
 
 /**
@@ -30,6 +30,8 @@ export interface AttentionItem {
   readonly asOfLastConfirmed: boolean;
   /** A record about work that has already stopped. It may still need a decision, but it is not blocking anything now. */
   readonly closedRecord: boolean;
+  /** The Decisions card a person can act on this from, or null when there is no such card. */
+  readonly decisionId: string | null;
 }
 
 const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merged', 'verified'];
@@ -95,7 +97,7 @@ export function classifyBlock(code: string): BlockClass {
 
 const isRestrictedDenial = (code: string): boolean => /restricted|classification_not_cloud|source_not_cloud_eligible/.test(code);
 
-function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
+export function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
   const out = [rootId];
   for (let i = 0; i < out.length; i += 1) {
     for (const t of Object.values(snapshot.tasks)) {
@@ -108,11 +110,24 @@ function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
 const whoWaits = (affected: readonly string[]): string =>
   affected.length > 1 ? `This task and ${affected.length - 1} that depend on it cannot proceed.` : 'This task cannot proceed.';
 
-type ItemInput = Omit<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'> & Partial<Pick<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'>>;
-const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, closedRecord: false, ...i });
+type Defaulted = 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord' | 'decisionId';
+type ItemInput = Omit<AttentionItem, Defaulted> & Partial<Pick<AttentionItem, Defaulted>>;
+const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, closedRecord: false, decisionId: null, ...i });
+
+/** The Decisions card that handles a task's block, or null when the fix is elsewhere (a limit, a slot, an approval row that does not exist yet). */
+export function decisionIdForBlock(task: Pick<TaskView, 'taskId' | 'runId'>, code: string): string | null {
+  if (isReverifiableReason(code)) return `reverify:${task.runId}`;
+  const klass = classifyBlock(code);
+  if (klass === 'policy' || klass === 'repair' || klass === 'blocked' || code === 'approval_denied') return `placement:${task.taskId}`;
+  return null;
+}
+
+/** True when a recorded acceptance names this budget-stopped task at this revision. */
+export const reducedScopeCovers = (run: RunView | undefined, task: Pick<TaskView, 'taskId' | 'revision'>): boolean =>
+  run?.reducedScope?.notDelivered.tasks.some((t) => t.taskId === task.taskId && t.revision === task.revision) ?? false;
 
 export function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
-  const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You' };
+  const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You', decisionId: decisionIdForBlock(task, code) };
   const name = titleOf(task);
   switch (classifyBlock(code)) {
     case 'decision': {
@@ -169,7 +184,9 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
 
   for (const task of live) {
     const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
-    if (blockCode !== null) items.push(blockItem(task, blockCode, affected(task)));
+    // The expiry sweep blocks the task with this reason, and the expired approval below already says so.
+    const expiredRequestShown = blockCode === 'approval_expired' && Object.values(snapshot.approvals).some((a) => a.taskId === task.taskId && approvalStateAt(a, nowMs) === 'expired');
+    if (blockCode !== null && !expiredRequestShown) items.push(blockItem(task, blockCode, affected(task)));
     const latestCheck = latestCheckOf(snapshot, task.taskId);
     if (atFailedGate(task, latestCheck)) {
       const check = latestCheck?.state === 'failed' ? latestCheck : undefined;
@@ -187,10 +204,11 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     if (task.status !== 'cancelled' || task.cancelReason !== 'budget_exhausted') continue;
     const runState = snapshot.runs[task.runId]?.lifecycle;
     const runOpen = runState !== 'merged' && runState !== 'failed' && runState !== 'cancelled';
+    const accepted = reducedScopeCovers(snapshot.runs[task.runId], task);
     items.push(make({
-      id: `budget:${task.taskId}`, kind: 'budget_resource', closedRecord: true, needsOperator: runOpen, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'You',
-      title: `${titleOf(task)}: stopped, budget exhausted`, detail: 'The attempt was stopped when its budget ran out.',
-      consequence: 'Its work so far is preserved, and its criteria stay unmet. It will not resume on its own.', nextAction: 'Request a scoped budget increase, or accept the reduced scope.',
+      id: `budget:${task.taskId}`, kind: 'budget_resource', closedRecord: true, needsOperator: runOpen && !accepted, decisionId: runOpen && !accepted ? `scope:${task.runId}` : null, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'You',
+      title: `${titleOf(task)}: stopped, budget exhausted`, detail: accepted ? 'The attempt was stopped when its budget ran out, and you accepted the reduced scope.' : 'The attempt was stopped when its budget ran out.',
+      consequence: accepted ? 'Its criteria stay listed as not delivered.' : 'Its work so far is preserved, and its criteria stay unmet. It will not resume on its own.', nextAction: accepted ? 'No action needed. It stays listed as not delivered.' : 'Accept the reduced scope, or replan the run.',
     }));
   }
 
@@ -206,12 +224,12 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     items.push(make(
       state === 'expired'
         ? {
-            id: `decision:${approval.approvalId}`, kind: 'decision', status: 'expired', code: approval.reason, since: approval.expiresAt ?? approval.requestedAt, affectedTaskIds: hit, owner: 'You',
+            id: `decision:${approval.approvalId}`, decisionId: `decision:${approval.approvalId}`, kind: 'decision', status: 'expired', code: approval.reason, since: approval.expiresAt ?? approval.requestedAt, affectedTaskIds: hit, owner: 'You',
             title: `${name}: approval expired`, detail: `Request: ${asked}.`,
             consequence: 'It stays paused. An expired approval is never treated as granted.', nextAction: 'Request approval again if the task still needs it.',
           }
         : {
-            id: `decision:${approval.approvalId}`, kind: 'decision', status: 'open', code: approval.reason, since: approval.requestedAt, affectedTaskIds: hit, owner: 'You',
+            id: `decision:${approval.approvalId}`, decisionId: `decision:${approval.approvalId}`, kind: 'decision', status: 'open', code: approval.reason, since: approval.requestedAt, affectedTaskIds: hit, owner: 'You',
             title: `${name}: needs your decision`, detail: `Request: ${asked}.`,
             consequence: `It stays paused until you decide.${expiresIn}`, nextAction: 'Approve or deny the request.',
           },
@@ -221,11 +239,17 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
   for (const run of Object.values(snapshot.runs)) {
     if (run.lifecycle !== 'ready_for_review') continue;
     const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status !== 'superseded' && t.status !== 'cancelled');
+    const stopped = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'cancelled' && t.cancelReason === 'budget_exhausted');
+    const undelivered = stopped.length > 0 || (run.reducedScope?.notDelivered.tasks.length ?? 0) > 0;
+    const stoppedWord = stopped.length === 1 ? '1 task was' : `${stopped.length} tasks were`;
+    const criteria = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : null;
+    const uncovered = stopped.some((t) => !reducedScopeCovers(run, t));
     items.push(make({
-      id: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
+      id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
       title: 'Run is ready for your review',
-      detail: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : 'Every task is verified at the current revision. Per-criterion evidence is not connected.',
-      consequence: 'Nothing merges without you. Agents never merge.', nextAction: 'Review the pull request and merge it on GitHub.',
+      // Budget-stopped work never reads as done: this run did not deliver everything it planned.
+      detail: undelivered ? `${stopped.length > 0 ? `${stoppedWord} not delivered: stopped for budget.` : 'Some planned work was not delivered.'}${criteria ? ` ${criteria}` : ' Not every planned task is verified.'}` : (criteria ?? 'Every task is verified at the current revision. Per-criterion evidence is not connected.'),
+      consequence: 'Nothing merges without you. Agents never merge.', nextAction: uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
     }));
   }
 

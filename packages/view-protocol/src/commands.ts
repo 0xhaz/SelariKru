@@ -13,10 +13,20 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.literal('task.retry'), ...base, args: z.object({ taskId: Id }).strict() }).strict(),
   z.object({ command: z.literal('approval.grant'), ...base, args: z.object({ approvalId: Id, scopeHash: Id }).strict() }).strict(),
   z.object({ command: z.literal('approval.deny'), ...base, args: z.object({ approvalId: Id, scopeHash: Id }).strict() }).strict(),
+  // Run-level commands. `expectedRevision` is the plan revision the caller saw. There is no merge command, and there never will be: people merge on GitHub.
+  z.object({ command: z.literal('run.accept_reduced_scope'), ...base, args: z.object({ runId: Id, note: z.string().max(2000).optional() }).strict() }).strict(),
+  z.object({ command: z.literal('run.reverify'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
+  z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
 ]);
 export type AuthorizedViewCommand = z.infer<typeof AuthorizedViewCommandSchema>;
 
-export const REJECTION_REASONS = ['stale_revision', 'unknown_target', 'not_allowed', 'invalid_command', 'approval_expired', 'scope_mismatch'] as const;
+export const REJECTION_REASONS = [
+  'stale_revision', 'unknown_target', 'not_allowed', 'invalid_command', 'approval_expired', 'scope_mismatch',
+  // Named refusals of the decision routes, so a screen can say why.
+  'policy_denied', 'cancel_pending', 'not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict',
+  'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged',
+] as const;
+export type RejectionReason = (typeof REJECTION_REASONS)[number];
 
 /** Acceptance is not execution: `accepted` says the request was taken; `execution` says what has happened to it. */
 export const CommandReceiptSchema = z

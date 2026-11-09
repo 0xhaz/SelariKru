@@ -231,6 +231,10 @@ describe('budget-stopped runs', () => {
 
   it('accepted reduced scope never counts stopped criteria as verified', async () => {
     await seedStopped();
+    const before = (await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.runs.find((r: { runId: string }) => r.runId === RUN);
+    expect(before.scopeAssessment).toMatchObject({ stopped: [{ taskId: 'stopped', revision: 1 }], stoppingTaskIds: [], deliveredRequirementIds: ['FB-01'] });
+    expect(before.scopeAssessment.notDelivered.requirementIds).toEqual(['FB-02', 'FB-03']);
+    expect(before.reducedScope).toBeNull();
     const res = await accept('a1');
     expect(res.status).toBe(201);
     expect(res.body.notDelivered).toEqual({ tasks: [{ taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-02', 'FB-03'], acceptanceCheckIds: ['chk-2'] });

@@ -157,6 +157,7 @@ for (const status of ['route_violation', 'unverified_source'] as const) {
     await generate(page);
     await expect(page.getByRole('alert')).toContainText('cannot be accepted');
     await expect(page.getByRole('button', { name: 'Review with server' })).toHaveCount(0);
+    if (status === 'unverified_source') await expect(page.getByRole('region', { name: 'Handoff to workflow' })).toContainText('could not be verified');
     await expect(page.getByRole('region', { name: 'Draft output' })).not.toContainText('Build FB');
     expect((await calls(page)).api).toHaveLength(0);
   });

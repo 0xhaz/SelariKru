@@ -13,6 +13,16 @@ export interface DataSourceUnderTest {
   readonly unknownProjectId: string;
   /** A project whose first `plan.accepted` is still to come after `advance()`; optional. */
   readonly prePlanProjectId?: string;
+  /** A project with a live, grantable approval whose request names an operation. Optional, as are the decision projects below. */
+  readonly pendingApprovalProjectId?: string;
+  /** A project whose approval is past its expiry and still undecided. */
+  readonly expiredApprovalProjectId?: string;
+  /** A run with budget-stopped work and no acceptance recorded. */
+  readonly budgetStopProjectId?: string;
+  /** A run with a task blocked by a verifier error. */
+  readonly reverifyProjectId?: string;
+  /** A run ready for review with no pull request yet. */
+  readonly reviewProjectId?: string;
   /** The project's own clock, for a session's liveness stamps. A live source passes `{ nowMs: () => Date.now() }`. */
   clockFor(projectId: string): { nowMs(): number };
   /** Makes the next batch of events available (the mock moves its virtual clock; a live fixture server writes events). */
@@ -191,6 +201,101 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       expect(types.indexOf('task.cancel_requested')).toBeGreaterThanOrEqual(0);
       expect(types.indexOf('task.cancelled')).toBeGreaterThan(types.indexOf('task.cancel_requested'));
       c.stop();
+    });
+
+    const firstRun = (snap: ProjectViewSnapshot) => Object.values(snap.runs)[0]!;
+    const runCommand = (command: 'run.accept_reduced_scope' | 'run.reverify' | 'run.open_pull_request', runId: string, expectedRevision: number, key: string) => ({ command, expectedRevision, idempotencyKey: key, args: { runId } });
+
+    it('a grant needs the exact revision and scope, and a deny replays by key', async () => {
+      const ds = await setup();
+      if (!ds.pendingApprovalProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.pendingApprovalProjectId);
+      const a = Object.values(snap.approvals).find((x) => x.state === 'pending' && x.operation === 'start_cloud_worker')!;
+      const t = snap.tasks[a.taskId!]!;
+      const args = { approvalId: a.approvalId, scopeHash: a.scopeHash! };
+      expect(await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision + 1, idempotencyKey: 'g-stale', args })).toMatchObject({ accepted: false, rejection: 'stale_revision' });
+      expect(await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'g-scope', args: { ...args, scopeHash: 'other' } })).toMatchObject({ accepted: false, rejection: 'scope_mismatch' });
+      // Nothing was resolved by the refusals.
+      expect((await ds.source.getSnapshot(ds.pendingApprovalProjectId)).approvals[a.approvalId]!.state).toBe('pending');
+      const granted = await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'g-ok', args });
+      expect(granted).toMatchObject({ accepted: true, execution: 'applied' });
+      expect((await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'g-ok', args })).replayed).toBe(true);
+      expect(await ds.source.execute({ command: 'approval.deny', expectedRevision: t.aggregateRevision + 1, idempotencyKey: 'g-after', args })).toMatchObject({ accepted: false, rejection: 'not_allowed' });
+      expect((await ds.source.getSnapshot(ds.pendingApprovalProjectId)).approvals[a.approvalId]!.state).toBe('granted');
+    });
+
+    it('a request that names no operation, or one that cannot take effect, is refused a grant but can be denied', async () => {
+      const ds = await setup();
+      if (!ds.pendingApprovalProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.pendingApprovalProjectId);
+      const blockedKinds = Object.values(snap.approvals).filter((x) => x.state === 'pending' && x.operation === 'new_domain');
+      for (const a of blockedKinds) {
+        const t = snap.tasks[a.taskId!]!;
+        expect(await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: `n-${a.approvalId}`, args: { approvalId: a.approvalId, scopeHash: a.scopeHash! } })).toMatchObject({ accepted: false, rejection: 'policy_denied' });
+      }
+    });
+
+    it('an expired approval is refused a grant and can still be denied', async () => {
+      const ds = await setup();
+      if (!ds.expiredApprovalProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.expiredApprovalProjectId);
+      const a = Object.values(snap.approvals)[0]!;
+      const t = snap.tasks[a.taskId!]!;
+      const args = { approvalId: a.approvalId, scopeHash: a.scopeHash! };
+      expect(await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'e-g', args })).toMatchObject({ accepted: false, rejection: 'approval_expired' });
+      expect(await ds.source.execute({ command: 'approval.deny', expectedRevision: t.aggregateRevision, idempotencyKey: 'e-d', args })).toMatchObject({ accepted: true, execution: 'applied' });
+    });
+
+    it('reduced scope is accepted once per plan revision, is learned through reducedScope, and lists what was not delivered', async () => {
+      const ds = await setup();
+      if (!ds.budgetStopProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.budgetStopProjectId);
+      const run = firstRun(snap);
+      expect(run.reducedScope).toBeNull();
+      expect(run.scopeAssessment?.notDelivered.tasks.some((t) => t.budgetStopped)).toBe(true);
+      expect(await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision + 3, 'rs-stale'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
+      const ok = await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision, 'rs-ok'));
+      expect(ok).toMatchObject({ accepted: true, execution: 'applied' });
+      await ds.settle();
+      const after = firstRun(await ds.source.getSnapshot(ds.budgetStopProjectId));
+      expect(after.reducedScope?.notDelivered).toEqual(run.scopeAssessment!.notDelivered);
+      expect(await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision, 'rs-twice'))).toMatchObject({ accepted: false, rejection: 'already_accepted' });
+    });
+
+    it('reduced scope is refused for a run with no budget stop, and a run-level command on an unknown run is unknown_target', async () => {
+      const ds = await setup();
+      const snap = await ds.source.getSnapshot(ds.busyProjectId);
+      const clean = ds.reviewProjectId ? await ds.source.getSnapshot(ds.reviewProjectId) : snap;
+      if (ds.reviewProjectId) expect(await ds.source.execute(runCommand('run.accept_reduced_scope', firstRun(clean).runId, firstRun(clean).planRevision, 'ns'))).toMatchObject({ accepted: false, rejection: 'not_budget_stopped' });
+      expect(await ds.source.execute(runCommand('run.reverify', 'no-such-run', 0, 'u'))).toMatchObject({ accepted: false, rejection: 'unknown_target' });
+    });
+
+    it('re-verify reopens only a verification block, and is bounded per task revision', async () => {
+      const ds = await setup();
+      if (!ds.reverifyProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.reverifyProjectId);
+      const run = firstRun(snap);
+      const blocked = Object.values(snap.tasks).filter((t) => t.status === 'blocked' && (t.statusReason === 'verification_error' || t.statusReason?.startsWith('assembly_infrastructure:')));
+      expect(blocked.length).toBeGreaterThan(0);
+      expect(await ds.source.execute(runCommand('run.reverify', run.runId, run.planRevision + 1, 'rv-stale'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
+      expect(await ds.source.execute(runCommand('run.reverify', run.runId, run.planRevision, 'rv-ok'))).toMatchObject({ accepted: true, execution: 'applied' });
+      await ds.settle();
+      const fresh = await ds.source.getSnapshot(ds.reverifyProjectId);
+      for (const t of blocked) expect(fresh.tasks[t.taskId]!.status).toBe('verifying');
+      expect(await ds.source.execute(runCommand('run.reverify', run.runId, run.planRevision, 'rv-again'))).toMatchObject({ accepted: false, rejection: 'nothing_to_reverify' });
+    });
+
+    it('a pull request opens only for a run ready for review, and there is no merge command', async () => {
+      const ds = await setup();
+      if (!ds.reviewProjectId || !ds.budgetStopProjectId) return;
+      const stopped = firstRun(await ds.source.getSnapshot(ds.budgetStopProjectId));
+      expect(await ds.source.execute(runCommand('run.open_pull_request', stopped.runId, stopped.planRevision, 'pr-no'))).toMatchObject({ accepted: false, rejection: 'run_not_ready' });
+      const ready = firstRun(await ds.source.getSnapshot(ds.reviewProjectId));
+      expect(ready.lifecycle).toBe('ready_for_review');
+      expect(await ds.source.execute(runCommand('run.open_pull_request', ready.runId, ready.planRevision, 'pr-ok'))).toMatchObject({ accepted: true });
+      const after = await ds.source.getSnapshot(ds.reviewProjectId);
+      expect(after.changeRequests[0]).toMatchObject({ runId: ready.runId, status: 'open' });
+      expect(await ds.source.execute({ command: 'run.merge', expectedRevision: 0, idempotencyKey: 'm', args: { runId: ready.runId } } as never)).toMatchObject({ accepted: false, rejection: 'invalid_command' });
     });
 
     it('openTerminal returns a bounded, closable channel for a known attempt and refuses an unknown one', async () => {

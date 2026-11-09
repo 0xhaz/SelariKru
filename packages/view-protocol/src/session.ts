@@ -1,7 +1,7 @@
 import type { Clock } from './common.ts';
 import { cursorToSequence } from './common.ts';
 import type { DataSourceError, EngineeringDataSource } from './data-source.ts';
-import { applyEvent, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
+import { applyEvent, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
 
 /** `live`: subscribed. `reconnecting`: a snapshot load failed and a retry is scheduled. `dead`: the stream cannot recover; data is frozen. */
 export type SessionStatus = 'live' | 'reconnecting' | 'dead';
@@ -13,8 +13,10 @@ export interface ProjectionSession {
   livenessAsOfMs(): number | null;
   /** How many times a gap, a provenance mismatch or an event needing snapshot data made the session fetch a new snapshot. */
   resyncCount(): number;
-  /** Fetches a snapshot and merges heartbeats and run lifecycle only (the two things events do not carry). The scheduled refresh calls this. A dead session does nothing. */
+  /** Fetches a snapshot and merges heartbeats, run lifecycle and the decision facts only (what events do not carry). The scheduled refresh calls this. A dead session does nothing. */
   refresh(): Promise<void>;
+  /** Replaces the projection with a fresh snapshot now. Used after a refused command, so the view shows what actually changed. A dead session does nothing. */
+  resync(): Promise<void>;
   stop(): void;
 }
 
@@ -203,7 +205,7 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     }
     if (stopped || !isLive() || current === null) return;
     asOf = options.clock.nowMs();
-    const merged = mergeRunLifecycle(mergeLiveness(current, fresh), fresh);
+    const merged = mergeDecisionFacts(mergeRunLifecycle(mergeLiveness(current, fresh), fresh), fresh);
     if (merged !== current) {
       current = merged;
       hooks.onState(current);
@@ -220,6 +222,10 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     livenessAsOfMs: () => asOf,
     resyncCount: () => resyncs,
     refresh,
+    async resync() {
+      if (stopped || status === 'dead') return;
+      await load();
+    },
     stop() {
       stopped = true;
       generation += 1;

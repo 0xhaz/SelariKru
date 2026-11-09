@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['overview', 'team', 'pipeline', 'assistant'] as const;
+export const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'assistant'] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */
@@ -8,6 +8,8 @@ const pathOf = (hash: string): string => hash.replace(/^#\/?/, '').split('?')[0]
 const parse = (hash: string): Route => ((ROUTES as readonly string[]).includes(pathOf(hash)) ? (pathOf(hash) as Route) : 'overview');
 
 export const hrefFor = (route: Route): string => `#/${route}`;
+/** A deep link to one card on the Decisions screen. */
+export const decisionHref = (cardId: string): string => `#/decisions?card=${encodeURIComponent(cardId)}`;
 
 /** Hash routes keep the page's query (`?demo`, `?fixture`) intact and need no server rewrite. */
 export function useRoute(): Route {

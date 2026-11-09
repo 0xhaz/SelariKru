@@ -123,6 +123,8 @@ export interface PipelineRow {
   readonly age: string;
   readonly since: string;
   readonly nextAction: string;
+  /** The Decisions card to act on this from, or null when there is none. */
+  readonly decisionId: string | null;
   readonly why: WhyBlocked;
   /** Held only by healthy waiting: a dependency still in progress or a free slot. Should not compete with a real blocker. */
   readonly quietWait: boolean;
@@ -506,6 +508,7 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
         age: formatAge(nowMs - Date.parse(t.enteredStatusAt)),
         since: t.enteredStatusAt,
         nextAction: own[0]?.nextAction ?? defaultNext(t, why, run ?? undefined),
+        decisionId: own.find((i) => i.decisionId !== null)?.decisionId ?? null,
         why,
         quietWait: why.held && why.reasons.every((r) => !r.unknown && !r.terminal && (r.cause === 'dependency' || r.cause === 'capacity')),
         critical: criticalIds.has(t.taskId),

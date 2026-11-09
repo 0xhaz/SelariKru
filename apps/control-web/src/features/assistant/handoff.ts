@@ -37,6 +37,7 @@ export function apiErrorText(code: string, details: unknown): string {
     case 'network_error': return 'Could not reach the control API.';
     case 'proposal_not_acceptable': {
       const reason = (details as { reason?: unknown } | null)?.reason;
+      if (reason === 'unverified_source') return 'The server will not accept this proposal: where its output came from could not be verified, so it stays untrusted.';
       return `The server will not accept this proposal${typeof reason === 'string' ? ` (${reason})` : ''}.`;
     }
     default: return `The server returned ${code}.`;

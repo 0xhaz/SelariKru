@@ -1,5 +1,5 @@
 import type { Actor, EventType } from '@selarikru/domain';
-import type { AssistantView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
+import type { AssistantView, ChangeRequestView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
 import { mulberry32, seededId } from './prng.ts';
 
 /** Every fixture starts from this instant (the first day of the interface milestone). Fixed, so fixtures never depend on the wall clock. */
@@ -20,7 +20,9 @@ export type FixtureId =
   /** Not one of the ten named scenarios: the verified-to-merged path, for run lifecycle. */
   | 'merge-flow'
   /** Not one of the ten named scenarios: a plan with real dependencies across stages, for the Pipeline graph. */
-  | 'feature-delivery';
+  | 'feature-delivery'
+  /** Not named scenarios: one state each, for the Decisions screen. */
+  | 'decision-queue' | 'changed-request' | 'budget-stop' | 'integration-blocked' | 'merge-review' | 'merged-sha-mismatch';
 
 /** What a live snapshot knows about a task that events do not say. The mock plays the server: it seeds these when the plan is accepted. */
 export interface TaskSeed {
@@ -33,6 +35,9 @@ export interface TaskSeed {
   readonly dependsOn: readonly string[];
   /** How many acceptance criteria this task covers. Null means this scene has no per-criterion evidence. */
   readonly criteria: number | null;
+  /** Requirement and acceptance-check ids this task carries: what a stopped task leaves undelivered. */
+  readonly requirementIds: readonly string[];
+  readonly acceptanceCheckIds: readonly string[];
 }
 
 /** An approval's id, scope and expiry are on the server, not yet in `approval.requested`. The mock attaches them to the matching task's request. */
@@ -42,6 +47,8 @@ export interface ApprovalSeed {
   readonly scopeHash: string;
   readonly reason: string;
   readonly expiresAt: string;
+  readonly operation: string | null;
+  readonly destination: string | null;
 }
 
 /** Heartbeats stop at `fromSec` and resume at `toSec` (never when null). Heartbeats are not events: this shapes the snapshot's liveness only. */
@@ -63,6 +70,8 @@ export interface Fixture {
   readonly tasks: readonly TaskSeed[];
   readonly approvals: readonly ApprovalSeed[];
   readonly silences: Readonly<Record<string, Silence>>;
+  /** What the provider has said about a run's pull request. Reconciliation has no event, so this is snapshot data. */
+  readonly changeRequests?: readonly ChangeRequestView[];
 }
 
 /** Ids are namespaced per fixture so a command or terminal request can only ever match one project. */
@@ -99,16 +108,16 @@ export class FixtureBuilder {
     return scoped(this.slug, local);
   }
 
-  task(local: string, seed: { title: string; role: string; dependsOn?: string[]; revision?: number; planRevision?: number; criteria?: number }): this {
+  task(local: string, seed: { title: string; role: string; dependsOn?: string[]; revision?: number; planRevision?: number; criteria?: number; requirements?: string[]; checks?: string[] }): this {
     this.taskSeeds.push({
       taskId: this.id(local), revision: seed.revision ?? 1, planRevision: seed.planRevision ?? 1, title: seed.title, role: seed.role,
-      dependsOn: (seed.dependsOn ?? []).map((d) => this.id(d)), criteria: seed.criteria ?? null,
+      dependsOn: (seed.dependsOn ?? []).map((d) => this.id(d)), criteria: seed.criteria ?? null, requirementIds: seed.requirements ?? [], acceptanceCheckIds: seed.checks ?? [],
     });
     return this;
   }
 
-  approval(local: string, seed: { task: string | null; scopeHash: string; reason: string; expiresAtSec: number }): this {
-    this.approvalSeeds.push({ approvalId: this.id(local), taskId: seed.task === null ? null : this.id(seed.task), scopeHash: seed.scopeHash, reason: seed.reason, expiresAt: fixtureTime(seed.expiresAtSec) });
+  approval(local: string, seed: { task: string | null; scopeHash: string; reason: string; expiresAtSec: number; operation?: string; destination?: string }): this {
+    this.approvalSeeds.push({ approvalId: this.id(local), taskId: seed.task === null ? null : this.id(seed.task), scopeHash: seed.scopeHash, reason: seed.reason, expiresAt: fixtureTime(seed.expiresAtSec), operation: seed.operation ?? null, destination: seed.destination ?? null });
     return this;
   }
 

@@ -194,4 +194,62 @@ describe('attention queue', () => {
     const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
     expect(buildAttention(snapshot, nowMs, nowMs)).toEqual([]);
   });
+
+  describe('reduced scope and Decisions links', () => {
+    const notDelivered = { tasks: [{ taskId: 't', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-1'], acceptanceCheckIds: [] };
+    const stopped = () => snapshotOf({ tasks: [task('t', { status: 'cancelled', cancelReason: 'budget_exhausted' })] });
+
+    it('a budget stop needs a decision until the reduced scope covers it', () => {
+      const open = stopped();
+      expect(buildAttention(open, NOW, NOW).find((i) => i.id === 'budget:t')).toMatchObject({ needsOperator: true, decisionId: 'scope:run' });
+      const accepted = stopped();
+      accepted.runs['run'] = { ...accepted.runs['run']!, reducedScope: { decisionId: 'd', runId: 'run', planRevision: 1, notDelivered, deliveredRequirementIds: [], acceptedAt: iso(5), acceptedBy: 'u', note: null } };
+      const item = buildAttention(accepted, NOW, NOW).find((i) => i.id === 'budget:t')!;
+      expect(item.needsOperator).toBe(false);
+      expect(item.decisionId).toBeNull();
+      expect(item.nextAction).not.toMatch(/accept/i);
+    });
+
+    it('a reduced scope that does not cover a later stop still needs a decision', () => {
+      const s = stopped();
+      s.runs['run'] = { ...s.runs['run']!, reducedScope: { decisionId: 'd', runId: 'run', planRevision: 1, notDelivered: { ...notDelivered, tasks: [{ ...notDelivered.tasks[0]!, taskId: 'other' }] }, deliveredRequirementIds: [], acceptedAt: iso(5), acceptedBy: 'u', note: null } };
+      expect(buildAttention(s, NOW, NOW).find((i) => i.id === 'budget:t')!.needsOperator).toBe(true);
+    });
+
+    it('a run with undelivered work does not say every task is verified', () => {
+      const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('t', { status: 'cancelled', cancelReason: 'budget_exhausted' })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+      const review = buildAttention(s, NOW, NOW).find((i) => i.id === 'review:run')!;
+      expect(review.detail).not.toMatch(/every task is verified/i);
+      expect(review.detail).toMatch(/not delivered/i);
+      expect(review.nextAction).toMatch(/reduced scope/i);
+    });
+
+    it('a fully verified run still says so', () => {
+      const s = snapshotOf({ tasks: [task('a', { status: 'verified' })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+      expect(buildAttention(s, NOW, NOW).find((i) => i.id === 'review:run')!.detail).toMatch(/every task is verified/i);
+    });
+
+    it('links an item to the Decisions card that can act on it, and not when there is none', () => {
+      const s = snapshotOf({
+        tasks: [task('a', { status: 'awaiting_approval' }), task('b', { status: 'blocked', statusReason: 'verification_error' }), task('c', { status: 'blocked', statusReason: 'resource_conflict:db' }), task('d', { status: 'ready', placementBlock: 'budget:exceeds_limit' }), task('e', { status: 'failed', statusReason: 'x' })],
+        approvals: [approval('apr', { taskId: 'a', taskRevision: 1 })],
+      });
+      const items = buildAttention(s, NOW, NOW);
+      const id = (x: string) => items.find((i) => i.id === x)!.decisionId;
+      expect(id('decision:apr')).toBe('decision:apr');
+      expect(id('placement:b')).toBe('reverify:run');
+      expect(id('placement:c')).toBe('placement:c');
+      expect(id('placement:d')).toBeNull();
+      expect(id('gate:e')).toBeNull();
+    });
+
+    it('an expired approval on a blocked task is one item, not two', () => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'approval_expired' })], approvals: [approval('apr', { taskId: 't', taskRevision: 1, state: 'expired' })] });
+      const items = buildAttention(s, NOW, NOW);
+      expect(items.map((i) => i.id)).toEqual(['decision:apr']);
+      expect(items[0]!.status).toBe('expired');
+    });
+  });
 });

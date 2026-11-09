@@ -51,6 +51,7 @@ export function HandoffPanel({
   if (result.restricted) {
     return <Shell><p>This draft is restricted. It stays on this device and nothing posts it. Publishing derived work would need a separate, permitted policy change.</p></Shell>;
   }
+  if (result.status === 'unverified_source') return <Shell><p className="text-danger">Where this output came from could not be verified, so it cannot be handed to the workflow.</p></Shell>;
   if (result.status !== 'ok') return <Shell><p className="text-muted">There is nothing to hand off for this response.</p></Shell>;
   if (result.operation !== 'draftTaskPlan') return <Shell><p className="text-muted">Only task plans are handed to the workflow. Criteria and briefs are for your review here; draft a task plan to continue.</p></Shell>;
   if (!semantic || semantic.status === 'rejected') return <Shell><p className="text-danger">The proposal checks rejected this draft, so it cannot be accepted.</p></Shell>;

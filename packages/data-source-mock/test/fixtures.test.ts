@@ -115,6 +115,7 @@ describe('fixtures', () => {
         case 'verification.passed': move(e.taskId, { type: 'verification_passed' }, at); break;
         case 'verification.failed': move(e.taskId, { type: 'verification_failed', reason: 'verification_failed' }, at); break;
         case 'task.cancelled': move(e.taskId, { type: 'cancel' }, at); running.delete(e.taskId); break;
+        case 'task.blocked': move(e.taskId, status === 'verifying' ? { type: 'verification_unavailable', reason: String(e.payload['reason']) } : { type: 'blocked', reason: String(e.payload['reason']) }, at); running.delete(e.taskId); break;
         case 'change.merged': if (e.taskId !== e.runId) move(e.taskId, { type: 'change_merged' }, at); break; // the run-level event has no task
         default: break;
       }
@@ -184,7 +185,7 @@ describe('fixtures', () => {
     expect(s.tasks[sc('contract-change', 'api')]).toMatchObject({ revision: 1, status: 'running' });
     expect(s.tasks[sc('contract-change', 'contract')]!.status).toBe('awaiting_approval');
     const apr = s.approvals[sc('contract-change', 'apr_contract_v2')]!;
-    expect(apr).toMatchObject({ reason: 'approve_contract_v2', state: 'pending' });
+    expect(apr).toMatchObject({ reason: 'The contract renames a field that clients depend on.', state: 'pending' });
     expect(approvalStateAt(apr, nowMs)).toBe('pending');
     expect(buildFixture('contract-change').events.some((e) => e.type === 'task.superseded')).toBe(false);
   });
@@ -373,7 +374,7 @@ describe('streaming and resync', () => {
     ds.clock.advance(15_000); // the request is at 40 s
     await settle();
     expect(session.resyncCount()).toBe(1);
-    expect(session.state()!.snapshot.approvals[sc('human-wait', 'apr_docs_domain')]).toMatchObject({ state: 'pending', reason: 'allow_documentation_domain' });
+    expect(session.state()!.snapshot.approvals[sc('human-wait', 'apr_docs_domain')]).toMatchObject({ state: 'pending', reason: 'Needs the documentation site to confirm the error codes.' });
     expect(session.state()!.snapshot.tasks[sc('human-wait', 'migrate')]!.status).toBe('awaiting_approval');
     session.stop();
   });

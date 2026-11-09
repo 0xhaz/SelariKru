@@ -9,6 +9,8 @@ import { buildTeam, type TeamModel } from '../features/team/model.ts';
 import { PipelineView } from '../features/pipeline/PipelineView.tsx';
 import { buildPipeline, type PipelineModel } from '../features/pipeline/model.ts';
 import { pipelinePresentation } from '../features/pipeline/presentation.ts';
+import { DecisionsView } from '../features/decisions/DecisionsView.tsx';
+import { buildDecisions, type DecisionsModel } from '../features/decisions/model.ts';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hrefFor, useRoute, type Route } from './route.ts';
@@ -36,11 +38,11 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Overview', route: 'overview' },
   { label: 'Team', route: 'team' },
   { label: 'Pipeline', route: 'pipeline' },
-  { label: 'Decisions', route: null },
+  { label: 'Decisions', route: 'decisions' },
   { label: 'Assistant', route: 'assistant' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', assistant: 'Assistant' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', assistant: 'Assistant' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -135,6 +137,16 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
       return { pipeline: null, failure };
     }
   }, [route, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale, pipelineRunId]);
+  // Always built, for the navigation count; contained the same way so a bad snapshot fails the route and not the shell.
+  const builtDecisions = useMemo((): { decisions: DecisionsModel | null; failure?: unknown } => {
+    if (!snapshot) return { decisions: null };
+    try {
+      return { decisions: buildDecisions(snapshot, state.nowMs, { mode, connection }) };
+    } catch (failure) {
+      return { decisions: null, failure };
+    }
+  }, [snapshot, state.nowMs, mode, connection]);
+  const decisionCount = builtDecisions.decisions?.waiting ?? 0;
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
@@ -150,11 +162,17 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
   useEffect(() => {
     document.title = `${TITLES[route]} · SelariKru`;
   }, [route]);
+  // The tab list scrolls on narrow screens: the current page must be in view, or the operator cannot tell where they are.
+  const navRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  }, [route]);
 
   const showCount = overview !== null && !overview.empty;
   const attentionCount = showCount ? overview.attentionCount : null;
   const attentionBadge = showCount ? overview.attentionBadge : null;
-  const announcement = `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
+  // On Decisions the view speaks for itself, one line per decision; the shell keeps to the connection there, so a decision is not announced twice.
+  const announcement = route === 'decisions' ? `${CONNECTION[connection].label}.` : `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
   return (
     <div className="min-h-screen">
@@ -183,7 +201,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
           </div>
         </div>
         <div className="mx-auto flex max-w-[1320px] items-center gap-2 pr-4 sm:pr-6">
-          <nav aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1 pt-1 sm:px-5">
+          <nav ref={navRef} aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1 pt-1 sm:px-5">
             {NAV.map((item) =>
               item.route ? (
                 <a
@@ -194,6 +212,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
                 >
                   {item.label}
                   {item.route === 'overview' && attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="text-warning sm:hidden">{attentionBadge}</span> : null}
+                  {item.route === 'decisions' && decisionCount > 0 ? <span data-testid="decisions-count" className="text-warning"><span className="sr-only">, </span>{decisionCount}<span className="sr-only"> waiting</span></span> : null}
                 </a>
               ) : (
                 <span key={item.label} className="hidden items-baseline gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm text-muted md:inline-flex">
@@ -223,6 +242,15 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
         {route === 'pipeline' ? (
           <RouteBoundary resetKey={`pipeline:${builtPipeline.failure === undefined ? 'ok' : 'failed'}`}>
             <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+          </RouteBoundary>
+        ) : null}
+        {route === 'decisions' ? (
+          <RouteBoundary resetKey={`decisions:${builtDecisions.failure === undefined ? 'ok' : 'failed'}`}>
+            <DecisionsView
+              connection={connection} error={state.error} model={builtDecisions.decisions} failure={builtDecisions.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} leaveDemoHref={leaveDemoHref}
+              delivery={overview ? { criteria: overview.delivery.criteriaLabel, blocker: overview.delivery.blocker } : null}
+              onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
+            />
           </RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}

@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type Clock, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type SessionStatus } from '@selarikru/view-protocol';
+import { DataSourceException, startProjection, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type SessionStatus } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -24,6 +24,12 @@ export interface ProjectionStoreState {
   start(): void;
   stop(): void;
   restart(): void;
+  /** Sends a command. It refuses to send while the session is not live, so a stale screen can never decide anything. */
+  execute(command: AuthorizedViewCommand): Promise<CommandReceipt>;
+  /** Pulls the facts events do not carry now, rather than at the next scheduled refresh. */
+  refresh(): void;
+  /** Replaces the projection from a fresh snapshot, after a command was refused. */
+  resync(): void;
 }
 
 export type ProjectionStore = StoreApi<ProjectionStoreState>;
@@ -90,6 +96,16 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
       restart() {
         close();
         open();
+      },
+      async execute(command) {
+        if (!source || connectionOf(get()) !== 'live') throw new DataSourceException({ code: 'disconnected', message: 'the session is not live', retryable: true });
+        return source.execute(command);
+      },
+      refresh() {
+        void session?.refresh();
+      },
+      resync() {
+        void session?.resync();
       },
     };
   });

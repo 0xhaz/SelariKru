@@ -31,13 +31,16 @@ export function effectiveWorkerHealth(worker: WorkerView, nowMs: number, livenes
   return { health: 'healthy', heartbeatAgeMs: age, derived: false };
 }
 
-export type ApprovalDisplayState = 'pending' | 'granted' | 'denied' | 'expired';
+export type ApprovalDisplayState = 'pending' | 'granted' | 'denied' | 'expired' | 'superseded';
 
 /** A pending approval past its expiry is `expired`: explicit, and never treated as granted. */
 export function approvalStateAt(approval: ApprovalView, nowMs: number): ApprovalDisplayState {
   if (approval.state === 'pending' && approval.expiresAt !== null && Date.parse(approval.expiresAt) <= nowMs) return 'expired';
   return approval.state;
 }
+
+/** Blocks that a re-verification can send back without a worker. The same rule as `isReverifiableBlock` on the server. */
+export const isReverifiableReason = (code: string | null): boolean => code === 'verification_error' || (code?.startsWith('assembly_infrastructure:') ?? false);
 
 export function tasksByStatus(snapshot: ProjectViewSnapshot): Record<string, readonly TaskView[]> {
   const out: Record<string, TaskView[]> = {};

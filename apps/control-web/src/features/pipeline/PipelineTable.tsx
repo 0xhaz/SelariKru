@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Chip, RAIL_BORDER, RAIL_SHADOW, Timestamp } from '@selarikru/ui';
 import { roleName } from '../team/TeamSignals.tsx';
 import { Muted } from './ui.tsx';
+import { decisionHref } from '../../shell/route.ts';
 import { PIPELINE_COLUMNS, stageLabel, type Predecessor, type PipelineRow, type StageGroup } from './model.ts';
 
 const EDGE_TEXT: Readonly<Record<Predecessor['edge'], string>> = { met: 'text-muted', waiting: 'text-fg', stale: 'text-warning', unknown: 'text-warning', cycle: 'text-danger' };
@@ -68,7 +69,7 @@ function Row({ row, selected, showStage, onOpen }: { row: PipelineRow; selected:
       <td className="px-3 py-3">{row.branch ?? <Muted>Not reported</Muted>}</td>
       <td className="px-3 py-3">{checksCell(row)}</td>
       <td className="whitespace-nowrap px-3 py-3 text-sm text-muted"><Timestamp iso={row.since} tabStop={false}>{row.age}</Timestamp></td>
-      <td className="px-3 py-3 text-sm text-fg">{row.nextAction}</td>
+      <td className="px-3 py-3 text-sm text-fg">{row.nextAction}{row.decisionId ? <> <a data-testid="decision-link" onClick={(e) => e.stopPropagation()} className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</td>
     </tr>
   );
 }
@@ -115,7 +116,7 @@ function Card({ row, selected, showStage, onOpen }: { row: PipelineRow; selected
         {row.branch ? <Field label="Branch or candidate">{row.branch}</Field> : null}
         {row.predecessors === null || row.predecessors.length > 0 ? <Field label="Predecessors" className="col-span-2 lg:col-span-1"><PredecessorList row={row} /></Field> : null}
         {row.checks ? <Field label="Checks" className="col-span-2 lg:col-span-1"><div>{checksCell(row)}</div></Field> : null}
-        <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span></Field>
+        <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span>{row.decisionId ? <a onClick={(e) => e.stopPropagation()} data-testid="decision-link" className="mt-1 block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a> : null}</Field>
       </dl>
     </li>
   );

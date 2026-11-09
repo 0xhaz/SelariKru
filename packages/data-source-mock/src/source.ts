@@ -1,11 +1,13 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
   isoOf, projectionFromSnapshot, sequenceToCursor,
-  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type RunView, type TaskView, type TerminalChannel,
+  isReverifiableReason,
+  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
+  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel,
 } from '@selarikru/view-protocol';
+import { approvalUnavailableReason } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
-import { FIXTURE_T0_MS, HUMAN, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
+import { FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 
@@ -25,6 +27,10 @@ interface Project {
   state: ProjectionState;
   readonly subscribers: Set<Subscriber>;
   readonly receipts: Map<string, CommandReceipt>;
+  /** Pull requests, as the provider last reported them. Merge reconciliation has no event. */
+  changeRequests: ChangeRequestView[];
+  /** Re-verifications spent per task revision, bounded like the real route. */
+  readonly reverifyCounts: Map<string, number>;
 }
 
 export interface MockOptions {
@@ -44,6 +50,10 @@ export interface MockDataSource extends EngineeringDataSource {
 /** The same lists the real cancel route uses: a running task gets a cancel request, these cancel at once, anything else is refused. */
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const HEARTBEAT_STEP_MS = 10_000;
+/** The route's `REVERIFY_LIMIT`: re-verifications per task revision. */
+const REVERIFY_LIMIT = 3;
+const NOT_OWED: readonly string[] = ['verified', 'merged', 'superseded'];
+const sorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
 
 const fail = (code: DataSourceError['code'], message: string, retryable = false): DataSourceException => new DataSourceException({ code, message, retryable });
 
@@ -69,7 +79,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
-      fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(),
+      fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
   }
@@ -97,7 +107,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         const seed = seedFor(id, planRevision);
         if (seed) tasks = { ...tasks, [id]: seedTask(seed, event.runId, event.occurredAt, tasks[id]) };
       }
-      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null };
+      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null };
       snap = {
         ...snap, tasks, runs: { ...snap.runs, [event.runId]: { ...run, lifecycle: 'running', planRevision } },
         meta: { ...snap.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt },
@@ -109,7 +119,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     let applied = event;
     if (event.type === 'approval.requested' && typeof event.payload['approvalId'] !== 'string') {
       const seed = p.fixture.approvals.find((a) => a.taskId === (event.taskId === event.runId ? null : event.taskId) && !snap.approvals[a.approvalId]);
-      if (seed) applied = { ...event, payload: { ...event.payload, approvalId: seed.approvalId, scopeHash: seed.scopeHash, expiresAt: seed.expiresAt } };
+      if (seed) applied = { ...event, payload: { ...event.payload, approvalId: seed.approvalId, scopeHash: seed.scopeHash, expiresAt: seed.expiresAt, ...(seed.operation !== null ? { operation: seed.operation } : {}), ...(seed.destination !== null ? { destination: seed.destination, destinationKind: 'network_host' } : {}) } };
     }
     const result = applyEvent(p.state, applied);
     if (result.outcome === 'resync' || result.outcome === 'duplicate') throw new Error(`mock fixture ${p.fixture.id} is inconsistent at ${event.type}: ${result.outcome}`);
@@ -194,6 +204,26 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     return { verified, total };
   }
 
+  /** The same reading as the real `assessRunScope`: what the budget stopped, and what is and is not delivered. Null when nothing was stopped. */
+  function scopeAssessmentOf(p: Project, runId: string): ScopeAssessment | null {
+    const tasks = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId).sort((a, b) => (a.taskId < b.taskId ? -1 : 1));
+    const stopped = tasks.filter((t) => t.status === 'cancelled' && t.cancelReason === 'budget_exhausted');
+    if (stopped.length === 0) return null;
+    const seedOf = (t: TaskView): TaskSeed | undefined => p.fixture.tasks.filter((s) => s.taskId === t.taskId && s.revision <= t.revision).sort((a, b) => b.revision - a.revision)[0];
+    const owed = tasks.filter((t) => !NOT_OWED.includes(t.status));
+    const requirementIds = sorted(owed.flatMap((t) => seedOf(t)?.requirementIds ?? []));
+    const notDelivered: NotDelivered = {
+      tasks: owed.map((t) => ({ taskId: t.taskId, revision: t.revision, status: t.status, budgetStopped: stopped.includes(t) })),
+      requirementIds,
+      acceptanceCheckIds: sorted(owed.flatMap((t) => seedOf(t)?.acceptanceCheckIds ?? [])),
+    };
+    const deliveredRequirementIds = sorted(tasks.filter((t) => t.status === 'verified' || t.status === 'merged').flatMap((t) => seedOf(t)?.requirementIds ?? [])).filter((id) => !requirementIds.includes(id));
+    return { notDelivered, deliveredRequirementIds, stopped: stopped.map((t) => ({ taskId: t.taskId, revision: t.revision })), stoppingTaskIds: tasks.filter((t) => t.status === 'running' && t.cancelRequested !== null && t.cancelReason === 'budget_exhausted').map((t) => t.taskId) };
+  }
+
+  /** True when the recorded acceptance names every task the budget stopped, at the revision it was stopped at. */
+  const acceptanceCovers = (run: RunView, stopped: ScopeAssessment['stopped']): boolean => run.reducedScope !== null && stopped.every((s) => run.reducedScope!.notDelivered.tasks.some((t) => t.taskId === s.taskId && t.revision === s.revision));
+
   function snapshotOf(p: Project): ProjectViewSnapshot {
     const s = p.state.snapshot;
     const attempts = Object.fromEntries(
@@ -205,19 +235,19 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         return [id, w.leaseHeld && a ? { ...w, lastHeartbeatAt: a.lastHeartbeatAt } : w];
       }),
     );
-    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id) }]));
-    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage] };
+    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
+    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })) };
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled';
+  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed';
   function appendCommandEvent(p: Project, taskId: string, type: CommandEvent, payload: Record<string, unknown>, o: { delayMs?: number; revisionStep?: number; attemptId?: string | null; system?: boolean } = {}): void {
     const task = p.state.snapshot.tasks[taskId];
     const runId = task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
     const at = isoOf(timeOf(p) + (o.delayMs ?? 0));
     const event: ProjectViewEvent = {
       schemaVersion: 1, eventId: seededId(prng, 'evt'), projectId: p.fixture.projectId, runId, taskId, attemptId: o.attemptId ?? null, type, sequence: 0,
-      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: o.system ? REAPER : type === 'task.ready' ? SCHEDULER : HUMAN,
+      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: o.system ? REAPER : type === 'task.ready' ? SCHEDULER : type === 'task.reopened' || type === 'change.proposed' ? INTEGRATION : HUMAN,
       occurredAt: at, receivedAt: at, causationId: null, traceId: `trace_${p.fixture.projectId}`, payload, provenance: 'simulated',
     };
     p.pending.push(event);
@@ -234,6 +264,42 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   function run(p: Project, c: AuthorizedViewCommand): CommandReceipt {
     const snap = p.state.snapshot;
     const op = `op_${seededId(prng, 'sim')}`;
+    if (c.command === 'run.accept_reduced_scope' || c.command === 'run.reverify' || c.command === 'run.open_pull_request') {
+      const r = snap.runs[c.args.runId];
+      if (!r) return rejected(c.idempotencyKey, 'unknown_target');
+      if (c.command === 'run.accept_reduced_scope') {
+        if (c.expectedRevision !== r.planRevision) return rejected(c.idempotencyKey, 'stale_revision');
+        const assessed = scopeAssessmentOf(p, r.runId);
+        if (!assessed) return rejected(c.idempotencyKey, 'not_budget_stopped');
+        if (assessed.stoppingTaskIds.length > 0) return rejected(c.idempotencyKey, 'cancel_pending');
+        if (acceptanceCovers(r, assessed.stopped)) return rejected(c.idempotencyKey, 'already_accepted');
+        appendCommandEvent(p, r.runId, 'run.reduced_scope_accepted', { decisionId: `dec_${seededId(prng, 'sim')}`, notDelivered: assessed.notDelivered, deliveredRequirementIds: assessed.deliveredRequirementIds, ...(c.args.note !== undefined ? { note: c.args.note } : {}) });
+        return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+      }
+      if (c.command === 'run.reverify') {
+        if (c.expectedRevision !== r.planRevision) return rejected(c.idempotencyKey, 'stale_revision');
+        const blocked = Object.values(snap.tasks).filter((t) => t.runId === r.runId && t.status === 'blocked' && isReverifiableReason(t.statusReason));
+        if (blocked.length === 0) return rejected(c.idempotencyKey, 'nothing_to_reverify');
+        const spent = (t: TaskView): number => p.reverifyCounts.get(`${t.taskId}:${t.revision}`) ?? 0;
+        if (blocked.some((t) => spent(t) >= REVERIFY_LIMIT)) return rejected(c.idempotencyKey, 'reverify_limit_reached');
+        for (const t of blocked) {
+          p.reverifyCounts.set(`${t.taskId}:${t.revision}`, spent(t) + 1);
+          appendCommandEvent(p, t.taskId, 'task.reopened', { reason: 'reverify_requested', status: 'verifying', requestedBy: 'demo-operator' });
+        }
+        return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+      }
+      if (r.lifecycle !== 'ready_for_review') return rejected(c.idempotencyKey, 'run_not_ready');
+      const assessed = scopeAssessmentOf(p, r.runId);
+      if (assessed && !acceptanceCovers(r, assessed.stopped)) return rejected(c.idempotencyKey, 'reduced_scope_not_accepted');
+      const prior = p.changeRequests.find((x) => x.runId === r.runId);
+      if (prior?.status === 'open') return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+      if (prior && prior.status !== 'closed' && prior.status !== 'stale_candidate') return rejected(c.idempotencyKey, 'run_already_merged');
+      const number = (prior?.prNumber ?? 11) + 1;
+      const url = `https://github.com/selarikru-demo/feedback-board/pull/${number}`;
+      p.changeRequests = [...p.changeRequests.filter((x) => x.runId !== r.runId), { runId: r.runId, prNumber: number, url, status: 'open', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'c'.repeat(40), mergeCommitSha: null, observedAt: isoOf(timeOf(p)) }];
+      appendCommandEvent(p, r.runId, 'change.proposed', { prNumber: number, url });
+      return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+    }
     if (c.command === 'task.cancel' || c.command === 'task.retry') {
       const task = snap.tasks[c.args.taskId];
       if (!task) return rejected(c.idempotencyKey, 'unknown_target');
@@ -257,10 +323,16 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const approval = snap.approvals[c.args.approvalId];
     if (!approval) return rejected(c.idempotencyKey, 'unknown_target');
     const task = approval.taskId ? snap.tasks[approval.taskId] : undefined;
-    if ((task?.aggregateRevision ?? 0) !== c.expectedRevision) return rejected(c.idempotencyKey, 'stale_revision');
+    // The same order of checks as `POST /v1/approvals/:id/resolve`.
+    const expired = approvalStateAt(approval, timeOf(p)) === 'expired';
+    if (!expired && approval.state !== 'pending') return rejected(c.idempotencyKey, 'not_allowed');
+    if (expired && c.command === 'approval.grant') return rejected(c.idempotencyKey, 'approval_expired');
     if (approval.scopeHash !== c.args.scopeHash) return rejected(c.idempotencyKey, 'scope_mismatch');
-    if (approvalStateAt(approval, timeOf(p)) === 'expired') return rejected(c.idempotencyKey, 'approval_expired');
-    if (approval.state !== 'pending') return rejected(c.idempotencyKey, 'not_allowed');
+    if (task && approval.taskRevision !== task.revision) return rejected(c.idempotencyKey, 'stale_revision');
+    if (task && task.status !== 'awaiting_approval' && approval.state !== 'expired') return rejected(c.idempotencyKey, 'stale_revision');
+    if ((task?.aggregateRevision ?? 0) !== c.expectedRevision) return rejected(c.idempotencyKey, 'stale_revision');
+    // A grant is re-judged: a row naming no operation cannot be judged, and one that could not take effect is not offered.
+    if (c.command === 'approval.grant' && (approval.operation === null || approvalUnavailableReason(approval.operation) !== null)) return rejected(c.idempotencyKey, 'policy_denied');
     appendCommandEvent(p, approval.taskId ?? approval.runId, c.command === 'approval.grant' ? 'approval.granted' : 'approval.denied', {
       approvalId: approval.approvalId, scopeHash: approval.scopeHash, actionHash: `action-${approval.approvalId}`,
     });
@@ -312,7 +384,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const c = parsed.data;
       if (closed) throw fail('disconnected', 'the mock data source is disconnected');
       // Ids are namespaced per fixture, so a target matches at most one project.
-      const owner = [...projects.values()].find((p) => ('taskId' in c.args ? Boolean(p.state.snapshot.tasks[c.args.taskId]) : Boolean(p.state.snapshot.approvals[c.args.approvalId])));
+      const owner = [...projects.values()].find((p) => ('taskId' in c.args ? Boolean(p.state.snapshot.tasks[c.args.taskId]) : 'runId' in c.args ? Boolean(p.state.snapshot.runs[c.args.runId]) : Boolean(p.state.snapshot.approvals[c.args.approvalId])));
       if (!owner) return rejected(c.idempotencyKey, 'unknown_target');
       const seen = owner.receipts.get(c.idempotencyKey);
       if (seen) return { ...seen, replayed: true };

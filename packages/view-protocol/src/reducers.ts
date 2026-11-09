@@ -3,7 +3,8 @@ import { cursorToSequence, sequenceToCursor } from './common.ts';
 import type { ProjectViewEvent } from './events.ts';
 import {
   WORKER_ACTIVITY,
-  type ApprovalView, type AttemptView, type EvidenceRef, type ProjectViewSnapshot, type TaskView, type WorkerActivity, type WorkerView,
+  NotDeliveredSchema,
+  type ApprovalView, type AttemptView, type EvidenceRef, type ProjectViewSnapshot, type ReducedScopeView, type TaskView, type WorkerActivity, type WorkerView,
 } from './snapshot.ts';
 
 /**
@@ -23,7 +24,7 @@ export interface ProjectionState {
   readonly recentEventIds: readonly string[];
 }
 
-export type ResyncReason = 'gap' | 'wrong_project' | 'provenance_mismatch' | 'unknown_task' | 'unknown_revision' | 'missing_approval_id' | 'plan_revision';
+export type ResyncReason = 'gap' | 'wrong_project' | 'provenance_mismatch' | 'unknown_task' | 'unknown_revision' | 'missing_approval_id' | 'plan_revision' | 'unreadable_reduced_scope';
 export type ApplyResult =
   | { readonly outcome: 'applied' | 'ignored' | 'duplicate'; readonly state: ProjectionState }
   | { readonly outcome: 'resync'; readonly reason: ResyncReason; readonly state: ProjectionState };
@@ -80,7 +81,7 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   const p = e.payload;
   const at = e.occurredAt;
   const existingRun = snap0.runs[e.runId];
-  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null };
+  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null };
   const snap: ProjectViewSnapshot = existingRun ? snap0 : { ...snap0, runs: put(snap0.runs, e.runId, run) };
   const setRun = (r: typeof run, s: ProjectViewSnapshot = snap): ProjectViewSnapshot => ({ ...s, runs: put(s.runs, e.runId, r) });
   const lifecycle = oneOf(p, 'lifecycle', RUN_STATUSES);
@@ -111,8 +112,8 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       const approvalId = str(p, 'approvalId');
       if (approvalId === null) return needs('missing_approval_id');
       const approval: ApprovalView = {
-        approvalId, taskId: null, taskRevision: null, runId: e.runId, scopeHash: str(p, 'scopeHash'), reason: str(p, 'reason'), state: 'pending', requestedAt: at,
-        expiresAt: iso(p, 'expiresAt'), resolvedAt: null,
+        approvalId, taskId: null, taskRevision: null, runId: e.runId, scopeHash: str(p, 'scopeHash'), reason: str(p, 'reason'), operation: str(p, 'operation'), destination: str(p, 'destination'), requester: null,
+        state: 'pending', requestedAt: at, expiresAt: iso(p, 'expiresAt'), resolvedAt: null,
       };
       return { ...snap, approvals: put(snap.approvals, approvalId, approval) };
     }
@@ -122,6 +123,17 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       const found = wanted !== null ? snap.approvals[wanted] : Object.values(snap.approvals).filter((a) => a.taskId === null && a.runId === e.runId && a.state === 'pending').at(-1);
       if (!found) return null;
       return { ...snap, approvals: put(snap.approvals, found.approvalId, { ...found, state: e.type === 'approval.granted' ? ('granted' as const) : ('denied' as const), resolvedAt: at }) };
+    }
+    case 'run.reduced_scope_accepted': {
+      const notDelivered = NotDeliveredSchema.safeParse(p['notDelivered']);
+      const decisionId = str(p, 'decisionId');
+      // The acceptance is a fact the view must not lose or half-read, so anything it cannot read comes from a snapshot.
+      if (!notDelivered.success || decisionId === null || !Array.isArray(p['deliveredRequirementIds'])) return needs('unreadable_reduced_scope');
+      const reducedScope: ReducedScopeView = {
+        decisionId, runId: e.runId, planRevision: run.planRevision, notDelivered: notDelivered.data, deliveredRequirementIds: (p['deliveredRequirementIds'] as unknown[]).filter((x): x is string => typeof x === 'string'),
+        acceptedAt: at, acceptedBy: e.actor.id, note: str(p, 'note'),
+      };
+      return setRun({ ...run, reducedScope });
     }
     default:
       return null; // a task-level type addressed to the run id: nothing to project, and never a phantom task
@@ -252,8 +264,8 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       const approvalId = str(p, 'approvalId');
       if (approvalId === null) return needs('missing_approval_id');
       const approval: ApprovalView = {
-        approvalId, taskId: task.taskId, taskRevision: task.revision, runId: e.runId, scopeHash: str(p, 'scopeHash'), reason: str(p, 'reason'), state: 'pending',
-        requestedAt: at, expiresAt: iso(p, 'expiresAt'), resolvedAt: null,
+        approvalId, taskId: task.taskId, taskRevision: task.revision, runId: e.runId, scopeHash: str(p, 'scopeHash'), reason: str(p, 'reason'), operation: str(p, 'operation'), destination: str(p, 'destination'), requester: null,
+        state: 'pending', requestedAt: at, expiresAt: iso(p, 'expiresAt'), resolvedAt: null,
       };
       let attempts = snap.attempts;
       let workers = snap.workers;
@@ -292,7 +304,13 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
         const w = workerFor(snap, running.attemptId);
         if (w) workers = put(workers, w.workerId, idleWorker(w, at, { leaseHeld: false, stateReason: reason, ...(reason?.startsWith('policy_denied') ? { activity: 'blocked_policy' as const } : {}) }));
       }
-      return commit({ ...moveTask(task, 'blocked', reason, at), activeAttemptId: null }, { ...snap, attempts, workers });
+      // The expiry sweep says which approval lapsed. It stays denied-able and is never a grant.
+      let approvals = snap.approvals;
+      if (reason === 'approval_expired') {
+        const lapsed = str(p, 'approvalId') !== null ? snap.approvals[str(p, 'approvalId')!] : Object.values(snap.approvals).filter((a) => a.taskId === task.taskId && a.state === 'pending').at(-1);
+        if (lapsed && lapsed.state === 'pending') approvals = put(approvals, lapsed.approvalId, { ...lapsed, state: 'expired' as const });
+      }
+      return commit({ ...moveTask(task, 'blocked', reason, at), activeAttemptId: null }, { ...snap, attempts, workers, approvals });
     }
 
     case 'verification.started':
@@ -442,4 +460,29 @@ export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnap
     changed = true;
   }
   return changed ? { ...state, snapshot: { ...snap, runs } } : state;
+}
+
+/**
+ * Merges what the Decisions screen reads and events do not carry: the change requests (merge reconciliation has no event), and each run's reduced-scope
+ * record and assessment. Same rule as the lifecycle merge: only a snapshot at or past the cursor counts. Returns the state unchanged when nothing differs.
+ */
+export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSnapshot): ProjectionState {
+  const snap = state.snapshot;
+  if (fresh.meta.projectId !== snap.meta.projectId || fresh.meta.provenance !== snap.meta.provenance) return state;
+  if (cursorToSequence(fresh.meta.cursor) < cursorToSequence(snap.meta.cursor)) return state;
+  const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+  let runs = snap.runs;
+  let changed = false;
+  for (const r of Object.values(fresh.runs)) {
+    const mine = snap.runs[r.runId];
+    if (!mine) continue;
+    // A recorded acceptance arrives by event first; a snapshot that has not caught up cannot clear it.
+    const reducedScope = r.reducedScope ?? mine.reducedScope;
+    if (same(mine.reducedScope, reducedScope) && same(mine.scopeAssessment, r.scopeAssessment)) continue;
+    runs = put(runs, r.runId, { ...mine, reducedScope, scopeAssessment: r.scopeAssessment });
+    changed = true;
+  }
+  const changeRequests = same(snap.changeRequests, fresh.changeRequests) ? snap.changeRequests : fresh.changeRequests;
+  if (!changed && changeRequests === snap.changeRequests) return state;
+  return { ...state, snapshot: { ...snap, runs, changeRequests } };
 }

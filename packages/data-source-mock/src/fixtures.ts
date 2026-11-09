@@ -1,4 +1,5 @@
-import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, type Fixture, type FixtureId } from './builder.ts';
+import type { ChangeRequestView } from '@selarikru/view-protocol';
+import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, fixtureTime, type Fixture, type FixtureId } from './builder.ts';
 
 /**
  * Ten named scenarios. Each is a stream of real domain events (the payload fields the services emit today), a fixed start time, usage
@@ -41,9 +42,9 @@ function healthyParallelWork(): Fixture {
 function humanWait(): Fixture {
   const b = new FixtureBuilder('human-wait', 202);
   b.task('migrate', { title: 'Add feedback table', role: 'backend', criteria: 2 }).task('ui', { title: 'Empty states', role: 'frontend', criteria: 3 });
-  b.approval('apr_docs_domain', { task: 'migrate', scopeHash: 'scope-docs-domain', reason: 'allow_documentation_domain', expiresAtSec: 3640 });
+  b.approval('apr_docs_domain', { task: 'migrate', scopeHash: 'scope-docs-domain', reason: 'Needs the documentation site to confirm the error codes.', expiresAtSec: 3640, operation: 'new_domain', destination: 'docs.example.com' });
   b.plan(1, ['migrate', 'ui']).ready('migrate', 5).start('migrate', 'att_mig_1', 6, LOCAL, 'local', 'cloud').ready('ui', 5).start('ui', 'att_ui_1', 7, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'migrate', attempt: 'att_mig_1', payload: { fence: 1, reason: 'allow_documentation_domain' } });
+  b.emit('approval.requested', 40, { task: 'migrate', attempt: 'att_mig_1', payload: { fence: 1, reason: 'Needs the documentation site to confirm the error codes.' } });
   // A grant releases the task to `ready` by itself; the scheduler then claims it again.
   b.emit('approval.granted', 150, { task: 'migrate', actor: HUMAN, payload: { approvalId: b.id('apr_docs_domain'), scopeHash: 'scope-docs-domain', actionHash: 'action-docs-domain' } });
   b.start('migrate', 'att_mig_2', 155, LOCAL, 'local', 'cloud', 2);
@@ -102,9 +103,9 @@ function contractChange(): Fixture {
   b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2 }).task('contract', { title: 'Approve contract v1', role: 'reviewer', criteria: 1 })
     .task('web', { title: 'Feedback list UI', role: 'frontend', dependsOn: ['contract'], criteria: 3 })
     .task('web', { title: 'Feedback list UI (contract v2)', role: 'frontend', dependsOn: ['contract'], revision: 2, planRevision: 2, criteria: 3 });
-  b.approval('apr_contract_v2', { task: 'contract', scopeHash: 'scope-contract-v2', reason: 'approve_contract_v2', expiresAtSec: 7265 });
+  b.approval('apr_contract_v2', { task: 'contract', scopeHash: 'scope-contract-v2', reason: 'The contract renames a field that clients depend on.', expiresAtSec: 7265, operation: 'breaking_api_change' });
   b.plan(1, ['api', 'contract', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('contract', 5).start('contract', 'att_con_1', 7, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'contract', attempt: 'att_con_1', payload: { fence: 1, reason: 'approve_contract_v2' } });
+  b.emit('approval.requested', 40, { task: 'contract', attempt: 'att_con_1', payload: { fence: 1, reason: 'The contract renames a field that clients depend on.' } });
   // The revised plan is a single event. Nothing says which tasks changed except the ids; the snapshot carries the new revision.
   b.plan(2, ['web'], 60);
   b.emit('approval.granted', 140, { task: 'contract', actor: HUMAN, payload: { approvalId: b.id('apr_contract_v2'), scopeHash: 'scope-contract-v2', actionHash: 'action-contract-v2' } });
@@ -132,9 +133,9 @@ function failedCi(): Fixture {
 function expiredApproval(): Fixture {
   const b = new FixtureBuilder('expired-approval', 808);
   b.task('docs', { title: 'Fetch vendor docs', role: 'research', criteria: 1 });
-  b.approval('apr_vendor_docs', { task: 'docs', scopeHash: 'scope-vendor-docs', reason: 'allow_vendor_docs_domain', expiresAtSec: 640 });
+  b.approval('apr_vendor_docs', { task: 'docs', scopeHash: 'scope-vendor-docs', reason: 'Needs the vendor API documentation to write the client.', expiresAtSec: 640, operation: 'new_domain', destination: 'docs.vendor.example' });
   b.plan(1, ['docs']).ready('docs', 5).start('docs', 'att_docs_1', 6, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'docs', attempt: 'att_docs_1', payload: { fence: 1, reason: 'allow_vendor_docs_domain' } });
+  b.emit('approval.requested', 40, { task: 'docs', attempt: 'att_docs_1', payload: { fence: 1, reason: 'Needs the vendor API documentation to write the client.' } });
   return done(b, {
     id: 'expired-approval', name: 'Expired approval', startSec: 700, assistant: { mode: 'PREFER_IN_CLOUD', observedSource: 'in_cloud' },
     description: 'An approval request passed its expiry. It reads as expired and the task stays awaiting approval; expiry is an explicit outcome and never a grant.',
@@ -184,9 +185,9 @@ function mergeFlow(): Fixture {
   b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
   // The last verdict makes the run ready for review in the same transaction, with no event: the snapshot says so.
   b.emit('candidate.assembled', 60, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
-  b.emit('change.proposed', 65, { actor: INTEGRATION, payload: { prNumber: 12, url: 'https://example.invalid/pr/12' } });
+  b.emit('change.proposed', 65, { actor: INTEGRATION, payload: { prNumber: 12, url: 'https://github.com/selarikru-demo/feedback-board/pull/12' } });
   // A merge seen on GitHub: a run-level event, then one per verified task. The run's `merged` follows with no event of its own.
-  const merged = { prNumber: 12, url: 'https://example.invalid/pr/12', candidateSha: 'c'.repeat(40), mergeCommitSha: 'd'.repeat(40) };
+  const merged = { prNumber: 12, url: 'https://github.com/selarikru-demo/feedback-board/pull/12', candidateSha: 'c'.repeat(40), mergeCommitSha: 'd'.repeat(40) };
   b.emit('change.merged', 100, { actor: INTEGRATION, payload: merged });
   b.emit('change.merged', 100, { task: 'api', actor: INTEGRATION, payload: merged });
   b.emit('change.merged', 100, { task: 'web', actor: INTEGRATION, payload: merged });
@@ -194,6 +195,105 @@ function mergeFlow(): Fixture {
     id: 'merge-flow', name: 'Merge flow', startSec: 70, assistant: ASSISTANT_DEVICE,
     description: 'Every task is verified, so the run is ready for review. A human merges on GitHub; the merge is observed and the run becomes merged.',
     usage: [b.use('api', 'att_api_1', figure('cost_usd', '0.20', 'estimated', 'rate_card')), b.use('web', 'att_web_1', figure('cost_usd', '0.18', 'estimated', 'rate_card'))],
+    changeRequests: [changeRequest(b)],
+  });
+}
+
+const CANDIDATE = 'c'.repeat(40);
+const PR_URL = 'https://github.com/selarikru-demo/feedback-board/pull/12';
+const changeRequest = (b: FixtureBuilder, over: Partial<ChangeRequestView> = {}): ChangeRequestView => ({
+  runId: b.runId, prNumber: 12, url: PR_URL, status: 'open', candidateSha: CANDIDATE, baseRef: 'main', observedHeadSha: CANDIDATE, mergeCommitSha: null, observedAt: fixtureTime(66), ...over,
+});
+
+/** Approvals a person can act on. Cloud starts wait at claim with no attempt, as the scheduler does; worker requests interrupt their attempt. */
+function decisionQueue(): Fixture {
+  const b = new FixtureBuilder('decision-queue', 1313);
+  b.task('search', { title: 'Search index', role: 'backend', criteria: 2 }).task('contract', { title: 'Renewal API contract', role: 'backend', dependsOn: ['search'], criteria: 2 })
+    .task('migrate', { title: 'Backfill feedback tables', role: 'backend', criteria: 2 }).task('ui', { title: 'Feedback list UI', role: 'frontend', dependsOn: ['contract'], criteria: 3 });
+  b.approval('apr_cloud', { task: 'search', scopeHash: 'scope-cloud-search', reason: 'configured_require_approval:start_cloud_worker', expiresAtSec: 2100, operation: 'start_cloud_worker' });
+  b.approval('apr_breaking', { task: 'contract', scopeHash: 'scope-breaking-renewal', reason: 'The renewal response needs nextRenewalAt as a required field, so clients on v1 fail validation.', expiresAtSec: 3000, operation: 'breaking_api_change' });
+  b.approval('apr_migration', { task: 'migrate', scopeHash: 'scope-migration', reason: 'Backfilling drops the legacy feedback_old table once rows are copied.', expiresAtSec: 3600, operation: 'destructive_data_migration' });
+  b.plan(1, ['search', 'contract', 'migrate', 'ui']).ready('search', 3).ready('contract', 4).ready('migrate', 5);
+  b.emit('approval.requested', 8, { task: 'search', payload: { reason: 'configured_require_approval:start_cloud_worker', operation: 'start_cloud_worker' } });
+  b.start('contract', 'att_contract_1', 10, LOCAL, 'local', 'cloud').emit('approval.requested', 45, { task: 'contract', attempt: 'att_contract_1', payload: { fence: 1, reason: 'The renewal response needs nextRenewalAt as a required field, so clients on v1 fail validation.', operation: 'breaking_api_change' } });
+  b.start('migrate', 'att_migrate_1', 11, LOCAL2, 'local', 'cloud').emit('approval.requested', 60, { task: 'migrate', attempt: 'att_migrate_1', payload: { fence: 1, reason: 'Backfilling drops the legacy feedback_old table once rows are copied.', operation: 'destructive_data_migration' } });
+  return done(b, {
+    id: 'decision-queue', name: 'Decision queue', startSec: 120, assistant: ASSISTANT_DEVICE,
+    description: 'Three requests wait for a person: a cloud start, a breaking API change and a destructive data migration. The last two are advisory pauses.',
+    usage: [b.use('contract', 'att_contract_1', figure('cost_usd', '0.12', 'estimated', 'rate_card'))],
+  });
+}
+
+function changedRequest(): Fixture {
+  const b = new FixtureBuilder('changed-request', 1414);
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2 }).task('api', { title: 'Feedback API (contract v2)', role: 'backend', revision: 2, planRevision: 2, criteria: 2 });
+  b.approval('apr_changed', { task: 'api', scopeHash: 'scope-api-v1', reason: 'The list endpoint renames its pagination fields.', expiresAtSec: 3600, operation: 'breaking_api_change' });
+  b.plan(1, ['api']).ready('api', 2).start('api', 'att_api_1', 3, LOCAL, 'local', 'cloud');
+  b.emit('approval.requested', 20, { task: 'api', attempt: 'att_api_1', payload: { fence: 1, reason: 'The list endpoint renames its pagination fields.', operation: 'breaking_api_change' } });
+  b.plan(2, ['api'], 60);
+  return done(b, {
+    id: 'changed-request', name: 'Changed request', startSec: 90, assistant: ASSISTANT_DEVICE,
+    description: 'A worker asked for approval at task revision 1, then the plan moved the task to revision 2. The request stays pending and cannot be decided as it stands.',
+    usage: [],
+  });
+}
+
+function budgetStop(): Fixture {
+  const b = new FixtureBuilder('budget-stop', 1515);
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2, requirements: ['FB-01', 'FB-02'], checks: ['chk-api'] })
+    .task('search', { title: 'Search index', role: 'backend', criteria: 2, requirements: ['FB-03'], checks: ['chk-search-1', 'chk-search-2'] })
+    .task('web', { title: 'Search results UI', role: 'frontend', dependsOn: ['search'], criteria: 1, requirements: ['FB-04'], checks: ['chk-web-1'] });
+  b.plan(1, ['api', 'search', 'web']).ready('api', 3).start('api', 'att_api_1', 4, LOCAL, 'local', 'cloud').ready('search', 4).start('search', 'att_search_1', 5, CLOUD, 'cloud', 'cloud');
+  b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 55, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
+  b.emit('task.cancelled', 70, { task: 'search', attempt: 'att_search_1', actor: REAPER, payload: { reason: 'budget_exhausted', attemptId: b.id('att_search_1'), cause: 'budget_exhausted' } });
+  return done(b, {
+    id: 'budget-stop', name: 'Budget stop', startSec: 90, assistant: ASSISTANT_DEVICE,
+    description: 'The run budget ran out while the search index was being built. The API is verified; the search index and its dependent UI are not delivered.',
+    usage: [b.use('search', 'att_search_1', figure('cost_usd', '2.50', 'estimated', 'rate_card')), b.use('api', 'att_api_1', figure('cost_usd', '0.42', 'estimated', 'rate_card'))],
+  });
+}
+
+function integrationBlocked(): Fixture {
+  const b = new FixtureBuilder('integration-blocked', 1616);
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2 }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2 }).task('docs', { title: 'Public changelog', role: 'docs', criteria: 1 });
+  b.plan(1, ['api', 'web', 'docs']).ready('api', 2).start('api', 'att_api_1', 3, LOCAL, 'local', 'cloud').complete('api', 'att_api_1', 25, LOCAL).emit('task.blocked', 26, { task: 'api', payload: { reason: 'resource_conflict:port:5432' } });
+  b.ready('web', 31).start('web', 'att_web_1', 32, LOCAL, 'local', 'cloud').complete('web', 'att_web_1', 50, LOCAL);
+  b.ready('docs', 33).start('docs', 'att_docs_1', 34, LOCAL2, 'local', 'cloud').complete('docs', 'att_docs_1', 51, LOCAL2);
+  b.emit('task.blocked', 70, { task: 'web', payload: { reason: 'verification_error' } });
+  b.emit('task.blocked', 71, { task: 'docs', payload: { reason: 'assembly_infrastructure:git_failed' } });
+  return done(b, {
+    id: 'integration-blocked', name: 'Integration blocked', startSec: 90, assistant: ASSISTANT_DEVICE,
+    description: 'A worker hit a resource conflict, and the verifier and the assembly step could not finish. No worker needs to redo the finished work.',
+    usage: [],
+  });
+}
+
+function reviewable(b: FixtureBuilder): void {
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3, requirements: ['FB-01'] }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2, requirements: ['FB-02'] });
+  b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
+  b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
+  b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
+  b.emit('candidate.assembled', 60, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+}
+
+function mergeReview(): Fixture {
+  const b = new FixtureBuilder('merge-review', 1717);
+  reviewable(b);
+  return done(b, {
+    id: 'merge-review', name: 'Ready, no pull request', startSec: 70, assistant: ASSISTANT_DEVICE,
+    description: 'Every task is verified and the candidate is assembled. A person opens the draft pull request; merging stays on GitHub.',
+    usage: [],
+  });
+}
+
+function mergedShaMismatch(): Fixture {
+  const b = new FixtureBuilder('merged-sha-mismatch', 1818);
+  reviewable(b);
+  b.emit('change.proposed', 65, { actor: INTEGRATION, payload: { prNumber: 12, url: PR_URL } });
+  return done(b, {
+    id: 'merged-sha-mismatch', name: 'Merged SHA mismatch', startSec: 90, assistant: ASSISTANT_DEVICE,
+    description: 'GitHub reports the pull request merged, but the merged head is not the commit that was verified, so no merge is recorded.',
+    usage: [], changeRequests: [changeRequest(b, { status: 'merged_sha_mismatch', observedHeadSha: 'a'.repeat(40), mergeCommitSha: 'd'.repeat(40), observedAt: fixtureTime(85) })],
   });
 }
 
@@ -223,12 +323,12 @@ export const FIXTURE_IDS = [
 
 const BUILDERS: Record<FixtureId, () => Fixture> = {
   'healthy-parallel-work': healthyParallelWork, 'human-wait': humanWait, 'policy-block': policyBlock, 'runner-loss': runnerLoss, 'long-build-stall': longBuildStall,
-  'merge-flow': mergeFlow, 'feature-delivery': featureDelivery, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
+  'merge-flow': mergeFlow, 'feature-delivery': featureDelivery, 'decision-queue': decisionQueue, 'changed-request': changedRequest, 'budget-stop': budgetStop, 'integration-blocked': integrationBlocked, 'merge-review': mergeReview, 'merged-sha-mismatch': mergedShaMismatch, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
 };
 
 /** A fresh copy each call. Fixtures are pure data, so two calls are deeply equal. */
 export const buildFixture = (id: FixtureId): Fixture => BUILDERS[id]();
 export const buildAllFixtures = (): Fixture[] => FIXTURE_IDS.map(buildFixture);
 /** The ten named fixtures plus the extras. This is what the demo source serves by default. */
-export const EXTRA_FIXTURE_IDS = ['merge-flow', 'feature-delivery'] as const satisfies readonly FixtureId[];
+export const EXTRA_FIXTURE_IDS = ['merge-flow', 'feature-delivery', 'decision-queue', 'changed-request', 'budget-stop', 'integration-blocked', 'merge-review', 'merged-sha-mismatch'] as const satisfies readonly FixtureId[];
 export const buildDemoFixtures = (): Fixture[] => [...buildAllFixtures(), ...EXTRA_FIXTURE_IDS.map(buildFixture)];

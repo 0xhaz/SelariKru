@@ -164,9 +164,9 @@ describe('inspector detail', () => {
     const { snapshot, nowMs } = await fixtureSnapshot('human-wait');
     const r = row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1');
     expect(r.detail.blockers[0]).toMatchObject({ kind: 'Waiting on a person' });
-    expect(r.detail.blockers[0]!.text).toContain('Allow documentation domain');
+    expect(r.detail.blockers[0]!.text).toContain('Needs the documentation site');
     expect(r.detail.permissions).toHaveLength(1);
-    expect(r.detail.permissions[0]).toMatchObject({ state: 'Pending', reasonCode: 'allow_documentation_domain' });
+    expect(r.detail.permissions[0]).toMatchObject({ state: 'Pending', reasonCode: 'Needs the documentation site to confirm the error codes.' });
   });
 
   it('dependencies are listed by name and unknown dependencies stay unknown', () => {

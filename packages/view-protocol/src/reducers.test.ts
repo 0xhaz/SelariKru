@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { EVENT_TYPES, checkEventAuthority, type Actor, type EventType } from '@selarikru/domain';
 import {
   PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, RunViewSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
-  mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
+  mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
   type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type ProjectionState, type TaskView, type UsageEntry, type UsageFigure,
 } from './index.ts';
 
@@ -24,7 +24,7 @@ function base(tasks: string[] = ['t1'], provenance: 'simulated' | 'observed' = '
   const s = emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance });
   return projectionFromSnapshot({
     ...s,
-    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null } },
+    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null } },
     tasks: Object.fromEntries(tasks.map((t) => [t, task(t)])),
   });
 }
@@ -700,3 +700,59 @@ describe('verifiedCounts', () => {
   });
 });
 
+
+describe('decision facts', () => {
+  const nd = { tasks: [{ taskId: 't1', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-02'], acceptanceCheckIds: ['chk-2'] };
+  const change = { runId: 'r1', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'merged_sha_mismatch', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'e'.repeat(40), mergeCommitSha: 'd'.repeat(40), observedAt: at(50) };
+  const withFacts = (cursor: string, over: Partial<ProjectViewSnapshot> = {}): ProjectViewSnapshot => ({ ...base().snapshot, meta: { ...base().snapshot.meta, cursor }, ...over });
+
+  it('approval.requested carries the operation and the structured destination', () => {
+    const s = run(base(), [['approval.requested', 5, { payload: { approvalId: 'apr1', scopeHash: 'h', reason: 'needed for docs', operation: 'new_domain', destination: 'docs.example.com', destinationKind: 'network_host' } }]]);
+    expect(s.snapshot.approvals['apr1']).toMatchObject({ operation: 'new_domain', destination: 'docs.example.com', requester: null });
+    expect(ProjectViewSnapshotSchema.safeParse(s.snapshot).success).toBe(true);
+  });
+
+  it('task.blocked with approval_expired stores the approval as expired, never granted', () => {
+    const s = run(base(), [['approval.requested', 5, { payload: { approvalId: 'apr1', scopeHash: 'h', reason: 'r', operation: 'breaking_api_change' } }], ['task.blocked', 9, { payload: { reason: 'approval_expired', approvalId: 'apr1' } }]]);
+    expect(s.snapshot.approvals['apr1']!.state).toBe('expired');
+    expect(approvalStateAt(s.snapshot.approvals['apr1']!, T0 + 9_000)).toBe('expired');
+    expect(s.snapshot.tasks['t1']!.status).toBe('blocked');
+  });
+
+  it('run.reduced_scope_accepted sets reducedScope from the event', () => {
+    const s = run(base(), [['run.reduced_scope_accepted', 5, { taskId: 'r1', actor: HUMAN, payload: { decisionId: 'dec1', notDelivered: nd, deliveredRequirementIds: ['FB-01'] } }]]);
+    expect(s.snapshot.runs['r1']!.reducedScope).toMatchObject({ decisionId: 'dec1', notDelivered: nd, deliveredRequirementIds: ['FB-01'], acceptedAt: at(5), acceptedBy: 'u' });
+  });
+
+  it('a reduced-scope event the view cannot read asks for a snapshot instead of guessing', () => {
+    const start = base();
+    const r = applyEvent(start, nx(start, 'run.reduced_scope_accepted', 5, { taskId: 'r1', actor: HUMAN, payload: { decisionId: 'dec1' } }));
+    expect(r.outcome).toBe('resync');
+  });
+
+  it('the refresh merges changeRequests, reducedScope and the scope assessment only from a snapshot at or past the cursor', () => {
+    const s = base();
+    const assessment = { notDelivered: nd, deliveredRequirementIds: [], stopped: [{ taskId: 't1', revision: 1 }], stoppingTaskIds: [] };
+    const fresh = withFacts('0', { changeRequests: [change], runs: { r1: { ...s.snapshot.runs['r1']!, scopeAssessment: assessment } } });
+    const merged = mergeDecisionFacts(s, fresh);
+    expect(merged.snapshot.changeRequests).toEqual([change]);
+    expect(merged.snapshot.runs['r1']!.scopeAssessment).toEqual(assessment);
+    expect(mergeDecisionFacts(merged, fresh)).toBe(merged);
+    const ahead = { ...s, snapshot: { ...s.snapshot, meta: { ...s.snapshot.meta, cursor: '4' } } };
+    expect(mergeDecisionFacts(ahead, fresh)).toBe(ahead);
+  });
+
+  it('merged_sha_mismatch reaches a live session through its refresh', async () => {
+    const snaps: ProjectViewSnapshot[] = [withFacts('0'), withFacts('0', { changeRequests: [change] })];
+    const source = { mode: 'mock', getSnapshot: async () => snaps.shift() ?? withFacts('0', { changeRequests: [change] }), subscribe: () => () => {}, execute: async () => { throw new Error('x'); }, openTerminal: async () => { throw new Error('x'); }, disconnect: () => {} } as unknown as EngineeringDataSource;
+    const states: ProjectionState[] = [];
+    const session = startProjection(source, 'p1', { onState: (s) => states.push(s), onError: () => {} }, { every: () => () => {}, clock: { nowMs: () => T0 }, refreshMs: 0 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(session.state()!.snapshot.changeRequests).toEqual([]);
+    await session.refresh();
+    expect(session.state()!.snapshot.changeRequests).toEqual([change]);
+    await session.resync();
+    expect(session.state()!.snapshot.changeRequests).toEqual([change]);
+    session.stop();
+  });
+});

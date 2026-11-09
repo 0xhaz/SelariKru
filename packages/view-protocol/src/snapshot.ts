@@ -24,6 +24,43 @@ export const EvidenceRefSchema = z
   .strict();
 export type EvidenceRef = z.infer<typeof EvidenceRefSchema>;
 
+/** What a run has not delivered: every current task not verified, merged or superseded, and what those tasks carry. Never counted as verified. */
+export const NotDeliveredSchema = z
+  .object({
+    tasks: z.array(z.object({ taskId: Id, revision: z.number().int().min(1), status: z.string().min(1), budgetStopped: z.boolean() }).strict()),
+    requirementIds: z.array(z.string()),
+    acceptanceCheckIds: z.array(z.string()),
+  })
+  .strict();
+export type NotDelivered = z.infer<typeof NotDeliveredSchema>;
+
+/** Where a run stands against its plan after a budget stop, before anyone has accepted it. It comes only from a snapshot. */
+export const ScopeAssessmentSchema = z
+  .object({
+    notDelivered: NotDeliveredSchema,
+    deliveredRequirementIds: z.array(z.string()),
+    stopped: z.array(z.object({ taskId: Id, revision: z.number().int().min(1) }).strict()),
+    /** Tasks with a budget stop still in flight: the scope is not final and cannot be accepted yet. */
+    stoppingTaskIds: z.array(Id),
+  })
+  .strict();
+export type ScopeAssessment = z.infer<typeof ScopeAssessmentSchema>;
+
+/** A recorded acceptance of a budget-stopped run. It changes no task and verifies nothing. */
+export const ReducedScopeViewSchema = z
+  .object({
+    decisionId: Id,
+    runId: Id,
+    planRevision: z.number().int().min(0),
+    notDelivered: NotDeliveredSchema,
+    deliveredRequirementIds: z.array(z.string()),
+    acceptedAt: Iso,
+    acceptedBy: z.string().min(1),
+    note: z.string().nullable().default(null),
+  })
+  .strict();
+export type ReducedScopeView = z.infer<typeof ReducedScopeViewSchema>;
+
 export const RunViewSchema = z
   .object({
     runId: Id,
@@ -36,6 +73,10 @@ export const RunViewSchema = z
      * a task count is then the most that can be said. Nothing derived from liveness or activity ever feeds this.
      */
     criteria: z.object({ verified: z.number().int().min(0), total: z.number().int().min(0) }).strict().refine((c) => c.verified <= c.total, { message: 'verified criteria cannot exceed the total' }).nullable().default(null),
+    /** Set once the owner accepted a budget stop. Null means nobody has. */
+    reducedScope: ReducedScopeViewSchema.nullable().default(null),
+    /** Null means the source has not reported one (or the run has no budget stop): the not-delivered list is then unknown, and is never read as empty. */
+    scopeAssessment: ScopeAssessmentSchema.nullable().default(null),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;
@@ -110,7 +151,7 @@ export const WorkerViewSchema = z
   .strict();
 export type WorkerView = z.infer<typeof WorkerViewSchema>;
 
-export const APPROVAL_STATES = ['pending', 'granted', 'denied'] as const;
+export const APPROVAL_STATES = ['pending', 'granted', 'denied', 'expired', 'superseded'] as const;
 export const ApprovalViewSchema = z
   .object({
     approvalId: Id,
@@ -118,10 +159,16 @@ export const ApprovalViewSchema = z
     taskRevision: z.number().int().min(1).nullable(),
     runId: Id,
     scopeHash: z.string().nullable(),
+    /** The worker's or policy's words about the request. For a worker's operation this text is worker-supplied and proves nothing. */
     reason: z.string().nullable(),
+    /** What is being approved. Null means the request named no operation, which can never be granted. */
+    operation: z.string().nullable().default(null),
+    /** The structured destination the scope is bound to, when there is one. Never parsed from `reason`. */
+    destination: z.string().nullable().default(null),
+    requester: z.string().nullable().default(null),
     state: z.enum(APPROVAL_STATES),
     requestedAt: Iso,
-    /** The stored state stays `pending` after this time; `approvalStateAt` reports it as expired. Expiry is explicit, never a grant. */
+    /** A sweep stores `expired`; until it runs the stored state stays `pending` and `approvalStateAt` reports it as expired. Expiry is explicit, never a grant. */
     expiresAt: Iso.nullable(),
     resolvedAt: Iso.nullable(),
   })
@@ -162,6 +209,22 @@ export const AssistantViewSchema = z
   .strict();
 export type AssistantView = z.infer<typeof AssistantViewSchema>;
 
+/** The reviewable change opened for a run. `status` is what the last authoritative read of GitHub said, and is kept as a string so a new status cannot break a snapshot. */
+export const ChangeRequestViewSchema = z
+  .object({
+    runId: Id,
+    prNumber: z.number().int().min(1),
+    url: z.string().min(1),
+    status: z.string().min(1),
+    candidateSha: z.string().min(1),
+    baseRef: z.string().min(1),
+    observedHeadSha: z.string().nullable(),
+    mergeCommitSha: z.string().nullable(),
+    observedAt: Iso.nullable(),
+  })
+  .strict();
+export type ChangeRequestView = z.infer<typeof ChangeRequestViewSchema>;
+
 export const ProjectViewSnapshotSchema = z
   .object({
     meta: SnapshotMetaSchema,
@@ -173,6 +236,8 @@ export const ProjectViewSnapshotSchema = z
     approvals: z.record(z.string(), ApprovalViewSchema),
     checks: z.record(z.string(), CheckViewSchema),
     usage: z.array(UsageEntrySchema),
+    /** One per run at most. Merge reconciliation has no event of its own, so this slot arrives by snapshot and the refresh carries it. */
+    changeRequests: z.array(ChangeRequestViewSchema).default([]),
   })
   .strict();
 export type ProjectViewSnapshot = z.infer<typeof ProjectViewSnapshotSchema>;
@@ -181,6 +246,6 @@ export function emptySnapshot(init: { projectId: string; observedAt: string; pro
   return {
     meta: { schemaVersion: VIEW_SCHEMA_VERSION, projectId: init.projectId, cursor: '0', observedAt: init.observedAt, provenance: init.provenance },
     assistant: { mode: null, observedSource: 'unknown' },
-    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [],
+    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [],
   };
 }

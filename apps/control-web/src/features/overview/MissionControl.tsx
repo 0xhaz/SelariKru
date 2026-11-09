@@ -2,6 +2,7 @@ import { AxisBadges, Chip, EmptyState, Panel, Timestamp, formatAge, formatClock,
 import type { DataSourceError, ProjectViewSnapshot, UsageTotal } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
+import { decisionHref } from '../../shell/route.ts';
 import type { AttentionItem, AttentionKind } from './attention.ts';
 import type { CriterionCell, DeliveryModel, EvidenceRow, FleetModel, OverviewModel, UsageModel } from './model.ts';
 
@@ -41,6 +42,7 @@ function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: 
         <div className="md:border-l md:border-line-strong md:pl-4">
           <p className="text-sm font-medium text-muted">Next action</p>
           <p className="mt-0.5 font-semibold text-fg">{item.nextAction}</p>
+          {item.decisionId && item.needsOperator ? <a data-testid="decision-link" className="mt-1 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(item.decisionId)}>Open in Decisions</a> : null}
         </div>
       </div>
       <details className="mt-2 text-sm text-muted">

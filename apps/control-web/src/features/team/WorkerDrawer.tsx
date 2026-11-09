@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { AxisBadges, Chip, buttonQuiet, formatExact, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
+import { decisionHref } from '../../shell/route.ts';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import type { Fact, TeamRow, WorkerDetail } from './model.ts';
 
@@ -152,6 +153,7 @@ function PermissionsPanel({ detail }: { detail: WorkerDetail }) {
                 {p.expiresAt ? <><dt>Expires</dt><dd className="m-0"><Exact iso={p.expiresAt} /></dd></> : null}
                 {p.resolvedAt ? <><dt>Resolved</dt><dd className="m-0"><Exact iso={p.resolvedAt} /></dd></> : null}
               </dl>
+              {p.state === 'Pending' || p.state === 'Expired' ? <a className="mt-2 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(`decision:${p.approvalId}`)}>Open in Decisions</a> : null}
             </li>
           ))}
         </ul>
