@@ -106,6 +106,7 @@ export async function consumeGrants(tx: Tx, key: TaskKey, revision: number, atte
     .where(and(
       eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId),
       eq(schema.approvals.revision, revision), eq(schema.approvals.outcome, 'granted'), isNull(schema.approvals.consumedAt),
+      or(isNull(schema.approvals.expiresAt), gt(schema.approvals.expiresAt, now)),
     ));
 }
 

@@ -18,6 +18,8 @@ export interface ReviewPackage {
   readonly record: VerificationRecord;
   readonly limitations: readonly string[];
   readonly usage: readonly UsageLine[];
+  /** Requirement ids the run's tasks carry that no check in the record covered. Listed so a reviewer cannot read a passing table as covering them. */
+  readonly untested?: readonly string[];
   /** Approvals a person granted for this run. Advisory: the sandbox does not enforce them, so the reviewer needs to see what was allowed. */
   readonly grants?: readonly { readonly operation: string; readonly taskId: string | null; readonly approver: string | null }[];
   /** Attempts of this run a person opened a shell in, in the order they happened. A verifier pass does not clear this. */
@@ -46,6 +48,7 @@ export function buildPrBody(p: ReviewPackage): string {
   lines.push('');
   const limits: string[] = [];
   for (const c of r.results) if (c.status !== 'passed') limits.push(`${c.checkId} is ${c.status}; a ${c.status} check is not a pass.`);
+  for (const id of p.untested ?? []) limits.push(`${id} is untested: no check in this run covered it.`);
   for (const id of r.flaky) limits.push(`${id} gave different results across verification runs (flaky).`);
   for (const l of p.limitations) limits.push(l);
   lines.push('## Limitations', '');

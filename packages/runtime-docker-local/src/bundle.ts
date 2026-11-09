@@ -19,13 +19,18 @@ export class BundleError extends Error {
   }
 }
 
+/** `.env` and `.env.<anything>` hold real credentials by convention. The checked-in templates do not, and a task may need to read them. */
+const ENV_TEMPLATE = /^\.env\.(?:example|sample|template|dist)$/;
+const isEnvFile = (segment: string): boolean => (segment === '.env' || segment.startsWith('.env.')) && !ENV_TEMPLATE.test(segment);
+
 /**
- * Paths that never go into a worker's workspace: the private verifier calibration (any depth, any case) and VCS metadata.
- * Workers never see verifier material (spec: pin the verifier outside worker-writable paths).
+ * Paths that never go into a worker's workspace: the private verifier calibration (any depth, any case), VCS metadata, and environment files.
+ * Workers never see verifier material (spec: pin the verifier outside worker-writable paths), and a tracked `.env` would put its secrets in front of the model.
+ * Excluded from the workspace only: the diff is against what was shipped, so an environment file in the repository is left exactly as it is.
  */
 export function isExcludedPath(path: string): boolean {
   const segs = path.normalize('NFC').toLowerCase().split('/');
-  return segs.some((s) => s === 'verifier-calibration' || s === '.git');
+  return segs.some((s) => s === 'verifier-calibration' || s === '.git' || isEnvFile(s));
 }
 
 function safeRel(path: string): string {

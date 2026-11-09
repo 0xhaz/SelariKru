@@ -137,7 +137,13 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       eq(schema.taskRevisions.tenantId, schema.attempts.tenantId), eq(schema.taskRevisions.projectId, schema.attempts.projectId), eq(schema.taskRevisions.taskId, schema.attempts.taskId), eq(schema.taskRevisions.revision, schema.attempts.revision)))
       .where(and(eq(schema.attempts.tenantId, run.tenantId), eq(schema.attempts.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.attempts.humanIntervenedAt} IS NOT NULL`)).orderBy(schema.attempts.humanIntervenedAt, schema.attempts.attemptId);
     const humanIntervention = intervened.map((h) => ({ attemptId: h.attemptId, taskId: h.taskId, at: h.at!.toISOString() }));
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, humanIntervention, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
+    // The record covers the suite's criteria; a task can name others. Those were never tested, and the review must say so.
+    const carried = await tx.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
+      eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
+      .where(and(eq(schema.taskRevisions.tenantId, run.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
+    const tested = new Set(record.results.map((r) => r.checkId));
+    const untested = [...new Set(carried.flatMap((c) => { const ids = (c.spec as { requirementIds?: unknown }).requirementIds; return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []; }))].filter((id) => !tested.has(id)).sort();
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, humanIntervention, untested, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {
