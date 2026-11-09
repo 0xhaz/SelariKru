@@ -79,7 +79,8 @@ function normalizeUsage(result: Json): NormalizedUsage {
   };
   const any = cost !== null || Object.values(fields).some((x) => x !== null);
   return {
-    source: any ? 'observed' : 'unavailable',
+    // The harness owns its model calls, so these are its own totals as it chose to report them: never an observed figure.
+    source: any ? 'estimated' : 'unavailable',
     ...fields,
     costUsd: cost,
     // total_cost_usd is a list-price computation (modelUsage.costBasis: list), not a billed amount.

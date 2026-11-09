@@ -44,4 +44,12 @@ describe('runner result fields', () => {
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'failed', reason: 'x', changeManifestSha256: manifest } }).success).toBe(false);
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: 'abc123' } }).success).toBe(false);
   });
+
+  it('accepts bounded usage numbers and rejects anything else', () => {
+    const ok = { outcome: 'failed', reason: 'x', reportedUsage: { inputTokens: 5, outputTokens: null, setupSeconds: 2.5 } };
+    expect(ResultRequestSchema.safeParse({ lease, result: ok }).success).toBe(true);
+    for (const bad of [{ inputTokens: -1 }, { inputTokens: 1.5 }, { setupSeconds: Number.POSITIVE_INFINITY }, { note: 'text never enters the ledger' }]) {
+      expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'failed', reason: 'x', reportedUsage: bad } }).success).toBe(false);
+    }
+  });
 });

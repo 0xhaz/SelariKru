@@ -5,6 +5,7 @@ import { confirmCancel, hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR } from './events.ts';
 import { closeLease, failAttempt } from './lease.ts';
 import { reservationIdFor, settle } from './reserve.ts';
+import { recordAbandonedAttempt } from './usage.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import type { ExpiredLease, SchedulerContext } from './types.ts';
 
@@ -65,7 +66,9 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
       .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, key.taskId), eq(schema.taskRevisions.revision, attempt.revision)));
     const revisionRow = revisionRows[0]!;
     const runScope = { tenantId: key.tenantId, projectId: key.projectId, runId: revisionRow.runId };
-    await settle(tx, runScope, reservationIdFor(attempt.attemptId), 'expired', null);
+    await settle(tx, runScope, reservationIdFor(attempt.attemptId), 'expired');
+    const role = (revisionRow.spec as { role?: unknown }).role;
+    await recordAbandonedAttempt(tx, { scope: runScope, role: typeof role === 'string' ? role : 'unknown', attempt, now });
 
     const running = statusRow.status === 'running' && statusRow.currentRevision === attempt.revision;
     if (!running) {

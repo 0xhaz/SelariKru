@@ -4,6 +4,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { confirmCancel, hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { reservationIdFor, settle } from './reserve.ts';
+import { recordAttemptUsage } from './usage.ts';
 import { buildTaskState, lockStatusRow, loadAttempts, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import type { HeartbeatReceipt, Lease, LeaseConflict, LeaseConflictReason, PublishReceipt, PublishResult, SchedulerContext } from './types.ts';
 
@@ -156,7 +157,8 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
 
   // An open cancel request wins over whatever the worker reports: the attempt ends, the task is cancelled.
   if (await hasCancelRequest(tx, key, lease.revision)) {
-    await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
+    await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled');
+    await recordAttemptUsage(tx, { scope: runScope, role: spec.role, attempt: live, now }, result);
     // History is kept: the reported head commit (the only pointer to pushed work), the worker's own reason and its cost.
     const reportedReason = result.outcome === 'completed' ? null : result.reason;
     await closeLease(tx, key, lease.attemptId, now, {
@@ -200,7 +202,8 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
       break;
   }
 
-  await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled', result.reportedCostUsd);
+  await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled');
+  await recordAttemptUsage(tx, { scope: runScope, role: spec.role, attempt: live, now }, result);
   await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined, keepClaims: result.outcome === 'completed' });
   if (result.outcome === 'completed' && result.changeManifestSha256) {
     await tx.update(schema.attempts)

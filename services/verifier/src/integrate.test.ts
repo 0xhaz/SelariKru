@@ -123,6 +123,7 @@ describe('assembleCandidate', () => {
     expect(show(r.sha, 'src/b.txt')).toBe('b changed');
     expect(() => show(r.sha, 'src/a.txt')).toThrow();
     expect(git(repo, 'rev-parse', baseSha)).toBe(baseSha);
+    expect(await q(`SELECT role, metric, provenance, host FROM usage_entries`)).toEqual([{ role: 'integration', metric: 'worker_seconds', provenance: 'observed', host: 'local' }]);
     // The commit is a real git commit on the pinned base, and only that.
     const clone = join(root, 'inspect');
     rmSync(clone, { recursive: true, force: true });
@@ -181,6 +182,8 @@ describe('assembleCandidate', () => {
     // Deterministic, and no duplicate proposal when asked again. Nothing was merged or guessed.
     const again = await assembleCandidate(run(), deps());
     expect(again.ok === false && again.proposalId === r.proposalId).toBe(true);
+    // Each assembly's time counts, a failed one included.
+    expect(await q(`SELECT 1 FROM usage_entries WHERE role = 'integration'`)).toHaveLength(2);
     expect(await q(`SELECT 1 FROM plan_proposals`)).toHaveLength(1);
   });
 

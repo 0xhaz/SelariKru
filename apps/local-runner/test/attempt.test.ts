@@ -116,7 +116,7 @@ describe('runAttempt', () => {
   it('runs the agent in a sandbox, accepts a diff inside allowedPaths, publishes completed once, and cleans up', async () => {
     const { w, deps } = await setup({ agent: async ({ write }) => void (await write('src/new.ts', 'export const b = 2;\n')) });
     const report = await runAttempt(deps, w.lease);
-    expect(w.api.published).toEqual([{ outcome: 'completed', reportedCostUsd: 0.05, changeManifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+    expect(w.api.published).toEqual([{ outcome: 'completed', reportedCostUsd: 0.05, changeManifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/), reportedUsage: expect.objectContaining({ inputTokens: 6, outputTokens: 20, setupSeconds: expect.any(Number) }) }]);
     expect((w.api.published[0] as { changeManifestSha256: string }).changeManifestSha256).toBe(report.changeManifest);
     expect(report.outcome).toBe('completed');
     // the sandbox was created with a stable name, its workspace holds the pinned source, and calibration material is absent

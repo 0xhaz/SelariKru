@@ -76,7 +76,7 @@ describe('ClaudeHarnessAdapter', () => {
     expect(JSON.stringify(events)).not.toContain('assistant prose');
     expect(JSON.stringify(events)).not.toContain('greet.py');
     expect(events.find((e) => e.type === 'usage')).toMatchObject({
-      usage: { source: 'observed', inputTokens: 6, outputTokens: 531, cacheReadTokens: 66901, cacheCreationTokens: 16822, costUsd: 0.0793001, costBasis: 'list' },
+      usage: { source: 'estimated', inputTokens: 6, outputTokens: 531, cacheReadTokens: 66901, cacheCreationTokens: 16822, costUsd: 0.0793001, costBasis: 'list' },
     });
     expect(events.find((e) => e.type === 'result')).toMatchObject({ subtype: 'success', terminalReason: 'completed' });
     expect(events.at(-1)).toMatchObject({ type: 'exit', code: 0 });
@@ -134,7 +134,7 @@ describe('ClaudeHarnessAdapter', () => {
     // partially present: absent fields stay null
     const partial = JSON.stringify({ type: 'result', subtype: 'success', usage: { output_tokens: 5 } });
     const e2 = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines([initEvent, partial])).launcher).run(base));
-    expect(e2.find((e) => e.type === 'usage')).toMatchObject({ usage: { source: 'observed', inputTokens: null, outputTokens: 5, costUsd: null } });
+    expect(e2.find((e) => e.type === 'usage')).toMatchObject({ usage: { source: 'estimated', inputTokens: null, outputTokens: 5, costUsd: null } });
   });
 
   it('secret canary redacted', async () => {

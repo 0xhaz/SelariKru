@@ -95,13 +95,15 @@ export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promis
     if (record.result !== 'passed' || record.results.length === 0 || record.results.some((r) => r.status !== 'passed')) {
       throw new PrNotAllowed('record_not_passing', 'the verification record is not a full pass');
     }
-    const outcome = await openUnderLock(run, deps, now, port, pre.sha, record);
+    // Loaded before the transaction for the same reason as the record. The figures are descriptive, so reading them a moment early is harmless.
+    const usage = deps.loadUsage ? await deps.loadUsage(run.runId) : [];
+    const outcome = await openUnderLock(run, deps, now, port, pre.sha, record, usage);
     if (outcome !== 'retry') return outcome;
   }
   throw new PrNotAllowed('candidate_changed', 'the run candidate kept changing while the pull request was being opened');
 }
 
-async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, port: GitHubPort, loadedSha: string, record: VerificationRecord): Promise<OpenPrResult | 'retry'> {
+async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, port: GitHubPort, loadedSha: string, record: VerificationRecord, usage: readonly UsageLine[]): Promise<OpenPrResult | 'retry'> {
   return withTx(deps.db, async (tx): Promise<OpenPrResult | 'retry'> => {
     const state = await readState(tx, run, true);
     if (state.skip) return { status: 'skipped', reason: 'trial' };
@@ -120,7 +122,6 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       if (prior.status !== 'closed' && prior.status !== 'stale_candidate') throw new PrNotAllowed('run_already_merged', `pull request #${prior.prNumber} for this run is ${prior.status}`, { prNumber: prior.prNumber });
     }
 
-    const usage = deps.loadUsage ? await deps.loadUsage(run.runId) : [];
     const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 

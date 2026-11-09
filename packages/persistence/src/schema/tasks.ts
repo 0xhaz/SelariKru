@@ -1,4 +1,4 @@
-import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import { check, foreignKey, integer, jsonb, numeric, pgTable, primaryKey, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { runs } from './projects.ts';
@@ -136,7 +136,10 @@ export const budgetReservations = pgTable(
     runId: text('run_id').notNull(),
     taskId: text('task_id'),
     revision: integer('revision'),
-    amountUsd: text('amount_usd'), // decimal string; null means unknown, never zero
+    /** Null means unknown, never zero. Read back as a decimal string; never converted through a float. */
+    amountUsd: numeric('amount_usd', { precision: 18, scale: 6 }),
+    /** `estimated` for a worst-case hold, `observed` once reconciled from a trusted figure, `unavailable` when the amount is unknown. */
+    amountProvenance: text('amount_provenance').notNull().default('unavailable'),
     state: text('state').notNull(),
     createdAt: createdAt(),
     detail: detail(),
@@ -149,5 +152,7 @@ export const budgetReservations = pgTable(
       foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
     }),
     check('budget_reservations_task_revision_paired', sql`(task_id IS NULL) = (revision IS NULL)`),
+    check('budget_reservations_amount_provenance', sql`amount_provenance IN ('observed', 'estimated', 'unavailable')`),
+    check('budget_reservations_unknown_is_null', sql`(amount_usd IS NULL) = (amount_provenance = 'unavailable')`),
   ],
 );

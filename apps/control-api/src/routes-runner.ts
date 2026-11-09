@@ -117,10 +117,11 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const body = parseBody(ResultRequestSchema, req.body);
     // Runner-supplied reasons are free text and end up in events.
     const r = body.result;
+    const reported = { ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}), ...(r.reportedUsage !== undefined ? { reportedUsage: r.reportedUsage } : {}) };
     const result: PublishResult =
       r.outcome === 'completed'
-        ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.changeManifestSha256 !== undefined ? { changeManifestSha256: r.changeManifestSha256 } : {}), ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}) }
-        : { outcome: r.outcome, reason: redactSecrets(r.reason), ...(r.reportedCostUsd !== undefined ? { reportedCostUsd: r.reportedCostUsd } : {}) };
+        ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.changeManifestSha256 !== undefined ? { changeManifestSha256: r.changeManifestSha256 } : {}), ...reported }
+        : { outcome: r.outcome, reason: redactSecrets(r.reason), ...reported };
     const published = await scheduler.publishResult(await leaseFor(runner, body.lease), result);
     if (!published.ok) throw conflict(published.error);
     return reply.code(200).send(published.value);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { schema } from '@selarikru/persistence';
+import { readUsageEntries, schema } from '@selarikru/persistence';
 import { formatMicros, toMicros, type Scheduler } from './index.ts';
 import {
   CAPS, PROJECT, RUN, TENANT, capsWith, countRows, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, testClock, type TestDb,
@@ -16,7 +16,7 @@ beforeEach(async () => {
 });
 
 const seedReservation = (over: Record<string, unknown>) =>
-  t.db.insert(schema.budgetReservations).values({ tenantId: TENANT, projectId: PROJECT, reservationId: 'res_x', runId: RUN, amountUsd: '0.1', state: 'reserved', ...over });
+  t.db.insert(schema.budgetReservations).values({ tenantId: TENANT, projectId: PROJECT, reservationId: 'res_x', runId: RUN, amountUsd: '0.1', amountProvenance: 'estimated', state: 'reserved', ...over });
 
 describe('budget reservations', () => {
   it('decimal amounts do not drift', () => {
@@ -37,7 +37,7 @@ describe('budget reservations', () => {
   });
 
   it('an outstanding reservation of unknown amount denies new reservations', async () => {
-    await seedReservation({ amountUsd: null });
+    await seedReservation({ amountUsd: null, amountProvenance: 'unavailable' });
     await seedTask(t.db, specFor('a', { maxCostUsd: 0.01 }));
     expect(await s.tryClaim(runner('r1'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 'a', reason: 'budget:unknown_cost' }] });
   });
@@ -46,7 +46,7 @@ describe('budget reservations', () => {
     await seedReservation({ amountUsd: '0.3', state: 'released' });
     await seedTask(t.db, specFor('a', { maxCostUsd: 0.3 }));
     expect(await s.claimNext(runner('r1'), CAPS)).not.toBeNull();
-    await t.db.insert(schema.budgetReservations).values({ tenantId: TENANT, projectId: PROJECT, reservationId: 'res_y', runId: RUN, amountUsd: '0', state: 'settled' });
+    await t.db.insert(schema.budgetReservations).values({ tenantId: TENANT, projectId: PROJECT, reservationId: 'res_y', runId: RUN, amountUsd: '0', amountProvenance: 'estimated', state: 'settled' });
     await seedTask(t.db, specFor('b', { maxCostUsd: 0.01 }));
     expect(await s.tryClaim(runner('r2'), capsWith(5))).toMatchObject({ ok: false, skipped: [{ taskId: 'b', reason: 'budget:exceeds_limit' }] });
   });
@@ -60,7 +60,8 @@ describe('budget reservations', () => {
     expect((await s.publishResult(lease, { outcome: 'completed', reportedCostUsd: 0 })).ok).toBe(true);
 
     const rows = await t.db.select().from(schema.budgetReservations);
-    expect(rows[0]).toMatchObject({ amountUsd: '1.000000', state: 'settled', detail: { reportedCostUsd: 0, costSource: 'reported' } });
+    expect(rows[0]).toMatchObject({ amountUsd: '1.000000', amountProvenance: 'estimated', state: 'settled' });
+    expect(rows[0]!.detail).not.toHaveProperty('reportedCostUsd');
     expect(await s.tryClaim(runner('r2'), caps)).toMatchObject({ ok: false, skipped: [{ taskId: 'b', reason: 'budget:exceeds_limit' }] });
   });
 
@@ -70,7 +71,8 @@ describe('budget reservations', () => {
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
     await s.publishResult(lease, { outcome: 'completed', reportedCostUsd: -5 });
     const rows = await t.db.select().from(schema.budgetReservations);
-    expect(rows[0]).toMatchObject({ amountUsd: '1.000000', detail: { reportedCostUsd: null, costSource: 'unavailable' } });
+    expect(rows[0]).toMatchObject({ amountUsd: '1.000000', amountProvenance: 'estimated' });
+    expect((await readUsageEntries(t.db, { tenantId: TENANT, projectId: PROJECT, runId: RUN })).find((e) => e.metric === 'cost_usd')).toMatchObject({ quantity: null, provenance: 'unavailable' });
   });
 
   it('a malformed run budget denies', async () => {

@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
-  advanceCursor, appendEvent, claimOutbox, markDelivered, readCursor, readEventsAfter, recordOperation, schema, withTx,
+  advanceCursor, appendEvent, claimOutbox, createDb, markDelivered, migrate, MIGRATIONS_DIR, readCursor, readEventsAfter, recordOperation, schema, withTx,
 } from '../src/index.ts';
-import { envelope, setupTestDb, TENANT, type TestDb } from './helpers.ts';
+import postgres from 'postgres';
+import { envelope, setupTestDb, TEST_DATABASE_URL, TENANT, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => { t = await setupTestDb(); });
@@ -333,5 +337,36 @@ describe('cross-project integrity', () => {
     await expect(
       t.db.insert(schema.runs).values({ tenantId: 'other_tenant', projectId: 'proj_a', runId: 'run_z', lifecycle: 'x' }),
     ).rejects.toSatisfy(isFkViolation);
+  });
+});
+
+describe('migration 0009', () => {
+  it('turns stored amounts into numeric with provenance; a malformed amount becomes unknown', async () => {
+    const name = 't_mig_0009';
+    const admin = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
+    await admin.unsafe(`DROP SCHEMA IF EXISTS ${name} CASCADE`);
+    await admin.unsafe(`CREATE SCHEMA ${name}`);
+    const { db, close } = createDb(TEST_DATABASE_URL, { max: 2, searchPath: name });
+    const before = mkdtempSync(join(tmpdir(), 'mig-'));
+    try {
+      for (const f of readdirSync(MIGRATIONS_DIR).filter((n) => n.endsWith('.sql') && n < '0009')) copyFileSync(join(MIGRATIONS_DIR, f), join(before, f));
+      await migrate(db, before);
+      await db.execute(sql`INSERT INTO projects (tenant_id, project_id, repository, default_branch, classification) VALUES ('t', 'p', 'r', 'main', 'internal')`);
+      await db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle) VALUES ('t', 'p', 'r1', 'running')`);
+      const put = (id: string, amount: string | null) => db.execute(sql`INSERT INTO budget_reservations (tenant_id, project_id, reservation_id, run_id, amount_usd, state) VALUES ('t', 'p', ${id}, 'r1', ${amount}, 'settled')`);
+      await put('a', '1.250000');
+      await put('b', 'lots');
+      await put('c', null);
+      await migrate(db);
+      const rows = await db.execute(sql`SELECT reservation_id, amount_usd, amount_provenance FROM budget_reservations ORDER BY reservation_id`);
+      expect(rows.map((r) => [r['reservation_id'], r['amount_usd'], r['amount_provenance']])).toEqual([
+        ['a', '1.250000', 'estimated'], ['b', null, 'unavailable'], ['c', null, 'unavailable'],
+      ]);
+    } finally {
+      await close();
+      await admin.unsafe(`DROP SCHEMA ${name} CASCADE`);
+      await admin.end();
+      rmSync(before, { recursive: true, force: true });
+    }
   });
 });

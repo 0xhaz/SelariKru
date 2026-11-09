@@ -3,10 +3,10 @@ import { redactSecrets } from '@selarikru/protocol';
 
 export type Provenance = 'observed' | 'estimated' | 'unavailable';
 
-/** One recorded usage value. `value: null` is unknown and is printed as unavailable, never as zero. */
+/** One recorded usage value. `value: null` is unknown and is printed as unavailable, never as zero. A string is an exact decimal. */
 export interface UsageLine {
   readonly label: string;
-  readonly value: number | null;
+  readonly value: number | string | null;
   readonly unit: string;
   readonly provenance: Provenance;
 }

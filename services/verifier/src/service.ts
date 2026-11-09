@@ -24,7 +24,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { RunnerResultSchema, VerificationRecordSchema, TaskSpecSchema, type Actor, type CheckResult, type CheckStatus, type TaskOutcome, type VerificationRecord, type VerificationRun } from '../../../packages/domain/src/index.ts';
-import { schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { appendUsage, schema, sql, VERIFICATION_ROLE, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
 import { applyVerification, markRunReadyForReview } from '../../workflow/src/verification.ts';
 import { hashTree, sha256, verifierHashes } from './hashing.ts';
@@ -280,6 +280,12 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
     const flaky = want.criteria.filter((id) => new Set(runs.map((r) => r.results.find((x) => x.checkId === id)!.status)).size > 1);
 
     return await withTx(deps.db, async (tx: Tx) => {
+      // Counted whatever the verdict: the time was spent even if the candidate was invalidated meanwhile. It is part of the host's total.
+      const spentMs = runs.reduce((sum, r) => sum + Math.max(0, Date.parse(r.finishedAt) - Date.parse(r.startedAt)), 0);
+      await appendUsage(tx, {
+        tenantId: candidate.tenantId, projectId: candidate.projectId, runId: candidate.runId, dedupeKey: `verification:${recordId}`, role: VERIFICATION_ROLE,
+        metric: 'worker_seconds', quantity: (spentMs / 1000).toFixed(3), provenance: 'observed', source: 'verifier', phase: 'active', host: deps.host.startsWith('local') ? 'local' : 'cloud', basis: 'measured', recordedAt: now(),
+      });
       const cur = await tx.execute(sql`
         SELECT status FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
       const live = cur[0]?.['status'] === 'assembled';

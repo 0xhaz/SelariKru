@@ -45,6 +45,8 @@ const safeSegment = (id: string): string => {
 };
 const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const clip = (s: string, n = 480): string => redactSecrets(s).slice(0, n);
+/** The wire takes whole, bounded counts only. A harness number outside that is unknown; it must not get the whole result refused. */
+const wireTokens = (n: number | null): number | null => (n !== null && Number.isInteger(n) && n >= 0 && n <= 1e12 ? n : null);
 
 export function renderTaskFile(task: TaskSpec): string {
   return [
@@ -154,11 +156,14 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     return false;
   };
+  // Sent once the agent started: the harness's own totals and how long setup took. The controller treats these as estimates.
+  const startedMs = Date.now();
+  let reportedUsage: { readonly reportedUsage: NonNullable<Extract<RunnerResult, { outcome: 'completed' }>['reportedUsage']> } | Record<string, never> = {};
   const finish = async (outcome: 'completed' | 'failed' | 'blocked', reason: string | null, cost: number | null, manifest: string | null): Promise<AttemptReport> => {
     const result: RunnerResult =
       outcome === 'completed'
-        ? { outcome, ...(manifest !== null ? { changeManifestSha256: manifest } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}) }
-        : { outcome, reason: clip(reason ?? outcome), ...(cost !== null ? { reportedCostUsd: cost } : {}) };
+        ? { outcome, ...(manifest !== null ? { changeManifestSha256: manifest } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
+        : { outcome, reason: clip(reason ?? outcome), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage };
     const ok = await publish(result);
     log(`${outcome}${reason ? `: ${clip(reason, 200)}` : ''}${ok ? '' : ' (result not accepted)'}`);
     return ok ? { outcome, reason: reason === null ? null : clip(reason), changeManifest: manifest } : { outcome: 'lease_lost', reason: 'result not accepted', changeManifest: manifest };
@@ -224,6 +229,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let refused: string | null = null;
     let cost: number | null = null;
     let mcpViolation: string[] | null = null;
+    const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
+    reportedUsage = { reportedUsage: { setupSeconds } };
     for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS })) {
       if (aborted()) requestStop();
       switch (ev.type) {
@@ -239,6 +246,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
           break;
         case 'usage':
           cost = ev.usage.costUsd;
+          reportedUsage = { reportedUsage: { inputTokens: wireTokens(ev.usage.inputTokens), outputTokens: wireTokens(ev.usage.outputTokens), cacheReadTokens: wireTokens(ev.usage.cacheReadTokens), cacheCreationTokens: wireTokens(ev.usage.cacheCreationTokens), setupSeconds } };
           break;
         case 'result':
           resultOk = ev.isError === false && ev.subtype === 'success';

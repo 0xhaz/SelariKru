@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VerificationRecordSchema } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
+import { appendUsage, withTx } from '@selarikru/persistence';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
@@ -88,6 +89,17 @@ describe('POST /v1/runs/:id/pull-request', () => {
     const again = await h.app.inject({ method: 'POST', url: URL, payload: {}, headers: owner() });
     expect(again.statusCode).toBe(200);
     expect(gh.prs).toHaveLength(1);
+  });
+
+  it('prints the run usage from the ledger, and absent usage as unavailable', async () => {
+    await seedVerified();
+    await withTx(t.db, (tx) => appendUsage(tx, { tenantId: TENANT, projectId: PROJECT, runId: RUN, dedupeKey: 'k1', role: 'backend', metric: 'input_tokens', quantity: '42', provenance: 'estimated', source: 'worker_report', recordedAt: new Date() }));
+    expect((await h.app.inject({ method: 'POST', url: URL, payload: {}, headers: owner() })).statusCode).toBe(200);
+    const body = gh.prs[0]!.body;
+    expect(body).toContain('Tokens (backend, input): 42 tokens (estimated)');
+    expect(body).toContain('Tokens (backend, output): unavailable (unavailable)');
+    expect(body).toContain('Worker-hours: unavailable (unavailable)');
+    expect(body).toContain('Cost: unavailable (unavailable)');
   });
 
   it('is denied by policy, and by an absent policy, before anything reaches GitHub', async () => {

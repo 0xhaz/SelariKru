@@ -167,6 +167,18 @@ describe('cancel request is honoured by the scheduler', () => {
     expect((await t.db.execute(sql`SELECT state FROM task_commands WHERE command = 'cancel'`))[0]!['state']).toBe('cancelled');
   });
 
+  it('a published result writes the worker figures to the ledger as estimates, and a retry adds nothing', async () => {
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const { token } = await enrolRunner(h.app);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    const body = { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'failed', reason: 'x', reportedCostUsd: 0.5, reportedUsage: { inputTokens: 12 } } };
+    expect((await post(h.app, '/v1/runners/result', body, bearer(token))).status).toBe(200);
+    const rows = await t.db.execute(sql`SELECT metric, quantity, provenance FROM usage_entries WHERE metric IN ('input_tokens', 'cost_usd') ORDER BY metric`);
+    expect(rows).toEqual([{ metric: 'cost_usd', quantity: '0.500000', provenance: 'estimated' }, { metric: 'input_tokens', quantity: '12.000000', provenance: 'estimated' }]);
+    await post(h.app, '/v1/runners/result', body, bearer(token));
+    expect(await t.db.execute(sql`SELECT 1 FROM usage_entries WHERE metric = 'input_tokens'`)).toHaveLength(1);
+  });
+
   it('a cancelled attempt keeps the reported headSha, reason and its id on the events', async () => {
     await seedTask(t.db, specFor('t1'), 'ready');
     const { token } = await enrolRunner(h.app);

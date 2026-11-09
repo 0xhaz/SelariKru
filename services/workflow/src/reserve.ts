@@ -1,6 +1,6 @@
 import { checkReservation } from '@selarikru/policy';
 import { schema, type Tx } from '@selarikru/persistence';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 const MICROS = 1_000_000;
 
@@ -8,10 +8,12 @@ const MICROS = 1_000_000;
 export const toMicros = (usd: number): number => Math.round(usd * MICROS);
 export const formatMicros = (micros: number): string => `${Math.trunc(micros / MICROS)}.${String(micros % MICROS).padStart(6, '0')}`;
 
+/** Exact: a stored decimal never passes through a float. An amount that cannot be held exactly reads as unknown, which denies. */
 const parseAmount = (amount: string | null): number | null => {
-  if (amount === null) return null;
-  const n = Number(amount);
-  return Number.isFinite(n) && n >= 0 ? toMicros(n) : null;
+  if (amount === null || !/^\d+(\.\d{1,6})?$/.test(amount)) return null;
+  const [whole, fraction = ''] = amount.split('.');
+  const micros = Number(whole) * MICROS + Number(fraction.padEnd(6, '0'));
+  return Number.isSafeInteger(micros) ? micros : null;
 };
 
 /** Deterministic, so settlement needs no lookup and a claim's reservation is tied to its attempt. */
@@ -96,21 +98,20 @@ export async function reserve(tx: Tx, position: BudgetPosition, r: ReservationDe
     taskId: r.taskId,
     revision: r.revision,
     amountUsd: formatMicros(r.amountMicros),
+    amountProvenance: 'estimated',
     state: 'reserved',
     detail: { attemptId: r.attemptId, fence: r.fence, source: 'spec.limits.maxCostUsd' },
   });
 }
 
 /**
- * Settles a reservation when its attempt ends. The worst-case amount stays consumed: a worker's figure is unverified,
- * so it is kept alongside as `reported` and cannot refund the hold. A trusted ledger (T4.8) may reconcile it later.
+ * Settles a reservation when its attempt ends. The worst-case amount stays consumed: a worker's figure goes to the usage ledger as
+ * `estimated` and cannot refund the hold. Only a trusted observed cost reconciles it (`reconcileObservedCost`).
  */
-export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired', reportedCostUsd: number | null | undefined): Promise<void> {
+export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired'): Promise<void> {
   await lockBudget(tx, scope);
-  const known = typeof reportedCostUsd === 'number' && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0;
-  const recorded = { reportedCostUsd: known ? reportedCostUsd : null, costSource: known ? 'reported' : 'unavailable' };
   await tx
     .update(schema.budgetReservations)
-    .set({ state, detail: sql`${schema.budgetReservations.detail} || ${JSON.stringify(recorded)}::jsonb` })
+    .set({ state })
     .where(and(eq(schema.budgetReservations.tenantId, scope.tenantId), eq(schema.budgetReservations.projectId, scope.projectId), eq(schema.budgetReservations.reservationId, reservationId)));
 }

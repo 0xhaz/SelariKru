@@ -13,6 +13,7 @@ export { retryTask } from './retry.ts';
 export { applyVerification, markRunReadyForReview, releaseTaskClaims, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
+export { reconcileObservedCost, runUsageLines, stopForExhaustedBudget, type ObservedCost, type ReconcileResult, type RunUsageLine } from './usage.ts';
 
 /** Binds the operations to a database and clock. Instances hold no state: any instance sees every lease. */
 export function createScheduler(ctx: SchedulerContext): Scheduler {

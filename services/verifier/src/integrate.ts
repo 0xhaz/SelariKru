@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { ArtifactIntegrityError, type ArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { checkEventAuthority, TaskSpecSchema, transition, validatePlanRevision, type EventEnvelope, type TaskSpec, type TaskStatus } from '../../../packages/domain/src/index.ts';
-import { appendEvent, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { appendEvent, appendUsage, INTEGRATION_ROLE, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { emit, SCHEDULER_ACTOR } from '../../workflow/src/events.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus } from '../../workflow/src/taskstate.ts';
 import { checkAllowedPaths, type FileChange } from '../../../packages/runtime-docker-local/src/diff.ts';
@@ -889,6 +889,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
     return { ok: false, reason: 'invalid_request', message: 'pinned and current base must be full commit ids and a target is required' };
   }
   const holder = `integration:${randomUUID()}`;
+  const startedAt = now();
   const leaseSeconds = deps.leaseSeconds ?? LEASE_SECONDS;
   if (!(await acquireLease(deps.db, run, holder, leaseSeconds))) {
     return { ok: false, reason: 'lease_held', message: `another assembly holds the integration lease for ${run.target}` };
@@ -955,6 +956,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       const superseded = await withTx(deps.db, async (tx) => {
         await fence(tx, run, holder);
         const at = now();
+        await recordIntegrationTime(tx, run, holder, startedAt, at);
         // The same commit can come back with new attempt bindings (an identical repair). Whatever was concluded about the earlier binding
       // is kept as history in `detail.history` but stops being evidence: its check runs are invalidated.
       const prior = await tx.execute(sql`SELECT status, parts IS DISTINCT FROM ${JSON.stringify(parts)}::jsonb AS changed FROM candidates WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${candidateId} FOR UPDATE`);
@@ -984,7 +986,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
     } catch (err) {
       const fail = err instanceof Fail ? err : new Fail('git_failed', `unexpected error: ${err instanceof Error ? clip(err.message, 160) : 'error'}`);
       if (fail.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: fail.message, ...(invalidated ? { invalidated } : {}) };
-      return await recordFailure(deps, run, holder, now(), fail, invalidated);
+      return await recordFailure(deps, run, holder, startedAt, now(), fail, invalidated);
     }
   } finally {
     clearInterval(renewer);
@@ -993,7 +995,15 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
   }
 }
 
-async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder: string, at: Date, fail: Fail, invalidated: Invalidation | undefined): Promise<CandidateFailure> {
+/** The assembly's elapsed time on the host, once per assembly (`holder` is unique to it), success or failure. It is part of the host's total. */
+async function recordIntegrationTime(tx: Tx, run: IntegrationRun, holder: string, startedAt: Date, at: Date): Promise<void> {
+  await appendUsage(tx, {
+    tenantId: run.tenantId, projectId: run.projectId, runId: run.runId, dedupeKey: `integration:${holder}`, role: INTEGRATION_ROLE,
+    metric: 'worker_seconds', quantity: (Math.max(0, at.getTime() - startedAt.getTime()) / 1000).toFixed(3), provenance: 'observed', source: 'integration', phase: 'active', host: 'local', basis: 'measured', recordedAt: at,
+  });
+}
+
+async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder: string, startedAt: Date, at: Date, fail: Fail, invalidated: Invalidation | undefined): Promise<CandidateFailure> {
   const conflicts = fail.extra.conflicts;
   const status = fail.reason === 'conflict' ? 'conflicted' : 'failed';
   const candidateId = `cand_${fail.reason}_${sha256(JSON.stringify([run.runId, run.target, run.currentBaseSha, fail.message])).slice(0, 16)}`;
@@ -1002,6 +1012,7 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
   try {
     await withTx(deps.db, async (tx) => {
       await fence(tx, run, holder);
+      await recordIntegrationTime(tx, run, holder, startedAt, at);
       if (conflicts) {
         const { specs } = await loadTasks(deps.db, run);
         const involved = new Set(conflicts.flatMap((c) => c.taskIds));
@@ -1033,7 +1044,7 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
     if (err.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: err.message, ...(invalidated ? { invalidated } : {}) };
     proposalError = err;
   }
-  if (proposalError) return await recordFailure(deps, run, holder, at, new Fail(proposalError.reason, proposalError.message), invalidated);
+  if (proposalError) return await recordFailure(deps, run, holder, startedAt, at, new Fail(proposalError.reason, proposalError.message), invalidated);
   return {
     ok: false, reason: fail.reason, message: fail.message, candidateId,
     ...(conflicts ? { conflicts } : {}), ...(proposalId ? { proposalId } : {}), ...(invalidated ? { invalidated } : {}),

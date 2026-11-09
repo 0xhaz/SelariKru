@@ -133,6 +133,8 @@ describe('verifyCandidate', () => {
     expect(record.candidateContentSha256).toBe(seenHash);
     // Stored, bound and loadable by SHA; the task passed through the workflow transition; the parent run is ready for review.
     expect(await loadValidRecord(db, artifacts, { tenantId: TENANT, projectId: PROJECT, sha: cand.sha })).toEqual(record);
+    // The verifier's time goes in the ledger, as measured time on its host.
+    expect(await db.execute(sql`SELECT role, metric, provenance, source, host, basis FROM usage_entries WHERE role = 'verification'`)).toEqual([{ role: 'verification', metric: 'worker_seconds', provenance: 'observed', source: 'verifier', host: 'local', basis: 'measured' }]);
     expect(await status('t1')).toBe('verified');
     expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
     expect(await q(`SELECT 1 FROM check_runs WHERE candidate_sha = '${cand.sha}' AND result = 'passed'`)).toHaveLength(8);

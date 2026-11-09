@@ -94,11 +94,19 @@ export interface HeartbeatReceipt {
   readonly cancelRequested: boolean;
 }
 
-/**
- * Cost the worker reports, in USD. Unverified: it is recorded as `reported` and never reduces a reservation
- * until a trusted ledger exists (T4.8). Unknown is null, never zero.
- */
-export type ReportedCost = { readonly reportedCostUsd?: number | null };
+/** Usage the worker reports. Unverified: it reaches the ledger as `estimated` at best. Unknown is null, never zero. */
+export interface ReportedUsage {
+  readonly inputTokens?: number | null | undefined;
+  readonly outputTokens?: number | null | undefined;
+  readonly cacheReadTokens?: number | null | undefined;
+  readonly cacheCreationTokens?: number | null | undefined;
+  /** Part of the attempt's controller-timed span that the worker spent setting up, or sitting idle. */
+  readonly setupSeconds?: number | null | undefined;
+  readonly idleSeconds?: number | null | undefined;
+}
+
+/** What the worker claims it spent, in USD. It never reduces a reservation: only a trusted observed cost can. */
+export type ReportedCost = { readonly reportedCostUsd?: number | null; readonly reportedUsage?: ReportedUsage | undefined };
 
 export type PublishResult =
   | ({ readonly outcome: 'completed'; readonly headSha?: string; readonly changeManifestSha256?: string } & ReportedCost)

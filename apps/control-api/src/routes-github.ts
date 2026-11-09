@@ -1,5 +1,6 @@
 import { handleGithubWebhook, openReviewablePr, PrNotAllowed } from '@selarikru/integrations-github';
 import { evaluate } from '@selarikru/policy';
+import { runUsageLines } from '@selarikru/workflow';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext, GithubDeps } from './app.ts';
 import { AppError } from './errors.ts';
@@ -38,7 +39,7 @@ export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, gith
       try {
         const result = await openReviewablePr(
           { tenantId: run.tenantId, projectId: run.projectId, runId: run.runId, repoPath: pr.repoPath },
-          { db: ctx.db, port: pr.port, now: ctx.now, loadRecord: (sha) => pr.loadRecord({ tenantId: run.tenantId, projectId: run.projectId, sha }) },
+          { db: ctx.db, port: pr.port, now: ctx.now, loadRecord: (sha) => pr.loadRecord({ tenantId: run.tenantId, projectId: run.projectId, sha }), loadUsage: (runId) => runUsageLines(ctx.db, { tenantId: run.tenantId, projectId: run.projectId, runId }) },
         );
         return reply.code(200).send(result);
       } catch (e) {
