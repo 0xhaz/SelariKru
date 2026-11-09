@@ -33,6 +33,8 @@ interface Scenario {
   assistantFails?: 'render' | 'chunk';
   /** Mount the shell on the mock source with its command methods wrapped in spies, recording to `window.__calls.commands`. */
   spiedFixture?: string;
+  /** Overrides `dependsOn` by task id in that fixture's snapshots, to show unknown dependencies and cycles. */
+  dependsOn?: Record<string, string[] | null>;
 }
 
 declare global {
@@ -165,6 +167,12 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
   const project = session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!;
   const source: EngineeringDataSource = {
     ...session.source,
+    getSnapshot: async (projectId) => {
+      const base = await session.source.getSnapshot(projectId);
+      if (!sc.dependsOn) return base;
+      const tasks = Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, id in sc.dependsOn! ? { ...t, dependsOn: sc.dependsOn![id]! } : t]));
+      return { ...base, tasks };
+    },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
       return session.source.execute(command);

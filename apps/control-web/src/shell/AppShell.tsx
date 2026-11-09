@@ -6,6 +6,9 @@ import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
 import { TeamView } from '../features/team/TeamView.tsx';
 import { buildTeam, type TeamModel } from '../features/team/model.ts';
+import { PipelineView } from '../features/pipeline/PipelineView.tsx';
+import { buildPipeline, type PipelineModel } from '../features/pipeline/model.ts';
+import { pipelinePresentation } from '../features/pipeline/presentation.ts';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hrefFor, useRoute, type Route } from './route.ts';
@@ -32,12 +35,12 @@ export interface AppShellProps {
 const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Overview', route: 'overview' },
   { label: 'Team', route: 'team' },
-  { label: 'Pipeline', route: null },
+  { label: 'Pipeline', route: 'pipeline' },
   { label: 'Decisions', route: null },
   { label: 'Assistant', route: 'assistant' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', assistant: 'Assistant' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', assistant: 'Assistant' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -124,6 +127,15 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
       return { team: null, failure };
     }
   }, [route, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
+  const pipelineRunId = useStore(pipelinePresentation, (s) => s.runId);
+  const builtPipeline = useMemo((): { pipeline: PipelineModel | null; failure?: unknown } => {
+    if (route !== 'pipeline' || !snapshot) return { pipeline: null };
+    try {
+      return { pipeline: buildPipeline(snapshot, state.nowMs, liveness, { runId: pipelineRunId, lastConfirmedMs: state.livenessAsOfMs, stale }) };
+    } catch (failure) {
+      return { pipeline: null, failure };
+    }
+  }, [route, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale, pipelineRunId]);
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
@@ -207,6 +219,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
         {route === 'team' ? (
           <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`}>
             <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+          </RouteBoundary>
+        ) : null}
+        {route === 'pipeline' ? (
+          <RouteBoundary resetKey={`pipeline:${builtPipeline.failure === undefined ? 'ok' : 'failed'}`}>
+            <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
           </RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}

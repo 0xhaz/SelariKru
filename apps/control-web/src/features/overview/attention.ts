@@ -75,10 +75,10 @@ export function explain(code: string): string {
   return `${sentence(bare)}.`;
 }
 
-type BlockClass = 'decision' | 'repair' | 'budget' | 'wait' | 'policy' | 'blocked';
+export type BlockClass = 'decision' | 'repair' | 'budget' | 'wait' | 'policy' | 'blocked';
 
 /** `policy` is an allowlist: only a real policy denial or classification denial is called a policy incident. Anything unrecognized is plainly `blocked`. */
-function classify(code: string): BlockClass {
+export function classifyBlock(code: string): BlockClass {
   if (code.startsWith('approval_required:') || code === 'approval_denied') return 'decision';
   const bare = stripPrefix(code);
   if (bare === 'repair_budget_exhausted' || bare === 'repair_limit_exhausted') return 'repair';
@@ -106,10 +106,10 @@ const whoWaits = (affected: readonly string[]): string =>
 type ItemInput = Omit<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'> & Partial<Pick<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'>>;
 const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, closedRecord: false, ...i });
 
-function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
+export function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
   const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You' };
   const name = titleOf(task);
-  switch (classify(code)) {
+  switch (classifyBlock(code)) {
     case 'decision': {
       const denied = code === 'approval_denied';
       return make({

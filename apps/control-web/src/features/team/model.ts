@@ -206,14 +206,14 @@ const CHECK: Readonly<Record<'running' | 'passed' | 'failed', { label: string; t
   running: { label: 'Check running', tone: 'active' }, passed: { label: 'Passed', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' },
 };
 
-function checksOf(snapshot: ProjectViewSnapshot, taskId: string | null) {
+export function checksOf(snapshot: ProjectViewSnapshot, taskId: string | null) {
   if (taskId === null) return [];
   return Object.values(snapshot.checks).filter((c) => c.taskId === taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 const taskNow = (t: TaskView): string => (t.latestEvidence?.kind === 'task.reopened' ? 'reopened' : taskRow(t).statusLabel.toLowerCase());
 
-interface CheckReading {
+export interface CheckReading {
   readonly check: CheckView;
   readonly label: string;
   readonly tone: Tone;
@@ -222,7 +222,7 @@ interface CheckReading {
 }
 
 /** What a check still says, given where its task is now. A check carries no revision of its own, so the task's status decides whether a pass still holds. */
-function readCheck(c: CheckView, focus: TaskView | undefined, attempt: AttemptView | undefined): CheckReading {
+export function readCheck(c: CheckView, focus: TaskView | undefined, attempt: AttemptView | undefined): CheckReading {
   const earlier = attempt !== undefined && attempt.taskId === c.taskId && Date.parse(c.updatedAt) < Date.parse(attempt.startedAt);
   if (c.state === 'passed') {
     const holds = focus?.status === 'verified' || focus?.status === 'merged';

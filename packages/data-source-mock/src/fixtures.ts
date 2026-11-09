@@ -197,18 +197,38 @@ function mergeFlow(): Fixture {
   });
 }
 
+function featureDelivery(): Fixture {
+  const b = new FixtureBuilder('feature-delivery', 1212);
+  b.task('brief', { title: 'Write feature brief', role: 'planner' }).task('contract', { title: 'Approve API contract', role: 'reviewer', dependsOn: ['brief'] })
+    .task('api', { title: 'Feedback API', role: 'backend', dependsOn: ['contract'] }).task('web', { title: 'Feedback list UI', role: 'frontend', dependsOn: ['contract'] })
+    .task('search', { title: 'Search index', role: 'backend', dependsOn: ['contract'] })
+    .task('integrate', { title: 'Integrate feedback board', role: 'integration', dependsOn: ['api', 'web', 'search'] })
+    .task('e2e', { title: 'End-to-end checks', role: 'verification', dependsOn: ['integrate'] }).task('review', { title: 'Merge review', role: 'reviewer', dependsOn: ['e2e'] });
+  b.plan(1, ['brief', 'contract', 'api', 'web', 'search', 'integrate', 'e2e', 'review']);
+  b.ready('brief', 2).start('brief', 'att_brief_1', 3, LOCAL, 'local', 'cloud').complete('brief', 'att_brief_1', 30, LOCAL).verdict('brief', 'att_brief_1', 40, 'passed', { checkId: 'ci:brief', summary: 'brief accepted' });
+  b.ready('contract', 41).start('contract', 'att_contract_1', 42, CLOUD, 'cloud', 'cloud').complete('contract', 'att_contract_1', 70, CLOUD).verdict('contract', 'att_contract_1', 80, 'passed', { checkId: 'ci:contract', summary: 'contract v1 accepted' });
+  b.ready('api', 81).start('api', 'att_api_1', 82, LOCAL, 'local', 'cloud').ready('web', 81).start('web', 'att_web_1', 83, CLOUD, 'cloud', 'cloud').ready('search', 81);
+  b.emit('placement.blocked', 90, { task: 'search', payload: { reason: 'approval_required:cloud_start', mode: 'local-first' } });
+  b.complete('api', 'att_api_1', 150, LOCAL).verdict('api', 'att_api_1', 170, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
+  return done(b, {
+    id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE,
+    description: 'A plan across stages: a brief and contract are verified, the API is done, the list UI is running, and the search index waits for approval to start on a cloud worker. Later tasks wait on it.',
+    usage: [b.use('api', 'att_api_1', figure('cost_usd', '0.42', 'estimated', 'rate_card')), b.use('web', 'att_web_1', figure('cost_usd', '0.37', 'estimated', 'rate_card'))],
+  });
+}
+
 export const FIXTURE_IDS = [
   'healthy-parallel-work', 'human-wait', 'policy-block', 'runner-loss', 'long-build-stall', 'contract-change', 'failed-ci', 'expired-approval', 'unknown-costs', 'no-data',
 ] as const satisfies readonly FixtureId[];
 
 const BUILDERS: Record<FixtureId, () => Fixture> = {
   'healthy-parallel-work': healthyParallelWork, 'human-wait': humanWait, 'policy-block': policyBlock, 'runner-loss': runnerLoss, 'long-build-stall': longBuildStall,
-  'merge-flow': mergeFlow, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
+  'merge-flow': mergeFlow, 'feature-delivery': featureDelivery, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
 };
 
 /** A fresh copy each call. Fixtures are pure data, so two calls are deeply equal. */
 export const buildFixture = (id: FixtureId): Fixture => BUILDERS[id]();
 export const buildAllFixtures = (): Fixture[] => FIXTURE_IDS.map(buildFixture);
-/** The ten named fixtures plus `merge-flow`. This is what the demo source serves by default. */
-export const EXTRA_FIXTURE_IDS = ['merge-flow'] as const satisfies readonly FixtureId[];
+/** The ten named fixtures plus the extras. This is what the demo source serves by default. */
+export const EXTRA_FIXTURE_IDS = ['merge-flow', 'feature-delivery'] as const satisfies readonly FixtureId[];
 export const buildDemoFixtures = (): Fixture[] => [...buildAllFixtures(), ...EXTRA_FIXTURE_IDS.map(buildFixture)];

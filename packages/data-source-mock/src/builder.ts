@@ -18,7 +18,9 @@ export type FixtureId =
   | 'healthy-parallel-work' | 'human-wait' | 'policy-block' | 'runner-loss' | 'long-build-stall'
   | 'contract-change' | 'failed-ci' | 'expired-approval' | 'unknown-costs' | 'no-data'
   /** Not one of the ten named scenarios: the verified-to-merged path, for run lifecycle. */
-  | 'merge-flow';
+  | 'merge-flow'
+  /** Not one of the ten named scenarios: a plan with real dependencies across stages, for the Pipeline graph. */
+  | 'feature-delivery';
 
 /** What a live snapshot knows about a task that events do not say. The mock plays the server: it seeds these when the plan is accepted. */
 export interface TaskSeed {
