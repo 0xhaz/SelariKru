@@ -26,7 +26,10 @@ export async function confirmCancel(
   const moved = transition(state, { type: 'cancel' });
   if (!moved.ok) throw new Error(`illegal cancel transition: ${JSON.stringify(moved.error)}`);
   const aggregateRevision = await setStatus(tx, key, rowRevision, moved.value.status, now);
+  // `task.cancel_requested` is human-only, so a budget stop is first named here: it must not read as an owner's cancel.
+  const request = await tx.select({ detail: schema.taskCommands.detail }).from(schema.taskCommands).where(requested(key, state.revision)).limit(1);
+  const reason = request[0]?.detail['reason'] === 'budget_exhausted' ? 'budget_exhausted' : 'cancel_requested';
   await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(requested(key, state.revision));
-  await emit(tx, { ...scope, aggregateRevision }, now, { type: 'task.cancelled', attemptId, actor: SYSTEM_ACTOR, payload: { reason: 'cancel_requested', ...cause } });
+  await emit(tx, { ...scope, aggregateRevision }, now, { type: 'task.cancelled', attemptId, actor: SYSTEM_ACTOR, payload: { reason, ...cause } });
   return aggregateRevision;
 }

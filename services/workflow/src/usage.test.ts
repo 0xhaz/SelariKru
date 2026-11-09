@@ -69,11 +69,30 @@ describe('usage ledger', () => {
     expect(workerSeconds.byPhase.setup).toMatchObject({ value: '20', provenance: 'estimated' });
     expect(workerSeconds.byPhase.idle).toMatchObject({ value: '5', provenance: 'estimated' });
     expect(workerSeconds.byPhase.active).toMatchObject({ value: '75', provenance: 'estimated' });
-    expect(workerSeconds.byPhase.abandoned).toMatchObject({ value: '120', provenance: 'estimated' });
-    expect(workerSeconds.byHost.local.measured.value).toBe('220');
-    expect(workerSeconds.total.measured.value).toBe('220');
+    // Counted to when the lease lapsed (60 s after the claim), not to when the reaper ran.
+    expect(workerSeconds.byPhase.abandoned).toMatchObject({ value: '60', provenance: 'estimated' });
+    expect(workerSeconds.byHost.local.measured.value).toBe('160');
+    expect(workerSeconds.total.measured.value).toBe('160');
     // Nothing billed was recorded: unknown, not zero.
     expect(workerSeconds.total.billed).toEqual({ value: null, provenance: 'unavailable', unavailableEntries: 0 });
+  });
+
+  it('a delayed reaper counts abandoned time only up to the renewed lease expiry', async () => {
+    await seedTask(t.db, specFor('a'));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    await elapse(lease, 30);
+    clock.advance(8 * 3600);
+    expect(await s.expireLeases(clock.now())).toMatchObject([{ reason: 'lease_expired' }]);
+    expect((await summary()).workerSeconds.byPhase.abandoned).toMatchObject({ value: '90', provenance: 'estimated' });
+  });
+
+  it('a delayed reaper counts abandoned time only up to the attempt deadline', async () => {
+    await seedTask(t.db, specFor('a', { timeoutSeconds: 40 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    await elapse(lease, 30);
+    clock.advance(8 * 3600);
+    expect(await s.expireLeases(clock.now())).toMatchObject([{ reason: 'attempt_timeout' }]);
+    expect((await summary()).workerSeconds.byPhase.abandoned).toMatchObject({ value: '40', provenance: 'estimated' });
   });
 
   it('an attempt with no worker breakdown is fully observed active time', async () => {
@@ -119,6 +138,14 @@ describe('usage ledger', () => {
     expect(await s.tryClaim(runner('r2'), capsWith(5))).toMatchObject({ ok: false, skipped: [{ taskId: 'b', reason: 'budget:exceeds_limit' }] });
     expect(await countRows(t.db, 'budget_reservations')).toBe(1);
 
+    // A zero cap reserves nothing, so it would otherwise walk through an exhausted budget.
+    await seedTask(t.db, specFor('zero', { maxCostUsd: 0 }));
+    const zero = await s.tryClaim(runner('r2'), capsWith(5));
+    expect(zero.ok).toBe(false);
+    expect(zero.skipped).toContainEqual({ taskId: 'zero', reason: 'budget:unknown_cost' });
+    expect(await countRows(t.db, 'budget_reservations')).toBe(1);
+    expect(await countRows(t.db, 'attempts', `task_id = 'zero'`)).toBe(0);
+
     // Spend beyond the limit: a trusted bill arrives above the hold, while another attempt is running under an earlier hold.
     await resetDb(t.db, { limitUsd: 2 });
     const done = await claimAndPublish('c', 'backend', { outcome: 'completed', headSha: 'head2' });
@@ -143,6 +170,12 @@ describe('usage ledger', () => {
     expect(await countRows(t.db, 'attempts')).toBe(2);
     expect(await countRows(t.db, 'budget_reservations')).toBe(2);
     expect(await countRows(t.db, 'task_status', `task_id = 'c' AND status = 'verifying'`)).toBe(1);
+
+    // The end of the attempt names the budget, so it does not read as an owner cancel.
+    expect((await s.publishResult(running, { outcome: 'failed', reason: 'stopped' })).ok).toBe(true);
+    const cancelled = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.cancelled'`);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]!['payload']).toMatchObject({ reason: 'budget_exhausted' });
   });
 
   it('a limit that is exactly used up asks nothing running to stop', async () => {
@@ -231,17 +264,28 @@ describe('usage ledger', () => {
   it('PR usage lines print what is known and say so when nothing is', async () => {
     expect(await runUsageLines(t.db, scope)).toEqual([
       { label: 'Tokens', value: null, unit: 'tokens', provenance: 'unavailable' },
-      { label: 'Worker-hours', value: null, unit: 'hours', provenance: 'unavailable' },
+      { label: 'Measured worker-hours', value: null, unit: 'hours', provenance: 'unavailable' },
+      { label: 'Billed worker-hours', value: null, unit: 'hours', provenance: 'unavailable' },
       { label: 'Cost', value: null, unit: 'USD', provenance: 'unavailable' },
     ]);
 
-    await claimAndPublish('a', 'backend', { outcome: 'completed', reportedCostUsd: 0.05, reportedUsage: { inputTokens: 100 } }, 1790);
+    await claimAndPublish('a', 'backend', { outcome: 'completed', reportedCostUsd: 0.05, reportedUsage: { inputTokens: 100, costBasis: 'list' } }, 1790);
     await time('integrate', 'integration', '1810', { source: 'integration' });
     const lines = await runUsageLines(t.db, scope);
     expect(lines).toContainEqual({ label: 'Tokens (backend, input)', value: '100', unit: 'tokens', provenance: 'estimated' });
     expect(lines).toContainEqual({ label: 'Tokens (backend, output)', value: null, unit: 'tokens', provenance: 'unavailable' });
-    expect(lines).toContainEqual({ label: 'Worker-hours, local', value: '1.0000', unit: 'hours', provenance: 'observed' });
-    expect(lines).toContainEqual({ label: 'Worker-hours, of which integration (already in the host totals)', value: '0.5028', unit: 'hours', provenance: 'observed' });
-    expect(lines).toContainEqual({ label: 'Cost', value: '0.05', unit: 'USD', provenance: 'estimated' });
+    expect(lines).toContainEqual({ label: 'Measured worker-hours, local', value: '1.0000', unit: 'hours', provenance: 'observed' });
+    expect(lines).toContainEqual({ label: 'Measured worker-hours, of which integration (already in the host totals)', value: '0.5028', unit: 'hours', provenance: 'observed' });
+    expect(lines).toContainEqual({ label: 'Billed worker-hours', value: null, unit: 'hours', provenance: 'unavailable' });
+    expect(lines).toContainEqual({ label: 'Cost (list basis)', value: '0.05', unit: 'USD', provenance: 'estimated' });
+
+    const cost = (await readUsageEntries(t.db, scope)).find((e) => e.metric === 'cost_usd')!;
+    expect(cost.detail).toMatchObject({ costBasis: 'list' });
+    expect(cost.rateCardVersion).toBeNull();
+  });
+
+  it('a cost with no stated basis says so', async () => {
+    await claimAndPublish('a', 'backend', { outcome: 'completed', reportedCostUsd: 0.05 });
+    expect(await runUsageLines(t.db, scope)).toContainEqual({ label: 'Cost (unknown basis)', value: '0.05', unit: 'USD', provenance: 'estimated' });
   });
 });

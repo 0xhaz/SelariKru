@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   appendUsage, correctUsage, loadUsageSummary, readUsageEntries, recordOperation, schema, TOKEN_METRICS, withTx,
-  type Executor, type TokenMetric, type Tx, type UsageFigure, type UsageFigures, type UsageMetric, type WorkerHost, type WorkerPhase,
+  type CostBasis, type Executor, type TokenMetric, type Tx, type UsageFigure, type UsageFigures, type UsageMetric, type WorkerHost, type WorkerPhase,
 } from '@selarikru/persistence';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { hasCancelRequest } from './cancel.ts';
@@ -24,7 +24,7 @@ const seconds = (ms: number): string => (Math.max(0, ms) / 1000).toFixed(3);
 
 const hostOf = (attempt: AttemptRow): WorkerHost => (attempt.detail?.['location'] === 'cloud' ? 'cloud' : 'local');
 
-const TOKEN_FIELDS: Readonly<Record<TokenMetric, keyof ReportedUsage>> = {
+const TOKEN_FIELDS: Readonly<Record<TokenMetric, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'>> = {
   input_tokens: 'inputTokens', output_tokens: 'outputTokens', cache_read_tokens: 'cacheReadTokens', cache_creation_tokens: 'cacheCreationTokens',
 };
 
@@ -38,7 +38,7 @@ interface AttemptUsage {
 function writer(tx: Tx, u: AttemptUsage) {
   const { attempt } = u;
   const base = { ...u.scope, taskId: attempt.taskId, revision: attempt.revision, attemptId: attempt.attemptId, role: u.role, recordedAt: u.now, detail: { attemptNumber: attempt.attemptNumber } };
-  const metric = (m: UsageMetric, f: UsageFigures) => appendUsage(tx, { ...base, ...f, detail: base.detail, metric: m, dedupeKey: `attempt:${attempt.attemptId}:${m}` });
+  const metric = (m: UsageMetric, f: UsageFigures) => appendUsage(tx, { ...base, ...f, detail: { ...base.detail, ...f.detail }, metric: m, dedupeKey: `attempt:${attempt.attemptId}:${m}` });
   const time = (phase: WorkerPhase, f: UsageFigures) =>
     appendUsage(tx, { ...base, ...f, detail: base.detail, metric: 'worker_seconds', phase, host: hostOf(attempt), basis: 'measured', dedupeKey: `attempt:${attempt.attemptId}:worker_seconds:${phase}` });
   return { metric, time };
@@ -56,7 +56,7 @@ export async function recordAttemptUsage(tx: Tx, u: AttemptUsage, result: Publis
     await metric(m, selfReported(value === null ? null : String(Math.trunc(value))));
   }
   const cost = reported(result.reportedCostUsd, MAX_REPORTED_COST_USD);
-  await metric('cost_usd', selfReported(cost === null ? null : formatMicros(toMicros(cost))));
+  await metric('cost_usd', { ...selfReported(cost === null ? null : formatMicros(toMicros(cost))), ...(cost !== null && usage.costBasis ? { detail: { costBasis: usage.costBasis } } : {}) });
 
   if (u.attempt.startedAt === null) {
     await time('active', { quantity: null, provenance: 'unavailable', source: 'controller_clock' });
@@ -75,14 +75,16 @@ export async function recordAttemptUsage(tx: Tx, u: AttemptUsage, result: Publis
 
 /**
  * Writes the ledger rows of an attempt whose lease was reaped. The worker went silent, so its tokens and cost are unknown. Its instance
- * time is `estimated`: the controller saw the lease lapse, not the moment the instance actually stopped.
+ * time is `estimated`: the controller saw the lease lapse, not the moment the instance actually stopped. It runs to the lease expiry as last
+ * renewed or the attempt deadline, whichever came first, so a reaper that runs late cannot inflate it.
  */
 export async function recordAbandonedAttempt(tx: Tx, u: AttemptUsage): Promise<void> {
   const { metric, time } = writer(tx, u);
   for (const m of [...TOKEN_METRICS, 'cost_usd'] as const) await metric(m, { quantity: null, provenance: 'unavailable', source: 'lease_reaper' });
+  const stoppedAt = Math.min(...[u.now, u.attempt.leaseExpiresAt, u.attempt.deadlineAt].filter((d) => d !== null).map((d) => d.getTime()));
   await time('abandoned', u.attempt.startedAt === null
     ? { quantity: null, provenance: 'unavailable', source: 'lease_reaper' }
-    : { quantity: seconds(u.now.getTime() - u.attempt.startedAt.getTime()), provenance: 'estimated', source: 'lease_reaper' });
+    : { quantity: seconds(stoppedAt - u.attempt.startedAt.getTime()), provenance: 'estimated', source: 'lease_reaper' });
 }
 
 const isOverrun = (p: BudgetPosition): boolean => p.limitMicros !== null && p.consumedMicros !== null && p.consumedMicros > p.limitMicros;
@@ -92,6 +94,8 @@ export interface ObservedCost extends RunScope {
   /** Exact decimal, from a provider response trusted code read directly. Never a worker's or harness's figure. */
   readonly costUsd: string;
   readonly operationId: string;
+  /** Left out when the caller does not know it. The worker's own basis does not describe this figure. */
+  readonly costBasis?: CostBasis | null;
   readonly rateCardVersion?: string | null;
 }
 
@@ -114,7 +118,8 @@ export async function reconcileObservedCost(ctx: SchedulerContext, input: Observ
     const current = (await readUsageEntries(tx, scope)).find((e) => e.attemptId === attemptId && e.metric === 'cost_usd');
     if (!current) return { reconciled: false, reason: 'no_ledger_entry' };
     return recordOperation<ReconcileResult>(tx, { tenantId, projectId, key: `usage.reconcile:${attemptId}:${input.operationId}` }, async () => {
-      const figures: UsageFigures = { quantity: input.costUsd, provenance: 'observed', source: 'provider_response', rateCardVersion: input.rateCardVersion ?? null };
+      const { costBasis: _workerBasis, ...kept } = current.detail;
+      const figures: UsageFigures = { quantity: input.costUsd, provenance: 'observed', source: 'provider_response', rateCardVersion: input.rateCardVersion ?? null, detail: { ...kept, ...(input.costBasis ? { costBasis: input.costBasis } : {}) } };
       await correctUsage(tx, { tenantId, projectId, entryId: current.entryId }, `usage.reconcile:${attemptId}:${input.operationId}`, figures, ctx.now());
       const updated = await tx
         .update(schema.budgetReservations)
@@ -196,15 +201,16 @@ export async function runUsageLines(db: Executor, scope: RunScope): Promise<read
   for (const role of roles) for (const m of TOKEN_METRICS) lines.push(line(`Tokens (${role}, ${TOKEN_LABELS[m]})`, s.tokensByRole[role]![m], 'tokens'));
   const w = s.workerSeconds;
   const anyTime = w.total.measured.value !== null || w.total.measured.unavailableEntries > 0;
-  if (!anyTime) lines.push(hours('Worker-hours', w.total.measured));
+  if (!anyTime) lines.push(hours('Measured worker-hours', w.total.measured));
   else {
     for (const host of ['local', 'cloud'] as const) {
       const f = w.byHost[host].measured;
-      if (f.value !== null || f.unavailableEntries > 0) lines.push(hours(`Worker-hours, ${host}`, f));
+      if (f.value !== null || f.unavailableEntries > 0) lines.push(hours(`Measured worker-hours, ${host}`, f));
     }
-    if (w.integrationSubtotal.value !== null) lines.push(hours('Worker-hours, of which integration (already in the host totals)', w.integrationSubtotal));
-    if (w.verificationSubtotal.value !== null) lines.push(hours('Worker-hours, of which verification (already in the host totals)', w.verificationSubtotal));
+    if (w.integrationSubtotal.value !== null) lines.push(hours('Measured worker-hours, of which integration (already in the host totals)', w.integrationSubtotal));
+    if (w.verificationSubtotal.value !== null) lines.push(hours('Measured worker-hours, of which verification (already in the host totals)', w.verificationSubtotal));
   }
-  lines.push(line('Cost', s.costUsd, 'USD'));
+  lines.push(hours('Billed worker-hours', w.total.billed));
+  lines.push(line(s.costBases.length > 0 ? `Cost (${s.costBases.join(', ')} basis)` : 'Cost', s.costUsd, 'USD'));
   return lines;
 }

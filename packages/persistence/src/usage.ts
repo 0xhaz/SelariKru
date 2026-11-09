@@ -14,6 +14,8 @@ export const WORKER_PHASES = ['setup', 'active', 'idle', 'abandoned'] as const;
 export type WorkerPhase = (typeof WORKER_PHASES)[number];
 export type WorkerHost = 'local' | 'cloud';
 export type WorkerTimeBasis = 'measured' | 'billed';
+/** What a cost figure is priced on, kept in the entry's `detail.costBasis`. `list` is list price, not money billed. */
+export type CostBasis = 'list' | 'billed';
 
 /** Sources whose figures come from inside the worker. They can be `estimated` or `unavailable`, never `observed`. */
 export const SELF_REPORTED_SOURCES = ['worker_report', 'harness_report'] as const;
@@ -149,6 +151,8 @@ export interface UsageSummary {
     readonly verificationSubtotal: UsageFigure;
   };
   readonly costUsd: UsageFigure;
+  /** The bases of the known cost figures, sorted; `unknown` for a figure that states none. Empty when no cost is known. */
+  readonly costBases: readonly string[];
 }
 
 function toScaled(quantity: string): bigint {
@@ -199,6 +203,7 @@ export function summarizeUsage(rows: readonly UsageEntryRow[]): UsageSummary {
       verificationSubtotal: measured((r) => r.role === VERIFICATION_ROLE),
     },
     costUsd: of((r) => r.metric === 'cost_usd'),
+    costBases: [...new Set(rows.filter((r) => r.metric === 'cost_usd' && r.quantity !== null).map((r) => (typeof r.detail['costBasis'] === 'string' ? r.detail['costBasis'] : 'unknown')))].sort(),
   };
 }
 

@@ -98,7 +98,8 @@ describe('POST /v1/runs/:id/pull-request', () => {
     const body = gh.prs[0]!.body;
     expect(body).toContain('Tokens (backend, input): 42 tokens (estimated)');
     expect(body).toContain('Tokens (backend, output): unavailable (unavailable)');
-    expect(body).toContain('Worker-hours: unavailable (unavailable)');
+    expect(body).toContain('Measured worker-hours: unavailable (unavailable)');
+    expect(body).toContain('Billed worker-hours: unavailable (unavailable)');
     expect(body).toContain('Cost: unavailable (unavailable)');
   });
 

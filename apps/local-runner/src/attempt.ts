@@ -246,7 +246,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
           break;
         case 'usage':
           cost = ev.usage.costUsd;
-          reportedUsage = { reportedUsage: { inputTokens: wireTokens(ev.usage.inputTokens), outputTokens: wireTokens(ev.usage.outputTokens), cacheReadTokens: wireTokens(ev.usage.cacheReadTokens), cacheCreationTokens: wireTokens(ev.usage.cacheCreationTokens), setupSeconds } };
+          reportedUsage = { reportedUsage: { inputTokens: wireTokens(ev.usage.inputTokens), outputTokens: wireTokens(ev.usage.outputTokens), cacheReadTokens: wireTokens(ev.usage.cacheReadTokens), cacheCreationTokens: wireTokens(ev.usage.cacheCreationTokens), setupSeconds, costBasis: ev.usage.costBasis } };
           break;
         case 'result':
           resultOk = ev.isError === false && ev.subtype === 'success';

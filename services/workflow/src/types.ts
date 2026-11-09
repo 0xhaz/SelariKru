@@ -103,6 +103,8 @@ export interface ReportedUsage {
   /** Part of the attempt's controller-timed span that the worker spent setting up, or sitting idle. */
   readonly setupSeconds?: number | null | undefined;
   readonly idleSeconds?: number | null | undefined;
+  /** What the reported cost is based on. `list` means list prices, not money billed. */
+  readonly costBasis?: 'list' | null | undefined;
 }
 
 /** What the worker claims it spent, in USD. It never reduces a reservation: only a trusted observed cost can. */

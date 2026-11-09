@@ -7,9 +7,10 @@ const ManifestSha = z.string().regex(/^[0-9a-f]{64}$/, 'expected lowercase hex s
 const Cost = z.number().finite().min(0).nullable().optional();
 const Tokens = z.number().int().min(0).max(1e12).nullable().optional();
 const Seconds = z.number().finite().min(0).max(86_400).nullable().optional();
+const CostBasis = z.literal('list').nullable().optional();
 /** What the worker says it used. The API records it as an estimate at best; numbers only, so no text can enter the ledger this way. */
 const ReportedUsage = z
-  .object({ inputTokens: Tokens, outputTokens: Tokens, cacheReadTokens: Tokens, cacheCreationTokens: Tokens, setupSeconds: Seconds, idleSeconds: Seconds })
+  .object({ inputTokens: Tokens, outputTokens: Tokens, cacheReadTokens: Tokens, cacheCreationTokens: Tokens, setupSeconds: Seconds, idleSeconds: Seconds, costBasis: CostBasis })
   .strict()
   .optional();
 

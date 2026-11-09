@@ -189,8 +189,9 @@ describe('cancel request is honoured by the scheduler', () => {
     const a = (await t.db.execute(sql`SELECT head_sha, outcome, exit_reason, detail FROM attempts`))[0]!;
     expect(a).toMatchObject({ head_sha: sha, outcome: 'cancelled', exit_reason: 'completed' });
     expect(a['detail']).toMatchObject({ cancelRequested: true, reportedOutcome: 'completed', reportedCostUsd: 0.5 });
-    const ev = (await t.db.execute(sql`SELECT attempt_id FROM events WHERE type = 'task.cancelled'`))[0]!;
+    const ev = (await t.db.execute(sql`SELECT attempt_id, payload FROM events WHERE type = 'task.cancelled'`))[0]!;
     expect(ev['attempt_id']).toBe(lease.attemptId);
+    expect(ev['payload']).toMatchObject({ reason: 'cancel_requested' });
   });
 
   it('a failure reason reported after a cancel request is kept, and expiry keeps the attempt id too', async () => {

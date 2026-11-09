@@ -77,6 +77,8 @@ export type ReserveCheck = { readonly ok: true } | { readonly ok: false; readonl
 export function checkFits(position: BudgetPosition, amountMicros: number | null): ReserveCheck {
   if (position.limitMicros === null) return { ok: false, reason: 'budget:missing_limit' };
   if (position.consumedMicros === null) return { ok: false, reason: 'budget:unknown_cost' };
+  // A zero cap holds nothing, so it would fit even an exhausted budget. It says nothing about what the attempt will spend: treat it as unknown.
+  if (amountMicros === 0) return { ok: false, reason: 'budget:unknown_cost' };
   const verdict = checkReservation(amountMicros, remainingMicros(position));
   return verdict.ok ? { ok: true } : { ok: false, reason: `budget:${verdict.reason}` };
 }
