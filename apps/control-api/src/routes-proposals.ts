@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
 import { proposalContentSha256, reviewPlanProposal, ProjectPlanConfigSchema, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
+import { onboardingPlanSettings } from './routes-onboarding.ts';
 import { parseBody } from './routes-owner.ts';
 import { newId, requireProject, requireRun } from './store.ts';
 
@@ -62,7 +63,7 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
     ownerOf(req);
     const body = parseBody(ReviewBodySchema, req.body);
     const run = await requireRun(db, config.tenantId, idParam(req));
-    const settings = ctx.planConfig?.(run.projectId);
+    const settings = ctx.planConfig?.(run.projectId) ?? await onboardingPlanSettings(db, config.tenantId, run.projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
     const cfg = ProjectPlanConfigSchema.safeParse({ ...(settings ?? {}), tenantId: config.tenantId, projectId: run.projectId, runId: run.runId });
     if (!settings || !cfg.success) {
       throw new AppError(422, 'missing_server_config', 'project plan settings are missing or incomplete', cfg.success ? [] : cfg.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })));

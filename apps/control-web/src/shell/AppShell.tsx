@@ -31,6 +31,8 @@ export interface AppShellProps {
   readonly account?: AccountInfo;
   /** The live assistant. Null under demo data, where it is not mounted. */
   readonly assistant: ReactNode | null;
+  /** The project setup screen. */
+  readonly onboarding?: ReactNode;
   /** Development controls, rendered below the page content under demo data only. */
   readonly devPanel?: ReactNode;
   /** Link that leaves demo mode, for the assistant notice. */
@@ -45,9 +47,10 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Evidence', route: 'evidence' },
   { label: 'Benchmark', route: 'benchmark' },
   { label: 'Assistant', route: 'assistant' },
+  { label: 'New project', route: 'onboarding' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', benchmark: 'Benchmark', assistant: 'Assistant' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', benchmark: 'Benchmark', assistant: 'Assistant', onboarding: 'New project' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -104,7 +107,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
 }
 
 /** The workspace frame: identity, navigation, data freshness and the demo label. Monitoring views render inside it and read one projection store. */
-export function AppShell({ store, mode, projectLabel, account, assistant, devPanel, leaveDemoHref }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref }: AppShellProps) {
   const route = useRoute();
   const [theme, toggleTheme] = useTheme();
   const state = useStore(store);
@@ -282,6 +285,9 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
           <RouteBoundary resetKey="benchmark">
             <BenchmarkView mode={mode} />
           </RouteBoundary>
+        ) : null}
+        {route === 'onboarding' ? (
+          <RouteBoundary resetKey="onboarding">{onboarding ?? null}</RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}
         {assistant !== null && assistantOpened ? (

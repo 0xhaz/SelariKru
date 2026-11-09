@@ -11,6 +11,8 @@ import { AppError, unauthenticated } from './errors.ts';
 import { registerOwnerRoutes } from './routes-owner.ts';
 import { registerGithubRoutes } from './routes-github.ts';
 import { registerProposalRoutes } from './routes-proposals.ts';
+import { registerOnboardingRoutes } from './routes-onboarding.ts';
+import type { ReadinessProbes } from './onboarding-readiness.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerEventStream } from './sse.ts';
@@ -66,6 +68,8 @@ export interface AppDeps {
   readonly github?: GithubDeps | undefined;
   /** The target's current tip, wherever merges really land. Absent: nothing can say whether main has moved, so nothing is allowed on that ground. */
   readonly tipOf?: ((project: { readonly repository: string; readonly target: string }) => Promise<string>) | undefined;
+  /** Trusted checks for onboarding readiness. Absent, as on the demo stack: repository and GitHub checks report unknown, so nothing can reach `ready`. */
+  readonly readiness?: ReadinessProbes | undefined;
   /** Fastify's logger. Default off. */
   readonly logger?: FastifyServerOptions['logger'];
   /** Live output. Injected by tests to shrink its limits; otherwise one is created here. */
@@ -209,6 +213,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false }, terminal, control };
   registerOwnerRoutes(app, ctx);
   registerProposalRoutes(app, ctx);
+  registerOnboardingRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);

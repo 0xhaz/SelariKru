@@ -5,6 +5,8 @@ import { createRoot } from 'react-dom/client';
 import { RestrictedDraftHold, type AssistRequest, type AssistantProposal, type Readiness } from '@selarikru/inference-firebase-web';
 import { AssistantPanel, createApiClient, useAssistantStore, type ApiResult, type AssistantApi, type AssistantPort } from '../../src/features/assistant/index.ts';
 import { AppShell } from '../../src/shell/AppShell.tsx';
+import { OnboardingView } from '../../src/features/onboarding/OnboardingView.tsx';
+import { createOnboardingApi } from '../../src/features/onboarding/index.ts';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
@@ -56,6 +58,8 @@ interface Scenario {
   liveApi?: { baseUrl: string; token: string; projectId: string };
   /** Failure loads on the spied source are refused until the test calls `window.__allowFailureLoads`, to exercise retrying. */
   refuseFailureLoads?: boolean;
+  /** Mounts the onboarding screen over the real HTTP client, against a route the test answers. */
+  onboardingApi?: { baseUrl: string };
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -254,7 +258,10 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
 }
 
 const root = createRoot(document.getElementById('root')!);
-if (sc.liveApi) {
+if (sc.onboardingApi) {
+  const o = sc.onboardingApi;
+  root.render(<StrictMode><AppShell store={createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined })} mode="live" projectLabel="New project" assistant={null} onboarding={<OnboardingView api={createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => 'test-token' })} adapter={adapter} hold={hold} mode="live" />} /></StrictMode>);
+} else if (sc.liveApi) {
   const live = sc.liveApi;
   const source = createLiveDataSource({ baseUrl: live.baseUrl, getToken: async () => live.token });
   const recording: EngineeringDataSource = {

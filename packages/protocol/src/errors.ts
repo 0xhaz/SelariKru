@@ -51,6 +51,7 @@ export const ERROR_CODES = [
   'control_session_active',
   'control_ticket_used',
   'control_unavailable',
+  'credential_in_input', 'step_not_available', 'onboarding_not_found', 'onboarding_cancelled', 'onboarding_not_activated', 'template_not_supported', 'project_already_started', 'second_repository_refused', 'readiness_failed', 'already_activated', 'not_ready', 'restricted_stays_on_device',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

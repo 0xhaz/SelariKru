@@ -3,6 +3,8 @@ import { createLiveDataSource } from '@selarikru/data-source-live';
 import { signOut } from 'firebase/auth';
 import { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
+import { OnboardingView } from '../features/onboarding/OnboardingView.tsx';
+import { createOnboardingApi } from '../features/onboarding/index.ts';
 import { createApiClient } from '../features/assistant/api.ts';
 import { auth, createAdapter, getOwnerToken, usingAuthEmulator } from '../firebase.ts';
 import { AppShell, type AccountInfo } from './AppShell.tsx';
@@ -22,8 +24,10 @@ function App({ account }: { account: AccountInfo }) {
   // The local default exists only in dev. A hosted build with no URL has no handoff.
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '');
   const api = useMemo(() => (baseUrl ? createApiClient({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
+  const onboardingApi = useMemo(() => (baseUrl ? createOnboardingApi({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
   const defaults = {
-    projectId: (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '',
+    // A project set up here opens with `?project=`. The env defaults still serve the seeded `dev:demo` and `dev:real` stacks.
+    projectId: new URLSearchParams(window.location.search).get('project') || (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '',
     runId: (import.meta.env.VITE_DEMO_RUN_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) || '',
   };
   // No URL or project configured means no source: the shell then says data is unavailable. It never shows mock data.
@@ -32,7 +36,11 @@ function App({ account }: { account: AccountInfo }) {
     store.getState().start();
     return () => store.getState().stop();
   }, [store]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} />} />;
+  // With nothing to show yet, a first-time visitor lands on the guide rather than an empty office.
+  useEffect(() => {
+    if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
+  }, [defaults.projectId]);
+  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" />} />;
 }
 
 export default function LiveRoot() {

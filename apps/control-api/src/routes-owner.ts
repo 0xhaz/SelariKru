@@ -11,6 +11,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
+import { assertRunAllowed } from './routes-onboarding.ts';
 import {
   bumpStatus, fingerprint, idempotent, loadSpecRow, newId, requireProject, requireRun, requireTaskStatus, writeEvent,
 } from './store.ts';
@@ -176,6 +177,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const at = now();
     const result = await withTx(db, (tx) =>
       idempotent(tx, { tenantId: config.tenantId, projectId, key: `run.create:${body.idempotencyKey}` }, fingerprint(body), async () => {
+        await assertRunAllowed(tx, config.tenantId, projectId);
         const runId = newId('run');
         const budget: Record<string, unknown> = body.budgetLimitUsd !== undefined ? { limitUsd: body.budgetLimitUsd } : {};
         const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };

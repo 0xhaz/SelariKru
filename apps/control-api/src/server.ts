@@ -8,6 +8,7 @@ import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
 import { createScheduler, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
+import { createGitProbes, ghAuthStatus, type ReadinessProbes } from './onboarding-readiness.ts';
 import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
@@ -103,6 +104,15 @@ export function evidenceOptionsFromEnv(env: NodeJS.ProcessEnv): EvidenceOptions 
   return { trusted: () => trusted, artifacts, loadRecord: (db, key) => loadValidRecord(db, artifacts, key) };
 }
 
+/**
+ * Readiness probes for onboarding. On the demo stack (`SELARIKRU_DEMO=1`) there are none on purpose: every repository and GitHub check then reports unknown, and demo data can never reach `ready`.
+ * Otherwise they read `SELARIKRU_SOURCE_REPO` and run the real `git` and `gh`, on this machine, at the moment a check is asked for.
+ */
+export function readinessProbesFromEnv(env: NodeJS.ProcessEnv): ReadinessProbes | undefined {
+  if (env['SELARIKRU_DEMO'] === '1') return undefined;
+  return createGitProbes({ sourceCheckout: sourceRepoFromEnv(env) ?? null, githubAuth: ghAuthStatus });
+}
+
 export interface EvidenceOptions {
   trusted: () => TrustedVerifier;
   artifacts: RecordBytes;
@@ -162,6 +172,8 @@ export async function startServer(options: {
   github?: GithubOptions | undefined;
   /** What evidence is held to. Absent: no criterion can be counted as verified. */
   evidence?: EvidenceOptions | undefined;
+  /** Onboarding's trusted checks. Absent: repository and GitHub readiness report unknown. */
+  readiness?: ReadinessProbes | undefined;
   /** Runs `verifyCandidate` for assembled candidates and reaps verifications with no verdict. Failures reach `onVerificationError`, or `onError`. */
   verification?: VerificationOptions | undefined;
   onVerificationError?: ((e: unknown) => void) | undefined;
@@ -181,7 +193,7 @@ export async function startServer(options: {
   const remote = options.github?.port;
   const sourceRepo = options.github?.sourceRepoPath ?? options.assembly?.repoPath ?? options.verification?.repoPath;
   const tipOf = sourceRepo || remote ? (p: { repository: string; target: string }) => readTip(sourceRepo ?? '', remote, p.repository, p.target) : undefined;
-  const app = buildApp({ tipOf, config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  const app = buildApp({ tipOf, config, db, verifier, now, scheduler, policy, catalog, readiness: options.readiness, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord

@@ -27,7 +27,8 @@ body {
 }
 
 /* Focus lands on the main region after a route change. It is a landing point, not a control, so it draws no ring. */
-#main:focus-visible {
+#main:focus-visible,
+[data-focus-landing]:focus-visible {
   outline: none;
 }
 
