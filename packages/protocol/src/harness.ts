@@ -33,7 +33,11 @@ export interface HarnessInput {
   /** Capabilities the task needs. Anything not `supported` fails before launch unless listed in `acceptPartial`. */
   readonly requires?: readonly HarnessCapabilityName[];
   readonly acceptPartial?: readonly HarnessCapabilityName[];
-  /** Off by default: assistant text and tool arguments are not forwarded. When on, previews are bounded. */
+  /**
+   * Off by default: assistant text and tool arguments are not forwarded. When on, previews are bounded and redacted per event.
+   * `raw` leaves them unredacted for a caller that redacts the joined stream itself: a per-event pass cannot see a secret split across events, and rewrites the part it does match
+   * so the other part can no longer be recognised. Only the terminal feed sets it, and it runs each preview through its own line-buffered redactor before anything is kept or sent.
+   */
   /** `none`: launch with an empty, strict MCP configuration so no owner connector is reachable. */
   readonly mcp?: 'none';
   /** Explicit built-in tool list. Anything not listed (WebFetch, WebSearch, Task...) is unavailable. */
@@ -43,7 +47,7 @@ export interface HarnessInput {
    * A tool call in the structured stream is the only channel; model text never is.
    */
   readonly approvalSignalPath?: string;
-  readonly previews?: { readonly enabled: boolean; readonly maxChars?: number };
+  readonly previews?: { readonly enabled: boolean; readonly maxChars?: number; readonly raw?: boolean };
 }
 
 export const APPROVAL_REFUSAL_REASONS = ['malformed_signal', 'unknown_operation', 'destination_required', 'destination_not_applicable', 'invalid_destination', 'missing_reason'] as const;

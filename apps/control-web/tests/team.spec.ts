@@ -116,7 +116,7 @@ test('drawer opens to Task, focus returns on close', async ({ page }) => {
   const taskTab = drawer(page).getByRole('tab', { name: 'Task' });
   await expect(taskTab).toHaveAttribute('aria-selected', 'true');
   await expect(taskTab).toBeFocused();
-  await expect(drawer(page).getByRole('tab', { name: 'Terminal' })).toHaveCount(0);
+  await expect(drawer(page).getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'false');
   await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Add feedback table');
 
   // Focus stays within the drawer: nothing behind it can be reached.
@@ -371,11 +371,128 @@ test('axe pass: drawer light theme and every tab', async ({ page }) => {
   }
 });
 
+test('opening a worker opens no terminal channel', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
+  await page.goto('/tests/harness/index.html#/team');
+  await rows(page).first().locator('[data-open-worker]').click();
+  await expect(drawer(page).getByRole('tab', { name: 'Task' })).toHaveAttribute('aria-selected', 'true');
+  for (const tab of ['Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage', 'Task']) await drawer(page).getByRole('tab', { name: tab }).click();
+  await page.keyboard.press('Escape');
+  await expect(drawer(page)).toHaveCount(0);
+  expect(await terminalCalls(page)).toEqual({ opened: 0, closed: 0 });
+});
+
+test('selecting Terminal connects and closing disconnects', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
+  await page.goto('/tests/harness/index.html#/team');
+  await rows(page).first().locator('[data-open-worker]').click();
+  expect(await terminalCalls(page)).toEqual({ opened: 0, closed: 0 });
+
+  // Connects, and the channel lands in a state (StrictMode in the harness opens one and discards it, so count the difference).
+  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  await expect(drawer(page).getByTestId('terminal-panel')).toHaveAttribute('data-status', /live|ended/);
+  let calls = await terminalCalls(page);
+  expect(calls.opened - calls.closed).toBe(1);
+
+  // Leaving the tab disconnects.
+  await drawer(page).getByRole('tab', { name: 'Task' }).click();
+  await expect.poll(() => terminalCalls(page).then((c) => c.opened - c.closed)).toBe(0);
+
+  // Back, and then closing the drawer disconnects.
+  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  await expect(drawer(page).getByTestId('terminal-panel')).toHaveAttribute('data-status', /live|ended/);
+  calls = await terminalCalls(page);
+  expect(calls.opened - calls.closed).toBe(1);
+  await page.keyboard.press('Escape');
+  await expect(drawer(page)).toHaveCount(0);
+  await expect.poll(() => terminalCalls(page).then((c) => c.opened - c.closed)).toBe(0);
+});
+
+test('the Terminal tab is read-only and shows the mock as simulated', async ({ page }) => {
+  await openTeam(page, fixture('human-wait'));
+  await openWorker(page, 'runner_local_1');
+  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(panel).toContainText('Simulated');
+  await expect(panel).toContainText('[demo]');
+  await expect(panel.getByRole('textbox')).toHaveCount(0);
+  await expect(panel.locator('input, textarea')).toHaveCount(0);
+  await expect(panel).toContainText('Read-only');
+  await expectNoAxeViolations(page);
+});
+
+async function terminalPage(page: Page, terminal: Record<string, unknown>, theme?: 'light'): Promise<void> {
+  await page.addInitScript(({ t, l }) => {
+    if (l) localStorage.setItem('selarikru.theme', 'light');
+    (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait', terminal: t };
+  }, { t: terminal, l: theme === 'light' });
+  await page.goto('/tests/harness/index.html#/team');
+  await rows(page).first().locator('[data-open-worker]').click();
+  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  await expect(drawer(page).getByTestId('terminal-panel')).toHaveAttribute('data-status', String(terminal['status']));
+}
+
+const LAST_LINE = '2026-11-09T10:15:30.000Z';
+const OUTPUT = ['> Bash npm test', 'Running the suite', '[ok]', '3 passed, 0 failed', '[REDACTED] token was in this line'];
+
+for (const [state, terminal, expected] of [
+  ['live', { status: 'live', lastLineAt: LAST_LINE, lines: OUTPUT }, 'Live'],
+  ['no output', { status: 'live', lines: [] }, 'No output yet'],
+  ['ended', { status: 'ended', lastLineAt: LAST_LINE, lines: OUTPUT }, 'Ended'],
+  ['disconnected', { status: 'disconnected', reason: 'connection_lost', lastLineAt: LAST_LINE, lines: OUTPUT }, 'Disconnected'],
+  ['unavailable', { status: 'unavailable', reason: 'no_channel', lines: [] }, 'no live output to show'],
+  ['restricted', { status: 'unavailable', reason: 'restricted', lines: [] }, 'not streamed for restricted'],
+] as const) {
+  test(`terminal state: ${state}`, async ({ page }) => {
+    await terminalPage(page, terminal);
+    const panel = drawer(page).getByTestId('terminal-panel');
+    await expect(panel).toContainText(expected);
+    await expectNoAxeViolations(page);
+  });
+}
+
+test('terminal: an attempt that is disconnected says when the last line arrived, and a reconnect opens a new channel', async ({ page }) => {
+  await terminalPage(page, { status: 'disconnected', reason: 'connection_lost', lastLineAt: LAST_LINE, lines: OUTPUT });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(panel.getByTestId('terminal-last-line')).toContainText('2026');
+  const before = (await terminalCalls(page)).opened;
+  await panel.getByRole('button', { name: 'Reconnect' }).click();
+  await expect.poll(async () => (await terminalCalls(page)).opened).toBeGreaterThan(before);
+});
+
+test('terminal: worker text is shown as text and never interpreted', async ({ page }) => {
+  await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: ['<img src=x onerror=alert(1)>', '\u001b[31mred\u001b[0m', 'a\u202eb'] });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(panel.getByTestId('terminal-line').first()).toHaveText('<img src=x onerror=alert(1)>');
+  await expect(panel.locator('img')).toHaveCount(0);
+  await expect(panel.getByTestId('terminal-line').nth(1)).toHaveText('red');
+  await expect(panel.getByTestId('terminal-line').nth(2)).toHaveText('ab');
+  await expect(panel.getByTestId('terminal-output')).toHaveAttribute('aria-live', 'off');
+});
+
+test('terminal: dropped lines are shown, and long output keeps the page at 375', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, dropped: 42, lines: ['x'.repeat(900), ...OUTPUT] });
+  await expect(drawer(page).getByTestId('terminal-dropped')).toContainText('42 lines were dropped');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expectNoAxeViolations(page);
+});
+
+test('axe pass: terminal light theme', async ({ page }) => {
+  await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: OUTPUT }, 'light');
+  await expectNoAxeViolations(page);
+});
+
 test('axe pass: reconnecting team', async ({ page }) => {
   await openTeam(page, '&fault=reconnecting');
   await expect(page.getByTestId('connection-banner')).toBeVisible();
   await expectNoAxeViolations(page);
 });
+
+const terminalCalls = async (page: Page): Promise<{ opened: number; closed: number }> => {
+  const calls = await page.evaluate(() => (window as unknown as { __calls: { commands: { method?: string }[] } }).__calls.commands);
+  return { opened: calls.filter((c) => c.method === 'openTerminal').length, closed: calls.filter((c) => c.method === 'terminalClose').length };
+};
 
 const SHOTS = process.env['SHOTS_DIR'];
 async function shot(page: Page, name: string): Promise<void> {

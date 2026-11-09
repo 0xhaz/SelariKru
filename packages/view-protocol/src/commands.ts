@@ -55,10 +55,26 @@ export const AuthorizedTerminalRequestSchema = z.object({ taskId: Id, attemptId:
 export type AuthorizedTerminalRequest = z.infer<typeof AuthorizedTerminalRequestSchema>;
 
 export const TERMINAL_MAX_LINES = 200;
+
+/** Where a live output channel stands. `live` is only ever claimed while output can actually arrive; an attempt with no channel is `unavailable`, never a quiet connection. */
+export type TerminalStatus = 'connecting' | 'live' | 'ended' | 'disconnected' | 'unavailable';
+export type TerminalReason = 'no_channel' | 'expired' | 'restricted' | 'runner_silent' | 'session_expired' | 'connection_lost' | 'unauthorized';
+export interface TerminalState {
+  readonly status: TerminalStatus;
+  readonly reason: TerminalReason | null;
+  /** When the last line was produced. Kept across a disconnect so it can be shown. Null: none has arrived. */
+  readonly lastLineAt: string | null;
+  /** How many lines were lost to backpressure before reaching this client. */
+  readonly dropped: number;
+}
+
 /** Bounded, transient output. It is never durable evidence and never read as a check result. */
 export interface TerminalChannel {
   readonly channelId: string;
   readonly simulated: boolean;
+  /** Delivers each line of output as plain text. */
   onLine(handler: (line: string) => void): () => void;
+  /** Delivers the channel's current state immediately, then every change. */
+  onState(handler: (state: TerminalState) => void): () => void;
   close(): void;
 }

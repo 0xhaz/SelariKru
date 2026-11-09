@@ -3,10 +3,11 @@ import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
-import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, isTerminalStreamable, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
+import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
 /** A harness this runner can start. It declares the models it runs, so an unsupported one is refused before any sandbox exists. */
 export interface RunnerHarness {
@@ -42,6 +43,8 @@ export interface AttemptDeps {
   readonly tools?: readonly string[];
   /** Multiplier on the attempt timeout, for tests only. */
   readonly timeoutScale?: number;
+  /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
+  readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
 }
 
 export interface AttemptReport {
@@ -125,6 +128,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
 
   let handle: SandboxHandle | null = null;
   let launcher: RuntimeHarnessLauncher | null = null;
+  let feed: TerminalFeed | null = null;
   let stopping: Promise<unknown> | null = null;
   const requestStop = (): void => {
     if (stopping === null && launcher?.current) stopping = launcher.stop(lease.attemptId).catch(() => undefined);
@@ -300,7 +304,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let coveredSignal = false;
     const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
     reportedUsage = { reportedUsage: { setupSeconds } };
-    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath })) {
+    // Terminal output is only produced for tasks that may leave this machine at all. Restricted and secret work never turns previews on, so there is nothing to upload.
+    feed = isTerminalStreamable(task.classification) ? new TerminalFeed(deps.api, ref, log, deps.terminalFeedLimits) : null;
+    feed?.start();
+    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath, ...(feed !== null ? { previews: { enabled: true, maxChars: TERMINAL_PREVIEW_CHARS, raw: true } } : {}) })) {
+      feed?.onEvent(ev);
       if (aborted()) requestStop();
       switch (ev.type) {
         case 'session_started':
@@ -373,6 +381,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       }
     }
     if (stopping) await stopping;
+    await feed?.close();
 
     // Never read a workspace an agent may still be writing to.
     let confirmed = true;
@@ -431,6 +440,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     return await finish('completed', null, cost, manifest);
   } finally {
+    feed?.abort();
     clearInterval(beat);
     deps.signal?.removeEventListener('abort', onAbort);
     if (deadline) clearTimeout(deadline);

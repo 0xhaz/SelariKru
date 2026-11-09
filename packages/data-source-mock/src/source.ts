@@ -3,7 +3,7 @@ import {
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel,
+  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel, type TerminalState,
 } from '@selarikru/view-protocol';
 import { approvalUnavailableReason, criterionDescription } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
@@ -510,21 +510,29 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         '[demo] this is fixture text, not a real terminal',
         `[demo] runner ${attempt.runnerId ?? 'unknown'}`,
       ].slice(-TERMINAL_MAX_LINES);
-      const handlers = new Set<(line: string) => void>();
+      const lineHandlers = new Set<(line: string) => void>();
+      const stateHandlers = new Set<(state: TerminalState) => void>();
       let open = true;
+      const state: TerminalState = { status: attempt.endedAt !== null ? 'ended' : 'live', reason: null, lastLineAt: attempt.endedAt ?? attempt.lastHeartbeatAt ?? attempt.startedAt, dropped: 0 };
       return {
         channelId: `term_${attempt.attemptId}`,
         simulated: true,
         onLine(handler) {
-          handlers.add(handler);
+          lineHandlers.add(handler);
           queueMicrotask(() => {
-            for (const line of lines) if (open && handlers.has(handler)) handler(line);
+            for (const line of lines) if (open && lineHandlers.has(handler)) handler(line);
           });
-          return () => handlers.delete(handler);
+          return () => lineHandlers.delete(handler);
+        },
+        onState(handler) {
+          stateHandlers.add(handler);
+          queueMicrotask(() => { if (open && stateHandlers.has(handler)) handler(state); });
+          return () => stateHandlers.delete(handler);
         },
         close() {
           open = false;
-          handlers.clear();
+          lineHandlers.clear();
+          stateHandlers.clear();
         },
       };
     },

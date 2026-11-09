@@ -1,7 +1,7 @@
 import { formatAge, formatCount, formatDuration, formatExact, formatUsd, type Tone } from '@selarikru/ui';
 import {
   approvalStateAt, effectiveWorkerHealth, runnerRecent, usageFor,
-  type AttemptView, type CheckView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerHealthReading, type WorkerView,
+  type AuthorizedTerminalRequest, type AttemptView, type CheckView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
 import { explain, requestText, sentence } from '../overview/attention.ts';
 import { activityOf, countFleet, taskRow, workerHealthDisplay, type WorkerHealthDisplay } from '../overview/model.ts';
@@ -160,6 +160,8 @@ export interface TeamRow {
   readonly modelDetail: string | null;
   /** The current or last task's own model assignment, when it can still take one. */
   readonly overrideTarget: AssignmentTarget | null;
+  /** What the Terminal tab would ask for: the current or last attempt. Null when the worker has had none, so nothing can be shown. */
+  readonly terminalTarget: AuthorizedTerminalRequest | null;
   /** True when what is shown is the last confirmed state: the connection is lost, or the session or liveness is stale. */
   readonly stale: boolean;
   /** When this worker's state was last confirmed. */
@@ -454,7 +456,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   return {
     workerId: w.workerId, role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
-    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, stale, lastConfirmedAt,
+    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
     blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
     detail: {

@@ -162,8 +162,12 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
 
   async *run(input: HarnessInput): AsyncGenerator<NormalizedHarnessEvent> {
     let seq = 0;
-    const finish = (d: Draft): NormalizedHarnessEvent =>
-      redactDeep({ ...d, attemptId: input.attemptId, seq: seq++ } as NormalizedHarnessEvent);
+    // `raw` previews are redacted by the caller, after being joined back up across events; everything else about the event is still redacted here.
+    const rawPreviews = input.previews?.raw === true;
+    const finish = (d: Draft): NormalizedHarnessEvent => {
+      const event = redactDeep({ ...d, attemptId: input.attemptId, seq: seq++ } as NormalizedHarnessEvent);
+      return rawPreviews && 'preview' in d && typeof d.preview === 'string' ? ({ ...event, preview: d.preview } as NormalizedHarnessEvent) : event;
+    };
 
     const acceptPartial = new Set(input.acceptPartial ?? []);
     for (const cap of input.requires ?? []) {
@@ -192,7 +196,7 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
     const previewsOn = input.previews?.enabled === true;
     const maxChars = input.previews?.maxChars ?? DEFAULT_PREVIEW_CHARS;
     const preview = (text: string): string => {
-      const safe = redactSecrets(text);
+      const safe = rawPreviews ? text : redactSecrets(text);
       return safe.length > maxChars ? `${safe.slice(0, maxChars)}…` : safe;
     };
     const toolNames = new Map<string, string>();

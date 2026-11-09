@@ -1,5 +1,5 @@
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest, type RunnerHarnessReport } from '@selarikru/protocol';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 
 export const ClaimedLeaseSchema = z
@@ -38,6 +38,8 @@ export interface RunnerApi {
   task(lease: LeaseRef): Promise<TaskSpec>;
   heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
+  /** One batch of the attempt's live output. Rejects with `LeaseLostError` when this attempt is no longer the runner's. Never awaited in the attempt's own path. */
+  terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>): Promise<void>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -60,12 +62,12 @@ export class HttpRunnerApi implements RunnerApi {
     this.base = assertSafeApiUrl(baseUrl);
   }
 
-  private async post(path: string, body: unknown): Promise<unknown> {
+  private async post(path: string, body: unknown, timeoutMs = 30_000): Promise<unknown> {
     const res = await this.fetchImpl(new URL(path, this.base), {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 409) throw new LeaseLostError();
     if (!res.ok) throw new Error(`control API ${path} responded ${res.status}`);
@@ -85,5 +87,8 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async result(lease: LeaseRef, result: RunnerResult) {
     await this.post('/v1/runners/result', { lease, result });
+  }
+  async terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>) {
+    await this.post('/v1/runners/terminal', { lease, ...batch }, 5_000);
   }
 }

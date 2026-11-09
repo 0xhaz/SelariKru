@@ -115,6 +115,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
       if (o.publishThrows) throw new LeaseLostError();
       published.push(r);
     }),
+    terminal: vi.fn(async () => undefined),
   } as unknown as World['api'];
 
   return {

@@ -156,6 +156,15 @@ describe('ClaudeHarnessAdapter', () => {
     }
   });
 
+  it('raw previews skip the per-event pass but nothing else, so a caller can redact the joined stream', async () => {
+    const stream = [initEvent, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'key sk-ant-api03-AbCdEf0123456789AbCdEf' }] } })];
+    const raw = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(stream)).launcher).run({ ...base, previews: { enabled: true, maxChars: 500, raw: true } }));
+    const redacted = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(stream)).launcher).run({ ...base, previews: { enabled: true, maxChars: 500 } }));
+    const msg = (evs: typeof raw) => evs.find((e) => e.type === 'message' && e.preview !== undefined) as { preview: string };
+    expect(msg(raw).preview).toContain('sk-ant-api03-AbCdEf0123456789AbCdEf');
+    expect(msg(redacted).preview).not.toContain('sk-ant-api03-AbCdEf0123456789AbCdEf');
+  });
+
   it('previews are off by default and bounded when enabled', async () => {
     const long = 'x'.repeat(1000);
     const stream = [

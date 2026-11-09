@@ -9,3 +9,4 @@ export * from './events.ts';
 export * from './plan.ts';
 export * from './proposal.ts';
 export * from './assignment.ts';
+export * from './terminal.ts';

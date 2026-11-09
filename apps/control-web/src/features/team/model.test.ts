@@ -8,6 +8,17 @@ import { NO_FILTER, buildTeam, filterRows, sortRows, type TeamRow } from './mode
 const row = (model: ReturnType<typeof buildTeam>, id: string): TeamRow => model.rows.find((r) => r.workerId === id)!;
 const cost = (entryId: string, quantity: string | null, provenance: 'observed' | 'estimated' | 'unavailable'): UsageEntry => ({ entryId, runId: 'run', taskId: 'a', attemptId: 'att', figure: { metric: 'cost_usd', quantity, provenance, source: 'rate_card' } });
 
+describe('terminal target', () => {
+  it('points at the worker\'s current or last attempt, and is null with none to show', () => {
+    const snapshot = snapshotOf({ tasks: [task('t', { activeAttemptId: 'a1' })], workers: [worker('w', { taskId: 't', attemptId: 'a1' }), worker('idle', {})] });
+    const attempt: AttemptView = { attemptId: 'a1', taskId: 't', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(0), endedAt: null, lastHeartbeatAt: null, assignment: null };
+    (snapshot as { attempts: Record<string, AttemptView> }).attempts['a1'] = attempt;
+    const model = buildTeam(snapshot, NOW, NOW);
+    expect(row(model, 'w').terminalTarget).toEqual({ taskId: 't', attemptId: 'a1', expectedRevision: 1 });
+    expect(row(model, 'idle').terminalTarget).toBeNull();
+  });
+});
+
 describe('three separate signals', () => {
   it('reports activity, health and results independently', () => {
     const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: 'testing' })] });

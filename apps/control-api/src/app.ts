@@ -14,6 +14,7 @@ import { registerProposalRoutes } from './routes-proposals.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerEventStream } from './sse.ts';
+import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -62,6 +63,8 @@ export interface AppDeps {
   } | undefined;
   /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */
   readonly github?: GithubDeps | undefined;
+  /** Live output. Injected by tests to shrink its limits; otherwise one is created here. */
+  readonly terminal?: TerminalHub | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -74,6 +77,8 @@ export interface AppContext extends AppDeps {
   readonly openStreams: Set<() => void>;
   /** Set once shutdown began, so a stream that was still being set up closes instead of holding the server open. */
   readonly lifecycle: { closing: boolean };
+  /** Live worker output. Never domain state: it lives only in this process. */
+  readonly terminal: TerminalHub;
 }
 
 const RUNNER_SEEN_WRITE_MS = 5_000;
@@ -180,17 +185,21 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (!bearerToken(req.headers.authorization)) throw unauthenticated('a pairing code is required');
   };
 
-  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false } };
+  const terminal = deps.terminal ?? new TerminalHub(() => deps.now().getTime());
+  terminal.startSweeper();
+  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false }, terminal };
   registerOwnerRoutes(app, ctx);
   registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
+  registerTerminalRoutes(app, ctx);
   if (deps.github) registerGithubRoutes(app, ctx, deps.github);
 
   // Before the HTTP server stops listening: a hijacked SSE response would otherwise keep close() waiting forever, and a restart would hang behind its own clients.
   app.addHook('preClose', async () => {
     ctx.lifecycle.closing = true;
     for (const close of [...ctx.openStreams]) close();
+    terminal.stop();
   });
   return app;
 }

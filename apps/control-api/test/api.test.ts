@@ -38,6 +38,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/snapshot`],
   ['GET', `/v1/projects/${PROJECT}/runs/${RUN}/failures`],
   ['GET', `/v1/projects/${PROJECT}/events?after=0`],
+  ['GET', `/v1/projects/${PROJECT}/attempts/a1/terminal`],
   ['POST', '/v1/runners/pairing-codes'],
 ];
 const RUNNER_ROUTES: [string, string][] = [
@@ -45,6 +46,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/heartbeat'],
   ['POST', '/v1/runners/result'],
   ['POST', '/v1/runners/task'],
+  ['POST', '/v1/runners/terminal'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 

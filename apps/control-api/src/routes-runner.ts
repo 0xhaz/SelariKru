@@ -1,6 +1,6 @@
 import { TaskSpecSchema } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
-import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
+import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, TerminalUploadRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
 import type { Lease, LeaseConflict, PublishResult, Runner } from '@selarikru/workflow';
 import { and, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -8,7 +8,8 @@ import type { AppContext } from './app.ts';
 import { bearerToken, newSecret, PAIRING_CODE_PREFIX, RUNNER_TOKEN_PREFIX, sha256Hex } from './auth.ts';
 import { AppError } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
-import { loadSpecRow, newId } from './store.ts';
+import { loadSpecRow, newId, requireProject } from './store.ts';
+import { streamableAttempt } from './terminal.ts';
 
 const runnerOf = (req: FastifyRequest): Runner => {
   const p = req.principal;
@@ -133,6 +134,27 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
         : { outcome: r.outcome, reason: redactSecrets(r.reason), ...(r.outcome === 'approval_requested' && r.operation !== undefined ? { operation: r.operation } : {}), ...(r.outcome === 'approval_requested' && r.destination !== undefined ? { destination: r.destination } : {}), ...reported };
     const published = await scheduler.publishResult(await leaseFor(runner, body.lease), result);
     if (!published.ok) throw conflict(published.error);
+    ctx.terminal.markEnded(body.lease.attemptId);
     return reply.code(200).send(published.value);
+  });
+
+  /**
+   * One batch of an attempt's live output, from the runner holding that attempt's current lease: this runner, this fence and token, the attempt not ended, the task still running at
+   * its revision, and the lease unexpired. Restricted or secret work is refused outright even if a runner sends it. The output goes only to the in-memory hub.
+   */
+  app.post('/v1/runners/terminal', guard, async (req, reply) => {
+    const runner = runnerOf(req);
+    const body = parseBody(TerminalUploadRequestSchema, req.body);
+    const stale = new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: body.lease.attemptId, fence: body.lease.fence });
+    const [a] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, runner.tenantId), eq(schema.attempts.attemptId, body.lease.attemptId)));
+    if (!a || a.runner !== runner.runnerId || a.leaseFence !== body.lease.fence || a.leaseToken !== body.lease.leaseToken || a.endedAt !== null || a.leaseExpiresAt === null || a.leaseExpiresAt.getTime() <= now().getTime()) throw stale;
+    const [row] = await db.select({ status: schema.taskStatus.status, revision: schema.taskStatus.currentRevision }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, runner.tenantId), eq(schema.taskStatus.projectId, a.projectId), eq(schema.taskStatus.taskId, a.taskId)));
+    if (!row || row.status !== 'running' || row.revision !== a.revision) throw stale;
+    const project = await requireProject(db, runner.tenantId, a.projectId);
+    if (!(await streamableAttempt(ctx, { projectId: a.projectId, taskId: a.taskId, revision: a.revision, projectClassification: project.classification }))) {
+      throw new AppError(403, 'terminal_restricted', 'live output is not accepted for restricted or secret work');
+    }
+    ctx.terminal.publish(a.projectId, a.attemptId, body);
+    return reply.code(200).send({ accepted: true });
   });
 }

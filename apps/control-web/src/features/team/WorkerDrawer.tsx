@@ -1,13 +1,15 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import type { AuthorizedTerminalRequest, TerminalChannel } from '@selarikru/view-protocol';
 import { AxisBadges, Chip, buttonQuiet, formatExact, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { decisionHref } from '../../shell/route.ts';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import type { Fact, TeamRow, WorkerDetail } from './model.ts';
 import { TaskModelOverride } from './ModelAssignments.tsx';
+import { TerminalPanel } from './TerminalPanel.tsx';
 
 const TABS = [
-  { id: 'task', label: 'Task' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
+  { id: 'task', label: 'Task' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' }, { id: 'terminal', label: 'Terminal' },
   { id: 'permissions', label: 'Permissions' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
 ] as const;
 type TabId = (typeof TABS)[number]['id'];
@@ -191,7 +193,7 @@ const MIN_WIDTH = 440;
 const maxWidth = (): number => Math.max(MIN_WIDTH, Math.min(window.innerWidth - 120, 1100));
 const clampWidth = (w: number): number => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
-export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps }) {
+export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign, onOpenTerminal }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps; onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel> }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -349,6 +351,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
           {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
+          {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} /> : null}
           {tab === 'permissions' ? <PermissionsPanel detail={detail} /> : null}
           {tab === 'sandbox' ? <Facts facts={[...detail.sandbox]} /> : null}
           {tab === 'usage' ? <UsagePanel detail={detail} /> : null}

@@ -1,8 +1,9 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView, type TerminalChannel,
+  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
+import { openLiveTerminal } from './terminal.ts';
 
 export interface LiveDataSourceOptions {
   readonly baseUrl: string;
@@ -103,10 +104,6 @@ function acceptedOf(c: AuthorizedViewCommand, body: Record<string, unknown>): Ac
   return { operationId: null, execution: 'applied' };
 }
 
-function emptyChannel(attemptId: string): TerminalChannel {
-  return { channelId: `none_${attemptId}`, simulated: false, onLine: () => () => {}, close: () => {} };
-}
-
 /**
  * The live source: every call goes to the control API with the owner's ID token, and every answer is validated against the view schema. The token lives only in the request
  * headers, the event stream is read with fetch so no credential ever reaches a URL, and a failed stream tells its caller exactly once. It imports no mock.
@@ -116,8 +113,8 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
   const doFetch: typeof fetch = options.fetch ?? ((...args) => fetch(...args));
   const idleMs = options.streamIdleMs ?? DEFAULT_IDLE_MS;
   const streams = new Set<() => void>();
-  // The attempts the last snapshots named, which is all a terminal request is validated against: the protocol's request does not say which project.
-  const attemptOwners = new Map<string, string>();
+  // The attempts the last snapshots named, and the project of each: a terminal request carries only the attempt and task, and the path is project-scoped.
+  const attemptOwners = new Map<string, { readonly taskId: string; readonly projectId: string }>();
   // Keys this source has seen accepted. The server replays by key and does not say it did, so a second acceptance of the same key here is a replay.
   const acceptedKeys = new Set<string>();
   let closed = false;
@@ -162,7 +159,7 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       } catch (e) {
         throw fail({ code: 'invalid_event', message: `the server sent a snapshot this build cannot read: ${e instanceof Error ? e.message.slice(0, 200) : 'unknown'}`, retryable: false });
       }
-      for (const a of Object.values(snapshot.attempts)) attemptOwners.set(a.attemptId, a.taskId);
+      for (const a of Object.values(snapshot.attempts)) attemptOwners.set(a.attemptId, { taskId: a.taskId, projectId });
       return snapshot;
     },
 
@@ -308,13 +305,22 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       return { idempotencyKey: c.idempotencyKey, operationId: accepted.operationId, accepted: true, execution: accepted.execution, rejection: null, replayed, simulated: false };
     },
 
-    /** The control API has no terminal endpoint yet, so a known attempt gets an open channel that never carries a line. No output is invented. */
+    /** Authenticated exactly like every other call: the owner's token goes in the header, and never in the URL. */
     async openTerminal(session: AuthorizedTerminalRequest) {
       const req = AuthorizedTerminalRequestSchema.safeParse(session);
       if (!req.success) throw fail({ code: 'unauthorized', message: 'invalid terminal request', retryable: false });
       assertOpen();
-      if (attemptOwners.get(req.data.attemptId) !== req.data.taskId) throw fail({ code: 'unknown_project', message: 'no such attempt', retryable: false });
-      return emptyChannel(req.data.attemptId);
+      const owner = attemptOwners.get(req.data.attemptId);
+      if (owner?.taskId !== req.data.taskId) throw fail({ code: 'unknown_project', message: 'no such attempt', retryable: false });
+      const channel = openLiveTerminal({
+        channelId: `term_${req.data.attemptId}`,
+        path: `/v1/projects/${encodeURIComponent(owner.projectId)}/attempts/${encodeURIComponent(req.data.attemptId)}/terminal`,
+        request,
+        idleMs,
+        onClose: (close) => streams.delete(close),
+      });
+      streams.add(channel.closeNow);
+      return channel;
     },
 
     disconnect() {

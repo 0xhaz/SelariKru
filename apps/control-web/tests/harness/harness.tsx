@@ -8,7 +8,7 @@ import { AppShell } from '../../src/shell/AppShell.tsx';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
-import type { EngineeringDataSource } from '@selarikru/view-protocol';
+import type { EngineeringDataSource, TerminalState } from '@selarikru/view-protocol';
 import '../../src/index.css';
 
 type Op = 'draftBrief' | 'suggestCriteria' | 'draftTaskPlan';
@@ -32,6 +32,8 @@ interface Scenario {
   shell?: boolean;
   /** Makes the assistant route fail, to exercise the route's error boundary. */
   assistantFails?: 'render' | 'chunk';
+  /** Replaces the spied source's terminal with a scripted channel: its lines arrive first, then its state. */
+  terminal?: { status: TerminalState['status']; reason?: TerminalState['reason']; lastLineAt?: string | null; dropped?: number; simulated?: boolean; lines?: string[] };
   /** Mount the shell on the mock source with its command methods wrapped in spies, recording to `window.__calls.commands`. */
   spiedFixture?: string;
   /** Overrides `dependsOn` by task id in that fixture's snapshots, to show unknown dependencies and cycles. */
@@ -203,9 +205,21 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       if (refuseFailureLoads) return Promise.reject(new Error('refused by the test'));
       return session.source.getRunFailures(projectId, runId);
     },
-    openTerminal: (request) => {
+    openTerminal: async (request) => {
       window.__calls.commands.push({ method: 'openTerminal', request });
-      return session.source.openTerminal(request);
+      const script = sc.terminal;
+      if (script) {
+        let open = true;
+        return {
+          channelId: 'scripted', simulated: script.simulated ?? false,
+          onLine(handler: (line: string) => void) { queueMicrotask(() => { if (open) for (const line of script.lines ?? []) handler(line); }); return () => {}; },
+          onState(handler: (state: TerminalState) => void) { queueMicrotask(() => { if (open) handler({ status: script.status, reason: script.reason ?? null, lastLineAt: script.lastLineAt ?? null, dropped: script.dropped ?? 0 }); }); return () => {}; },
+          close() { open = false; window.__calls.commands.push({ method: 'terminalClose' }); },
+        };
+      }
+      const channel = await session.source.openTerminal(request);
+      const inner = channel.close.bind(channel);
+      return { ...channel, close() { inner(); window.__calls.commands.push({ method: 'terminalClose' }); } };
     },
   };
   window.__spiedSource = source;
