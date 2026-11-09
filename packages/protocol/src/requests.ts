@@ -108,6 +108,17 @@ export const ApprovalResolveRequestSchema = z
   .strict();
 export type ApprovalResolveRequest = z.infer<typeof ApprovalResolveRequestSchema>;
 
+/** Accepts a budget-stopped run as delivered at reduced scope. The stopped criteria stay listed as not delivered. */
+export const AcceptReducedScopeRequestSchema = z
+  .object({
+    /** The run's plan revision as the owner reviewed it. A stale value is a 409. */
+    expectedPlanRevision: Revision,
+    idempotencyKey: Key,
+    note: z.string().min(1).max(2000).optional(),
+  })
+  .strict();
+export type AcceptReducedScopeRequest = z.infer<typeof AcceptReducedScopeRequestSchema>;
+
 export const INFERENCE_MODES = ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const;
 export const INFERENCE_SOURCES = ['on_device', 'in_cloud', 'unknown'] as const;
 

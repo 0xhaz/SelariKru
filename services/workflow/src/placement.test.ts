@@ -374,12 +374,11 @@ describe('placement in claimNext', () => {
     it('a changed reason writes a new event; a successful placement clears the field', async () => {
       await seedTask(t.db, specFor('x', { execution: 'cloud' }));
       await sched('C1', { ...(CLOUD_POLICY as Policy), destinations: [] }).tryClaim(cloud('c1'), CAPS);
-      await sched('C1', { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } }).tryClaim(cloud('c1'), CAPS);
+      await sched('C1', { ...(CLOUD_POLICY as Policy), selectedSources: [] }).tryClaim(cloud('c1'), CAPS);
       const ev = await blockedEvents();
       expect(ev.map((e) => (e['payload'] as { reason: string }).reason)).toEqual([
-        'policy_denied:missing_destination:execution', 'approval_required:configured_require_approval:start_cloud_worker',
+        'policy_denied:missing_destination:execution', 'policy_denied:source_not_selected',
       ]);
-      expect(await countRows(t.db, 'approvals')).toBe(0);
       expect((await statusOf(t.db, 'x')).status).toBe('ready');
       expect(await sched('C1').claimNext(cloud('c1'), CAPS)).not.toBeNull();
       expect((await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 'x'`))[0]!['placement_block']).toBeNull();
@@ -418,15 +417,16 @@ describe('placement in claimNext', () => {
       expect(await blockedEvents()).toHaveLength(0);
     });
 
-    it('repair_within_limits configured require_approval is visible with its reason', async () => {
+    it('repair_within_limits configured require_approval opens a real approval with its reason', async () => {
       const s = createScheduler({ db: t.db, now: clock.now, policy: { ...(CLOUD_POLICY as Policy), operations: { repair_within_limits: 'require_approval' } } });
       await seedTask(t.db, specFor('rp'));
       const lease = (await s.claimNext(runner('l1'), CAPS))!;
       await s.publishResult(lease, { outcome: 'failed', reason: 'boom' });
       await s.tryClaim(runner('l1'), CAPS);
-      expect((await statusOf(t.db, 'rp')).status).toBe('blocked');
-      const rows = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked'`);
-      expect(rows[0]!['payload']).toMatchObject({ reason: 'configured_require_approval:repair_within_limits' });
+      expect((await statusOf(t.db, 'rp')).status).toBe('awaiting_approval');
+      const rows = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'approval.requested'`);
+      expect(rows[0]!['payload']).toMatchObject({ reason: 'approval_required:configured_require_approval:repair_within_limits', operation: 'repair_within_limits' });
+      expect(await countRows(t.db, 'approvals', `outcome = 'pending'`)).toBe(1);
     });
   });
 });

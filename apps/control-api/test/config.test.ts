@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfigFromEnv, parseConfig } from '../src/index.ts';
 import { testConfig } from './helpers.ts';
+import { verificationOptionsFromEnv } from '../src/server.ts';
 
 const ENV = {
   SELARIKRU_TENANT_ID: 'tenant_a',
@@ -57,5 +58,16 @@ describe('config', () => {
     expect(() => parseConfig({ ...testConfig(), mode: 'hosted', host: '0.0.0.0', allowedOrigins: [] })).toThrow(ConfigError);
     expect(() => loadConfigFromEnv({ ...ENV, SELARIKRU_MODE: 'hosted', SELARIKRU_API_HOST: '0.0.0.0', FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099' })).toThrow(ConfigError);
     expect(parseConfig({ ...testConfig(), mode: 'hosted', host: '0.0.0.0', allowedOrigins: ['https://app.example'] }).mode).toBe('hosted');
+  });
+});
+
+describe('verification driver settings', () => {
+  it('are off by default and require the repository and artifact directory when on', () => {
+    expect(verificationOptionsFromEnv({})).toBeUndefined();
+    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: 'soon' })).toThrow(/positive integer/);
+    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000' })).toThrow(/SELARIKRU_GITHUB_SOURCE_REPO/);
+    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r' })).toThrow(/SELARIKRU_ARTIFACT_DIR/);
+    const options = verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r', SELARIKRU_ARTIFACT_DIR: '/a', SELARIKRU_VERIFIER_HOST: 'local-docker' });
+    expect(options).toMatchObject({ intervalMs: 60000, repoPath: '/r', host: 'local-docker', verifier: { kind: 'verifier', id: 'verifier:local-docker' } });
   });
 });

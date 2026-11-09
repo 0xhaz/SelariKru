@@ -351,7 +351,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.
-      const _run: 'run.created' | 'plan.accepted' | 'run.reverted' = e.type;
+      const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' = e.type;
       void _run;
       return null;
     }

@@ -121,7 +121,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const result: PublishResult =
       r.outcome === 'completed'
         ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.changeManifestSha256 !== undefined ? { changeManifestSha256: r.changeManifestSha256 } : {}), ...reported }
-        : { outcome: r.outcome, reason: redactSecrets(r.reason), ...reported };
+        : { outcome: r.outcome, reason: redactSecrets(r.reason), ...(r.outcome === 'approval_requested' && r.operation !== undefined ? { operation: r.operation } : {}), ...reported };
     const published = await scheduler.publishResult(await leaseFor(runner, body.lease), result);
     if (!published.ok) throw conflict(published.error);
     return reply.code(200).send(published.value);

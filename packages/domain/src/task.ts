@@ -81,6 +81,7 @@ export type TaskEvent =
   | { type: 'attempt_started'; attemptId: string }
   | { type: 'attempt_completed' }
   | { type: 'attempt_failed'; reason: string }
+  /** From `running` (a worker asked; its attempt is interrupted) or `ready` (a placement or repair gate needs a human before any attempt starts). */
   | { type: 'approval_requested' }
   | { type: 'approval_granted' }
   | { type: 'approval_denied' }
@@ -88,6 +89,8 @@ export type TaskEvent =
   | { type: 'unblocked' }
   | { type: 'verification_passed' }
   | { type: 'verification_failed'; reason: string }
+  /** The verifier produced no verdict (`error` or `skipped`). The task stops at `blocked`; nothing about the candidate is concluded, so no repair is spent. */
+  | { type: 'verification_unavailable'; reason: string }
   /** The evidence behind a verified task was invalidated. It goes back to `verifying`, or to `blocked` when its claims cannot be re-acquired. */
   | { type: 'verification_invalidated'; blockedReason?: string }
   | { type: 'retry_requested' }
@@ -135,7 +138,7 @@ const ACTIVE: readonly TaskStatus[] = ['planned', 'ready', 'running', 'awaiting_
 const SIMPLE: Partial<Record<TaskEvent['type'], { from: readonly TaskStatus[]; to: TaskStatus }>> = {
   dependencies_satisfied: { from: ['planned'], to: 'ready' },
   attempt_completed: { from: ['running'], to: 'verifying' },
-  approval_requested: { from: ['running'], to: 'awaiting_approval' },
+  approval_requested: { from: ['running', 'ready'], to: 'awaiting_approval' },
   approval_granted: { from: ['awaiting_approval'], to: 'ready' },
   approval_denied: { from: ['awaiting_approval'], to: 'blocked' },
   blocked: { from: ['running'], to: 'blocked' },
@@ -183,6 +186,8 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
     }
     case 'approval_requested':
     case 'blocked': {
+      // A gate at claim time: no attempt exists yet, so there is nothing to interrupt.
+      if (event.type === 'approval_requested' && state.status === 'ready') return move('awaiting_approval');
       if (state.status !== 'running') return bad(`${event.type} applies only to a running task`);
       return move(event.type === 'blocked' ? 'blocked' : 'awaiting_approval', closeLast(state.attempts, 'interrupted', event.type === 'blocked' ? event.reason : undefined));
     }
@@ -200,6 +205,9 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
       if (last && last.outcome === 'succeeded') attempts[attempts.length - 1] = event.blockedReason !== undefined ? { ...last, outcome: 'interrupted', reason: event.blockedReason } : { ...last, outcome: 'running' };
       return move(event.blockedReason !== undefined ? 'blocked' : 'verifying', attempts);
     }
+    case 'verification_unavailable':
+      if (state.status !== 'verifying') return bad('only a verifying task can have an unavailable verification');
+      return move('blocked', closeLast(state.attempts, 'interrupted', event.reason));
     case 'retry_requested':
       if (state.status !== 'failed') return bad('retry applies only to a failed task');
       if (budgetUsed(state.attempts) >= state.maxAttempts) return bad('attempt budget exhausted');

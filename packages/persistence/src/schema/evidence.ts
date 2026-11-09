@@ -1,4 +1,4 @@
-import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text } from 'drizzle-orm/pg-core';
+import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { projects, runs } from './projects.ts';
@@ -67,6 +67,11 @@ export const approvals = pgTable(
     expiresAt: tstz('expires_at'),
     policy: text('policy'),
     outcome: text('outcome').notNull(),
+    /** What is being approved: the operation, the request reason and the policy decision. Identifiers and codes only, never secrets. */
+    detail: detail(),
+    /** Set when the attempt this grant released starts. A grant releases work once; a later attempt needs a new approval. */
+    consumedAt: tstz('consumed_at'),
+    consumedBy: text('consumed_by'),
     createdAt: createdAt(),
   },
   (t) => [
@@ -78,6 +83,8 @@ export const approvals = pgTable(
       foreignColumns: [taskRevisions.tenantId, taskRevisions.projectId, taskRevisions.taskId, taskRevisions.revision],
     }),
     check('approvals_task_revision_paired', sql`(task_id IS NULL) = (revision IS NULL)`),
+    // One open request per task revision and scope: a retried request can never queue a second approvable row.
+    uniqueIndex('approvals_one_pending_key').on(t.tenantId, t.projectId, t.taskId, t.revision, t.scopeHash).where(sql`outcome = 'pending' AND task_id IS NOT NULL`),
   ],
 );
 

@@ -34,6 +34,12 @@ const feedbackBoard = plan([
 ]);
 
 describe('validatePlanRevision', () => {
+  it('refuses a zero cost cap with a typed error', () => {
+    const v = validatePlanRevision(plan([t('a', [], { limits: { maxAttempts: 3, timeoutSeconds: 1800, maxCostUsd: 0 } })]), ctx);
+    expect(kinds(v)).toEqual(['zero_cost_cap']);
+    expect(v.ok ? [] : v.errors).toEqual([{ kind: 'zero_cost_cap', taskId: 'a', field: 'limits.maxCostUsd' }]);
+  });
+
   it('accepts a valid plan', () => {
     expect(validatePlanRevision(feedbackBoard, ctx)).toEqual({ ok: true });
   });

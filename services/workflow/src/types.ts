@@ -41,6 +41,8 @@ export interface SchedulerContext {
    * which denies cloud placement. Missing is never unlimited.
    */
   readonly placement?: PlacementConfig | undefined;
+  /** How long an approval request stays grantable. Default `APPROVAL_TTL_SECONDS`. */
+  readonly approvalTtlSeconds?: number | undefined;
 }
 
 /** What a worker holds. `leaseToken` is a credential: it never appears in events or logs. */
@@ -114,7 +116,8 @@ export type PublishResult =
   | ({ readonly outcome: 'completed'; readonly headSha?: string; readonly changeManifestSha256?: string } & ReportedCost)
   | ({ readonly outcome: 'failed'; readonly reason: string } & ReportedCost)
   | ({ readonly outcome: 'blocked'; readonly reason: string } & ReportedCost)
-  | ({ readonly outcome: 'approval_requested'; readonly reason: string } & ReportedCost);
+  /** `operation` names the policy operation asked for; `evaluate` decides. Absent or unknown is denied, and the worker's `reason` is never an operation. */
+  | ({ readonly outcome: 'approval_requested'; readonly reason: string; readonly operation?: string } & ReportedCost);
 
 export interface PublishReceipt {
   readonly attemptId: string;

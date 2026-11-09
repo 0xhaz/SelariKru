@@ -166,6 +166,23 @@ describe('task state machine', () => {
     expect(run(blocked, [{ type: 'unblocked' }]).status).toBe('ready');
   });
 
+  it('a ready task can wait for approval with no attempt, and a grant returns it to ready', () => {
+    const ready = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }]);
+    const awaiting = run(ready, [{ type: 'approval_requested' }]);
+    expect(awaiting.status).toBe('awaiting_approval');
+    expect(awaiting.attempts).toEqual([]);
+    expect(run(awaiting, [{ type: 'approval_granted' }]).status).toBe('ready');
+  });
+
+  it('an unavailable verification blocks a verifying task and spends no repair', () => {
+    const running = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }, start(1)]);
+    const verifying = run(running, [{ type: 'attempt_completed' }]);
+    const blocked = run(verifying, [{ type: 'verification_unavailable', reason: 'verification_error' }]);
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.attempts).toEqual([{ attemptId: 'attempt_1', number: 1, outcome: 'interrupted', reason: 'verification_error' }]);
+    expect(transition(running, { type: 'verification_unavailable', reason: 'x' }).ok).toBe(false);
+  });
+
   it('approval then grant then attempt_started keeps history; interrupted does not consume budget', () => {
     const base = newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 });
     let s = run(base, [{ type: 'dependencies_satisfied' }, start(1), { type: 'approval_requested' }]);

@@ -31,7 +31,8 @@ export const ResultRequestSchema = z
       z.object({ outcome: z.literal('completed'), headSha: CommitSha.optional(), changeManifestSha256: ManifestSha.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('failed'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('blocked'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
-      z.object({ outcome: z.literal('approval_requested'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
+      // `operation` is the policy operation the worker asks for. Absent or unknown is denied by policy; it is an identifier, never free text.
+      z.object({ outcome: z.literal('approval_requested'), reason: z.string().min(1).max(500), operation: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
     ]),
   })
   .strict();

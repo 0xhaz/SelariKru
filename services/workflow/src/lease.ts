@@ -1,6 +1,8 @@
 import { transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
+import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
+import { openApproval } from './approval.ts';
 import { confirmCancel, hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { reservationIdFor, settle } from './reserve.ts';
@@ -195,11 +197,26 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
       exitReason = result.reason;
       event = { type: 'task.blocked', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: result.reason } };
       break;
-    case 'approval_requested':
-      state = must(state, { type: 'approval_requested' });
-      exitReason = result.reason;
-      event = { type: 'approval.requested', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: result.reason } };
+    case 'approval_requested': {
+      // `operation` is the worker's claim of what it needs. `evaluate` is the authority; absent or unknown is denied, and admin kinds are denied for an agent.
+      const op = { kind: result.operation, actor: 'agent' } as unknown as Operation;
+      const opened = await openApproval(ctx, tx, key, spec.runId, lease.revision, { op, requester: runner.id, reason: result.reason, detail: { reason: result.reason } }, now);
+      if (opened.approval) {
+        state = must(state, { type: 'approval_requested' });
+        exitReason = result.reason;
+        event = {
+          type: 'approval.requested', actor: SCHEDULER_ACTOR,
+          payload: { fence: lease.fence, reason: result.reason, operation: result.operation, approvalId: opened.approval.approvalId, scopeHash: opened.approval.scopeHash, expiresAt: opened.approval.expiresAt },
+        };
+      } else {
+        // Nothing to approve: a deny stays a deny, and an operation policy allows needs no approval. Either way the worker stops here, visibly.
+        const code = opened.decision.decision === 'deny' ? `policy_denied:${opened.decision.reason}` : `approval_not_required:${opened.decision.reason}`;
+        state = must(state, { type: 'blocked', reason: code });
+        exitReason = code;
+        event = { type: 'task.blocked', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: code, requestedReason: result.reason } };
+      }
       break;
+    }
   }
 
   await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled');

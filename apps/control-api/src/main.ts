@@ -3,7 +3,7 @@ import { createGhCliPort } from '@selarikru/integrations-github';
 import { loadValidRecord } from '../../../services/verifier/src/service.ts';
 import type { Db } from '@selarikru/persistence';
 import { ConfigError, loadConfigFromEnv } from './config.ts';
-import { startServer, type GithubOptions } from './server.ts';
+import { startServer, verificationOptionsFromEnv, type GithubOptions } from './server.ts';
 
 function githubOptions(env: NodeJS.ProcessEnv): GithubOptions | undefined {
   const interval = env['SELARIKRU_GITHUB_POLL_INTERVAL_MS'];
@@ -28,6 +28,8 @@ try {
     policyFile: process.env['SELARIKRU_POLICY_FILE'] || undefined,
     planConfigFile: process.env['SELARIKRU_PLAN_CONFIG_FILE'] || undefined,
     github: githubOptions(process.env),
+    verification: verificationOptionsFromEnv(process.env),
+    onVerificationError: (e) => console.error('verification driver pass failed:', e instanceof Error ? e.message : e),
     onReconcileError: (e) => console.error('github reconciler pass failed:', e instanceof Error ? e.message : e),
     onError: (e) => console.error('lease expiry pass failed:', e instanceof Error ? e.message : e),
   });

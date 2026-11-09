@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { TaskSpecSchema, budgetUsed, readyTasks, transition, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
-import { evaluate, strongest, type Classification, type Source } from '@selarikru/policy';
+import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { approvalScopeHash, consumeGrants, findUsableGrant, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { leaseDeadline } from './lease.ts';
@@ -323,6 +324,37 @@ async function recordBlock(tx: Tx, key: TaskKey, c: Candidate, row: { placementB
   });
 }
 
+/** The cloud gate for a placement, without the fields that change between claim passes (running count, remaining budget). */
+function cloudGate(op: Operation, estimatedCost: number, reason: string): ApprovalGate {
+  const o = op as Extract<Operation, { kind: 'start_cloud_worker' }>;
+  const sources = [...o.sources].map((s) => ({ id: s.id, classification: s.classification ?? null })).sort((a, b) => a.id.localeCompare(b.id));
+  return { op, requester: 'scheduler', reason, detail: { destination: o.destination, sources, estimatedCostMicros: estimatedCost } };
+}
+
+function repairGate(op: Operation, attempt: number, estimatedCost: number, reason: string): ApprovalGate {
+  return { op, requester: 'scheduler', reason, detail: { repairAttempt: attempt, estimatedCostMicros: estimatedCost } };
+}
+
+/**
+ * Parks a ready task behind a human decision: one approval row, `awaiting_approval`, `approval.requested`, and no attempt. If `evaluate` no longer says
+ * `require_approval` (it re-runs here), the task is left unchanged for the next pass.
+ */
+async function requestGate(ctx: SchedulerContext, tx: Tx, key: TaskKey, c: Candidate, spec: TaskSpec, state: TaskState, row: { placementBlock: string | null; rowRevision: number }, gate: ApprovalGate, promoted: boolean, now: Date): Promise<CandidateResult> {
+  const moved = transition(state, { type: 'approval_requested' });
+  if (!moved.ok) return { reason: 'illegal_transition' };
+  const opened = await openApproval(ctx, tx, key, c.runId, spec.revision, gate, now);
+  if (!opened.approval) return { reason: opened.decision.reason };
+  if (row.placementBlock !== null) await clearBlock(tx, key);
+  const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
+  const scope: EventScope = { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision };
+  if (promoted) await emit(tx, scope, now, { type: 'task.ready', attemptId: null, actor: SCHEDULER_ACTOR, payload: { reason: 'dependencies_satisfied' } });
+  await emit(tx, scope, now, {
+    type: 'approval.requested', attemptId: null, actor: SCHEDULER_ACTOR,
+    payload: { reason: gate.reason, operation: gate.op.kind, approvalId: opened.approval.approvalId, scopeHash: opened.approval.scopeHash, expiresAt: opened.approval.expiresAt },
+  });
+  return { reason: `awaiting_approval:${gate.op.kind}` };
+}
+
 async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, counts: RunningCounts, now: Date): Promise<CandidateResult> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const statusRow = await lockStatusRow(tx, key);
@@ -348,17 +380,29 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const cfg = runPlacement(ctx, c);
   const resolved = await resolveSources(tx, key, spec);
   const capacity = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
-  const placed = capacity === null ? (cfg as Blocked) : place({ ...spec, classification: resolved.classification }, capacity, ctx.policy, {
-    sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position),
+  const placeWith = (approved: boolean) => place({ ...spec, classification: resolved.classification }, capacity!, ctx.policy, {
+    sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position), approved,
   });
-  if (isBlocked(placed)) {
+  let placed = capacity === null ? (cfg as Blocked) : placeWith(false);
+  // A configured require_approval: an unused human grant for exactly this start lets it through; `evaluate` still denies what it denies.
+  let gate: ApprovalGate | null = null;
+  if (isBlocked(placed) && placed.approval) {
+    gate = cloudGate(placed.approval.op, amountMicros, placed.reason);
+    if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, gate, ctx.policy))) {
+      gate = null;
+      placed = placeWith(true);
+    }
+  }
+  if (isBlocked(placed) && gate === null) {
     // A permanent block is recorded once per reason so the owner can see why the task never starts. A transient one is silent and
     // leaves the field alone, so a wait cannot make the same permanent reason write a new event.
     if (!placed.transient) await recordBlock(tx, key, c, statusRow, placed.reason, cfg !== null && !('blocked' in cfg) ? cfg.mode.id : null, now);
     return { reason: `placement_blocked:${placed.reason}` };
   }
-  if (statusRow.placementBlock !== null) await clearBlock(tx, key);
-  if (placed.target !== runner.location) return { reason: 'location_mismatch' };
+  if (!isBlocked(placed)) {
+    if (statusRow.placementBlock !== null) await clearBlock(tx, key);
+    if (placed.target !== runner.location) return { reason: 'location_mismatch' };
+  }
 
   const attempts = await loadAttempts(tx, key, spec.revision);
   let state = buildTaskState(spec, statusRow.status as TaskStatus, attempts);
@@ -381,9 +425,18 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
       : { reason: 'illegal_transition' };
   }
 
+  // A gate waits for a person only after the checks that could refuse the attempt anyway, and never starts it.
+  if (gate !== null) return requestGate(ctx, tx, key, c, spec, state, statusRow, gate, promoted, now);
+
   const repairNumber = budgetUsed(state.attempts);
   if (repairNumber > 0) {
-    const decision = evaluate({ kind: 'repair_within_limits', attempt: repairNumber, estimatedCost: amountMicros, remainingBudget: remainingMicros(position) }, ctx.policy);
+    const op = { kind: 'repair_within_limits', attempt: repairNumber, estimatedCost: amountMicros, remainingBudget: remainingMicros(position) } as const;
+    let decision = evaluate(op, ctx.policy);
+    if (decision.decision === 'require_approval') {
+      const repair = repairGate(op, repairNumber, amountMicros, `approval_required:${decision.reason}`);
+      if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, repair, ctx.policy))) decision = applyApproval(decision, true);
+      else return requestGate(ctx, tx, key, c, spec, state, statusRow, repair, promoted, now);
+    }
     if (decision.decision !== 'allow') {
       // Budget denials are transient, so the task stays ready. Any other denial stops this repair.
       if (decision.reason.startsWith('budget:')) return { reason: decision.reason };
@@ -394,7 +447,10 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const fits = checkFits(position, amountMicros);
   if (!fits.ok) return { reason: fits.reason };
 
-  return { lease: await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now) };
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now);
+  // Every grant waiting on this revision is spent on this attempt: a grant releases work once.
+  await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
+  return { lease };
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */

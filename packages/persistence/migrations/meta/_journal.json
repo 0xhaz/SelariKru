@@ -71,6 +71,13 @@
       "when": 1794194577068,
       "tag": "0009_usage_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794208556366,
+      "tag": "0010_approval_release_columns",
+      "breakpoints": true
     }
   ]
 }

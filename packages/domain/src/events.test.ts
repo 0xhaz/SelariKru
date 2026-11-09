@@ -62,6 +62,10 @@ describe('checkEventAuthority', () => {
     expect(checkEventAuthority(as('human', 'task.cancel_requested')).ok).toBe(true);
     for (const k of ['worker', 'verifier', 'scheduler', 'system', 'integration']) denied(k, 'task.cancel_requested');
   });
+  it('only a human may accept reduced scope', () => {
+    expect(checkEventAuthority(as('human', 'run.reduced_scope_accepted')).ok).toBe(true);
+    for (const k of ['worker', 'verifier', 'scheduler', 'system', 'integration']) denied(k, 'run.reduced_scope_accepted');
+  });
   it('verifier and scheduler cannot merge or grant approvals', () => {
     for (const k of ['verifier', 'scheduler', 'system']) {
       denied(k, 'change.merged');

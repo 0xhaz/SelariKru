@@ -3,7 +3,7 @@ import { ActorSchema, type ActorKind, Id, SchemaVersion, Timestamp } from './com
 import { err, ok, type Result } from './result.ts';
 
 export const EVENT_TYPES = [
-  'run.created', 'plan.accepted',
+  'run.created', 'plan.accepted', 'run.reduced_scope_accepted',
   'task.ready', 'placement.decided', 'placement.blocked', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.reopened', 'run.reverted', 'task.blocked',
   'attempt.started', 'attempt.heartbeat', 'attempt.completed', 'attempt.failed',
   'approval.requested', 'approval.granted', 'approval.denied',
@@ -43,6 +43,8 @@ const { worker: W, verifier: V, human: H, scheduler: S, integration: I, system: 
 export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly ActorKind[]>>> = {
   'run.created': [H, S, Y],
   'plan.accepted': [S, Y],
+  /** The owner accepted a budget-stopped run as delivered at reduced scope. Human only. It never marks stopped criteria verified. */
+  'run.reduced_scope_accepted': [H],
   'task.ready': [S],
   /** Where a claimed task runs and why: a scheduler decision, recorded with the policy decision behind any cloud start. Never an approval. */
   'placement.decided': [S],

@@ -22,7 +22,9 @@ export type PlanError =
   | { kind: 'revision_mismatch'; taskId: string; dependsOn: string; expected: number; actual: number }
   | { kind: 'scope_mismatch'; taskId?: string; field: 'projectId' | 'runId' }
   /** `allowedPaths` entries are plain repo-relative prefixes: no globs, absolute paths, `..` or `.git`. */
-  | { kind: 'invalid_allowed_path'; taskId: string; path: string; reason: string };
+  | { kind: 'invalid_allowed_path'; taskId: string; path: string; reason: string }
+  /** A task's cost ceiling is zero: no attempt could ever reserve budget, so it would wait forever with no signal. */
+  | { kind: 'zero_cost_cap'; taskId: string; field: 'limits.maxCostUsd' };
 
 export type PlanValidation = { ok: true } | { ok: false; errors: PlanError[] };
 
@@ -96,6 +98,7 @@ export function validatePlanRevision(plan: PlanRevision, ctx: PlanContext): Plan
   for (const task of byId.values()) {
     if (task.projectId !== ctx.projectId) errors.push({ kind: 'scope_mismatch', taskId: task.taskId, field: 'projectId' });
     if (task.runId !== ctx.runId) errors.push({ kind: 'scope_mismatch', taskId: task.taskId, field: 'runId' });
+    if (task.limits.maxCostUsd === 0) errors.push({ kind: 'zero_cost_cap', taskId: task.taskId, field: 'limits.maxCostUsd' });
     for (const path of task.allowedPaths) {
       const reason = allowedPathProblem(path);
       if (reason !== null) errors.push({ kind: 'invalid_allowed_path', taskId: task.taskId, path: path.slice(0, 80), reason });

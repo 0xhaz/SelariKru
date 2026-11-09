@@ -26,7 +26,7 @@ export async function releaseTaskClaims(tx: Tx, key: TaskKey, revision: number, 
  *
  * Only a real `verifier` principal may call this; the event allowlist enforces it again at emission. A task that is no longer
  * `verifying` (cancelled, superseded, ...) keeps its state: the late verdict is history only. `error` and `skipped` are not
- * verdicts: the task stays `verifying` with its claims held, so it can be verified again.
+ * verdicts: the task stays `verifying` with its claims held until the verification driver's reaper closes it (`closeVerificationWithoutVerdict`).
  *
  * passed -> `verified`, claims released. (Readiness of the run is decided by `markRunReadyForReview`, which needs live evidence.)
  * failed -> `failed`, claims released, then a bounded repair through the retry transition (`ready`), or `blocked` when the
@@ -95,6 +95,37 @@ export async function applyVerification(
     return { applied: true, taskStatus: state.status, reason: input.outcome, ...(repair ? { repair } : {}) };
   };
   return tx ? run(tx) : withTx(ctx.db, run);
+}
+
+/**
+ * Closes a task whose candidate got no verdict (`error`, `skipped`): it stops at `blocked` with its claims released, so nothing waits on it forever.
+ * The attempt ends `interrupted`, so no repair is spent. The caller holds the candidate lock and passes the part's revision and attempt: a task that
+ * moved on is left alone. Returns whether this task was closed.
+ */
+export async function closeVerificationWithoutVerdict(
+  ctx: { readonly now: () => Date }, tx: Tx, key: TaskKey,
+  input: { readonly reason: string; readonly candidateSha: string; readonly expect: { readonly revision: number; readonly attemptId: string } },
+): Promise<boolean> {
+  const row = await lockStatusRow(tx, key);
+  if (!row || row.status !== 'verifying' || row.currentRevision !== input.expect.revision) return false;
+  const attempts = await loadAttempts(tx, key, row.currentRevision);
+  if (attempts.at(-1)?.attemptId !== input.expect.attemptId) return false;
+  const revisions = await tx.select({ spec: schema.taskRevisions.spec, runId: schema.taskRevisions.runId }).from(schema.taskRevisions).where(and(
+    eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, key.taskId), eq(schema.taskRevisions.revision, row.currentRevision)));
+  const spec = TaskSpecSchema.parse(revisions[0]!.spec);
+  const state = buildTaskState(spec, 'verifying', attempts);
+  if (!state) throw new Error(`task ${key.taskId}: stored spec no longer valid`);
+  const moved = transition(state, { type: 'verification_unavailable', reason: input.reason });
+  if (!moved.ok) throw new Error(`illegal verification transition: ${JSON.stringify(moved.error)}`);
+  const now = ctx.now();
+  await tx.update(schema.attempts).set({ outcome: 'interrupted', exitReason: input.reason }).where(and(
+    eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, input.expect.attemptId)));
+  await releaseTaskClaims(tx, key, row.currentRevision, now);
+  const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
+  await emit(tx, { projectId: key.projectId, runId: revisions[0]!.runId, taskId: key.taskId, aggregateRevision }, now, {
+    type: 'task.blocked', attemptId: input.expect.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: input.reason, candidateSha: input.candidateSha },
+  });
+  return true;
 }
 
 /**
