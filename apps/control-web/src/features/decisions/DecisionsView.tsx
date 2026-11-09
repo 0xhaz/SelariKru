@@ -7,7 +7,7 @@ import { hrefFor } from '../../shell/route.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
 import { DecisionCard } from './DecisionCard.tsx';
 import { CHANGED_NOT_SENT_MESSAGE, GONE_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
-import type { DecisionAction, DecisionCardModel, DecisionsModel } from './model.ts';
+import { confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionsModel } from './model.ts';
 
 type CommandAction = Extract<DecisionAction, { kind: 'command' }>;
 
@@ -112,7 +112,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   // A dialog is only good for the card as it was when opened, and only while the session is live.
   const liveConfirm = confirming ? (cards?.find((c) => c.id === confirming.cardId) ?? null) : null;
   const liveAction = liveConfirm?.actions.find((a): a is CommandAction => a.kind === 'command' && a.id === confirming?.actionId) ?? null;
-  const confirmStale = confirming !== null && (connection !== 'live' || liveConfirm === null || liveAction === null || liveConfirm.fingerprint !== confirming.fingerprint);
+  const confirmStale = confirming !== null && confirmIsStale(connection, liveConfirm, liveAction, confirming.fingerprint);
   useEffect(() => {
     if (!confirming || !confirmStale) return;
     setConfirming(null);
@@ -256,7 +256,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
                     </span>
                     <span className="text-sm text-muted">{h.at ? <Timestamp iso={h.at}>{`${formatAge(nowMs - Date.parse(h.at))} ago`}</Timestamp> : 'Time not recorded'}</span>
                   </div>
-                  <p className="mt-1 text-sm text-muted wrap-anywhere">{h.approver ? `By ${h.approver}` : 'Approver not reported yet'}. {h.scope ? `${h.scope}. ` : 'Scope not recorded. '}{h.execution}</p>
+                  <p className="mt-1 text-sm text-muted wrap-anywhere">{h.attribution}. {h.scope ? `${h.scope}. ` : 'Scope not recorded. '}{h.execution}</p>
                 </li>
               ))}
             </ul>

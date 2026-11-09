@@ -492,13 +492,22 @@ const RESOLVED: readonly ApprovalView['state'][] = ['granted', 'denied', 'expire
 
 /**
  * Keeps approvals resolved during this session across a snapshot replacement. A snapshot lists only open approvals, so a resync would otherwise forget a
- * decision the person just made until the server's history reports it. Open requests always come from the snapshot.
+ * decision the person just made until the server's history reports it. Open requests always come from the snapshot. An expired request the snapshot no longer
+ * lists is history only: left among the approvals it would still build a card for a task that has moved on.
  */
 export function carryResolvedApprovals(previous: ProjectViewSnapshot | null, fresh: ProjectViewSnapshot): ProjectViewSnapshot {
   if (previous === null) return fresh;
   let approvals = fresh.approvals;
+  let approvalHistory = fresh.approvalHistory;
   for (const a of Object.values(previous.approvals)) {
-    if (RESOLVED.includes(a.state) && a.resolvedAt !== null && !approvals[a.approvalId]) approvals = put(approvals, a.approvalId, a);
+    if (!RESOLVED.includes(a.state) || a.resolvedAt === null || approvals[a.approvalId]) continue;
+    if (a.state === 'expired') {
+      if (!approvalHistory.some((h) => h.approvalId === a.approvalId)) {
+        approvalHistory = [...approvalHistory, { approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.taskRevision, outcome: 'expired', approver: null, scopeHash: a.scopeHash, operation: a.operation, destination: a.destination, requestedAt: a.requestedAt, resolvedAt: a.resolvedAt, consumedAt: null, consumedBy: null }];
+      }
+      continue;
+    }
+    approvals = put(approvals, a.approvalId, a);
   }
-  return approvals === fresh.approvals ? fresh : { ...fresh, approvals };
+  return approvals === fresh.approvals && approvalHistory === fresh.approvalHistory ? fresh : { ...fresh, approvals, approvalHistory };
 }

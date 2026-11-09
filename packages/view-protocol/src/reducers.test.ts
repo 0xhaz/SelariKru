@@ -777,6 +777,19 @@ describe('history and real-shape snapshots', () => {
     expect(carryResolvedApprovals(null, fresh)).toBe(fresh);
   });
 
+  it('an expired request carries as history only, so it can never build a card after a replan', () => {
+    const lapsed = { approvalId: 'old', taskId: 't1', taskRevision: 1, runId: 'r1', scopeHash: 's', reason: null, operation: 'start_cloud_worker', destination: null, requester: null, state: 'expired' as const, requestedAt: at(1), expiresAt: at(2), resolvedAt: at(3) };
+    const before = { ...base().snapshot, approvals: { old: lapsed } };
+    const kept = carryResolvedApprovals(before, base().snapshot);
+    expect(kept.approvals).toEqual({});
+    expect(kept.approvalHistory).toEqual([expect.objectContaining({ approvalId: 'old', outcome: 'expired', approver: null, resolvedAt: at(3), operation: 'start_cloud_worker' })]);
+    // Still listed by the server: the snapshot's row wins, and it is not recorded twice.
+    const listed = { ...base().snapshot, approvals: { old: lapsed } };
+    expect(carryResolvedApprovals(before, listed)).toBe(listed);
+    const reported = { ...base().snapshot, approvalHistory: [{ ...entry, approvalId: 'old' }] };
+    expect(carryResolvedApprovals(before, reported).approvalHistory).toHaveLength(1);
+  });
+
   it('the refresh brings in new approval history', () => {
     const s = base();
     const fresh = { ...s.snapshot, approvalHistory: [entry] };

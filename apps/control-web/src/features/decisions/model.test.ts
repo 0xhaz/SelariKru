@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task } from '../overview/testing.ts';
-import { buildDecisions, type DecisionAction, type DecisionCardModel, type DecisionOptions } from './model.ts';
+import { buildDecisions, confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionOptions } from './model.ts';
 
 const live = { mode: 'live' as const, connection: 'live' as const };
 const build = (s: ReturnType<typeof snapshotOf>, over: Partial<DecisionOptions> = {}) => buildDecisions(s, NOW, { ...live, ...over });
@@ -356,5 +356,38 @@ describe('history', () => {
     const open = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'approval_expired' })], approvals: [approval('apr', { taskId: 't', taskRevision: 1, state: 'expired', operation: 'start_cloud_worker' })] });
     open.approvalHistory = [entry({ approvalId: 'apr', outcome: 'expired' })];
     expect(build(open).history).toEqual([]);
+  });
+});
+
+describe('carried follow-ups', () => {
+  const history = (approvals: Parameters<typeof approval>[1][], approvalHistory: ReturnType<typeof snapshotOf>['approvalHistory'] = []) => build({ ...snapshotOf({ approvals: approvals.map((a) => approval(a?.approvalId ?? 'x', a)) }), approvalHistory }).history;
+  it('an expired or superseded row never says the approver is not reported yet', () => {
+    const entry = { runId: 'r', taskId: null, revision: 1, approver: null, scopeHash: 's', operation: null, destination: null, requestedAt: iso(0), resolvedAt: iso(1), consumedAt: null, consumedBy: null };
+    const rows = history([], [{ ...entry, approvalId: 'a', outcome: 'expired' }, { ...entry, approvalId: 'b', outcome: 'superseded' }, { ...entry, approvalId: 'c', outcome: 'denied' }]);
+    expect(rows.find((h) => h.id === 'a')!.attribution).toBe('Expired with no decision');
+    expect(rows.find((h) => h.id === 'b')!.attribution).toBe('Replaced before a decision');
+    expect(rows.find((h) => h.id === 'c')!.attribution).toBe('Approver not reported yet');
+    const local = history([{ approvalId: 'd', state: 'superseded', resolvedAt: iso(2) }]);
+    expect(local.find((h) => h.id === 'd')!.attribution).toBe('Replaced before a decision');
+    expect(history([], [{ ...entry, approvalId: 'e', outcome: 'granted', approver: 'owner' }])[0]!.attribution).toBe('By owner');
+  });
+
+  it('a confirmation is stale once its action is disabled, even when the fingerprint is the same', () => {
+    const card = { id: 'c', fingerprint: 'f' } as DecisionCardModel;
+    const on = { kind: 'command', disabledReason: null } as Extract<DecisionAction, { kind: 'command' }>;
+    expect(confirmIsStale('live', card, on, 'f')).toBe(false);
+    expect(confirmIsStale('live', card, { ...on, disabledReason: 'A task stopped that is not in the list below yet.' }, 'f')).toBe(true);
+    expect(confirmIsStale('live', card, on, 'other')).toBe(true);
+    expect(confirmIsStale('reconnecting', card, on, 'f')).toBe(true);
+    expect(confirmIsStale('live', null, on, 'f')).toBe(true);
+    expect(confirmIsStale('live', card, null, 'f')).toBe(true);
+  });
+
+  it('merge evidence leaves deliberately cancelled tasks out of the count and names them', () => {
+    const base = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'verified' }), task('c', { status: 'cancelled', cancelReason: 'cancel_requested' })] });
+    const snap = { ...base, runs: { run: { ...base.runs['run']!, lifecycle: 'ready_for_review' as const } } };
+    const card = build(snap).cards.find((c) => c.kind === 'merge_review')!;
+    expect(card.summary).toContain('2 of 2 tasks verified');
+    expect(card.summary).toMatch(/1 deliberately cancelled task is not counted/);
   });
 });

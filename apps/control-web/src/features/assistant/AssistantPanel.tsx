@@ -40,7 +40,11 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
     const read = (): void => {
       const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
       const run = params.get('run');
-      if (!run) return;
+      // The banner belongs to the link: a hash with no run is no longer replanning anything.
+      if (!run) {
+        setReplanFor(null);
+        return;
+      }
       setTarget((t) => ({ ...t, runId: run }));
       setReplanFor({ runId: run, taskId: params.get('task') });
     };

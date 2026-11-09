@@ -1,5 +1,5 @@
 import { ADVISORY_APPROVAL_OPERATIONS, WORKER_APPROVAL_OPERATIONS, approvalUnavailableReason } from '@selarikru/domain';
-import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
+import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, verifiedCounts, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge, type Tone } from '@selarikru/ui';
 import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, isClosedTask, reducedScopeCovers, sentence } from '../overview/attention.ts';
 import { hrefFor } from '../../shell/route.ts';
@@ -67,8 +67,10 @@ export interface HistoryEntry {
   /** Null when the record does not say when. */
   readonly at: string | null;
   readonly tone: Tone;
-  /** Null when the record does not say who. */
+  /** Null when the record does not say who, or when nobody decided. */
   readonly approver: string | null;
+  /** Who decided, or why no person is named. */
+  readonly attribution: string;
   /** What the decision covered, or null when the record does not say. */
   readonly scope: string | null;
   /** A grant is a record; this says what became of it, or that it is not known. */
@@ -329,7 +331,11 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   const uncovered = tasks.some((t) => isBudgetStopped(t, run) && !reducedScopeCovers(run, t));
   const cancelled = tasks.filter((t) => t.status === 'cancelled').length;
   const scopeNote = run.reducedScope ? `Accepted at reduced scope: ${run.reducedScope.notDelivered.tasks.length} planned task${run.reducedScope.notDelivered.tasks.length === 1 ? ' is' : 's are'} not delivered.` : uncovered ? 'Some planned work was stopped for budget and is not delivered.' : cancelled > 0 ? `${cancelled} planned task${cancelled === 1 ? ' was' : 's were'} cancelled and ${cancelled === 1 ? 'is' : 'are'} not delivered.` : null;
-  const evidence = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision` : `${tasks.filter((t) => t.status === 'verified' || t.status === 'merged').length} of ${tasks.filter((t) => t.status !== 'superseded').length} tasks verified; per-criterion evidence is not connected`;
+  // The same count Mission Control shows: a deliberately cancelled task is out of scope, and is named beside the figure so the gap can be read.
+  const counts = verifiedCounts(snapshot, run.runId);
+  const deliberate = tasks.filter((t) => t.status === 'cancelled' && t.cancelReason !== 'budget_exhausted' && !isBudgetStopped(t, run)).length;
+  const dropped = deliberate > 0 ? `; ${deliberate} deliberately cancelled task${deliberate === 1 ? ' is' : 's are'} not counted` : '';
+  const evidence = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision${dropped}` : `${counts.verified} of ${counts.total} tasks verified; per-criterion evidence is not connected${dropped}`;
   const base = { state: 'open' as const, reason: null, advisory: null, notDelivered: null, changed: null };
 
   if (cr && (cr.status === 'merged_sha_mismatch' || cr.status === 'stale_candidate')) {
@@ -367,6 +373,12 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
 const OUTCOME: Readonly<Record<Exclude<ApprovalView['state'], 'pending'>, string>> = { granted: 'Granted', denied: 'Denied', expired: 'Expired', superseded: 'Superseded' };
 const OUTCOME_TONE: Readonly<Record<Exclude<ApprovalView['state'], 'pending'>, Tone>> = { granted: 'success', denied: 'danger', expired: 'neutral', superseded: 'neutral' };
 
+function attributionOf(approver: string | null, outcome: Exclude<ApprovalView['state'], 'pending'>): string {
+  if (approver !== null) return `By ${approver}`;
+  if (outcome === 'expired') return 'Expired with no decision';
+  return outcome === 'superseded' ? 'Replaced before a decision' : 'Approver not reported yet';
+}
+
 const OPERATION_NAME: Readonly<Record<string, string>> = { start_cloud_worker: 'Cloud start', repair_within_limits: 'Repair attempt', breaking_api_change: 'Breaking API change', destructive_data_migration: 'Destructive data migration' };
 const operationName = (operation: string | null): string => (operation === null ? 'Request' : (OPERATION_NAME[operation] ?? sentence(operation)));
 
@@ -378,6 +390,11 @@ function scopeLine(scopeHash: string | null, revision: number | null, destinatio
 function executionOf(h: ApprovalHistoryEntry): string {
   if (h.outcome === 'granted') return h.consumedAt !== null ? `Used by attempt ${h.consumedBy ?? 'not recorded'}.` : 'No attempt has used this grant yet.';
   return h.outcome === 'superseded' ? 'Replaced before a decision, so nothing ran from it.' : 'Nothing ran from this request.';
+}
+
+/** A confirmation only stands while the session is live and its action is still on, for the card as it was when opened. */
+export function confirmIsStale(connection: ConnectionState, card: DecisionCardModel | null, action: Extract<DecisionAction, { kind: 'command' }> | null, fingerprint: string | null): boolean {
+  return connection !== 'live' || card === null || action === null || action.disabledReason !== null || card.fingerprint !== fingerprint;
 }
 
 const RANK: Readonly<Record<CardKind, number>> = { policy_deny: 0, reconciliation: 1, approval: 2, budget_stop: 3, blocked: 4, reverify: 4, merge_review: 5 };
@@ -411,21 +428,21 @@ export function buildDecisions(snapshot: ProjectViewSnapshot, nowMs: number, opt
     if (open.has(`decision:${h.approvalId}`)) continue;
     seen.add(h.approvalId);
     history.push({
-      id: h.approvalId, outcome: OUTCOME[h.outcome], subject: `${nameOf(h.taskId)}: ${operationName(h.operation)}`, at: h.resolvedAt, tone: OUTCOME_TONE[h.outcome], approver: h.approver,
+      id: h.approvalId, outcome: OUTCOME[h.outcome], subject: `${nameOf(h.taskId)}: ${operationName(h.operation)}`, at: h.resolvedAt, tone: OUTCOME_TONE[h.outcome], approver: h.approver, attribution: attributionOf(h.approver, h.outcome),
       scope: scopeLine(h.scopeHash, h.revision, h.destination), execution: executionOf(h),
     });
   }
   for (const a of Object.values(snapshot.approvals)) {
     if (a.state === 'pending' || a.resolvedAt === null || seen.has(a.approvalId) || open.has(`decision:${a.approvalId}`)) continue;
     history.push({
-      id: a.approvalId, outcome: OUTCOME[a.state], subject: `${nameOf(a.taskId)}: ${operationName(a.operation)}`, at: a.resolvedAt, tone: OUTCOME_TONE[a.state], approver: null,
+      id: a.approvalId, outcome: OUTCOME[a.state], subject: `${nameOf(a.taskId)}: ${operationName(a.operation)}`, at: a.resolvedAt, tone: OUTCOME_TONE[a.state], approver: null, attribution: attributionOf(null, a.state),
       scope: scopeLine(a.scopeHash, a.taskRevision, a.destination), execution: 'The execution result is not reported yet.',
     });
   }
   for (const run of Object.values(snapshot.runs)) {
     if (!run.reducedScope) continue;
     const n = run.reducedScope.notDelivered.tasks.length;
-    history.push({ id: run.reducedScope.decisionId, outcome: 'Accepted reduced scope', subject: `${n} task${n === 1 ? '' : 's'} not delivered`, at: run.reducedScope.acceptedAt, tone: 'neutral', approver: run.reducedScope.acceptedBy, scope: `Plan revision ${run.reducedScope.planRevision}`, execution: 'Recorded. No task changed.' });
+    history.push({ id: run.reducedScope.decisionId, outcome: 'Accepted reduced scope', subject: `${n} task${n === 1 ? '' : 's'} not delivered`, at: run.reducedScope.acceptedAt, tone: 'neutral', approver: run.reducedScope.acceptedBy, attribution: `By ${run.reducedScope.acceptedBy}`, scope: `Plan revision ${run.reducedScope.planRevision}`, execution: 'Recorded. No task changed.' });
   }
   history.sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''));
 

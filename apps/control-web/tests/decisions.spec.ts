@@ -216,6 +216,14 @@ test('two stops sharing one decision say why the counts differ', async ({ page }
   await expect(page.getByTestId('decisions-grouped')).toContainText('The header counts 2 items');
 });
 
+test('the replan banner clears when the link no longer names a run', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { shell: true }; });
+  await page.goto('/tests/harness/index.html#/assistant?run=run-42&task=task-7');
+  await expect(page.getByTestId('replan-context')).toContainText('task-7');
+  await page.evaluate(() => { window.location.hash = '#/assistant'; });
+  await expect(page.getByTestId('replan-context')).toHaveCount(0);
+});
+
 test('a policy-denied card does not read as queued', async ({ page }) => {
   await open(page, { spiedFixture: 'policy-block' });
   await expect(card(page, 'policy_deny').first()).toContainText('Held by policy');
