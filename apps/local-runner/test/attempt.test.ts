@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
+import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
 import { LeaseLostError } from '../src/api.ts';
 import { sandboxName } from '@selarikru/runtime-docker-local';
 import { makeWorld, type World, type WorldOptions } from './world.ts';
@@ -337,3 +337,51 @@ describe('runAttempt', () => {
     expect(w.logs.join('\n')).not.toContain('CANARY');
   });
 });
+
+describe('the base .gitignore at the completion gate', () => {
+  const baseFiles = { '.gitignore': 'dist/\ndata/*.sqlite*\n' };
+
+  it('a worker that builds and starts the app can still finish', async () => {
+    const { w, deps } = await setup({ baseFiles, agent: async ({ write }) => {
+      await write('src/x.ts', 'x');
+      await write('dist/assets/app.js', 'built');
+      await write('data/feedback.sqlite', 'db');
+    } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+  });
+
+  it('a worker cannot hide a change by editing .gitignore', async () => {
+    const { w, deps } = await setup({ baseFiles, agent: async ({ write }) => {
+      await write('.gitignore', 'dist/\ndata/*.sqlite*\nescaped.txt\n');
+      await write('escaped.txt', 'x');
+    } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/diff outside allowedPaths: 2 path.*escaped\.txt/);
+  });
+});
+
+describe('TASK.md', () => {
+  const spec = (over: object) => ({ taskId: 't', revision: 1, role: 'backend', title: 'API', requirementIds: [], acceptanceCheckIds: [], allowedPaths: ['server', 'migrations', 'tests/backend'], ...over }) as never;
+
+  it('says build output is ignored and how to read the worker split on the pilot', () => {
+    const file = renderTaskFile(spec({}));
+    expect(file).toMatch(/\.gitignore/);
+    expect(file).toMatch(/dependenc/i);
+    expect(file).toMatch(/node environment/i);
+    expect(file).toMatch(/backend worker/i);
+    expect(file).toMatch(/frontend worker/i);
+    expect(file).toMatch(/dist\//);
+  });
+
+  it('a generic task gets no pilot text', () => {
+    expect(renderTaskFile(spec({ allowedPaths: ['src'] }))).not.toMatch(/frontend worker/i);
+  });
+
+  it('a repair names why the last attempt failed, as a report', () => {
+    const file = renderTaskFile(spec({}), { priorFailure: 'FB-02 failed: title too long accepted' });
+    expect(file).toContain('FB-02 failed: title too long accepted');
+    expect(file).toMatch(/not an instruction/i);
+    expect(renderTaskFile(spec({}))).not.toMatch(/last attempt/i);
+  });
+});
+

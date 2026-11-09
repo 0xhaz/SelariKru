@@ -68,6 +68,19 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
   // ---- scheduler access --------------------------------------------------------------------------------------
   const guard = { onRequest: [ctx.runner] };
 
+  /** Why the last attempt at this task revision did not stand, for the repair's TASK.md: the verifier's verdict when there is one, else the attempt's own reason. Redacted and bounded. */
+  async function priorFailureOf(lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptNumber: number }): Promise<string | null> {
+    const [prior] = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason }).from(schema.attempts).where(and(
+      eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.taskId, lease.taskId), eq(schema.attempts.revision, lease.revision), eq(schema.attempts.attemptNumber, lease.attemptNumber - 1)));
+    if (!prior) return null;
+    const [verdict] = await db.execute(sql`SELECT payload FROM events WHERE tenant_id = ${lease.tenantId} AND project_id = ${lease.projectId} AND attempt_id = ${prior.attemptId} AND type = 'verification.failed' ORDER BY sequence DESC LIMIT 1`);
+    const payload = (verdict?.['payload'] ?? null) as { summary?: unknown; failedChecks?: unknown } | null;
+    const checks = Array.isArray(payload?.failedChecks) ? payload.failedChecks.filter((c): c is string => typeof c === 'string') : [];
+    const fromVerdict = payload === null ? null : [checks.length > 0 ? `Verification failed: ${checks.join(', ')}.` : 'Verification failed.', typeof payload.summary === 'string' ? payload.summary : ''].join(' ').trim();
+    const text = fromVerdict ?? prior.exitReason;
+    return text ? redactSecrets(text).slice(0, 1000) : null;
+  }
+
   app.post('/v1/runners/claim', guard, async (req, reply) => {
     const runner = runnerOf(req);
     const body = parseBody(ClaimRequestSchema, req.body);
@@ -82,7 +95,10 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     }
     const harnesses = body.harnesses ?? stored ?? [];
     const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
-    if (outcome.ok) return reply.code(200).send({ lease: outcome.lease, reason: null, skipped: outcome.skipped });
+    if (outcome.ok) {
+      const priorFailure = outcome.lease.attemptNumber > 1 ? await priorFailureOf(outcome.lease) : null;
+      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}) }, reason: null, skipped: outcome.skipped });
+    }
     return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped });
   });
 

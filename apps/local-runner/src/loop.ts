@@ -46,7 +46,9 @@ export class RunnerLoop {
     } catch (err) {
       this.d.log(`orphan sweep failed: ${err instanceof Error ? err.message : 'error'}`);
     }
-    await Promise.all(Array.from({ length: Math.max(1, this.d.slots ?? 1) }, () => this.worker(signal, sleep)));
+    const slots = this.d.slots ?? 1;
+    if (!Number.isInteger(slots) || slots < 1) throw new Error(`slots must be a whole number of at least 1, got ${String(slots)}`);
+    await Promise.all(Array.from({ length: slots }, () => this.worker(signal, sleep)));
   }
 
   /** One slot: claim, run, repeat. The server's limits decide how many slots actually hold work. */

@@ -239,13 +239,15 @@ describe('claim preconditions', () => {
     expect(await countRows(t.db, 'attempts')).toBe(1);
   });
 
-  it('a denied claim leaves nothing behind', async () => {
+  it('a claim the budget denies starts nothing and is recorded once, not per poll', async () => {
     await resetDb(t.db, {});
     await seedTask(t.db, specFor('t1'));
     expect(await s.tryClaim(runner('r1'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'budget:missing_limit' }] });
     expect(await countRows(t.db, 'attempts')).toBe(0);
     expect(await countRows(t.db, 'budget_reservations')).toBe(0);
-    expect(await countRows(t.db, 'events')).toBe(0);
+    expect(await s.tryClaim(runner('r1'), CAPS)).toMatchObject({ ok: false });
+    expect(await countRows(t.db, 'events')).toBe(1);
+    expect(await countRows(t.db, 'events', `type = 'placement.blocked' AND payload ->> 'reason' = 'budget:missing_limit'`)).toBe(1);
     expect(await countRows(t.db, 'resource_claims')).toBe(0);
     expect((await statusOf(t.db, 't1')).status).toBe('ready');
   });

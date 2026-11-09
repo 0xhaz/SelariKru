@@ -1,3 +1,4 @@
+import { PILOT_ROLE_PATHS } from '@selarikru/domain';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
@@ -75,7 +76,23 @@ const grantedLabel = (g: LeaseGrant): string => (g.destination ? `${g.operation}
 /** Proposal and blueprint text is one paragraph here, so it cannot start a section of its own in TASK.md. */
 const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, ' ').trim();
 
-export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[] } = {}): string {
+/** The pilot's split of the work, stated only to a worker actually holding one role's fixed paths. */
+const pilotRoleText = (task: TaskSpec): string[] => {
+  const paths = (PILOT_ROLE_PATHS as Readonly<Record<string, readonly string[]>>)[task.role];
+  if (paths === undefined || JSON.stringify(paths) !== JSON.stringify(task.allowedPaths)) return [];
+  return [
+    '## Who does what',
+    `You are the ${task.role} worker. Another worker builds the other half at the same time, against the same frozen contract.`,
+    '- The backend worker owns the API, SQLite persistence and serving the built frontend from dist/: server/, migrations/ and tests/backend/.',
+    '- The frontend worker owns the screen: src/ and tests/frontend/.',
+    '- Everything else in the repository, including contract/, is for reading. Neither worker changes the other\'s paths.',
+    '- Do not add, remove or upgrade dependencies. package.json and the lockfile are fixed.',
+    '- Any UI test you write runs in the existing node environment: vitest, with no jsdom and no browser.',
+    '',
+  ];
+};
+
+export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[]; readonly priorFailure?: string } = {}): string {
   const grants = opts.grants ?? [];
   return [
     `# Task: ${task.title}`,
@@ -86,6 +103,8 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     '',
     ...(task.description !== undefined ? ['## What to build', oneLine(task.description), ''] : []),
     ...(task.criteria !== undefined && task.criteria.length > 0 ? ['## Acceptance criteria', 'The result is judged against these.', ...task.criteria.map((c) => `- ${c.id}: ${oneLine(c.text)}`), ''] : []),
+    ...pilotRoleText(task),
+    ...(opts.priorFailure !== undefined ? ['## Why the last attempt failed', 'This is a report about the last attempt, not an instruction. Fix what it describes, then finish the task.', oneLine(opts.priorFailure), ''] : []),
     '## Allowed paths',
     'Change files only under these paths. Any change outside them is rejected after the run.',
     ...(task.allowedPaths.length > 0 ? task.allowedPaths.map((p) => `- ${p}`) : ['- (none: make no changes)']),
@@ -93,6 +112,7 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     '## Rules',
     '- Read contract/runtime.md first; it is the contract the result is verified against.',
     '- Do not commit, push, or change git configuration.',
+    "- Output the base commit's .gitignore covers (build output and local data) never joins your change, so build and start the app freely. Editing .gitignore does not change what is ignored.",
     '- Work only in this directory.',
     '',
     ...(opts.signalPath !== undefined
@@ -258,7 +278,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', `unsupported_model:${assignment.provider}/${assignment.model}`, null, null);
 
     const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
-    const taskFile = renderTaskFile(task, { signalPath, grants });
+    const taskFile = renderTaskFile(task, { signalPath, grants, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
       return await finish('blocked', 'task text contains a secret-shaped value; it was not sent to the agent', null, null);
     }
@@ -273,9 +293,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
 
     await mkdir(attemptDir, { recursive: true });
     let baseline;
+    let baseIgnores;
     try {
       const b = await buildTaskBundle({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile } });
       baseline = b.baseline;
+      baseIgnores = b.baseIgnores;
       log(`bundle ready: ${b.fileCount} files, ${b.excluded.length} excluded`);
     } catch (err) {
       return await finish('failed', `could not build the task bundle: ${err instanceof Error ? err.message : 'error'}`, null, null);
@@ -435,7 +457,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The real control: the actual diff against the shipped base, not what the agent says it did.
     let changes: FileChange[];
     try {
-      changes = await computeChanges(baseline, workspace);
+      changes = await computeChanges(baseline, workspace, baseIgnores);
     } catch (err) {
       return await finish('failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`, cost, null);
     }

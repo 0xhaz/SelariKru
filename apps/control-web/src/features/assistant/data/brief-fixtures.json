@@ -239,7 +239,7 @@
     },
     {
       "id": "brief-11",
-      "prompt": "Draft a task plan for the whole one-screen Feedback Board in exactly two tasks, which run at the same time against the frozen API contract. One task has role backend: the Express API and SQLite persistence. The other has role frontend: the form, list, status filters and loading, empty and error states. Together they must cover every acceptance criterion, FB-01 to FB-08; a criterion that needs both the API and the screen goes on both tasks.",
+      "prompt": "Draft a task plan for the whole one-screen Feedback Board in exactly two tasks, which run at the same time against the frozen API contract. One task has role backend: the Express API, SQLite persistence and static serving of the built frontend from dist/. The other has role frontend: the form, list, status filters and loading, empty and error states. Together they must cover every acceptance criterion, FB-01 to FB-08; a criterion that needs both the API and the screen goes on both tasks.",
       "allowedRequirementIds": [
         "FB-01",
         "FB-02",

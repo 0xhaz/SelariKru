@@ -155,7 +155,7 @@ const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: tr
 export function decisionIdForBlock(task: Pick<TaskView, 'taskId' | 'runId'>, code: string): string | null {
   if (isReverifiableReason(code)) return `reverify:${task.runId}`;
   const klass = classifyBlock(code);
-  if (klass === 'policy' || klass === 'repair' || klass === 'blocked' || code === 'approval_denied') return `placement:${task.taskId}`;
+  if (klass === 'policy' || klass === 'repair' || klass === 'blocked' || code === 'approval_denied' || stripPrefix(code).startsWith('budget:')) return `placement:${task.taskId}`;
   return null;
 }
 
@@ -191,7 +191,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
       return make({
         ...base, kind: 'budget_resource', title: `${name}: cannot start`, detail: explain(code),
         consequence: `${whoWaits(hit)} ${exceeds ? 'It will not start over budget.' : unknownCost ? 'An unknown cost is never treated as zero.' : 'A missing limit is never treated as unlimited.'}`,
-        nextAction: exceeds ? 'Request a scoped budget increase or narrow the task.' : unknownCost ? 'Resolve the missing usage figures, then retry.' : 'Set the limit in the run policy.',
+        nextAction: exceeds ? 'Holds stay at their worst case and do not come back, so this will not clear by itself. Request a scoped budget increase, or assign a cheaper model and replan.' : unknownCost ? 'Resolve the missing usage figures, then retry.' : 'Set the limit in the run policy.',
       });
     }
     case 'wait':

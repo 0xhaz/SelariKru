@@ -36,6 +36,8 @@ export interface WorldOptions {
   agent?: (ctx: { stream: FakeStream; cwd: string; write(rel: string, body: string): Promise<void> }) => Promise<boolean | void>;
   heartbeat?: (n: number) => Promise<{ cancelRequested: boolean }>;
   task?: Partial<TaskSpec>;
+  /** Extra files committed in the base. */
+  baseFiles?: Readonly<Record<string, string>>;
   publishThrows?: boolean;
   initMcp?: Array<{ name: string; status: string }>;
   /** The model the scripted init event reports. Default: the fixture's. Null: an init event naming no model. */
@@ -61,7 +63,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
   execFileSync('git', ['init', '-q', repo]);
   git('config', 'user.email', 't@t');
   git('config', 'user.name', 't');
-  for (const [p, b] of Object.entries({ 'src/app.ts': 'export const a = 1;\n', 'contract/runtime.md': '# contract\n', 'tools/verifier-calibration/secret.json': '{}' })) {
+  for (const [p, b] of Object.entries({ 'src/app.ts': 'export const a = 1;\n', 'contract/runtime.md': '# contract\n', 'tools/verifier-calibration/secret.json': '{}', ...o.baseFiles })) {
     await mkdir(dirname(join(repo, p)), { recursive: true });
     await writeFile(join(repo, p), b);
   }

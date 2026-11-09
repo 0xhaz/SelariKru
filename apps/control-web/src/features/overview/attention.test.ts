@@ -301,7 +301,7 @@ describe('attention queue', () => {
       expect(id('decision:apr')).toBe('decision:apr');
       expect(id('placement:b')).toBe('reverify:run');
       expect(id('placement:c')).toBe('placement:c');
-      expect(id('placement:d')).toBeNull();
+      expect(id('placement:d')).toBe('placement:d');
       expect(id('gate:e')).toBeNull();
     });
 
@@ -394,3 +394,16 @@ describe('a worker\'s failure reason, in its own words', () => {
     expect(item!.detail).toContain('base commit is not in the source repository');
   });
 });
+
+describe('a budget refusal', () => {
+  it('reaches Mission Control and Decisions with what to do', () => {
+    const [item] = buildAttention(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] }), NOW, NOW);
+    expect(item).toMatchObject({ kind: 'budget_resource', needsOperator: true, decisionId: 'placement:t' });
+    expect(item!.nextAction).toMatch(/budget/i);
+    expect(item!.nextAction).toMatch(/cheaper model/i);
+  });
+  it('a missing limit stays a setting to fix, not a decision', () => {
+    expect(blockItem(attentionTask(), 'missing_budget_limit', ['t']).decisionId).toBeNull();
+  });
+});
+

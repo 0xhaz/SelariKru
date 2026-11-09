@@ -498,3 +498,13 @@ describe('carried follow-ups', () => {
     expect(card.summary).toMatch(/1 deliberately cancelled task is not counted/);
   });
 });
+
+describe('a budget refusal on a task', () => {
+  it('becomes a Decisions card with what to do', () => {
+    const cards = build(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] })).cards;
+    const card = cards.find((c) => c.id === 'placement:t')!;
+    expect(card.summary).toMatch(/exceed/i);
+    expect(card.facts.find((f) => f.label === 'Next')!.value).toMatch(/cheaper model/i);
+  });
+});
+

@@ -1,3 +1,4 @@
+import { checkAllowedPaths, computeChanges } from './diff.ts';
 import { execFileSync } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -134,5 +135,54 @@ describe('isExcludedPath', () => {
       expect(isExcludedPath(p), p).toBe(true);
     for (const p of ['tools/other/a', 'src/verifier.ts', 'contract/runtime.md', '.git/config', 'a/.git/hooks/x'])
       expect(isExcludedPath(p) , p).toBe(p.includes('.git'));
+  });
+
+  describe('the completion gate and the base .gitignore', () => {
+    const base = async () => {
+      await writeFile(join(repo, '.gitignore'), 'dist/\ndata/*.sqlite*\n');
+      await mkdir(join(repo, 'data'), { recursive: true });
+      await writeFile(join(repo, 'data/.gitkeep'), '');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'ignore build output');
+      const b = await buildTaskBundle({ repoPath: repo, baseSha: git('rev-parse', 'HEAD'), destDir: join(root, 'g') });
+      return { dest: join(root, 'g'), b };
+    };
+    const put2 = async (dest: string, rel: string, body = 'x') => { await mkdir(join(dest, rel, '..'), { recursive: true }); await writeFile(join(dest, rel), body); };
+
+    it('never counts output the base ignores, and still counts real source changes', async () => {
+      const { dest, b } = await base();
+      await put2(dest, 'dist/assets/app.js');
+      await put2(dest, 'data/feedback.sqlite');
+      await put2(dest, 'data/feedback.sqlite-wal');
+      await put2(dest, 'src/new.ts');
+      const changes = await computeChanges(b.baseline, dest, b.baseIgnores);
+      expect(changes.map((c) => c.path)).toEqual(['src/new.ts']);
+      expect(checkAllowedPaths(changes, ['src']).ok).toBe(true);
+    });
+
+    it('reads the rules from the base: a worker editing .gitignore cannot hide a change', async () => {
+      const { dest, b } = await base();
+      await writeFile(join(dest, '.gitignore'), 'dist/\ndata/*.sqlite*\nsecret-change.txt\ncontract/\n');
+      await put2(dest, 'secret-change.txt');
+      await writeFile(join(dest, REQUIRED_CONTRACT_PATH), 'tampered');
+      await put2(dest, 'src/.gitignore', '*\n');
+      await put2(dest, 'src/hidden.ts');
+      const changes = await computeChanges(b.baseline, dest, b.baseIgnores);
+      expect(changes.map((c) => c.path)).toEqual(['.gitignore', REQUIRED_CONTRACT_PATH, 'secret-change.txt', 'src/.gitignore', 'src/hidden.ts']);
+      expect(checkAllowedPaths(changes, ['src']).violations.map((v) => v.path)).toEqual(['.gitignore', REQUIRED_CONTRACT_PATH, 'secret-change.txt']);
+    });
+
+    it('a tracked file stays a change even if it matches an ignore rule', async () => {
+      await writeFile(join(repo, 'tracked.log'), 'a');
+      git('add', '-f', 'tracked.log');
+      await writeFile(join(repo, '.gitignore'), '*.log\n');
+      git('add', '-A');
+      git('commit', '-q', '-m', 'tracked but matching');
+      const dest = join(root, 'h');
+      const b = await buildTaskBundle({ repoPath: repo, baseSha: git('rev-parse', 'HEAD'), destDir: dest });
+      await writeFile(join(dest, 'tracked.log'), 'b');
+      await writeFile(join(dest, 'new.log'), 'b');
+      expect((await computeChanges(b.baseline, dest, b.baseIgnores)).map((c) => c.path)).toEqual(['tracked.log']);
+    });
   });
 });

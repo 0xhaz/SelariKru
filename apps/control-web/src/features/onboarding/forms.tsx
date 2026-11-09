@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from 'react';
-import { COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, templateSupport, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
+import { COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, pilotAttemptCapUsd, pilotCriteriaProblem, templateSupport, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
 import type { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import type { AssistantPort } from '../assistant/types.ts';
@@ -249,6 +249,12 @@ export function BlueprintStep(p: StepProps) {
       {view.template && !view.template.executable ? (
         <Notice tone="warning" title="Plan only">This blueprint can be kept and edited, but a run is refused while it includes {view.template.unsupported.map((u) => TRACK_LABELS[u.track]).join(' and ')}. {view.template.unsupported[0]!.reason}</Notice>
       ) : null}
+      {view.state !== 'discovering' && !view.firstRunId && pilotCriteriaProblem(c) ? (
+        <Notice tone="warning" title="This version needs redrafting">
+          {pilotCriteriaProblem(c)}
+          <div className="mt-2"><button type="button" className={buttonQuiet} disabled={busy} onClick={() => void redraft()}>Draft a new version</button></div>
+        </Notice>
+      ) : null}
       {view.state === 'discovering' ? (
         <Notice tone="warning" title="Your answers changed">
           This version was drafted before your last answers. Draft a new version to carry them in.
@@ -405,6 +411,7 @@ export function FeasibilityStep(p: StepProps) {
       <Failure error={error} />
       {plan && !plan.confirmed ? <Notice tone="warning" title="Needs review">{cloudChanged ? 'Your execution choice added cloud worker time to the plan. Check the new line, then save to confirm.' : 'Something this plan depends on changed. Save it again to confirm it still holds.'}</Notice> : null}
       <Field id="agent-budget" label="Agent budget ceiling, USD" hint="A limit on what agents may spend on this project. It is not an estimate of build effort or of running costs. A run is refused without one." error={fieldErrors(error).get('agentBudgetUsd')}><input id="agent-budget" className={inputClass} inputMode="decimal" value={budget} onChange={(e) => setBudget(e.target.value)} /></Field>
+      {budgetOk && view?.blueprint?.content.rolePaths && view.deployment.maxAttempts ? <p className="text-sm text-muted" data-testid="attempt-cap">Two workers with up to {view.deployment.maxAttempts} attempts each means each attempt may hold up to {usd(pilotAttemptCapUsd(n, view.deployment.maxAttempts))}, its worst case. Holds are not handed back, so this is sized for every repair.</p> : null}
       <Ledger ledgerKey="build_effort" title="Building the app" sub="Engineering effort for the first milestone, as a range." unit="hours" defaultPayer="you" lines={merged('build_effort', effort)} onAdd={(l) => setEffort((c) => [...c, l])} onRemove={(id) => setEffort((c) => c.filter((l) => l.id !== id))} />
       <Ledger ledgerKey="production" title="Running the app in production" sub="Hosting, database, paid APIs, once your app exists." unit="usd" defaultPayer="your_accounts" lines={merged('production', production)} onAdd={(l) => setProduction((c) => [...c, l])} onRemove={(id) => setProduction((c) => c.filter((l) => l.id !== id))} />
       <Ledger ledgerKey="agent_usage" title="Platform agent usage" sub="Agents, models and workers while building. Each line says who pays." unit="usd" defaultPayer="your_provider" lines={merged('agent_usage', agentUsage)} onAdd={(l) => setAgentUsage((c) => [...c, l])} onRemove={(id) => setAgentUsage((c) => c.filter((l) => l.id !== id))} />

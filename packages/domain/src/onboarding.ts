@@ -192,14 +192,22 @@ export const PILOT_CRITERIA: readonly { readonly id: string; readonly text: stri
  * What each role's worker may change. They do not overlap, so two workers cannot conflict. Tests are per role, each in its own directory; everything else in the shell, the contract included, is readable by both.
  */
 export const PILOT_ROLE_PATHS = { backend: ['server', 'migrations', 'tests/backend'], frontend: ['src', 'tests/frontend'] } as const;
-const PILOT_CRITERIA_REFUSAL = `The pilot stack is judged on the verification suite's fixed criteria, ${PILOT_CRITERIA[0]!.id} to ${PILOT_CRITERIA.at(-1)!.id}, so they cannot be changed.`;
+const PILOT_CRITERIA_REFUSAL = `The pilot stack is judged on the verification suite's fixed criteria, ${PILOT_CRITERIA[0]!.id} to ${PILOT_CRITERIA.at(-1)!.id}, so they cannot be changed. Draft a new version from your answers to restore them.`;
+
+/**
+ * The most one attempt may hold on the pilot: the agent budget spread over every attempt of every role, so each repair the policy promises still fits. Holds stay at the worst case and
+ * none comes back. Rounded down to whole micro-dollars, the unit holds are counted in, so the total can never exceed the budget by rounding.
+ */
+export function pilotAttemptCapUsd(budgetUsd: number, maxAttempts: number): number {
+  return Math.floor((budgetUsd * 1_000_000) / (Object.keys(PILOT_ROLE_PATHS).length * maxAttempts)) / 1_000_000;
+}
 
 /** Why this blueprint's criteria would leave a run judged on something else, or null when they are right. Only an executable template has a suite to agree with. */
 export function pilotCriteriaProblem(content: Pick<BlueprintContent, 'tracks' | 'acceptanceCriteria' | 'rolePaths'>): string | null {
   if (!templateSupport(content.tracks).executable) return null;
   const same = content.acceptanceCriteria.length === PILOT_CRITERIA.length && PILOT_CRITERIA.every((c, i) => content.acceptanceCriteria[i]?.id === c.id && content.acceptanceCriteria[i]?.text === c.text);
   if (!same) return PILOT_CRITERIA_REFUSAL;
-  return JSON.stringify(content.rolePaths) === JSON.stringify(PILOT_ROLE_PATHS) ? null : 'The pilot stack has one worker per role with fixed paths, so these cannot be changed.';
+  return JSON.stringify(content.rolePaths) === JSON.stringify(PILOT_ROLE_PATHS) ? null : 'The pilot stack has one worker per role with fixed paths, so these cannot be changed. Draft a new version from your answers to restore them.';
 }
 
 /** The controller's own first draft. Deterministic: the same answers give the same blueprint, and no model is involved. */
@@ -420,7 +428,7 @@ export const OnboardingViewSchema = z.strictObject({
   connection: z.strictObject({ repository: z.string(), defaultBranch: z.string() }).nullable(),
   readiness: z.strictObject({ blueprintVersion: z.number().int(), outcome: z.enum(['ready', 'blocked']), checkedAt: z.string(), baseSha: z.string().nullable(), snapshot: SetupSnapshotSchema.nullable(), checks: z.array(ReadinessCheckViewSchema) }).nullable(),
   firstRunId: z.string().nullable(),
-  deployment: z.strictObject({ sourceCheckout: z.string().nullable(), servesRepository: z.string().nullable(), checker: z.boolean() }),
+  deployment: z.strictObject({ sourceCheckout: z.string().nullable(), servesRepository: z.string().nullable(), checker: z.boolean(), maxAttempts: z.number().int().min(1).nullable().optional() }),
 });
 export type OnboardingView = z.infer<typeof OnboardingViewSchema>;
 export type ReadinessCheckView = z.infer<typeof ReadinessCheckViewSchema>;

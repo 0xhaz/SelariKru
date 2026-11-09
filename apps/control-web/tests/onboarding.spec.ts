@@ -169,6 +169,19 @@ test.describe('behaviour', () => {
     await expect(page.getByText('It is not an estimate of build effort', { exact: false })).toBeVisible();
   });
 
+  test('the cost step shows what the budget allows each attempt on the pilot', async ({ page }) => {
+    const split = blueprint({ accepted: true });
+    (split.content as Record<string, unknown>)['rolePaths'] = { backend: ['server', 'migrations', 'tests/backend'], frontend: ['src', 'tests/frontend'] };
+    await open(page, { ...configured, blueprint: split, costPlan: { ...costPlan, confirmed: false }, execution: null, connection: null, deployment: { sourceCheckout: '/srv/source', servesRepository: null, checker: true, maxAttempts: 3 } }, '#/onboarding?id=proj_1');
+    await expect(page.getByTestId('attempt-cap')).toContainText('$4.17');
+  });
+
+  test('a pilot blueprint that no longer matches the suite offers a redraft', async ({ page }) => {
+    await open(page, { ...base, state: 'blueprint_ready', source: { kind: 'new' }, focus: { tracks: ['saas_web'] }, blueprint: blueprint(), template: { executable: true, unsupported: [] } }, '#/onboarding?id=proj_1');
+    await expect(page.getByText('This version needs redrafting')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Draft a new version' })).toBeVisible();
+  });
+
   test('a choice that adds cost lines returns to the cost plan', async ({ page }) => {
     const before = { ...configured, execution: null, connection: null };
     const after = { ...before, execution: { execution: 'cloud', inference: 'PREFER_ON_DEVICE' }, costPlan: { ...costPlan, confirmed: false } };

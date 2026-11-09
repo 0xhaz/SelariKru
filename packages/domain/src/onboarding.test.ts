@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CRITERION_DESCRIPTIONS } from './evidence.ts';
 import {
-  BlueprintContentSchema, COST_REFERENCES, CostLineSchema, ONBOARDING_STATES, advanceOnboarding, blueprintFromAnswers, costPlanFor, ledgerTotals, pilotCriteriaProblem, routeHonoursRecorded, TEMPLATE_CATALOG, templateSupport,
+  BlueprintContentSchema, COST_REFERENCES, CostLineSchema, ONBOARDING_STATES, advanceOnboarding, blueprintFromAnswers, costPlanFor, ledgerTotals, pilotAttemptCapUsd, pilotCriteriaProblem, routeHonoursRecorded, TEMPLATE_CATALOG, templateSupport,
   type CostLine, type OnboardingAnswers,
 } from './onboarding.ts';
 
@@ -107,6 +107,17 @@ describe('blueprint', () => {
       expect(c.acceptanceCriteria).toEqual([{ id: 'AC-1', text: 'A patient can see their position' }]);
       expect(c.allowedPaths).toEqual(['src', 'tests']);
       expect(pilotCriteriaProblem(c)).toBeNull();
+    });
+
+    it.each([[5, 3, 0.833333], [25, 3, 4.166666], [12, 2, 3]])('at $%d with %d attempts each, holds fit the budget and never round over it', (budget, attempts, cap) => {
+      expect(pilotAttemptCapUsd(budget, attempts)).toBe(cap);
+      expect(Math.round(cap * 1e6) * 2 * attempts).toBeLessThanOrEqual(budget * 1e6);
+    });
+
+    it('says how to fix it', () => {
+      const c = blueprintFromAnswers(answers());
+      expect(pilotCriteriaProblem({ ...c, acceptanceCriteria: c.acceptanceCriteria.slice(1) })).toMatch(/draft a new version/i);
+      expect(pilotCriteriaProblem({ ...c, rolePaths: undefined })).toMatch(/draft a new version/i);
     });
 
     it('gives each role its own paths: writable, and with no overlap', () => {

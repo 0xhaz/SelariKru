@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RunnerLoop } from '../src/loop.ts';
-import { gitBackedProjects } from '../src/repos.ts';
+import { gitBackedProjects, parseSlots } from '../src/repos.ts';
 
 let dir: string | null = null;
 afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
@@ -50,5 +50,13 @@ describe('slots', () => {
     await loop.run(ctl.signal);
     expect(peak).toBe(2);
   });
+});
+
+describe('--slots', () => {
+  it('defaults to two and takes a whole number', () => {
+    expect(parseSlots(undefined)).toBe(2);
+    expect(parseSlots('1')).toBe(1);
+  });
+  it.each(['abc', '0', '-1', '1.5', '', '2x'])('%s is a startup error', (raw) => expect(() => parseSlots(raw)).toThrow(/--slots/));
 });
 

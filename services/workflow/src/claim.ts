@@ -434,7 +434,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     return { reason: `placement_blocked:${placed.reason}` };
   }
   if (!isBlocked(placed)) {
-    if (statusRow.placementBlock !== null) await clearBlock(tx, key);
+    // A budget refusal is judged below on the same pass. Clearing it here would make `recordBlock` write it again on every other poll.
+    if (statusRow.placementBlock !== null && !statusRow.placementBlock.startsWith('budget:')) await clearBlock(tx, key);
     if (placed.target !== runner.location) return { reason: 'location_mismatch' };
   }
 
@@ -473,13 +474,21 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     }
     if (decision.decision !== 'allow') {
       // Budget denials are transient, so the task stays ready. Any other denial stops this repair.
-      if (decision.reason.startsWith('budget:')) return { reason: decision.reason };
+      if (decision.reason.startsWith('budget:')) {
+        await recordBlock(tx, key, c, statusRow, decision.reason, null, now);
+        return { reason: decision.reason };
+      }
       return refuseRepair(tx, key, c, state, statusRow.rowRevision, decision.reason, now);
     }
   }
 
   const fits = checkFits(position, amountMicros);
-  if (!fits.ok) return { reason: fits.reason };
+  if (!fits.ok) {
+    // Holds are never handed back, so this will not clear by itself: the owner has to see it. Recorded once per reason, not per poll.
+    await recordBlock(tx, key, c, statusRow, fits.reason, null, now);
+    return { reason: fits.reason };
+  }
+  if (statusRow.placementBlock?.startsWith('budget:')) await clearBlock(tx, key);
 
   const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification));
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.

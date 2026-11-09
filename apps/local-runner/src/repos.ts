@@ -11,3 +11,10 @@ export async function gitBackedProjects(repos: Readonly<Record<string, string>>,
   }
   return projects;
 }
+
+/** `--slots`: a whole number of at least one, or the pilot's two when not given. Anything else stops startup rather than silently claiming nothing. */
+export function parseSlots(raw: string | undefined): number {
+  if (raw === undefined) return 2;
+  if (!/^[1-9]\d*$/.test(raw)) throw new Error(`--slots must be a whole number of at least 1, got ${JSON.stringify(raw)}`);
+  return Number(raw);
+}

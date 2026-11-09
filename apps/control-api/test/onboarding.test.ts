@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VerificationRecordSchema } from '@selarikru/domain';
-import { schema } from '@selarikru/persistence';
+import { schema, withTx } from '@selarikru/persistence';
 import { OnboardingViewSchema } from '@selarikru/protocol';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -16,6 +16,7 @@ import { PLAN_TASK_ROLES, type TaskSpec } from '@selarikru/domain';
 import { renderTaskFile } from '../../local-runner/src/attempt.ts';
 import { PLACEMENT_MODES } from '../../../services/workflow/src/placement.ts';
 import { hashTree } from '../../../services/verifier/src/hashing.ts';
+import { writeEvent } from '../src/store.ts';
 import { API_POLICY, ORIGIN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
@@ -910,7 +911,7 @@ describe('controller', () => {
       const frontend = specs.find((s) => s.role === 'frontend')!;
       expect(backend.allowedPaths).toEqual(['server', 'migrations', 'tests/backend']);
       expect(frontend.allowedPaths).toEqual(['src', 'tests/frontend']);
-      expect([backend.limits.maxCostUsd, frontend.limits.maxCostUsd]).toEqual([12.5, 12.5]); // both fit under the $25 run budget at once
+      expect([backend.limits.maxCostUsd, frontend.limits.maxCostUsd]).toEqual([4.166666, 4.166666]); // 2 roles x 3 attempts fit under $25
       expect(leases.find((l) => l.taskId === frontend.taskId).assignment).toMatchObject({ model: 'claude-sonnet-5-5', source: 'role' });
       expect(leases.find((l) => l.taskId === backend.taskId).assignment).toMatchObject({ source: 'default' });
 
@@ -931,6 +932,121 @@ describe('controller', () => {
       expect(snapshot).not.toContain('Build the Express routes');
       const events = JSON.stringify(await t.db.execute(sql`SELECT payload FROM events WHERE project_id = ${v.projectId}`));
       expect(events).not.toContain('Build the Express routes');
+    });
+
+    const twoWorkerRun = async (h: Harness, budget: number) => {
+      const runner = await enrolRunner(h.app);
+      let v = await configured(h, ['saas_web'], budget);
+      await reportProjects(h, runner.token, [v.projectId]);
+      v = (await check(h, v)).body;
+      v = (await activate(h, v)).body;
+      const runId = v.firstRunId as string;
+      const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf(TWO_ROLES) });
+      expect(review.status, JSON.stringify(review.body)).toBe(200);
+      const accepted = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('plan'), tasks: review.body.tasks });
+      expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
+      const claim = async () => (await post(h.app, '/v1/runners/claim', { projects: [v.projectId] }, bearer(runner.token))).body;
+      const fail = async (lease: { attemptId: string; fence: number; leaseToken: string }, reason: string) => post(h.app, '/v1/runners/result', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'failed', reason } }, bearer(runner.token));
+      return { v, runId, runner, claim, fail };
+    };
+
+    it.each([5, 25])('at $%d every attempt fits: two workers, a failure, and both repairs for each', async (budget) => {
+      const h = harness();
+      const { claim, fail } = await twoWorkerRun(h, budget);
+      for (let round = 0; round < 3; round += 1) {
+        const [a, b] = [await claim(), await claim()];
+        expect(a.lease, JSON.stringify(a)).not.toBeNull();
+        expect(b.lease, JSON.stringify(b)).not.toBeNull();
+        expect(a.lease.attemptNumber).toBe(round + 1);
+        const failed = await fail(a.lease, `attempt ${round} failed`);
+        expect(failed.status, JSON.stringify(failed.body)).toBe(200);
+        expect((await fail(b.lease, `other attempt ${round} failed`)).status).toBe(200);
+      }
+    });
+
+    it('a repair carries why the last attempt failed, redacted and bounded', async () => {
+      const h = harness();
+      const { claim, fail } = await twoWorkerRun(h, 25);
+      const first = await claim();
+      expect(first.lease.priorFailure ?? null).toBeNull();
+      await claim();
+      await fail(first.lease, `could not build: sk_live_CANARY0123456789abcdefXYZ ${'x'.repeat(420)}`);
+      const repair = await claim();
+      expect(repair.lease.taskId).toBe(first.lease.taskId);
+      expect(repair.lease.priorFailure).toMatch(/could not build/);
+      expect(repair.lease.priorFailure).not.toContain('sk_live_CANARY');
+      expect(repair.lease.priorFailure.length).toBeLessThanOrEqual(1000);
+    });
+
+    it('a repair after a failed verification carries the failed checks', async () => {
+      const h = harness();
+      const { v, runId, claim, fail } = await twoWorkerRun(h, 25);
+      const first = await claim();
+      await claim();
+      await fail(first.lease, 'worker reason');
+      await withTx(t.db, (tx) => writeEvent(tx, new Date(), { projectId: v.projectId, runId, taskId: first.lease.taskId, attemptId: first.lease.attemptId, aggregateRevision: 99, type: 'verification.failed', actor: { kind: 'verifier', id: 'verifier-local-1' }, payload: { failedChecks: ['FB-02', 'FB-07'], summary: 'titles of 121 characters were accepted' } }));
+      const repair = await claim();
+      expect(repair.lease.priorFailure).toBe('Verification failed: FB-02, FB-07. titles of 121 characters were accepted');
+    });
+
+    it('a claim the budget refuses says so once, on the task, and clears when it fits', async () => {
+      const h = harness();
+      const { v, runId, claim } = await twoWorkerRun(h, 25);
+      await t.db.execute(sql`UPDATE runs SET budget = ${JSON.stringify({ limitUsd: 1 })}::jsonb WHERE run_id = ${runId}`);
+      for (let i = 0; i < 3; i += 1) expect((await claim()).lease).toBeNull();
+      const blocked = async () => (await t.db.execute(sql`SELECT count(*)::int AS n FROM events WHERE project_id = ${v.projectId} AND type = 'placement.blocked' AND payload ->> 'reason' = 'budget:exceeds_limit'`))[0]!['n'];
+      expect(await blocked()).toBe(2); // one per task, not one per poll
+      const snapshot = (await get(h.app, `/v1/projects/${v.projectId}/snapshot`, owner())).body;
+      expect(snapshot.tasks.map((x: { placementBlock: string }) => x.placementBlock)).toEqual(['budget:exceeds_limit', 'budget:exceeds_limit']);
+
+      await t.db.execute(sql`UPDATE runs SET budget = ${JSON.stringify({ limitUsd: 25 })}::jsonb WHERE run_id = ${runId}`);
+      const after = await claim();
+      expect(after.lease, JSON.stringify(after)).not.toBeNull();
+      const row = await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = ${after.lease.taskId}`);
+      expect(row[0]!['placement_block']).toBeNull();
+    });
+
+    it('a plan needs exactly one task per role', async () => {
+      const h = harness();
+      let v = await configuredWithRunner(h);
+      v = (await check(h, v)).body;
+      v = (await activate(h, v)).body;
+      const runId = v.firstRunId as string;
+      const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([...TWO_ROLES, { title: 'A second API task', requirementIds: ['FB-01'], role: 'backend' }]) });
+      expect(review.status).toBe(200);
+      const refused = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('dup'), tasks: review.body.tasks });
+      expect(refused.status).toBe(422);
+      expect(refused.body.error).toMatchObject({ code: 'role_has_many_tasks', details: { roles: ['backend'] } });
+    });
+
+    it('refuses a role model the run cannot afford, naming the budget needed', async () => {
+      const h = harness();
+      const { v } = await twoWorkerRun(h, 25);
+      const refused = await post(h.app, `/v1/projects/${v.projectId}/model-assignments`, { scope: 'role', key: 'frontend', selection: { provider: 'anthropic', model: 'claude-opus-5-5' }, expectedRevision: 0, idempotencyKey: k('dear') });
+      expect(refused.status, JSON.stringify(refused.body)).toBe(422);
+      expect(refused.body.error.code).toBe('model_over_run_budget');
+      expect(refused.body.error.details.neededUsd).toBeGreaterThan(25);
+      expect(refused.body.error.message).toContain(`$${refused.body.error.details.neededUsd}`);
+      expect(refused.body.error.message).toMatch(/\$25/);
+    });
+
+    it('offers a redraft for a blueprint that predates the fixed criteria', async () => {
+      const h = harness();
+      let v = await configured(h);
+      const old = { ...v.blueprint.content, acceptanceCriteria: [{ id: 'AC-1', text: 'A patient sees their position' }] };
+      await t.db.execute(sql`INSERT INTO project_blueprints (tenant_id, project_id, version, content, content_sha256, origin, created_by) VALUES (${TENANT}, ${v.projectId}, ${v.blueprint.version + 1}, ${JSON.stringify(old)}::jsonb, ${'f'.repeat(64)}, 'owner', 'owner')`);
+      await t.db.execute(sql`UPDATE project_onboardings SET current_blueprint_version = ${v.blueprint.version + 1}, accepted_blueprint_version = ${v.blueprint.version + 1} WHERE project_id = ${v.projectId}`);
+      v = (await get(h.app, `/v1/onboarding/${v.projectId}`, owner())).body;
+      const redrafted = await write(h, v.projectId, 'blueprints', {}, v.revision);
+      expect(redrafted.status, JSON.stringify(redrafted.body)).toBe(200);
+      expect(redrafted.body.blueprint.content.acceptanceCriteria.map((c: { id: string }) => c.id)).toEqual(CRITERIA);
+      expect(redrafted.body.blueprint.accepted).toBe(false);
+    });
+
+    it('tells the screen how many attempts each worker has', async () => {
+      const h = harness();
+      const v = await configured(h);
+      expect(v.deployment.maxAttempts).toBe(POLICY_WITH_PR.limits.repairAttempts + 1);
     });
 
     it('refuses an owner edit that would replace the criteria, and an older blueprint that already did', async () => {

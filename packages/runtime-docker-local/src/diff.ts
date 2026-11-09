@@ -1,7 +1,10 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open, readdir, readlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, mkdtemp, open, readdir, readlink, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 
 export type EntryKind = 'file' | 'symlink' | 'special';
 
@@ -86,10 +89,49 @@ export async function readRegularFile(path: string): Promise<Buffer> {
 const same = (a: TreeEntry, b: TreeEntry): boolean =>
   a.kind === b.kind && a.sha256 === b.sha256 && a.executable === b.executable && a.linkTarget === b.linkTarget;
 
-export async function computeChanges(base: TreeSnapshot, root: string): Promise<FileChange[]> {
+/** The base commit's `.gitignore` files, by path, as read from git at that commit. Never the worker's copies. */
+export type BaseIgnores = ReadonlyMap<string, Buffer>;
+
+const execFileP = promisify(execFile);
+const isolatedGitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' });
+
+/**
+ * Which of `paths` the base's ignore rules cover. Git decides, in a throwaway repository holding nothing but the base's `.gitignore` files, so neither the worker's
+ * files nor this machine's git configuration take part. The worker's path names only go in on stdin. A failure throws: the caller then fails the attempt rather than guessing.
+ */
+async function ignoredByBase(ignores: BaseIgnores, paths: readonly string[]): Promise<ReadonlySet<string>> {
+  if (ignores.size === 0 || paths.length === 0) return new Set();
+  const dir = await mkdtemp(join(tmpdir(), 'selarikru-ignore-'));
+  try {
+    await execFileP('git', ['init', '-q', '--template=', dir], { env: isolatedGitEnv() });
+    for (const [path, bytes] of ignores) {
+      await mkdir(dirname(join(dir, path)), { recursive: true });
+      await writeFile(join(dir, path), bytes);
+    }
+    const run = execFileP('git', ['-C', dir, 'check-ignore', '-z', '--stdin'], { encoding: 'buffer', maxBuffer: 64 * 1024 * 1024, env: isolatedGitEnv() });
+    run.child.stdin?.on('error', () => undefined);
+    run.child.stdin?.end(`${paths.join('\0')}\0`);
+    // Exit 1 means nothing matched.
+    const stdout = await run.then((r) => r.stdout, (e: { code?: unknown; stdout?: Buffer }) => {
+      if (e.code === 1) return e.stdout ?? Buffer.alloc(0);
+      throw e;
+    });
+    return new Set(stdout.toString('utf8').split('\0').filter(Boolean));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * What changed against the base. A new path the base's ignore rules cover is build output and never enters the change set; a path the base tracks is reported whatever the rules
+ * say, as in git. `baseIgnores` comes from the base commit, so editing `.gitignore` in the workspace widens nothing: that edit is itself a change.
+ */
+export async function computeChanges(base: TreeSnapshot, root: string, baseIgnores: BaseIgnores = new Map()): Promise<FileChange[]> {
   const now = await snapshotTree(root);
+  const ignored = await ignoredByBase(baseIgnores, [...now.keys()].filter((p) => !base.has(p) && !hasGitSegment(p)));
   const changes: FileChange[] = [];
   for (const [path, e] of now) {
+    if (ignored.has(path)) continue;
     const old = base.get(path);
     if (!old) changes.push({ path, status: 'added', kind: e.kind, sha256: e.sha256, linkTarget: e.linkTarget });
     else if (!same(old, e)) changes.push({ path, status: 'modified', kind: e.kind, sha256: e.sha256, linkTarget: e.linkTarget });

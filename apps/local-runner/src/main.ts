@@ -8,7 +8,7 @@ import { cachedHarnessReport } from '@selarikru/harness-claude';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { redactSecrets } from '@selarikru/protocol';
 import { HttpRunnerApi } from './api.ts';
-import { gitBackedProjects } from './repos.ts';
+import { gitBackedProjects, parseSlots } from './repos.ts';
 import { wsControlConnector } from './control.ts';
 import { loadCredentials, pair } from './credentials.ts';
 import { RunnerLoop } from './loop.ts';
@@ -47,6 +47,7 @@ async function main(): Promise<void> {
   }
   if (cmd === 'run') {
     const { values } = parseArgs({ args: rest, options: { repo: { type: 'string', multiple: true }, poll: { type: 'string' }, slots: { type: 'string' } } });
+    const slots = parseSlots(values.slots);
     const creds = await loadCredentials(stateDir);
     if (!creds) throw new Error('not paired: run `pair` first');
     const repos = await loadRepos(values.repo ?? []);
@@ -74,7 +75,7 @@ async function main(): Promise<void> {
       // Probed on this machine's host. The CLI inside the sandbox image can differ; the init-event check is what proves the model that actually ran.
       harnessReport: cachedHarnessReport(),
       // Two by default, the pilot's coding limit. The server still decides: a one-slot placement mode simply gives the second slot nothing.
-      slots: Number(values.slots ?? 2),
+      slots,
       // A path that is not a git repository is not a checkout: say so here, and the server's readiness check will not count it.
       projects: await gitBackedProjects(repos, log),
       log,

@@ -1,7 +1,8 @@
 import { availableCatalog, findCatalogModel, NO_HARNESS_CATALOG, RUNNER_RECENT_SECONDS, type RunnerHarnessReport, type CatalogModel, type HarnessCatalog, type ModelRate, type ModelRefusalReason, type ModelSelection, type RecordedAssignment, type TaskSpec } from '@selarikru/domain';
 import { evaluate, type Policy, type PolicyDecision } from '@selarikru/policy';
-import { schema, type Executor } from '@selarikru/persistence';
-import { and, desc, eq, gte, isNull, or } from 'drizzle-orm';
+import { schema, type Executor, type Tx } from '@selarikru/persistence';
+import { and, desc, eq, gte, isNull, ne, notInArray, or } from 'drizzle-orm';
+import { lockBudget, toMicros } from './reserve.ts';
 import type { TaskKey } from './taskstate.ts';
 import type { SchedulerContext } from './types.ts';
 
@@ -163,4 +164,41 @@ export async function assignmentRevision(db: Executor, tenantId: string, project
   const t = schema.modelAssignments;
   const rows = await db.select({ revision: t.revision }).from(t).where(and(eq(t.tenantId, tenantId), eq(t.projectId, projectId), eq(t.scopeKind, scope), eq(t.scopeKey, scopeKey))).orderBy(desc(t.revision)).limit(1);
   return rows[0]?.revision ?? 0;
+}
+
+/**
+ * The run budget a model assignment would need, when it is more than the run has. Each attempt left holds its worst case and no hold comes back, so a role on a dearer model can leave
+ * the other worker unable to start. Only meant for plans with one worker per role. Before a plan exists, each role counts as one task at the planned cap.
+ */
+export async function modelOverRunBudget(tx: Tx, input: {
+  readonly tenantId: string; readonly projectId: string;
+  readonly roles: readonly string[]; readonly capUsd: number; readonly maxAttempts: number;
+  readonly change: { readonly scope: 'role' | 'task'; readonly key: string; readonly selection: ModelSelection };
+  readonly catalog: HarnessCatalog; readonly policy: Policy | undefined;
+}): Promise<{ readonly runId: string; readonly neededUsd: number; readonly limitUsd: number } | null> {
+  const { tenantId, projectId, change, catalog, policy } = input;
+  const runs = await tx.select({ runId: schema.runs.runId }).from(schema.runs).where(and(eq(schema.runs.tenantId, tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.trial, false), notInArray(schema.runs.lifecycle, ['merged', 'failed', 'cancelled'])));
+  for (const { runId } of runs) {
+    const scope = { tenantId, projectId, runId };
+    const position = await lockBudget(tx, scope);
+    if (position.limitMicros === null) continue;
+    const tasks = await tx.select({ taskId: schema.taskStatus.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
+      eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
+      .where(and(eq(schema.taskRevisions.tenantId, tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.runId, runId), notInArray(schema.taskStatus.status, ['cancelled', 'superseded'])));
+    const holds = await tx.select({ taskId: schema.budgetReservations.taskId, revision: schema.budgetReservations.revision }).from(schema.budgetReservations)
+      .where(and(eq(schema.budgetReservations.tenantId, tenantId), eq(schema.budgetReservations.projectId, projectId), eq(schema.budgetReservations.runId, runId), ne(schema.budgetReservations.state, 'released')));
+    const slots = tasks.length > 0
+      ? tasks.map((t) => { const spec = t.spec as TaskSpec; return { taskId: t.taskId as string | null, role: spec.role, capUsd: spec.limits.maxCostUsd, left: spec.limits.maxAttempts - holds.filter((h) => h.taskId === t.taskId && h.revision === t.revision).length }; })
+      : input.roles.map((role) => ({ taskId: null as string | null, role, capUsd: input.capUsd, left: input.maxAttempts }));
+    const rows = await currentRows(tx, tenantId, projectId, slots.flatMap((s) => [{ scope: 'role' as const, key: s.role }, ...(s.taskId !== null ? [{ scope: 'task' as const, key: s.taskId }] : [])]));
+    let needed = position.consumedMicros ?? 0;
+    for (const s of slots) {
+      const own = s.taskId !== null && change.scope === 'task' && change.key === s.taskId ? change.selection : s.taskId !== null ? rows.get(`task:${s.taskId}`) : undefined;
+      const selection = own ?? (change.scope === 'role' && change.key === s.role ? change.selection : rows.get(`role:${s.role}`)) ?? policy?.models?.default;
+      const cap = toMicros(s.capUsd);
+      needed += Math.max(0, s.left) * (selection ? worstCaseHold(cap, selection, catalog, policy).amountMicros : cap);
+    }
+    if (needed > position.limitMicros) return { runId, neededUsd: Math.ceil(needed / 10_000) / 100, limitUsd: position.limitMicros / 1_000_000 };
+  }
+  return null;
 }

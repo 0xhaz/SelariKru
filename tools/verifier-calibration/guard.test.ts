@@ -51,3 +51,33 @@ describe('calibration solution is kept out of the starter', () => {
     }
   });
 });
+
+describe('the starter shell baseline', () => {
+  const inside = (dir: string): string[] => readdirSync(join(starter, dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? inside(`${dir}/${e.name}`) : [`${dir}/${e.name}`]));
+
+  it('ships no test a worker cannot edit: a shell test would fail tsc over tests once createApp changes', () => {
+    expect(inside('tests').filter((f) => !f.endsWith('.gitkeep'))).toEqual([]);
+  });
+
+  it('has no feedback implementation or UI in server, src or migrations', () => {
+    for (const f of ['server', 'src', 'migrations'].flatMap(inside).filter((x) => !x.endsWith('.gitkeep'))) {
+      expect(readFileSync(join(starter, f), 'utf8'), f).not.toMatch(/\/api\/feedback|create\s+table\s+(if\s+not\s+exists\s+)?feedback|<form|<select|<input|<textarea/i);
+    }
+    expect(readdirSync(join(starter, 'migrations')).filter((f) => f.endsWith('.sql'))).toEqual([]);
+  });
+
+  it.skipIf(!existsSync(join(starter, 'node_modules/express')))('serves /health and no feedback API', async () => {
+    const { createApp } = (await import(join(starter, 'server/app.ts'))) as { createApp: () => { listen(port: number): import('node:http').Server } };
+    const server = createApp().listen(0);
+    await new Promise((r) => server.once('listening', r));
+    const base = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
+    try {
+      expect((await fetch(`${base}/health`)).status).toBe(200);
+      for (const method of ['GET', 'POST', 'PATCH']) expect((await fetch(`${base}/api/feedback`, { method })).status, method).toBe(404);
+      expect((await fetch(`${base}/api/feedback/fb_001`, { method: 'PATCH' })).status).toBe(404);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+

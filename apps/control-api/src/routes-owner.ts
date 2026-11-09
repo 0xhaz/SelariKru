@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -157,6 +157,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           const refused = await refuseSelection(tx, body.selection);
           if (refused) throw refused;
         }
+        if (body.selection !== null) {
+          const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
+          if (settings?.rolePaths) {
+            const over = await modelOverRunBudget(tx, { tenantId: config.tenantId, projectId, roles: Object.keys(settings.rolePaths), capUsd: settings.limits.maxCostUsd, maxAttempts: settings.limits.maxAttempts, change: { scope: body.scope, key: body.key, selection: body.selection }, catalog: ctx.catalog ?? NO_HARNESS_CATALOG, policy: ctx.policy });
+            if (over) throw new AppError(422, 'model_over_run_budget', `This model needs a run budget of at least $${over.neededUsd}, and this run has $${over.limitUsd}: every attempt holds its worst case, so the other worker could not start. Choose a cheaper model or raise the budget.`, over);
+          }
+        }
         const revision = current + 1;
         await tx.insert(schema.modelAssignments).values({
           tenantId: config.tenantId, projectId, scopeKind: body.scope, scopeKey: body.key, revision,
@@ -248,7 +255,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (missing.length > 0) throw new AppError(422, 'criteria_not_covered', `This plan leaves out ${missing.join(', ')}. A run on this project is judged on every criterion.`, { missing });
         const roles = new Set(plan.map((t) => t.role));
         const absent = Object.keys(settings.rolePaths ?? {}).filter((r) => !roles.has(r));
-        if (absent.length > 0) throw new AppError(422, 'roles_not_covered', `This plan has no ${absent.join(' or ')} task. This project is built by one worker per role, so each role needs its own task.`, { missing: absent });
+        if (absent.length > 0) throw new AppError(422, 'roles_not_covered', `This plan has no ${absent.join(' or ')} task. This project is built by one worker per role, so each role needs its own task. Draft the plan again from the whole-board brief.`, { missing: absent });
+        const crowded = Object.keys(settings.rolePaths ?? {}).filter((r) => plan.filter((t) => t.role === r).length > 1);
+        if (crowded.length > 0) throw new AppError(422, 'role_has_many_tasks', `This plan has more than one ${crowded.join(' and ')} task. Each role has one worker with one set of paths: merge them, or cancel the task this one replaces.`, { roles: crowded });
       }
 
       const existing = new Map<string, { currentRevision: number; status: string; rowRevision: number; projectId: string }>();

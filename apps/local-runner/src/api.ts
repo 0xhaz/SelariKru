@@ -4,6 +4,8 @@ import { z } from 'zod';
 
 export const ClaimedLeaseSchema = z
   .object({
+    /** On a repair: why the last attempt did not stand, redacted and bounded by the server. */
+    priorFailure: z.string().max(1000).optional(),
     attemptId: z.string().min(1),
     fence: z.number().int().min(0),
     leaseToken: z.string().min(1),

@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import { promisify } from 'node:util';
-import { snapshotTree, type TreeSnapshot } from './diff.ts';
+import { snapshotTree, type TreeSnapshot, type BaseIgnores } from './diff.ts';
 
 const execFileP = promisify(execFile);
 
@@ -113,6 +113,8 @@ export interface TaskBundleResult {
   readonly skipped: readonly string[];
   /** Hashes of the workspace as shipped, for the post-run diff. */
   readonly baseline: TreeSnapshot;
+  /** The base commit's `.gitignore` files, for the post-run diff. */
+  readonly baseIgnores: BaseIgnores;
 }
 
 /**
@@ -193,5 +195,8 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
   await git('add', '-A');
   await git('commit', '-q', '--no-verify', '--allow-empty', '-m', 'task base');
 
-  return { destDir, fileCount: written.size, excluded, skipped, baseline: await snapshotTree(destDir) };
+  // Taken from the commit, before any agent runs, and only from regular files: the workspace's own copies never decide what the gate ignores.
+  const ignoreItems = keep.filter((k) => /(^|\/)\.gitignore$/.test(k.path) && (k.mode === '100644' || k.mode === '100755'));
+  const baseIgnores = new Map(ignoreItems.map((k) => [k.path, blobs.get(k.oid)!] as const));
+  return { destDir, fileCount: written.size, excluded, skipped, baseline: await snapshotTree(destDir), baseIgnores };
 }

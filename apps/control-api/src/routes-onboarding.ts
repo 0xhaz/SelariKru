@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BlueprintContentSchema, EXECUTION_CHOICES, pilotCriteriaProblem, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
+import { BlueprintContentSchema, EXECUTION_CHOICES, pilotAttemptCapUsd, pilotCriteriaProblem, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
 import { recordOnboardingOperation, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import {
@@ -124,11 +124,12 @@ export async function onboardingPlanSettings(db: Executor, tenantId: string, pro
   if (!blueprintRow || !pass?.baseSha || budget === null || !execution) return undefined;
   const blueprint = BlueprintContentSchema.parse(blueprintRow.content);
   const goal = GoalAnswersSchema.safeParse(row.answers['goal']);
+  const maxAttempts = (policy.limits?.repairAttempts ?? 0) + 1;
   return {
     boardId: 'first-milestone', role: 'backend', baseSha: pass.baseSha, allowedPaths: blueprint.allowedPaths,
     classification: goal.success ? goal.data.classification : 'internal', policyVersion: policy.policyVersion, execution: execution === 'hybrid' ? 'eligible_any' : execution, inferencePolicyId: 'onboarding',
-    // A claim reserves its task's whole cap from the run's budget. With one worker per role, a cap equal to the budget would refuse the second worker.
-    limits: { maxAttempts: (policy.limits?.repairAttempts ?? 0) + 1, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: blueprint.rolePaths ? budget / Object.keys(blueprint.rolePaths).length : budget },
+    // A claim reserves its task's whole cap, and no hold comes back, so the cap is sized for every attempt of every role.
+    limits: { maxAttempts, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: blueprint.rolePaths ? pilotAttemptCapUsd(budget, maxAttempts) : budget },
     allowedRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), forbiddenMandatoryScope: blueprint.nonGoals,
     requirementText: Object.fromEntries(blueprint.acceptanceCriteria.map((c) => [c.id, c.text])),
     ...(templateSupport(blueprint.tracks).executable ? { requiredRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), ...(blueprint.rolePaths ? { rolePaths: blueprint.rolePaths } : {}) } : {}),
@@ -166,7 +167,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
       connection: asConnection(row),
       readiness: pass ? { blueprintVersion: pass.blueprintVersion, outcome: pass.outcome as 'ready' | 'blocked', checkedAt: pass.checkedAt.toISOString(), baseSha: pass.baseSha, snapshot: SetupSnapshotSchema.safeParse(pass.snapshot).data ?? null, checks: pass.checks as NonNullable<OnboardingView['readiness']>['checks'] } : null,
       firstRunId: row.firstRunId,
-      deployment: { sourceCheckout: ctx.readiness?.sourceCheckout ?? null, servesRepository: served?.repository ?? null, checker: ctx.readiness !== undefined },
+      deployment: { sourceCheckout: ctx.readiness?.sourceCheckout ?? null, servesRepository: served?.repository ?? null, checker: ctx.readiness !== undefined, maxAttempts: ctx.policy ? (ctx.policy.limits?.repairAttempts ?? 0) + 1 : null },
     };
   };
 
@@ -251,8 +252,11 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
         await write(tx, row, { conditionKind: 'needs_input', conditionReason: `Answer the ${missing.join(' and ')} step before a blueprint can be drafted.` });
         return;
       }
-      // The controller only drafts when answers have changed. Anywhere else this is a re-save, and it must not replace the owner's edits or lose acceptance.
-      if (row.state !== 'discovering') return;
+      // The controller only drafts when answers have changed, or to restore a pilot blueprint that no longer matches what the verifier judges. Anywhere else this is a re-save, and it must not replace the owner's edits or lose acceptance.
+      const existing = row.currentBlueprintVersion !== null ? await loadBlueprint(tx, row, row.currentBlueprintVersion) : undefined;
+      const parsed = BlueprintContentSchema.safeParse(existing?.content);
+      const stale = parsed.success && pilotCriteriaProblem(parsed.data) !== null;
+      if (row.state !== 'discovering' && !stale) return;
     }
     const content = body.content ?? blueprintFromAnswers({ goal: row.answers['goal'], source: row.answers['source'], focus: row.answers['focus'] } as Parameters<typeof blueprintFromAnswers>[0]);
     const criteriaProblem = pilotCriteriaProblem(content);
