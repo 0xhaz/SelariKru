@@ -3,18 +3,19 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "SelariKru control web app. This slice holds the assistant inference UI and the validated handoff; the full shell comes later.",
+  "description": "SelariKru control web app: the operator shell, Mission Control and the assistant inference UI.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "playwright test",
+    "test": "vitest run && playwright test",
     "test:install": "playwright install chromium"
   },
   "dependencies": {
     "@selarikru/domain": "workspace:*",
     "@selarikru/inference-firebase-web": "workspace:*",
     "@selarikru/policy": "workspace:*",
+    "@selarikru/ui": "workspace:*",
     "@selarikru/view-protocol": "workspace:*",
     "firebase": "13.1.0",
     "react": "18.3.1",
@@ -32,6 +33,7 @@
     "@vitejs/plugin-react": "6.2.1",
     "tailwindcss": "4.3.5",
     "typescript": "5.9.3",
-    "vite": "8.3.6"
+    "vite": "8.3.6",
+    "vitest": "5.1.0"
   }
 }

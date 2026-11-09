@@ -1,0 +1,26 @@
+{
+  "name": "@selarikru/ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Presentation primitives shared by the operator views: design tokens, status chips, panels, the two-axis location badges and time and quantity formatting. No data access.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tokens.css": "./src/tokens.css"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "@selarikru/view-protocol": "workspace:*" },
+  "peerDependencies": { "react": "18.3.1" },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/react": "18.3.31",
+    "react": "18.3.1",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

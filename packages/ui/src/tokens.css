@@ -1,0 +1,43 @@
+/*
+ * Design tokens. Dark values are the proposed tokens from design section 11; tints, panel-2 and the strong line were added around them.
+ * packages/ui/test/tokens.test.ts measures every text and surface pair in both themes, so a change here that breaks AA fails the build.
+ */
+@theme {
+  --color-bg: #0b1020;
+  --color-panel: #151e30;
+  --color-panel-2: #1b263b;
+  --color-line: #2d3a52;
+  --color-line-strong: #71819c;
+  --color-fg: #f1f5f9;
+  --color-muted: #b8c4d6;
+  --color-active: #70b7ff;
+  --color-success: #70d6a3;
+  --color-warning: #ffd27a;
+  --color-danger: #ff9a9a;
+  --color-active-tint: #15263f;
+  --color-success-tint: #14292b;
+  --color-warning-tint: #2b2517;
+  --color-danger-tint: #2f1a24;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius-card: 8px;
+  --radius-chip: 4px;
+}
+
+:root[data-theme="light"] {
+  --color-bg: #f5f7fa;
+  --color-panel: #ffffff;
+  --color-panel-2: #edf1f6;
+  --color-line: #d5dce6;
+  --color-line-strong: #76839a;
+  --color-fg: #0f172a;
+  --color-muted: #475569;
+  --color-active: #0b5cad;
+  --color-success: #0b6b43;
+  --color-warning: #805000;
+  --color-danger: #b3261e;
+  --color-active-tint: #e5effb;
+  --color-success-tint: #e2f5eb;
+  --color-warning-tint: #fbf1dc;
+  --color-danger-tint: #fcebea;
+}

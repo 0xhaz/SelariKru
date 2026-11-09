@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FirebaseHybridAssistantAdapter, type AssistRequest, type TelemetryEvent } from './adapter.ts';
+import { FirebaseHybridAssistantAdapter, errorCodeOf, type AssistRequest, type TelemetryEvent } from './adapter.ts';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
 
 const GOOD = JSON.stringify({ summary: 'Add a board.', acceptanceCriteria: [{ requirementId: 'FB-01', text: 'Shows posts.' }] });
@@ -357,6 +357,26 @@ describe('readiness and download', () => {
     expect(seen).toEqual([0.5, 1]);
     expect(states).toEqual(['downloading']);
     expect((await adapter.getReadiness()).device).toBe('available');
+  });
+
+  it('an SDK error keeps its stable code and never its message', async () => {
+    const failing = class extends FakeSdk {
+      override createModel(spec: ModelSpec): SdkModel {
+        this.specs.push(spec);
+        return { generate: async () => { throw Object.assign(new Error('prompt text may be quoted here'), { name: 'FirebaseError', code: 'AI/api-not-enabled' }); } };
+      }
+    };
+    const { adapter } = make(new failing());
+    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD') }));
+    expect(p).toMatchObject({ status: 'error', errorName: 'FirebaseError', errorCode: 'AI/api-not-enabled' });
+    expect(JSON.stringify(p)).not.toContain('prompt text');
+  });
+
+  it('errorCodeOf accepts only a plain code string', () => {
+    expect(errorCodeOf({ code: 'auth/network-request-failed' })).toBe('auth/network-request-failed');
+    expect(errorCodeOf({ code: 'has spaces and prompt text' })).toBeNull();
+    expect(errorCodeOf({ code: 42 })).toBeNull();
+    expect(errorCodeOf(new Error('x'))).toBeNull();
   });
 
   it('a failed download surfaces the error and leaves readiness re-read from the SDK', async () => {

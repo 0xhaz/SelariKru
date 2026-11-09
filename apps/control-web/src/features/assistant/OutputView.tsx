@@ -62,6 +62,7 @@ export function OutputView({ result, semantic, onDiscard }: { result: ResultMeta
       <div role="alert" className="rounded-[4px] border border-danger p-3">
         <p className="font-medium text-danger">The request failed</p>
         <p className="mt-1 text-muted">No draft was produced{result.errorName ? ` (${result.errorName})` : ''}. Nothing was retried in the cloud.</p>
+        {result.errorCode ? <p className="mt-2 text-sm text-muted">Error code <span className={mono} data-testid="error-code">{result.errorCode}</span></p> : null}
       </div>
     );
   } else if (result.status === 'invalid') {

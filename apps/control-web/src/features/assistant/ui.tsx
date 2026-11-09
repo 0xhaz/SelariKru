@@ -1,24 +1,7 @@
 import type { ReactNode } from 'react';
-import type { Tone } from './labels.ts';
+import { Chip } from '@selarikru/ui';
 
-const TONE: Record<Tone, string> = {
-  neutral: 'border-line text-muted',
-  active: 'border-active text-active',
-  success: 'border-success text-success',
-  warning: 'border-warning text-warning',
-  danger: 'border-danger text-danger',
-};
-const GLYPH: Record<Tone, string> = { neutral: '○', active: '◆', success: '●', warning: '▲', danger: '■' };
-
-/** Status chip: color is always paired with a glyph and text. */
-export function Chip({ tone, children, testId }: { tone: Tone; children: ReactNode; testId?: string }) {
-  return (
-    <span data-testid={testId} className={`inline-flex items-center gap-1.5 rounded-[4px] border px-2 py-0.5 text-sm ${TONE[tone]}`}>
-      <span aria-hidden="true" className="text-[10px]">{GLYPH[tone]}</span>
-      <span>{children}</span>
-    </span>
-  );
-}
+export { Chip };
 
 export function Card({ title, labelId, hint, children, className = '' }: { title: string; labelId: string; hint?: string; children: ReactNode; className?: string }) {
   return (

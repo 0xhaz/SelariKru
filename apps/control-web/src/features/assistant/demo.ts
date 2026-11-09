@@ -28,5 +28,6 @@ export function demoProposal(op: ProposalOperation, ids: readonly string[]): Ass
     allowedRequirementIds: [...ids],
     blockedReason: null,
     errorName: null,
+    errorCode: null,
   };
 }

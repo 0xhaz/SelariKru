@@ -352,3 +352,12 @@ test.describe('accessibility', () => {
     await scan(page);
   });
 });
+
+test('request-failed screen shows the Firebase error code', async ({ page }) => {
+  await open(page, { proposal: { status: 'error', errorName: 'FirebaseError', errorCode: 'AI/api-not-enabled', observedSource: 'UNKNOWN', rawInferenceSource: null, requestedMode: null } });
+  await generate(page);
+  const output = page.getByRole('region', { name: 'Draft output' });
+  await expect(output).toContainText('The request failed');
+  await expect(output).toContainText('FirebaseError');
+  await expect(output.getByTestId('error-code')).toHaveText('AI/api-not-enabled');
+});

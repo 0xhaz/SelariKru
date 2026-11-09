@@ -25,6 +25,7 @@ export interface ResultMeta {
   readonly schemaErrors: readonly string[];
   readonly blockedReason: string | null;
   readonly errorName: string | null;
+  readonly errorCode: string | null;
   readonly cloudModel: string;
   readonly sdkVersion: string;
   /** Set only for a held restricted draft. */

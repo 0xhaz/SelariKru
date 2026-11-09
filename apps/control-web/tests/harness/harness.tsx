@@ -4,6 +4,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RestrictedDraftHold, type AssistRequest, type AssistantProposal, type Readiness } from '@selarikru/inference-firebase-web';
 import { AssistantPanel, createApiClient, useAssistantStore, type ApiResult, type AssistantApi, type AssistantPort } from '../../src/features/assistant/index.ts';
+import { AppShell } from '../../src/shell/AppShell.tsx';
+import { createProjectionStore } from '../../src/shell/projection-store.ts';
 import '../../src/index.css';
 
 type Op = 'draftBrief' | 'suggestCriteria' | 'draftTaskPlan';
@@ -23,6 +25,8 @@ interface Scenario {
   noApi?: boolean;
   report?: ApiResult<any>;
   realApi?: { baseUrl: string; token: string };
+  /** Mount inside the app shell with no projection source, as a production build runs today. */
+  shell?: boolean;
 }
 
 declare global {
@@ -77,6 +81,7 @@ async function run(op: Op, req: AssistRequest): Promise<AssistantProposal> {
     allowedRequirementIds: [...req.allowedRequirementIds],
     blockedReason: null,
     errorName: null,
+    errorCode: null,
   };
   const merged = { ...base, ...(sc.proposal ?? {}) } as AssistantProposal;
   if (merged.status !== 'ok') return { ...merged, data: null };
@@ -140,8 +145,11 @@ const hold = new RestrictedDraftHold();
 window.__store = useAssistantStore;
 window.__hold = hold;
 
+const panel = <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />;
+const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: { nowMs: () => Date.now() }, every: () => () => {} });
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />
+    {sc.shell ? <AppShell store={store} mode="live" projectLabel="proj-1" account={{ label: 'owner@example.test', onSignOut: () => {} }} assistant={panel} /> : panel}
   </StrictMode>,
 );

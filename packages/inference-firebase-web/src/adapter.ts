@@ -61,6 +61,8 @@ export interface AssistantProposal {
   readonly allowedRequirementIds: readonly string[];
   readonly blockedReason: string | null;
   readonly errorName: string | null;
+  /** The SDK's stable error code (for example `AI/api-not-enabled`) when it gave one. Never the message: that can quote the request. */
+  readonly errorCode: string | null;
 }
 
 /**
@@ -95,6 +97,12 @@ export interface AdapterState {
 }
 
 const UNAVAILABLE_USAGE: ProposalUsage = { status: 'unavailable', inputTokens: null, outputTokens: null, totalTokens: null };
+
+/** The SDK's error code when it is a plain code string. Anything else is dropped, so a message can never reach the UI through this field. */
+export function errorCodeOf(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && /^[\w./-]{1,80}$/.test(code) ? code : null;
+}
 
 export class FirebaseHybridAssistantAdapter {
   private readonly sdk: AssistantSdk;
@@ -190,6 +198,7 @@ export class FirebaseHybridAssistantAdapter {
       allowedRequirementIds: [...req.allowedRequirementIds],
       blockedReason: null,
       errorName: null,
+      errorCode: null,
       ...over,
     });
   }
@@ -233,7 +242,7 @@ export class FirebaseHybridAssistantAdapter {
       this.queue = job.catch(() => undefined);
       result = await job;
     } catch (e) {
-      return make({ status: 'error', requestedMode: routed.mode, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error' });
+      return make({ status: 'error', requestedMode: routed.mode, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
     }
 
     const observedSource = mapInferenceSource(result.inferenceSource);

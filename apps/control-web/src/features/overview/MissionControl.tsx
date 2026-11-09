@@ -1,0 +1,349 @@
+import { useId } from 'react';
+import { AxisBadges, Chip, EmptyState, Panel, Timestamp, buttonPrimary, buttonQuiet, formatAge, formatClock, formatCount, formatDuration, formatExact, formatUsd, toneGlyph, type Tone } from '@selarikru/ui';
+import type { DataSourceError, ProjectViewSnapshot, UsageTotal } from '@selarikru/view-protocol';
+import { hrefFor } from '../../shell/route.ts';
+import type { ConnectionState } from '../../shell/projection-store.ts';
+import type { AttentionItem, AttentionKind } from './attention.ts';
+import type { CriterionCell, DeliveryModel, EvidenceRow, FleetModel, OverviewModel, UsageModel } from './model.ts';
+
+const KIND: Readonly<Record<AttentionKind, { label: string; tone: Tone }>> = {
+  policy_incident: { label: 'Policy block', tone: 'danger' },
+  failed_gate: { label: 'Failed check', tone: 'danger' },
+  decision: { label: 'Decision', tone: 'warning' },
+  worker_lost: { label: 'Connection lost', tone: 'danger' },
+  budget_resource: { label: 'Budget or limit', tone: 'warning' },
+  information: { label: 'Update', tone: 'neutral' },
+};
+const RAIL: Readonly<Record<Tone, string>> = { neutral: 'border-l-line-strong', active: 'border-l-active', success: 'border-l-success', warning: 'border-l-warning', danger: 'border-l-danger' };
+const TINT: Readonly<Record<Tone, string>> = { neutral: '', active: 'bg-active-tint', success: 'bg-success-tint', warning: 'bg-warning-tint', danger: 'bg-danger-tint' };
+const CELL: Readonly<Record<CriterionCell, string>> = { verified: 'bg-success', failed: 'bg-danger', held: 'bg-warning', active: 'bg-active', pending: 'bg-line' };
+
+function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: boolean; titles: Readonly<Record<string, string>>; nowMs: number }) {
+  const k = KIND[item.kind];
+  const n = item.affectedTaskIds.length;
+  return (
+    <li className={`rounded-[4px] border border-line border-l-4 p-3 ${RAIL[k.tone]} ${top ? TINT[k.tone] : ''}`} data-testid="attention-item" data-kind={item.kind}>
+      <div className="grid gap-x-6 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,20rem)]">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip tone={k.tone}>{k.label}</Chip>
+            {item.status === 'expired' ? <Chip tone="danger">Expired</Chip> : null}
+            <span className="text-sm text-muted">
+              {item.kind === 'information' ? 'Noted' : 'Waiting'} <Timestamp iso={item.since}>{formatAge(nowMs - Date.parse(item.since))}</Timestamp>
+            </span>
+          </div>
+          <p className={`mt-2 font-medium ${top ? 'text-lg' : ''} text-fg`}>{item.title}</p>
+          <p className="mt-0.5 text-muted">{item.detail}</p>
+          <p className="mt-1 text-sm text-muted">If nothing changes: {item.consequence}</p>
+        </div>
+        <div>
+          <p className="text-sm font-medium text-muted">Next action</p>
+          <p className="mt-0.5 text-fg">{item.nextAction}</p>
+        </div>
+      </div>
+      <details className="mt-2 text-sm text-muted">
+        <summary className="cursor-pointer">Details</summary>
+        <dl className="mt-2 grid gap-x-3 gap-y-1 sm:grid-cols-[auto_1fr]">
+          <dt>Reason code</dt>
+          <dd className="break-all font-mono text-[13px]">{item.code ?? 'None reported'}</dd>
+          <dt>Started</dt>
+          <dd>{formatExact(item.since)}</dd>
+          <dt>Affected tasks ({n})</dt>
+          <dd>{item.affectedTaskIds.map((id) => titles[id] ?? id).join(', ')}</dd>
+          <dt>Owner</dt>
+          <dd>{item.owner}</dd>
+        </dl>
+      </details>
+    </li>
+  );
+}
+
+function AttentionQueue({ items, titles, nowMs, stale }: { items: readonly AttentionItem[]; titles: Readonly<Record<string, string>>; nowMs: number; stale: boolean }) {
+  return (
+    <Panel title="Attention" labelId="attention-title">
+      {items.length === 0 ? (
+        <p className="text-muted">{stale ? 'No decisions were waiting at the last confirmed state.' : 'No decisions waiting.'}</p>
+      ) : (
+        <ol className="space-y-3">
+          {items.map((item, i) => <AttentionRow key={item.id} item={item} top={i === 0 && item.kind !== 'information'} titles={titles} nowMs={nowMs} />)}
+        </ol>
+      )}
+    </Panel>
+  );
+}
+
+const STAGES = [
+  { lifecycle: 'planning', label: 'Planning' },
+  { lifecycle: 'running', label: 'Running' },
+  { lifecycle: 'ready_for_review', label: 'Ready for review' },
+  { lifecycle: 'merged', label: 'Merged' },
+] as const;
+const RUN_LABEL: Readonly<Record<string, { label: string; tone: Tone }>> = {
+  blocked: { label: 'Blocked', tone: 'warning' }, failed: { label: 'Failed', tone: 'danger' }, cancelled: { label: 'Cancelled', tone: 'neutral' },
+};
+/** The lifecycles the stage rail cannot show on its own. */
+const OFF_RAIL: readonly string[] = Object.keys(RUN_LABEL);
+
+function RunStages({ lifecycle }: { lifecycle: string }) {
+  const effective = lifecycle === 'blocked' ? 'running' : lifecycle;
+  const index = STAGES.findIndex((s) => s.lifecycle === effective);
+  return (
+    <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+      {STAGES.map((s, i) => (
+        <li key={s.lifecycle} className="flex items-center gap-2" aria-current={i === index ? 'step' : undefined}>
+          {i > 0 ? <span aria-hidden="true" className="text-muted">›</span> : null}
+          <span className={i === index ? 'font-semibold text-fg' : 'text-muted'}>{s.label}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolean }) {
+  const run = model.run;
+  const countable = model.tasks.filter((t) => t.cell !== null);
+  return (
+    <Panel title="Delivery" labelId="delivery-title">
+      <p className="text-2xl font-semibold tracking-tight" data-testid="criteria">{model.criteriaLabel}</p>
+      {countable.length > 0 ? (
+        <div aria-hidden="true" className="mt-3 flex max-w-md gap-1">
+          {countable.map((t) => <span key={t.taskId} className={`h-2 flex-1 rounded-[2px] ${CELL[t.cell!]}`} />)}
+        </div>
+      ) : null}
+      {run ? (
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-sm text-muted">Run stage</span>
+          {OFF_RAIL.includes(run.lifecycle) ? <Chip tone={RUN_LABEL[run.lifecycle]!.tone}>Run {RUN_LABEL[run.lifecycle]!.label.toLowerCase()}</Chip> : null}
+          <RunStages lifecycle={run.lifecycle} />
+        </div>
+      ) : null}
+      <p className="mt-3 text-sm" data-testid="critical-path">
+        <span className="text-muted">Critical path: </span>
+        <span className={model.blocker ? 'text-warning' : 'text-muted'}>{model.blocker ?? (stale ? 'no blocker at the last confirmed state' : 'no blocker right now')}</span>
+      </p>
+      {model.tasks.length > 0 ? (
+        <ul className="mt-4 divide-y divide-line border-t border-line">
+          {model.tasks.map((t) => (
+            <li key={t.taskId} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2">
+              <span className="min-w-0">
+                <span className="text-fg">{t.title}</span>
+                {t.role ? <span className="ml-2 text-sm text-muted">{t.role}</span> : null}
+              </span>
+              <Chip tone={t.tone}>{t.statusLabel}</Chip>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="mt-3 text-muted">No criteria recorded for this run yet.</p>}
+    </Panel>
+  );
+}
+
+function FleetPanel({ model }: { model: FleetModel }) {
+  const { working, waiting, idle, lost } = model.summary;
+  const parts = [`${working} working`, `${waiting} waiting`, `${idle} idle`, ...(lost > 0 ? [`${lost} lost`] : [])];
+  return (
+    <Panel title="Fleet" labelId="fleet-title" aside={model.rows.length > 0 ? parts.join(' · ') : null}>
+      {model.rows.length === 0 ? (
+        <p className="text-muted">No workers have started.</p>
+      ) : (
+        <ul className="space-y-3">
+          {model.rows.map((w) => (
+            <li key={w.workerId} className="rounded-[4px] border border-line bg-panel-2 p-3" data-testid="fleet-row">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                <span className="min-w-0">
+                  <span className="font-medium capitalize text-fg">{w.role ?? 'Unassigned'}</span>
+                  <span className="ml-2 break-all font-mono text-[13px] text-muted">{w.workerId}</span>
+                </span>
+              </div>
+              {w.taskTitle ? <p className="mt-0.5 text-sm text-muted">{w.taskTitle}</p> : null}
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Chip tone={w.activity.tone}>{w.activity.label}</Chip>
+                <Chip tone={w.health.tone}>
+                  {w.health.state === 'disconnected' ? (
+                    <>Connection lost; state last confirmed <Timestamp iso={w.lastConfirmedAt}>{formatClock(w.lastConfirmedAt)}</Timestamp></>
+                  ) : w.health.label}
+                </Chip>
+                {w.heartbeatAgeMs !== null && w.health.state === 'healthy' ? <span className="self-center text-sm text-muted">Heartbeat {formatAge(w.heartbeatAgeMs)} ago</span> : null}
+              </div>
+              <div className="mt-2">
+                <AxisBadges execution={w.execution} modelRoute={w.modelRoute} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+function EvidencePanel({ rows, simulated }: { rows: readonly EvidenceRow[]; simulated: boolean }) {
+  return (
+    <Panel title="Recent evidence" labelId="evidence-title" aside={simulated ? 'Simulated, not evidence' : null}>
+      {rows.length === 0 ? (
+        <p className="text-muted">No checks have reported yet.</p>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((r) => (
+            <li key={r.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <span className="flex min-w-0 flex-wrap items-center gap-2">
+                <Chip tone={r.tone}>{r.stateLabel}</Chip>
+                <span className="text-fg">{r.summary}</span>
+                {r.subject ? <span className="text-sm text-muted">{r.subject}</span> : null}
+              </span>
+              <span className="text-sm text-muted"><Timestamp iso={r.at}>{formatClock(r.at)}</Timestamp></span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+function Stat({ label, value, note, chip }: { label: string; value: string; note?: string | undefined; chip?: { tone: Tone; text: string } | undefined }) {
+  return (
+    <div className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-0.5 py-2">
+      <dt className="text-sm text-muted">{label}</dt>
+      <dd className="m-0 flex flex-wrap items-center justify-end gap-2">
+        <span className="font-semibold text-fg">{value}</span>
+        {chip ? <Chip tone={chip.tone}>{chip.text}</Chip> : null}
+      </dd>
+      {note ? <dd className="col-span-2 m-0 text-sm text-muted">{note}</dd> : null}
+    </div>
+  );
+}
+
+const PROVENANCE_CHIP: Readonly<Record<string, { tone: Tone; text: string }>> = { observed: { tone: 'success', text: 'Observed' }, estimated: { tone: 'warning', text: 'Estimated' } };
+
+/** Unknown is never zero. A total only appears when every figure is known; otherwise it reads as unknown, with the known part labelled as a lower bound. */
+function usageStat(label: string, total: UsageTotal, format: (q: string) => string) {
+  if (total.figureCount === 0) return <Stat label={label} value="Not reported" />;
+  if (total.total === null) {
+    const note = total.knownSubtotal !== null
+      ? `At least ${format(total.knownSubtotal)} known; ${total.unavailableCount} of ${total.figureCount} figures unavailable`
+      : 'Unavailable from the source';
+    return <Stat label={label} value="Unknown" note={note} chip={{ tone: 'neutral', text: 'Unavailable' }} />;
+  }
+  return <Stat label={label} value={format(total.total)} chip={PROVENANCE_CHIP[total.provenance]} />;
+}
+
+function ResourcesPanel({ model }: { model: UsageModel }) {
+  const { running, local, cloud, unknown } = model.capacity;
+  const where = [`${local} in local sandbox`, `${cloud} in cloud sandbox`, ...(unknown > 0 ? [`${unknown} location unknown`] : [])].join(', ');
+  return (
+    <Panel title="Resources and usage" labelId="resources-title">
+      <dl className="divide-y divide-line">
+        <Stat label="Workers running" value={String(running)} note={`${where}. Slot limit not in this view.`} />
+        {usageStat('Model spend', model.spend, formatUsd)}
+        {usageStat('Input tokens', model.inputTokens, formatCount)}
+        {usageStat('Output tokens', model.outputTokens, formatCount)}
+        {usageStat('Worker time', model.workerSeconds, formatDuration)}
+        <Stat label="Assistant inference" value={model.assistant.requested} note={model.assistant.observed ?? undefined} />
+      </dl>
+    </Panel>
+  );
+}
+
+function EmptyProject() {
+  return (
+    <section aria-label="Project setup" className="rounded-[8px] border border-line bg-panel">
+      <EmptyState title="No run in this project yet" action={<a className={buttonPrimary} href={hrefFor('assistant')}>Open the Assistant</a>}>
+        <p>Start by drafting acceptance criteria and a task plan. Mission Control fills in once a plan is accepted and work begins.</p>
+      </EmptyState>
+    </section>
+  );
+}
+
+const STATE_COPY = {
+  unavailable: { live: 'Live project data is not connected to this build yet. No demo or placeholder data is shown in its place.', mock: 'The demo source did not return a snapshot.' },
+};
+
+function ConnectionBanner({ connection, error, onRestart, observedAt }: { connection: ConnectionState; error: DataSourceError | null; onRestart: () => void; observedAt: string | null }) {
+  const headingId = useId();
+  if (connection !== 'reconnecting' && connection !== 'dead') return null;
+  const dead = connection === 'dead';
+  return (
+    <section aria-labelledby={headingId} className={`mb-4 rounded-[4px] border border-l-4 p-3 ${dead ? 'border-danger bg-danger-tint' : 'border-warning bg-warning-tint'}`} data-testid="connection-banner">
+      <h2 id={headingId} className={`font-medium ${dead ? 'text-danger' : 'text-warning'}`}>{dead ? 'The event stream stopped' : 'Reconnecting to the event stream'}</h2>
+      <p className="mt-0.5 text-fg">
+        {dead ? 'What you see is frozen at the last confirmed state' : 'Showing the last confirmed state'}{observedAt ? ` from ${formatClock(observedAt)}` : ''}. Worker health reads as unknown, and no action is taken on stale data.
+      </p>
+      {error ? <p className="mt-1 text-sm text-muted">Error category <span className="font-mono text-[13px]">{error.code}</span>{error.retryable ? ', retrying' : ', not retryable'}</p> : null}
+      {dead ? <button type="button" className={`${buttonQuiet} mt-2`} onClick={onRestart}>Restart session</button> : null}
+    </section>
+  );
+}
+
+function titlesOf(snapshot: ProjectViewSnapshot): Record<string, string> {
+  return Object.fromEntries(Object.values(snapshot.tasks).map((t) => [t.taskId, t.title ?? t.taskId]));
+}
+
+export interface MissionControlProps {
+  readonly connection: ConnectionState;
+  readonly error: DataSourceError | null;
+  readonly overview: OverviewModel | null;
+  readonly snapshot: ProjectViewSnapshot | null;
+  readonly confirmedAt: string | null;
+  readonly nowMs: number;
+  readonly mode: 'mock' | 'live';
+  readonly onRestart: () => void;
+}
+
+export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart }: MissionControlProps) {
+  if (!overview || !snapshot) {
+    if (connection === 'unavailable') {
+      return (
+        <>
+          <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+          <section aria-label="Connection" className="mt-4 rounded-[8px] border border-line bg-panel">
+            <EmptyState title="Project data is unavailable" action={<a className={buttonQuiet} href={hrefFor('assistant')}>Open the Assistant</a>}>
+              <p>{STATE_COPY.unavailable[mode]}</p>
+              {error ? <p className="mt-2 text-sm">Error category <span className="font-mono text-[13px]">{error.code}</span></p> : null}
+            </EmptyState>
+          </section>
+        </>
+      );
+    }
+    return (
+      <>
+        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <p role="status" className="mt-4 text-muted">Loading project state</p>
+      </>
+    );
+  }
+  if (overview.empty) {
+    return (
+      <>
+        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
+        <div className="mt-4"><EmptyProject /></div>
+      </>
+    );
+  }
+  // A frozen or reconnecting screen must not reassure the operator about the present.
+  const stale = connection !== 'live';
+  return (
+    <>
+      <div className="mb-5">
+        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <p className="mt-1 text-lg text-muted" data-testid="headline">
+          {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-[12px] text-warning">{toneGlyph('warning')}</span> : null}
+          {stale && overview.needsYou === 0 ? 'Nothing was waiting at the last confirmed state.' : overview.headline}
+        </p>
+      </div>
+      <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
+      <div className="grid gap-4">
+        <AttentionQueue items={overview.attention} titles={titlesOf(snapshot)} nowMs={nowMs} stale={stale} />
+        <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <div className="grid gap-4">
+            <DeliverySummary model={overview.delivery} stale={stale} />
+            <EvidencePanel rows={overview.evidence} simulated={overview.simulated} />
+          </div>
+          <div className="grid gap-4">
+            <FleetPanel model={overview.fleet} />
+            <ResourcesPanel model={overview.usage} />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AssistRequest, AssistantProposal, RestrictedDraftHold } from '@selarikru/inference-firebase-web';
+import { errorCodeOf, type AssistRequest, type AssistantProposal, type RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { validateProposal, type ProposalValidation } from '@selarikru/domain';
 import { demoProposal } from './demo.ts';
 import { briefById } from './fixtures.ts';
@@ -21,11 +21,11 @@ export interface AssistantPanelProps {
   readonly defaults?: { readonly projectId: string; readonly runId: string };
 }
 
-const ERROR_PROPOSAL = (op: AssistantProposal['operation'], ids: readonly string[], name: string): AssistantProposal => ({
+const ERROR_PROPOSAL = (op: AssistantProposal['operation'], ids: readonly string[], name: string, code: string | null): AssistantProposal => ({
   trust: 'untrusted_proposal', status: 'error', operation: op, data: null, requestId: 'none', requestedMode: null, observedSource: 'UNKNOWN',
   rawInferenceSource: null, model: { cloudModel: '', sdkVersion: '' }, timing: { totalMs: 0, firstOutputMs: null },
   usage: { status: 'unavailable', inputTokens: null, outputTokens: null, totalTokens: null }, validation: { status: 'not_run', errors: [] },
-  payloadSha256: null, allowedRequirementIds: [...ids], blockedReason: null, errorName: name,
+  payloadSha256: null, allowedRequirementIds: [...ids], blockedReason: null, errorName: name, errorCode: code,
 });
 
 export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelProps) {
@@ -105,7 +105,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
       try {
         p = await adapter[operation](req);
       } catch (e) {
-        p = ERROR_PROPOSAL(operation, ids, e instanceof Error ? e.name : 'Error');
+        p = ERROR_PROPOSAL(operation, ids, e instanceof Error ? e.name : 'Error', errorCodeOf(e));
       }
     }
     // A newer request, or a selection change, superseded this one: drop it.
@@ -120,7 +120,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
       requestId: p.requestId, operation, status: p.status, demo: effectiveDemo, restricted: brief.restricted, briefId: brief.id, runId: target.runId, baseline: [...ids],
       selectedMode: mode, requestedMode: p.requestedMode, observedSource: p.observedSource, rawInferenceSource: p.rawInferenceSource,
       totalMs: p.timing.totalMs, schemaStatus: p.validation.status, schemaErrors: p.validation.errors, blockedReason: p.blockedReason,
-      errorName: p.errorName, cloudModel: p.model.cloudModel, sdkVersion: p.model.sdkVersion, draftId, proposal: brief.restricted ? null : p,
+      errorName: p.errorName, errorCode: p.errorCode, cloudModel: p.model.cloudModel, sdkVersion: p.model.sdkVersion, draftId, proposal: brief.restricted ? null : p,
     };
     setResult(meta);
     setGenerating(false);

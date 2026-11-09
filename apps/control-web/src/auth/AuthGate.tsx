@@ -1,10 +1,10 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, type Auth, type User } from 'firebase/auth';
+import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, type Auth, type User } from 'firebase/auth';
 
 const input = 'w-full rounded-[4px] border border-line bg-bg px-2 py-2 text-fg';
 const button = 'rounded-[4px] px-3 py-2 text-sm font-medium disabled:opacity-50';
 
-/** Minimal Firebase Auth gate. T5.2 replaces it with the real shell. */
+/** Firebase Auth gate. The signed-in frame, including sign-out, belongs to the shell. */
 export function AuthGate({ auth, emulator, children }: { auth: Auth; emulator: boolean; children: (user: User) => ReactNode }) {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -57,13 +57,5 @@ export function AuthGate({ auth, emulator, children }: { auth: Auth; emulator: b
       </main>
     );
   }
-  return (
-    <>
-      <div className="flex items-center justify-end gap-3 border-b border-line bg-panel px-4 py-2 text-sm">
-        <span className="text-muted">Signed in as <span className="font-mono text-[13px]">{user.email ?? user.uid}</span></span>
-        <button type="button" className={`${button} border border-line bg-panel-2 text-fg`} onClick={() => void signOut(auth)}>Sign out</button>
-      </div>
-      {children(user)}
-    </>
-  );
+  return <>{children(user)}</>;
 }

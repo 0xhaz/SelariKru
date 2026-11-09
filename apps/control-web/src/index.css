@@ -1,25 +1,15 @@
 @import "tailwindcss";
 
-/* Dark tokens from docs/design.md section 11. Starting values; contrast of the used pairs is checked by the axe tests. */
-@theme {
-  --color-bg: #0b1020;
-  --color-panel: #151e30;
-  --color-panel-2: #1b263b;
-  --color-line: #2d3a52;
-  --color-fg: #f1f5f9;
-  --color-muted: #b8c4d6;
-  --color-active: #70b7ff;
-  --color-success: #70d6a3;
-  --color-warning: #ffd27a;
-  --color-danger: #ff9a9a;
-  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --radius-card: 8px;
-  --radius-chip: 4px;
-}
+@import "@selarikru/ui/tokens.css";
+@source "../../../packages/ui/src";
 
 :root {
   color-scheme: dark;
+  /* The sticky header must never cover a focused element (WCAG 2.2, 2.4.11). */
+  scroll-padding-top: 8rem;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 body {
