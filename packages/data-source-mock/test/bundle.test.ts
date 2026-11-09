@@ -9,8 +9,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 const webRoot = resolve(import.meta.dirname, '../../../apps/control-web');
 
-/** Strings that exist only in the mock package (fixture ids, terminal text). If any is in built output, the mock leaked. */
-const NEEDLES = ['demo-healthy-parallel-work', 'demo-runner-loss', 'demo-unknown-costs', '[demo] this is fixture text, not a real terminal'];
+/** Strings that exist only in the mock package (fixture descriptions, terminal text). If any is in built output, the mock leaked. */
+const NEEDLES = ['Two workers run in parallel, one local sandbox', 'A project with no runs, tasks, workers or usage', '[demo] this is fixture text, not a real terminal', 'Feedback list UI (contract v2)'];
 
 const out: string[] = [];
 const execFileAsync = promisify(execFile);

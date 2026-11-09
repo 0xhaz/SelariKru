@@ -47,7 +47,7 @@ describe('mock module makes zero network calls', () => {
         await ds.execute({ command: 'task.cancel', expectedRevision: t.aggregateRevision, idempotencyKey: `${p.projectId}:${t.taskId}`, args: { taskId: t.taskId } });
       }
       for (const a of Object.values(snap.approvals)) {
-        await ds.execute({ command: 'approval.deny', expectedRevision: 0, idempotencyKey: `${p.projectId}:${a.approvalId}`, args: { approvalId: a.approvalId, scopeHash: a.scopeHash ?? 'x' } });
+        await ds.execute({ command: 'approval.deny', expectedRevision: snap.tasks[a.taskId ?? '']?.aggregateRevision ?? 0, idempotencyKey: `${p.projectId}:${a.approvalId}`, args: { approvalId: a.approvalId, scopeHash: a.scopeHash ?? 'x' } });
       }
       for (const at of Object.values(snap.attempts)) {
         const ch = await ds.openTerminal({ taskId: at.taskId, attemptId: at.attemptId, expectedRevision: 0 });

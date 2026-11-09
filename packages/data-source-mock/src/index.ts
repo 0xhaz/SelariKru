@@ -1,6 +1,6 @@
 export { createSeededClock, type VirtualClock } from './clock.ts';
 export { mulberry32, seededId } from './prng.ts';
-export { FIXTURE_T0_MS, fixtureTime, type Fixture, type FixtureId } from './builder.ts';
+export { FIXTURE_T0_MS, fixtureTime, scoped, type Fixture, type FixtureId, type TaskSeed, type ApprovalSeed, type Silence } from './builder.ts';
 export { FIXTURE_IDS, buildAllFixtures, buildFixture } from './fixtures.ts';
 export { createMockDataSource, type MockDataSource, type MockOptions } from './source.ts';
 import { createMockDataSource, type MockDataSource } from './source.ts';

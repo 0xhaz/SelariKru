@@ -7,6 +7,7 @@ export const FIXTURE_T0_MS = Date.parse('2026-11-16T09:00:00.000Z');
 export const fixtureTime = (sec: number): string => new Date(FIXTURE_T0_MS + sec * 1000).toISOString();
 
 export const SCHEDULER: Actor = { kind: 'scheduler', id: 'scheduler' };
+export const SYSTEM: Actor = { kind: 'system', id: 'control-plane' };
 export const HUMAN: Actor = { kind: 'human', id: 'demo-operator' };
 export const VERIFIER: Actor = { kind: 'verifier', id: 'verifier' };
 export const REAPER: Actor = { kind: 'system', id: 'lease_reaper' };
@@ -15,6 +16,32 @@ export const runnerActor = (runnerId: string): Actor => ({ kind: 'worker', id: r
 export type FixtureId =
   | 'healthy-parallel-work' | 'human-wait' | 'policy-block' | 'runner-loss' | 'long-build-stall'
   | 'contract-change' | 'failed-ci' | 'expired-approval' | 'unknown-costs' | 'no-data';
+
+/** What a live snapshot knows about a task that events do not say. The mock plays the server: it seeds these when the plan is accepted. */
+export interface TaskSeed {
+  readonly taskId: string;
+  readonly revision: number;
+  /** The plan revision that introduced this task revision. */
+  readonly planRevision: number;
+  readonly title: string;
+  readonly role: string;
+  readonly dependsOn: readonly string[];
+}
+
+/** An approval's id, scope and expiry are on the server, not yet in `approval.requested`. The mock attaches them to the matching task's request. */
+export interface ApprovalSeed {
+  readonly approvalId: string;
+  readonly taskId: string | null;
+  readonly scopeHash: string;
+  readonly reason: string;
+  readonly expiresAt: string;
+}
+
+/** Heartbeats stop at `fromSec` and resume at `toSec` (never when null). Heartbeats are not events: this shapes the snapshot's liveness only. */
+export interface Silence {
+  readonly fromSec: number;
+  readonly toSec: number | null;
+}
 
 export interface Fixture {
   readonly id: FixtureId;
@@ -26,81 +53,118 @@ export interface Fixture {
   readonly events: readonly ProjectViewEvent[];
   readonly usage: readonly UsageEntry[];
   readonly assistant: AssistantView;
+  readonly tasks: readonly TaskSeed[];
+  readonly approvals: readonly ApprovalSeed[];
+  readonly silences: Readonly<Record<string, Silence>>;
 }
 
+/** Ids are namespaced per fixture so a command or terminal request can only ever match one project. */
+export const scoped = (fixtureId: FixtureId, local: string): string => `${fixtureId}.${local}`;
+
 interface EmitOptions {
-  taskId?: string;
-  attemptId?: string | null;
+  /** Local task name; omitted for run-level events. */
+  task?: string;
+  attempt?: string;
   actor?: Actor;
   payload?: Record<string, unknown>;
   /** Events written in the same transaction share an aggregate revision (as `attempt.started` and `placement.decided` do). */
   bump?: boolean;
 }
 
-/** Builds a deterministic, ordered event stream out of real domain event names. Ids come from the seeded PRNG. */
+/** Builds a deterministic, ordered stream of real domain events. Ids come from the seeded PRNG; local names are namespaced here. */
 export class FixtureBuilder {
   readonly events: ProjectViewEvent[] = [];
+  readonly projectId: string;
+  readonly runId: string;
+  readonly taskSeeds: TaskSeed[] = [];
+  readonly approvalSeeds: ApprovalSeed[] = [];
+  readonly silences: Record<string, Silence> = {};
   private readonly next: () => number;
   private readonly revisions = new Map<string, number>();
 
-  constructor(
-    readonly projectId: string,
-    readonly runId: string,
-    seed: number,
-  ) {
+  constructor(readonly slug: FixtureId, seed: number) {
+    this.projectId = `demo-${slug}`;
+    this.runId = scoped(slug, 'run');
     this.next = mulberry32(seed);
   }
 
+  id(local: string): string {
+    return scoped(this.slug, local);
+  }
+
+  task(local: string, seed: { title: string; role: string; dependsOn?: string[]; revision?: number; planRevision?: number }): this {
+    this.taskSeeds.push({
+      taskId: this.id(local), revision: seed.revision ?? 1, planRevision: seed.planRevision ?? 1, title: seed.title, role: seed.role,
+      dependsOn: (seed.dependsOn ?? []).map((d) => this.id(d)),
+    });
+    return this;
+  }
+
+  approval(local: string, seed: { task: string | null; scopeHash: string; reason: string; expiresAtSec: number }): this {
+    this.approvalSeeds.push({ approvalId: this.id(local), taskId: seed.task === null ? null : this.id(seed.task), scopeHash: seed.scopeHash, reason: seed.reason, expiresAt: fixtureTime(seed.expiresAtSec) });
+    return this;
+  }
+
+  silence(attemptLocal: string, fromSec: number, toSec: number | null): this {
+    this.silences[this.id(attemptLocal)] = { fromSec, toSec };
+    return this;
+  }
+
   emit(type: EventType, sec: number, o: EmitOptions = {}): this {
-    const taskId = o.taskId ?? this.runId;
+    const taskId = o.task === undefined ? this.runId : this.id(o.task);
     const rev = (this.revisions.get(taskId) ?? 0) + (o.bump === false ? 0 : 1);
     this.revisions.set(taskId, rev);
     const at = fixtureTime(sec);
     this.events.push({
-      schemaVersion: 1, eventId: seededId(this.next, 'evt'), projectId: this.projectId, runId: this.runId, taskId, attemptId: o.attemptId ?? null,
+      schemaVersion: 1, eventId: seededId(this.next, 'evt'), projectId: this.projectId, runId: this.runId, taskId,
+      attemptId: o.attempt === undefined ? null : this.id(o.attempt),
       type, sequence: this.events.length + 1, aggregateRevision: rev, actor: o.actor ?? SCHEDULER, occurredAt: at, receivedAt: at,
       causationId: null, traceId: `trace_${this.projectId}`, payload: o.payload ?? {}, provenance: 'simulated',
     });
     return this;
   }
 
-  run(planRevision = 1): this {
-    return this.emit('run.created', 0, { actor: HUMAN, payload: { lifecycle: 'planning' } }).emit('plan.accepted', 1, { payload: { planRevision, lifecycle: 'running' } });
+  /** `run.created`, then `plan.accepted` with the real payload shape (revision, task ids, who accepted it). */
+  plan(planRevision: number, tasks: readonly string[], sec = 1): this {
+    if (planRevision === 1) this.emit('run.created', 0, { actor: HUMAN });
+    return this.emit('plan.accepted', sec, { actor: SYSTEM, payload: { planRevision, taskIds: tasks.map((t) => this.id(t)), acceptedFor: 'demo-operator' } });
   }
 
-  ready(taskId: string, sec: number, title: string, role: string, extra: Record<string, unknown> = {}): this {
-    return this.emit('task.ready', sec, { taskId, payload: { title, role, reason: 'dependencies_satisfied', ...extra } });
+  ready(task: string, sec: number, reason = 'dependencies_satisfied'): this {
+    return this.emit('task.ready', sec, { task, payload: { reason } });
   }
 
-  start(taskId: string, attemptId: string, sec: number, runnerId: string, location: 'local' | 'cloud', modelRoute: 'device' | 'cloud' | 'unknown', n = 1, fence = n): this {
-    return this.emit('attempt.started', sec, { taskId, attemptId, payload: { fence, attemptNumber: n, runnerId, location, modelRoute } })
-      .emit('placement.decided', sec, {
-        taskId, attemptId, bump: false,
-        payload: { target: location, reason: location === 'local' ? 'local_slot_free' : 'execution_cloud', modelRoute, ...(location === 'cloud' ? { destination: 'sandbox-cloud' } : {}) },
-      });
+  /** Claim: `attempt.started` then `placement.decided` in one revision. `modelRoute` is the one extra field (see the report). */
+  start(task: string, attempt: string, sec: number, runnerId: string, location: 'local' | 'cloud', modelRoute: 'device' | 'cloud' | 'unknown', n = 1): this {
+    return this.emit('attempt.started', sec, {
+      task, attempt, payload: { fence: n, attemptNumber: n, runnerId, location, reservationId: `rsv_${attempt}_${n}`, amountUsd: 1, modelRoute },
+    }).emit('placement.decided', sec, {
+      task, attempt, bump: false,
+      payload: { target: location, reason: location === 'local' ? 'local_slot_free' : 'execution_cloud', mode: 'local-first', runnerId, ...(location === 'cloud' ? { destination: 'sandbox-cloud' } : {}) },
+    });
   }
 
-  beat(taskId: string, attemptId: string, runnerId: string, sec: number, payload: Record<string, unknown> = {}, fence = 1): this {
-    return this.emit('attempt.heartbeat', sec, { taskId, attemptId, actor: runnerActor(runnerId), bump: false, payload: { fence, ...payload } });
+  complete(task: string, attempt: string, sec: number, runnerId: string, fence = 1): this {
+    return this.emit('attempt.completed', sec, { task, attempt, actor: runnerActor(runnerId), payload: { fence } });
   }
 
-  /** Heartbeats every 10 s (the real interval) from `from` to `to`, inclusive. */
-  beats(taskId: string, attemptId: string, runnerId: string, from: number, to: number, payload: (sec: number) => Record<string, unknown> = () => ({}), fence = 1): this {
-    for (let s = from; s <= to; s += 10) this.beat(taskId, attemptId, runnerId, s, payload(s), fence);
-    return this;
+  /** The verifier's verdict. A failure is followed, in the same transaction, by `task.ready` (repair scheduled). */
+  verdict(task: string, attempt: string, sec: number, outcome: 'passed' | 'failed', detail: { checkId: string; summary: string }): this {
+    this.emit(outcome === 'passed' ? 'verification.passed' : 'verification.failed', sec, { task, attempt, actor: VERIFIER, payload: { ...detail } });
+    return outcome === 'failed' ? this.emit('task.ready', sec, { task, attempt, bump: false, payload: { reason: 'repair_scheduled' } }) : this;
   }
 
   /** Sorted by time then insertion order, with sequences renumbered from 1: the order a real feed would deliver. */
-  build(): ProjectViewEvent[] {
+  buildEvents(): ProjectViewEvent[] {
     return this.events
       .map((e, i) => ({ e, i }))
       .sort((a, b) => Date.parse(a.e.occurredAt) - Date.parse(b.e.occurredAt) || a.i - b.i)
       .map(({ e }, i) => ({ ...e, sequence: i + 1 }));
   }
+
+  use(task: string | null, attempt: string | null, fig: UsageFigure): UsageEntry {
+    return { entryId: `usg_${task ?? 'run'}_${attempt ?? 'all'}_${fig.metric}_${this.slug}`, runId: this.runId, taskId: task === null ? null : this.id(task), attemptId: attempt === null ? null : this.id(attempt), figure: fig };
+  }
 }
 
 export const figure = (metric: UsageFigure['metric'], quantity: string | null, provenance: UsageFigure['provenance'], source: string): UsageFigure => ({ metric, quantity, provenance, source });
-
-export function usageEntry(runId: string, taskId: string | null, attemptId: string | null, fig: UsageFigure): UsageEntry {
-  return { entryId: `usg_${taskId ?? runId}_${attemptId ?? 'all'}_${fig.metric}`, runId, taskId, attemptId, figure: fig };
-}

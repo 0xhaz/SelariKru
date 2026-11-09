@@ -29,6 +29,8 @@ export const RunViewSchema = z
     runId: Id,
     lifecycle: z.enum(RUN_STATUSES),
     planRevision: z.number().int().min(0),
+    /** Latest run-level evidence (candidate assembled, change proposed or merged). Run-level events never create tasks. */
+    latestEvidence: EvidenceRefSchema.nullable(),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;
@@ -41,7 +43,8 @@ export const TaskViewSchema = z
     aggregateRevision: z.number().int().min(0),
     title: z.string().nullable(),
     role: z.string().nullable(),
-    dependsOn: z.array(Id),
+    /** Null means unknown (events do not carry dependencies): it is filled from a snapshot. An empty list means no dependencies. */
+    dependsOn: z.array(Id).nullable(),
     status: z.enum(TASK_STATUSES),
     /** Why the task is in its status, when the scheduler said (block reason, failure reason). Null means nothing was said. */
     statusReason: z.string().nullable(),
@@ -123,7 +126,8 @@ export type ApprovalView = z.infer<typeof ApprovalViewSchema>;
 export const CheckViewSchema = z
   .object({
     checkId: Id,
-    taskId: Id,
+    /** Null for a run-level check (a failed candidate). */
+    taskId: Id.nullable(),
     state: z.enum(['running', 'passed', 'failed']),
     summary: z.string().nullable(),
     updatedAt: Iso,

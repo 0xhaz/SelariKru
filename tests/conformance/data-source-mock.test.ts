@@ -6,7 +6,7 @@ dataSourceConformance('mock over the ten named fixtures', async () => {
   const source = createMockDataSource({ clock });
   return {
     source,
-    busyProjectId: 'demo-healthy-parallel-work',
+    busyProjectId: 'demo-unknown-costs',
     emptyProjectId: 'demo-no-data',
     unknownProjectId: 'demo-does-not-exist',
     async advance() {

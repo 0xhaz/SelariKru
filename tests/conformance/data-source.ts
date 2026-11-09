@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  DataSourceException, ProjectViewEventSchema, ProjectViewSnapshotSchema, TERMINAL_MAX_LINES, applyEvents, emptySnapshot, projectionFromSnapshot,
+  DataSourceException, ProjectViewEventSchema, ProjectViewSnapshotSchema, TERMINAL_MAX_LINES, startProjection,
   type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot,
 } from '@selarikru/view-protocol';
 
@@ -17,7 +17,18 @@ export interface DataSourceUnderTest {
 }
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
-const folded = (s: ProjectViewSnapshot) => ({ runs: s.runs, tasks: s.tasks, attempts: s.attempts, workers: s.workers, approvals: s.approvals, checks: s.checks });
+/**
+ * The event-derived part of a snapshot. Titles, dependencies and heartbeat times come from the snapshot, not the events, so they are
+ * excluded: a source that serves them differently must still pass. (Task titles and `dependsOn` are null or filled depending on the source.)
+ */
+const eventDerived = (s: ProjectViewSnapshot) => ({
+  runs: s.runs,
+  tasks: Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, title: null, dependsOn: null, role: null }])),
+  attempts: Object.fromEntries(Object.entries(s.attempts).map(([id, a]) => [id, { ...a, lastHeartbeatAt: null }])),
+  workers: Object.fromEntries(Object.entries(s.workers).map(([id, w]) => [id, { ...w, lastHeartbeatAt: null }])),
+  approvals: s.approvals,
+  checks: s.checks,
+});
 
 /**
  * EngineeringDataSource conformance: schema-valid snapshots, snapshot and replay agree, ordered gapless events, safe unsubscribe, commands that
@@ -69,7 +80,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       c.stop();
     });
 
-    it('replay from cursor 0 is ordered, gapless and valid, and folding it reproduces the snapshot', async () => {
+    it('replay from cursor 0 is ordered, gapless and valid', async () => {
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const c = collect(ds, ds.busyProjectId, '0');
@@ -80,11 +91,22 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
         expect(ProjectViewEventSchema.safeParse(e).success).toBe(true);
         expect(e.sequence).toBe(i + 1);
         expect(e.provenance).toBe(snap.meta.provenance);
+        expect(e.type).not.toBe('attempt.heartbeat'); // liveness is carried by snapshots
       });
-      const folded0 = applyEvents(projectionFromSnapshot(emptySnapshot({ projectId: ds.busyProjectId, observedAt: snap.meta.observedAt, provenance: snap.meta.provenance })), c.events);
-      expect(folded0.outcome).not.toBe('resync');
-      expect(folded(folded0.state.snapshot)).toEqual(folded(snap));
       c.stop();
+    });
+
+    it('a session that follows the stream (resyncing when asked) converges on a fresh snapshot, on event-derived fields', async () => {
+      const ds = await setup();
+      const session = startProjection(ds.source, ds.busyProjectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0 });
+      await tick();
+      await ds.advance();
+      for (let i = 0; i < 5; i += 1) await tick();
+      const fresh = await ds.source.getSnapshot(ds.busyProjectId);
+      const mine = session.state()!.snapshot;
+      expect(mine.meta.cursor).toBe(fresh.meta.cursor);
+      expect(eventDerived(mine)).toEqual(eventDerived(fresh));
+      session.stop();
     });
 
     it('subscribing after the snapshot cursor delivers only later events, in order, as they happen', async () => {
