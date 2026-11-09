@@ -179,7 +179,7 @@ const HEALTH: Readonly<Record<WorkerHealthState, { label: string; tone: Tone }>>
   disconnected: { label: 'Connection lost', tone: 'danger' },
   failed: { label: 'Failed', tone: 'danger' },
   unknown: { label: 'Health unknown', tone: 'warning' },
-  no_lease: { label: 'No lease held', tone: 'neutral' },
+  no_lease: { label: 'No active attempt', tone: 'neutral' },
 };
 
 /** What a view may say about a worker's connection. `stale` means the session is not live, so nothing here can be called healthy. */

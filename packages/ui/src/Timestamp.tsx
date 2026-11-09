@@ -4,10 +4,11 @@ import { formatExact } from './format.ts';
 const TOOLTIP_WIDTH_PX = 256;
 
 /**
- * A relative or clock label that shows the exact local time in a tooltip on hover and on keyboard focus, positioned so the line does not move.
- * A screen reader gets the exact time from the label.
+ * A relative or clock label that shows the exact local time in a tooltip on hover, positioned so the line does not move. By default it is also a
+ * tab stop, showing the tooltip on focus and giving a screen reader the exact time in its label. With `tabStop={false}`, for row-heavy views, it is
+ * plain text with the tooltip on hover only, so the view must make the exact time reachable some other way.
  */
-export function Timestamp({ iso, children, tabStop = true }: { iso: string; children: string; /** False in row-heavy views, where the exact time is reachable elsewhere. Hover still shows it. */ tabStop?: boolean }) {
+export function Timestamp({ iso, children, tabStop = true }: { iso: string; children: string; tabStop?: boolean }) {
   const exact = formatExact(iso);
   const ref = useRef<HTMLSpanElement>(null);
   const [alignRight, setAlignRight] = useState(false);

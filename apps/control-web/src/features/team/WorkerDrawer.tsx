@@ -67,10 +67,11 @@ function TaskPanel({ detail }: { detail: WorkerDetail }) {
             )}
           </section>
           <Facts facts={[
+            { label: 'Run', value: t.runId, mono: true },
             ...(t.attempt ? [{ label: 'Attempt', value: t.attempt }] : []),
             ...(t.runCriteria ? [{ label: 'Run progress', value: t.runCriteria }] : []),
           ]} />
-          <Note>Accepted contract versions, per-task criteria and the branch or pull request are not reported in this snapshot yet.</Note>
+          {t.current ? <Note>Accepted contract versions, per-task criteria and the branch or pull request are not reported in this snapshot.</Note> : null}
         </>
       ) : <Empty>No task has been assigned to this worker.</Empty>}
     </div>
@@ -80,7 +81,7 @@ function TaskPanel({ detail }: { detail: WorkerDetail }) {
 function TimelinePanel({ detail }: { detail: WorkerDetail }) {
   return (
     <div>
-      <p className="mb-3 text-sm text-muted">Built from what this snapshot records. The full event history is not connected yet.</p>
+      {detail.timeline.length > 0 ? <p className="mb-3 text-sm text-muted">Built from what this snapshot records. The full event history is not connected.</p> : null}
       {detail.timeline.length === 0 ? <Empty>Nothing recorded for this worker yet.</Empty> : (
         <ol className="space-y-3">
           {detail.timeline.map((e, i) => (
@@ -163,7 +164,7 @@ function UsagePanel({ detail }: { detail: WorkerDetail }) {
   if (detail.usage.length === 0) return <Empty>No usage figures reported for this task.</Empty>;
   return (
     <div>
-      <p className="mb-3 text-sm text-muted">Each figure keeps its source. Unavailable means unknown, not zero.</p>
+      <p className="mb-3 text-sm text-muted">Figures cover the whole task, across its attempts. Each keeps its source. Unavailable means unknown, not zero.</p>
       <ul className="divide-y divide-line">
         {detail.usage.map((u) => (
           <li key={u.key} className="grid grid-cols-[1fr_auto] items-center gap-x-3 py-2">
@@ -253,6 +254,10 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
     if (dragging.current) setWidth(clampWidth(window.innerWidth - e.clientX));
   };
 
+  const stopResize = (): void => {
+    dragging.current = false;
+  };
+
   const { detail } = row;
   const widthStyle = wide ? { width: maximized ? '100vw' : `${width}px` } : undefined;
   const canResize = wide && !maximized;
@@ -265,7 +270,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
       onClose={onDialogClose}
       onClick={onDialogClick}
       style={widthStyle}
-      className="wrap-anywhere fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-black/60 sm:w-[36rem]"
+      className="wrap-anywhere fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem]"
     >
         {canResize ? (
           <div
@@ -279,7 +284,9 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
             onKeyDown={onResizeKey}
             onPointerDown={onResizeDown}
             onPointerMove={onResizeMove}
-            onPointerUp={() => { dragging.current = false; }}
+            onPointerUp={stopResize}
+            onPointerCancel={stopResize}
+            onLostPointerCapture={stopResize}
             className="group absolute inset-y-0 left-0 z-10 flex w-6 cursor-col-resize touch-none justify-center"
           >
             <span aria-hidden="true" className="h-full w-0.5 bg-transparent group-hover:bg-active group-focus-visible:bg-active" />
@@ -342,7 +349,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          Read-only. Closing this does not affect the worker. Terminal output and messages are not connected here yet.
+          Read-only. Closing this does not affect the worker.
         </footer>
       </div>
     </dialog>

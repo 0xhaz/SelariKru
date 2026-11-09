@@ -33,7 +33,7 @@ test('activity, health and results render separately', async ({ page }) => {
   await openTeam(page, fixture('failed-ci'));
   const row = rows(page).first();
   await expect(row.getByTestId('signal-activity')).toContainText('Idle');
-  await expect(row.getByTestId('signal-health')).toContainText('No lease held');
+  await expect(row.getByTestId('signal-health')).toContainText('No active attempt');
   await expect(row.getByTestId('signal-results')).toContainText('Failed');
   await expect(row.getByTestId('signal-results')).toContainText('3 of 41 tests failed');
   // A failed check does not turn into a health problem, and idle is not a result.
@@ -212,6 +212,77 @@ test('sorting and filtering reorder and narrow the fleet, and say what is hidden
   await expect(rows(page)).toHaveCount(3);
   await page.getByLabel('Sort by').selectOption('role');
   await expect(page.locator('th[aria-sort="ascending"]')).toHaveText('Worker and task');
+});
+
+test('the run filter lists the runs seen and keeps their workers', async ({ page }) => {
+  await openTeam(page, fixture('unknown-costs'));
+  const select = page.getByLabel('Run', { exact: true });
+  await expect(select.locator('option')).toHaveText(['All runs', 'unknown-costs.run']);
+  await select.selectOption('unknown-costs.run');
+  await expect(rows(page)).toHaveCount(3);
+});
+
+test('spend is labelled as the task\'s, not the worker\'s own', async ({ page }) => {
+  await openTeam(page, fixture('healthy-parallel-work'));
+  await expect(rowOf(page, 'runner_local_1').getByTestId('row-spend')).toContainText('Task spend');
+});
+
+test('selecting text in a row does not open the drawer, and a plain click still does', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openTeam(page, fixture('healthy-parallel-work'));
+  const text = rowOf(page, 'runner_local_1').getByText('Feedback API');
+  const box = (await text.boundingBox())!;
+  await page.mouse.move(box.x + 1, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString().length)).toBeGreaterThan(0);
+  await expect(drawer(page)).toHaveCount(0);
+  await rowOf(page, 'runner_local_1').getByTestId('signal-health').click();
+  await expect(drawer(page)).toBeVisible();
+});
+
+test('if the opened worker vanishes the drawer closes and focus lands on the main content', async ({ page }) => {
+  await openTeam(page, fixture('human-wait'));
+  await openWorker(page, 'runner_local_1');
+  // The page behind a modal is inert, so a person cannot do this; a new project replacing the snapshot can.
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#demo-fixture')!;
+    select.value = 'expired-approval';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(rowOf(page, 'runner_cloud_1')).toBeVisible();
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(page.locator('#main')).toBeFocused();
+});
+
+test('the drawer resizes by pointer, and a cancelled drag stops following the pointer', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openTeam(page, fixture('human-wait'));
+  await openWorker(page, 'runner_local_1');
+  const separator = drawer(page).getByRole('separator', { name: 'Drawer width' });
+  const width = async (): Promise<number> => (await drawer(page).boundingBox())!.width;
+  const startDrag = async (): Promise<number> => {
+    const box = (await separator.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, 450);
+    await page.mouse.down();
+    return box.x + box.width / 2;
+  };
+
+  const before = await width();
+  const x = await startDrag();
+  await page.mouse.move(x - 120, 450, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(width).toBeGreaterThan(before + 100);
+
+  for (const event of ['pointercancel', 'lostpointercapture']) {
+    const settled = await width();
+    const from = await startDrag();
+    await separator.dispatchEvent(event);
+    await page.mouse.move(from - 200, 450, { steps: 4 });
+    await page.mouse.up();
+    expect(await width()).toBe(settled);
+  }
 });
 
 test('an empty project shows no invented workers', async ({ page }) => {

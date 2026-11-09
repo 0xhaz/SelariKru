@@ -18,6 +18,7 @@
   --color-success-tint: #14292b;
   --color-warning-tint: #2b2517;
   --color-danger-tint: #2f1a24;
+  --color-backdrop: #00000099;
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --radius-card: 8px;
@@ -42,4 +43,5 @@
   --color-success-tint: #e2f5eb;
   --color-warning-tint: #fbf1dc;
   --color-danger-tint: #fcebea;
+  --color-backdrop: #0f172a66;
 }

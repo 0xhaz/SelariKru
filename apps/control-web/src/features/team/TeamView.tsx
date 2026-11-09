@@ -41,13 +41,19 @@ function Identity({ row, onOpen }: { row: TeamRow; onOpen: (id: string) => void 
       {!row.task && !row.lastTask ? <p className="mt-1 text-sm text-muted">No task assigned</p> : null}
       {row.spend ? (
         <p className="mt-1 text-sm text-muted" data-testid="row-spend">
-          Spend <span className="text-fg">{row.spend.value}</span>{row.spend.provenance === 'unavailable' ? '' : ` ${PROVENANCE_CHIP[row.spend.provenance]!.text.toLowerCase()}`}
+          Task spend <span className="text-fg">{row.spend.value}</span>{row.spend.provenance === 'unavailable' ? '' : ` ${PROVENANCE_CHIP[row.spend.provenance]!.text.toLowerCase()}`}
           {row.spend.note ? `, ${row.spend.note.toLowerCase()}` : ''}
         </p>
       ) : null}
     </div>
   );
 }
+
+/** Dragging across a row to copy text ends in a click on the row. That is not a request to inspect the worker. */
+const hasTextSelection = (): boolean => {
+  const selection = window.getSelection();
+  return selection !== null && !selection.isCollapsed;
+};
 
 const SORTED_COLUMN: Readonly<Partial<Record<SortKey, 'worker' | 'activity' | 'location'>>> = { role: 'worker', task: 'worker', activity: 'activity', runtime: 'location' };
 
@@ -70,7 +76,7 @@ function FleetTable({ rows, sort, nowMs, onOpen }: { rows: readonly TeamRow[]; s
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={row.workerId} data-testid="fleet-row" data-worker-id={row.workerId} onClick={() => onOpen(row.workerId)} className="cursor-pointer wrap-anywhere border-b border-line align-top last:border-b-0 hover:bg-panel-2">
+          <tr key={row.workerId} data-testid="fleet-row" data-worker-id={row.workerId} onClick={() => { if (!hasTextSelection()) onOpen(row.workerId); }} className="cursor-pointer wrap-anywhere border-b border-line align-top last:border-b-0 hover:bg-panel-2">
             <td className={`px-3 py-3 ${row.rail ? RAIL_SHADOW[row.rail] : ''}`}><Identity row={row} onOpen={onOpen} /></td>
             <td className="px-3 py-3"><ActivitySignalView row={row} /></td>
             <td className="px-3 py-3"><HealthSignalView row={row} nowMs={nowMs} /></td>
@@ -103,7 +109,7 @@ function FleetCards({ rows, nowMs, onOpen }: { rows: readonly TeamRow[]; nowMs: 
 
 const selectClass = 'rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg';
 
-function Toolbar({ sort, onSort, filter, onFilter, roles, shown, total }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; shown: number; total: number }) {
+function Toolbar({ sort, onSort, filter, onFilter, roles, runs, shown, total }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; runs: readonly string[]; shown: number; total: number }) {
   return (
     <div className="mb-3 flex flex-wrap items-end gap-3 border-b border-line pb-3">
       <div>
@@ -126,6 +132,13 @@ function Toolbar({ sort, onSort, filter, onFilter, roles, shown, total }: { sort
         <select id="team-role" className={selectClass} value={filter.role} onChange={(e) => onFilter({ ...filter, role: e.target.value })}>
           <option value="all">All roles</option>
           {roles.map((r) => <option key={r} value={r}>{roleName(r)}</option>)}
+        </select>
+      </div>
+      <div className="min-w-0">
+        <label htmlFor="team-run" className="mb-1 block text-sm text-muted">Run</label>
+        <select id="team-run" className={`${selectClass} max-w-52`} value={filter.run} onChange={(e) => onFilter({ ...filter, run: e.target.value })}>
+          <option value="all">All runs</option>
+          {runs.map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
       <label className="flex items-center gap-2 py-1.5 text-sm text-fg">
@@ -213,7 +226,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
         </section>
       ) : (
         <Panel title="Fleet" labelId="team-fleet-title" aside={team.simulated ? 'Simulated, not evidence' : null}>
-          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} shown={rows.length} total={team.rows.length} />
+          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} runs={team.runs} shown={rows.length} total={team.rows.length} />
           {rows.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-muted">No workers match these filters.</p>

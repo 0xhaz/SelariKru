@@ -1,7 +1,7 @@
 import { formatAge, formatCount, formatDuration, formatExact, formatUsd, type Tone } from '@selarikru/ui';
 import {
   approvalStateAt, effectiveWorkerHealth, usageFor,
-  type AttemptView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerView,
+  type AttemptView, type CheckView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
 import { explain, sentence } from '../overview/attention.ts';
 import { activityOf, countFleet, taskRow, workerHealthDisplay, type WorkerHealthDisplay } from '../overview/model.ts';
@@ -14,9 +14,10 @@ export const SORT_KEYS: readonly { key: SortKey; label: string }[] = [
 export interface FleetFilter {
   readonly runtime: 'all' | WorkerView['execution'];
   readonly role: string;
+  readonly run: string;
   readonly blockedOnly: boolean;
 }
-export const NO_FILTER: FleetFilter = { runtime: 'all', role: 'all', blockedOnly: false };
+export const NO_FILTER: FleetFilter = { runtime: 'all', role: 'all', run: 'all', blockedOnly: false };
 
 export interface ActivitySignal {
   readonly label: string;
@@ -139,6 +140,8 @@ export interface WorkerDetail {
 export interface TeamRow {
   readonly workerId: string;
   readonly role: string | null;
+  /** The run of the task held now, or of the last one. Null when the worker has had no task. */
+  readonly runId: string | null;
   /** The task held now. Null when idle or offline, in which case `lastTask` is what it last worked on. */
   readonly task: TaskRef | null;
   readonly lastTask: TaskRef | null;
@@ -170,6 +173,7 @@ export interface TeamModel {
   readonly summary: string | null;
   readonly rows: readonly TeamRow[];
   readonly roles: readonly string[];
+  readonly runs: readonly string[];
 }
 
 const ACTIVITY_RANK: Readonly<Partial<Record<WorkerActivity, number>>> = { blocked_policy: 1, waiting_human: 2 };
@@ -207,11 +211,41 @@ function checksOf(snapshot: ProjectViewSnapshot, taskId: string | null) {
   return Object.values(snapshot.checks).filter((c) => c.taskId === taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-function resultOf(w: WorkerView, focus: TaskView | undefined, snapshot: ProjectViewSnapshot, showTask: boolean): ResultSignal {
-  const latest = checksOf(snapshot, focus?.taskId ?? null)[0];
-  if (latest) {
+const taskNow = (t: TaskView): string => (t.latestEvidence?.kind === 'task.reopened' ? 'reopened' : taskRow(t).statusLabel.toLowerCase());
+
+interface CheckReading {
+  readonly check: CheckView;
+  readonly label: string;
+  readonly tone: Tone;
+  /** True when the check predates the attempt this worker is on, so it says nothing about that attempt. */
+  readonly earlier: boolean;
+}
+
+/** What a check still says, given where its task is now. A check carries no revision of its own, so the task's status decides whether a pass still holds. */
+function readCheck(c: CheckView, focus: TaskView | undefined, attempt: AttemptView | undefined): CheckReading {
+  const earlier = attempt !== undefined && attempt.taskId === c.taskId && Date.parse(c.updatedAt) < Date.parse(attempt.startedAt);
+  if (c.state === 'passed') {
+    const holds = focus?.status === 'verified' || focus?.status === 'merged';
+    if (holds && !earlier) return { check: c, ...CHECK.passed, earlier };
+    return { check: c, label: holds || !focus ? 'Passed earlier' : `Passed earlier; task now ${taskNow(focus)}`, tone: 'neutral', earlier };
+  }
+  if (!earlier) return { check: c, ...CHECK[c.state], earlier };
+  return { check: c, label: c.state === 'failed' ? 'Failed earlier' : 'Check started earlier', tone: 'neutral', earlier };
+}
+
+function resultOf(w: WorkerView, focus: TaskView | undefined, attempt: AttemptView | undefined, snapshot: ProjectViewSnapshot, showTask: boolean): ResultSignal {
+  const readings = checksOf(snapshot, focus?.taskId ?? null).map((c) => readCheck(c, focus, attempt));
+  const current = readings.filter((r) => !r.earlier);
+  // A failure outranks a newer pass, so green can never hide it.
+  const pick = current.find((r) => r.check.state === 'failed') ?? current.find((r) => r.check.state === 'running') ?? current[0] ?? readings[0];
+  if (pick) {
     const prefix = showTask && focus ? `${focus.title ?? focus.taskId}: ` : '';
-    return { known: true, ...CHECK[latest.state], detail: latest.summary ? `${prefix}${latest.summary}` : (prefix ? prefix.slice(0, -2) : null), at: latest.updatedAt };
+    const before = pick.earlier && attempt ? `Before attempt ${attempt.number}: ` : '';
+    const body = `${before}${pick.check.summary ?? ''}`;
+    const detail = `${prefix}${body}`.replace(/: $/, '') || null;
+    const failedBefore = pick.check.state === 'passed' && !pick.earlier && readings.some((r) => r.check.state === 'failed');
+    if (failedBefore) return { known: true, label: 'Passed; an earlier check failed', tone: 'warning', detail, at: pick.check.updatedAt };
+    return { known: true, label: pick.label, tone: pick.tone, detail, at: pick.check.updatedAt };
   }
   const evidence = w.latestEvidence ?? focus?.latestEvidence ?? null;
   const shape = evidence ? EVIDENCE[evidence.kind] : undefined;
@@ -256,12 +290,13 @@ function taskDetail(t: TaskView, current: boolean, attempt: AttemptView | undefi
       const dep = snapshot.tasks[id];
       return { taskId: id, title: dep?.title ?? id, status: dep ? taskRow(dep).statusLabel : 'Unknown' };
     }),
-    attempt: attempt ? `Attempt ${attempt.number}, ${attempt.outcome === 'running' ? 'running' : attempt.outcome}${attempt.exitReason ? ` (${attempt.exitReason})` : ''}` : null,
+    attempt: attempt ? `Attempt ${attempt.number}, ${attempt.outcome}${attempt.exitReason ? `. ${explain(attempt.exitReason)}` : ''}` : null,
     runId: t.runId, runCriteria: run?.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified across the run` : null,
   };
 }
 
-function blockersOf(w: WorkerView, focus: TaskView | undefined, snapshot: ProjectViewSnapshot): Blocker[] {
+/** The one list of what holds this worker up, for the row's count and the drawer alike. Only the task held now can block it. */
+function blockersOf(w: WorkerView, held: TaskView | undefined, snapshot: ProjectViewSnapshot): Blocker[] {
   const out: Blocker[] = [];
   if (w.blockedByApprovalId !== null) {
     const a = snapshot.approvals[w.blockedByApprovalId];
@@ -271,8 +306,8 @@ function blockersOf(w: WorkerView, focus: TaskView | undefined, snapshot: Projec
     const t = snapshot.tasks[id];
     out.push({ kind: 'Waiting on a task', text: t ? `${t.title ?? t.taskId} (${taskRow(t).statusLabel.toLowerCase()})` : id, code: null });
   }
-  if (focus?.placementBlock) out.push({ kind: 'Cannot be placed', text: explain(focus.placementBlock), code: focus.placementBlock });
-  if (w.activity === 'blocked_policy' && w.stateReason && !focus?.placementBlock) out.push({ kind: 'Blocked by policy', text: explain(w.stateReason), code: w.stateReason });
+  if (held?.placementBlock) out.push({ kind: 'Cannot be placed', text: explain(held.placementBlock), code: held.placementBlock });
+  if (w.activity === 'blocked_policy' && w.stateReason && !held?.placementBlock) out.push({ kind: 'Blocked by policy', text: explain(w.stateReason), code: w.stateReason });
   return out;
 }
 
@@ -297,6 +332,11 @@ function timelineOf(w: WorkerView, focus: TaskView | undefined, snapshot: Projec
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }
 
+/** Evidence kinds that are results. Lifecycle events such as an attempt starting produce nothing to inspect. */
+const ARTIFACT_KINDS: Readonly<Record<string, string>> = {
+  'attempt.completed': 'Attempt output', 'candidate.assembled': 'Assembled candidate', 'change.proposed': 'Proposed change', 'change.merged': 'Merged change',
+};
+
 function artifactsOf(w: WorkerView, focus: TaskView | undefined, snapshot: ProjectViewSnapshot): ArtifactEntry[] {
   const seen = new Set<string>();
   const out: ArtifactEntry[] = [];
@@ -306,8 +346,10 @@ function artifactsOf(w: WorkerView, focus: TaskView | undefined, snapshot: Proje
     out.push({ label, ref, at });
   };
   for (const c of checksOf(snapshot, focus?.taskId ?? null)) add(`Check output: ${c.checkId}`, c.evidenceRef, c.updatedAt);
-  if (w.latestEvidence) add(sentence(w.latestEvidence.kind.replace('.', ' ')), w.latestEvidence.ref, w.latestEvidence.at);
-  if (focus?.latestEvidence) add(sentence(focus.latestEvidence.kind.replace('.', ' ')), focus.latestEvidence.ref, focus.latestEvidence.at);
+  for (const evidence of [w.latestEvidence, focus?.latestEvidence]) {
+    const label = evidence ? ARTIFACT_KINDS[evidence.kind] : undefined;
+    if (evidence && label) add(label, evidence.ref, evidence.at);
+  }
   return out.sort((a, b) => b.at.localeCompare(a.at));
 }
 
@@ -342,16 +384,26 @@ function summaryOf(w: WorkerView, activity: ActivitySignal, health: WorkerHealth
   if (health.state === 'disconnected') return `Connection lost ${formatAge(nowMs - Date.parse(lastConfirmedAt))} ago`;
   if (health.state === 'unknown') return 'Health unknown; showing the last confirmed state';
   if (health.state === 'failed') return w.stateReason ? `Failed: ${explain(w.stateReason)}` : 'Failed';
-  if (health.state === 'suspected_stall') return heartbeatAgeMs !== null ? `Connected; no heartbeat for ${formatAge(heartbeatAgeMs)}` : 'Connected; progress may be stalled';
+  if (health.state === 'suspected_stall') return heartbeatAgeMs !== null ? `Connected; no progress event for ${formatAge(heartbeatAgeMs)}` : 'Connected; progress may be stalled';
   if (!activity.reported) return task ? `Assigned to ${task.title}; activity not reported` : 'Activity not reported';
   return activity.tool ? `${activity.label}: ${activity.tool}` : activity.label;
+}
+
+/**
+ * When this worker's state was last confirmed. A reachable worker with no lease sends no heartbeat, so entering its state is the later fact. A lease
+ * holder is confirmed only by its heartbeat, and for a lost worker the time it entered that state is the reaper's, which confirms nothing about the worker.
+ */
+function lastConfirmedOf(w: WorkerView, health: WorkerHealthReading['health']): string {
+  if (w.lastHeartbeatAt === null) return w.enteredStateAt;
+  if (w.leaseHeld || w.availability === 'offline' || health === 'disconnected') return w.lastHeartbeatAt;
+  return Date.parse(w.enteredStateAt) > Date.parse(w.lastHeartbeatAt) ? w.enteredStateAt : w.lastHeartbeatAt;
 }
 
 function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, sessionStale: boolean): TeamRow {
   const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
   const health = workerHealthDisplay(w, reading, sessionStale);
   const stale = sessionStale || health.state === 'disconnected' || health.state === 'unknown';
-  const lastConfirmedAt = w.lastHeartbeatAt ?? w.enteredStateAt;
+  const lastConfirmedAt = lastConfirmedOf(w, reading.health);
 
   const currentTask = w.taskId !== null ? snapshot.tasks[w.taskId] : undefined;
   const attempt = w.attemptId !== null ? snapshot.attempts[w.attemptId] : lastAttemptOf(w, snapshot);
@@ -370,22 +422,25 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   else if (health.state === 'suspected_stall' && reading.heartbeatAgeMs !== null) healthNote = `No heartbeat for ${formatAge(reading.heartbeatAgeMs)}`;
 
   const rank = attentionRank(w, health);
-  const blockers = (w.blockedByApprovalId !== null ? 1 : 0) + w.blockedByTaskIds.length + (focus?.placementBlock ? 1 : 0);
+  const blockers = blockersOf(w, currentTask, snapshot);
   const taskId = focus?.taskId ?? null;
   const progressTimes = [w.enteredStateAt, w.latestAction?.at, w.latestEvidence?.at].filter((t): t is string => t !== undefined);
 
   return {
-    workerId: w.workerId, role: focus?.role ?? null, task, lastTask, activity, health, healthNote,
-    results: resultOf(w, focus, snapshot, task === null),
+    workerId: w.workerId, role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
+    results: resultOf(w, focus, attempt, snapshot, task === null),
     execution: w.execution, modelRoute: w.modelRoute, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
-    blockers, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
+    blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
     detail: {
       summary: summaryOf(w, activity, health, reading.heartbeatAgeMs, lastConfirmedAt, nowMs, task),
       task: focus ? taskDetail(focus, currentTask !== undefined, attempt, snapshot) : null,
-      blockers: blockersOf(w, focus, snapshot),
+      blockers,
       timeline: timelineOf(w, focus, snapshot),
-      checks: checksOf(snapshot, taskId).map((c) => ({ checkId: c.checkId, ...CHECK[c.state], summary: c.summary, at: c.updatedAt, evidenceRef: c.evidenceRef })),
+      checks: checksOf(snapshot, taskId).map((c) => {
+        const { label, tone } = readCheck(c, focus, attempt);
+        return { checkId: c.checkId, label, tone, summary: c.summary, at: c.updatedAt, evidenceRef: c.evidenceRef };
+      }),
       artifacts: artifactsOf(w, focus, snapshot),
       permissions: permissionsOf(focus, snapshot, nowMs),
       sandbox: sandboxFacts(w, attempt, reading.heartbeatAgeMs, nowMs),
@@ -396,7 +451,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
 
 const byId = (a: TeamRow, b: TeamRow): number => a.workerId.localeCompare(b.workerId);
 
-/** Keeps the incoming order for ties in everything but the worker id, so rows do not jump between ticks. */
+/** Ties break on the worker id, so rows do not jump between ticks. */
 export function sortRows(rows: readonly TeamRow[], key: SortKey): TeamRow[] {
   const taskTitle = (r: TeamRow): string => r.task?.title ?? r.lastTask?.title ?? '￿';
   const compare: Readonly<Record<SortKey, (a: TeamRow, b: TeamRow) => number>> = {
@@ -411,7 +466,7 @@ export function sortRows(rows: readonly TeamRow[], key: SortKey): TeamRow[] {
 }
 
 export function filterRows(rows: readonly TeamRow[], f: FleetFilter): TeamRow[] {
-  return rows.filter((r) => (f.runtime === 'all' || r.execution === f.runtime) && (f.role === 'all' || r.role === f.role) && (!f.blockedOnly || r.blockers > 0));
+  return rows.filter((r) => (f.runtime === 'all' || r.execution === f.runtime) && (f.role === 'all' || r.role === f.role) && (f.run === 'all' || r.runId === f.run) && (!f.blockedOnly || r.blockers > 0));
 }
 
 export interface TeamOptions {
@@ -429,6 +484,6 @@ export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, liveness
   const counts = countFleet(workers, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const parts = [[counts.working, 'assigned'], [counts.waiting, 'waiting'], [counts.idle, 'idle'], [counts.lost, 'lost']].filter(([n]) => (n as number) > 0).map(([n, label]) => `${n} ${label as string}`);
   const stale = sessionStale || rows.some((r) => r.health.state === 'unknown');
-  const summary = rows.length === 0 ? null : `${stale ? 'Last confirmed: ' : ''}${rows.length} worker${rows.length === 1 ? '' : 's'} seen: ${parts.join(', ')}. Slot limit not reported.`;
-  return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort() };
+  const summary = rows.length === 0 ? null : `${stale ? 'Last confirmed: ' : ''}${rows.length} worker${rows.length === 1 ? '' : 's'} seen: ${parts.join(', ')}.${workers.some((w) => w.activity === 'waiting_resource') ? ' Slot limit not reported.' : ''}`;
+  return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort(), runs: [...new Set(rows.flatMap((r) => (r.runId ? [r.runId] : [])))].sort() };
 }

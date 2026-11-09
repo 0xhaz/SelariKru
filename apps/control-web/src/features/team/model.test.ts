@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effectiveWorkerHealth, type UsageEntry } from '@selarikru/view-protocol';
+import { effectiveWorkerHealth, type AttemptView, type TaskView, type UsageEntry } from '@selarikru/view-protocol';
 import { NOW, fixtureSnapshot, iso, snapshotOf, task, worker } from '../overview/testing.ts';
 import { buildTeam, filterRows, sortRows, type TeamRow } from './model.ts';
 
@@ -42,7 +42,7 @@ describe('health goes only through effectiveWorkerHealth', () => {
 
   it('does not call a worker with no lease healthy: there is no heartbeat to say so', () => {
     const r = row(buildTeam(snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', leaseHeld: false, activity: 'waiting_human' })] }), NOW, NOW), 'w');
-    expect(r.health).toMatchObject({ state: 'no_lease', tone: 'neutral' });
+    expect(r.health).toMatchObject({ state: 'no_lease', label: 'No active attempt', tone: 'neutral' });
     expect(r.health.label).not.toMatch(/healthy/i);
   });
 
@@ -148,9 +148,9 @@ describe('fleet order and filters', () => {
   });
 
   it('filters by runtime, role and blockers', () => {
-    expect(ids(filterRows(model.rows, { runtime: 'cloud', role: 'all', blockedOnly: false }))).toEqual(['decide']);
-    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'backend', blockedOnly: false }))).toEqual(['lost', 'calm']);
-    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'all', blockedOnly: true }))).toEqual(['decide']);
+    expect(ids(filterRows(model.rows, { runtime: 'cloud', role: 'all', run: 'all', blockedOnly: false }))).toEqual(['decide']);
+    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'backend', run: 'all', blockedOnly: false }))).toEqual(['lost', 'calm']);
+    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'all', blockedOnly: true }))).toEqual(['decide']);
   });
 
   it('counts blockers from approvals, dependencies and placement', () => {
@@ -187,7 +187,7 @@ describe('inspector detail', () => {
 
   it('a summary says what is happening in plain language', () => {
     const summary = (over: Parameters<typeof worker>[1], tasks = [task('a')]) => row(buildTeam(snapshotOf({ tasks, workers: [worker('w', { taskId: 'a', ...over })] }), NOW, NOW), 'w').detail.summary;
-    expect(summary({ lastHeartbeatAt: iso(45) })).toBe('Connected; no heartbeat for 45s');
+    expect(summary({ lastHeartbeatAt: iso(45) })).toBe('Connected; no progress event for 45s');
     expect(summary({ lastHeartbeatAt: iso(70) })).toBe('Connection lost 1m 10s ago');
     expect(summary({ activity: 'testing', latestAction: { tool: 'vitest', summary: 'unit suite', longRunning: true, at: iso(1) } })).toBe('Testing: vitest, unit suite');
     expect(summary({ activity: null })).toBe('Assigned to Task a; activity not reported');
@@ -211,16 +211,138 @@ describe('team as a whole', () => {
 
   it('summarises the fleet and says the slot limit is not reported', () => {
     const model = buildTeam(snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a' }), worker('i', { availability: 'idle', activity: null, leaseHeld: false })] }), NOW, NOW);
-    expect(model.summary).toBe('2 workers seen: 1 assigned, 1 idle. Slot limit not reported.');
+    expect(model.summary).toBe('2 workers seen: 1 assigned, 1 idle.');
   });
 
   it('marks the summary as last confirmed when stale', () => {
     const model = buildTeam(snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a' })] }), NOW, null, { stale: true, lastConfirmedMs: NOW - 5_000 });
-    expect(model.summary).toBe('Last confirmed: 1 worker seen: 1 assigned. Slot limit not reported.');
+    expect(model.summary).toBe('Last confirmed: 1 worker seen: 1 assigned.');
   });
 
   it('marks simulated data so it never reads as evidence', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
     expect(buildTeam(snapshot, nowMs, nowMs).simulated).toBe(true);
+  });
+});
+
+const attemptOf = (id: string, over: Partial<AttemptView> = {}): AttemptView => ({ attemptId: id, taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(30), endedAt: null, lastHeartbeatAt: iso(5), ...over });
+const check = (id: string, state: 'running' | 'passed' | 'failed', secondsAgo: number, summary: string) => ({ checkId: id, taskId: 'a', state, summary, updatedAt: iso(secondsAgo), evidenceRef: `ev-${id}` });
+
+describe('fix round 1: blockers have one path', () => {
+  const policyBlocked = () => worker('w', { taskId: null, availability: 'idle', activity: 'blocked_policy', leaseHeld: false, stateReason: 'policy_denied:restricted_data_cloud_destination' });
+
+  it('a policy-blocked worker counts as blocked and shows under Blocked only', () => {
+    const model = buildTeam(snapshotOf({ workers: [policyBlocked()] }), NOW, NOW);
+    expect(row(model, 'w').blockers).toBe(1);
+    expect(row(model, 'w').detail.blockers).toHaveLength(1);
+    expect(row(model, 'w').detail.blockers[0]).toMatchObject({ kind: 'Blocked by policy' });
+    expect(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'all', blockedOnly: true })).toHaveLength(1);
+  });
+
+  it('the row count always equals the drawer list', async () => {
+    for (const id of ['human-wait', 'policy-block', 'contract-change', 'unknown-costs'] as const) {
+      const { snapshot, nowMs } = await fixtureSnapshot(id);
+      for (const r of buildTeam(snapshot, nowMs, nowMs).rows) expect(r.blockers).toBe(r.detail.blockers.length);
+    }
+  });
+
+  it('an idle worker does not inherit a placement block from a task it no longer holds', () => {
+    const snapshot = snapshotOf({ tasks: [task('a', { placementBlock: 'policy_denied:x' })], workers: [worker('w', { taskId: null, attemptId: null, availability: 'idle', activity: null, leaseHeld: false })] });
+    snapshot.attempts['att'] = attemptOf('att', { outcome: 'failed', endedAt: iso(10) });
+    const r = row(buildTeam(snapshot, NOW, NOW), 'w');
+    expect(r.lastTask?.taskId).toBe('a');
+    expect(r.blockers).toBe(0);
+    expect(r.detail.blockers).toEqual([]);
+  });
+});
+
+describe('fix round 1: last confirmed never predates the state it confirms', () => {
+  const at = (over: Parameters<typeof worker>[1]) => row(buildTeam(snapshotOf({ workers: [worker('w', over)] }), NOW, NOW), 'w').lastConfirmedAt;
+
+  it('a no-lease worker that is still reachable uses the later of heartbeat and state entry', () => {
+    expect(at({ leaseHeld: false, availability: 'idle', activity: null, lastHeartbeatAt: iso(100), enteredStateAt: iso(20) })).toBe(iso(20));
+    expect(at({ leaseHeld: false, availability: 'idle', activity: null, lastHeartbeatAt: iso(10), enteredStateAt: iso(20) })).toBe(iso(10));
+  });
+
+  it('a lease holder keeps its heartbeat time', () => {
+    expect(at({ leaseHeld: true, lastHeartbeatAt: iso(25), enteredStateAt: iso(10) })).toBe(iso(25));
+  });
+
+  it('a lost worker keeps its heartbeat: the reaper entering the state confirms nothing about the worker', () => {
+    expect(at({ leaseHeld: false, availability: 'offline', health: 'disconnected', activity: null, lastHeartbeatAt: iso(100), enteredStateAt: iso(20) })).toBe(iso(100));
+  });
+
+  it('holds on the fixtures the review measured', async () => {
+    for (const id of ['human-wait', 'unknown-costs'] as const) {
+      const { snapshot, nowMs } = await fixtureSnapshot(id);
+      for (const w of Object.values(snapshot.workers)) {
+        if (w.leaseHeld) continue;
+        expect(Date.parse(row(buildTeam(snapshot, nowMs, nowMs), w.workerId).lastConfirmedAt)).toBeGreaterThanOrEqual(Date.parse(w.enteredStateAt));
+      }
+    }
+  });
+});
+
+describe('fix round 1: a result says only what still holds', () => {
+  const results = (t: Partial<TaskView>, checks: ReturnType<typeof check>[], attempt: Partial<AttemptView> = {}) => {
+    const snapshot = snapshotOf({ tasks: [task('a', t)], workers: [worker('w', { taskId: 'a', attemptId: 'att' })], checks: Object.fromEntries(checks.map((c) => [c.checkId, c])) });
+    snapshot.attempts['att'] = attemptOf('att', attempt);
+    return row(buildTeam(snapshot, NOW, NOW), 'w');
+  };
+
+  it('a passed check on a reopened task is no longer green', () => {
+    const r = results({ status: 'verifying', latestEvidence: { kind: 'task.reopened', ref: 'e', at: iso(2) } }, [check('c', 'passed', 10, 'ok')]);
+    expect(r.results).toMatchObject({ label: 'Passed earlier; task now reopened', tone: 'neutral' });
+    expect(r.detail.checks[0]).toMatchObject({ label: 'Passed earlier; task now reopened', tone: 'neutral' });
+  });
+
+  it('a passed check on a superseded task names that', () => {
+    const r = results({ status: 'superseded', supersededByRevision: 2 }, [check('c', 'passed', 10, 'ok')]);
+    expect(r.results.label).toBe('Passed earlier; task now superseded by revision 2');
+    expect(r.results.tone).toBe('neutral');
+  });
+
+  it('stays Passed on a verified or merged task', () => {
+    for (const status of ['verified', 'merged'] as const) expect(results({ status }, [check('c', 'passed', 10, 'ok')]).results).toMatchObject({ label: 'Passed', tone: 'success' });
+  });
+
+  it('marks a check older than the current attempt as earlier', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('failed-ci', 70_000);
+    const r = row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1');
+    expect(r.results).toMatchObject({ label: 'Failed earlier', tone: 'neutral' });
+    expect(r.results.detail).toContain('Before attempt 2');
+    expect(r.results.detail).toContain('3 of 41 tests failed');
+    expect(r.detail.checks[0]).toMatchObject({ label: 'Failed earlier', tone: 'neutral' });
+  });
+
+  it('a newer pass does not mask a failed sibling from the same attempt', () => {
+    expect(results({ status: 'verified' }, [check('new', 'passed', 5, 'lint ok'), check('old', 'failed', 15, 'unit failed')]).results).toMatchObject({ label: 'Failed', tone: 'danger', detail: 'unit failed' });
+  });
+
+  it('a pass beside a failure from before this attempt is not a bare Passed', () => {
+    expect(results({ status: 'verified' }, [check('new', 'passed', 5, 'lint ok'), check('old', 'failed', 60, 'unit failed')]).results).toMatchObject({ label: 'Passed; an earlier check failed', tone: 'warning' });
+  });
+});
+
+describe('fix round 1: wording and scope', () => {
+  it('filters by run and lists the runs seen', () => {
+    const model = buildTeam(snapshotOf({ tasks: [task('a'), task('b', { runId: 'run-2' })], workers: [worker('x', { taskId: 'a' }), worker('y', { taskId: 'b' })] }), NOW, NOW);
+    expect(model.runs).toEqual(['run', 'run-2']);
+    expect(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'run-2', blockedOnly: false }).map((r) => r.workerId)).toEqual(['y']);
+  });
+
+  it('explains how an attempt ended, with no raw code in the default tab', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('human-wait');
+    expect(row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1').detail.task!.attempt).toBe('Attempt 1, interrupted. Approval requested.');
+  });
+
+  it('lists only real results as artifacts', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
+    expect(row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1').detail.artifacts).toEqual([]);
+  });
+
+  it('mentions the slot limit only when a worker is waiting for capacity', () => {
+    const waiting = buildTeam(snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: 'waiting_resource' })] }), NOW, NOW);
+    expect(waiting.summary).toBe('1 worker seen: 1 waiting. Slot limit not reported.');
   });
 });
