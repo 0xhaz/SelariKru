@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from 'react';
+import { Children, cloneElement, createContext, isValidElement, useContext, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { Chip, toneGlyph, TONE_TEXT, type Tone } from '@selarikru/ui';
 import type { ExecutionChoice, ReadinessStatus } from '@selarikru/domain';
 import type { InferenceChoice } from './api.ts';
@@ -24,25 +24,39 @@ export function Notice({ tone, title, children }: { tone: keyof typeof NOTICE_TO
   );
 }
 
+/** A labelled control. The hint and any error are tied to the control, so a screen reader announces them with it. */
 export function Field({ id, label, hint, children, error }: { id: string; label: string; hint?: ReactNode; children: ReactNode; error?: string | undefined }) {
+  const described = [hint ? `${id}-hint` : null, error ? `${id}-error` : null].filter(Boolean).join(' ') || undefined;
+  const control = Children.only(children);
   return (
     <div>
       <label htmlFor={id} className="block text-sm font-medium text-fg">{label}</label>
       {hint ? <p id={`${id}-hint`} className="mt-0.5 text-sm text-muted">{hint}</p> : null}
-      <div className="mt-1.5">{children}</div>
-      {error ? <p className="mt-1 text-sm text-danger">{error}</p> : null}
+      <div className="mt-1.5">{isValidElement(control) ? cloneElement(control as ReactElement<Record<string, unknown>>, { 'aria-describedby': described, 'aria-invalid': error ? true : undefined }) : control}</div>
+      {error ? <p id={`${id}-error`} className="mt-1 text-sm text-danger">{error}</p> : null}
     </div>
   );
 }
 
+/** True once the project has started: every step can be read and none can be changed. */
+export const ReadOnlyContext = createContext(false);
+
+/** Server text uses backticks around commands. They become code here, so no literal backtick reaches the page. */
+export function CodeText({ text }: { text: string }) {
+  return <>{text.split('`').map((part, i) => (i % 2 === 1 ? <code key={i} className="wrap-anywhere font-mono text-mono">{part}</code> : <span key={i}>{part}</span>))}</>;
+}
+
 /** A form step's frame: the question, its reason, then the fields. The heading takes focus when the step changes. */
-export function StepFrame({ title, intro, heading, children, footer }: { title: string; intro?: ReactNode; heading: RefObject<HTMLHeadingElement>; children: ReactNode; footer?: ReactNode }) {
+export function StepFrame({ title, intro, heading, children, footer, keepFooter }: { title: string; intro?: ReactNode; heading: RefObject<HTMLHeadingElement>; children: ReactNode; footer?: ReactNode; keepFooter?: boolean }) {
+  const readOnly = useContext(ReadOnlyContext);
+  const showFooter = footer && (!readOnly || keepFooter);
   return (
     <section aria-labelledby="step-title">
       <h1 ref={heading} id="step-title" tabIndex={-1} data-focus-landing className="text-xl font-semibold tracking-tight sm:text-2xl">{title}</h1>
       {intro ? <div className="mt-1.5 max-w-prose text-muted">{intro}</div> : null}
+      {readOnly && !keepFooter ? <div className="mt-4"><Notice tone="neutral" title="Read-only">This project has started, so its setup can no longer change.</Notice></div> : null}
       <div className="mt-5 space-y-4">{children}</div>
-      {footer ? <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-4">{footer}</div> : null}
+      {showFooter ? <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-4">{footer}</div> : null}
     </section>
   );
 }

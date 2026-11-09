@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FIREBASE_CLOUD_ROUTE, type InferenceMode, type Policy } from '@selarikru/policy';
 import { errorCodeOf, type AssistantProposal, type RestrictedDraftHold } from '@selarikru/inference-firebase-web';
-import type { AssistReviewResponse } from '@selarikru/domain';
+import type { AssistReviewResponse, GoalAssist } from '@selarikru/domain';
 import { Chip, buttonQuiet } from '@selarikru/ui';
 import { POLICY_HINT, POLICY_LABEL, MODES } from '../assistant/labels.ts';
 import type { AssistantPort } from '../assistant/types.ts';
@@ -26,15 +26,23 @@ const ROUTE_TEXT = (mode: InferenceMode, restricted: boolean): string =>
   restricted ? 'Restricted text stays on this device. No cloud model will see it, and the result is kept here only.' : `${POLICY_LABEL[mode]}. ${POLICY_HINT[mode]}`;
 
 /** Optional single-turn help. Its output is a suggestion. It can only fill in the form, and the owner still has to save. */
-export function AssistPanel({ adapter, hold, api, mode, goal, onApply }: { adapter: AssistantPort | null; hold: RestrictedDraftHold | null; api: OnboardingApi; mode: 'mock' | 'live'; goal: AssistedGoal; onApply: (next: Partial<AssistedGoal>) => void }) {
+export function AssistPanel({ adapter, hold, api, mode, goal, restricted, recorded, projectId, onApply }: { adapter: AssistantPort | null; hold: RestrictedDraftHold | null; api: OnboardingApi; mode: 'mock' | 'live'; goal: AssistedGoal; restricted: boolean; recorded: InferenceMode | null; projectId: string | null; onApply: (next: Partial<AssistedGoal>, source: GoalAssist) => void }) {
   const [open, setOpen] = useState(false);
-  const [routeMode, setRouteMode] = useState<InferenceMode>('PREFER_ON_DEVICE');
+  const [chosenMode, setRouteMode] = useState<InferenceMode>('PREFER_ON_DEVICE');
+  // Once the project has a recorded route, the assistant uses that one and offers no other.
+  const routeMode = recorded ?? chosenMode;
   const [cloudApproved, setCloudApproved] = useState(false);
-  const [restricted, setRestricted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [proposal, setProposal] = useState<AssistantProposal | null>(null);
   const [review, setReview] = useState<AssistReviewResponse | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+
+  // Clearing the restricted flag discards anything drafted from that text.
+  const heldId = useRef<string | null>(null);
+  useEffect(() => {
+    setProposal(null); setReview(null); setFailure(null);
+    if (heldId.current) { hold?.discard(heldId.current); heldId.current = null; }
+  }, [restricted, hold]);
 
   if (mode === 'mock' || !adapter) return <p className="text-sm text-muted">The assistant is off in demo mode.</p>;
 
@@ -45,8 +53,8 @@ export function AssistPanel({ adapter, hold, api, mode, goal, onApply }: { adapt
       const p = await adapter.draftBrief({ projectId: 'onboarding', taskText, allowedRequirementIds: CRITERIA_IDS, sources: [{ id: SOURCE_ID, classification: restricted ? 'restricted' : 'internal' }], policy: policyFor(routeMode, restricted, cloudApproved) });
       setProposal(p);
       if (p.status !== 'ok') { setFailure(p.blockedReason ? `The assistant could not answer: ${p.blockedReason.replace(/_/g, ' ')}.` : 'The assistant did not return a usable draft.'); return; }
-      if (restricted) { hold?.hold({ id: p.requestId, sourceClassifications: ['restricted'], proposal: p }); return; }
-      const r = await api.reviewAssist({ envelope: { operation: p.operation, status: p.status, data: p.data } });
+      if (restricted) { hold?.hold({ id: p.requestId, sourceClassifications: ['restricted'], proposal: p }); heldId.current = p.requestId; return; }
+      const r = await api.reviewAssist({ envelope: { operation: p.operation, status: p.status, data: p.data }, ...(projectId ? { projectId } : {}), observed: { source: p.observedSource, requestedMode: p.requestedMode } });
       if (r.ok) setReview(r.value);
       else setFailure(r.message);
     } catch (e) {
@@ -66,12 +74,12 @@ export function AssistPanel({ adapter, hold, api, mode, goal, onApply }: { adapt
           <legend className="text-sm font-medium">Where the assistant runs</legend>
           <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
             {MODES.map((m) => (
-              <label key={m} className="flex items-center gap-1.5 text-sm"><input type="radio" name="assist-route" checked={routeMode === m} disabled={restricted} onChange={() => setRouteMode(m)} />{POLICY_LABEL[m]}</label>
+              <label key={m} className="flex items-center gap-1.5 text-sm"><input type="radio" name="assist-route" checked={routeMode === m} disabled={restricted || recorded !== null} onChange={() => setRouteMode(m)} />{POLICY_LABEL[m]}</label>
             ))}
           </div>
+          {recorded !== null ? <p className="mt-1 text-sm text-muted">Recorded for this project in the Execution step.</p> : null}
         </fieldset>
         <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-0.5" checked={cloudApproved} disabled={restricted} onChange={(e) => setCloudApproved(e.target.checked)} /><span>Cloud is allowed for this text</span></label>
-        <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-0.5" checked={restricted} onChange={(e) => setRestricted(e.target.checked)} /><span>This includes restricted material</span></label>
         <p className="text-sm text-fg" data-testid="assist-route-text">{ROUTE_TEXT(routeMode, restricted)}</p>
         <button type="button" className={buttonQuiet} disabled={busy || !goal.idea.trim()} onClick={() => void ask()}>{busy ? 'Drafting' : 'Draft a suggestion'}</button>
         {failure ? <Notice tone="warning" title="No suggestion">{failure}</Notice> : null}
@@ -82,7 +90,7 @@ export function AssistPanel({ adapter, hold, api, mode, goal, onApply }: { adapt
             <p className="text-sm font-semibold">Suggestion, not saved</p>
             {review.summary ? <p className="mt-1 wrap-anywhere text-sm">{review.summary}</p> : null}
             <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{review.acceptanceCriteria.map((c) => <li key={c.id}>{c.text}</li>)}</ul>
-            <button type="button" className={`${buttonQuiet} mt-3`} onClick={() => onApply({ ...(review.summary ? { idea: review.summary } : {}), ...(review.acceptanceCriteria[0] ? { firstOutcome: review.acceptanceCriteria[0].text } : {}) })}>Use this wording</button>
+            <button type="button" className={`${buttonQuiet} mt-3`} onClick={() => onApply({ ...(review.summary ? { idea: review.summary } : {}), ...(review.acceptanceCriteria[0] ? { firstOutcome: review.acceptanceCriteria[0].text } : {}) }, { observedSource: proposal?.observedSource ?? 'UNKNOWN', requestedMode: proposal?.requestedMode ?? null, provenance: 'assistant_proposal_reviewed' })}>Use this wording</button>
           </div>
         ) : null}
       </div>

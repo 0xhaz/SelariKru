@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BlueprintContentSchema, EXECUTION_CHOICES, FocusAnswersSchema, GoalAnswersSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, templateSupport, validateProposal, type BlueprintContent, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState } from '@selarikru/domain';
+import { BlueprintContentSchema, EXECUTION_CHOICES, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
 import { recordOnboardingOperation, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import {
@@ -43,7 +43,7 @@ export function assertNoCredentials(value: unknown): void {
 const refuseStep = (reason: string): AppError => new AppError(409, 'step_not_available', reason);
 const advance = (state: OnboardingState, event: OnboardingEvent): OnboardingState => {
   const r = advanceOnboarding(state, event);
-  if (!r.ok) throw refuseStep(r.error.reason);
+  if (!r.ok) throw refuseStep(state === 'activated' ? 'This project has started, so its setup can no longer change.' : 'That step is not available yet. Finish the earlier steps first.');
   return r.value;
 };
 
@@ -55,7 +55,10 @@ const asConnection = (row: Row): { repository: string; defaultBranch: string } |
   const c = row.connection;
   return c && typeof c['repository'] === 'string' && typeof c['defaultBranch'] === 'string' ? { repository: c['repository'], defaultBranch: c['defaultBranch'] } : null;
 };
-const costInputs = (row: Row): { agentBudgetUsd: number | null; provider: CostLine[]; app: CostLine[] } | null => row.costInputs as { agentBudgetUsd: number | null; provider: CostLine[]; app: CostLine[] } | null;
+type CostInputs = { agentBudgetUsd: number | null; effort: CostLine[]; production: CostLine[]; agentUsage: CostLine[]; assumptions?: CostAssumptions };
+const costInputs = (row: Row): CostInputs | null => row.costInputs as CostInputs | null;
+const inferenceOf = (row: Row): SetupSnapshot['inference'] => (row.execution?.['inference'] as SetupSnapshot['inference'] | undefined) ?? null;
+const classificationOf = (row: Row): 'public' | 'internal' => { const g = GoalAnswersSchema.safeParse(row.answers['goal']); return g.success ? g.data.classification : 'internal'; };
 
 async function requireOnboarding(db: Executor, tenantId: string, projectId: string, lock = false): Promise<Row> {
   const q = db.select().from(schema.projectOnboardings).where(and(eq(schema.projectOnboardings.tenantId, tenantId), eq(schema.projectOnboardings.projectId, projectId)));
@@ -70,8 +73,10 @@ async function loadBlueprint(db: Executor, row: Row, version: number): Promise<t
 
 /** Which project's repository the deployment's one checkout already serves, ignoring the local demo seed. */
 async function servedRepository(db: Executor, tenantId: string, exceptProject: string): Promise<{ projectId: string; repository: string } | null> {
+  // A project whose setup was cancelled will never run, so it does not hold the checkout.
   const rows = await db.select({ projectId: schema.projects.projectId, repository: schema.projects.repository }).from(schema.projects)
-    .where(and(eq(schema.projects.tenantId, tenantId), ne(schema.projects.projectId, exceptProject), ne(schema.projects.projectId, DEMO.projectId)))
+    .where(and(eq(schema.projects.tenantId, tenantId), ne(schema.projects.projectId, exceptProject), ne(schema.projects.projectId, DEMO.projectId),
+      sql`NOT EXISTS (SELECT 1 FROM project_onboardings o WHERE o.tenant_id = ${schema.projects.tenantId} AND o.project_id = ${schema.projects.projectId} AND o.cancelled_at IS NOT NULL)`))
     .orderBy(asc(schema.projects.createdAt)).limit(1);
   return rows[0] ?? null;
 }
@@ -80,7 +85,7 @@ async function servedRepository(db: Executor, tenantId: string, exceptProject: s
  * Refuses a run on a project that onboarding owns until onboarding is done. Projects created another way (the demo seed, `dev:real`) have no row and are left alone.
  * Called by the run route as well as by activation, so an unsupported template cannot start a run by any route.
  */
-export async function assertRunAllowed(db: Executor, tenantId: string, projectId: string): Promise<void> {
+export async function assertRunAllowed(db: Executor, tenantId: string, projectId: string, requested: { readonly budgetLimitUsd?: number | undefined; readonly placement?: { readonly mode: string } | undefined }): Promise<void> {
   const row = (await db.select().from(schema.projectOnboardings).where(and(eq(schema.projectOnboardings.tenantId, tenantId), eq(schema.projectOnboardings.projectId, projectId))))[0];
   if (!row) return;
   const version = row.acceptedBlueprintVersion ?? row.currentBlueprintVersion;
@@ -90,6 +95,21 @@ export async function assertRunAllowed(db: Executor, tenantId: string, projectId
     if (!support.executable) throw new AppError(422, 'template_not_supported', 'This project is a plan only: its template cannot start a run yet.', { unsupported: support.unsupported });
   }
   if (row.state !== 'activated' || row.cancelledAt !== null) throw new AppError(409, 'onboarding_not_activated', 'This project has not finished setup, so it cannot start a run.', { state: row.state });
+  // Later runs stay inside what the owner authorised for this project.
+  const snapshot = await loadSnapshot(db, row);
+  if (!snapshot || snapshot.agentBudgetUsd === null || snapshot.execution === null) throw new AppError(422, 'outside_recorded_limits', 'This project has no recorded limits, so another run cannot start.');
+  if (requested.budgetLimitUsd === undefined || requested.budgetLimitUsd > snapshot.agentBudgetUsd) throw new AppError(422, 'outside_recorded_limits', `A run on this project needs a budget of at most $${snapshot.agentBudgetUsd}, the ceiling recorded at setup.`, { agentBudgetUsd: snapshot.agentBudgetUsd });
+  const mode = requested.placement?.mode ?? 'L1';
+  const allowed = snapshot.execution === 'local' ? mode.startsWith('L') : snapshot.execution === 'cloud' ? mode.startsWith('C') : true;
+  if (!allowed) throw new AppError(422, 'outside_recorded_limits', `This project was set up for ${snapshot.execution} execution, so a run cannot be placed elsewhere.`, { execution: snapshot.execution });
+}
+
+/** The frozen choices of the pass that currently stands. */
+async function loadSnapshot(db: Executor, row: Row): Promise<SetupSnapshot | null> {
+  if (row.currentReadinessPass === null) return null;
+  const pass = (await db.select({ snapshot: schema.onboardingReadinessPasses.snapshot }).from(schema.onboardingReadinessPasses).where(and(eq(schema.onboardingReadinessPasses.tenantId, row.tenantId), eq(schema.onboardingReadinessPasses.projectId, row.projectId), eq(schema.onboardingReadinessPasses.pass, row.currentReadinessPass))))[0];
+  const parsed = SetupSnapshotSchema.safeParse(pass?.snapshot);
+  return parsed.success ? parsed.data : null;
 }
 
 /** Plan settings for a project that came through onboarding, from its own accepted blueprint and the commit its last readiness pass resolved. Nothing is defaulted. */
@@ -98,8 +118,9 @@ export async function onboardingPlanSettings(db: Executor, tenantId: string, pro
   if (!row || row.state !== 'activated' || !policy || !row.acceptedBlueprintVersion || row.currentReadinessPass === null) return undefined;
   const blueprintRow = await loadBlueprint(db, row, row.acceptedBlueprintVersion);
   const pass = (await db.select().from(schema.onboardingReadinessPasses).where(and(eq(schema.onboardingReadinessPasses.tenantId, tenantId), eq(schema.onboardingReadinessPasses.projectId, projectId), eq(schema.onboardingReadinessPasses.pass, row.currentReadinessPass))))[0];
-  const budget = costInputs(row)?.agentBudgetUsd ?? null;
-  const execution = asExecutionChoice(row);
+  const snapshot = await loadSnapshot(db, row);
+  const budget = snapshot?.agentBudgetUsd ?? null;
+  const execution = snapshot?.execution ?? null;
   if (!blueprintRow || !pass?.baseSha || budget === null || !execution) return undefined;
   const blueprint = BlueprintContentSchema.parse(blueprintRow.content);
   const goal = GoalAnswersSchema.safeParse(row.answers['goal']);
@@ -122,6 +143,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     const blueprintRow = row.currentBlueprintVersion ? await loadBlueprint(exec, row, row.currentBlueprintVersion) : undefined;
     const content = blueprintRow ? BlueprintContentSchema.parse(blueprintRow.content) : null;
     const goal = GoalAnswersSchema.safeParse(row.answers['goal']);
+    const goalAssist = GoalAssistSchema.safeParse(row.answers['goalAssist']);
     const source = SourceAnswersSchema.safeParse(row.answers['source']);
     const focus = FocusAnswersSchema.safeParse(row.answers['focus']);
     const tracks = content?.tracks ?? (focus.success ? focus.data.tracks : null);
@@ -133,13 +155,13 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     return {
       projectId, name: row.name, state: row.state as OnboardingState, revision: row.revision,
       condition: row.conditionKind ? { kind: row.conditionKind as 'needs_input' | 'blocked' | 'failed', reason: row.conditionReason ?? '' } : null,
-      goal: goal.success ? goal.data : null, source: source.success ? source.data : null, focus: focus.success ? focus.data : null,
+      goal: goal.success ? goal.data : null, goalAssist: goalAssist.success ? goalAssist.data : null, source: source.success ? source.data : null, focus: focus.success ? focus.data : null,
       blueprint: blueprintRow && content ? { version: blueprintRow.version, accepted: row.acceptedBlueprintVersion === blueprintRow.version, origin: blueprintRow.origin as 'controller' | 'owner', contentSha256: blueprintRow.contentSha256, createdAt: blueprintRow.createdAt.toISOString(), content } : null,
       template: tracks ? (() => { const v = templateSupport(tracks); return { executable: v.executable, unsupported: [...v.unsupported] }; })() : null,
-      costPlan: plan ? { agentBudgetUsd: plan.agentBudgetUsd, ledgers: { platform: { lines: [...plan.ledgers.platform.lines], totals: plan.ledgers.platform.totals }, provider: { lines: [...plan.ledgers.provider.lines], totals: plan.ledgers.provider.totals }, app: { lines: [...plan.ledgers.app.lines], totals: plan.ledgers.app.totals } }, confirmed: row.costConfirmedForVersion !== null && row.costConfirmedForVersion === row.currentBlueprintVersion } : null,
+      costPlan: plan ? { agentBudgetUsd: plan.agentBudgetUsd, assumptions: plan.assumptions, ledgers: { build_effort: { lines: [...plan.ledgers.build_effort.lines], totals: plan.ledgers.build_effort.totals }, production: { lines: [...plan.ledgers.production.lines], totals: plan.ledgers.production.totals }, agent_usage: { lines: [...plan.ledgers.agent_usage.lines], totals: plan.ledgers.agent_usage.totals } }, confirmed: row.costConfirmedForVersion !== null && row.costConfirmedForVersion === row.currentBlueprintVersion } : null,
       execution: execution ? { execution, inference: row.execution!['inference'] as NonNullable<OnboardingView['execution']>['inference'] } : null,
       connection: asConnection(row),
-      readiness: pass ? { blueprintVersion: pass.blueprintVersion, outcome: pass.outcome as 'ready' | 'blocked', checkedAt: pass.checkedAt.toISOString(), baseSha: pass.baseSha, checks: pass.checks as NonNullable<OnboardingView['readiness']>['checks'] } : null,
+      readiness: pass ? { blueprintVersion: pass.blueprintVersion, outcome: pass.outcome as 'ready' | 'blocked', checkedAt: pass.checkedAt.toISOString(), baseSha: pass.baseSha, snapshot: SetupSnapshotSchema.safeParse(pass.snapshot).data ?? null, checks: pass.checks as NonNullable<OnboardingView['readiness']>['checks'] } : null,
       firstRunId: row.firstRunId,
       deployment: { sourceCheckout: ctx.readiness?.sourceCheckout ?? null, servesRepository: served?.repository ?? null, checker: ctx.readiness !== undefined },
     };
@@ -176,7 +198,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
         .where(and(eq(schema.projectOnboardings.tenantId, tenantId), eq(schema.projectOnboardings.nameKey, key), isNull(schema.projectOnboardings.cancelledAt))))[0];
       if (existing) throw new AppError(409, 'project_already_started', 'A project with this name is already being set up. Resume it instead.', { projectId: existing.projectId });
       const id = newId('proj');
-      await tx.insert(schema.projectOnboardings).values({ tenantId, projectId: id, name: body.goal.name, nameKey: key, state: 'draft', answers: { goal: body.goal }, createdBy: uid });
+      await tx.insert(schema.projectOnboardings).values({ tenantId, projectId: id, name: body.goal.name, nameKey: key, state: 'draft', answers: { goal: body.goal, ...(body.goalAssist ? { goalAssist: body.goalAssist } : {}) }, createdBy: uid });
       return id;
     }));
     return reply.code(201).send(await viewOf(db, projectId));
@@ -207,7 +229,8 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
 
   // ---- answers and blueprint --------------------------------------------------------------------------------------
   step('answers', SaveAnswersRequestSchema, async (tx, row, body) => {
-    const answers = { ...row.answers, ...(body.goal ? { goal: body.goal } : {}), ...(body.source ? { source: body.source } : {}), ...(body.focus ? { focus: body.focus } : {}) };
+    const answers: Record<string, unknown> = { ...row.answers, ...(body.goal ? { goal: body.goal } : {}), ...(body.source ? { source: body.source } : {}), ...(body.focus ? { focus: body.focus } : {}) };
+    if (body.goalAssist !== undefined) { if (body.goalAssist === null) delete answers['goalAssist']; else answers['goalAssist'] = body.goalAssist; }
     if (canonicalJson(answers) === canonicalJson(row.answers)) return;
     const name = body.goal?.name ?? row.name;
     if (nameKey(name) !== row.nameKey) {
@@ -225,7 +248,8 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
         await write(tx, row, { conditionKind: 'needs_input', conditionReason: `Answer the ${missing.join(' and ')} step before a blueprint can be drafted.` });
         return;
       }
-      if (row.state === 'blueprint_ready') return;
+      // The controller only drafts when answers have changed. Anywhere else this is a re-save, and it must not replace the owner's edits or lose acceptance.
+      if (row.state !== 'discovering') return;
     }
     const content = body.content ?? blueprintFromAnswers({ goal: row.answers['goal'], source: row.answers['source'], focus: row.answers['focus'] } as Parameters<typeof blueprintFromAnswers>[0]);
     const contentSha256 = hashContent(content);
@@ -254,7 +278,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
 
   step('cost-plan', SaveCostPlanRequestSchema, async (tx, row, body) => {
     const state = requireConfigurable(row);
-    const inputs = { agentBudgetUsd: body.agentBudgetUsd, provider: body.provider, app: body.app };
+    const inputs = { agentBudgetUsd: body.agentBudgetUsd, effort: body.effort, production: body.production, agentUsage: body.agentUsage, assumptions: body.assumptions };
     const confirmedNow = row.costConfirmedForVersion === row.currentBlueprintVersion;
     if (confirmedNow && row.costInputs !== null && canonicalJson(inputs) === canonicalJson(row.costInputs)) return;
     await write(tx, row, { state, costInputs: inputs, costConfirmedForVersion: row.currentBlueprintVersion, ...clearReadiness });
@@ -264,7 +288,11 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     const state = requireConfigurable(row);
     const execution = { execution: body.execution, inference: body.inference };
     if (row.execution !== null && canonicalJson(execution) === canonicalJson(row.execution)) return;
-    await write(tx, row, { state, execution, costConfirmedForVersion: null, ...clearReadiness });
+    // Only a change that alters the cost lines needs the plan looked at again.
+    const inputs = costInputs(row);
+    const linesOf = (e: ExecutionChoice | null): string => (inputs ? canonicalJson(costPlanFor({ ...inputs, execution: e }).ledgers) : '');
+    const linesChanged = linesOf(asExecutionChoice(row)) !== linesOf(body.execution);
+    await write(tx, row, { state, execution, ...(linesChanged ? { costConfirmedForVersion: null } : {}), ...clearReadiness });
   });
 
   step('connections', SaveConnectionRequestSchema, async (tx, row, body) => {
@@ -277,8 +305,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     if (served && served.repository.toLowerCase() !== body.repository.toLowerCase()) {
       throw new AppError(409, 'second_repository_refused', `This deployment builds every project from one source checkout, and it already serves ${served.repository}. A second repository would be built from the wrong code. Use ${served.repository}, or run a separate deployment with its own SELARIKRU_SOURCE_REPO.`, { servesRepository: served.repository, projectId: served.projectId });
     }
-    const goal = GoalAnswersSchema.safeParse(row.answers['goal']);
-    const classification = goal.success ? goal.data.classification : 'internal';
+    const classification = classificationOf(row);
     await tx.insert(schema.projects).values({ tenantId, projectId: row.projectId, repository: body.repository, defaultBranch: body.defaultBranch, classification })
       .onConflictDoUpdate({ target: [schema.projects.tenantId, schema.projects.projectId], set: { repository: body.repository, defaultBranch: body.defaultBranch } });
     await write(tx, row, { state, connection, projectCreated: true, ...clearReadiness });
@@ -288,7 +315,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
   const inputsFor = (row: Row, blueprint: BlueprintContent) => {
     const budget = costInputs(row)?.agentBudgetUsd ?? null;
     return {
-      db, tenantId, projectId: row.projectId, now: now(), probes: ctx.readiness, policy: ctx.policy, catalog: declared, pullRequestsEnabled: ctx.github?.pullRequests !== undefined,
+      db, tenantId, projectId: row.projectId, now: now(), probes: ctx.readiness, drivers: ctx.drivers?.(), classification: classificationOf(row), policy: ctx.policy, catalog: declared, pullRequestsEnabled: ctx.github?.pullRequests !== undefined,
       blueprint, connection: asConnection(row), execution: asExecutionChoice(row), agentBudgetUsd: budget, costPlanConfirmed: row.costConfirmedForVersion !== null && row.costConfirmedForVersion === row.currentBlueprintVersion,
     };
   };
@@ -299,12 +326,17 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     return BlueprintContentSchema.parse(stored.content);
   };
 
+  const snapshotOf = (row: Row, baseSha: string | null): SetupSnapshot => {
+    const connection = asConnection(row);
+    return { blueprintVersion: row.currentBlueprintVersion!, execution: asExecutionChoice(row), inference: inferenceOf(row), agentBudgetUsd: costInputs(row)?.agentBudgetUsd ?? null, repository: connection?.repository ?? null, defaultBranch: connection?.defaultBranch ?? null, baseSha };
+  };
+
   /** Records one pass under the row lock. The result can only come from `performReadiness`. */
   const recordPass = async (tx: Tx, row: Row, result: ReadinessResult): Promise<void> => {
     const prior = await tx.select({ pass: schema.onboardingReadinessPasses.pass }).from(schema.onboardingReadinessPasses).where(and(eq(schema.onboardingReadinessPasses.tenantId, tenantId), eq(schema.onboardingReadinessPasses.projectId, row.projectId))).orderBy(desc(schema.onboardingReadinessPasses.pass)).limit(1);
     const pass = (prior[0]?.pass ?? 0) + 1;
     const outcome = result.passed ? 'ready' : 'blocked';
-    await tx.insert(schema.onboardingReadinessPasses).values({ tenantId, projectId: row.projectId, pass, blueprintVersion: row.currentBlueprintVersion!, outcome, checks: [...result.checks], baseSha: result.baseSha, checkedAt: now() });
+    await tx.insert(schema.onboardingReadinessPasses).values({ tenantId, projectId: row.projectId, pass, blueprintVersion: row.currentBlueprintVersion!, outcome, checks: [...result.checks], baseSha: result.baseSha, snapshot: snapshotOf(row, result.baseSha), checkedAt: now() });
     const open = result.checks.filter((c) => c.required && c.status !== 'passed');
     await write(tx, row, {
       state: advance(row.state as OnboardingState, result.passed ? 'readiness_passed' : 'readiness_blocked'), currentReadinessPass: pass,
@@ -374,15 +406,16 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
       const runId = newId('run');
       const at = now();
       const budgetJson = { limitUsd: budget };
-      await tx.insert(schema.runs).values({ tenantId, projectId, runId, lifecycle: 'planning', budget: budgetJson, placement });
+      const snapshot = snapshotOf(row, fresh.baseSha);
+      await tx.insert(schema.runs).values({ tenantId, projectId, runId, lifecycle: 'planning', budget: budgetJson, placement, setupSnapshot: snapshot });
       await writeEvent(tx, at, {
         projectId, runId, taskId: runId, aggregateRevision: 1, type: 'run.created', actor: { kind: 'human', id: uid },
-        payload: { title: redactSecrets(blueprint.firstMilestone.title), budget: { status: 'set', limitUsd: budget }, ...(placement ? { placement } : {}) },
+        payload: { title: redactSecrets(blueprint.firstMilestone.title), budget: { status: 'set', limitUsd: budget }, ...(placement ? { placement } : {}), setup: snapshot },
       });
       // The pass that authorised this start was taken a moment ago; record it so the base commit a plan uses is that one.
       const prior = await tx.select({ pass: schema.onboardingReadinessPasses.pass }).from(schema.onboardingReadinessPasses).where(and(eq(schema.onboardingReadinessPasses.tenantId, tenantId), eq(schema.onboardingReadinessPasses.projectId, projectId))).orderBy(desc(schema.onboardingReadinessPasses.pass)).limit(1);
       const pass = (prior[0]?.pass ?? 0) + 1;
-      await tx.insert(schema.onboardingReadinessPasses).values({ tenantId, projectId, pass, blueprintVersion: row.currentBlueprintVersion!, outcome: 'ready', checks: [...fresh.checks], baseSha: fresh.baseSha, checkedAt: at });
+      await tx.insert(schema.onboardingReadinessPasses).values({ tenantId, projectId, pass, blueprintVersion: row.currentBlueprintVersion!, outcome: 'ready', checks: [...fresh.checks], baseSha: fresh.baseSha, snapshot, checkedAt: at });
       await write(tx, row, { state: advance(row.state as OnboardingState, 'activated'), firstRunId: runId, currentReadinessPass: pass, conditionKind: null, conditionReason: null });
       return { runId };
     }));
@@ -408,6 +441,12 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     ownerOf(req);
     const body = parseBody(AssistReviewRequestSchema, req.body);
     if (body.restricted === true) throw new AppError(422, 'restricted_stays_on_device', 'A draft made from restricted text stays on your device, so it cannot be applied here.');
+    // Once a project has a recorded route, an answer that came by another one is not looked at.
+    if (body.projectId !== undefined) {
+      const row = await requireOnboarding(db, tenantId, body.projectId);
+      const recorded = inferenceOf(row);
+      if (recorded !== null && (!body.observed || !routeHonoursRecorded(recorded, body.observed.requestedMode, body.observed.source))) throw new AppError(422, 'route_not_recorded', 'This answer did not come by the route you recorded for this project, so it was not used.');
+    }
     if (body.envelope.status !== 'ok' || body.envelope.operation !== 'draftBrief') throw new AppError(422, 'proposal_not_acceptable', 'This proposal cannot be used.', { reason: body.envelope.status === 'ok' ? 'wrong_operation' : `status_${body.envelope.status}` });
     const v = validateProposal(body.envelope.data, { operation: 'draftBrief', allowedRequirementIds: [...ASSIST_CRITERIA_IDS], forbiddenMandatoryScope: [] });
     if (v.status === 'rejected' || v.data === null || !('summary' in v.data)) throw new AppError(422, 'proposal_rejected', 'The proposal failed validation.', v.issues.map((i) => ({ kind: i.kind, path: i.path, message: i.message })));

@@ -56,8 +56,8 @@ export interface TemplateDefinition {
 /** Phase 1 certifies one pilot stack for execution (architecture.md section 5). Every other track is honest about being a plan only. */
 export const TEMPLATE_CATALOG: Readonly<Record<ProjectTrack, TemplateDefinition>> = {
   saas_web: {
-    track: 'saas_web', version: 1, label: 'SaaS or web app', support: 'executable', summary: 'One authenticated vertical slice',
-    reason: 'A web app on the pilot stack is what the verifier is certified to build and check today.',
+    track: 'saas_web', version: 1, label: 'Pilot stack (Feedback Board)', support: 'executable', summary: 'The Feedback Board web app',
+    reason: 'The verifier has one suite, written for the Feedback Board starter, so this is the only stack it can judge today.',
     milestone: 'One vertical slice with passing acceptance checks',
     roles: [
       { role: 'Lead', reason: 'Keeps the plan to one small vertical slice' },
@@ -135,8 +135,20 @@ export const SourceAnswersSchema = z.strictObject({
 });
 export type SourceAnswers = z.infer<typeof SourceAnswersSchema>;
 
-export const FocusAnswersSchema = z.strictObject({ tracks: z.array(ProjectTrackSchema).min(1).max(PROJECT_TRACKS.length) });
+export const FocusAnswersSchema = z.strictObject({
+  tracks: z.array(ProjectTrackSchema).min(1).max(PROJECT_TRACKS.length),
+  /** Whether the product itself will contain model-powered features. Asked on its own, because the answer adds an evaluation plan to the blueprint. */
+  modelFeatures: z.enum(['yes', 'no', 'unsure']).optional(),
+});
 export type FocusAnswers = z.infer<typeof FocusAnswersSchema>;
+
+/** Where applied assistant wording came from, as the browser reported it. A label for the record; nothing trusts it. */
+export const GoalAssistSchema = z.strictObject({
+  observedSource: z.enum(['ON_DEVICE', 'IN_CLOUD', 'UNKNOWN']),
+  requestedMode: z.enum(INFERENCE_CHOICES).nullable(),
+  provenance: z.literal('assistant_proposal_reviewed'),
+});
+export type GoalAssist = z.infer<typeof GoalAssistSchema>;
 
 export const OnboardingAnswersSchema = z.strictObject({ goal: GoalAnswersSchema, source: SourceAnswersSchema, focus: FocusAnswersSchema });
 export type OnboardingAnswers = z.input<typeof OnboardingAnswersSchema>;
@@ -185,7 +197,10 @@ export function blueprintFromAnswers(answers: OnboardingAnswers): BlueprintConte
     nonGoals: [],
     assumptions: [a.source.kind === 'new' ? 'You will create an empty repository and connect it.' : 'The existing repository stays the source of truth; detected conventions outrank the template.'],
     firstMilestone: { title: lead.milestone, tasks: [{ id: 'T1', title: `Deliver: ${a.goal.firstOutcome}`.slice(0, 120), dependsOn: [] }] },
-    pendingDecisions: executable.unsupported.map((u) => `${TEMPLATE_CATALOG[u.track].label}: ${u.reason}`),
+    pendingDecisions: [
+      ...executable.unsupported.map((u) => `${TEMPLATE_CATALOG[u.track].label}: ${u.reason}`.slice(0, 240)),
+      ...(a.focus.modelFeatures === 'yes' || a.focus.modelFeatures === 'unsure' ? ['Model-powered features: agree a behavioural evaluation plan, a fallback, and the model, data and cost limits.'] : []),
+    ],
   };
 }
 
@@ -193,6 +208,9 @@ export function blueprintFromAnswers(answers: OnboardingAnswers): BlueprintConte
 
 export const COST_PROVENANCE = ['reference_price', 'user_estimate', 'unknown'] as const;
 export const COST_CADENCES = ['monthly', 'one_time', 'per_worker_hour'] as const;
+export const COST_UNITS = ['usd', 'hours'] as const;
+/** Who pays a line. A label on each line, separate from which ledger the line belongs to. */
+export const COST_PAYERS = ['platform', 'your_provider', 'your_hardware', 'your_accounts', 'you'] as const;
 
 export const CostSourceSchema = z.strictObject({
   name: Text(120),
@@ -214,6 +232,8 @@ export const CostLineSchema = z.strictObject({
   id: z.string().regex(/^[a-z0-9_]{1,60}$/),
   label: Text(120),
   cadence: z.enum(COST_CADENCES),
+  unit: z.enum(COST_UNITS),
+  payer: z.enum(COST_PAYERS),
   lowUsd: Amount,
   baseUsd: Amount,
   highUsd: Amount,
@@ -232,50 +252,99 @@ export const CostLineSchema = z.strictObject({
 export type CostLine = z.infer<typeof CostLineSchema>;
 
 export interface LedgerTotals {
-  /** Sum of monthly lines with a figure. Null when no line has one: never zero. */
-  readonly knownLowUsd: number | null;
-  readonly knownBaseUsd: number | null;
-  readonly knownHighUsd: number | null;
+  /** Sum of the lines with a figure in this ledger's unit and cadence. Null when no line has one: never zero. */
+  readonly knownLow: number | null;
+  readonly knownBase: number | null;
+  readonly knownHigh: number | null;
+  readonly unit: 'usd' | 'hours';
+  readonly cadence: 'monthly' | 'one_time';
   /** Lines with no figure. They are never part of a total. */
   readonly unknownLines: number;
 }
 
-export function ledgerTotals(lines: readonly CostLine[]): LedgerTotals {
-  const monthly = lines.filter((l) => l.cadence === 'monthly' && l.provenance !== 'unknown');
-  const sum = (key: 'lowUsd' | 'baseUsd' | 'highUsd'): number | null => (monthly.length === 0 ? null : Math.round(monthly.reduce((a, l) => a + l[key]!, 0) * 10_000) / 10_000);
-  return { knownLowUsd: sum('lowUsd'), knownBaseUsd: sum('baseUsd'), knownHighUsd: sum('highUsd'), unknownLines: lines.filter((l) => l.provenance === 'unknown').length };
+/** Only lines in the same unit and cadence can be added. A per-hour rate is shown on its line and never summed. */
+export function ledgerTotals(lines: readonly CostLine[], basis: { unit: 'usd' | 'hours'; cadence: 'monthly' | 'one_time' } = { unit: 'usd', cadence: 'monthly' }): LedgerTotals {
+  const summed = lines.filter((l) => l.cadence === basis.cadence && l.unit === basis.unit && l.provenance !== 'unknown');
+  const sum = (key: 'lowUsd' | 'baseUsd' | 'highUsd'): number | null => (summed.length === 0 ? null : Math.round(summed.reduce((a, l) => a + l[key]!, 0) * 10_000) / 10_000);
+  return { knownLow: sum('lowUsd'), knownBase: sum('baseUsd'), knownHigh: sum('highUsd'), unit: basis.unit, cadence: basis.cadence, unknownLines: lines.filter((l) => l.provenance === 'unknown').length };
 }
 
-export type LedgerKey = 'platform' | 'provider' | 'app';
+export const LEDGER_KEYS = ['build_effort', 'production', 'agent_usage'] as const;
+export type LedgerKey = (typeof LEDGER_KEYS)[number];
+export const LEDGER_BASIS: Readonly<Record<LedgerKey, { unit: 'usd' | 'hours'; cadence: 'monthly' | 'one_time' }>> = {
+  build_effort: { unit: 'hours', cadence: 'one_time' },
+  production: { unit: 'usd', cadence: 'monthly' },
+  agent_usage: { unit: 'usd', cadence: 'monthly' },
+};
 export interface CostLedger { readonly lines: readonly CostLine[]; readonly totals: LedgerTotals }
+
+const Assumption = z.strictObject({ value: z.string().trim().min(1).max(200).nullable(), confidence: z.enum(['low', 'medium', 'high', 'unknown']) })
+  .refine((a) => a.value !== null || a.confidence === 'unknown', { message: 'an unanswered assumption has unknown confidence', path: ['confidence'] });
+/** The workload a cost plan rests on (architecture.md section 5). A null value is an explicit unknown. */
+export const CostAssumptionsSchema = z.strictObject({ users: Assumption, traffic: Assumption, storage: Assumption, aiUsage: Assumption });
+export type CostAssumptions = z.infer<typeof CostAssumptionsSchema>;
+export const NO_ASSUMPTIONS: CostAssumptions = { users: { value: null, confidence: 'unknown' }, traffic: { value: null, confidence: 'unknown' }, storage: { value: null, confidence: 'unknown' }, aiUsage: { value: null, confidence: 'unknown' } };
+
 export interface CostPlan {
-  /** The ceiling the owner set for agent execution. Null means not set, and a missing limit blocks. */
+  /** The ceiling the owner set for agent execution. It limits spend; it is not an estimate of build effort or running costs. Null means not set, and a missing limit blocks. */
   readonly agentBudgetUsd: number | null;
   readonly ledgers: Readonly<Record<LedgerKey, CostLedger>>;
+  readonly assumptions: CostAssumptions;
 }
 
-const unknownLine = (id: string, label: string, basis: string): CostLine => ({ id, label, cadence: 'monthly', lowUsd: null, baseUsd: null, highUsd: null, provenance: 'unknown', basis, source: null });
+const unknownLine = (id: string, label: string, payer: CostLine['payer'], basis: string, unit: CostLine['unit'] = 'usd', cadence: CostLine['cadence'] = 'monthly'): CostLine => ({ id, label, cadence, unit, payer, lowUsd: null, baseUsd: null, highUsd: null, provenance: 'unknown', basis, source: null });
 
-/** Builds the three ledgers. Platform and provider reference lines come from this function; a browser cannot price them. Unknown stays null. */
-export function costPlanFor(input: { execution: ExecutionChoice | null; agentBudgetUsd: number | null; provider: readonly CostLine[]; app: readonly CostLine[] }): CostPlan {
+export interface CostPlanInput {
+  readonly execution: ExecutionChoice | null;
+  readonly agentBudgetUsd: number | null;
+  readonly effort: readonly CostLine[];
+  readonly production: readonly CostLine[];
+  readonly agentUsage: readonly CostLine[];
+  readonly assumptions?: CostAssumptions | undefined;
+}
+
+/**
+ * Builds the three ledgers of feasibility.md: application build effort, application production operation, and platform agent usage. Who pays is a label on each line.
+ * Reference lines come from this function, so a browser cannot price them. Unknown stays null.
+ */
+export function costPlanFor(input: CostPlanInput): CostPlan {
   const cloud = input.execution === 'cloud' || input.execution === 'hybrid';
-  const platform = [
-    unknownLine('platform_access', 'Platform access', 'No launch price is set. The figures in planning documents are test hypotheses, not prices.'),
-    unknownLine('managed_usage', 'Managed model or worker usage', 'This local release meters nothing on your behalf, and no managed lane is enabled.'),
+  const local = input.execution !== 'cloud';
+  const effort = input.effort.length > 0 ? [...input.effort] : [unknownLine('build_effort', 'Build effort for the first milestone', 'you', 'No estimate yet. Effort is engineering judgment on scoped tasks, and the agent budget is not an estimate of it.', 'hours', 'one_time')];
+  const production = input.production.length > 0 ? [...input.production] : [unknownLine('app_hosting', 'Running the app you build', 'your_accounts', 'Add hosting, database and API lines once you know the architecture. No figure is assumed.')];
+  const agentUsage: CostLine[] = [
+    unknownLine('platform_access', 'Platform access', 'platform', 'No launch price is set. The figures in planning documents are test hypotheses, not prices.'),
+    unknownLine('managed_usage', 'Managed model or worker usage', 'platform', 'This local release meters nothing on your behalf, and no managed lane is enabled.'),
+    unknownLine('coding_model', 'Coding model usage', 'your_provider', 'Billed by your model provider. No usage has been observed yet, and token prices depend on the model you assign.'),
+    ...(local ? [unknownLine('local_hardware', 'Local hardware and electricity', 'your_hardware', 'Your own machine. This service cannot see those costs, and local is not the same as free.')] : []),
+    ...(cloud ? [{ id: 'cloud_worker', label: 'Cloud worker time, 2 vCPU / 4 GiB', cadence: 'per_worker_hour' as const, unit: 'usd' as const, payer: 'your_provider' as const, lowUsd: 0.1656, baseUsd: 0.1656, highUsd: 0.1656, provenance: 'reference_price' as const, basis: 'E2B per-second rates for a 2 vCPU / 4 GiB worker, derived to one hour. A reference, not a quote.', source: COST_REFERENCES.cloudWorker2c4g }] : []),
+    ...input.agentUsage,
   ];
-  const provider: CostLine[] = [
-    unknownLine('coding_model', 'Coding model usage', 'Billed by your model provider. No usage has been observed yet, and token prices depend on the model you assign.'),
-    ...(cloud
-      ? [{ id: 'cloud_worker', label: 'Cloud worker time, 2 vCPU / 4 GiB', cadence: 'per_worker_hour' as const, lowUsd: 0.1656, baseUsd: 0.1656, highUsd: 0.1656, provenance: 'reference_price' as const, basis: 'E2B per-second rates for a 2 vCPU / 4 GiB worker, derived to one hour. A reference, not a quote.', source: COST_REFERENCES.cloudWorker2c4g }]
-      : [unknownLine('local_hardware', 'Local hardware and electricity', 'Your own machine. This service cannot see those costs, and local is not the same as free.')]),
-    ...input.provider,
-  ];
-  const app = input.app.length > 0 ? [...input.app] : [unknownLine('app_hosting', 'Running the app you build', 'Add hosting, database and API lines once you know the architecture. No figure is assumed.')];
-  const ledger = (lines: readonly CostLine[]): CostLedger => ({ lines, totals: ledgerTotals(lines) });
-  return { agentBudgetUsd: input.agentBudgetUsd, ledgers: { platform: ledger(platform), provider: ledger(provider), app: ledger(app) } };
+  const ledger = (key: LedgerKey, lines: readonly CostLine[]): CostLedger => ({ lines, totals: ledgerTotals(lines, LEDGER_BASIS[key]) });
+  return { agentBudgetUsd: input.agentBudgetUsd, assumptions: input.assumptions ?? NO_ASSUMPTIONS, ledgers: { build_effort: ledger('build_effort', effort), production: ledger('production', production), agent_usage: ledger('agent_usage', agentUsage) } };
 }
 
-export const READINESS_CHECK_IDS = ['template_supported', 'repository_path', 'repository_identity', 'base_commit', 'runner_enrolled', 'policy_loaded', 'github_auth', 'budget_limit'] as const;
+/** The choices that authorised a pass, frozen with it. A run started from onboarding carries this copy. */
+export const SetupSnapshotSchema = z.strictObject({
+  blueprintVersion: z.number().int().min(1),
+  execution: ExecutionChoiceSchema.nullable(),
+  inference: z.enum(INFERENCE_CHOICES).nullable(),
+  agentBudgetUsd: z.number().nullable(),
+  repository: z.string().nullable(),
+  defaultBranch: z.string().nullable(),
+  baseSha: z.string().nullable(),
+});
+export type SetupSnapshot = z.infer<typeof SetupSnapshotSchema>;
+
+/** Whether an assistant answer came by the route recorded for this project. A preference allows either side; an `only` needs that side, so an unknown source does not count. */
+export function routeHonoursRecorded(recorded: (typeof INFERENCE_CHOICES)[number], requested: string | null, observed: string): boolean {
+  if (requested !== recorded) return false;
+  if (recorded === 'ONLY_ON_DEVICE') return observed === 'ON_DEVICE';
+  if (recorded === 'ONLY_IN_CLOUD') return observed === 'IN_CLOUD';
+  return true;
+}
+
+export const READINESS_CHECK_IDS = ['template_supported', 'stack_certified', 'checkout_present', 'repository_identity', 'repository_reachable', 'base_commit', 'runner_enrolled', 'runner_has_project', 'cloud_destination', 'pipeline_drivers', 'policy_loaded', 'budget_limit'] as const;
 export type ReadinessCheckId = (typeof READINESS_CHECK_IDS)[number];
 export type ReadinessStatus = 'passed' | 'failed' | 'unknown';
 export interface ReadinessCheck {
@@ -297,13 +366,14 @@ export const readinessPassed = (checks: readonly ReadinessCheck[]): boolean => c
 
 const CostLedgerViewSchema = z.strictObject({
   lines: z.array(CostLineSchema),
-  totals: z.strictObject({ knownLowUsd: z.number().nullable(), knownBaseUsd: z.number().nullable(), knownHighUsd: z.number().nullable(), unknownLines: z.number().int() }),
+  totals: z.strictObject({ knownLow: z.number().nullable(), knownBase: z.number().nullable(), knownHigh: z.number().nullable(), unit: z.enum(COST_UNITS), cadence: z.enum(['monthly', 'one_time']), unknownLines: z.number().int() }),
 });
 export const OnboardingCostPlanViewSchema = z.strictObject({
   agentBudgetUsd: z.number().nullable(),
   /** True once confirmed against the current blueprint version. */
   confirmed: z.boolean(),
-  ledgers: z.strictObject({ platform: CostLedgerViewSchema, provider: CostLedgerViewSchema, app: CostLedgerViewSchema }),
+  ledgers: z.strictObject({ build_effort: CostLedgerViewSchema, production: CostLedgerViewSchema, agent_usage: CostLedgerViewSchema }),
+  assumptions: CostAssumptionsSchema,
 });
 
 export const ReadinessCheckViewSchema = z.strictObject({
@@ -317,6 +387,7 @@ export const OnboardingViewSchema = z.strictObject({
   condition: z.strictObject({ kind: OnboardingConditionSchema, reason: z.string() }).nullable(),
   revision: z.number().int(),
   goal: GoalAnswersSchema.nullable(),
+  goalAssist: GoalAssistSchema.nullable(),
   source: SourceAnswersSchema.nullable(),
   focus: FocusAnswersSchema.nullable(),
   blueprint: z.strictObject({ version: z.number().int(), accepted: z.boolean(), origin: z.enum(['controller', 'owner']), contentSha256: z.string(), createdAt: z.string(), content: BlueprintContentSchema }).nullable(),
@@ -324,7 +395,7 @@ export const OnboardingViewSchema = z.strictObject({
   costPlan: OnboardingCostPlanViewSchema.nullable(),
   execution: z.strictObject({ execution: z.enum(EXECUTION_CHOICES), inference: z.enum(INFERENCE_CHOICES) }).nullable(),
   connection: z.strictObject({ repository: z.string(), defaultBranch: z.string() }).nullable(),
-  readiness: z.strictObject({ blueprintVersion: z.number().int(), outcome: z.enum(['ready', 'blocked']), checkedAt: z.string(), baseSha: z.string().nullable(), checks: z.array(ReadinessCheckViewSchema) }).nullable(),
+  readiness: z.strictObject({ blueprintVersion: z.number().int(), outcome: z.enum(['ready', 'blocked']), checkedAt: z.string(), baseSha: z.string().nullable(), snapshot: SetupSnapshotSchema.nullable(), checks: z.array(ReadinessCheckViewSchema) }).nullable(),
   firstRunId: z.string().nullable(),
   deployment: z.strictObject({ sourceCheckout: z.string().nullable(), servesRepository: z.string().nullable(), checker: z.boolean() }),
 });

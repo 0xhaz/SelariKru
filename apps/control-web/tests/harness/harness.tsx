@@ -59,7 +59,7 @@ interface Scenario {
   /** Failure loads on the spied source are refused until the test calls `window.__allowFailureLoads`, to exercise retrying. */
   refuseFailureLoads?: boolean;
   /** Mounts the onboarding screen over the real HTTP client, against a route the test answers. */
-  onboardingApi?: { baseUrl: string };
+  onboardingApi?: { baseUrl: string; token?: string };
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -260,7 +260,7 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
 const root = createRoot(document.getElementById('root')!);
 if (sc.onboardingApi) {
   const o = sc.onboardingApi;
-  root.render(<StrictMode><AppShell store={createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined })} mode="live" projectLabel="New project" assistant={null} onboarding={<OnboardingView api={createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => 'test-token' })} adapter={adapter} hold={hold} mode="live" />} /></StrictMode>);
+  root.render(<StrictMode><AppShell store={createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined })} mode="live" projectLabel="New project" assistant={null} onboarding={<OnboardingView api={createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => o.token ?? 'test-token' })} adapter={adapter} hold={hold} mode="live" />} /></StrictMode>);
 } else if (sc.liveApi) {
   const live = sc.liveApi;
   const source = createLiveDataSource({ baseUrl: live.baseUrl, getToken: async () => live.token });

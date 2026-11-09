@@ -72,9 +72,14 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const runner = runnerOf(req);
     const body = parseBody(ClaimRequestSchema, req.body);
     const where = and(eq(schema.runners.tenantId, runner.tenantId), eq(schema.runners.runnerId, runner.runnerId));
-    const stored = (await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(where))[0]?.report ?? null;
+    const storedRow = (await db.select({ report: schema.runners.harnessReport, projects: schema.runners.configuredProjects }).from(schema.runners).where(where))[0];
+    const stored = storedRow?.report ?? null;
     // Claims arrive at poll rate; an unchanged report writes nothing.
     if (body.harnesses !== undefined && (stored === null || reportKey(stored) !== reportKey(body.harnesses))) await db.update(schema.runners).set({ harnessReport: body.harnesses }).where(where);
+    if (body.projects !== undefined) {
+      const next = [...new Set(body.projects)].sort();
+      if (JSON.stringify(storedRow?.projects ?? null) !== JSON.stringify(next)) await db.update(schema.runners).set({ configuredProjects: next }).where(where);
+    }
     const harnesses = body.harnesses ?? stored ?? [];
     const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
     if (outcome.ok) return reply.code(200).send({ lease: outcome.lease, reason: null, skipped: outcome.skipped });

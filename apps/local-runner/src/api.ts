@@ -48,8 +48,8 @@ export class ApiStatusError extends Error {
 
 /** Everything the runner asks of the control plane. Every call is an outbound request. */
 export interface RunnerApi {
-  /** `harnesses`: what this runner can launch now. */
-  claim(harnesses?: readonly RunnerHarnessReport[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
+  /** `harnesses`: what this runner can launch now. `projects`: the project ids it has a checkout for. */
+  claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
   task(lease: LeaseRef): Promise<TaskSpec>;
   heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
@@ -89,8 +89,8 @@ export class HttpRunnerApi implements RunnerApi {
     return res.json();
   }
 
-  async claim(harnesses?: readonly RunnerHarnessReport[]) {
-    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', harnesses === undefined ? {} : { harnesses }));
+  async claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]) {
+    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', { ...(harnesses === undefined ? {} : { harnesses }), ...(projects === undefined ? {} : { projects }) }));
     return { lease: r.lease, reason: r.reason ?? null };
   }
   async task(lease: LeaseRef) {

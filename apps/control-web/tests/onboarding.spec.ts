@@ -19,20 +19,25 @@ const blueprint = (over: Record<string, unknown> = {}) => ({
   },
   ...over,
 });
-const line = (id: string, label: string, provenance: string, basis: string, amount: number | null, cadence = 'monthly', source: unknown = null) => ({ id, label, cadence, lowUsd: amount, baseUsd: amount, highUsd: amount, provenance, basis, source });
+const line = (id: string, label: string, payer: string, provenance: string, basis: string, amount: number | null, unit = 'usd', cadence = 'monthly', source: unknown = null) => ({ id, label, cadence, unit, payer, lowUsd: amount, baseUsd: amount, highUsd: amount, provenance, basis, source });
+const noTotals = { knownLow: null, knownBase: null, knownHigh: null, unit: 'usd', cadence: 'monthly' };
 const ledgers = {
-  platform: { lines: [line('platform_access', 'Platform access', 'unknown', 'No launch price is set. The figures in planning documents are test hypotheses, not prices.', null), line('managed_usage', 'Managed model or worker usage', 'unknown', 'This local release meters nothing on your behalf, and no managed lane is enabled.', null)], totals: { knownLowUsd: null, knownBaseUsd: null, knownHighUsd: null, unknownLines: 2 } },
-  provider: { lines: [line('coding_model', 'Coding model usage', 'unknown', 'Billed by your model provider. No usage has been observed yet.', null), line('local_hardware', 'Local hardware and electricity', 'unknown', 'Your own machine. This service cannot see those costs, and local is not the same as free.', null)], totals: { knownLowUsd: null, knownBaseUsd: null, knownHighUsd: null, unknownLines: 2 } },
-  app: { lines: [line('line_db', 'Database', 'unknown', 'Not chosen yet.', null), { ...line('line_host', 'Hosting', 'user_estimate', 'My current hosting bill for a similar app', 10), lowUsd: 5, highUsd: 20 }], totals: { knownLowUsd: 5, knownBaseUsd: 10, knownHighUsd: 20, unknownLines: 1 } },
+  build_effort: { lines: [line('build_effort', 'Build effort for the first milestone', 'you', 'unknown', 'No estimate yet. Effort is engineering judgment on scoped tasks, and the agent budget is not an estimate of it.', null, 'hours', 'one_time')], totals: { ...noTotals, unit: 'hours', cadence: 'one_time', unknownLines: 1 } },
+  production: { lines: [line('line_db', 'Database', 'your_accounts', 'unknown', 'Not chosen yet.', null), { ...line('line_host', 'Hosting', 'your_accounts', 'user_estimate', 'My current hosting bill for a similar app', 10), lowUsd: 5, highUsd: 20 }], totals: { knownLow: 5, knownBase: 10, knownHigh: 20, unit: 'usd', cadence: 'monthly', unknownLines: 1 } },
+  agent_usage: { lines: [line('platform_access', 'Platform access', 'platform', 'unknown', 'No launch price is set. The figures in planning documents are test hypotheses, not prices.', null), line('managed_usage', 'Managed model or worker usage', 'platform', 'unknown', 'This local release meters nothing on your behalf, and no managed lane is enabled.', null), line('coding_model', 'Coding model usage', 'your_provider', 'unknown', 'Billed by your model provider. No usage has been observed yet.', null), line('local_hardware', 'Local hardware and electricity', 'your_hardware', 'unknown', 'Your own machine. This service cannot see those costs, and local is not the same as free.', null)], totals: { ...noTotals, unknownLines: 4 } },
 };
+const assumptions = { users: { value: '200 patients a day', confidence: 'low' }, traffic: { value: null, confidence: 'unknown' }, storage: { value: null, confidence: 'unknown' }, aiUsage: { value: null, confidence: 'unknown' } };
 const checks = (over: Record<string, { status: string; reason: string; next?: string | null }> = {}) => [
-  ['template_supported', 'Template can run', 'Every chosen track is certified to run.'],
-  ['repository_path', 'Repository reachable', 'The checkout at /srv/source is a git repository.'],
+  ['template_supported', 'Template can run', 'This is the pilot stack (Feedback Board), the only one the verifier can judge.'],
+  ['stack_certified', 'Checkout is the pilot stack', 'The base commit carries the frozen Feedback Board contract.'],
+  ['checkout_present', 'Checkout present', 'The checkout at /srv/source is a git repository.'],
   ['repository_identity', 'Checkout matches repository', "The checkout's origin is acme/clinic-queue."],
+  ['repository_reachable', 'Repository reachable', 'This account can push to acme/clinic-queue.'],
   ['base_commit', 'Base commit resolves', 'Branch main resolves to 1f3c8a90b2d4.'],
-  ['runner_enrolled', 'Runner enrolled', 'A local runner reported in recently.'],
+  ['runner_enrolled', 'Runner enrolled', 'A local runner reported in recently, with a model it can launch.'],
+  ['runner_has_project', 'Runner has this project', 'The runner reports a source checkout for this project.'],
+  ['pipeline_drivers', 'Build and verification running', 'The assembly and verification drivers are running in this server.'],
   ['policy_loaded', 'Policy loaded', 'Policy 2026-11-09.2 is loaded and allows draft pull requests.'],
-  ['github_auth', 'GitHub sign-in', 'The GitHub CLI is signed in on this machine.'],
   ['budget_limit', 'Agent budget set', 'The agent budget ceiling is $25.'],
 ].map(([id, label, reason]) => {
   const o = over[id!];
@@ -40,21 +45,22 @@ const checks = (over: Record<string, { status: string; reason: string; next?: st
 });
 
 const base = {
-  projectId: 'proj_1', name: goal.name, state: 'draft', condition: null, revision: 3, goal, source: null, focus: null, blueprint: null, template: null, costPlan: null, execution: null, connection: null, readiness: null, firstRunId: null,
+  projectId: 'proj_1', name: goal.name, state: 'draft', condition: null, revision: 3, goal, goalAssist: null, source: null, focus: null, blueprint: null, template: null, costPlan: null, execution: null, connection: null, readiness: null, firstRunId: null,
   deployment: { sourceCheckout: '/srv/source', servesRepository: null, checker: true },
 };
 const execution = { execution: 'local', inference: 'PREFER_ON_DEVICE' };
-const costPlan = { agentBudgetUsd: 25, confirmed: true, ledgers };
+const costPlan = { agentBudgetUsd: 25, confirmed: true, ledgers, assumptions };
+const snapshot = { blueprintVersion: 1, execution: 'local', inference: 'PREFER_ON_DEVICE', agentBudgetUsd: 25, repository: 'acme/clinic-queue', defaultBranch: 'main', baseSha: 'b'.repeat(40) };
 const configured = { ...base, state: 'configuring', source: { kind: 'new' }, focus: { tracks: ['saas_web'] }, blueprint: blueprint({ accepted: true }), template: { executable: true, unsupported: [] }, costPlan, execution, connection: { repository: 'acme/clinic-queue', defaultBranch: 'main' } };
 const failed = {
-  ...configured, state: 'readiness_check', condition: { kind: 'blocked', reason: 'Not ready: Runner enrolled, GitHub sign-in, Checkout matches repository.' },
-  readiness: { blueprintVersion: 1, outcome: 'blocked', checkedAt: '2026-11-10T04:12:00.000Z', baseSha: 'b'.repeat(40), checks: checks({
+  ...configured, state: 'readiness_check', condition: { kind: 'blocked', reason: 'Not ready: Runner has this project, Repository reachable, Checkout matches repository.' },
+  readiness: { blueprintVersion: 1, outcome: 'blocked', checkedAt: '2026-11-10T04:12:00.000Z', baseSha: 'b'.repeat(40), snapshot, checks: checks({
     repository_identity: { status: 'unknown', reason: 'The checkout has no origin remote, so it cannot be confirmed as this repository.', next: 'Point the checkout\'s origin at github.com/acme/clinic-queue.' },
-    runner_enrolled: { status: 'failed', reason: 'No local runner has reached this server recently.', next: 'Pair a runner and start it on this machine, then try again.' },
-    github_auth: { status: 'failed', reason: 'The GitHub CLI is not signed in to github.com on this machine.', next: 'Run `gh auth login` on this machine.' },
+    runner_has_project: { status: 'failed', reason: 'The runner has not been given a source checkout for this project, so it could not build it.', next: 'Restart the runner with `--repo proj_1=/srv/source`.' },
+    repository_reachable: { status: 'failed', reason: 'The GitHub CLI is not signed in on this machine.', next: 'Run `gh auth login` on this machine with an account that can push to the repository.' },
   }) },
 };
-const ready = { ...configured, state: 'ready', readiness: { blueprintVersion: 1, outcome: 'ready', checkedAt: '2026-11-10T04:14:00.000Z', baseSha: 'b'.repeat(40), checks: checks() } };
+const ready = { ...configured, state: 'ready', readiness: { blueprintVersion: 1, outcome: 'ready', checkedAt: '2026-11-10T04:14:00.000Z', baseSha: 'b'.repeat(40), snapshot, checks: checks() } };
 
 type Screen = { id: string; view: unknown; hash: string; heading: string; run?: (p: Page) => Promise<void> };
 const go = (name: string) => async (p: Page) => { await p.getByRole('navigation', { name: 'Setup steps' }).getByRole('button', { name, exact: true }).click(); };
@@ -128,6 +134,84 @@ test.describe('screens', () => {
 });
 
 test.describe('behaviour', () => {
+  const stepNav = (page: Page, name: string) => page.getByRole('navigation', { name: 'Setup steps' }).getByRole('button', { name, exact: true });
+
+  test('text marked restricted cannot be saved, and clearing the mark is deliberate', async ({ page }) => {
+    await open(page, base, '#/onboarding?id=proj_1');
+    await stepNav(page, 'Goal').click();
+    const save = page.getByRole('button', { name: 'Save and continue' });
+    await expect(save).toBeEnabled();
+    await page.getByLabel('This text includes restricted material').click();
+    await expect(save).toBeDisabled();
+    await expect(page.getByText('This text is marked restricted, so it cannot be saved.')).toBeVisible();
+    await page.getByRole('button', { name: 'I have removed the restricted material' }).click();
+    await expect(save).toBeEnabled();
+  });
+
+  test('a ledger total follows the rows on screen', async ({ page }) => {
+    await open(page, { ...configured, costPlan: { ...costPlan, confirmed: false }, execution: null, connection: null }, '#/onboarding?id=proj_1');
+    await expect(page.getByTestId('ledger-total-production')).toHaveText('Known monthly: $5–$20');
+    const ledger = page.getByTestId('ledger-production');
+    await ledger.getByRole('button', { name: /Add a line/ }).click();
+    await ledger.getByLabel('What is it').fill('Email');
+    await ledger.getByLabel('Low, $/month').fill('1');
+    await ledger.getByLabel('Base', { exact: true }).fill('2');
+    await ledger.getByLabel('High', { exact: true }).fill('3');
+    await ledger.getByLabel('What this is based on').fill('Provider price page');
+    await ledger.getByRole('button', { name: 'Add line' }).click();
+    await expect(page.getByTestId('ledger-total-production')).toHaveText('Known monthly: $6–$23');
+  });
+
+  test('build effort and the agent budget are kept apart', async ({ page }) => {
+    await open(page, { ...configured, costPlan: { ...costPlan, confirmed: false }, execution: null, connection: null }, '#/onboarding?id=proj_1');
+    await expect(page.getByTestId('cost-line-build_effort')).toContainText('Unknown');
+    await expect(page.getByTestId('cost-line-build_effort')).toContainText('Paid by You');
+    await expect(page.getByText('It is not an estimate of build effort', { exact: false })).toBeVisible();
+  });
+
+  test('a choice that adds cost lines returns to the cost plan', async ({ page }) => {
+    const before = { ...configured, execution: null, connection: null };
+    const after = { ...before, execution: { execution: 'cloud', inference: 'PREFER_ON_DEVICE' }, costPlan: { ...costPlan, confirmed: false } };
+    await page.addInitScript((url) => { (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url } }; }, API);
+    await page.route('**/mockapi/v1/onboarding**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(route.request().method() === 'POST' ? after : before) }));
+    await page.goto('/tests/harness/index.html#/onboarding?id=proj_1');
+    await page.getByLabel(/Cloud sandbox/).check();
+    await page.getByRole('button', { name: 'Save and continue' }).click();
+    await expect(page.getByRole('heading', { name: 'What will it cost?' })).toBeVisible();
+    await expect(page.getByText('added cloud worker time')).toBeVisible();
+  });
+
+  test('after activation setup is read-only and the next action is planning', async ({ page }) => {
+    await open(page, { ...ready, state: 'activated', firstRunId: 'run_7f2' }, '#/onboarding?id=proj_1');
+    await expect(page.getByRole('link', { name: 'Plan the run' })).toHaveAttribute('href', /#\/assistant\?run=run_7f2/);
+    await stepNav(page, 'Blueprint').click();
+    await expect(page.getByText('so its setup can no longer change')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Edit blueprint' })).toHaveCount(0);
+    await stepNav(page, 'Connections').click();
+    await expect(page.getByLabel('GitHub repository')).toBeDisabled();
+  });
+
+  test('a hint and an error are tied to their control', async ({ page }) => {
+    await page.addInitScript((url) => { (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url } }; }, API);
+    await page.route('**/mockapi/v1/onboarding**', (route) => route.request().method() === 'POST'
+      ? route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: { code: 'credential_in_input', message: 'x', details: { paths: ['goal.idea'] } } }) })
+      : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(base) }));
+    await page.goto('/tests/harness/index.html#/onboarding?id=proj_1');
+    await stepNav(page, 'Goal').click();
+    await page.getByRole('button', { name: 'Save and continue' }).click();
+    const idea = page.getByLabel('Your idea');
+    await expect(idea).toHaveAttribute('aria-invalid', 'true');
+    await expect(idea).toHaveAttribute('aria-describedby', 'goal-idea-hint goal-idea-error');
+    await stepNav(page, 'Starting point').click();
+    await expect(page.getByText('That did not work')).toHaveCount(0);
+  });
+
+  test('first-time setup does not say the data is unavailable', async ({ page }) => {
+    await open(page, null, '#/onboarding');
+    await expect(page.getByRole('heading', { name: 'What you will go through' })).toBeVisible();
+    await expect(page.getByTestId('freshness')).toHaveCount(0);
+  });
+
   test('a double click submits the goal once', async ({ page }) => {
     await page.addInitScript((url) => { (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url } }; }, API);
     const calls = await mockApi(page, base);
@@ -144,11 +228,13 @@ test.describe('behaviour', () => {
 
   test('a failed check says why and what to do next, with no pass implied', async ({ page }) => {
     await open(page, failed, '#/onboarding?id=proj_1');
-    const runner = page.getByTestId('check-runner_enrolled');
+    const runner = page.getByTestId('check-runner_has_project');
     await expect(runner).toHaveAttribute('data-status', 'failed');
     await expect(runner).toContainText('Failed');
-    await expect(runner).toContainText('No local runner has reached this server recently.');
+    await expect(runner).toContainText('has not been given a source checkout');
     await expect(runner).toContainText('Next:');
+    await expect(runner.locator('code')).toHaveText('--repo proj_1=/srv/source');
+    await expect(page.getByTestId('readiness-checks')).not.toContainText('`');
     await expect(page.getByTestId('check-repository_identity')).toContainText('Unknown');
     await expect(page.getByTestId('setup-state')).toContainText('Blocked');
   });

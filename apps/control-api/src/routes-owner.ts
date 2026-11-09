@@ -177,7 +177,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const at = now();
     const result = await withTx(db, (tx) =>
       idempotent(tx, { tenantId: config.tenantId, projectId, key: `run.create:${body.idempotencyKey}` }, fingerprint(body), async () => {
-        await assertRunAllowed(tx, config.tenantId, projectId);
+        await assertRunAllowed(tx, config.tenantId, projectId, { budgetLimitUsd: body.budgetLimitUsd, placement: body.placement });
         const runId = newId('run');
         const budget: Record<string, unknown> = body.budgetLimitUsd !== undefined ? { limitUsd: body.budgetLimitUsd } : {};
         const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import { declaredHarnessCatalog } from '@selarikru/harness-claude';
@@ -8,7 +8,7 @@ import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
 import { createScheduler, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
-import { createGitProbes, ghAuthStatus, type ReadinessProbes } from './onboarding-readiness.ts';
+import { createGitProbes, ghRepoAccess, type ReadinessProbes } from './onboarding-readiness.ts';
 import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
@@ -19,6 +19,16 @@ import { dockerRunner, currentTrusted, loadValidRecord, LOCAL_DOCKER_HOST } from
 import { DEFAULT_VERIFICATION_RETRIES, startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
 import { ASSEMBLY_LEASE_SECONDS, startAssemblyDriver, type AssemblyDriverOptions } from '../../../services/verifier/src/assembly-driver.ts';
 import { readTip } from '../../../services/verifier/src/tip.ts';
+
+/** The frozen contract's hash from the verifier's own record. Null when it cannot be read: the stack check then says unknown. */
+function certifiedContractHash(): string | null {
+  try {
+    const hashes = JSON.parse(readFileSync(new URL('../../../services/verifier/suites/feedback-board/HASHES.json', import.meta.url), 'utf8')) as { contractSha256?: unknown };
+    return typeof hashes.contractSha256 === 'string' ? hashes.contractSha256 : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Starts the verification driver. Absent: nothing verifies assembled candidates in this process. */
 export type VerificationOptions = Omit<VerificationDriverOptions, 'db' | 'tenantId' | 'now'> & { intervalMs: number };
@@ -110,7 +120,7 @@ export function evidenceOptionsFromEnv(env: NodeJS.ProcessEnv): EvidenceOptions 
  */
 export function readinessProbesFromEnv(env: NodeJS.ProcessEnv): ReadinessProbes | undefined {
   if (env['SELARIKRU_DEMO'] === '1') return undefined;
-  return createGitProbes({ sourceCheckout: sourceRepoFromEnv(env) ?? null, githubAuth: ghAuthStatus });
+  return createGitProbes({ sourceCheckout: sourceRepoFromEnv(env) ?? null, githubAccess: (repository) => ghRepoAccess(repository), certifiedContractSha256: certifiedContractHash() });
 }
 
 export interface EvidenceOptions {
@@ -193,7 +203,7 @@ export async function startServer(options: {
   const remote = options.github?.port;
   const sourceRepo = options.github?.sourceRepoPath ?? options.assembly?.repoPath ?? options.verification?.repoPath;
   const tipOf = sourceRepo || remote ? (p: { repository: string; target: string }) => readTip(sourceRepo ?? '', remote, p.repository, p.target) : undefined;
-  const app = buildApp({ tipOf, config, db, verifier, now, scheduler, policy, catalog, readiness: options.readiness, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  const app = buildApp({ tipOf, config, db, verifier, now, scheduler, policy, catalog, readiness: options.readiness, drivers: () => ({ assembly: options.assembly !== undefined, verification: options.verification !== undefined }), evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord

@@ -1,7 +1,7 @@
-import { lazy, useEffect, useMemo } from 'react';
+import { lazy, useEffect, useMemo, useState } from 'react';
 import { createLiveDataSource } from '@selarikru/data-source-live';
 import { signOut } from 'firebase/auth';
-import { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
+import { RestrictedDraftHold, type InferenceMode } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
 import { OnboardingView } from '../features/onboarding/OnboardingView.tsx';
 import { createOnboardingApi } from '../features/onboarding/index.ts';
@@ -36,11 +36,19 @@ function App({ account }: { account: AccountInfo }) {
     store.getState().start();
     return () => store.getState().stop();
   }, [store]);
+  // A project set up here keeps the assistant route chosen for it.
+  const [recordedMode, setRecordedMode] = useState<InferenceMode | null>(null);
+  useEffect(() => {
+    if (!onboardingApi || !defaults.projectId) return;
+    let live = true;
+    void onboardingApi.get(defaults.projectId).then((r) => { if (live) setRecordedMode(r.ok ? (r.value.execution?.inference ?? null) : null); });
+    return () => { live = false; };
+  }, [onboardingApi, defaults.projectId]);
   // With nothing to show yet, a first-time visitor lands on the guide rather than an empty office.
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" />} />;
+  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" />} />;
 }
 
 export default function LiveRoot() {

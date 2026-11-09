@@ -5,8 +5,9 @@ import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import { useHashQuery } from '../../shell/route.ts';
 import type { AssistantPort } from '../assistant/types.ts';
 import type { ApiResult, OnboardingApi } from './api.ts';
+import { ENTRY_STEPS } from './entry.ts';
 import { BlueprintStep, ConnectionsStep, ExecutionStep, FeasibilityStep, FocusStep, GoalStep, ReadinessStep, SourceStep, StartStep, type StepProps } from './forms.tsx';
-import { EXECUTION_TEXT, INFERENCE_TEXT, Notice, usd } from './ui.tsx';
+import { EXECUTION_TEXT, INFERENCE_TEXT, Notice, ReadOnlyContext, usd } from './ui.tsx';
 import { CONDITION_LABELS, STATE_LABELS, STEPS, furthestStep, reachableSteps, stepIndex, type StepId } from './steps.ts';
 
 export interface OnboardingViewProps {
@@ -56,7 +57,7 @@ function Brief({ view }: { view: View | null }) {
   const tracks = view?.blueprint?.content.tracks ?? view?.focus?.tracks ?? [];
   return (
     <dl className="space-y-3">
-      <BriefRow label="You are building">{view?.goal?.idea ?? <span className="text-muted">Not answered yet</span>}</BriefRow>
+      <BriefRow label="You are building">{view?.goal?.idea ?? <span className="text-muted">Not answered yet</span>}{view?.goalAssist ? <span className="mt-0.5 block text-muted">Wording suggested by the assistant ({view.goalAssist.observedSource === 'ON_DEVICE' ? 'on this device' : view.goalAssist.observedSource === 'IN_CLOUD' ? 'cloud model' : 'source unknown'}), reviewed by you</span> : null}</BriefRow>
       <BriefRow label="For">{view?.goal?.audience ?? <span className="text-muted">Not answered yet</span>}</BriefRow>
       <BriefRow label="First useful outcome">{view?.goal?.firstOutcome ?? <span className="text-muted">Not answered yet</span>}</BriefRow>
       <BriefRow label="Focus">{tracks.length ? tracks.map((t) => TRACK_LABELS[t]).join(', ') : <span className="text-muted">Not chosen</span>}</BriefRow>
@@ -89,6 +90,12 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
       <div className="mt-6">
         <button type="button" className={buttonPrimary} onClick={onNew}>Start a new project</button>
       </div>
+      <section aria-labelledby="preview-title" className="mt-8">
+        <h2 id="preview-title" className="text-base font-semibold">What you will go through</h2>
+        <ol className="mt-3 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+          {ENTRY_STEPS.map((s, i) => <li key={s.label} className="flex gap-2"><span aria-hidden="true" className="w-5 shrink-0 text-right text-muted">{i + 1}</span><span><span className="font-medium">{s.label}.</span> <span className="text-muted">{s.hint}</span></span></li>)}
+        </ol>
+      </section>
       {error ? <div className="mt-4"><Notice tone="danger" title="Could not load your setups">{error}</Notice></div> : null}
       {list && list.items.length > 0 ? (
         <section aria-labelledby="resume-title" className="mt-8">
@@ -100,7 +107,7 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
                   <p className="wrap-anywhere font-medium text-fg">{item.name}</p>
                   <p className="text-sm text-muted">{STATE_LABELS[item.state]}{item.condition ? `, ${item.condition.replace('_', ' ')}` : ''}</p>
                 </div>
-                <button type="button" className={buttonQuiet} onClick={() => onResume(item.projectId)}>Continue setup</button>
+                {item.state === 'activated' ? <a className={buttonQuiet} href={`?project=${encodeURIComponent(item.projectId)}#/overview`}>Open project</a> : <button type="button" className={buttonQuiet} onClick={() => onResume(item.projectId)}>Continue setup</button>}
               </li>
             ))}
           </ul>
@@ -117,7 +124,7 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
   const [creating, setCreating] = useState(false);
   const [view, setView] = useState<View | null>(null);
   const [step, setStep] = useState<StepId>('goal');
-  const [error, setError] = useState<{ code: string; message: string } | null>(null);
+  const [error, setError] = useState<StepProps['error']>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [confirmingCancel, setConfirmingCancel] = useState(false);
@@ -128,7 +135,7 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
     if (!api) return;
     const r = await api.get(id);
     if (r.ok) { setView(r.value); setStep(furthestStep(r.value)); setError(null); }
-    else setError({ code: r.code, message: r.message });
+    else setError({ code: r.code, message: r.message, details: r.details });
   }, [api]);
 
   useEffect(() => {
@@ -143,7 +150,7 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
   };
 
   /** Runs one server write. A busy guard stops a double submit reaching the server at all; the idempotency key covers anything that gets past it. */
-  const run = useCallback(async (call: () => Promise<ApiResult<View>>, nextStep?: StepId): Promise<boolean> => {
+  const run = useCallback(async (call: () => Promise<ApiResult<View>>, nextStep?: StepId | ((v: View) => StepId)): Promise<boolean> => {
     if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(true);
@@ -153,7 +160,7 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
     setBusy(false);
     if (r.ok) {
       setView(r.value);
-      if (nextStep) setStep(nextStep);
+      if (nextStep) setStep(typeof nextStep === 'function' ? nextStep(r.value) : nextStep);
       setNotice('Saved');
       return true;
     }
@@ -162,7 +169,7 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
       setError({ code: r.code, message: 'This setup changed somewhere else, so the latest version was loaded. Check it and continue.' });
       return false;
     }
-    setError({ code: r.code, message: r.message });
+    setError({ code: r.code, message: r.message, details: r.details });
     return false;
   }, [load, view]);
 
@@ -184,8 +191,9 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
       window.location.hash = '#/onboarding';
     }
   };
+  const go = (s: StepId): void => { setError(null); setStep(s); };
   const reach = reachableSteps(view);
-  const props: StepProps = { api, view, busy, error, run, onGo: setStep, onCreated: openProject, adapter, hold, mode, heading };
+  const props: StepProps = { api, view, busy, error, run, onGo: go, onCreated: openProject, adapter, hold, mode, heading };
   const reachIndex = Math.max(reach, stepIndex(step));
   return (
     <div>
@@ -211,8 +219,10 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
       {view?.condition && step !== 'readiness' ? <div className="mt-3"><Notice tone={view.condition.kind === 'failed' ? 'danger' : 'warning'} title={view.condition.kind === 'needs_input' ? 'More information needed' : view.condition.kind === 'blocked' ? 'Blocked' : 'Failed'}>{view.condition.reason}</Notice></div> : null}
 
       <div className="mt-5 grid gap-6 lg:grid-cols-[13rem_minmax(0,1fr)] xl:grid-cols-[14rem_minmax(0,1fr)_20rem]">
-        <div className="lg:sticky lg:top-28 lg:self-start"><Stepper current={step} reach={reachIndex} onGo={setStep} /></div>
-        <div className="min-w-0">
+        <div className="lg:sticky lg:top-28 lg:self-start"><Stepper current={step} reach={reachIndex} onGo={go} /></div>
+        <ReadOnlyContext.Provider value={view?.state === 'activated'}>
+        <fieldset disabled={view?.state === 'activated'} className="min-w-0 border-0 p-0">
+          <legend className="sr-only">Setup step</legend>
           {step === 'goal' ? <GoalStep {...props} /> : null}
           {step === 'source' ? <SourceStep {...props} /> : null}
           {step === 'focus' ? <FocusStep {...props} /> : null}
@@ -222,7 +232,8 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
           {step === 'connections' ? <ConnectionsStep {...props} /> : null}
           {step === 'readiness' ? <ReadinessStep {...props} /> : null}
           {step === 'start' ? <StartStep {...props} /> : null}
-        </div>
+        </fieldset>
+        </ReadOnlyContext.Provider>
         <aside aria-label="Project brief" className="min-w-0 lg:col-span-2 xl:col-span-1 xl:sticky xl:top-28 xl:self-start">
           <details className="rounded-card border border-line bg-panel xl:hidden" open={false}>
             <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Project brief</summary>

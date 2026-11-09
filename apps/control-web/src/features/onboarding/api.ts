@@ -1,4 +1,4 @@
-import { AssistReviewResponseSchema, OnboardingListSchema, OnboardingViewSchema, type AssistReviewResponse, type BlueprintContent, type CostLine, type ExecutionChoice, type FocusAnswers, type GoalAnswers, type OnboardingList, type OnboardingView, type SourceAnswers } from '@selarikru/domain';
+import { AssistReviewResponseSchema, OnboardingListSchema, OnboardingViewSchema, type AssistReviewResponse, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type FocusAnswers, type GoalAnswers, type GoalAssist, type OnboardingList, type OnboardingView, type SourceAnswers } from '@selarikru/domain';
 import type { z } from 'zod';
 import type { ApiResult } from '../assistant/types.ts';
 
@@ -11,17 +11,17 @@ export type InferenceChoice = NonNullable<OnboardingView['execution']>['inferenc
 export interface OnboardingApi {
   list(): Promise<ApiResult<OnboardingList>>;
   get(id: string): Promise<ApiResult<OnboardingView>>;
-  create(input: { idempotencyKey: string; goal: GoalAnswers }): Promise<ApiResult<OnboardingView>>;
-  saveAnswers(id: string, input: Write & { goal?: GoalAnswers; source?: SourceAnswers; focus?: FocusAnswers }): Promise<ApiResult<OnboardingView>>;
+  create(input: { idempotencyKey: string; goal: GoalAnswers; goalAssist?: GoalAssist }): Promise<ApiResult<OnboardingView>>;
+  saveAnswers(id: string, input: Write & { goal?: GoalAnswers; goalAssist?: GoalAssist | null; source?: SourceAnswers; focus?: FocusAnswers }): Promise<ApiResult<OnboardingView>>;
   createBlueprint(id: string, input: Write & { content?: BlueprintContent }): Promise<ApiResult<OnboardingView>>;
   acceptBlueprint(id: string, input: Write & { version: number }): Promise<ApiResult<OnboardingView>>;
-  saveCostPlan(id: string, input: Write & { agentBudgetUsd: number | null; provider: readonly OwnerCostLine[]; app: readonly OwnerCostLine[] }): Promise<ApiResult<OnboardingView>>;
+  saveCostPlan(id: string, input: Write & { agentBudgetUsd: number | null; effort: readonly OwnerCostLine[]; production: readonly OwnerCostLine[]; agentUsage: readonly OwnerCostLine[]; assumptions: CostAssumptions }): Promise<ApiResult<OnboardingView>>;
   saveExecution(id: string, input: Write & { execution: ExecutionChoice; inference: InferenceChoice }): Promise<ApiResult<OnboardingView>>;
   saveConnection(id: string, input: Write & { repository: string; defaultBranch: string }): Promise<ApiResult<OnboardingView>>;
   runReadiness(id: string, input: { expectedRevision: number }): Promise<ApiResult<OnboardingView>>;
   activate(id: string, input: Write & { blueprintVersion: number }): Promise<ApiResult<OnboardingView>>;
   cancel(id: string, input: { expectedRevision: number }): Promise<ApiResult<OnboardingView>>;
-  reviewAssist(input: { envelope: { operation: string; status: string; data: unknown }; restricted?: boolean }): Promise<ApiResult<AssistReviewResponse>>;
+  reviewAssist(input: { envelope: { operation: string; status: string; data: unknown }; restricted?: boolean; projectId?: string; observed?: { source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN'; requestedMode: InferenceChoice | null } }): Promise<ApiResult<AssistReviewResponse>>;
 }
 
 export function createOnboardingApi(opts: { baseUrl: string; getToken: () => Promise<string> }): OnboardingApi {

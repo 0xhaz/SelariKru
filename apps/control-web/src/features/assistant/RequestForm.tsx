@@ -1,3 +1,4 @@
+import type { InferenceMode } from '@selarikru/inference-firebase-web';
 import { MODES, POLICY_HINT, POLICY_LABEL } from './labels.ts';
 import { BRIEFS, OPERATIONS, briefById } from './fixtures.ts';
 import { useAssistantStore } from './store.ts';
@@ -6,7 +7,7 @@ import type { ProposalOperation } from '@selarikru/domain';
 
 export interface Target { projectId: string; runId: string }
 
-export function RequestForm({ target, onTarget, onGenerate }: { target: Target; onTarget: (t: Target) => void; onGenerate: () => void }) {
+export function RequestForm({ target, onTarget, onGenerate, recordedMode }: { target: Target; onTarget: (t: Target) => void; onGenerate: () => void; recordedMode?: InferenceMode | null | undefined }) {
   const { mode, operation, briefId, cloudPermitted, demo, generating, download, result, set } = useAssistantStore();
   const brief = briefById(briefId);
   const effectiveDemo = demo && !brief.restricted;
@@ -41,10 +42,11 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
 
         <fieldset>
           <legend className="mb-1 text-sm text-muted">Requested policy</legend>
+          {recordedMode ? <p className="mb-1 text-sm text-muted" data-testid="recorded-mode">Recorded for this project during setup.</p> : null}
           <div className="space-y-2">
             {MODES.map((m) => (
               <label key={m} className={`flex cursor-pointer items-start gap-2 rounded-chip border px-3 py-2 ${mode === m ? 'border-active bg-panel-2' : 'border-line'}`}>
-                <input type="radio" name="policy" className="mt-1" checked={mode === m} onChange={() => set({ mode: m })} />
+                <input type="radio" name="policy" className="mt-1" checked={mode === m} disabled={recordedMode !== null && recordedMode !== undefined} onChange={() => set({ mode: m })} />
                 <span>
                   <span className="block text-sm font-medium">{POLICY_LABEL[m]}</span>
                   <span className="block text-sm text-muted">{POLICY_HINT[m]}</span>

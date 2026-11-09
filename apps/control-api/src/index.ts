@@ -6,5 +6,5 @@ export { type TokenVerifier, type Principal } from './auth.ts';
 export { AppError } from './errors.ts';
 export { readinessProbesFromEnv, startServer, type RunningServer } from './server.ts';
 export { reviewPlanProposal, loadPlanConfigFile, ProjectPlanConfigSchema, ProjectPlanSettingsSchema, type PlanConfigSource, type ProjectPlanConfig, type ProjectPlanSettings, type ProposalEnvelope, type PlanReview, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
-export { createGitProbes, ghAuthStatus, type ReadinessProbes } from './onboarding-readiness.ts';
+export { createGitProbes, ghRepoAccess, type ReadinessProbes } from './onboarding-readiness.ts';
 export { seedDemo } from './demo.ts';

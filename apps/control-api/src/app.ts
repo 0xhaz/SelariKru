@@ -12,7 +12,7 @@ import { registerOwnerRoutes } from './routes-owner.ts';
 import { registerGithubRoutes } from './routes-github.ts';
 import { registerProposalRoutes } from './routes-proposals.ts';
 import { registerOnboardingRoutes } from './routes-onboarding.ts';
-import type { ReadinessProbes } from './onboarding-readiness.ts';
+import type { PipelineDrivers, ReadinessProbes } from './onboarding-readiness.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerEventStream } from './sse.ts';
@@ -70,6 +70,8 @@ export interface AppDeps {
   readonly tipOf?: ((project: { readonly repository: string; readonly target: string }) => Promise<string>) | undefined;
   /** Trusted checks for onboarding readiness. Absent, as on the demo stack: repository and GitHub checks report unknown, so nothing can reach `ready`. */
   readonly readiness?: ReadinessProbes | undefined;
+  /** Whether the assembly and verification drivers run in this process. Absent: nothing can say, and readiness reports unknown. */
+  readonly drivers?: (() => PipelineDrivers) | undefined;
   /** Fastify's logger. Default off. */
   readonly logger?: FastifyServerOptions['logger'];
   /** Live output. Injected by tests to shrink its limits; otherwise one is created here. */

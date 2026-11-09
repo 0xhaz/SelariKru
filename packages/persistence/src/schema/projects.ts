@@ -44,6 +44,8 @@ export const runs = pgTable(
     trial: boolean('trial').notNull().default(false),
     /** A trial's one model, fixed at creation. Every attempt in the trial uses it and no assignment can change it. */
     pinnedModel: jsonb('pinned_model').$type<{ provider: string; model: string }>(),
+    /** For a run started from onboarding: the execution, inference, budget and connection that authorised it, frozen at activation. Null for any other run. */
+    setupSnapshot: jsonb('setup_snapshot').$type<Record<string, unknown>>(),
     createdAt: createdAt(),
   },
   (t) => [

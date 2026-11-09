@@ -1,13 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@selarikru/persistence';
 import { OnboardingViewSchema } from '@selarikru/protocol';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createGitProbes, readinessProbesFromEnv, seedDemo, type ReadinessProbes } from '../src/index.ts';
-import { API_POLICY, ORIGIN, TENANT, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
+import { createGitProbes, ghRepoAccess, readinessProbesFromEnv, seedDemo, type ReadinessProbes } from '../src/index.ts';
+import { hashTree } from '../../../services/verifier/src/hashing.ts';
+import { API_POLICY, ORIGIN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 const CHECKOUT = '/srv/source';
@@ -15,8 +16,8 @@ const SHA = 'a'.repeat(40);
 /** A checker that sees a healthy machine. Each test breaks one fact. */
 const goodProbes = (over: Partial<ReadinessProbes> = {}): ReadinessProbes => ({
   sourceCheckout: CHECKOUT,
-  git: async () => ({ reachable: { ok: true, reason: 'ok' }, identity: { status: 'passed', reason: 'origin matches' }, base: { sha: SHA, reason: 'resolved' } }),
-  githubAuth: async () => ({ status: 'passed', reason: 'gh is signed in' }),
+  git: async () => ({ checkout: { ok: true, reason: 'ok' }, identity: { status: 'passed', reason: 'origin matches' }, base: { sha: SHA, reason: 'resolved' }, stack: { status: 'passed', reason: 'frozen contract' } }),
+  githubAccess: async () => ({ status: 'passed', reason: 'can push' }),
   ...over,
 });
 
@@ -24,8 +25,11 @@ beforeAll(async () => { t = await setupTestDb(); });
 afterAll(async () => { await t.close(); });
 beforeEach(async () => { await t.db.execute(sql`TRUNCATE project_onboardings, project_blueprints, onboarding_readiness_passes, onboarding_receipts, projects, project_sequences, runs, runners, operation_receipts, events, outbox CASCADE`); });
 
+const DRIVERS_ON = () => ({ assembly: true, verification: true });
+const NO_ASSUMPTIONS = { users: { value: null, confidence: 'unknown' }, traffic: { value: null, confidence: 'unknown' }, storage: { value: null, confidence: 'unknown' }, aiUsage: { value: null, confidence: 'unknown' } };
+const costBody = (budget: number | null, over: object = {}) => ({ agentBudgetUsd: budget, effort: [], production: [], agentUsage: [], assumptions: NO_ASSUMPTIONS, ...over });
 const POLICY_WITH_PR = { ...API_POLICY, operations: { ...API_POLICY.operations, create_draft_pr: 'allow' } } as const;
-const harness = (probes: ReadinessProbes | undefined = goodProbes()): Harness => makeHarness(t, {}, POLICY_WITH_PR, { readiness: probes, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+const harness = (probes: ReadinessProbes | undefined = goodProbes()): Harness => makeHarness(t, {}, POLICY_WITH_PR, { readiness: probes, drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
 const goal = (over = {}) => ({ name: 'Clinic queue', idea: 'Patients see their place in the queue', audience: 'Small clinics', firstOutcome: 'A patient sees their position', ...over });
 const k = (s: string) => `key:${s.replace(/\//g, "-")}:${Math.random().toString(36).slice(2)}`;
 
@@ -36,11 +40,12 @@ async function start(h: Harness, over = {}) {
 }
 const write = async (h: Harness, id: string, path: string, body: object, rev: number) => post(h.app, `/v1/onboarding/${id}/${path}`, { idempotencyKey: k(path), expectedRevision: rev, ...body });
 
-/** Through the real routes up to the readiness step. */
+/** Through the real routes up to the readiness step, in the order the browser sends them: source, focus, draft, accept, cost plan, execution, connection. */
 async function configured(h: Harness, focus: readonly string[] = ['saas_web'], budget: number | null = 25) {
   let v = await start(h);
   for (const [path, body] of [
-    ['answers', { source: { kind: 'new' }, focus: { tracks: focus } }],
+    ['answers', { source: { kind: 'new' } }],
+    ['answers', { focus: { tracks: focus } }],
     ['blueprints', {}],
   ] as const) {
     const r = await write(h, v.projectId, path, body, v.revision);
@@ -51,14 +56,25 @@ async function configured(h: Harness, focus: readonly string[] = ['saas_web'], b
   expect(accepted.status).toBe(200);
   v = accepted.body;
   for (const [path, body] of [
+    ['cost-plan', costBody(budget)],
     ['execution', { execution: 'local', inference: 'PREFER_ON_DEVICE' }],
-    ['cost-plan', { agentBudgetUsd: budget, provider: [], app: [] }],
     ['connections', { repository: 'acme/clinic', defaultBranch: 'main' }],
   ] as const) {
     const r = await write(h, v.projectId, path, body, v.revision);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     v = r.body;
   }
+  return v;
+}
+/** A runner that has been paired and has said it holds a checkout for this project. */
+async function reportProjects(h: Harness, token: string, projects: readonly string[]) {
+  const r = await post(h.app, '/v1/runners/claim', { projects }, bearer(token));
+  expect(r.status).toBe(200);
+}
+async function configuredWithRunner(h: Harness, focus: readonly string[] = ['saas_web'], budget: number | null = 25) {
+  const runner = await enrolRunner(h.app);
+  const v = await configured(h, focus, budget);
+  await reportProjects(h, runner.token, [v.projectId]);
   return v;
 }
 const check = async (h: Harness, v: { projectId: string; revision: number }) => post(h.app, `/v1/onboarding/${v.projectId}/readiness`, { expectedRevision: v.revision });
@@ -103,8 +119,7 @@ describe('key behaviours', () => {
 
   it('resume does not replay side effects', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    let v = await configured(h);
+    let v = await configuredWithRunner(h);
     v = (await check(h, v)).body;
     expect(v.state).toBe('ready');
     const key = k('activate');
@@ -133,8 +148,7 @@ describe('key behaviours', () => {
 
   it('blueprint edit invalidates readiness', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    let v = await configured(h);
+    let v = await configuredWithRunner(h);
     v = (await check(h, v)).body;
     expect(v.state).toBe('ready');
     expect(v.readiness.outcome).toBe('ready');
@@ -159,8 +173,7 @@ describe('key behaviours', () => {
 
   it('unsupported template cannot start a run', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    let v = await configured(h, ['mobile']);
+    let v = await configuredWithRunner(h, ['mobile']);
     v = (await check(h, v)).body;
     expect(v.state).toBe('readiness_check');
     expect(v.condition.kind).toBe('blocked');
@@ -182,12 +195,12 @@ describe('key behaviours', () => {
   it('demo progress cannot satisfy readiness', async () => {
     // Demo data in the same database, and a server with no trusted checker, which is how the demo stack runs.
     await seedDemo(t.db, { tenantId: TENANT });
-    const noChecker = makeHarness(t, {}, POLICY_WITH_PR, { readiness: undefined, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+    const noChecker = makeHarness(t, {}, POLICY_WITH_PR, { readiness: undefined, drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
     let v = await configured(noChecker);
     const body = (await check(noChecker, v)).body;
     expect(body.state).toBe('readiness_check');
     expect(body.condition.kind).toBe('blocked');
-    for (const id of ['repository_path', 'repository_identity', 'base_commit', 'github_auth']) {
+    for (const id of ['checkout_present', 'repository_identity', 'base_commit', 'stack_certified', 'repository_reachable']) {
       const c = body.readiness.checks.find((x: any) => x.id === id);
       expect(c.status, id).toBe('unknown');
       expect(c.reason).toMatch(/checker|confirm/i);
@@ -196,7 +209,7 @@ describe('key behaviours', () => {
     expect(await countRuns(v.projectId)).toBe(0);
 
     // A client cannot report its own results: unknown fields are refused, and client reports are never read.
-    const forged = await post(noChecker.app, `/v1/onboarding/${v.projectId}/readiness`, { expectedRevision: body.revision, checks: [{ id: 'repository_path', status: 'passed' }] });
+    const forged = await post(noChecker.app, `/v1/onboarding/${v.projectId}/readiness`, { expectedRevision: body.revision, checks: [{ id: 'checkout_present', status: 'passed' }] });
     expect(forged.status).toBe(400);
     const claimed = await post(noChecker.app, `/v1/onboarding/${v.projectId}/readiness`, { expectedRevision: body.revision, status: 'ready' });
     expect(claimed.status).toBe(400);
@@ -226,36 +239,34 @@ describe('readiness probes from the environment', () => {
 describe('readiness', () => {
   it('reports each failed fact with its own reason', async () => {
     const h = harness(goodProbes({
-      git: async () => ({ reachable: { ok: false, reason: 'The path does not exist on this machine' }, identity: { status: 'unknown', reason: 'Could not read the checkout' }, base: { sha: null, reason: 'Could not read the checkout' } }),
-      githubAuth: async () => ({ status: 'failed', reason: 'gh is not signed in' }),
+      git: async () => ({ checkout: { ok: false, reason: 'The path does not exist on this machine' }, identity: { status: 'unknown', reason: 'Could not read the checkout' }, base: { sha: null, reason: 'Could not read the checkout' }, stack: { status: 'unknown', reason: 'Could not read the checkout' } }),
+      githubAccess: async () => ({ status: 'failed', reason: 'gh is not signed in' }),
     }));
     const v = await configured(h);
     const body = (await check(h, v)).body;
     expect(body.state).toBe('readiness_check');
-    expect(statusOf(body, 'repository_path')).toBe('failed');
+    expect(statusOf(body, 'checkout_present')).toBe('failed');
     expect(statusOf(body, 'repository_identity')).toBe('unknown');
     expect(statusOf(body, 'base_commit')).toBe('failed');
     expect(statusOf(body, 'runner_enrolled')).toBe('failed');
-    expect(statusOf(body, 'github_auth')).toBe('failed');
-    expect(body.readiness.checks.find((c: any) => c.id === 'repository_path').reason).toContain('does not exist');
+    expect(statusOf(body, 'repository_reachable')).toBe('failed');
+    expect(body.readiness.checks.find((c: any) => c.id === 'checkout_present').reason).toContain('does not exist');
   });
 
   it('an unknown required check blocks exactly as a failure does', async () => {
-    const h = harness(goodProbes({ githubAuth: async () => ({ status: 'unknown', reason: 'gh is not installed' }) }));
-    await enrolRunner(h.app);
-    const v = await configured(h);
+    const h = harness(goodProbes({ githubAccess: async () => ({ status: 'unknown', reason: 'gh is not installed' }) }));
+    const v = await configuredWithRunner(h);
     const body = (await check(h, v)).body;
-    expect(statusOf(body, 'github_auth')).toBe('unknown');
+    expect(statusOf(body, 'repository_reachable')).toBe('unknown');
     expect(body.state).toBe('readiness_check');
     expect((await activate(h, body)).status).toBe(409);
   });
 
   it('a checker that throws records unknown, never a pass', async () => {
     const h = harness(goodProbes({ git: async () => { throw new Error('boom token=abcdefghijklmnop1234567890'); } }));
-    await enrolRunner(h.app);
-    const v = await configured(h);
+    const v = await configuredWithRunner(h);
     const body = (await check(h, v)).body;
-    expect(statusOf(body, 'repository_path')).toBe('unknown');
+    expect(statusOf(body, 'checkout_present')).toBe('unknown');
     expect(body.state).toBe('readiness_check');
     expect(JSON.stringify(body)).not.toContain('abcdefghijklmnop');
   });
@@ -285,15 +296,14 @@ describe('readiness', () => {
   });
 
   it('missing policy fails the policy check', async () => {
-    const h = makeHarness(t, {}, null, { readiness: goodProbes(), github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+    const h = makeHarness(t, {}, null, { readiness: goodProbes(), drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
     const v = await configured(h);
     expect(statusOf((await check(h, v)).body, 'policy_loaded')).toBe('failed');
   });
 
   it('no budget ceiling fails the budget check', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    const v = await configured(h, ['saas_web'], null);
+    const v = await configuredWithRunner(h, ['saas_web'], null);
     const body = (await check(h, v)).body;
     expect(statusOf(body, 'budget_limit')).toBe('failed');
     expect(body.state).toBe('readiness_check');
@@ -301,9 +311,8 @@ describe('readiness', () => {
 
   it('activation re-checks the machine, so an old pass cannot start a run', async () => {
     let auth: { status: 'passed' | 'failed' | 'unknown'; reason: string } = { status: 'passed', reason: 'signed in' };
-    const h = harness(goodProbes({ githubAuth: async () => auth }));
-    await enrolRunner(h.app);
-    let v = await configured(h);
+    const h = harness(goodProbes({ githubAccess: async () => auth }));
+    let v = await configuredWithRunner(h);
     v = (await check(h, v)).body;
     expect(v.state).toBe('ready');
     auth = { status: 'failed', reason: 'gh signed out' };
@@ -323,9 +332,16 @@ describe('readiness', () => {
       g('init', '-q', '-b', 'main');
       g('commit', '-q', '--allow-empty', '-m', 'x');
       g('remote', 'add', 'origin', 'git@github.com:acme/clinic.git');
-      const probes = createGitProbes({ sourceCheckout: dir, githubAuth: async () => ({ status: 'unknown', reason: 'not checked here' }) });
+      const contract = join(dir, 'contract');
+      mkdirSync(contract);
+      writeFileSync(join(contract, 'api.ts'), 'export const X = 1;\n');
+      g('add', '-A');
+      g('commit', '-q', '-m', 'contract');
+      const frozen = hashTree(contract);
+      const probes = createGitProbes({ sourceCheckout: dir, githubAccess: async () => ({ status: 'unknown', reason: 'not checked here' }), certifiedContractSha256: frozen });
       const ok = await probes.git({ checkout: dir, repository: 'acme/clinic', branch: 'main' });
-      expect(ok.reachable.ok).toBe(true);
+      expect(ok.checkout.ok).toBe(true);
+      expect(ok.stack.status).toBe('passed');
       expect(ok.identity.status).toBe('passed');
       expect(ok.base.sha).toMatch(/^[0-9a-f]{40}$/);
 
@@ -338,10 +354,249 @@ describe('readiness', () => {
       expect(noBranch.base.reason).toContain('nope');
 
       const notThere = await probes.git({ checkout: join(dir, 'missing'), repository: 'acme/clinic', branch: 'main' });
-      expect(notThere.reachable.ok).toBe(false);
+      expect(notThere.checkout.ok).toBe(false);
+
+      // Another repository's contract is not the pilot stack, and an unknown record says unknown.
+      const other = createGitProbes({ sourceCheckout: dir, githubAccess: async () => ({ status: 'unknown', reason: '' }), certifiedContractSha256: 'f'.repeat(64) });
+      expect((await other.git({ checkout: dir, repository: 'acme/clinic', branch: 'main' })).stack.status).toBe('failed');
+      const noRecord = createGitProbes({ sourceCheckout: dir, githubAccess: async () => ({ status: 'unknown', reason: '' }), certifiedContractSha256: null });
+      expect((await noRecord.git({ checkout: dir, repository: 'acme/clinic', branch: 'main' })).stack.status).toBe('unknown');
+
+      g('remote', 'set-url', 'origin', 'https://notgithub.com/acme/clinic.git');
+      expect((await probes.git({ checkout: dir, repository: 'acme/clinic', branch: 'main' })).identity.status).toBe('unknown');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('fix round 1', () => {
+  const CLOUD = { ...POLICY_WITH_PR, policyVersion: 'cloud.1', limits: { repairAttempts: 2, maxConcurrentTotal: 2 }, destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'execution', classifications: ['public', 'internal'] }] } as const;
+  const withPolicy = (policy: object, probes: ReadinessProbes = goodProbes()) => makeHarness(t, {}, policy as never, { readiness: probes, drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+  /** Up to the execution step, in browser order. */
+  async function toExecution(h: Harness) {
+    let v = await start(h);
+    for (const [path, body] of [['answers', { source: { kind: 'new' } }], ['answers', { focus: { tracks: ['saas_web'] } }], ['blueprints', {}]] as const) v = (await write(h, v.projectId, path, body, v.revision)).body;
+    v = (await write(h, v.projectId, 'blueprint/accept', { version: v.blueprint.version }, v.revision)).body;
+    return (await write(h, v.projectId, 'cost-plan', costBody(25), v.revision)).body;
+  }
+  const lineIds = (view: any): string[] => view.costPlan.ledgers.agent_usage.lines.map((l: any) => l.id);
+
+  it('the browser order reaches ready: choosing local after the cost plan does not unconfirm it', async () => {
+    const h = harness();
+    const v = await configuredWithRunner(h);
+    expect(v.costPlan.confirmed).toBe(true);
+    const body = (await check(h, v)).body;
+    expect(statusOf(body, 'budget_limit')).toBe('passed');
+    expect(body.state).toBe('ready');
+  });
+
+  it('a choice that changes the cost lines returns the plan for review and shows the new line', async () => {
+    const h = harness();
+    const v = await toExecution(h);
+    expect(lineIds(v)).not.toContain('cloud_worker');
+    const cloud = (await write(h, v.projectId, 'execution', { execution: 'hybrid', inference: 'PREFER_ON_DEVICE' }, v.revision)).body;
+    expect(cloud.costPlan.confirmed).toBe(false);
+    expect(lineIds(cloud)).toEqual(expect.arrayContaining(['cloud_worker', 'local_hardware']));
+  });
+
+  it('changing only the assistant route leaves the cost plan confirmed', async () => {
+    const h = harness();
+    const v = await toExecution(h);
+    const first = (await write(h, v.projectId, 'execution', { execution: 'local', inference: 'PREFER_ON_DEVICE' }, v.revision)).body;
+    const second = (await write(h, v.projectId, 'execution', { execution: 'local', inference: 'ONLY_ON_DEVICE' }, first.revision)).body;
+    expect(second.costPlan.confirmed).toBe(true);
+  });
+
+  it('a runner that has not said which projects it holds is unknown and blocks', async () => {
+    const h = harness();
+    await enrolRunner(h.app);
+    const body = (await check(h, await configured(h))).body;
+    expect(statusOf(body, 'runner_enrolled')).toBe('passed');
+    expect(statusOf(body, 'runner_has_project')).toBe('unknown');
+    expect(body.state).toBe('readiness_check');
+  });
+
+  it('a runner configured for other projects fails, and says how to fix it', async () => {
+    const h = harness();
+    const r = await enrolRunner(h.app);
+    const v = await configured(h);
+    await reportProjects(h, r.token, ['proj_other']);
+    const body = (await check(h, v)).body;
+    expect(statusOf(body, 'runner_has_project')).toBe('failed');
+    expect(body.readiness.checks.find((c: any) => c.id === 'runner_has_project').nextAction).toContain(v.projectId);
+  });
+
+  it('a runner report carries ids only: a path is refused', async () => {
+    const h = harness();
+    const r = await enrolRunner(h.app);
+    expect((await post(h.app, '/v1/runners/claim', { projects: ['/Users/me/code'] }, bearer(r.token))).status).toBe(400);
+  });
+
+  async function cloudSetup(h: Harness, choice: 'cloud' | 'hybrid') {
+    const v = await toExecution(h);
+    const saved = (await write(h, v.projectId, 'execution', { execution: choice, inference: 'PREFER_ON_DEVICE' }, v.revision)).body;
+    const confirmed = (await write(h, saved.projectId, 'cost-plan', costBody(25), saved.revision)).body;
+    return (await write(h, confirmed.projectId, 'connections', { repository: 'acme/clinic', defaultBranch: 'main' }, confirmed.revision)).body;
+  }
+
+  it('the default policy, with no destinations, cannot reach ready on cloud', async () => {
+    const h = harness();
+    const r = await enrolRunner(h.app, 'cloud');
+    const v = await cloudSetup(h, 'cloud');
+    await reportProjects(h, r.token, [v.projectId]);
+    const body = (await check(h, v)).body;
+    expect(statusOf(body, 'runner_enrolled')).toBe('passed');
+    expect(statusOf(body, 'cloud_destination')).toBe('failed');
+    expect(body.state).toBe('readiness_check');
+  });
+
+  it('a destination that does not name this project as a source still refuses', async () => {
+    const h = withPolicy(CLOUD);
+    const r = await enrolRunner(h.app, 'cloud');
+    const v = await cloudSetup(h, 'cloud');
+    await reportProjects(h, r.token, [v.projectId]);
+    const body = (await check(h, v)).body;
+    expect(statusOf(body, 'cloud_destination')).toBe('failed');
+    expect(body.readiness.checks.find((c: any) => c.id === 'cloud_destination').reason).toMatch(/source not selected/);
+  });
+
+  it('models are matched per location: a hybrid project needs each side to launch one', async () => {
+    const h = harness();
+    const local = await enrolRunner(h.app, 'local');
+    const cloud = await enrolRunner(h.app, 'cloud', []);
+    const v = await cloudSetup(h, 'hybrid');
+    await reportProjects(h, local.token, [v.projectId]);
+    await reportProjects(h, cloud.token, [v.projectId]);
+    const body = (await check(h, v)).body;
+    const c = body.readiness.checks.find((x: any) => x.id === 'runner_enrolled');
+    expect(c.status).toBe('failed');
+    expect(c.reason).toMatch(/cloud runner reports no model/);
+  });
+
+  it('says unknown when it cannot tell the drivers are running', async () => {
+    const unknownH = makeHarness(t, {}, POLICY_WITH_PR, { readiness: goodProbes(), github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+    expect(statusOf((await check(unknownH, await configuredWithRunner(unknownH))).body, 'pipeline_drivers')).toBe('unknown');
+  });
+
+  it('fails when a driver is off', async () => {
+    const off = makeHarness(t, {}, POLICY_WITH_PR, { readiness: goodProbes(), drivers: () => ({ assembly: true, verification: false }), github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+    const body = (await check(off, await configuredWithRunner(off))).body;
+    expect(statusOf(body, 'pipeline_drivers')).toBe('failed');
+  });
+
+  it('a checkout that is not the pilot stack blocks readiness', async () => {
+    const h = harness(goodProbes({ git: async () => ({ checkout: { ok: true, reason: 'ok' }, identity: { status: 'passed', reason: 'ok' }, base: { sha: SHA, reason: 'ok' }, stack: { status: 'failed', reason: 'not the contract' } }) }));
+    const body = (await check(h, await configuredWithRunner(h))).body;
+    expect(statusOf(body, 'stack_certified')).toBe('failed');
+    expect(body.state).toBe('readiness_check');
+  });
+
+  it('nothing claims more than the pilot stack', async () => {
+    const h = harness();
+    const body = (await check(h, await configuredWithRunner(h))).body;
+    expect(JSON.stringify(body.readiness.checks)).not.toMatch(/certified to run/i);
+  });
+
+  describe('gh repo view', () => {
+    const fakeGh = (stdout: string) => async () => stdout;
+    const failing = (stderr: string, code?: string) => async () => { throw Object.assign(new Error('x'), { stderr, ...(code ? { code } : {}) }); };
+    it('passes only with write access', async () => {
+      for (const p of ['ADMIN', 'MAINTAIN', 'WRITE']) expect((await ghRepoAccess('a/b', fakeGh(JSON.stringify({ viewerPermission: p })))).status).toBe('passed');
+      const read = await ghRepoAccess('a/b', fakeGh(JSON.stringify({ viewerPermission: 'READ' })));
+      expect(read.status).toBe('failed');
+      expect(read.reason).toContain('write access');
+    });
+    it('asks gh about exactly this repository', async () => {
+      let seen: readonly string[] = [];
+      await ghRepoAccess('acme/clinic', async (args) => { seen = args; return '{"viewerPermission":"WRITE"}'; });
+      expect(seen).toEqual(['repo', 'view', 'acme/clinic', '--json', 'viewerPermission']);
+    });
+    it('tells apart signed out, not found, not installed and unreachable, and quotes none of it', async () => {
+      expect((await ghRepoAccess('a/b', failing('To get started, run: gh auth login'))).reason).toMatch(/not signed in/);
+      expect((await ghRepoAccess('a/b', failing('GraphQL: Could not resolve to a Repository'))).reason).toMatch(/does not exist/);
+      expect((await ghRepoAccess('a/b', failing('', 'ENOENT'))).status).toBe('unknown');
+      const net = await ghRepoAccess('a/b', failing('dial tcp ghp_abcdefghijklmnopqrstuvwxyz0123'));
+      expect(net.status).toBe('unknown');
+      expect(net.reason).not.toContain('ghp_');
+    });
+  });
+
+  it('a run started from onboarding carries the snapshot that authorised it, and later edits cannot change it', async () => {
+    const h = harness();
+    let v = await configuredWithRunner(h);
+    v = (await check(h, v)).body;
+    expect(v.readiness.snapshot).toMatchObject({ blueprintVersion: 1, execution: 'local', inference: 'PREFER_ON_DEVICE', agentBudgetUsd: 25, repository: 'acme/clinic', defaultBranch: 'main', baseSha: SHA });
+    v = (await activate(h, v)).body;
+    const [run] = await t.db.select().from(schema.runs).where(eq(schema.runs.projectId, v.projectId));
+    expect(run!.setupSnapshot).toMatchObject({ execution: 'local', inference: 'PREFER_ON_DEVICE', agentBudgetUsd: 25, repository: 'acme/clinic', baseSha: SHA });
+    await expect(t.db.update(schema.onboardingReadinessPasses).set({ baseSha: 'x' }).where(eq(schema.onboardingReadinessPasses.projectId, v.projectId))).rejects.toThrow();
+  });
+
+  it('later runs are bound to the recorded ceiling and location', async () => {
+    const h = harness();
+    let v = await configuredWithRunner(h);
+    v = (await check(h, v)).body;
+    v = (await activate(h, v)).body;
+    const run = (body: object) => post(h.app, `/v1/projects/${v.projectId}/runs`, { idempotencyKey: k('run'), title: 'Next', ...body });
+    expect((await run({})).body.error.code).toBe('outside_recorded_limits');
+    expect((await run({ budgetLimitUsd: 26 })).body.error.code).toBe('outside_recorded_limits');
+    expect((await run({ budgetLimitUsd: 5, placement: { mode: 'C1', cloudDestination: 'x' } })).body.error.code).toBe('outside_recorded_limits');
+    expect((await run({ budgetLimitUsd: 25 })).status).toBe(201);
+  });
+
+  it('a cancelled project does not hold the checkout', async () => {
+    const h = harness();
+    const first = await configured(h);
+    const cancelled = await post(h.app, `/v1/onboarding/${first.projectId}/cancel`, { expectedRevision: first.revision });
+    expect(cancelled.status).toBe(200);
+    let other = await start(h, { name: 'Another app' });
+    for (const [path, body] of [['answers', { source: { kind: 'new' } }], ['answers', { focus: { tracks: ['saas_web'] } }], ['blueprints', {}]] as const) other = (await write(h, other.projectId, path, body, other.revision)).body;
+    other = (await write(h, other.projectId, 'blueprint/accept', { version: other.blueprint.version }, other.revision)).body;
+    const free = await write(h, other.projectId, 'connections', { repository: 'acme/different', defaultBranch: 'main' }, other.revision);
+    expect(free.status, JSON.stringify(free.body)).toBe(200);
+  });
+
+  it('re-saving unchanged focus keeps owner edits and acceptance', async () => {
+    const h = harness();
+    let v = await start(h);
+    for (const [path, body] of [['answers', { source: { kind: 'new' } }], ['answers', { focus: { tracks: ['saas_web'] } }], ['blueprints', {}]] as const) v = (await write(h, v.projectId, path, body, v.revision)).body;
+    v = (await write(h, v.projectId, 'blueprints', { content: { ...v.blueprint.content, nonGoals: ['Payments'] } }, v.revision)).body;
+    v = (await write(h, v.projectId, 'blueprint/accept', { version: 2 }, v.revision)).body;
+    const again = (await write(h, v.projectId, 'answers', { focus: { tracks: ['saas_web'] } }, v.revision)).body;
+    const draft = (await write(h, v.projectId, 'blueprints', {}, again.revision)).body;
+    expect(draft.blueprint.version).toBe(2);
+    expect(draft.blueprint.accepted).toBe(true);
+    expect(draft.blueprint.content.nonGoals).toEqual(['Payments']);
+    expect(draft.state).toBe('configuring');
+  });
+
+  it('after activation a write gets a plain refusal, not internal state names', async () => {
+    const h = harness();
+    let v = await configuredWithRunner(h);
+    v = (await check(h, v)).body;
+    v = (await activate(h, v)).body;
+    const r = await write(h, v.projectId, 'blueprints', { content: { ...v.blueprint.content, nonGoals: ['X'] } }, v.revision);
+    expect(r.status).toBe(409);
+    expect(r.body.error.message).toBe('This project has started, so its setup can no longer change.');
+  });
+
+  it('the assistant answer is held to the recorded route', async () => {
+    const h = harness();
+    const v = await toExecution(h);
+    const saved = (await write(h, v.projectId, 'execution', { execution: 'local', inference: 'ONLY_ON_DEVICE' }, v.revision)).body;
+    const envelope = { operation: 'draftBrief', status: 'ok', data: { summary: 'A queue', acceptanceCriteria: [{ requirementId: 'AC-1', text: 'Works' }] } };
+    const wrong = await post(h.app, '/v1/onboarding/assist-review', { envelope, projectId: saved.projectId, observed: { source: 'IN_CLOUD', requestedMode: 'ONLY_ON_DEVICE' } });
+    expect(wrong.status).toBe(422);
+    expect(wrong.body.error.code).toBe('route_not_recorded');
+    expect((await post(h.app, '/v1/onboarding/assist-review', { envelope, projectId: saved.projectId })).status).toBe(422);
+    expect((await post(h.app, '/v1/onboarding/assist-review', { envelope, projectId: saved.projectId, observed: { source: 'ON_DEVICE', requestedMode: 'ONLY_ON_DEVICE' } })).status).toBe(200);
+  });
+
+  it('records where applied assistant wording came from', async () => {
+    const h = harness();
+    const r = await post(h.app, '/v1/onboarding', { idempotencyKey: k('a'), goal: goal(), goalAssist: { observedSource: 'ON_DEVICE', requestedMode: 'ONLY_ON_DEVICE', provenance: 'assistant_proposal_reviewed' } });
+    expect(r.body.goalAssist.observedSource).toBe('ON_DEVICE');
   });
 });
 
@@ -379,8 +634,7 @@ describe('controller', () => {
 
   it('activation records a real run on the project', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    let v = await configured(h);
+    let v = await configuredWithRunner(h);
     v = (await check(h, v)).body;
     const r = await activate(h, v);
     expect(r.status).toBe(200);
@@ -411,7 +665,7 @@ describe('controller', () => {
     const first = await configured(h);
     expect(first.connection.repository).toBe('acme/clinic');
     let other = await start(h, { name: 'Another app' });
-    for (const [path, body] of [['answers', { source: { kind: 'new' }, focus: { tracks: ['saas_web'] } }], ['blueprints', {}]] as const) {
+    for (const [path, body] of [['answers', { source: { kind: 'new' } }], ['answers', { focus: { tracks: ['saas_web'] } }], ['blueprints', {}]] as const) {
       other = (await write(h, other.projectId, path, body, other.revision)).body;
     }
     other = (await write(h, other.projectId, 'blueprint/accept', { version: other.blueprint.version }, other.revision)).body;
@@ -447,8 +701,7 @@ describe('controller', () => {
 
   it('every response matches the published view contract', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    const v = await configured(h);
+    const v = await configuredWithRunner(h);
     const body = (await check(h, v)).body;
     expect(OnboardingViewSchema.safeParse(body).success, JSON.stringify(OnboardingViewSchema.safeParse(body).error?.issues)).toBe(true);
   });
@@ -456,21 +709,24 @@ describe('controller', () => {
   it('never accepts a browser-supplied reference price', async () => {
     const h = harness();
     const v = await configured(h);
-    const line = { id: 'x', label: 'Hosting', cadence: 'monthly', lowUsd: 1, baseUsd: 1, highUsd: 1, provenance: 'reference_price', basis: 'someone said so' };
-    const r = await write(h, v.projectId, 'cost-plan', { agentBudgetUsd: 25, provider: [], app: [line] }, v.revision);
+    const line = { id: 'x', label: 'Hosting', cadence: 'monthly', unit: 'usd', payer: 'your_accounts', lowUsd: 1, baseUsd: 1, highUsd: 1, provenance: 'reference_price', basis: 'someone said so' };
+    const r = await write(h, v.projectId, 'cost-plan', costBody(25, { production: [line] }), v.revision);
     expect(r.status).toBe(400);
   });
 
   it('unknown costs stay null and owner estimates are labelled', async () => {
     const h = harness();
     const v = await configured(h);
-    const unknown = { id: 'db', label: 'Database', cadence: 'monthly', lowUsd: null, baseUsd: null, highUsd: null, provenance: 'unknown', basis: 'Not chosen yet' };
-    const estimate = { id: 'host', label: 'Hosting', cadence: 'monthly', lowUsd: 5, baseUsd: 10, highUsd: 20, provenance: 'user_estimate', basis: 'My current bill' };
-    const r = await write(h, v.projectId, 'cost-plan', { agentBudgetUsd: 25, provider: [], app: [unknown, estimate] }, v.revision);
+    const unknown = { id: 'db', label: 'Database', cadence: 'monthly', unit: 'usd', payer: 'your_accounts', lowUsd: null, baseUsd: null, highUsd: null, provenance: 'unknown', basis: 'Not chosen yet' };
+    const estimate = { id: 'host', label: 'Hosting', cadence: 'monthly', unit: 'usd', payer: 'your_accounts', lowUsd: 5, baseUsd: 10, highUsd: 20, provenance: 'user_estimate', basis: 'My current bill' };
+    const assumptions = { ...NO_ASSUMPTIONS, users: { value: '200 patients a day', confidence: 'low' } };
+    const r = await write(h, v.projectId, 'cost-plan', costBody(25, { production: [unknown, estimate], assumptions }), v.revision);
     expect(r.status).toBe(200);
-    const app = r.body.costPlan.ledgers.app;
-    expect(app.totals).toEqual({ knownLowUsd: 5, knownBaseUsd: 10, knownHighUsd: 20, unknownLines: 1 });
-    expect(app.lines.find((l: any) => l.id === 'db').baseUsd).toBeNull();
+    const production = r.body.costPlan.ledgers.production;
+    expect(production.totals).toEqual({ knownLow: 5, knownBase: 10, knownHigh: 20, unit: 'usd', cadence: 'monthly', unknownLines: 1 });
+    expect(production.lines.find((l: any) => l.id === 'db').baseUsd).toBeNull();
+    expect(r.body.costPlan.assumptions.users).toEqual({ value: '200 patients a day', confidence: 'low' });
+    expect(r.body.costPlan.ledgers.build_effort.lines[0].provenance).toBe('unknown');
   });
 
   it('every route requires the owner', async () => {
@@ -520,8 +776,7 @@ describe('controller', () => {
 
   it('activated projects feed the plan assistant from their own blueprint', async () => {
     const h = harness();
-    await enrolRunner(h.app);
-    let v = await configured(h);
+    let v = await configuredWithRunner(h);
     v = (await check(h, v)).body;
     v = (await activate(h, v)).body;
     const review = await post(h.app, `/v1/runs/${v.firstRunId}/proposals/review`, {

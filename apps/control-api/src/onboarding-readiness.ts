@@ -1,79 +1,132 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
-import { RUNNER_RECENT_SECONDS, availableCatalog, readinessPassed, templateSupport, type BlueprintContent, type ExecutionChoice, type HarnessCatalog, type ReadinessCheck, type ReadinessCheckId, type ReadinessStatus } from '@selarikru/domain';
+import { RUNNER_RECENT_SECONDS, availableCatalog, readinessPassed, templateSupport, type BlueprintContent, type ExecutionChoice, type HarnessCatalog, type ReadinessCheck, type ReadinessCheckId, type ReadinessStatus, type RunnerHarnessReport } from '@selarikru/domain';
 import { schema, type Executor } from '@selarikru/persistence';
 import { evaluate, type Policy } from '@selarikru/policy';
-import { loadRecentRunnerReports } from '@selarikru/workflow';
-import { and, eq, inArray, isNull, gte } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull } from 'drizzle-orm';
 
 /**
  * The trusted half of onboarding: these checks run on this server against real state. A request cannot supply a result, and only an explicit pass counts.
  * With no probes wired, as on the demo stack, the repository and GitHub checks say unknown, so demo data can never reach `ready`.
  */
+type Fact = { readonly status: ReadinessStatus; readonly reason: string };
+
 export interface GitFacts {
-  readonly reachable: { readonly ok: boolean; readonly reason: string };
-  readonly identity: { readonly status: ReadinessStatus; readonly reason: string };
+  readonly checkout: { readonly ok: boolean; readonly reason: string };
+  readonly identity: Fact;
   readonly base: { readonly sha: string | null; readonly reason: string };
+  /** Whether the base commit carries the frozen contract the verifier was built for. */
+  readonly stack: Fact;
 }
 
 export interface ReadinessProbes {
   /** The deployment's one source checkout (`SELARIKRU_SOURCE_REPO`). Null: none is configured. */
   readonly sourceCheckout: string | null;
   git(input: { readonly checkout: string; readonly repository: string; readonly branch: string }): Promise<GitFacts>;
-  githubAuth(): Promise<{ readonly status: ReadinessStatus; readonly reason: string }>;
+  /** Whether GitHub says this machine can push to the repository. */
+  githubAccess(repository: string): Promise<Fact>;
 }
+
+/** Whether the background drivers run in this process. */
+export interface PipelineDrivers { readonly assembly: boolean; readonly verification: boolean }
 
 const execFileP = promisify(execFile);
 const GIT_ENV = { PATH: process.env['PATH'] ?? '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' };
-const ORIGIN_SLUG = /github\.com[:/]+([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i;
+/** The host is anchored, so `notgithub.com` or a path containing `github.com` is not GitHub. */
+const ORIGIN_SLUG = /^(?:https?:\/\/(?:[^@/\s]+@)?|ssh:\/\/(?:[^@/\s]+@)?|git@)github\.com[:/]+([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i;
 
 async function gitOut(checkout: string, args: readonly string[]): Promise<string | null> {
   try {
-    const { stdout } = await execFileP('git', ['-C', checkout, ...args], { env: GIT_ENV, timeout: 15_000, encoding: 'utf8' });
+    const { stdout } = await execFileP('git', ['-C', checkout, ...args], { env: GIT_ENV, timeout: 15_000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
     return stdout.trim();
   } catch {
     return null;
   }
 }
 
+/** `hashTree` from the verifier, over the commit instead of a directory, so an edited working tree cannot pass. */
+async function contractHashAt(checkout: string, sha: string): Promise<string | null> {
+  const listing = await gitOut(checkout, ['ls-tree', '-r', '--name-only', '--full-tree', sha, '--', 'contract']);
+  if (listing === null || listing === '') return null;
+  const lines: string[] = [];
+  for (const path of listing.split('\n').sort()) {
+    try {
+      const { stdout } = await execFileP('git', ['-C', checkout, 'cat-file', 'blob', `${sha}:${path}`], { env: GIT_ENV, timeout: 15_000, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 });
+      lines.push(`${path.replace(/^contract\//, '')}\0${createHash('sha256').update(stdout).digest('hex')}\n`);
+    } catch {
+      return null;
+    }
+  }
+  return createHash('sha256').update(lines.join('')).digest('hex');
+}
+
 /** Reads real facts with `git`, argument arrays only. Branch and repository were validated by the request schema. */
-export function createGitProbes(options: { sourceCheckout: string | null; githubAuth: ReadinessProbes['githubAuth'] }): ReadinessProbes {
+export function createGitProbes(options: { sourceCheckout: string | null; githubAccess: ReadinessProbes['githubAccess']; certifiedContractSha256?: string | null | undefined }): ReadinessProbes {
   return {
     sourceCheckout: options.sourceCheckout,
-    githubAuth: options.githubAuth,
+    githubAccess: options.githubAccess,
     async git({ checkout, repository, branch }) {
       const unreadable = 'The checkout could not be read, so this could not be confirmed.';
-      if (!isAbsolute(checkout) || !existsSync(checkout)) return { reachable: { ok: false, reason: `The configured checkout does not exist on this machine: ${checkout}` }, identity: { status: 'unknown', reason: unreadable }, base: { sha: null, reason: unreadable } };
-      if ((await gitOut(checkout, ['rev-parse', '--git-dir'])) === null) return { reachable: { ok: false, reason: `The configured checkout is not a git repository: ${checkout}` }, identity: { status: 'unknown', reason: unreadable }, base: { sha: null, reason: unreadable } };
+      const nothing = { identity: { status: 'unknown' as const, reason: unreadable }, base: { sha: null, reason: unreadable }, stack: { status: 'unknown' as const, reason: unreadable } };
+      if (!isAbsolute(checkout) || !existsSync(checkout)) return { checkout: { ok: false, reason: `The configured checkout does not exist on this machine: ${checkout}` }, ...nothing };
+      if ((await gitOut(checkout, ['rev-parse', '--git-dir'])) === null) return { checkout: { ok: false, reason: `The configured checkout is not a git repository: ${checkout}` }, ...nothing };
       const url = await gitOut(checkout, ['remote', 'get-url', 'origin']);
       const slug = url === null ? null : (ORIGIN_SLUG.exec(url)?.[1] ?? null);
-      const identity = url === null
-        ? { status: 'unknown' as const, reason: 'The checkout has no origin remote, so it cannot be confirmed as this repository.' }
+      const identity: Fact = url === null
+        ? { status: 'unknown', reason: 'The checkout has no origin remote, so it cannot be confirmed as this repository.' }
         : slug === null
-          ? { status: 'unknown' as const, reason: 'The checkout has an origin remote, but it is not a GitHub repository.' }
+          ? { status: 'unknown', reason: 'The checkout has an origin remote, but it is not a GitHub repository.' }
           : slug.toLowerCase() === repository.toLowerCase()
-            ? { status: 'passed' as const, reason: `The checkout's origin is ${slug}.` }
-            : { status: 'failed' as const, reason: `The checkout's origin is ${slug}, not ${repository}.` };
+            ? { status: 'passed', reason: `The checkout's origin is ${slug}.` }
+            : { status: 'failed', reason: `The checkout's origin is ${slug}, not ${repository}.` };
       const sha = await gitOut(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`]);
-      const base = sha !== null && /^[0-9a-f]{40}$/.test(sha)
-        ? { sha, reason: `Branch ${branch} resolves to ${sha.slice(0, 12)}.` }
-        : { sha: null, reason: `Branch ${branch} does not exist in the checkout.` };
-      return { reachable: { ok: true, reason: `The checkout at ${checkout} is a git repository.` }, identity, base };
+      const resolved = sha !== null && /^[0-9a-f]{40}$/.test(sha);
+      const base = resolved ? { sha, reason: `Branch ${branch} resolves to ${sha.slice(0, 12)}.` } : { sha: null, reason: `Branch ${branch} does not exist in the checkout.` };
+      let stack: Fact;
+      if (!resolved) stack = { status: 'unknown', reason: 'There is no base commit to inspect.' };
+      else if (!options.certifiedContractSha256) stack = { status: 'unknown', reason: 'This server could not read the hash of the verifier\'s contract, so the stack cannot be confirmed.' };
+      else {
+        const hash = await contractHashAt(checkout, sha!);
+        stack = hash === null
+          ? { status: 'failed', reason: 'The base commit has no contract directory, so it is not the Feedback Board starter the verifier can judge.' }
+          : hash === options.certifiedContractSha256
+            ? { status: 'passed', reason: 'The base commit carries the frozen Feedback Board contract.' }
+            : { status: 'failed', reason: 'The base commit\'s contract differs from the frozen Feedback Board contract the verifier was built for.' };
+      }
+      return { checkout: { ok: true, reason: `The checkout at ${checkout} is a git repository.` }, identity, base, stack };
     },
   };
 }
 
-/** `gh auth status`, on this machine. A missing `gh` is unknown, not a pass. */
-export async function ghAuthStatus(): Promise<{ status: ReadinessStatus; reason: string }> {
+export type GhExec = (args: readonly string[]) => Promise<string>;
+const realGh: GhExec = async (args) => (await execFileP('gh', [...args], { env: { ...process.env, GH_PROMPT_DISABLED: '1' }, timeout: 20_000, encoding: 'utf8' })).stdout;
+const WRITE_ACCESS = new Set(['ADMIN', 'MAINTAIN', 'WRITE']);
+
+/** `gh repo view`, on this machine. Requires write access. What `gh` printed is matched and never quoted. */
+export async function ghRepoAccess(repository: string, exec: GhExec = realGh): Promise<Fact> {
+  let out: string;
   try {
-    await execFileP('gh', ['auth', 'status', '--hostname', 'github.com'], { env: { ...process.env, GH_PROMPT_DISABLED: '1' }, timeout: 20_000, encoding: 'utf8' });
-    return { status: 'passed', reason: 'The GitHub CLI is signed in on this machine.' };
+    out = await exec(['repo', 'view', repository, '--json', 'viewerPermission']);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'unknown', reason: 'The GitHub CLI is not installed on this machine, so its sign-in cannot be confirmed.' };
-    return { status: 'failed', reason: 'The GitHub CLI is not signed in to github.com on this machine.' };
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'unknown', reason: 'The GitHub CLI is not installed on this machine, so access to the repository cannot be confirmed.' };
+    const said = `${(e as { stderr?: unknown }).stderr ?? ''}`;
+    if (/gh auth login|not logged in|authentication/i.test(said)) return { status: 'failed', reason: 'The GitHub CLI is not signed in on this machine.' };
+    if (/could not resolve to a repository|not found|http 404/i.test(said)) return { status: 'failed', reason: `GitHub says ${repository} does not exist, or this account cannot see it.` };
+    return { status: 'unknown', reason: 'GitHub could not be reached, so access to the repository cannot be confirmed.' };
   }
+  let permission: unknown;
+  try {
+    permission = (JSON.parse(out) as { viewerPermission?: unknown }).viewerPermission;
+  } catch {
+    return { status: 'unknown', reason: 'GitHub gave an answer that could not be read.' };
+  }
+  if (typeof permission !== 'string' || permission === '') return { status: 'unknown', reason: 'GitHub did not say what access this account has.' };
+  return WRITE_ACCESS.has(permission)
+    ? { status: 'passed', reason: `This account can push to ${repository}.` }
+    : { status: 'failed', reason: `This account has ${permission.toLowerCase()} access to ${repository}. Opening a pull request needs write access.` };
 }
 
 export interface ReadinessInput {
@@ -85,9 +138,12 @@ export interface ReadinessInput {
   readonly policy: Policy | undefined;
   readonly catalog: HarnessCatalog;
   readonly pullRequestsEnabled: boolean;
+  /** Absent: this process cannot say whether the drivers run. */
+  readonly drivers: PipelineDrivers | undefined;
   readonly blueprint: BlueprintContent;
   readonly connection: { readonly repository: string; readonly defaultBranch: string } | null;
   readonly execution: ExecutionChoice | null;
+  readonly classification: 'public' | 'internal';
   readonly agentBudgetUsd: number | null;
   readonly costPlanConfirmed: boolean;
 }
@@ -108,54 +164,93 @@ export async function performReadiness(input: ReadinessInput): Promise<Readiness
 
   const support = templateSupport(input.blueprint.tracks);
   checks.push(check('template_supported', 'Template can run', support.executable ? 'passed' : 'failed',
-    support.executable ? 'Every chosen track is certified to run.' : support.unsupported.map((u) => u.reason).join(' '),
-    'Change the focus to a supported track, or keep this as a plan only.'));
+    support.executable ? 'This is the pilot stack (Feedback Board), the only one the verifier can judge.' : support.unsupported.map((u) => u.reason).join(' '),
+    'Change the focus to the pilot stack, or keep this as a plan only.'));
 
   const { probes, connection } = input;
-  const repoLabel = 'Repository reachable', identityLabel = 'Checkout matches repository', baseLabel = 'Base commit resolves';
-  if (!probes) {
-    checks.push(check('repository_path', repoLabel, 'unknown', NO_CHECKER, 'Run this on a real stack, with `pnpm dev:real`.'));
-    checks.push(check('repository_identity', identityLabel, 'unknown', NO_CHECKER, null));
-    checks.push(check('base_commit', baseLabel, 'unknown', NO_CHECKER, null));
-  } else if (probes.sourceCheckout === null) {
-    const reason = 'This deployment has no source checkout configured (SELARIKRU_SOURCE_REPO).';
-    checks.push(check('repository_path', repoLabel, 'failed', reason, 'Set SELARIKRU_SOURCE_REPO to an absolute path and restart the API.'));
-    checks.push(check('repository_identity', identityLabel, 'unknown', reason, null));
-    checks.push(check('base_commit', baseLabel, 'unknown', reason, null));
-  } else if (!connection) {
-    const reason = 'No repository is connected yet.';
-    checks.push(check('repository_path', repoLabel, 'failed', reason, 'Connect a repository in the previous step.'));
-    checks.push(check('repository_identity', identityLabel, 'unknown', reason, null));
-    checks.push(check('base_commit', baseLabel, 'unknown', reason, null));
-  } else {
+  const CHECKOUT = 'Checkout present', IDENTITY = 'Checkout matches repository', BASE = 'Base commit resolves', STACK = 'Checkout is the pilot stack';
+  const noFacts = (reason: string, checkoutStatus: ReadinessStatus, next: string | null): void => {
+    checks.push(check('checkout_present', CHECKOUT, checkoutStatus, reason, next));
+    checks.push(check('repository_identity', IDENTITY, 'unknown', reason, null));
+    checks.push(check('base_commit', BASE, 'unknown', reason, null));
+    checks.push(check('stack_certified', STACK, 'unknown', reason, null));
+  };
+  if (!probes) noFacts(NO_CHECKER, 'unknown', 'Run this on a real stack, with `pnpm dev:real`.');
+  else if (probes.sourceCheckout === null) noFacts('This deployment has no source checkout configured (SELARIKRU_SOURCE_REPO).', 'failed', 'Set SELARIKRU_SOURCE_REPO to an absolute path and restart the API.');
+  else if (!connection) noFacts('No repository is connected yet.', 'failed', 'Connect a repository in the previous step.');
+  else {
     try {
       const facts = await probes.git({ checkout: probes.sourceCheckout, repository: connection.repository, branch: connection.defaultBranch });
-      checks.push(check('repository_path', repoLabel, facts.reachable.ok ? 'passed' : 'failed', facts.reachable.reason, 'Fix the path in SELARIKRU_SOURCE_REPO and restart the API.'));
-      checks.push(check('repository_identity', identityLabel, facts.identity.status, facts.identity.reason, `Point the checkout's origin at github.com/${connection.repository}.`));
-      checks.push(check('base_commit', baseLabel, facts.base.sha ? 'passed' : 'failed', facts.base.reason, `Fetch or create ${connection.defaultBranch} in the checkout.`));
+      checks.push(check('checkout_present', CHECKOUT, facts.checkout.ok ? 'passed' : 'failed', facts.checkout.reason, 'Fix the path in SELARIKRU_SOURCE_REPO and restart the API.'));
+      checks.push(check('repository_identity', IDENTITY, facts.identity.status, facts.identity.reason, `Point the checkout's origin at github.com/${connection.repository}.`));
+      checks.push(check('base_commit', BASE, facts.base.sha ? 'passed' : 'failed', facts.base.reason, `Fetch or create ${connection.defaultBranch} in the checkout.`));
+      checks.push(check('stack_certified', STACK, facts.stack.status, facts.stack.reason, 'Start from the Feedback Board starter in `examples/feedback-board-starter`.'));
       baseSha = facts.base.sha;
     } catch {
-      const reason = 'The checkout could not be read, so this could not be confirmed.';
-      checks.push(check('repository_path', repoLabel, 'unknown', reason, 'Check the checkout on this machine and try again.'));
-      checks.push(check('repository_identity', identityLabel, 'unknown', reason, null));
-      checks.push(check('base_commit', baseLabel, 'unknown', reason, null));
+      noFacts('The checkout could not be read, so this could not be confirmed.', 'unknown', 'Check the checkout on this machine and try again.');
     }
   }
 
-  // Enrolment and health come from what the runner itself last did, seen by this server.
-  const label = 'Runner enrolled';
+  const REACHABLE = 'Repository reachable';
+  if (!input.pullRequestsEnabled) checks.push(check('repository_reachable', REACHABLE, 'failed', 'Draft pull requests are off on this server.', 'Set SELARIKRU_GITHUB_ENABLED=1 and restart the API.'));
+  else if (!probes) checks.push(check('repository_reachable', REACHABLE, 'unknown', NO_CHECKER, null));
+  else if (!connection) checks.push(check('repository_reachable', REACHABLE, 'unknown', 'No repository is connected yet.', null));
+  else {
+    try {
+      const access = await probes.githubAccess(connection.repository);
+      checks.push(check('repository_reachable', REACHABLE, access.status, access.reason, 'Run `gh auth login` on this machine with an account that can push to the repository.'));
+    } catch {
+      checks.push(check('repository_reachable', REACHABLE, 'unknown', 'GitHub could not be checked.', 'Run `gh repo view` for this repository on this machine.'));
+    }
+  }
+
+  // Enrolment, models and project checkouts come from what each runner last said, seen by this server, and are judged for every location in scope.
   const locations = input.execution === 'hybrid' ? ['local', 'cloud'] : input.execution ? [input.execution] : [];
+  const ENROLLED = 'Runner enrolled', HAS_PROJECT = 'Runner has this project';
+  const runCommand = `--repo ${input.projectId}=${probes?.sourceCheckout ?? '<checkout>'}`;
   if (locations.length === 0) {
-    checks.push(check('runner_enrolled', label, 'failed', 'Execution has not been chosen yet.', 'Choose where workers run.'));
+    checks.push(check('runner_enrolled', ENROLLED, 'failed', 'Execution has not been chosen yet.', 'Choose where workers run.'));
+    checks.push(check('runner_has_project', HAS_PROJECT, 'unknown', 'Execution has not been chosen yet.', null));
   } else {
     const since = new Date(input.now.getTime() - RUNNER_RECENT_SECONDS * 1000);
-    const seen = await input.db.select({ location: schema.runners.location, report: schema.runners.harnessReport }).from(schema.runners)
+    const seen = await input.db.select({ location: schema.runners.location, report: schema.runners.harnessReport, projects: schema.runners.configuredProjects }).from(schema.runners)
       .where(and(eq(schema.runners.tenantId, input.tenantId), isNull(schema.runners.revokedAt), inArray(schema.runners.location, locations), gte(schema.runners.lastSeenAt, since)));
-    const missing = locations.filter((l) => !seen.some((r) => r.location === l));
-    const canLaunch = availableCatalog(input.catalog, await loadRecentRunnerReports(input.db, input.tenantId, input.now)).providers.some((p) => p.models.length > 0);
-    if (missing.length > 0) checks.push(check('runner_enrolled', label, 'failed', `No ${missing.join(' or ')} runner has reached this server recently.`, `Pair a runner with \`selarikru-runner pair\`, then start it with \`--repo ${input.projectId}=${input.probes?.sourceCheckout ?? '<checkout>'}\` so it can build this project.`));
-    else if (!canLaunch) checks.push(check('runner_enrolled', label, 'failed', 'A runner is connected, but it reports no model this build can launch.', 'Install a supported harness on the runner.'));
-    else checks.push(check('runner_enrolled', label, 'passed', `A ${locations.join(' and a ')} runner reported in recently.`, null));
+    const at = (l: string) => seen.filter((r) => r.location === l);
+    const missing = locations.filter((l) => at(l).length === 0);
+    const noModel = locations.filter((l) => at(l).length > 0 && !availableCatalog(input.catalog, at(l).flatMap((r) => (r.report ?? []) as RunnerHarnessReport[])).providers.some((p) => p.models.length > 0));
+    if (missing.length > 0) checks.push(check('runner_enrolled', ENROLLED, 'failed', `No ${missing.join(' or ')} runner has reached this server recently.`, `Pair a runner with \`selarikru-runner pair\`, then start it with \`${runCommand}\`.`));
+    else if (noModel.length > 0) checks.push(check('runner_enrolled', ENROLLED, 'failed', `The ${noModel.join(' and ')} runner reports no model this build can launch.`, 'Install a supported harness on that runner.'));
+    else checks.push(check('runner_enrolled', ENROLLED, 'passed', `A ${locations.join(' and a ')} runner reported in recently, with a model it can launch.`, null));
+
+    const verdicts = locations.map((l) => {
+      const here = at(l);
+      if (here.some((r) => r.projects?.includes(input.projectId))) return 'has';
+      return here.some((r) => r.projects !== null) ? 'lacks' : 'unsaid';
+    });
+    const next = `Restart the runner with \`${runCommand}\`.`;
+    if (verdicts.every((v) => v === 'has')) checks.push(check('runner_has_project', HAS_PROJECT, 'passed', 'The runner reports a source checkout for this project.', null));
+    else if (verdicts.includes('lacks')) checks.push(check('runner_has_project', HAS_PROJECT, 'failed', 'The runner has not been given a source checkout for this project, so it could not build it.', next));
+    else checks.push(check('runner_has_project', HAS_PROJECT, 'unknown', 'No runner has said which projects it has a checkout for.', next));
+  }
+
+  // Judged the way a cloud start is judged at claim, so this cannot pass where the scheduler would refuse.
+  if (input.execution === 'cloud' || input.execution === 'hybrid') {
+    const label = 'Cloud destination granted';
+    const destination = input.policy?.destinations?.find((d) => d.purpose === 'execution')?.destination;
+    if (!destination) checks.push(check('cloud_destination', label, 'failed', 'The loaded policy grants no destination for cloud execution.', 'Add an execution destination to the policy, or choose a local sandbox.'));
+    else {
+      const verdict = evaluate({ kind: 'start_cloud_worker', destination, sources: [{ id: `repo:${input.projectId}`, classification: input.classification }], totalRunning: 0, estimatedCost: 0, remainingBudget: input.agentBudgetUsd ?? 0 }, input.policy);
+      checks.push(check('cloud_destination', label, verdict.decision === 'allow' ? 'passed' : 'failed',
+        verdict.decision === 'allow' ? `The policy allows this project to run in ${destination}.` : verdict.decision === 'require_approval' ? 'The policy requires an approval for each cloud start.' : `The policy would refuse a cloud start: ${verdict.reason.replace(/[_:]/g, ' ')}.`,
+        'Grant this repository as a source for the destination in the policy, or choose a local sandbox.'));
+    }
+  }
+
+  const DRIVERS = 'Build and verification running';
+  if (!input.drivers) checks.push(check('pipeline_drivers', DRIVERS, 'unknown', 'This server cannot say whether the assembly and verification drivers are running.', null));
+  else {
+    const off = [...(input.drivers.assembly ? [] : ['assembly']), ...(input.drivers.verification ? [] : ['verification'])];
+    checks.push(check('pipeline_drivers', DRIVERS, off.length === 0 ? 'passed' : 'failed', off.length === 0 ? 'The assembly and verification drivers are running in this server.' : `The ${off.join(' and ')} driver is not running, so finished work would never be built or checked.`, 'Set SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS and SELARIKRU_VERIFICATION_POLL_INTERVAL_MS, and restart the API.'));
   }
 
   const policyGate = input.policy ? evaluate({ kind: 'create_draft_pr' }, input.policy) : null;
@@ -163,21 +258,8 @@ export async function performReadiness(input: ReadinessInput): Promise<Readiness
     !input.policy ? 'No policy is loaded on this server.' : policyGate!.decision === 'allow' ? `Policy ${input.policy.policyVersion} is loaded and allows draft pull requests.` : 'The loaded policy does not allow draft pull requests.',
     'Load a policy that allows draft pull requests, and restart the API.'));
 
-  if (!input.pullRequestsEnabled) {
-    checks.push(check('github_auth', 'GitHub sign-in', 'failed', 'Draft pull requests are off on this server.', 'Set SELARIKRU_GITHUB_ENABLED=1 and restart the API.'));
-  } else if (!probes) {
-    checks.push(check('github_auth', 'GitHub sign-in', 'unknown', NO_CHECKER, null));
-  } else {
-    try {
-      const auth = await probes.githubAuth();
-      checks.push(check('github_auth', 'GitHub sign-in', auth.status, auth.reason, 'Run `gh auth login` on this machine.'));
-    } catch {
-      checks.push(check('github_auth', 'GitHub sign-in', 'unknown', 'The GitHub CLI could not be checked.', 'Run `gh auth status` on this machine.'));
-    }
-  }
-
   checks.push(check('budget_limit', 'Agent budget set', input.agentBudgetUsd !== null && input.costPlanConfirmed ? 'passed' : 'failed',
-    input.agentBudgetUsd === null ? 'No agent budget ceiling is set. A missing limit blocks work; it is never unlimited.' : input.costPlanConfirmed ? `The agent budget ceiling is $${input.agentBudgetUsd}.` : 'The cost plan was confirmed for an older blueprint.',
+    input.agentBudgetUsd === null ? 'No agent budget ceiling is set. A missing limit blocks work; it is never unlimited.' : input.costPlanConfirmed ? `The agent budget ceiling is $${input.agentBudgetUsd}.` : 'The cost plan has changed since you last confirmed it.',
     'Set and confirm the agent budget in the cost plan.'));
 
   return { checks, baseSha, passed: readinessPassed(checks) };

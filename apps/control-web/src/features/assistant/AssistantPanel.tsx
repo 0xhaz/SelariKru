@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { errorCodeOf, type AssistRequest, type AssistantProposal, type RestrictedDraftHold } from '@selarikru/inference-firebase-web';
+import { errorCodeOf, type AssistRequest, type AssistantProposal, type InferenceMode, type RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { validateProposal, type ProposalValidation } from '@selarikru/domain';
 import { demoProposal } from './demo.ts';
 import { briefById } from './fixtures.ts';
@@ -19,6 +19,8 @@ export interface AssistantPanelProps {
   readonly api: AssistantApi | null;
   readonly hold: RestrictedDraftHold;
   readonly defaults?: { readonly projectId: string; readonly runId: string };
+  /** The route recorded for this project at setup. When set, the assistant uses it and offers no other. */
+  readonly recordedMode?: InferenceMode | null | undefined;
 }
 
 const ERROR_PROPOSAL = (op: AssistantProposal['operation'], ids: readonly string[], name: string, code: string | null): AssistantProposal => ({
@@ -28,7 +30,7 @@ const ERROR_PROPOSAL = (op: AssistantProposal['operation'], ids: readonly string
   payloadSha256: null, allowedRequirementIds: [...ids], blockedReason: null, errorName: name, errorCode: code,
 });
 
-export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelProps) {
+export function AssistantPanel({ adapter, api, hold, defaults, recordedMode }: AssistantPanelProps) {
   const store = useAssistantStore();
   const { mode, operation, briefId, cloudPermitted, demo, result, set, setResult, setGenerating, setDownload, setReadiness } = store;
   const reqRef = useRef(0);
@@ -52,6 +54,9 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
     window.addEventListener('hashchange', read);
     return () => window.removeEventListener('hashchange', read);
   }, []);
+  useEffect(() => {
+    if (recordedMode) set({ mode: recordedMode });
+  }, [recordedMode, set]);
   const brief = briefById(briefId);
   const effectiveDemo = demo && !brief.restricted;
   const heldRef = useRef<string | null>(null);
@@ -169,7 +174,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
       {replanFor ? <p data-testid="replan-context" className="mb-4 rounded-chip border border-active bg-active-tint p-3 text-fg">Replanning {replanFor.taskId ? <>task <span className="font-mono text-mono">{replanFor.taskId}</span> in </> : null}run <span className="font-mono text-mono">{replanFor.runId}</span>. Draft a task plan below; a new revision replaces the current one once you accept it.</p> : null}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <div className="space-y-4">
-          <RequestForm target={target} onTarget={setTarget} onGenerate={() => void onGenerate()} />
+          <RequestForm target={target} onTarget={setTarget} onGenerate={() => void onGenerate()} recordedMode={recordedMode} />
           <ModelCard onDownload={() => void onDownload()} />
         </div>
         <div className="space-y-4">

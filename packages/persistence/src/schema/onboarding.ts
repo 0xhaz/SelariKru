@@ -65,7 +65,7 @@ export const projectBlueprints = pgTable(
   ],
 );
 
-/** One row for each time the readiness checks ran. Written only by trusted server code; results are never taken from a request. */
+/** One row for each time the readiness checks ran. Written only by trusted server code; results are never taken from a request. A trigger refuses update and delete. */
 export const onboardingReadinessPasses = pgTable(
   'onboarding_readiness_passes',
   {
@@ -76,6 +76,8 @@ export const onboardingReadinessPasses = pgTable(
     checks: jsonb('checks').$type<unknown[]>().notNull(),
     /** The commit the base-commit check resolved, when it resolved one. */
     baseSha: text('base_sha'),
+    /** The execution, inference, budget and connection this pass judged. Immutable with the row. */
+    snapshot: jsonb('snapshot').$type<Record<string, unknown>>(),
     checkedAt: tstz('checked_at').notNull(),
   },
   (t) => [

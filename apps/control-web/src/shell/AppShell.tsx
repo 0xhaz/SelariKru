@@ -241,7 +241,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             )}
           </nav>
           <div className="shrink-0">
-            <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />
+            {/* Setting up a first project has no live data to be fresh about. */}
+            {route === 'onboarding' && connection === 'unavailable' ? null : <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />}
           </div>
         </div>
       </header>
