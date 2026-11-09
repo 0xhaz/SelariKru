@@ -45,9 +45,12 @@ export function tasksByStatus(snapshot: ProjectViewSnapshot): Record<string, rea
   return out;
 }
 
-/** Counts of tasks with qualifying evidence at their current revision, optionally for one run. No percentage is derived from tokens or time. */
+/**
+ * Counts of tasks with qualifying evidence at their current revision, optionally for one run. Work stopped for budget stays in the total: its
+ * acceptance is still unmet, and leaving it out would make a run look closer to done. No percentage is derived from tokens or time.
+ */
 export function verifiedCounts(snapshot: ProjectViewSnapshot, runId?: string): { verified: number; total: number } {
-  const live = Object.values(snapshot.tasks).filter((t) => (runId === undefined || t.runId === runId) && t.status !== 'superseded' && t.status !== 'cancelled');
+  const live = Object.values(snapshot.tasks).filter((t) => (runId === undefined || t.runId === runId) && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
   return { verified: live.filter((t) => t.status === 'verified' || t.status === 'merged').length, total: live.length };
 }
 

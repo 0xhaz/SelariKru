@@ -123,6 +123,8 @@ test('a runner loss stays visible over stale data, labelled as of the last confi
   await expect(items(page).first()).toHaveAttribute('data-kind', 'worker_lost');
   await expect(items(page).first()).toContainText('As of last confirmed state');
   await expect(page.getByTestId('headline')).toContainText('at the last confirmed state');
+  await expect(page.getByTestId('attention-count')).toHaveText('1 item at last confirmed state');
+  await expect(page.getByRole('region', { name: 'Fleet' })).toContainText('1 lost');
 });
 
 test('a view that fails to render is contained: shell and badge stay, and the other tab works', async ({ page }) => {
@@ -131,6 +133,15 @@ test('a view that fails to render is contained: shell and badge stay, and the ot
   await expect(page.getByTestId('demo-badge')).toBeVisible();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
+  await page.getByRole('link', { name: 'Overview' }).click();
+});
+
+test('a failed Overview recovers once the failure clears', async ({ page }) => {
+  await page.goto('/?demo&fault=corrupt');
+  await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
+  await page.getByRole('button', { name: 'Restart projection' }).click();
+  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await expect(page.getByTestId('criteria')).toBeVisible();
 });
 
 test('changing route moves focus to the main content, and first load does not', async ({ page }) => {
@@ -143,8 +154,10 @@ test('changing route moves focus to the main content, and first load does not', 
 test('exact time appears on keyboard focus', async ({ page }) => {
   await open(page, fixture('human-wait'));
   const time = items(page).first().locator('time').first();
+  const before = await items(page).first().boundingBox();
   await time.focus();
   await expect(items(page).first().locator('span[aria-hidden="true"]', { hasText: '2026' }).first()).toBeVisible();
+  expect(await items(page).first().boundingBox()).toEqual(before); // a positioned tooltip does not reflow the line
 });
 
 test('a long payload wraps instead of overflowing at 375', async ({ page }) => {
@@ -157,6 +170,34 @@ test('a long payload wraps instead of overflowing at 375', async ({ page }) => {
     });
   });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('the 375 header stays on two rows, with the count on the Overview tab', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  for (const query of [fixture('policy-block'), fixture('healthy-parallel-work'), '&fault=dead']) {
+    await open(page, query);
+    const header = await page.locator('.sticky').first().boundingBox();
+    expect(header!.height).toBeLessThanOrEqual(92);
+  }
+  await open(page, fixture('policy-block'));
+  await expect(page.getByTestId('attention-badge')).toHaveText('2');
+  await expect(page.getByTestId('attention-badge')).toHaveAttribute('aria-label', '2 need attention');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('a calm screen says it once', async ({ page }) => {
+  await open(page, fixture('healthy-parallel-work'));
+  await expect(page.getByText('No decisions waiting.')).toBeVisible();
+  await expect(page.getByTestId('headline')).toHaveCount(0);
+  await expect(page.getByTestId('attention-count')).toHaveCount(0);
+});
+
+test('a budget stop asks for a decision but is not the top blocker, and its criteria stay in the total', async ({ page }) => {
+  await open(page, fixture('unknown-costs'));
+  await expect(page.getByTestId('criteria')).toHaveText('2 of 7 criteria verified');
+  await expect(page.getByTestId('headline')).toHaveText(/1 item needs you\.$/);
+  await expect(items(page).first()).toContainText('Stopped');
+  await expect(page.getByTestId('top-blocker')).toContainText('none right now');
 });
 
 test('a light-theme preference is applied before any app code runs', async ({ page }) => {

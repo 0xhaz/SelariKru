@@ -28,6 +28,8 @@ export interface AttentionItem {
   readonly needsOperator: boolean;
   /** True when this was evaluated at the last confirmed time because liveness is stale now. */
   readonly asOfLastConfirmed: boolean;
+  /** A record about work that has already stopped. It may still need a decision, but it is not blocking anything now. */
+  readonly closedRecord: boolean;
 }
 
 const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merged', 'verified'];
@@ -65,7 +67,11 @@ function explain(code: string): string {
   if (head === 'resource_conflict') return arg ? `Another task holds a resource this one needs (${arg}).` : 'Another task holds a resource this one needs.';
   if (head === 'role_not_mapped') return `The ${arg || 'task\'s'} role is not mapped to a worker location.`;
   if (head === 'location_disabled') return `The ${arg || 'chosen'} location is disabled for this run.`;
-  if (head === 'budget') return `The run budget does not allow this: ${sentence(arg).toLowerCase()}.`;
+  if (head === 'budget') {
+    if (arg === 'exceeds_limit') return 'This would exceed the run\'s budget limit.';
+    if (arg === 'unknown_cost') return 'The cost of this work cannot be established, so it cannot be checked against the budget.';
+    return `The run budget does not allow this: ${sentence(arg).toLowerCase()}.`;
+  }
   return `${sentence(bare)}.`;
 }
 
@@ -97,8 +103,8 @@ function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
 const whoWaits = (affected: readonly string[]): string =>
   affected.length > 1 ? `This task and ${affected.length - 1} that depend on it cannot proceed.` : 'This task cannot proceed.';
 
-type ItemInput = Omit<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed'> & Partial<Pick<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed'>>;
-const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, ...i });
+type ItemInput = Omit<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'> & Partial<Pick<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed' | 'closedRecord'>>;
+const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, closedRecord: false, ...i });
 
 function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
   const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You' };
@@ -116,11 +122,15 @@ function blockItem(task: TaskView, code: string, hit: readonly string[]): Attent
         ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: 'Its repair attempts are used up, so no further attempt will start.',
         consequence: `${whoWaits(hit)} It stays blocked until a person changes the plan.`, nextAction: 'Inspect the failing check, then replan or cancel the task.',
       });
-    case 'budget':
+    case 'budget': {
+      const exceeds = code.endsWith('budget:exceeds_limit');
+      const unknownCost = code.endsWith('budget:unknown_cost');
       return make({
         ...base, kind: 'budget_resource', title: `${name}: cannot start`, detail: explain(code),
-        consequence: `${whoWaits(hit)} A missing limit is never treated as unlimited.`, nextAction: 'Set the limit in the run policy.',
+        consequence: `${whoWaits(hit)} ${exceeds ? 'It will not start over budget.' : unknownCost ? 'An unknown cost is never treated as zero.' : 'A missing limit is never treated as unlimited.'}`,
+        nextAction: exceeds ? 'Request a scoped budget increase or narrow the task.' : unknownCost ? 'Resolve the missing usage figures, then retry.' : 'Set the limit in the run policy.',
       });
+    }
     case 'wait':
       return make({
         ...base, kind: 'budget_resource', owner: 'Scheduler', needsOperator: false, title: `${name}: waiting for a slot`, detail: explain(code),
@@ -133,11 +143,10 @@ function blockItem(task: TaskView, code: string, hit: readonly string[]): Attent
         nextAction: isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : 'Review the effective policy for this task.',
       });
     case 'blocked': {
-      const conflict = code.startsWith('resource_conflict');
-      const nextAction = conflict ? 'No action needed unless the conflict does not clear.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
+      // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
+      const nextAction = code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
       return make({
-        ...base, kind: 'blocked', owner: conflict ? 'Scheduler' : 'You', needsOperator: !conflict, title: `${name}: blocked`, detail: explain(code),
-        consequence: conflict ? 'It starts once the other task releases the resource.' : whoWaits(hit), nextAction,
+        ...base, kind: 'blocked', title: `${name}: blocked`, detail: explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction,
       });
     }
   }
@@ -169,13 +178,15 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     }
   }
 
-  // A budget stop is on a closed task: it stays visible as a record but nobody can act on that task now.
+  // A budget stop is on a closed task, so it blocks nothing now. While its run is open the operator still has to choose: fund it or accept reduced scope.
   for (const task of Object.values(snapshot.tasks)) {
     if (task.status !== 'cancelled' || task.cancelReason !== 'budget_exhausted') continue;
+    const runState = snapshot.runs[task.runId]?.lifecycle;
+    const runOpen = runState !== 'merged' && runState !== 'failed' && runState !== 'cancelled';
     items.push(make({
-      id: `budget:${task.taskId}`, kind: 'budget_resource', needsOperator: false, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'You',
+      id: `budget:${task.taskId}`, kind: 'budget_resource', closedRecord: true, needsOperator: runOpen, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'You',
       title: `${titleOf(task)}: stopped, budget exhausted`, detail: 'The attempt was stopped when its budget ran out.',
-      consequence: 'Its work so far is preserved. It will not resume on its own.', nextAction: 'Request a scoped budget increase if you want it to run again.',
+      consequence: 'Its work so far is preserved, and its criteria stay unmet. It will not resume on its own.', nextAction: 'Request a scoped budget increase, or accept the reduced scope.',
     }));
   }
 

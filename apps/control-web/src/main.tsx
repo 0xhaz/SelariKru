@@ -13,7 +13,7 @@ const Root = DemoRoot && wantsDemo ? DemoRoot : LiveRoot;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <RouteBoundary resetKey="root">
+    <RouteBoundary resetKey="root" root>
       <Suspense fallback={<p role="status" className="p-6 text-muted">Loading</p>}>
         <Root />
       </Suspense>

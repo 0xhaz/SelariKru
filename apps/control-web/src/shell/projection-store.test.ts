@@ -103,6 +103,21 @@ describe('projection store', () => {
     store.getState().stop();
   });
 
+  it('keeps the last confirmed time across a restart while retries fail', async () => {
+    let fail = false;
+    const { store, fire } = setup((s) => ({ ...s, getSnapshot: (p) => (fail ? Promise.reject(new Error('down')) : s.getSnapshot(p)) }));
+    store.getState().start();
+    await flush();
+    const confirmed = store.getState().livenessAsOfMs;
+    expect(confirmed).not.toBeNull();
+    fail = true;
+    store.getState().restart();
+    await flush();
+    fire();
+    expect(store.getState().livenessAsOfMs).toBe(confirmed);
+    store.getState().stop();
+  });
+
   it('stop cancels the scheduled work', async () => {
     const { store, timers } = setup();
     store.getState().start();

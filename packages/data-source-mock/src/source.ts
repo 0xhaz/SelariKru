@@ -180,7 +180,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   /** Per-criterion counts as a server would hold them. A scene whose tasks declare no criteria reports null: per-criterion evidence is not connected. */
   function criteriaOf(p: Project, runId: string): RunView['criteria'] {
-    const live = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && t.status !== 'cancelled');
+    // Budget-stopped work keeps its criteria in the total: they are still unmet. Superseded and deliberately cancelled work does not.
+    const live = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
     if (live.length === 0) return null;
     let verified = 0;
     let total = 0;

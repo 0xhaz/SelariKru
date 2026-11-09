@@ -76,9 +76,12 @@ export interface OverviewModel {
   readonly needsYou: number;
   /** True while what is shown may no longer be current: the session is not live, or worker liveness is stale. */
   readonly stale: boolean;
-  readonly headline: string;
-  /** The aggregate count for the header. */
-  readonly attentionCount: string;
+  /** Null when nothing needs saying: the attention panel already says so, and repeating it makes a calm screen noisy. */
+  readonly headline: string | null;
+  /** The aggregate count for the header; null when live with nothing to count. */
+  readonly attentionCount: string | null;
+  /** The same count for the narrow header. `?` marks a count that may be out of date. */
+  readonly attentionBadge: string | null;
   /** What to say to a screen reader about attention, once per change. */
   readonly announcement: string;
   readonly delivery: DeliveryModel;
@@ -111,7 +114,8 @@ function taskRow(t: TaskView): TaskRow {
   const s = STATUS[t.status];
   const label = placed ? 'Cannot be placed' : t.status === 'superseded' && t.supersededByRevision !== null ? `Superseded by revision ${t.supersededByRevision}` : s.label;
   const tone: Tone = placed ? (t.placementBlock!.startsWith('approval_required:') ? 'warning' : 'danger') : s.tone;
-  const cell = placed ? 'held' : (CELL[t.status] ?? null);
+  // Work stopped for budget still counts towards delivery, as unmet.
+  const cell = placed || (t.status === 'cancelled' && t.cancelReason === 'budget_exhausted') ? 'held' : (CELL[t.status] ?? null);
   return { taskId: t.taskId, title: t.title ?? t.taskId, role: t.role, statusLabel: label, tone, cell };
 }
 
@@ -128,7 +132,7 @@ function delivery(snapshot: ProjectViewSnapshot, attention: readonly AttentionIt
   const tasks = scoped.sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)).map(taskRow);
   const criteria = run?.criteria ?? null;
   const { verified, total } = criteria ?? taskCounts;
-  const blocker = attention.find((i) => i.needsOperator && i.status !== 'review')?.title ?? null;
+  const blocker = attention.find((i) => i.needsOperator && i.status !== 'review' && !i.closedRecord)?.title ?? null;
   const segments: CriterionCell[] = criteria
     ? [...Array<CriterionCell>(criteria.verified).fill('verified'), ...Array<CriterionCell>(Math.max(0, criteria.total - criteria.verified)).fill('pending')]
     : tasks.flatMap((t) => (t.cell === null ? [] : [t.cell])).sort((a, b) => Number(b === 'verified') - Number(a === 'verified'));
@@ -169,12 +173,14 @@ const HEALTH: Readonly<Record<WorkerHealthReading['health'], { label: string; to
   unknown: { label: 'Health unknown', tone: 'warning' },
 };
 
-function fleet(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null): FleetModel {
+function fleet(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null): FleetModel {
   const summary = { working: 0, waiting: 0, idle: 0, lost: 0 };
   const rows = Object.values(snapshot.workers).map((w): FleetRow => {
     const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
     const task = w.taskId !== null ? snapshot.tasks[w.taskId] : undefined;
-    if (reading.health === 'disconnected' || reading.health === 'failed') summary.lost += 1;
+    // The row stays honest about now (unknown); the summary keeps a loss already seen at the last confirmed time.
+    const counted = reading.health === 'unknown' && lastConfirmedMs !== null ? effectiveWorkerHealth(w, lastConfirmedMs, lastConfirmedMs).health : reading.health;
+    if (counted === 'disconnected' || counted === 'failed') summary.lost += 1;
     else if (w.activity !== null && WAITING.includes(w.activity)) summary.waiting += 1;
     else if (w.availability === 'idle') summary.idle += 1;
     else if (w.availability === 'assigned') summary.working += 1;
@@ -235,28 +241,31 @@ export interface OverviewOptions {
 export function buildOverview(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: OverviewOptions = {}): OverviewModel {
   const attention = buildAttention(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const needsYou = attention.filter((i) => i.needsOperator).length;
-  const fleetModel = fleet(snapshot, nowMs, livenessAsOfMs);
+  const fleetModel = fleet(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const workersUnknown = fleetModel.rows.some((r) => r.health.state === 'unknown');
   const stale = options.stale === true || workersUnknown;
 
-  let headline: string;
-  let attentionCount: string;
+  let headline: string | null;
+  let attentionCount: string | null;
+  let attentionBadge: string | null;
   let announcement: string;
   if (stale) {
     const workers = workersUnknown ? 'Worker connections are unknown.' : '';
     headline = needsYou > 0
       ? `${items(needsYou, ['needed', 'needed'])} you at the last confirmed state.${workers ? ` ${workers}` : ''}`
       : workers ? `${workers} Showing the last confirmed state.` : 'Showing the last confirmed state, which may be out of date.';
-    attentionCount = needsYou > 0 ? `${needsYou} at last confirmed state` : 'Attention unknown';
+    attentionCount = needsYou > 0 ? `${needsYou} ${needsYou === 1 ? 'item' : 'items'} at last confirmed state` : 'Attention unknown';
+    attentionBadge = needsYou > 0 ? `${needsYou}?` : '?';
     announcement = needsYou > 0 ? `${items(needsYou, ['needed', 'needed'])} attention at the last confirmed state.` : 'Attention is unknown until the connection returns.';
   } else {
-    headline = needsYou === 0 ? 'Nothing needs you right now.' : `${items(needsYou, ['needs', 'need'])} you.`;
-    attentionCount = needsYou === 0 ? 'None need attention' : `${needsYou} ${needsYou === 1 ? 'needs' : 'need'} attention`;
+    headline = needsYou === 0 ? null : `${items(needsYou, ['needs', 'need'])} you.`;
+    attentionCount = needsYou === 0 ? null : `${needsYou} ${needsYou === 1 ? 'needs' : 'need'} attention`;
+    attentionBadge = needsYou === 0 ? null : String(needsYou);
     announcement = needsYou === 0 ? 'Nothing needs attention.' : `${items(needsYou, ['needs', 'need'])} attention.`;
   }
 
   return {
-    empty: isEmptyProject(snapshot), simulated: snapshot.meta.provenance === 'simulated', attention, needsYou, stale, headline, attentionCount, announcement,
+    empty: isEmptyProject(snapshot), simulated: snapshot.meta.provenance === 'simulated', attention, needsYou, stale, headline, attentionCount, attentionBadge, announcement,
     delivery: delivery(snapshot, attention), fleet: fleetModel, evidence: evidence(snapshot), usage: usage(snapshot),
   };
 }

@@ -47,8 +47,13 @@ const TONE_TEXT: Readonly<Record<Tone, string>> = { neutral: 'text-muted', activ
 function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionState; confirmedAt: string | null; nowMs: number }) {
   const c = CONNECTION[connection];
   let detail: string | null = null;
+  // The narrow header keeps a short age; when stale, the banner in the page carries the exact time.
+  let compact: string | null = null;
   if (confirmedAt !== null) {
-    if (connection === 'live') detail = `updated ${formatAge(nowMs - Date.parse(confirmedAt))} ago`;
+    if (connection === 'live') {
+      detail = `updated ${formatAge(nowMs - Date.parse(confirmedAt))} ago`;
+      compact = `${formatAge(nowMs - Date.parse(confirmedAt))} ago`;
+    }
     else if (connection !== 'connecting') detail = `last confirmed ${formatClock(confirmedAt)}`;
   }
   return (
@@ -57,7 +62,8 @@ function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionS
         <span aria-hidden="true" className="text-glyph">{toneGlyph(c.tone)}</span>
         {c.label}
       </span>
-      {detail ? <span className="text-muted">{detail}</span> : null}
+      {detail ? <span className="hidden text-muted sm:inline">{detail}</span> : null}
+      {compact ? <span className="text-muted sm:hidden">{compact}</span> : null}
     </span>
   );
 }
@@ -122,23 +128,28 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
   }, [route]);
 
   const showCount = overview !== null && !overview.empty;
+  const attentionCount = showCount ? overview.attentionCount : null;
+  const attentionBadge = showCount ? overview.attentionBadge : null;
   const announcement = `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
   return (
     <div className="min-h-screen">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
       <Announcer message={announcement} />
-      <div className="sticky top-0 z-40 border-b border-line bg-panel">
-        <header className="mx-auto flex max-w-[1320px] flex-wrap items-center gap-x-4 gap-y-1 px-4 pt-2 sm:px-6">
-          <p className="flex min-w-0 items-baseline gap-2">
+      <header className="sticky top-0 z-40 border-b border-line bg-panel">
+        <div className="mx-auto flex max-w-[1320px] items-center gap-x-3 px-4 pt-2 sm:gap-x-4 sm:px-6">
+          <p className="flex min-w-0 flex-1 items-baseline gap-2">
             <span className="text-base font-semibold tracking-tight text-fg">SelariKru</span>
             <span aria-hidden="true" className="text-muted">/</span>
             <span className="truncate text-sm text-muted" data-testid="project-label">{projectLabel}</span>
           </p>
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+          <div className="ml-auto flex shrink-0 items-center justify-end gap-x-3">
             <DemoBadge mode={mode} />
-            {showCount ? <a data-testid="attention-count" href={hrefFor('overview')} className={`text-sm font-medium underline-offset-2 hover:underline ${overview.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{overview.attentionCount}</a> : null}
-            <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />
+            {attentionCount ? <a data-testid="attention-count" href={hrefFor('overview')} className={`hidden text-sm font-medium underline-offset-2 hover:underline sm:inline ${overview!.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{attentionCount}</a> : null}
+            <button type="button" aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} className="rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
+              <span className="sm:hidden">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+              <span className="hidden sm:inline">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
+            </button>
             {account ? (
               <span className="flex items-center gap-2 text-sm">
                 <span className="hidden max-w-[16rem] truncate font-mono text-mono text-muted lg:inline" title={account.label}>{account.label}</span>
@@ -146,36 +157,37 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
               </span>
             ) : null}
           </div>
-        </header>
-        <div className="mx-auto flex max-w-[1320px] items-center gap-2 pr-4 sm:pr-6">
-        <nav aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-3 pt-1 sm:px-5">
-          {NAV.map((item) =>
-            item.route ? (
-              <a
-                key={item.label}
-                href={hrefFor(item.route)}
-                aria-current={route === item.route ? 'page' : undefined}
-                className={`whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${route === item.route ? 'border-active text-fg' : 'border-transparent text-muted hover:text-fg'}`}
-              >
-                {item.label}
-              </a>
-            ) : (
-              <span key={item.label} className="hidden items-baseline gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm text-muted md:inline-flex">
-                {item.label}
-                <span className="text-xs">soon</span>
-              </span>
-            ),
-          )}
-        </nav>
-        <button type="button" className="shrink-0 rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
-          {theme === 'dark' ? 'Light theme' : 'Dark theme'}
-        </button>
         </div>
-      </div>
+        <div className="mx-auto flex max-w-[1320px] items-center gap-2 pr-4 sm:pr-6">
+          <nav aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1 pt-1 sm:px-5">
+            {NAV.map((item) =>
+              item.route ? (
+                <a
+                  key={item.label}
+                  href={hrefFor(item.route)}
+                  aria-current={route === item.route ? 'page' : undefined}
+                  className={`inline-flex items-baseline gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${route === item.route ? 'border-active text-fg' : 'border-transparent text-muted hover:text-fg'}`}
+                >
+                  {item.label}
+                  {item.route === 'overview' && attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="text-warning sm:hidden">{attentionBadge}</span> : null}
+                </a>
+              ) : (
+                <span key={item.label} className="hidden items-baseline gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm text-muted md:inline-flex">
+                  {item.label}
+                  <span className="text-xs">soon</span>
+                </span>
+              ),
+            )}
+          </nav>
+          <div className="shrink-0">
+            <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />
+          </div>
+        </div>
+      </header>
 
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
-          <RouteBoundary resetKey={route}>
+          <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
             <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
           </RouteBoundary>
         ) : null}

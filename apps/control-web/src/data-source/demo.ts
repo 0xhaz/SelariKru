@@ -30,8 +30,19 @@ export interface DemoSession {
 /** Simulated transport faults for the development panel, so every connection state can be seen. A `dead` fault clears after one restart. */
 function withFault(source: EngineeringDataSource, fault: DemoFault): EngineeringDataSource {
   const outage: DataSourceError = { code: 'unavailable', message: 'simulated outage', retryable: true };
-  // A malformed snapshot that gets past transport, so the view's error boundary can be seen.
-  if (fault === 'corrupt') return { ...source, getSnapshot: async (projectId) => ({ ...(await source.getSnapshot(projectId)), tasks: null as never }) };
+  // One malformed snapshot that gets past transport, so the view's error boundary and its recovery can be seen.
+  if (fault === 'corrupt') {
+    let once = true;
+    return {
+      ...source,
+      getSnapshot: async (projectId) => {
+        const snapshot = await source.getSnapshot(projectId);
+        if (!once) return snapshot;
+        once = false;
+        return { ...snapshot, tasks: null as never };
+      },
+    };
+  }
   if (fault === 'unavailable') return { ...source, getSnapshot: () => Promise.reject(new Error(outage.message)) };
   if (fault === 'reconnecting') {
     let loads = 0;

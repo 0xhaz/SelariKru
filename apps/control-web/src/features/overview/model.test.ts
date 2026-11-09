@@ -52,6 +52,12 @@ describe('delivery', () => {
     expect(delivery.tasks.map((t) => t.taskId)).toEqual(['c', 'b']);
   });
 
+  it('keeps budget-cancelled work in the task fallback and leaves superseded work out', () => {
+    const { delivery } = buildOverview(snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: 'budget_exhausted' }), task('c', { status: 'superseded' }), task('d', { status: 'cancelled' })] }), NOW, NOW);
+    expect(delivery.criteriaLabel).toBe('1 of 2 tasks verified');
+    expect(delivery.segments).toHaveLength(2);
+  });
+
   it('never marks work as filled unless it is verified', () => {
     const { delivery } = buildOverview(snapshotOf({ tasks: [task('a'), task('b', { status: 'awaiting_approval' }), task('c', { status: 'ready' })] }), NOW, NOW);
     expect(delivery.segments).not.toContain('verified');
@@ -91,6 +97,13 @@ describe('fleet', () => {
   it('reports a null activity as not reported, and quietly', () => {
     const [row] = buildOverview(snapshotOf({ workers: [worker('a', { activity: null })] }), NOW, NOW).fleet.rows;
     expect(row!.activity).toMatchObject({ label: 'Activity not reported', reported: false });
+  });
+
+  it('counts a loss seen at the last confirmed time, while each row still reads health unknown', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
+    const { fleet } = buildOverview(snapshot, nowMs + 300_000, null, { lastConfirmedMs: nowMs, stale: true });
+    expect(fleet.summary.lost).toBe(1);
+    expect(fleet.rows[0]!.health.state).toBe('unknown');
   });
 
   it('renders a null activity as unknown, and an idle worker as idle', () => {
@@ -150,7 +163,7 @@ describe('headline and empty project', () => {
     const human = await fixtureSnapshot('human-wait');
     expect(buildOverview(human.snapshot, human.nowMs, human.nowMs).headline).toBe('1 item needs you.');
     const healthy = await fixtureSnapshot('healthy-parallel-work');
-    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).headline).toBe('Nothing needs you right now.');
+    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).headline).toBeNull();
   });
 
   it('never reassures over stale data', async () => {
@@ -165,26 +178,32 @@ describe('headline and empty project', () => {
     const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
     const model = buildOverview(snapshot, nowMs + 300_000, null, { lastConfirmedMs: nowMs, stale: true });
     expect(model.headline).toBe('1 item needed you at the last confirmed state. Worker connections are unknown.');
-    expect(model.attentionCount).toBe('1 at last confirmed state');
+    expect(model.attentionCount).toBe('1 item at last confirmed state');
+    expect(model.attentionBadge).toBe('1?');
   });
 
   it('gives an aggregate count for the header', async () => {
     const blocked = await fixtureSnapshot('policy-block');
     expect(buildOverview(blocked.snapshot, blocked.nowMs, blocked.nowMs).attentionCount).toBe('2 need attention');
     const healthy = await fixtureSnapshot('healthy-parallel-work');
-    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).attentionCount).toBe('None need attention');
+    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).attentionCount).toBeNull();
+    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).attentionBadge).toBeNull();
     const lost = await fixtureSnapshot('runner-loss');
     expect(buildOverview(lost.snapshot, lost.nowMs, lost.nowMs).attentionCount).toBe('1 needs attention');
   });
 
-  it('does not count Scheduler-owned waits or closed tasks as needing the operator', async () => {
+  it('does not count Scheduler-owned waits as needing the operator', () => {
+    expect(buildOverview(snapshotOf({ tasks: [task('a', { status: 'ready', placementBlock: 'no_free_slot' })] }), NOW, NOW).needsYou).toBe(0);
+  });
+
+  it('counts a budget stop on an open run: the operator chooses to fund it or accept reduced scope', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('unknown-costs');
-    expect(buildOverview(snapshot, nowMs, nowMs).needsYou).toBe(0);
+    expect(buildOverview(snapshot, nowMs, nowMs).needsYou).toBe(1);
   });
 
   it('does not count information as needing the operator', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('long-build-stall');
-    expect(buildOverview(snapshot, nowMs, nowMs).headline).toBe('Nothing needs you right now.');
+    expect(buildOverview(snapshot, nowMs, nowMs).headline).toBeNull();
   });
 
   it('flags an empty project and invents nothing for it', async () => {

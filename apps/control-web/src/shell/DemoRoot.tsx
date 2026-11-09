@@ -6,7 +6,7 @@ import { createProjectionStore } from './projection-store.ts';
 
 const params = (): URLSearchParams => new URLSearchParams(window.location.search);
 
-function DevPanel({ session, fixtureId, onFixture }: { session: DemoSession; fixtureId: string; onFixture: (id: string) => void }) {
+function DevPanel({ session, fixtureId, onFixture, onRestart }: { session: DemoSession; fixtureId: string; onFixture: (id: string) => void; onRestart: () => void }) {
   const current = session.projects.find((p) => p.fixtureId === fixtureId);
   return (
     <aside aria-label="Demo controls" className="rounded-card border border-dashed border-line-strong p-3">
@@ -19,6 +19,7 @@ function DevPanel({ session, fixtureId, onFixture }: { session: DemoSession; fix
           </select>
         </div>
         <button type="button" className={buttonQuiet} onClick={() => session.advance(10_000)}>Advance 10 s</button>
+        <button type="button" className={buttonQuiet} onClick={onRestart}>Restart projection</button>
       </div>
       {current ? <p className="mt-2 max-w-prose text-sm text-muted">{current.description}</p> : null}
     </aside>
@@ -63,6 +64,6 @@ export default function DemoRoot() {
   const leave = new URL(window.location.href);
   leave.search = '';
   return (
-    <AppShell store={store} mode="mock" projectLabel={project.name} assistant={null} leaveDemoHref={leave.href} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} />} />
+    <AppShell store={store} mode="mock" projectLabel={project.name} assistant={null} leaveDemoHref={leave.href} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} onRestart={store.getState().restart} />} />
   );
 }

@@ -57,7 +57,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         if (mine.current === null || session === mine.current) fn();
       };
       mine.current = startProjection(source, projectId, {
-        onState: (projection) => guard(() => set({ projection, loaded: true, error: null, livenessAsOfMs: mine.current?.livenessAsOfMs() ?? null, nowMs: clock.nowMs() })),
+        onState: (projection) => guard(() => set({ projection, loaded: true, error: null, livenessAsOfMs: mine.current?.livenessAsOfMs() ?? get().livenessAsOfMs, nowMs: clock.nowMs() })),
         onError: (error) => guard(() => set({ error })),
         onStatus: (status) => guard(() => set({ status })),
       }, { every, clock });
@@ -78,7 +78,8 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
       start() {
         if (!source || session) return;
         open();
-        cancelTick = every(() => set({ nowMs: clock.nowMs(), livenessAsOfMs: session?.livenessAsOfMs() ?? null }), NOW_TICK_MS);
+        // A restarted session has no time of its own yet: keep the last confirmed one, so a labelled loss does not vanish while retries fail.
+        cancelTick = every(() => set({ nowMs: clock.nowMs(), livenessAsOfMs: session?.livenessAsOfMs() ?? get().livenessAsOfMs }), NOW_TICK_MS);
       },
       stop() {
         close();

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { EVENT_TYPES, checkEventAuthority, type Actor, type EventType } from '@selarikru/domain';
 import {
-  PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
+  PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, RunViewSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
   mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
   type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type ProjectionState, type TaskView, type UsageEntry, type UsageFigure,
 } from './index.ts';
@@ -677,3 +677,26 @@ describe('run lifecycle comes from the refresh, not from events', () => {
     expect(mergeRunLifecycle(ahead, fresh(0, 'merged'))).toBe(ahead); // an older snapshot cannot move it
   });
 });
+
+describe('run criteria schema', () => {
+  const run = (criteria: unknown) => RunViewSchema.safeParse({ runId: 'r', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria });
+  it('accepts null, equal and partial counts', () => {
+    expect(run(null).success).toBe(true);
+    expect(run({ verified: 3, total: 3 }).success).toBe(true);
+    expect(run({ verified: 1, total: 3 }).success).toBe(true);
+  });
+  it('rejects more verified than exist', () => {
+    expect(run({ verified: 4, total: 3 }).success).toBe(false);
+  });
+});
+
+describe('verifiedCounts', () => {
+  const snap = (statuses: { status: 'verified' | 'cancelled' | 'superseded'; cancelReason?: 'budget_exhausted' | 'cancel_requested' }[]) => {
+    const tasks = Object.fromEntries(statuses.map((t, i) => [`t${i}`, { ...task(`t${i}`), status: t.status, cancelReason: t.cancelReason ?? null }]));
+    return { ...base([]).snapshot, tasks };
+  };
+  it('keeps budget-cancelled work in the denominator, and drops other cancels and superseded work', () => {
+    expect(verifiedCounts(snap([{ status: 'verified' }, { status: 'cancelled', cancelReason: 'budget_exhausted' }, { status: 'cancelled', cancelReason: 'cancel_requested' }, { status: 'superseded' }]))).toEqual({ verified: 1, total: 2 });
+  });
+});
+

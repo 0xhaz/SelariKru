@@ -247,8 +247,8 @@ describe('criteria', () => {
     expect((await runOf('healthy-parallel-work', 40_000)).criteria).toEqual({ verified: 3, total: 5 });
   });
 
-  it('excludes cancelled work from the denominator', async () => {
-    expect((await runOf('unknown-costs')).criteria).toEqual({ verified: 2, total: 5 });
+  it('keeps budget-cancelled work in the denominator: those criteria are still unmet', async () => {
+    expect((await runOf('unknown-costs')).criteria).toEqual({ verified: 2, total: 7 });
   });
 
   it('reports null where a scene has no per-criterion evidence', async () => {

@@ -89,7 +89,7 @@ describe('attention queue', () => {
   });
 
   it.each([
-    ['resource_conflict:db', /resource/i, false],
+    ['resource_conflict:db', /resource/i, true],
     ['role_not_mapped:backend', /backend/, true],
     ['location_disabled:cloud', /cloud/, true],
     ['something_new', /something new/i, true],
@@ -110,9 +110,39 @@ describe('attention queue', () => {
     expect(item!.detail).toBe('No recent heartbeat from w. It is still connected.');
   });
 
-  it('a budget stop on a closed task stays visible but does not need the operator', async () => {
+  it('a budget stop needs the operator while its run is open, as a closed record', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('unknown-costs');
-    expect(buildAttention(snapshot, nowMs, nowMs)[0]).toMatchObject({ kind: 'budget_resource', needsOperator: false });
+    expect(buildAttention(snapshot, nowMs, nowMs)[0]).toMatchObject({ kind: 'budget_resource', needsOperator: true, closedRecord: true });
+  });
+
+  it.each(['merged', 'failed', 'cancelled'] as const)('a budget stop on a %s run needs no one', (lifecycle) => {
+    const snapshot = snapshotOf({ tasks: [task('a', { status: 'cancelled', cancelReason: 'budget_exhausted' })] });
+    snapshot.runs['run'] = { ...snapshot.runs['run']!, lifecycle };
+    expect(buildAttention(snapshot, NOW, NOW)[0]).toMatchObject({ needsOperator: false, closedRecord: true });
+  });
+
+  it('a resource conflict needs a person, because nothing unblocks it', () => {
+    const [item] = buildAttention(blockedBy('resource_conflict:db'), NOW, NOW);
+    expect(item).toMatchObject({ kind: 'blocked', owner: 'You', needsOperator: true });
+    expect(item!.nextAction).toBe('Replan or cancel the task once the resource is free.');
+    expect(item!.consequence).not.toMatch(/starts once/i);
+  });
+
+  it('says exceeded and unknown budgets differently, with their own actions', () => {
+    const [over] = buildAttention(placed('policy_denied:budget:exceeds_limit'), NOW, NOW);
+    const [unknown] = buildAttention(placed('policy_denied:budget:unknown_cost'), NOW, NOW);
+    expect(over!.detail).toMatch(/exceed/i);
+    expect(unknown!.detail).toMatch(/cost/i);
+    expect(over!.nextAction).not.toBe(unknown!.nextAction);
+    expect(over!.nextAction).not.toMatch(/set the limit/i);
+    expect(unknown!.consequence).toMatch(/never treated as zero/i);
+  });
+
+  it('a stale-labelled loss clears once fresh data shows the worker recovered', () => {
+    const lost = snapshotOf({ tasks: [task('a', { activeAttemptId: 'att' })], workers: [worker('w', { taskId: 'a', attemptId: 'att', lastHeartbeatAt: iso(90) })] });
+    expect(buildAttention(lost, NOW, null, NOW)[0]).toMatchObject({ kind: 'worker_lost', asOfLastConfirmed: true });
+    const recovered = snapshotOf({ tasks: [task('a', { activeAttemptId: 'att' })], workers: [worker('w', { taskId: 'a', attemptId: 'att', lastHeartbeatAt: iso(2) })] });
+    expect(buildAttention(recovered, NOW, NOW, NOW)).toEqual([]);
   });
 
   it('shows an expired approval as expired, never as granted or still open', async () => {

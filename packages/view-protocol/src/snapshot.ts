@@ -35,7 +35,7 @@ export const RunViewSchema = z
      * Acceptance criteria (FB-IDs) with qualifying evidence at this run's current revision. Null means per-criterion evidence is not connected:
      * a task count is then the most that can be said. Nothing derived from liveness or activity ever feeds this.
      */
-    criteria: z.object({ verified: z.number().int().min(0), total: z.number().int().min(0) }).strict().nullable().default(null),
+    criteria: z.object({ verified: z.number().int().min(0), total: z.number().int().min(0) }).strict().refine((c) => c.verified <= c.total, { message: 'verified criteria cannot exceed the total' }).nullable().default(null),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;

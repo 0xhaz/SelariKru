@@ -32,7 +32,7 @@ function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: 
             {item.status === 'expired' ? <Chip tone="danger">Expired</Chip> : null}
             {item.asOfLastConfirmed ? <Chip tone="neutral">As of last confirmed state</Chip> : null}
             <span className="text-sm text-muted">
-              {item.needsOperator ? 'Waiting' : 'Noted'} <Timestamp iso={item.since}>{formatAge(nowMs - Date.parse(item.since))}</Timestamp>
+              {item.closedRecord ? 'Stopped' : item.needsOperator ? 'Waiting' : 'Noted'} <Timestamp iso={item.since}>{formatAge(nowMs - Date.parse(item.since))}</Timestamp>
             </span>
           </div>
           <p className={`mt-2 font-medium wrap-anywhere ${top ? 'text-lg' : ''} text-fg`}>{item.title}</p>
@@ -342,10 +342,12 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
     <>
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
-        <p className="mt-1 text-lg text-muted" data-testid="headline">
-          {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-glyph text-warning">{toneGlyph('warning')}</span> : null}
-          {overview.headline}
-        </p>
+        {overview.headline ? (
+          <p className="mt-1 text-lg text-muted" data-testid="headline">
+            {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-glyph text-warning">{toneGlyph('warning')}</span> : null}
+            {overview.headline}
+          </p>
+        ) : null}
       </div>
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
       <div className="grid gap-4">
