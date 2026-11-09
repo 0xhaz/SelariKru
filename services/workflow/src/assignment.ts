@@ -107,12 +107,30 @@ const ratio = (a: ModelRate, reference: ModelRate): number => Math.max(a.inputUs
  * estimate like every reservation, never an observed cost. Cache and long-prompt tiers are left out: the ratio can only raise a hold, and the cap is its floor.
  */
 export function worstCaseHold(capMicros: number, selection: ModelSelection, catalog: HarnessCatalog, policy: Policy | undefined): WorstCaseHold {
+  const m = holdMultiplier(selection, catalog, policy);
+  return { amountMicros: m.basis === 'no_reference' ? capMicros : Math.ceil(capMicros * m.ratio), basis: m.basis, rateSource: m.rateSource };
+}
+
+/** How many times the cap one attempt on this model holds. At least 1. Used for the hold itself and for sizing caps, so a size can never disagree with the hold it plans for. */
+export function holdMultiplier(selection: ModelSelection, catalog: HarnessCatalog, policy: Policy | undefined): { readonly ratio: number; readonly basis: WorstCaseHold['basis']; readonly rateSource: string | null } {
   const reference = policy?.models?.default ? findCatalogModel(catalog, policy.models.default).model : null;
   const own = findCatalogModel(catalog, selection).model;
-  if (!reference?.rate) return { amountMicros: capMicros, basis: 'no_reference', rateSource: null };
-  if (own?.rate) return { amountMicros: Math.ceil(capMicros * Math.max(1, ratio(own.rate, reference.rate))), basis: 'known_rate', rateSource: own.rate.source };
+  if (!reference?.rate) return { ratio: 1, basis: 'no_reference', rateSource: null };
+  if (own?.rate) return { ratio: Math.max(1, ratio(own.rate, reference.rate)), basis: 'known_rate', rateSource: own.rate.source };
   const knownRatios = catalog.providers.flatMap((p) => p.models).flatMap((m) => (m.rate ? [ratio(m.rate, reference.rate!)] : []));
-  return { amountMicros: Math.ceil(capMicros * Math.max(1, ...knownRatios)), basis: 'conservative', rateSource: null };
+  return { ratio: Math.max(1, ...knownRatios), basis: 'conservative', rateSource: null };
+}
+
+/**
+ * The largest cap at which every attempt of every role fits `budgetMicros`: budget / sum of (hold multiplier x attempts), rounded down to micro-dollars. Holds round up, so the result is
+ * then checked against the holds themselves and lowered until they fit.
+ */
+export function sizeCapMicros(budgetMicros: number, roles: readonly { readonly selection: ModelSelection | null; readonly attempts: number }[], catalog: HarnessCatalog, policy: Policy | undefined): number {
+  const hold = (cap: number, s: ModelSelection | null) => (s ? worstCaseHold(cap, s, catalog, policy).amountMicros : cap);
+  const weight = roles.reduce((n, r) => n + r.attempts * (r.selection ? holdMultiplier(r.selection, catalog, policy).ratio : 1), 0);
+  let cap = Math.floor(budgetMicros / weight);
+  while (cap > 0 && roles.reduce((n, r) => n + r.attempts * hold(cap, r.selection), 0) > budgetMicros) cap -= 1;
+  return Math.max(0, cap);
 }
 
 /** The catalog as a screen may read it: each model marked with what policy says now. No rate leaves this function. */
@@ -166,37 +184,79 @@ export async function assignmentRevision(db: Executor, tenantId: string, project
   return rows[0]?.revision ?? 0;
 }
 
+interface RunSlot { readonly taskId: string; readonly role: string; readonly capUsd: number; readonly left: number }
+
+/** The run's live tasks, each with the attempts it still has to hold for. */
+async function runSlots(tx: Tx, tenantId: string, projectId: string, runId: string): Promise<RunSlot[]> {
+  const tasks = await tx.select({ taskId: schema.taskStatus.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
+    eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
+    .where(and(eq(schema.taskRevisions.tenantId, tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.runId, runId), notInArray(schema.taskStatus.status, ['cancelled', 'superseded'])));
+  const holds = await tx.select({ taskId: schema.budgetReservations.taskId, revision: schema.budgetReservations.revision }).from(schema.budgetReservations)
+    .where(and(eq(schema.budgetReservations.tenantId, tenantId), eq(schema.budgetReservations.projectId, projectId), eq(schema.budgetReservations.runId, runId), ne(schema.budgetReservations.state, 'released')));
+  return tasks.map((t) => {
+    const spec = t.spec as TaskSpec;
+    return { taskId: t.taskId, role: spec.role, capUsd: spec.limits.maxCostUsd, left: Math.max(0, spec.limits.maxAttempts - holds.filter((h) => h.taskId === t.taskId && h.revision === t.revision).length) };
+  });
+}
+
+const slotKeys = (slots: readonly RunSlot[]) => slots.flatMap((s) => [{ scope: 'role' as const, key: s.role }, { scope: 'task' as const, key: s.taskId }]);
+
 /**
- * The run budget a model assignment would need, when it is more than the run has. Each attempt left holds its worst case and no hold comes back, so a role on a dearer model can leave
- * the other worker unable to start. Only meant for plans with one worker per role. Before a plan exists, each role counts as one task at the planned cap.
+ * The cap for the tasks a plan is accepting: what the run has left once the tasks staying on it are provided for, spread by each role's recorded model. On a first plan that is the whole budget.
+ * Null when the run has no budget limit, which blocks the claim on its own.
+ */
+export async function planCapMicros(tx: Tx, input: {
+  readonly tenantId: string; readonly projectId: string; readonly runId: string;
+  readonly tasks: readonly { readonly taskId: string; readonly role: string; readonly attempts: number }[];
+  readonly catalog: HarnessCatalog; readonly policy: Policy | undefined;
+}): Promise<number | null> {
+  const { tenantId, projectId, runId, tasks, catalog, policy } = input;
+  const position = await lockBudget(tx, { tenantId, projectId, runId });
+  if (position.limitMicros === null) return null;
+  const replaced = new Set(tasks.map((t) => t.taskId));
+  const kept = (await runSlots(tx, tenantId, projectId, runId)).filter((s) => !replaced.has(s.taskId));
+  const rows = await currentRows(tx, tenantId, projectId, [...slotKeys(kept), ...tasks.map((t) => ({ scope: 'role' as const, key: t.role }))]);
+  const fallback = policy?.models?.default ?? null;
+  const reserved = kept.reduce((n, s) => {
+    const selection = rows.get(`task:${s.taskId}`) ?? rows.get(`role:${s.role}`) ?? fallback;
+    const cap = toMicros(s.capUsd);
+    return n + s.left * (selection ? worstCaseHold(cap, selection, catalog, policy).amountMicros : cap);
+  }, position.consumedMicros ?? 0);
+  return sizeCapMicros(Math.max(0, position.limitMicros - reserved), tasks.map((t) => ({ selection: rows.get(`role:${t.role}`) ?? fallback, attempts: t.attempts })), catalog, policy);
+}
+
+/** Each role's share of the budget for one attempt, with the models recorded now: what onboarding shows before a plan exists. A share, so no rate leaves here. */
+export async function roleAttemptShares(db: Executor, input: { readonly tenantId: string; readonly projectId: string; readonly roles: readonly string[]; readonly maxAttempts: number; readonly catalog: HarnessCatalog; readonly policy: Policy | undefined }): Promise<Record<string, number>> {
+  const rows = await currentRows(db, input.tenantId, input.projectId, input.roles.map((key) => ({ scope: 'role' as const, key })));
+  const fallback = input.policy?.models?.default ?? null;
+  const ratios = input.roles.map((role) => { const s = rows.get(`role:${role}`) ?? fallback; return s ? holdMultiplier(s, input.catalog, input.policy).ratio : 1; });
+  const weight = ratios.reduce((n, r) => n + r * input.maxAttempts, 0);
+  return Object.fromEntries(input.roles.map((role, i) => [role, ratios[i]! / weight]));
+}
+
+/**
+ * The run budget an assignment change would need, when it is more than the run has. Caps are frozen when a plan is accepted, each attempt left holds its worst case and no hold comes back, so
+ * a dearer model after that point can leave a worker unable to start. Before a plan exists nothing is refused: acceptance sizes the caps to the recorded models.
  */
 export async function modelOverRunBudget(tx: Tx, input: {
   readonly tenantId: string; readonly projectId: string;
-  readonly roles: readonly string[]; readonly capUsd: number; readonly maxAttempts: number;
   readonly change: { readonly scope: 'role' | 'task'; readonly key: string; readonly selection: ModelSelection };
   readonly catalog: HarnessCatalog; readonly policy: Policy | undefined;
 }): Promise<{ readonly runId: string; readonly neededUsd: number; readonly limitUsd: number } | null> {
   const { tenantId, projectId, change, catalog, policy } = input;
   const runs = await tx.select({ runId: schema.runs.runId }).from(schema.runs).where(and(eq(schema.runs.tenantId, tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.trial, false), notInArray(schema.runs.lifecycle, ['merged', 'failed', 'cancelled'])));
   for (const { runId } of runs) {
-    const scope = { tenantId, projectId, runId };
-    const position = await lockBudget(tx, scope);
+    const position = await lockBudget(tx, { tenantId, projectId, runId });
     if (position.limitMicros === null) continue;
-    const tasks = await tx.select({ taskId: schema.taskStatus.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
-      eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
-      .where(and(eq(schema.taskRevisions.tenantId, tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.runId, runId), notInArray(schema.taskStatus.status, ['cancelled', 'superseded'])));
-    const holds = await tx.select({ taskId: schema.budgetReservations.taskId, revision: schema.budgetReservations.revision }).from(schema.budgetReservations)
-      .where(and(eq(schema.budgetReservations.tenantId, tenantId), eq(schema.budgetReservations.projectId, projectId), eq(schema.budgetReservations.runId, runId), ne(schema.budgetReservations.state, 'released')));
-    const slots = tasks.length > 0
-      ? tasks.map((t) => { const spec = t.spec as TaskSpec; return { taskId: t.taskId as string | null, role: spec.role, capUsd: spec.limits.maxCostUsd, left: spec.limits.maxAttempts - holds.filter((h) => h.taskId === t.taskId && h.revision === t.revision).length }; })
-      : input.roles.map((role) => ({ taskId: null as string | null, role, capUsd: input.capUsd, left: input.maxAttempts }));
-    const rows = await currentRows(tx, tenantId, projectId, slots.flatMap((s) => [{ scope: 'role' as const, key: s.role }, ...(s.taskId !== null ? [{ scope: 'task' as const, key: s.taskId }] : [])]));
+    const slots = await runSlots(tx, tenantId, projectId, runId);
+    if (slots.length === 0) continue;
+    const rows = await currentRows(tx, tenantId, projectId, slotKeys(slots));
     let needed = position.consumedMicros ?? 0;
     for (const s of slots) {
-      const own = s.taskId !== null && change.scope === 'task' && change.key === s.taskId ? change.selection : s.taskId !== null ? rows.get(`task:${s.taskId}`) : undefined;
+      const own = change.scope === 'task' && change.key === s.taskId ? change.selection : rows.get(`task:${s.taskId}`);
       const selection = own ?? (change.scope === 'role' && change.key === s.role ? change.selection : rows.get(`role:${s.role}`)) ?? policy?.models?.default;
       const cap = toMicros(s.capUsd);
-      needed += Math.max(0, s.left) * (selection ? worstCaseHold(cap, selection, catalog, policy).amountMicros : cap);
+      needed += s.left * (selection ? worstCaseHold(cap, selection, catalog, policy).amountMicros : cap);
     }
     if (needed > position.limitMicros) return { runId, neededUsd: Math.ceil(needed / 10_000) / 100, limitUsd: position.limitMicros / 1_000_000 };
   }

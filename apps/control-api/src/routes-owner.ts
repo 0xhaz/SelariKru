@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -160,8 +160,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (body.selection !== null) {
           const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
           if (settings?.rolePaths) {
-            const over = await modelOverRunBudget(tx, { tenantId: config.tenantId, projectId, roles: Object.keys(settings.rolePaths), capUsd: settings.limits.maxCostUsd, maxAttempts: settings.limits.maxAttempts, change: { scope: body.scope, key: body.key, selection: body.selection }, catalog: ctx.catalog ?? NO_HARNESS_CATALOG, policy: ctx.policy });
-            if (over) throw new AppError(422, 'model_over_run_budget', `This model needs a run budget of at least $${over.neededUsd}, and this run has $${over.limitUsd}: every attempt holds its worst case, so the other worker could not start. Choose a cheaper model or raise the budget.`, over);
+            const over = await modelOverRunBudget(tx, { tenantId: config.tenantId, projectId, change: { scope: body.scope, key: body.key, selection: body.selection }, catalog: ctx.catalog ?? NO_HARNESS_CATALOG, policy: ctx.policy });
+            if (over) throw new AppError(422, 'model_over_run_budget', `With the caps frozen on this plan, this model needs a run budget of at least $${over.neededUsd}, and this run has $${over.limitUsd}: every attempt holds its worst case, so a worker could not start. Choose a cheaper model, or set the model before a plan is accepted so the caps are sized for it.`, over);
           }
         }
         const revision = current + 1;
@@ -229,7 +229,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (errors.length > 0) throw new AppError(422, 'plan_invalid', 'the proposed plan is not valid', errors);
 
     // Titles are free text; everything else in a spec is an identifier, hash or limit.
-    const tasks: TaskSpec[] = body.tasks.map((t) => TaskSpecSchema.parse({ ...t, title: redactSecrets(t.title), ...(t.description !== undefined ? { description: redactSecrets(t.description) } : {}), ...(t.criteria !== undefined ? { criteria: t.criteria.map((c) => ({ ...c, text: redactSecrets(c.text) })) } : {}) }));
+    let tasks: TaskSpec[] = body.tasks.map((t) => TaskSpecSchema.parse({ ...t, title: redactSecrets(t.title), ...(t.description !== undefined ? { description: redactSecrets(t.description) } : {}), ...(t.criteria !== undefined ? { criteria: t.criteria.map((c) => ({ ...c, text: redactSecrets(c.text) })) } : {}) }));
     const at = now();
 
     // Only a verified task needs its record judged, and the record is read outside the transaction.
@@ -258,6 +258,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (absent.length > 0) throw new AppError(422, 'roles_not_covered', `This plan has no ${absent.join(' or ')} task. This project is built by one worker per role, so each role needs its own task. Draft the plan again from the whole-board brief.`, { missing: absent });
         const crowded = Object.keys(settings.rolePaths ?? {}).filter((r) => plan.filter((t) => t.role === r).length > 1);
         if (crowded.length > 0) throw new AppError(422, 'role_has_many_tasks', `This plan has more than one ${crowded.join(' and ')} task. Each role has one worker with one set of paths: merge them, or cancel the task this one replaces.`, { roles: crowded });
+        // Sized here, on the models recorded now: a dearer model fits by shrinking the caps, and every attempt's worst-case hold still fits the budget.
+        if (settings.rolePaths !== undefined) {
+          const cap = await planCapMicros(tx, { tenantId: config.tenantId, projectId, runId: run.runId, tasks: tasks.map((t) => ({ taskId: t.taskId, role: t.role, attempts: t.limits.maxAttempts })), catalog: ctx.catalog ?? NO_HARNESS_CATALOG, policy: ctx.policy });
+          if (cap === 0) throw new AppError(422, 'plan_over_run_budget', 'This run has no budget left for these tasks, once what is already held is counted. Raise the budget, or cancel work to free it.');
+          if (cap !== null) tasks = tasks.map((t) => ({ ...t, limits: { ...t.limits, maxCostUsd: cap / 1_000_000 } }));
+        }
       }
 
       const existing = new Map<string, { currentRevision: number; status: string; rowRevision: number; projectId: string }>();

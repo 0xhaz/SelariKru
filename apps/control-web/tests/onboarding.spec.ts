@@ -172,8 +172,9 @@ test.describe('behaviour', () => {
   test('the cost step shows what the budget allows each attempt on the pilot', async ({ page }) => {
     const split = blueprint({ accepted: true });
     (split.content as Record<string, unknown>)['rolePaths'] = { backend: ['server', 'migrations', 'tests/backend'], frontend: ['src', 'tests/frontend'] };
-    await open(page, { ...configured, blueprint: split, costPlan: { ...costPlan, confirmed: false }, execution: null, connection: null, deployment: { sourceCheckout: '/srv/source', servesRepository: null, checker: true, maxAttempts: 3 } }, '#/onboarding?id=proj_1');
-    await expect(page.getByTestId('attempt-cap')).toContainText('$4.17');
+    await open(page, { ...configured, blueprint: split, costPlan: { ...costPlan, confirmed: false }, execution: null, connection: null, deployment: { sourceCheckout: '/srv/source', servesRepository: null, checker: true, maxAttempts: 3, attemptShares: { backend: 0.125, frontend: 0.2083333 } } }, '#/onboarding?id=proj_1');
+    await expect(page.getByTestId('attempt-cap')).toContainText('backend $3.13');
+    await expect(page.getByTestId('attempt-cap')).toContainText('frontend $5.21');
   });
 
   test('a pilot blueprint that no longer matches the suite offers a redraft', async ({ page }) => {

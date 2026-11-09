@@ -17,7 +17,8 @@ import { renderTaskFile } from '../../local-runner/src/attempt.ts';
 import { PLACEMENT_MODES } from '../../../services/workflow/src/placement.ts';
 import { hashTree } from '../../../services/verifier/src/hashing.ts';
 import { writeEvent } from '../src/store.ts';
-import { API_POLICY, ORIGIN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
+import { createScheduler } from '@selarikru/workflow';
+import { API_POLICY, ORIGIN, TENANT, TEST_CATALOG, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, testClock, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 const CHECKOUT = '/srv/source';
@@ -1017,6 +1018,84 @@ describe('controller', () => {
       const refused = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('dup'), tasks: review.body.tasks });
       expect(refused.status).toBe(422);
       expect(refused.body.error).toMatchObject({ code: 'role_has_many_tasks', details: { roles: ['backend'] } });
+    });
+
+    const OPUS = { provider: 'anthropic', model: 'claude-opus-5-5' };
+    const assignRole = (h: Harness, projectId: string, key: string, selection: object) => post(h.app, `/v1/projects/${projectId}/model-assignments`, { scope: 'role', key, selection, expectedRevision: 0, idempotencyKey: k('assign') });
+    /** Activated, with the role model recorded before the plan is accepted. */
+    const runWithRoleModel = async (h: Harness, budget: number, role: string, selection: object) => {
+      const runner = await enrolRunner(h.app);
+      let v = await configured(h, ['saas_web'], budget);
+      await reportProjects(h, runner.token, [v.projectId]);
+      v = (await check(h, v)).body;
+      v = (await activate(h, v)).body;
+      const assigned = await assignRole(h, v.projectId, role, selection);
+      expect(assigned.status, JSON.stringify(assigned.body)).toBe(200);
+      const runId = v.firstRunId as string;
+      const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf(TWO_ROLES) });
+      const accepted = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('plan'), tasks: review.body.tasks });
+      expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
+      const claim = async () => (await post(h.app, '/v1/runners/claim', { projects: [v.projectId] }, bearer(runner.token))).body;
+      const fail = (lease: { attemptId: string; fence: number; leaseToken: string }) => post(h.app, '/v1/runners/result', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, result: { outcome: 'failed', reason: 'try again' } }, bearer(runner.token));
+      const holds = async () => (await t.db.execute(sql`SELECT task_id, amount_usd::float8 AS usd FROM budget_reservations WHERE run_id = ${runId}`)).map((r) => ({ taskId: String(r['task_id']), usd: Number(r['usd']) }));
+      const capOf = async (taskId: string) => ((await t.db.execute(sql`SELECT spec FROM task_revisions WHERE task_id = ${taskId}`))[0]!['spec'] as TaskSpec);
+      return { v, runId, claim, fail, holds, capOf };
+    };
+
+    it.each([5, 25])('at $%d Opus on one role and Sonnet on the other: both start and every attempt fits, repairs included', async (budget) => {
+      const h = harness();
+      const { claim, fail, holds, capOf } = await runWithRoleModel(h, budget, 'frontend', OPUS);
+      for (let round = 0; round < 3; round += 1) {
+        const [a, b] = [await claim(), await claim()];
+        expect(a.lease, JSON.stringify(a)).not.toBeNull();
+        expect(b.lease, JSON.stringify(b)).not.toBeNull();
+        await fail(a.lease);
+        await fail(b.lease);
+      }
+      const all = await holds();
+      expect(all).toHaveLength(6);
+      expect(all.reduce((n, x) => n + x.usd, 0)).toBeLessThanOrEqual(budget);
+      const specs = await Promise.all([...new Set(all.map((x) => x.taskId))].map(capOf));
+      const frontend = specs.find((s) => s.role === 'frontend')!;
+      const backend = specs.find((s) => s.role === 'backend')!;
+      expect(frontend.limits.maxCostUsd).toBe(backend.limits.maxCostUsd); // one cap; the dearer model holds more of it
+      expect(backend.limits.maxCostUsd).toBeLessThan(budget / 6);
+      const holdOf = (taskId: string) => all.find((x) => x.taskId === taskId)!.usd;
+      expect(holdOf(frontend.taskId)).toBeGreaterThan(holdOf(backend.taskId));
+      expect(holdOf(backend.taskId)).toBeCloseTo(backend.limits.maxCostUsd, 6);
+    });
+
+    it('after the plan, a change to a dearer model that no longer fits its frozen caps is refused, and a cheaper one is not', async () => {
+      const h = harness();
+      const { v } = await runWithRoleModel(h, 25, 'frontend', OPUS);
+      const refused = await post(h.app, `/v1/projects/${v.projectId}/model-assignments`, { scope: 'role', key: 'backend', selection: OPUS, expectedRevision: 0, idempotencyKey: k('dear') });
+      expect(refused.status, JSON.stringify(refused.body)).toBe(422);
+      expect(refused.body.error.code).toBe('model_over_run_budget');
+      expect(refused.body.error.message).toMatch(/frozen/);
+      const cheaper = await post(h.app, `/v1/projects/${v.projectId}/model-assignments`, { scope: 'role', key: 'frontend', selection: { provider: 'anthropic', model: 'claude-sonnet-5-5' }, expectedRevision: 1, idempotencyKey: k('cheap') });
+      expect(cheaper.status, JSON.stringify(cheaper.body)).toBe(200);
+    });
+
+    it('a model with no known rate never holds less than the cap, and still fits', async () => {
+      const policy = { ...POLICY_WITH_PR, models: { ...POLICY_WITH_PR.models, allowed: [...POLICY_WITH_PR.models.allowed, { provider: 'anthropic', model: 'claude-haiku-5-5' }] } };
+      const clock = testClock();
+      const h = makeHarness(t, {}, policy, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), readiness: goodProbes(), drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+      const { claim, holds, capOf } = await runWithRoleModel(h, 25, 'frontend', { provider: 'anthropic', model: 'claude-haiku-5-5' });
+      const [a, b] = [await claim(), await claim()];
+      expect(a.lease, JSON.stringify(a)).not.toBeNull();
+      expect(b.lease, JSON.stringify(b)).not.toBeNull();
+      for (const hold of await holds()) expect(hold.usd).toBeGreaterThanOrEqual((await capOf(hold.taskId)).limits.maxCostUsd);
+    });
+
+    it('tells the screen each role\'s share of the budget per attempt, with the recorded models', async () => {
+      const h = harness();
+      let v = await configuredWithRunner(h);
+      expect(v.deployment.attemptShares.backend).toBeCloseTo(1 / 6, 6);
+      expect(v.deployment.attemptShares.frontend).toBeCloseTo(1 / 6, 6);
+      expect((await assignRole(h, v.projectId, 'frontend', OPUS)).status).toBe(200);
+      v = (await get(h.app, `/v1/onboarding/${v.projectId}`, owner())).body;
+      expect(v.deployment.attemptShares.frontend).toBeGreaterThan(v.deployment.attemptShares.backend);
+      expect(3 * (v.deployment.attemptShares.frontend + v.deployment.attemptShares.backend)).toBeCloseTo(1, 6);
     });
 
     it('refuses a role model the run cannot afford, naming the budget needed', async () => {

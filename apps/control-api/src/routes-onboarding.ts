@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { roleAttemptShares } from '@selarikru/workflow';
 import { BlueprintContentSchema, EXECUTION_CHOICES, pilotAttemptCapUsd, pilotCriteriaProblem, FocusAnswersSchema, GoalAnswersSchema, GoalAssistSchema, SetupSnapshotSchema, SourceAnswersSchema, NO_HARNESS_CATALOG, advanceOnboarding, blueprintFromAnswers, canonicalJson, costPlanFor, routeHonoursRecorded, templateSupport, validateProposal, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type OnboardingEvent, type OnboardingState, type SetupSnapshot } from '@selarikru/domain';
 import { recordOnboardingOperation, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
@@ -128,7 +129,7 @@ export async function onboardingPlanSettings(db: Executor, tenantId: string, pro
   return {
     boardId: 'first-milestone', role: 'backend', baseSha: pass.baseSha, allowedPaths: blueprint.allowedPaths,
     classification: goal.success ? goal.data.classification : 'internal', policyVersion: policy.policyVersion, execution: execution === 'hybrid' ? 'eligible_any' : execution, inferencePolicyId: 'onboarding',
-    // A claim reserves its task's whole cap, and no hold comes back, so the cap is sized for every attempt of every role.
+    // A claim reserves its task's whole cap, and no hold comes back, so the cap is sized for every attempt of every role. This figure assumes the default model; plan acceptance resizes it to the models recorded then.
     limits: { maxAttempts, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: blueprint.rolePaths ? pilotAttemptCapUsd(budget, maxAttempts) : budget },
     allowedRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), forbiddenMandatoryScope: blueprint.nonGoals,
     requirementText: Object.fromEntries(blueprint.acceptanceCriteria.map((c) => [c.id, c.text])),
@@ -156,6 +157,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
     const plan = inputs ? costPlanFor({ ...inputs, execution }) : null;
     const pass = row.currentReadinessPass !== null ? (await exec.select().from(schema.onboardingReadinessPasses).where(and(eq(schema.onboardingReadinessPasses.tenantId, tenantId), eq(schema.onboardingReadinessPasses.projectId, projectId), eq(schema.onboardingReadinessPasses.pass, row.currentReadinessPass))))[0] : undefined;
     const served = await servedRepository(exec, tenantId, projectId);
+    const attemptShares = content?.rolePaths && ctx.policy ? await roleAttemptShares(exec, { tenantId, projectId, roles: Object.keys(content.rolePaths), maxAttempts: (ctx.policy.limits?.repairAttempts ?? 0) + 1, catalog: declared, policy: ctx.policy }) : null;
     return {
       projectId, name: row.name, state: row.state as OnboardingState, revision: row.revision,
       condition: row.conditionKind ? { kind: row.conditionKind as 'needs_input' | 'blocked' | 'failed', reason: row.conditionReason ?? '' } : null,
@@ -167,7 +169,7 @@ export function registerOnboardingRoutes(app: FastifyInstance, ctx: AppContext):
       connection: asConnection(row),
       readiness: pass ? { blueprintVersion: pass.blueprintVersion, outcome: pass.outcome as 'ready' | 'blocked', checkedAt: pass.checkedAt.toISOString(), baseSha: pass.baseSha, snapshot: SetupSnapshotSchema.safeParse(pass.snapshot).data ?? null, checks: pass.checks as NonNullable<OnboardingView['readiness']>['checks'] } : null,
       firstRunId: row.firstRunId,
-      deployment: { sourceCheckout: ctx.readiness?.sourceCheckout ?? null, servesRepository: served?.repository ?? null, checker: ctx.readiness !== undefined, maxAttempts: ctx.policy ? (ctx.policy.limits?.repairAttempts ?? 0) + 1 : null },
+      deployment: { sourceCheckout: ctx.readiness?.sourceCheckout ?? null, servesRepository: served?.repository ?? null, checker: ctx.readiness !== undefined, maxAttempts: ctx.policy ? (ctx.policy.limits?.repairAttempts ?? 0) + 1 : null, attemptShares },
     };
   };
 

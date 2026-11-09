@@ -428,7 +428,7 @@ export const OnboardingViewSchema = z.strictObject({
   connection: z.strictObject({ repository: z.string(), defaultBranch: z.string() }).nullable(),
   readiness: z.strictObject({ blueprintVersion: z.number().int(), outcome: z.enum(['ready', 'blocked']), checkedAt: z.string(), baseSha: z.string().nullable(), snapshot: SetupSnapshotSchema.nullable(), checks: z.array(ReadinessCheckViewSchema) }).nullable(),
   firstRunId: z.string().nullable(),
-  deployment: z.strictObject({ sourceCheckout: z.string().nullable(), servesRepository: z.string().nullable(), checker: z.boolean(), maxAttempts: z.number().int().min(1).nullable().optional() }),
+  deployment: z.strictObject({ sourceCheckout: z.string().nullable(), servesRepository: z.string().nullable(), checker: z.boolean(), maxAttempts: z.number().int().min(1).nullable().optional(), attemptShares: z.record(z.string(), z.number()).nullable().optional() }),
 });
 export type OnboardingView = z.infer<typeof OnboardingViewSchema>;
 export type ReadinessCheckView = z.infer<typeof ReadinessCheckViewSchema>;
