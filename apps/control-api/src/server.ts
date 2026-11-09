@@ -6,7 +6,7 @@ import { declaredHarnessCatalog } from '@selarikru/harness-claude';
 import { createGhCliPort, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
-import { createScheduler, type TrustedVerifier } from '@selarikru/workflow';
+import { createScheduler, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
 import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
@@ -99,11 +99,12 @@ export function assemblyOptionsFromEnv(env: NodeJS.ProcessEnv): AssemblyOptions 
 export function evidenceOptionsFromEnv(env: NodeJS.ProcessEnv): EvidenceOptions {
   const artifacts = new LocalDiskArtifactStore(resolveArtifactDir(env));
   const trusted = currentTrusted();
-  return { trusted: () => trusted, loadRecord: (db, key) => loadValidRecord(db, artifacts, key) };
+  return { trusted: () => trusted, artifacts, loadRecord: (db, key) => loadValidRecord(db, artifacts, key) };
 }
 
 export interface EvidenceOptions {
   trusted: () => TrustedVerifier;
+  artifacts: RecordBytes;
   loadRecord: (db: Db, key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>;
 }
 
@@ -175,7 +176,7 @@ export async function startServer(options: {
   const catalog = options.harnessCatalog ?? declaredHarnessCatalog();
   const scheduler = createScheduler({ db, now, policy, catalog });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
-  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord

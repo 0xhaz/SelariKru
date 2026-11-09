@@ -197,6 +197,13 @@ describe('attention queue', () => {
     expect(buildAttention(snapshot, nowMs, nowMs).map((i) => i.kind)).toEqual(['information']);
   });
 
+  it('says the reason is in Evidence when a failed check carries no summary, and only then', () => {
+    const noSummary = { ci: { checkId: 'ci', taskId: 'a', state: 'failed' as const, summary: null, updatedAt: iso(50), evidenceRef: 'e' } };
+    expect(buildAttention(snapshotOf({ tasks: [task('a', { status: 'ready' })], checks: noSummary }), NOW, NOW)[0]!.detail).toMatch(/is in Evidence/);
+    const noCheck = buildAttention(snapshotOf({ tasks: [task('a', { status: 'failed' })] }), NOW, NOW)[0]!;
+    expect(noCheck.detail).toBe('No reason was reported.');
+  });
+
   it('stops raising a failed check once the task has moved on, and ignores superseded work', () => {
     const failed = { ci: { checkId: 'ci', taskId: 'a', state: 'failed' as const, summary: 'bad', updatedAt: iso(50), evidenceRef: 'e' } };
     expect(buildAttention(snapshotOf({ tasks: [task('a', { status: 'running' })], checks: failed }), NOW, NOW)).toEqual([]);

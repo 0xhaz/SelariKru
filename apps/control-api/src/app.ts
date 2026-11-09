@@ -2,7 +2,7 @@ import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { Scheduler, TrustedVerifier } from '@selarikru/workflow';
+import type { RecordBytes, Scheduler, TrustedVerifier } from '@selarikru/workflow';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type TokenVerifier } from './auth.ts';
@@ -55,6 +55,8 @@ export interface AppDeps {
   readonly evidence?: {
     /** The trusted hashes of this build. Cached by the caller: the snapshot reads them every refresh. */
     readonly trusted: () => TrustedVerifier;
+    /** Reads record bytes for the evidence report, so a wiped store reads the same there as on the pull-request route. */
+    readonly artifacts: RecordBytes;
     /** The verifier's `loadValidRecord`. */
     readonly loadRecord: (key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>;
   } | undefined;

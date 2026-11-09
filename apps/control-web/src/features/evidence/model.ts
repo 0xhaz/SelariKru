@@ -1,6 +1,6 @@
 import type { Tone } from '@selarikru/ui';
 import type { CriterionEvidenceView, ProjectViewSnapshot, RunEvidenceView, RunView } from '@selarikru/view-protocol';
-import { hrefFor } from '../../shell/route.ts';
+import { decisionHref, hrefFor } from '../../shell/route.ts';
 
 export type DeliveryKey = 'verified' | 'merged' | 'deployed';
 
@@ -61,6 +61,11 @@ export interface EvidenceModel {
 }
 
 export const shortSha = (sha: string): string => sha.slice(0, 12);
+
+// C0 and C1 controls except tab and newline, and the bidi marks and embeddings that can reorder what a reader sees.
+const UNPRINTABLE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+/** Test output as a person should read it: candidate code can shape this text, so it can never carry control or direction characters onto the screen. */
+export const cleanFailureText = (text: string): string => text.replace(UNPRINTABLE, '');
 const CRITERION_STATE: Readonly<Record<CriterionEvidenceView['state'], { label: string; tone: Tone }>> = {
   not_delivered: { label: 'Not delivered', tone: 'warning' },
   passed: { label: 'Passed', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, skipped: { label: 'Skipped', tone: 'warning' }, error: { label: 'Verifier error', tone: 'warning' }, not_run: { label: 'No check yet', tone: 'neutral' },
@@ -79,7 +84,7 @@ function verifiedState(run: RunView, evidence: RunEvidenceView | null): Delivery
   const { verified, total } = run.criteria;
   const at = evidence.candidate ? ` at candidate ${shortSha(evidence.candidate.sha)}` : '';
   if (evidence.candidate && !evidence.candidate.live) return { ...base, value: 'Not verified', tone: 'warning', detail: `The last candidate was ${evidence.candidate.status}, so its passes count for nothing. ${verified} of ${total} approved criteria verified.`, established: false };
-  if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verification record for candidate ${shortSha(evidence.candidate.sha)} no longer stands, so its passes do not count. 0 of ${total} approved criteria verified.`, established: false };
+  if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count. Re-verifying judges the same commit again and runs no worker. 0 of ${total} approved criteria verified.`, established: false, link: { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Decisions', external: false } };
   if (total > 0 && verified === total) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} approved criteria passed${at}.`, established: true };
   const missing = evidence.criteria.filter((c) => c.state === 'not_delivered').map((c) => c.criterionId);
   const accepted = run.reducedScope?.notDelivered.requirementIds ?? [];
@@ -115,10 +120,11 @@ function rowsOf(run: RunView, evidence: RunEvidenceView, titles: Readonly<Record
   const rejected = evidence.candidate !== null && !evidence.candidate.live;
   return evidence.criteria.map((c) => {
     const shape = CRITERION_STATE[c.state];
-    // A pass that does not count must not look like one that does: on a rejected candidate it is muted, on a live one it says why.
+    // A pass that does not count must not look like one that does: on a rejected candidate it is muted, and on a live one it says why, a record that no longer stands or a carrier still unfinished.
     const uncounted = c.state === 'passed' && !c.verified;
-    const stateLabel = uncounted && !rejected ? 'Record no longer valid' : shape.label;
-    const tone: Tone = uncounted ? (rejected ? 'neutral' : 'warning') : shape.tone;
+    const recordStands = evidence.candidate?.recordValid === true;
+    const stateLabel = !uncounted || rejected ? shape.label : recordStands ? 'Waiting on another task' : 'Record no longer valid';
+    const tone: Tone = uncounted ? (rejected || recordStands ? 'neutral' : 'warning') : shape.tone;
     return {
       criterionId: c.criterionId, description: c.description, state: c.state, stateLabel, tone, verified: c.verified, flaky: evidence.candidate?.flaky.includes(c.criterionId) ?? false, tasks: c.taskIds.map((id) => titles[id] ?? id),
       evidence: c.check && c.candidateSha ? {

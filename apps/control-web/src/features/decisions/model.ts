@@ -236,6 +236,8 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
   };
 }
 
+const isClosedRun = (run: RunView): boolean => run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled';
+
 function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: DecisionOptions, paused: string | null): DecisionCardModel[] {
   const out: DecisionCardModel[] = [];
   const reverify = new Map<string, TaskView[]>();
@@ -281,11 +283,25 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
       since: tasks.map((t) => t.enteredStatusAt).sort()[0]!, fingerprint: ['reverify', expected, codes, tasks.map((t) => `${t.taskId}:${t.aggregateRevision}`).join(',')].join('|'),
     });
   }
+  // Finished work whose record no longer stands has no block to clear, so it gets its own card: the same command, reached from the Evidence report.
+  for (const run of Object.values(snapshot.runs)) {
+    const c = run.evidence?.candidate;
+    if (!c || !c.live || c.recordValid || reverify.has(run.runId) || isClosedRun(run) || !run.evidence!.criteria.some((x) => x.state === 'passed')) continue;
+    const expected = run.planRevision;
+    out.push({
+      id: `reverify:${run.runId}`, kind: 'reverify', chip: 'Record no longer valid', tone: 'warning', state: 'open',
+      title: `Candidate ${c.sha.slice(0, 12)}: verification record no longer valid`, summary: 'The verifier, its suite or the stored record changed after this candidate was judged. Its passes do not count, and no pull request can open on it.',
+      consequence: 'Its tasks stay out of review until a new verdict. Re-verifying judges the same commit again.', reason: null, advisory: null, note: 'Re-verifying runs no worker. A failed verdict leaves the task blocked for you to decide. It is limited per task revision.',
+      facts: [{ label: 'Candidate', value: c.sha }, { label: 'Plan revision', value: String(expected) }], details: [{ label: 'Reason code', value: 'record_no_longer_valid' }, { label: 'Run ID', value: run.runId }], notDelivered: null, changed: null,
+      actions: [{ kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId: run.runId } }, confirm: null }],
+      since: c.recordedAt, fingerprint: ['reverify-stale', expected, c.sha, c.recordId ?? 'none'].join('|'),
+    });
+  }
   return out;
 }
 
 function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: DecisionOptions, paused: string | null): DecisionCardModel | null {
-  if (run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled') return null;
+  if (isClosedRun(run)) return null;
   const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId);
   const stopped = tasks.filter((t) => isBudgetStopped(t, run));
   if (stopped.length === 0 || stopped.every((t) => reducedScopeCovers(run, t))) return null;

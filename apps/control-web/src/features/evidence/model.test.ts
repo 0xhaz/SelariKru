@@ -1,6 +1,6 @@
 import { emptySnapshot, type CriterionEvidenceView, type ProjectViewSnapshot, type RunEvidenceView, type RunView } from '@selarikru/view-protocol';
 import { describe, expect, it } from 'vitest';
-import { buildEvidence, checkAnchor } from './model.ts';
+import { buildEvidence, cleanFailureText, checkAnchor } from './model.ts';
 
 const SHA = 'a'.repeat(40);
 const criterion = (id: string, over: Partial<CriterionEvidenceView> = {}): CriterionEvidenceView => ({
@@ -88,6 +88,20 @@ describe('buildEvidence', () => {
     const m = buildEvidence(snap({ criteria: { verified: 0, total: 1 }, evidence: evidence([criterion('FB-01', { verified: false })], true, false) }), null)!;
     expect(states(m)['verified']).toMatchObject({ value: 'Record no longer valid', established: false });
     expect(m.criteria[0]).toMatchObject({ stateLabel: 'Record no longer valid', tone: 'warning' });
+    // It says why, and where to act: re-verifying runs no worker.
+    expect(states(m)['verified']!.detail).toMatch(/verifier, its suite or the stored record changed/i);
+    expect(states(m)['verified']!.detail).toMatch(/no worker/i);
+    expect(states(m)['verified']!.link).toMatchObject({ href: '#/decisions?card=reverify%3Ar1', label: 'Re-verify in Decisions', external: false });
+  });
+
+  it('a passing row with a valid record but an unfinished carrier reads as waiting, not as invalid', () => {
+    const m = buildEvidence(snap({ criteria: { verified: 0, total: 1 }, evidence: evidence([criterion('FB-01', { verified: false })], true, true) }), null)!;
+    expect(m.criteria[0]).toMatchObject({ stateLabel: 'Waiting on another task', tone: 'neutral' });
+    expect(states(m)['verified']!.value).not.toBe('Record no longer valid');
+  });
+
+  it('strips control and direction characters from failure text, and keeps line structure', () => {
+    expect(cleanFailureText('safe\u202Egnp.exe\u2066\u0007\nline2\ttab\u009b')).toBe('safegnp.exe\nline2\ttab');
   });
 
   it('a pass on a rejected candidate is muted, and a flaky criterion is marked', () => {

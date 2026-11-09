@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { deriveRunEvidence, type CriterionObservation, type EvidenceTask } from './evidence.ts';
+import { CRITERION_DESCRIPTIONS, criterionDescription, deriveRunEvidence, type CriterionObservation, type EvidenceTask } from './evidence.ts';
 
 const SHA = 'a'.repeat(40);
 const task = (taskId: string, requirementIds: string[], over: Partial<EvidenceTask> = {}): EvidenceTask => ({ taskId, revision: 1, status: 'verified', requirementIds, ...over });
@@ -83,5 +86,19 @@ describe('deriveRunEvidence', () => {
 
   it('every known criterion carries its description, and an unknown one none', () => {
     expect(derive([task('a', ['FB-01', 'X-9'])], [])!.criteria.map((c) => c.description)).toEqual([expect.stringMatching(/feedback/i), null]);
+  });
+});
+
+describe('criterion descriptions', () => {
+  it('cover exactly the criteria in the Feedback Board suite manifest', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '../../../services/verifier/suites/feedback-board/manifest.json'), 'utf8')) as { criteria: { id: string }[] };
+    expect(Object.keys(CRITERION_DESCRIPTIONS).sort()).toEqual(manifest.criteria.map((c) => c.id).sort());
+  });
+
+  it('keep the details the brief approved', () => {
+    expect(criterionDescription('FB-01')).toContain('1,000 characters');
+    expect(criterionDescription('FB-03')).toContain('descending');
+    expect(criterionDescription('FB-99')).toBeNull();
   });
 });

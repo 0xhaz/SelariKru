@@ -298,6 +298,7 @@ describe('verifyCandidate', () => {
 });
 
 const loadKey = (c: { sha: string }) => ({ tenantId: TENANT, projectId: PROJECT, sha: c.sha });
+const bar = (trusted = currentTrusted()) => ({ trusted, artifacts });
 
 describe('per-criterion evidence over a real verification', () => {
   it('two parts, a shared requirement and a failed-then-passed retry read as verified, flaky, on the real record', async () => {
@@ -313,7 +314,7 @@ describe('per-criterion evidence over a real verification', () => {
     ];
     expect(await status('t1')).toBe('verified');
     const scope = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
-    const result = (await loadRunEvidence(db, scope, await tasks(), currentTrusted()))!;
+    const result = (await loadRunEvidence(db, scope, await tasks(), bar()))!;
     expect(result.criteria).toEqual({ verified: 3, total: 3 });
     expect(result.evidence.candidate).toMatchObject({ sha: cand.sha, recordValid: true, flaky: ['FB-02'] });
     const shared = result.evidence.criteria.find((c) => c.criterionId === 'FB-02')!;
@@ -323,8 +324,29 @@ describe('per-criterion evidence over a real verification', () => {
     expect(shared.check?.recordId).toBe(result.evidence.candidate!.recordId);
 
     // Another verifier build, or a part not finished, and the same rows count for nothing.
-    expect((await loadRunEvidence(db, scope, await tasks(), { ...currentTrusted(), verifierSha256: 'f'.repeat(64) }))!.criteria.verified).toBe(0);
-    expect((await loadRunEvidence(db, scope, await tasks('running'), currentTrusted()))!.criteria.verified).toBe(1); // FB-03 alone is carried only by t2
+    expect((await loadRunEvidence(db, scope, await tasks(), bar({ ...currentTrusted(), verifierSha256: 'f'.repeat(64) })))!.criteria.verified).toBe(0);
+    expect((await loadRunEvidence(db, scope, await tasks('running'), bar()))!.criteria.verified).toBe(1); // FB-03 alone is carried only by t2
+  });
+
+  it('one bar: a wiped or corrupt record reads as not valid on both the evidence and the pull-request routes', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' }, { requirementIds: ['FB-01'] });
+    const cand = await assemble();
+    await verifyCandidate(ref(cand), deps(async (i) => ok(i)));
+    const scope = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+    const tasks = [{ taskId: 't1', revision: 1, status: 'verified', requirementIds: ['FB-01'] }];
+    expect((await loadRunEvidence(db, scope, tasks, bar()))!.evidence.candidate).toMatchObject({ recordValid: true });
+    for (const store of [
+      { put: artifacts.put.bind(artifacts), has: async () => false, get: async () => null },
+      { put: artifacts.put.bind(artifacts), has: async () => true, get: async (): Promise<Uint8Array | null> => { throw new Error('stored bytes do not match'); } },
+      { put: artifacts.put.bind(artifacts), has: async () => true, get: async () => Buffer.from('not a record') },
+    ]) {
+      expect(await loadValidRecord(db, store, loadKey(cand))).toBeNull();
+      const report = (await loadRunEvidence(db, scope, tasks, { trusted: currentTrusted(), artifacts: store }))!;
+      expect(report.evidence.candidate).toMatchObject({ recordValid: false });
+      expect(report.criteria.verified).toBe(0);
+    }
+    // No store at all is the same answer, not a pass.
+    expect((await loadRunEvidence(db, scope, tasks, null))!.criteria.verified).toBe(0);
   });
 });
 

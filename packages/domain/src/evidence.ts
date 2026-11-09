@@ -157,10 +157,10 @@ export interface EvidenceTask {
 export type CriterionState = CheckStatus | 'not_run' | 'not_delivered';
 
 /** What each Feedback Board acceptance criterion asks for, as approved in the brief. A criterion outside this list simply has no description. */
-const CRITERION_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  'FB-01': 'Create feedback with a trimmed title of 3 to 120 characters and an optional description',
+export const CRITERION_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'FB-01': 'Create feedback with a trimmed title of 3 to 120 characters and an optional trimmed description of at most 1,000 characters',
   'FB-02': 'Reject invalid titles, oversized descriptions, wrong types and invalid statuses',
-  'FB-03': 'List feedback newest first, breaking equal timestamps by item ID',
+  'FB-03': 'List feedback newest first, breaking equal timestamps by descending item ID',
   'FB-04': 'New feedback starts Open; updates permit Open, Planned or Done',
   'FB-05': 'Filter by status; status counts describe the full dataset',
   'FB-06': 'Saved feedback and status survive a browser reload and an API restart',

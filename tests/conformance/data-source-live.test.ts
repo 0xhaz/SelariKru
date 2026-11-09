@@ -32,7 +32,7 @@ dataSourceConformance('live, over the real control API on Postgres', async () =>
     flaky: [], taskOutcomes: [], artifactIds: [], verifier: { kind: 'verifier', id: 'verifier-local-1' },
   });
   const failedRecord = VerificationRecordSchema.parse({ ...record, recordId: 'rec_2', candidateSha: FAILED_SHA, result: 'failed', results: [{ checkId: 'FB-02', status: 'failed', tests: [{ runner: 'vitest', title: 'rejects', status: 'failed' }], failures: [{ test: 'FB-02 reject', status: 'failed', message: 'AssertionError: expected 400' }], evidenceReferences: [] }] });
-  const h = makeHarness(t, {}, allow, { github: { pullRequests: { port: gh, repoPath: '/repos/source', loadRecord: async () => record } }, evidence: { trusted: () => TRUSTED, loadRecord: async (key) => (key.sha === FAILED_SHA ? failedRecord : record) } });
+  const h = makeHarness(t, {}, allow, { github: { pullRequests: { port: gh, repoPath: '/repos/source', loadRecord: async () => record } }, evidence: { trusted: () => TRUSTED, artifacts: { get: async () => null }, loadRecord: async (key) => (key.sha === FAILED_SHA ? failedRecord : record) } });
   const base = await h.app.listen({ port: 0, host: '127.0.0.1' });
   const source = createLiveDataSource({ baseUrl: base, getToken: async () => OWNER_TOKEN });
   const nowDate = () => h.clock.now();

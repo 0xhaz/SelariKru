@@ -102,8 +102,7 @@ describe('SSE', () => {
     const closing = slow.app.close();
     await new Promise((r) => setTimeout(r, 50));
     release();
-    await closing;
+    await expect(Promise.resolve(closing)).resolves.toBeUndefined();
     await opening;
-    expect(true).toBe(true);
   }, 10_000);
 });

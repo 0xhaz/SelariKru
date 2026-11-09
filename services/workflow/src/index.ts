@@ -14,10 +14,11 @@ export { APPROVAL_TTL_SECONDS, expireApprovals, openApproval, type ApprovalGate,
 export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
-export { applyVerification, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, REVERIFY_LIMIT, type VerificationApplication, type VerificationVerdict } from './verification.ts';
+export { applyVerification, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, REVERIFY_LIMIT, type ReverifyOutcome, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
-export { loadRunEvidence, type RunEvidence, type TrustedVerifier } from './evidence.ts';
+export { loadRunEvidence, type RunEvidence } from './evidence.ts';
+export { loadLatestAppliedRecord, validRecordOf, type LatestAppliedRecord, type RecordBar, type RecordBytes, type TrustedVerifier } from './verification-record.ts';
 export { reconcileObservedCost, runUsageLines, stopForExhaustedBudget, type ObservedCost, type ReconcileResult, type RunUsageLine } from './usage.ts';
 
 /** Binds the operations to a database and clock. Instances hold no state: any instance sees every lease. */

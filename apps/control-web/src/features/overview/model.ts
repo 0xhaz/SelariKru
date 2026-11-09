@@ -162,8 +162,8 @@ export function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetR
   if (w.availability === 'offline') return { label: 'Offline', tone: 'neutral', reported: true };
   if (w.activity === null) {
     if (w.availability === 'idle') return { label: 'Idle', tone: 'neutral', reported: true };
-    // A tool name says what is running, and nothing about planning or coding, so it is shown as itself.
-    return w.latestAction !== null ? { label: `Using ${w.latestAction.tool}`, tone: 'active', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
+    // A tool name says what ran last, not that it still runs, and nothing about planning or coding, so it is shown as itself.
+    return w.latestAction !== null ? { label: `Last tool: ${w.latestAction.tool}`, tone: 'active', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
   }
   if (w.activity === 'waiting_dependency' && w.blockedByTaskIds.length > 0) {
     const on = w.blockedByTaskIds.map((id) => snapshot.tasks[id]?.title ?? id).join(', ');

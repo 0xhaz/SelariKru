@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { appendEvent, withTx } from '@selarikru/persistence';
 import { startLeaseExpiryDriver } from '../src/index.ts';
+import { VerificationRecordSchema } from '@selarikru/domain';
 import { API_POLICY, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 import { createScheduler } from '@selarikru/workflow';
 import { TEST_CATALOG, POLICY } from '@selarikru/workflow/test-helpers';
@@ -307,7 +308,15 @@ describe('freshness and activity', () => {
 describe('per-criterion evidence on the snapshot', () => {
   const SHA = 'a'.repeat(40);
   const TRUSTED = { checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64) };
-  const trustedHarness = (trusted = TRUSTED): Harness => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => trusted, loadRecord: async () => null } });
+  /** The bytes of the verifier's record, as the artifact store would hand them back. Absent: the store was wiped. */
+  const recordBytes = (candidateSha: string, trusted = TRUSTED) => Buffer.from(JSON.stringify(VerificationRecordSchema.parse({
+    schemaVersion: 1, recordId: 'ver_1', taskId: 't1', runId: 'run_a', partTaskIds: ['t1'], candidateSha, candidateTreeSha: 'c'.repeat(40), candidateContentSha256: 'd'.repeat(64), baseSha: 'b'.repeat(40),
+    contractRevisions: [], ...trusted, toolVersions: {}, configVersions: {}, environmentImageDigest: 'sha256:img', host: 'local-docker', fixtures: [], startedAt: '2026-11-09T01:00:00Z', finishedAt: '2026-11-09T01:01:00Z',
+    result: 'passed', exitCode: 0, results: [{ checkId: 'FB-01', status: 'passed', tests: [{ runner: 'vitest', title: 'creates', status: 'passed' }], failures: [], evidenceReferences: [] }],
+    runs: [{ attempt: 1, startedAt: '2026-11-09T01:00:00Z', finishedAt: '2026-11-09T01:01:00Z', exitCode: 0, infrastructureError: null, results: [], resultArtifactId: null, logArtifactId: null }],
+    flaky: [], taskOutcomes: [], artifactIds: [], verifier: { kind: 'verifier', id: 'verifier-local-1' },
+  })));
+  const trustedHarness = (trusted = TRUSTED, stored: Buffer | null = recordBytes(SHA)): Harness => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => trusted, artifacts: { get: async () => stored }, loadRecord: async () => null } });
 
   /** A candidate with its applied record, check rows and verdict, exactly as the verifier leaves them. */
   async function seedEvidence(over: { candidate?: string; applied?: boolean; firstTaskStatus?: string } = {}) {
@@ -347,6 +356,30 @@ describe('per-criterion evidence on the snapshot', () => {
   it('a verdict with applied false is not a valid record and counts for nothing', async () => {
     await seedEvidence({ applied: false });
     const r = await run();
+    expect(r.criteria.verified).toBe(0);
+    expect(r.evidence.candidate.recordValid).toBe(false);
+  });
+
+  it('a run still in play stays in the report window however many finished runs came after it', async () => {
+    await seedEvidence();
+    await t.db.execute(sql`UPDATE runs SET lifecycle = 'ready_for_review', created_at = now() - interval '1 year' WHERE run_id = 'run_a'`);
+    for (let i = 0; i < 25; i++) {
+      await t.db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle, budget, created_at) VALUES ('tenant_a', 'proj_a', ${`run_old_${i}`}, 'merged', '{}'::jsonb, now() - ${`${i + 1} days`}::interval)`);
+    }
+    await seedTask(t.db, specFor('t_old', { runId: 'run_old_24', requirementIds: ['FB-01'] }), 'merged');
+    const harness = trustedHarness();
+    await harness.app.ready();
+    const runs = (await get(harness.app, '/v1/projects/proj_a/snapshot')).body.runs as { runId: string; evidence: unknown }[];
+    await harness.app.close();
+    expect(runs.find((r) => r.runId === 'run_a')!.evidence).not.toBeNull();
+    // An old finished run stays listed but is outside the window, so its evidence is not read.
+    expect(runs.find((r) => r.runId === 'run_old_24')!.evidence).toBeNull();
+    expect(runs).toHaveLength(26);
+  });
+
+  it('a wiped artifact store means the record no longer stands, whatever the rows say', async () => {
+    await seedEvidence();
+    const r = await run(trustedHarness(TRUSTED, null));
     expect(r.criteria.verified).toBe(0);
     expect(r.evidence.candidate.recordValid).toBe(false);
   });
@@ -400,7 +433,7 @@ describe('per-criterion evidence on the snapshot', () => {
 describe('verification failures', () => {
   const SHA = 'a'.repeat(40);
   const secret = `ghp_${'a'.repeat(36)}`;
-  const withRecord = (failures: { test: string; status: 'failed'; message: string }[]) => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => ({ checkManifestSha256: 'x', verifierSha256: 'y' }), loadRecord: async () => ({ results: [{ checkId: 'FB-02', status: 'failed', tests: [], failures, evidenceReferences: [] }] }) as never } });
+  const withRecord = (failures: { test: string; status: 'failed'; message: string }[]) => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => ({ checkManifestSha256: 'x', verifierSha256: 'y' }), artifacts: { get: async () => null }, loadRecord: async () => ({ results: [{ checkId: 'FB-02', status: 'failed', tests: [], failures, evidenceReferences: [] }] }) as never } });
   const seedCandidate = () => t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES ('tenant_a', 'proj_a', 'c1', 'run_a', 'main', ${SHA}, ${'b'.repeat(40)}, ${'c'.repeat(40)}, '[]'::jsonb, 'rejected')`);
   const URL = '/v1/projects/proj_a/runs/run_a/failures';
 

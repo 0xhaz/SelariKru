@@ -229,7 +229,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
       const hit = affected(task);
       items.push(make({
         id: `gate:${task.taskId}`, kind: 'failed_gate', code: check?.checkId ?? task.statusReason, since: check?.updatedAt ?? task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
-        title: `${titleOf(task)}: ${check ? 'check failed' : 'failed'}`, detail: check?.summary ?? (task.statusReason ? sentence(task.statusReason) : 'No reason was reported.'),
+        title: `${titleOf(task)}: ${check ? 'check failed' : 'failed'}`, detail: check?.summary ?? (task.statusReason ? sentence(task.statusReason) : check ? 'The failure text is in Evidence: open the run and read the failed criteria.' : 'No reason was reported.'),
         consequence: `${whoWaits(hit)} It cannot reach review until the check passes.`, nextAction: 'Inspect the failing check, then let the repair attempt run.',
       }));
     }

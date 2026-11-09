@@ -992,7 +992,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
           ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET
             detail = CASE WHEN candidates.status = 'assembled' AND candidates.parts IS NOT DISTINCT FROM EXCLUDED.parts THEN candidates.detail
               ELSE (jsonb_set(candidates.detail, '{history}', COALESCE(candidates.detail -> 'history', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
-                'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at)))) - 'verificationDriver' - 'verification' - 'verificationRetry' END,
+                'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at)))) - 'verificationDriver' - 'verification' - 'verificationRetry' - 'reverification' END,
             status = 'assembled', reason = NULL, parts = EXCLUDED.parts, tree_sha = EXCLUDED.tree_sha, base_sha = EXCLUDED.base_sha, updated_at = EXCLUDED.updated_at`);
         const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at);
         await emitCandidate(tx, run, at, 'candidate.assembled', {

@@ -24,7 +24,7 @@ describe('three separate signals', () => {
 
   it('a reported tool shows as itself, once, and says nothing about planning or coding', () => {
     const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: null, latestAction: { tool: 'Edit', summary: null, longRunning: false, at: iso(1) } })] });
-    expect(row(buildTeam(snapshot, NOW, NOW), 'w').activity).toMatchObject({ label: 'Using Edit', reported: true, tool: null });
+    expect(row(buildTeam(snapshot, NOW, NOW), 'w').activity).toMatchObject({ label: 'Last tool: Edit', reported: true, tool: null });
   });
 
   it('a running check is reported as running, never as a passing result', () => {
@@ -91,7 +91,7 @@ describe('stale and disconnected workers', () => {
     const r = row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1');
     expect(r.health.state).toBe('disconnected');
     expect(r.stale).toBe(true);
-    expect(r.activity).toMatchObject({ label: 'Using Edit', reported: true, stale: true });
+    expect(r.activity).toMatchObject({ label: 'Last tool: Edit', reported: true, stale: true });
     expect(r.task?.title).toBe('Feedback API');
   });
 });

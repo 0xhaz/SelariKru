@@ -71,7 +71,7 @@ test('disconnected keeps last-confirmed state with stale label', async ({ page }
   await expect(row).toContainText('Feedback API');
   await expect(row).toContainText('Local sandbox');
   // Nothing invented: the last tool it reported, no result, and not shown healthy.
-  await expect(row.getByTestId('signal-activity')).toHaveText(/Using /);
+  await expect(row.getByTestId('signal-activity')).toHaveText(/Last tool: /);
   await expect(row).not.toContainText('Healthy');
   await openWorker(page, 'runner_local_1');
   await expect(drawer(page).getByTestId('drawer-summary')).toContainText('Connection lost');

@@ -4,7 +4,7 @@ import type { CriterionFailureView, DataSourceError, RunFailuresView } from '@se
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import type { CandidateModel, CriterionRow, DeliveryState, EvidenceModel } from './model.ts';
-import { CANDIDATE_ANCHOR } from './model.ts';
+import { CANDIDATE_ANCHOR, cleanFailureText } from './model.ts';
 
 function Facts({ facts }: { facts: readonly { label: string; value: string }[] }) {
   return (
@@ -60,29 +60,30 @@ function StateChips({ row }: { row: CriterionRow }) {
 interface FailureState { readonly loading: boolean; readonly available: boolean | null; readonly failures: readonly CriterionFailureView[] }
 
 /** The verifier's words on why this failed. Candidate code can shape them, so they are text nodes only: never markup, and never a link. */
-function FailureList({ state, criterionId }: { state: FailureState; criterionId: string }) {
+function FailureList({ state, criterionId, onRetry }: { state: FailureState; criterionId: string; onRetry: () => void }) {
   if (state.loading) return <p role="status" className="mt-2 text-sm text-muted">Loading why it failed</p>;
   if (state.available === false) return <p className="mt-2 text-sm text-muted">The failure details are not available: the verification record no longer stands.</p>;
-  if (state.available === null) return <p className="mt-2 text-sm text-muted">The failure details could not be loaded.</p>;
+  if (state.available === null) return <p className="mt-2 text-sm text-muted">The failure details could not be loaded. <button type="button" onClick={onRetry} className="font-medium text-active underline underline-offset-2">Try again</button></p>;
   const mine = state.failures.filter((f) => f.criterionId === criterionId);
   if (mine.length === 0) return <p className="mt-2 text-sm text-muted">No failure text was recorded for this criterion.</p>;
   return (
     <ul className="mt-2 space-y-2" data-testid="failure-list">
       {mine.map((f, i) => (
         <li key={i} className="rounded-chip border border-l-4 border-line border-l-danger bg-panel p-2 text-sm">
-          <p className="font-medium text-fg">{f.test}</p>
-          <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-mono text-muted">{f.message}</pre>
+          <p className="font-medium text-fg">{cleanFailureText(f.test)}</p>
+          <p className="mt-1 text-xs font-medium uppercase tracking-wide text-muted">Test output</p>
+          <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-mono text-muted">{cleanFailureText(f.message)}</pre>
         </li>
       ))}
     </ul>
   );
 }
 
-function CriterionDetail({ row, failures }: { row: CriterionRow; failures: FailureState }) {
+function CriterionDetail({ row, failures, onRetry }: { row: CriterionRow; failures: FailureState; onRetry: () => void }) {
   if (!row.evidence) return null;
   return (
     <div className="rounded-chip bg-panel-2 p-3">
-      {row.state === 'failed' || row.state === 'error' ? <FailureList state={failures} criterionId={row.criterionId} /> : null}
+      {row.state === 'failed' || row.state === 'error' ? <FailureList state={failures} criterionId={row.criterionId} onRetry={onRetry} /> : null}
       <Facts facts={row.evidence.facts} />
     </div>
   );
@@ -98,7 +99,7 @@ function Disclosure({ row, open, onToggle }: { row: CriterionRow; open: boolean;
   );
 }
 
-function CriteriaTable({ rows, openIds, onToggle, failures }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState }) {
+function CriteriaTable({ rows, openIds, onToggle, failures, onRetry }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState; onRetry: () => void }) {
   return (
     <table className="w-full border-collapse text-left text-sm">
       <caption className="sr-only">Each acceptance criterion, its result, its check and the candidate commit it was judged on</caption>
@@ -126,11 +127,11 @@ function CriteriaTable({ rows, openIds, onToggle, failures }: { rows: readonly C
                 <td className="py-2.5 pr-3 text-muted">{r.tasks.join(', ')}</td>
                 <td className="py-2.5 pr-3"><CheckLink row={r} /></td>
                 <td className="py-2.5 pr-3"><ShaLink row={r} /></td>
-                <td className="whitespace-nowrap py-2.5 text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatDayTime(r.evidence.at)}</Timestamp> : 'Not yet'}</td>
+                <td className="whitespace-nowrap py-2.5 text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatDayTime(r.evidence.at)}</Timestamp> : r.state === 'not_delivered' ? 'Not delivered' : 'Not yet'}</td>
               </tr>
               {r.evidence ? (
                 <tr id={r.evidence.anchor} tabIndex={-1} hidden={!open} className="scroll-mt-40 border-b border-line outline-none">
-                  <td colSpan={6} className="pb-3 pt-1"><CriterionDetail row={r} failures={failures} /></td>
+                  <td colSpan={6} className="pb-3 pt-1"><CriterionDetail row={r} failures={failures} onRetry={onRetry} /></td>
                 </tr>
               ) : null}
             </Fragment>
@@ -141,7 +142,7 @@ function CriteriaTable({ rows, openIds, onToggle, failures }: { rows: readonly C
   );
 }
 
-function CriteriaCards({ rows, openIds, onToggle, failures }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState }) {
+function CriteriaCards({ rows, openIds, onToggle, failures, onRetry }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState; onRetry: () => void }) {
   return (
     <ul className="space-y-2">
       {rows.map((r) => {
@@ -155,7 +156,7 @@ function CriteriaCards({ rows, openIds, onToggle, failures }: { rows: readonly C
             {r.description ? <p className="mt-1 text-fg">{r.description}</p> : null}
             <p className="mt-1 text-muted">{r.tasks.join(', ')}</p>
             <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span className="text-muted">Check <CheckLink row={r} /></span><span className="text-muted">Candidate <ShaLink row={r} /></span>{r.evidence ? <span className="text-muted">Judged <Timestamp iso={r.evidence.at}>{formatDayTime(r.evidence.at)}</Timestamp></span> : null}</p>
-            {r.evidence ? <div id={r.evidence.anchor} tabIndex={-1} hidden={!open} className="mt-2 scroll-mt-40 outline-none"><CriterionDetail row={r} failures={failures} /></div> : null}
+            {r.evidence ? <div id={r.evidence.anchor} tabIndex={-1} hidden={!open} className="mt-2 scroll-mt-40 outline-none"><CriterionDetail row={r} failures={failures} onRetry={onRetry} /></div> : null}
           </li>
         );
       })}
@@ -245,6 +246,8 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
   useEffect(() => { setToggled(new Set()); }, [checkTarget]);
 
   const [failures, setFailures] = useState<FailureState>({ loading: false, available: null, failures: [] });
+  const [retry, setRetry] = useState(0);
+  const retryFailures = useCallback(() => setRetry((n) => n + 1), []);
   const live = connection === 'live';
   const failureKey = model && failedKey !== '' && live ? `${model.runId}:${model.candidate?.sha ?? ''}:${failedKey}` : null;
   useEffect(() => {
@@ -256,7 +259,7 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
       () => { if (!cancelled) setFailures({ loading: false, available: null, failures: [] }); },
     );
     return () => { cancelled = true; };
-  }, [failureKey]);
+  }, [failureKey, retry]);
 
   useEffect(() => {
     const anchor = checkTarget !== null ? rows.find((r) => r.evidence?.checkId === checkTarget)?.evidence?.anchor ?? null : candidateTarget !== null ? CANDIDATE_ANCHOR : null;
@@ -308,7 +311,7 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
           <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
             <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
               <Panel title="Acceptance criteria" labelId="evidence-criteria-title" aside={`${model.simulated ? 'Simulated, not evidence. ' : ''}${model.counts.map((c) => `${c.n} ${c.label}`).join(', ')}`}>
-                {wide ? <CriteriaTable rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} /> : <CriteriaCards rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} />}
+                {wide ? <CriteriaTable rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} onRetry={retryFailures} /> : <CriteriaCards rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} onRetry={retryFailures} />}
               </Panel>
             </div>
             <div className="grid gap-4">

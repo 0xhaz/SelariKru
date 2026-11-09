@@ -181,6 +181,19 @@ describe('blocked work', () => {
     expect(action(cards[0]!, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', expectedRevision: 1, args: { runId: 'run' } } });
   });
 
+  it('a stale record on finished work gets a re-verify card; a valid record does not', () => {
+    const withRecord = (recordValid: boolean, state: 'passed' | 'failed' = 'passed') => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
+      s.runs['run'] = { ...s.runs['run']!, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state, verified: false, taskIds: ['t'], check: null, candidateSha: null }] } };
+      return s;
+    };
+    const card = build(withRecord(false)).cards.find((c) => c.id === 'reverify:run')!;
+    expect(card).toMatchObject({ kind: 'reverify', chip: 'Record no longer valid' });
+    expect(action(card, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', args: { runId: 'run' } } });
+    expect(build(withRecord(true)).cards.find((c) => c.id === 'reverify:run')).toBeUndefined();
+    expect(build(withRecord(false, 'failed')).cards.find((c) => c.id === 'reverify:run')).toBeUndefined();
+  });
+
   it('demo mode says why replan is off rather than linking to a dead end', () => {
     const card = buildDecisions(snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'resource_conflict:db' })] }), NOW, { mode: 'mock', connection: 'live' }).cards[0]!;
     expect(action(card, 'Replan in the Assistant').disabledReason).toMatch(/demo/i);

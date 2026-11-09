@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, type AcceptedReducedScope, type ReverifyOutcome } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -43,8 +43,9 @@ const REPLANNABLE: readonly string[] = ['planned', 'ready', 'blocked', 'awaiting
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const CANCEL_REQUEST: readonly string[] = ['running'];
 const APPROVAL_HISTORY_LIMIT = 50;
-/** Runs whose scope and evidence a snapshot reads. An older run keeps its rows but reports neither, so the cost of a refresh does not grow with the project's history. */
+/** Finished runs whose scope and evidence a snapshot reads, the newest ones. An older finished run keeps its rows but reports neither, so the cost of a refresh does not grow with the project's history. */
 const SNAPSHOT_EVIDENCE_RUNS = 20;
+const TERMINAL_RUN: readonly string[] = ['merged', 'failed', 'cancelled'];
 const FAILURE_LIMIT = 200;
 const FAILURE_TEXT_LIMIT = 2000;
 /** Redacted before it is bounded, so a cut can never split a secret past the pattern. */
@@ -467,21 +468,34 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   });
 
   // ---- re-verification ---------------------------------------------------------------------------------------
-  /** Sends finished work blocked by a verifier or assembly failure back for a verdict. No worker runs; the assembly and verification drivers do the rest. */
+  /**
+   * Sends finished work back for a verdict: work blocked by a verifier or assembly failure, and a current candidate whose record no longer stands. No worker runs; the assembly and
+   * verification drivers do the rest. Task status during a stale-record re-verify: `verifying` until a new valid record is applied (see `reopenStaleVerification`).
+   */
   app.post('/v1/runs/:id/reverify', auth, async (req, reply) => {
     const uid = ownerOf(req);
     const body = parseBody(ReverifyRunRequestSchema, req.body);
     const runId = idParam(req);
+    const seen = await requireRun(db, config.tenantId, runId);
+    // The same gate as retry: re-verifying is work sent back to the drivers, so a policy that withholds replanning withholds it.
+    const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
+    if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow re-verifying', { reason: gate.reason, decision: gate.decision });
+    // The record is read before the transaction, as the pull-request route does: loading it takes its own connection. Under the locks the candidate must still be this one.
+    const [latest] = await db.execute(sql`
+      SELECT sha, status FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${seen.projectId} AND run_id = ${runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
+      ORDER BY created_at DESC, candidate_id DESC LIMIT 1`);
+    const staleSha = latest && latest['status'] === 'assembled' && ctx.evidence && (await ctx.evidence.loadRecord({ tenantId: config.tenantId, projectId: seen.projectId, sha: String(latest['sha']) })) === null ? String(latest['sha']) : null;
     const result = await withTx(db, async (tx) => {
       const run = await requireRun(tx, config.tenantId, runId, true);
-      // The same gate as retry: re-verifying is work sent back to the drivers, so a policy that withholds replanning withholds it.
-      const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
-      if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow re-verifying', { reason: gate.reason, decision: gate.decision });
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
         if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
-        const outcome = await reopenBlockedVerification({ now }, tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, uid, newId('op'));
-        if (!outcome.ok) throw new AppError(outcome.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: outcome.reason, ...(outcome.taskId !== undefined ? { taskId: outcome.taskId } : {}) });
-        return { runId, reopened: outcome.reopened };
+        const refuse = (o: Extract<ReverifyOutcome, { ok: false }>) => new AppError(o.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: o.reason, ...(o.taskId !== undefined ? { taskId: o.taskId } : {}) });
+        const scope = { tenantId: config.tenantId, projectId: run.projectId, runId };
+        const stale: ReverifyOutcome = staleSha === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification({ now }, tx, scope, uid, newId('op'), staleSha);
+        if (!stale.ok && stale.reason !== 'nothing_to_reverify') throw refuse(stale);
+        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'));
+        if (!blocked.ok && (blocked.reason !== 'nothing_to_reverify' || !stale.ok)) throw refuse(blocked);
+        return { runId, reopened: [...(stale.ok ? stale.reopened : []), ...(blocked.ok ? blocked.reopened : [])] };
       });
     });
     return reply.code(200).send(result);
@@ -568,7 +582,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
         const assessments = new Map<string, { notDelivered: unknown; notDeliveredHash: string; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
         const evidence = new Map<string, Awaited<ReturnType<typeof loadRunEvidence>>>();
-        for (const r of runs.slice(-SNAPSHOT_EVIDENCE_RUNS)) {
+        // Every run still in play is in the window, so a live run cannot fall out of it, plus the latest finished ones.
+        for (const r of runs.filter((r, i) => !TERMINAL_RUN.includes(r.lifecycle) || i >= runs.length - SNAPSHOT_EVIDENCE_RUNS)) {
           const assessed = await assessRunScope(tx, { tenantId: config.tenantId, projectId, runId: r.runId }).catch(() => null);
           assessments.set(r.runId, assessed && assessed.stopped.length + assessed.stopping.length > 0
             ? { notDelivered: assessed.notDelivered, notDeliveredHash: notDeliveredHash(assessed.notDelivered), deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
@@ -579,7 +594,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             if (row?.runId !== r.runId) return [];
             const requirementIds = (row.spec as { requirementIds?: unknown }).requirementIds;
             return [{ taskId: s.taskId, revision: s.currentRevision, status: s.status, requirementIds: Array.isArray(requirementIds) ? requirementIds.filter((x): x is string => typeof x === 'string') : [] }];
-          }), ctx.evidence?.trusted() ?? null).catch(() => null));
+          }), ctx.evidence ? { trusted: ctx.evidence.trusted(), artifacts: ctx.evidence.artifacts } : null).catch(() => null));
         }
         const refOf = (row: Record<string, unknown> | undefined) => (row ? { kind: String(row['type']), ref: String(row['event_id']), at: eventTime(row) } : null);
         return {

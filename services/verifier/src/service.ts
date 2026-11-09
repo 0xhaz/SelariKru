@@ -27,6 +27,7 @@ import { RunnerResultSchema, VerificationRecordSchema, TaskSpecSchema, type Acto
 import { appendUsage, schema, sql, VERIFICATION_ROLE, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
 import { applyVerification, markRunReadyForReview } from '../../workflow/src/verification.ts';
+import { loadLatestAppliedRecord, validRecordOf } from '../../workflow/src/verification-record.ts';
 import { hashTree, sha256, verifierHashes } from './hashing.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -209,12 +210,14 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
   const logLimit = deps.logLimitBytes ?? DEFAULT_LOG_LIMIT;
 
   const rows = await deps.db.execute(sql`
-    SELECT status, base_sha, tree_sha, parts FROM candidates
+    SELECT status, base_sha, tree_sha, parts, detail FROM candidates
     WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha}`);
   const row = rows[0];
   if (!row) throw new CandidateNotVerifiable('not_found', 'no such candidate');
   if (row['status'] !== 'assembled') throw new CandidateNotVerifiable('not_assembled', `the candidate is ${String(row['status'])}`);
   const parts = (row['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? [];
+  // An owner's re-verification of finished work: a failed verdict stops there and asks the owner, it does not start a repair worker.
+  const reverification = (row['detail'] as { reverification?: unknown } | null)?.reverification !== undefined;
   if (!parts.some((p) => p.taskId === candidate.taskId)) throw new CandidateNotVerifiable('task_not_in_candidate', 'the task is not a part of this candidate');
   const baseSha = String(row['base_sha']);
   const treeSha = String(row['tree_sha']);
@@ -327,6 +330,7 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
         const applied = await applyVerification({ db: deps.db, now }, key, {
           actor: deps.verifier, outcome: overall, expect: { revision: p.revision, attemptId: p.attemptId },
           detail: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, verifierSha256: want.verifierSha, host: deps.host, result: overall, failedChecks, flaky },
+          repairable: !reverification,
         }, tx);
         taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: applied.applied, taskStatus: applied.taskStatus, reason: applied.reason });
       }
@@ -395,30 +399,16 @@ export function currentTrusted(): { checkManifestSha256: string; verifierSha256:
 /**
  * The authoritative record for a candidate SHA: the latest one that was applied to task state (a non-applied, `error` or `skipped`
  * record is history, never evidence). It is returned only while the candidate is still live (`assembled`, or `rejected` for a failed
- * verdict), none of its check runs is invalidated, and it names this SHA and the current trusted manifest and verifier hashes.
+ * verdict), none of its check runs is invalidated, its bytes are intact, and it names this SHA and the current trusted hashes. The check
+ * is `validRecordOf` in the workflow package, shared with the evidence report, so a pass cannot count in one and not the other.
  */
 export async function loadValidRecord(
   db: Db, artifacts: ArtifactStore, key: { tenantId: string; projectId: string; sha: string }, opts: { trusted?: { checkManifestSha256: string; verifierSha256: string } } = {},
 ): Promise<VerificationRecord | null> {
   const cand = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND sha = ${key.sha} AND status IN ('assembled', 'rejected')`);
   if (cand.length === 0) return null;
-  const rows = await db.execute(sql`
-    SELECT sha256, locator FROM artifacts WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND type = 'verification_record' AND source_revision = ${key.sha}
-      AND locator ->> 'applied' = 'true'
-    ORDER BY created_at DESC, artifact_id DESC LIMIT 1`);
-  const row = rows[0];
-  if (!row) return null;
-  const ids = ((row['locator'] as { checkRunIds?: string[] }).checkRunIds ?? []) as string[];
-  const live = await db.execute(sql`
-    SELECT count(*)::int AS n FROM check_runs WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND candidate_sha = ${key.sha} AND result <> 'invalidated'
-      AND check_run_id = ANY(${sql.raw(`ARRAY[${ids.map((i) => `'${i.replace(/'/g, "''")}'`).join(',') || "''"}]::text[]`)})`);
-  if (Number(live[0]?.['n']) !== ids.length) return null;
-  const bytes = await artifacts.get(String(row['sha256']));
-  if (!bytes) return null;
-  const record = VerificationRecordSchema.parse(JSON.parse(Buffer.from(bytes).toString()));
-  const trusted = opts.trusted ?? currentTrusted();
-  if (record.candidateSha !== key.sha || record.checkManifestSha256 !== trusted.checkManifestSha256 || record.verifierSha256 !== trusted.verifierSha256) return null;
-  return record;
+  const latest = await loadLatestAppliedRecord(db, key);
+  return validRecordOf(latest, key.sha, { artifacts, trusted: () => opts.trusted ?? currentTrusted() });
 }
 
 /**

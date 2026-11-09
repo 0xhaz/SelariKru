@@ -1,6 +1,7 @@
 import { deriveRunEvidence, type CheckStatus, type CriterionObservation, type EvidenceTask } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
 import type { Executor } from '@selarikru/persistence';
+import { loadLatestAppliedRecord, validRecordOf, type RecordBar } from './verification-record.ts';
 
 const STATUSES: readonly string[] = ['passed', 'failed', 'skipped', 'error'];
 const iso = (v: unknown): string => new Date(v as string | Date).toISOString();
@@ -17,16 +18,13 @@ export interface RunEvidence {
   };
 }
 
-/** What the trusted verifier is right now. A record made under different hashes is no longer evidence. Null: nothing can be trusted, so nothing counts. */
-export interface TrustedVerifier { readonly checkManifestSha256: string; readonly verifierSha256: string }
-
 /**
  * Per-requirement evidence for one run: the requirement ids of its current tasks, judged against the run's latest candidate. The data is the verifier's own `check_runs`, one
- * row per FB-ID. A pass counts only on the bar the pull-request route uses (`loadValidRecord`): the latest applied record for this candidate, every one of its check runs still
- * live, and a verdict made under the current trusted hashes. A rejected candidate is shown for what it said, and an invalidated one is not read at all.
+ * row per FB-ID. A pass counts only on the bar the pull-request route uses (`validRecordOf`, the same check): the latest applied record for this candidate, every one of its check runs
+ * still live, its bytes present and intact, and made under the current trusted hashes. A null bar means nothing can be trusted, so nothing counts. A rejected candidate is shown for what it said, and an invalidated one is not read at all.
  * Null when no task names a requirement: criteria are then unknown, and a task count must never stand in for them.
  */
-export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, tasks: readonly EvidenceTask[], trusted: TrustedVerifier | null): Promise<RunEvidence | null> {
+export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, tasks: readonly EvidenceTask[], bar: RecordBar | null): Promise<RunEvidence | null> {
   const { tenantId, projectId, runId } = scope;
   const candidates = await db.execute(sql`
     SELECT sha, status, base_sha, tree_sha, target, updated_at FROM candidates
@@ -36,7 +34,6 @@ export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: 
   const sha = row ? String(row['sha']) : null;
   let observations: CriterionObservation[] = [];
   let recordId: string | null = null;
-  let recordIds: readonly string[] | null = null;
   let verdict: Record<string, unknown> = {};
   let recordValid = false;
   if (sha !== null) {
@@ -51,21 +48,16 @@ export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: 
         attemptId: str(r['attempt_id']), recordId: str(ref?.recordId), verificationAttempt: typeof ref?.attempt === 'number' ? ref.attempt : 1, candidateSha: String(r['candidate_sha']), result: r['result'] as CheckStatus, at: iso(r['created_at']),
       });
     }
-    // The latest applied record, the one `loadValidRecord` would return. A non-applied, later record is history and never shadows it.
-    const records = await db.execute(sql`
-      SELECT artifact_id, locator FROM artifacts WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND type = 'verification_record' AND source_revision = ${sha} AND locator ->> 'applied' = 'true'
-      ORDER BY created_at DESC, artifact_id DESC LIMIT 1`);
-    if (records[0]) {
-      recordId = String(records[0]['artifact_id']);
-      const ids = (records[0]['locator'] as { checkRunIds?: unknown }).checkRunIds;
-      recordIds = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [];
-      observations = observations.filter((o) => recordIds!.includes(o.checkRunId));
+    const latest = await loadLatestAppliedRecord(db, { tenantId, projectId, sha, runId });
+    if (latest) {
+      recordId = latest.recordId;
+      const ids = latest.checkRunIds;
+      observations = observations.filter((o) => ids.includes(o.checkRunId));
       const events = await db.execute(sql`
         SELECT payload FROM events WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND type IN ('verification.passed', 'verification.failed') AND payload ->> 'recordId' = ${recordId}
         ORDER BY sequence DESC LIMIT 1`);
       verdict = (events[0]?.['payload'] as Record<string, unknown> | undefined) ?? {};
-      const live = recordIds.length > 0 && recordIds.every((id) => observations.some((o) => o.checkRunId === id));
-      recordValid = live && trusted !== null && verdict['checkManifestSha256'] === trusted.checkManifestSha256 && verdict['verifierSha256'] === trusted.verifierSha256;
+      if (bar !== null) recordValid = (await validRecordOf(latest, sha, { artifacts: bar.artifacts, trusted: () => bar.trusted })) !== null;
     }
   }
   const derived = deriveRunEvidence({ tasks, observations, candidateSha: sha, candidateLive: row?.['status'] === 'assembled', recordValid });

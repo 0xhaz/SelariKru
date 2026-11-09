@@ -4,6 +4,7 @@
  * and the owner PR route against a fake GitHub port. Real Compose Postgres. No real sandbox, no real GitHub.
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -12,7 +13,7 @@ import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/ar
 import { initEvent } from '../../../packages/harness-claude/src/fixtures.ts';
 import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { createScheduler } from '@selarikru/workflow';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
 import { eq, sql } from 'drizzle-orm';
 import { FakeSbx, type FakeStream } from '../../../packages/runtime-docker-local/src/fake-sbx.ts';
@@ -406,6 +407,141 @@ describe('run orchestration chain', () => {
       expect(await taskStatus('t_redo')).toBe('verified');
       expect(await lifecycle(runId)).toBe('ready_for_review');
       expect(await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_redo'`)).toEqual(attemptsBefore);
+    });
+
+    describe('a verified task whose record went stale', () => {
+      let real: { checkManifestSha256: string; verifierSha256: string };
+      let trustedNow: { checkManifestSha256: string; verifierSha256: string };
+      const STALE = { checkManifestSha256: 'e'.repeat(64), verifierSha256: 'f'.repeat(64) };
+      let evApp: ReturnType<typeof buildApp>;
+      beforeEach(async () => {
+        real = { checkManifestSha256: createHash('sha256').update(readFileSync(join(verifierRoot, 'suites/feedback-board/manifest.json'))).digest('hex'), verifierSha256: verifierHashes(verifierRoot, resolve(verifierRoot, '../..')).verifierSha256 };
+        trustedNow = real;
+        const store = new LocalDiskArtifactStore(artifactDir);
+        const now = () => new Date();
+        evApp = buildApp({
+          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
+          evidence: { trusted: () => trustedNow, artifacts: store, loadRecord: (key) => loadValidRecord(t.db, store, key, { trusted: trustedNow }) },
+        });
+        await evApp.ready();
+      });
+      afterEach(() => evApp.close());
+
+      async function verifiedRun(taskId: string): Promise<{ runId: string; sha: string; store: LocalDiskArtifactStore }> {
+        const runId = await newRun();
+        await planOf(runId, [task(runId, taskId)]);
+        const { report } = await runWorker(await claim(), ({ write }) => { write(`src/${taskId}.ts`, 'export const v = 1;\n'); });
+        expect(report.outcome).toBe('completed');
+        const store = new LocalDiskArtifactStore(artifactDir);
+        const { assembled } = await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick();
+        const sha = assembled[0]!;
+        expect((await verification(store, verifierRunner).tick()).verified).toBe(sha);
+        expect(await taskStatus(taskId)).toBe('verified');
+        expect(await lifecycle(runId)).toBe('ready_for_review');
+        return { runId, sha, store };
+      }
+      const verification = (store: LocalDiskArtifactStore, runner: (i: RunnerInput) => Promise<RunnerOutput>, maxVerificationRetries = 0) => createVerificationDriver({ db: t.db, artifacts: store, runner, verifier: { kind: 'verifier', id: 'verifier-local-1' }, host: 'local-docker', tenantId: TENANT, repoPath: repo, workRoot: join(root, 'verify'), maxVerificationRetries });
+      const failing = async (input: RunnerInput): Promise<RunnerOutput> => {
+        const passed = passingResult(input) as { quality: { allRequiredChecksPassed: boolean; criteria: { id: string; status: string; failures: unknown[]; tests: { status: string }[] }[] } };
+        const c = passed.quality.criteria[0]!;
+        c.status = 'failed'; c.failures = [{ test: 'a test', status: 'failed', message: 'expected 201' }]; c.tests = c.tests.map((x) => ({ ...x, status: 'failed' }));
+        passed.quality.allRequiredChecksPassed = false;
+        return { exitCode: 1, result: passed, log: 'ran' };
+      };
+      const reverify = (runId: string, key: string, over: Record<string, unknown> = {}) => post(evApp, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: key, ...over });
+      const verifyingNow = () => t.db.execute(sql`SELECT status FROM task_status WHERE status = 'verifying'`);
+
+      it('reports not valid while it runs, promotes only on a new applied record, and runs no worker', async () => {
+        const { runId, sha, store } = await verifiedRun('t_stale');
+        const attemptsBefore = await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_stale'`);
+        trustedNow = STALE;
+        expect(await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: trustedNow })).toBeNull();
+
+        const first = await reverify(runId, 'k1');
+        expect(first.status).toBe(200);
+        expect(first.body).toMatchObject({ runId, reopened: ['t_stale'] });
+        // The status during a re-verify: `verifying`, attempt reopened, run out of review, the old record no longer live.
+        expect(await taskStatus('t_stale')).toBe('verifying');
+        expect(await lifecycle(runId)).toBe('running');
+        expect(await t.db.execute(sql`SELECT 1 FROM check_runs WHERE candidate_sha = ${sha} AND result <> 'invalidated'`)).toHaveLength(0);
+        expect(await t.db.execute(sql`SELECT 1 FROM events WHERE type = 'run.reverted'`)).toHaveLength(1);
+        // Nothing can read it as verified or open a PR on it while it is pending, even if the hashes now match again.
+        trustedNow = real;
+        expect(await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: real })).toBeNull();
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).body.error.details).toMatchObject({ reason: 'run_not_ready' });
+
+        // A repeat with the same key replays; a new key finds nothing more to do and spends nothing.
+        const same = await reverify(runId, 'k1');
+        expect(same.status).toBe(200);
+        const again = await reverify(runId, 'k2');
+        expect(again.status).toBe(403);
+        expect(again.body.error.details).toMatchObject({ reason: 'nothing_to_reverify' });
+        expect(await t.db.execute(sql`SELECT 1 FROM task_commands WHERE command = 'reverify'`)).toHaveLength(1);
+
+        // The driver reruns the same commit; the assembly driver has nothing to rebuild.
+        expect((await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick()).assembled).toEqual([]);
+        expect((await verification(store, verifierRunner).tick()).verified).toBe(sha);
+        expect(await taskStatus('t_stale')).toBe('verified');
+        expect(await lifecycle(runId)).toBe('ready_for_review');
+        const fresh = await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: real });
+        expect(fresh?.result).toBe('passed');
+        expect(await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_stale'`)).toEqual(attemptsBefore);
+        expect(await verifyingNow()).toHaveLength(0);
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).status).toBe(200);
+      });
+
+      it('a failed verdict blocks the task and schedules no repair worker', async () => {
+        const { runId, store } = await verifiedRun('t_stale_f');
+        const attemptsBefore = await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_stale_f'`);
+        trustedNow = STALE;
+        expect((await reverify(runId, 'f1')).status).toBe(200);
+        trustedNow = real;
+        await verification(store, failing).tick();
+        expect(await taskStatus('t_stale_f')).toBe('blocked');
+        expect(await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked' AND task_id = 't_stale_f'`)).toMatchObject([{ payload: { reason: 'reverification_failed' } }]);
+        expect(await lifecycle(runId)).toBe('running');
+        expect(await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_stale_f'`)).toEqual(attemptsBefore);
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).body.error.details).toMatchObject({ reason: 'run_not_ready' });
+      });
+
+      it('an infrastructure error ends blocked with no verified record, and the bound holds', async () => {
+        const { runId, sha, store } = await verifiedRun('t_stale_e');
+        trustedNow = STALE;
+        expect((await reverify(runId, 'e1')).status).toBe(200);
+        await verification(store, async () => ({ exitCode: null, result: null, log: 'docker daemon restarting' })).tick();
+        expect(await taskStatus('t_stale_e')).toBe('blocked');
+        expect(await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: real })).toBeNull();
+      });
+
+      it('leaves a valid record alone, and a spent bound leaves the task verified', async () => {
+        const { runId } = await verifiedRun('t_stale_b');
+        const valid = await reverify(runId, 'b1');
+        expect(valid.status).toBe(403);
+        expect(valid.body.error.details).toMatchObject({ reason: 'nothing_to_reverify' });
+        expect(await taskStatus('t_stale_b')).toBe('verified');
+
+        trustedNow = STALE;
+        await t.db.insert(schema.taskCommands).values([1, 2, 3].map((n) => ({ tenantId: TENANT, projectId: PROJECT, operationId: `op_b_${n}`, taskId: 't_stale_b', revision: 1, command: 'reverify', state: 'applied', requestedBy: 'owner', requestedAt: new Date() })));
+        const over = await reverify(runId, 'b2');
+        expect(over.status).toBe(403);
+        expect(over.body.error.details).toMatchObject({ reason: 'reverify_limit_reached', taskId: 't_stale_b' });
+        expect(await taskStatus('t_stale_b')).toBe('verified');
+        expect(await lifecycle(runId)).toBe('ready_for_review');
+        expect(await t.db.execute(sql`SELECT 1 FROM check_runs WHERE result = 'invalidated'`)).toHaveLength(0);
+      });
+
+      it('a stale record is refused to anyone but the owner and under a policy that withholds it', async () => {
+        const { runId } = await verifiedRun('t_stale_a');
+        trustedNow = STALE;
+        expect((await post(evApp, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'a1' }, { authorization: `Bearer ${INTRUDER_TOKEN}` })).status).toBe(403);
+        const denied = buildApp({ config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now: () => new Date(), scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy }), policy: { ...policy, operations: { ...policy.operations, assign_replan_tasks: 'deny' } }, evidence: { trusted: () => trustedNow, artifacts: new LocalDiskArtifactStore(artifactDir), loadRecord: async () => null } });
+        await denied.ready();
+        const r = await post(denied, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'a2' });
+        await denied.close();
+        expect(r.status).toBe(403);
+        expect(r.body.error.code).toBe('policy_denied');
+        expect(await taskStatus('t_stale_a')).toBe('verified');
+      });
     });
 
     it('is bounded, needs the owner, and refuses a run with nothing blocked on the verifier', async () => {
