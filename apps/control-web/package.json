@@ -15,6 +15,7 @@
     "@selarikru/domain": "workspace:*",
     "@selarikru/inference-firebase-web": "workspace:*",
     "@selarikru/policy": "workspace:*",
+    "@selarikru/view-protocol": "workspace:*",
     "firebase": "13.1.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
@@ -23,6 +24,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
     "@playwright/test": "1.65.0",
+    "@selarikru/data-source-mock": "workspace:*",
     "@tailwindcss/vite": "4.3.5",
     "@types/node": "24.19.2",
     "@types/react": "18.3.31",

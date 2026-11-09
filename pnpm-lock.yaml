@@ -72,6 +72,9 @@ importers:
       '@selarikru/policy':
         specifier: workspace:*
         version: link:../../packages/policy
+      '@selarikru/view-protocol':
+        specifier: workspace:*
+        version: link:../../packages/view-protocol
       firebase:
         specifier: 13.1.0
         version: 13.1.0
@@ -91,6 +94,9 @@ importers:
       '@playwright/test':
         specifier: 1.65.0
         version: 1.65.0
+      '@selarikru/data-source-mock':
+        specifier: workspace:*
+        version: link:../../packages/data-source-mock
       '@tailwindcss/vite':
         specifier: 4.3.5
         version: 4.3.5(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -160,6 +166,25 @@ importers:
         version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
   packages/artifacts:
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  packages/data-source-mock:
+    dependencies:
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@selarikru/view-protocol':
+        specifier: workspace:*
+        version: link:../view-protocol
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -338,6 +363,28 @@ importers:
         specifier: 5.1.0
         version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  packages/view-protocol:
+    dependencies:
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@selarikru/policy':
+        specifier: workspace:*
+        version: link:../policy
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   services/verifier:
     devDependencies:
       '@playwright/test':
@@ -386,12 +433,18 @@ importers:
 
   tests/conformance:
     dependencies:
+      '@selarikru/data-source-mock':
+        specifier: workspace:*
+        version: link:../../packages/data-source-mock
       '@selarikru/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       '@selarikru/runtime-docker-local':
         specifier: workspace:*
         version: link:../../packages/runtime-docker-local
+      '@selarikru/view-protocol':
+        specifier: workspace:*
+        version: link:../../packages/view-protocol
     devDependencies:
       '@types/node':
         specifier: 24.19.2

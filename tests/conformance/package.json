@@ -3,14 +3,16 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Reusable adapter conformance suites. The local sbx adapter runs runtime.ts against a fake always and against real sbx when SELARIKRU_REAL_SBX=1; the cloud adapter will run the same suite.",
+  "description": "Reusable adapter conformance suites. The local sbx adapter runs runtime.ts against a fake always and against real sbx when SELARIKRU_REAL_SBX=1; the cloud adapter will run the same suite. data-source.ts is the EngineeringDataSource suite; the mock runs it, and the live source will run it unchanged.",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@selarikru/protocol": "workspace:*",
-    "@selarikru/runtime-docker-local": "workspace:*"
+    "@selarikru/runtime-docker-local": "workspace:*",
+    "@selarikru/view-protocol": "workspace:*",
+    "@selarikru/data-source-mock": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
