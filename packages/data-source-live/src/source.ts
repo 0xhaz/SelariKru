@@ -29,7 +29,7 @@ const DROPPED: DataSourceError = { code: 'disconnected', message: 'the connectio
 const AUTH_CODES: readonly string[] = ['unauthenticated', 'invalid_token', 'not_owner', 'wrong_principal_type', 'origin_not_allowed', 'host_not_allowed'];
 const NOT_FOUND_CODES: readonly string[] = ['task_not_found', 'run_not_found', 'approval_not_found', 'not_found', 'project_not_found'];
 /** Reasons the route carries in `details.reason` on a 403, and the pull-request route's refusals. */
-const DETAIL_REASONS: readonly string[] = ['not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'nothing_to_rebuild', 'rebuild_limit_reached', 'resource_conflict', 'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged', 'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate'];
+const DETAIL_REASONS: readonly string[] = ['not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict', 'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged', 'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate'];
 
 interface WireError {
   readonly status: number;
@@ -93,7 +93,6 @@ function routeOf(c: AuthorizedViewCommand): Route {
     case 'approval.deny': return { path: `/v1/approvals/${enc(c.args.approvalId)}/resolve`, body: { decision: 'deny', scopeHash: c.args.scopeHash, expectedRevision: c.expectedRevision, ...key } };
     case 'run.accept_reduced_scope': return { path: `/v1/runs/${enc(c.args.runId)}/accept-reduced-scope`, body: { expectedPlanRevision: c.expectedRevision, notDeliveredHash: c.args.notDeliveredHash, ...(c.args.note !== undefined ? { note: c.args.note } : {}), ...key } };
     case 'run.reverify': return { path: `/v1/runs/${enc(c.args.runId)}/reverify`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
-    case 'run.rebuild': return { path: `/v1/runs/${enc(c.args.runId)}/rebuild`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
     case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: {} };
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
   }

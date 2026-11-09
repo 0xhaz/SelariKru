@@ -144,9 +144,6 @@ export async function closeVerificationWithoutVerdict(
  */
 export const REVERIFY_LIMIT = 3;
 
-/** Owner-requested rebuilds on a moved main per task revision. Past it, close the pull request; without one the driver rebuilds on its own. */
-export const REBUILD_LIMIT = 3;
-
 /** What each `reverify` command records: the attempt sent back, which is what carries the no-repair rule, and the verifier build it was asked of, which keys the bound. */
 const reverifyDetail = (attemptId: string, trusted: TrustedVerifier | null): Record<string, unknown> => ({ attemptId, ...(trusted ?? {}) });
 

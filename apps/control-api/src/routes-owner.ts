@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, REBUILD_LIMIT, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -537,47 +537,6 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     return reply.code(200).send(result);
   });
 
-  // ---- rebuild on a moved main --------------------------------------------------------------------------------
-  /**
-   * The owner's decision to rebuild a run whose target moved past its candidate while a pull request is open. It records the request; the assembly driver does the rebuild. Without a
-   * pull request the driver rebuilds on its own, so there is nothing here to ask for. The open pull request then carries a commit that is no longer current: `candidate_changed` names it.
-   */
-  app.post('/v1/runs/:id/rebuild', auth, async (req, reply) => {
-    const uid = ownerOf(req);
-    const body = parseBody(ReverifyRunRequestSchema, req.body);
-    const runId = idParam(req);
-    await requireRun(db, config.tenantId, runId);
-    const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
-    if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow rebuilding', { reason: gate.reason, decision: gate.decision });
-    const at = now();
-    const result = await withTx(db, async (tx) => {
-      const run = await requireRun(tx, config.tenantId, runId, true);
-      return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.rebuild:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
-        if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
-        const refuse = (reason: string, extra: Record<string, unknown> = {}) => new AppError(403, 'command_not_allowed', 'this run cannot be rebuilt', { reason, ...extra });
-        const [candidate] = await tx.execute(sql`
-          SELECT candidate_id, sha, parts, detail FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${run.projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL
-          ORDER BY created_at DESC, candidate_id DESC LIMIT 1 FOR UPDATE`);
-        const detail = (candidate?.['detail'] ?? {}) as { mainMoved?: { tipSha?: string }; rebuildRequested?: unknown };
-        const [pr] = await tx.select({ status: schema.changeRequests.status, candidateSha: schema.changeRequests.candidateSha }).from(schema.changeRequests).where(and(eq(schema.changeRequests.tenantId, config.tenantId), eq(schema.changeRequests.projectId, run.projectId), eq(schema.changeRequests.runId, runId)));
-        if (!candidate || detail.mainMoved?.tipSha === undefined || pr?.status !== 'open' || pr.candidateSha !== candidate['sha'] || run.lifecycle === 'merged') throw refuse('nothing_to_rebuild');
-        const sha = String(candidate['sha']);
-        // Asked already and not done yet: the same request, nothing more to spend.
-        if (detail.rebuildRequested !== undefined) return { runId, candidateSha: sha, state: 'requested' as const };
-        const parts = (candidate['parts'] as { taskId: string; revision: number }[] | null) ?? [];
-        for (const part of parts) {
-          const used = await tx.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, run.projectId), eq(schema.taskCommands.taskId, part.taskId), eq(schema.taskCommands.revision, part.revision), eq(schema.taskCommands.command, 'rebuild')));
-          if (used.length >= REBUILD_LIMIT) throw refuse('rebuild_limit_reached', { taskId: part.taskId });
-        }
-        const operationId = newId('op');
-        for (const part of parts) await tx.insert(schema.taskCommands).values({ tenantId: config.tenantId, projectId: run.projectId, operationId: `${operationId}_${part.taskId}`, taskId: part.taskId, revision: part.revision, command: 'rebuild', state: 'applied', requestedBy: uid, requestedAt: at, detail: { candidateSha: sha, tipSha: detail.mainMoved.tipSha } });
-        await tx.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{rebuildRequested}', ${JSON.stringify({ requestedBy: uid, at: at.toISOString() })}::jsonb) WHERE tenant_id = ${config.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${candidate['candidate_id'] as string}`);
-        return { runId, candidateSha: sha, state: 'requested' as const };
-      });
-    });
-    return reply.code(200).send(result);
-  });
-
   // ---- verification failures ---------------------------------------------------------------------------------
   /** Why a run's criteria failed, in the verifier's words. Candidate code influences those words, so they are redacted and bounded here and only ever rendered as text. */
   app.get('/v1/projects/:id/runs/:runId/failures', auth, async (req) => {
@@ -629,8 +588,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           .orderBy(sql`${schema.approvals.resolvedAt} DESC NULLS LAST`, desc(schema.approvals.createdAt)).limit(APPROVAL_HISTORY_LIMIT);
         const reports = await tx.select().from(schema.clientReports).where(scope(schema.clientReports)).orderBy(desc(schema.clientReports.createdAt)).limit(50);
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
-        // Read from the candidate, not the evidence report: a run with no requirement ids has no evidence report, and an open pull request still needs this said.
-        const movedCandidates = await tx.execute(sql`SELECT run_id, sha, base_sha, detail -> 'mainMoved' AS main_moved FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'assembled' AND detail -> 'mainMoved' IS NOT NULL`);
+        // A rebuild for a moved main retires the pull request's candidate first, so this is true from the moment the rebuild starts. Read from candidates, not the evidence report: a run with no requirement ids has none.
+        const retiredForMain = await tx.execute(sql`SELECT run_id, sha, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'invalidated' AND reason = 'base_changed' AND sha IS NOT NULL`);
+        const liveCandidates = await tx.execute(sql`SELECT run_id, sha FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'assembled' AND sha IS NOT NULL`);
         const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith(reducedScopeContext('')));
         // Why each blocked task stopped: the latest blocking event names it. Statuses alone can't say.
         const blockEvents = await tx.execute(sql`
@@ -771,11 +731,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           changeRequests: changes.map((c) => ({
             runId: c.runId, prNumber: c.prNumber, url: c.url, status: c.status, candidateSha: c.candidateSha, baseRef: c.baseRef,
             observedHeadSha: c.observedHeadSha ?? null, mergeCommitSha: c.mergeCommitSha ?? null, observedAt: c.observedAt?.toISOString() ?? null,
-            /** Main moved past this pull request's candidate. Set only by the assembly driver, once per tip, while the pull request is open. */
-            mainMoved: (() => {
-              const row = movedCandidates.find((m) => m['run_id'] === c.runId && m['sha'] === c.candidateSha);
-              const m = row?.['main_moved'] as { tipSha?: unknown; observedAt?: unknown } | undefined;
-              return c.status === 'open' && m && typeof m.tipSha === 'string' && typeof m.observedAt === 'string' ? { tipSha: m.tipSha, observedAt: m.observedAt, baseSha: String(row!['base_sha']) } : null;
+            /** The run's code was rebuilt on a newer main, so this open pull request no longer holds it. `rebuiltSha` is null while nothing has been built yet. */
+            outOfDate: (() => {
+              const retired = c.status === 'open' ? retiredForMain.find((m) => m['run_id'] === c.runId && m['sha'] === c.candidateSha) : undefined;
+              return retired ? { reason: 'main_moved', at: new Date(retired['updated_at'] as string | Date).toISOString(), rebuiltSha: (liveCandidates.find((l) => l['run_id'] === c.runId)?.['sha'] as string | undefined) ?? null } : null;
             })(),
           })),
           clientReports: reports.map((r) => ({

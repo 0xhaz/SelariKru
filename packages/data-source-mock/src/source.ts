@@ -235,7 +235,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const judged = Object.values(snap.checks).some((c) => live.some((t) => t.taskId === c.taskId));
     const candidate = judged ? {
       sha: SIMULATED_CANDIDATE, status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: 'd'.repeat(40), target: 'main', recordedAt: Object.values(snap.checks).map((c) => c.updatedAt).sort().at(-1)!,
-      recordId: 'ver_simulated', recordValid: true, verifierHost: 'demo-verifier', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: [], mainMoved: null,
+      recordId: 'ver_simulated', recordValid: true, verifierHost: 'demo-verifier', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: [],
     } : null;
     const criteria = live.flatMap((t) => {
       const seed = p.fixture.tasks.filter((x) => x.taskId === t.taskId && x.revision <= t.revision).sort((a, b) => b.revision - a.revision)[0]!;
@@ -359,7 +359,6 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const snap = p.state.snapshot;
     const op = `op_${seededId(prng, 'sim')}`;
     if (c.command === 'assignment.set') return setAssignment(p, c, op);
-    if (c.command === 'run.rebuild') return rejected(c.idempotencyKey, 'nothing_to_rebuild');
     if (c.command === 'run.accept_reduced_scope' || c.command === 'run.reverify' || c.command === 'run.open_pull_request') {
       const r = snap.runs[c.args.runId];
       if (!r) return rejected(c.idempotencyKey, 'unknown_target');
@@ -393,7 +392,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (prior && prior.status !== 'closed' && prior.status !== 'stale_candidate') return rejected(c.idempotencyKey, 'run_already_merged');
       const number = (prior?.prNumber ?? 11) + 1;
       const url = `https://github.com/selarikru-demo/feedback-board/pull/${number}`;
-      p.changeRequests = [...p.changeRequests.filter((x) => x.runId !== r.runId), { runId: r.runId, prNumber: number, url, status: 'open', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'c'.repeat(40), mergeCommitSha: null, observedAt: isoOf(timeOf(p)), mainMoved: null }];
+      p.changeRequests = [...p.changeRequests.filter((x) => x.runId !== r.runId), { runId: r.runId, prNumber: number, url, status: 'open', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'c'.repeat(40), mergeCommitSha: null, observedAt: isoOf(timeOf(p)), outOfDate: null }];
       appendCommandEvent(p, r.runId, 'change.proposed', { prNumber: number, url });
       return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
     }

@@ -1,13 +1,14 @@
 /**
  * Architecture section 6 rule 8: if main advances, rebuild the candidate and rerun affected gates. Real assembly and verification drivers against real git commits on the source repository's main.
- * With an open pull request the driver stands still and the owner decides.
+ * An open pull request does not stop it: the old one is left for a person to close, and the screens say it is out of date.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { reconcileRun } from '@selarikru/integrations-github';
-import { API_POLICY } from '@selarikru/control-api/test-helpers';
-import type { Policy } from '@selarikru/policy';
 import { failingOn, passing, post, PROJECT, sql, TENANT, World } from './world.ts';
 import { loadValidRecord } from '../../services/verifier/src/service.ts';
+import { toViewSnapshot } from '../../packages/data-source-live/src/snapshot.ts';
+import { buildDecisions } from '../../apps/control-web/src/features/decisions/model.ts';
+import { buildEvidence } from '../../apps/control-web/src/features/evidence/model.ts';
 
 let w: World;
 beforeAll(async () => { w = await World.create(); });
@@ -20,7 +21,13 @@ const live = () => w.t.db.execute(sql`SELECT sha, base_sha, detail FROM candidat
 const attempts = () => w.t.db.execute(sql`SELECT attempt_id, attempt_number FROM attempts ORDER BY attempt_number`);
 let landings = 0;
 const landOnMain = () => w.gitCommit('src/landed.ts', `export const landed = ${++landings};\n`);
-const rebuild = (runId: string, key: string, expectedPlanRevision = 1) => post(w.app, `/v1/runs/${runId}/rebuild`, { expectedPlanRevision, idempotencyKey: key });
+/** What a person actually reads: the live snapshot through the real conversion, into the real Decisions and Evidence models. */
+async function views(runId: string) {
+  const snapshot = toViewSnapshot(await w.snapshot());
+  const card = buildDecisions(snapshot, Date.now(), { mode: 'live', connection: 'live' }).cards.find((c) => c.id === `review:${runId}`)!;
+  const report = buildEvidence(snapshot, runId)!;
+  return { card, merged: report.states.find((x) => x.key === 'merged')! };
+}
 
 describe('main moves past a run that has no open pull request', () => {
   it('at ready_for_review: rebuilt on the new tip, re-verified with no worker redone, one live candidate throughout', async () => {
@@ -92,98 +99,84 @@ describe('main moves past a run that has no open pull request', () => {
 });
 
 describe('main moves past a run with an open pull request', () => {
-  async function reviewing(taskId: string): Promise<{ runId: string; sha: string; number: number }> {
-    const { runId, sha } = await w.verifiedRun([taskId]);
+  it('rebuilds and re-verifies with no worker, says the pull request is out of date, refuses a new one by name, and opens one after the old closes', async () => {
+    const { runId, sha: old } = await w.verifiedRun(['t_o'], () => ({ requirementIds: ['FB-01'] }));
     expect((await pr(runId)).status).toBe(200);
-    return { runId, sha, number: w.gh.prs[0]!.number };
-  }
-
-  it('does not rebuild: the commit stays under review, and the fact is written once for the tip', async () => {
-    const { runId, sha } = await reviewing('t_o');
-    const tip = landOnMain();
-
-    expect((await w.assembly().tick()).assembled).toEqual([]);
-    expect((await w.status('t_o')).status).toBe('verified');
-    expect(await w.lifecycle(runId)).toBe('ready_for_review');
-    expect(await valid(sha)).not.toBeNull();
-    const [first] = await live();
-    expect(first).toMatchObject({ sha, detail: { mainMoved: { tipSha: tip } } });
-
-    const events = await w.count('events');
-    w.advance(30);
-    for (let i = 0; i < 3; i++) await w.assembly().tick();
-    expect(await w.count('events')).toBe(events);
-    expect((await live())[0]!['detail']).toEqual(first!['detail']);
-
-    // Read through the snapshot the Decisions card uses, on a run with no requirement ids and so no evidence report.
-    const snap = await w.snapshot();
-    expect(snap.changeRequests).toMatchObject([{ runId, candidateSha: sha, mainMoved: { tipSha: tip, baseSha: w.baseSha } }]);
-  });
-
-  it('the fact also reaches the evidence report of a run with criteria', async () => {
-    const { runId, sha } = await w.verifiedRun(['t_e'], () => ({ requirementIds: ['FB-01'] }));
-    expect((await pr(runId)).status).toBe(200);
-    const tip = landOnMain();
-    await w.assembly().tick();
-    const run = (await w.snapshot()).runs.find((r: { runId: string }) => r.runId === runId);
-    expect(run.evidence.candidate).toMatchObject({ sha, mainMoved: { tipSha: tip } });
-  });
-
-  it('the owner’s rebuild rebuilds, re-verifies with no worker, and the old pull request is then refused by name', async () => {
-    const { runId, sha, number } = await reviewing('t_r');
+    const number = w.gh.prs[0]!.number;
     const before = await attempts();
-    landOnMain();
-    await w.assembly().tick();
-
-    const asked = await rebuild(runId, 'k1');
-    expect(asked.status).toBe(200);
-    expect(asked.body).toMatchObject({ runId, candidateSha: sha, state: 'requested' });
-    expect((await rebuild(runId, 'k1')).body).toEqual(asked.body);
-    expect(await w.count('task_commands', `command = 'rebuild'`)).toBe(1);
+    const callsBefore = [...w.gh.calls];
+    const tip = landOnMain();
 
     const tick = await w.assembly().tick();
+    expect(tick.failed).toEqual([]);
     expect(tick.assembled).toHaveLength(1);
     const fresh = tick.assembled[0]!;
-    expect(fresh).not.toBe(sha);
+    expect(fresh).not.toBe(old);
+    expect(await live()).toMatchObject([{ sha: fresh, base_sha: tip }]);
+    expect(await valid(old)).toBeNull();
+    expect((await w.status('t_o')).status).toBe('verifying');
     expect(await w.lifecycle(runId)).toBe('running');
-    expect((await w.verification(passing).tick()).verified).toBe(fresh);
     expect(await attempts()).toEqual(before);
+
+    // As soon as the rebuild has started, before any verdict.
+    const during = await views(runId);
+    expect(during.card).toMatchObject({ kind: 'reconciliation', chip: 'Pull request out of date' });
+    expect(during.card.title).toBe(`Pull request #${number} no longer holds the verified code`);
+    expect(during.card.summary).toContain('The rebuilt code has not passed verification yet.');
+    expect(during.card.note).toContain('open the new one once verification passes');
+    expect(during.merged).toMatchObject({ value: 'Pull request out of date', tone: 'warning' });
+
+    expect((await w.verification(passing).tick()).verified).toBe(fresh);
+    expect(await w.lifecycle(runId)).toBe('ready_for_review');
+    expect(await attempts()).toEqual(before);
+
+    // Back in review, the old pull request still must not read as ready.
+    const after = await views(runId);
+    expect(after.card).toMatchObject({ kind: 'reconciliation', chip: 'Pull request out of date' });
+    expect(after.card.summary).toContain('The rebuilt code has passed verification.');
+    expect(after.card.title).not.toMatch(/ready for your review/i);
+    expect(after.merged.detail).toContain(`Pull request #${number} no longer holds the verified code`);
 
     const refused = await pr(runId);
     expect(refused.status).toBe(409);
     expect(refused.body.error.details).toMatchObject({ reason: 'candidate_changed', prNumber: number });
     expect(w.gh.prs).toHaveLength(1);
+    // Nothing closed or touched the old one for the owner.
+    expect(w.gh.calls.slice(callsBefore.length).filter((c) => c !== 'findPullRequest' && c !== 'branchHead')).toEqual([]);
+    expect(w.gh.prs[0]).toMatchObject({ number, state: 'open' });
 
-    // That pull request now carries an old commit, so nobody is reviewing this candidate through it: the next move of main rebuilds again on its own.
-    landOnMain();
-    expect((await w.assembly().tick()).assembled).toHaveLength(1);
-  });
-
-  it('the owner’s rebuild is refused with nothing to rebuild, to anyone but the owner, past its bound, and under a denying policy', async () => {
-    const { runId } = await reviewing('t_b');
-    expect((await rebuild(runId, 'early')).body.error.details.reason).toBe('nothing_to_rebuild');
-    landOnMain();
-    await w.assembly().tick();
-    expect((await post(w.app, `/v1/runs/${runId}/rebuild`, { expectedPlanRevision: 1, idempotencyKey: 'r' }, { authorization: `Bearer ${w.token}` })).status).toBe(403);
-    expect((await rebuild(runId, 'stale', 9)).status).toBe(409);
-
-    await w.t.db.execute(sql`INSERT INTO task_commands (tenant_id, project_id, operation_id, task_id, revision, command, state, requested_by, requested_at, detail)
-      SELECT ${TENANT}, ${PROJECT}, 'op_' || n, 't_b', 1, 'rebuild', 'applied', 'owner', now(), '{}'::jsonb FROM generate_series(1, 3) n`);
-    const over = await rebuild(runId, 'k2');
-    expect(over.status).toBe(403);
-    expect(over.body.error.details).toMatchObject({ reason: 'rebuild_limit_reached', taskId: 't_b' });
-    expect((await live())[0]!['detail']).not.toHaveProperty('rebuildRequested');
-  });
-
-  it('after the pull request is closed the driver rebuilds on its own', async () => {
-    const { runId, number } = await reviewing('t_cl');
-    landOnMain();
-    await w.assembly().tick();
     w.gh.humanCloses(number);
-    await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId }, { db: w.t.db, port: w.gh, now: w.now });
-    // The fact is still on the candidate, but with no open pull request there is nothing for the owner to ask for.
-    expect((await rebuild(runId, 'closed')).body.error.details.reason).toBe('nothing_to_rebuild');
-    expect((await w.assembly().tick()).assembled).toHaveLength(1);
+    expect(await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId }, { db: w.t.db, port: w.gh, now: w.now })).toEqual({ status: 'closed' });
+    const opened = await pr(runId);
+    expect(opened.status, JSON.stringify(opened.body)).toBe(200);
+    expect(opened.body).toMatchObject({ status: 'opened', candidateSha: fresh, adopted: false });
+    expect(w.gh.prs).toHaveLength(2);
+    expect((await views(runId)).card.chip).not.toBe('Pull request out of date');
+  });
+
+  it('a person merging the old pull request is recorded as stale and counts for nothing', async () => {
+    const { runId } = await w.verifiedRun(['t_s']);
+    expect((await pr(runId)).status).toBe(200);
+    const number = w.gh.prs[0]!.number;
+    landOnMain();
+    const fresh = (await w.assembly().tick()).assembled[0]!;
+    expect((await w.verification(passing).tick()).verified).toBe(fresh);
+
+    w.gh.humanMerges(number);
+    expect(await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId }, { db: w.t.db, port: w.gh, now: w.now })).toEqual({ status: 'stale' });
+    expect(await w.count('change_requests', `status = 'stale_candidate'`)).toBe(1);
+    expect(await w.count('events', `type = 'change.merged'`)).toBe(0);
+    expect((await w.status('t_s')).status).toBe('verified');
+    expect(await w.lifecycle(runId)).toBe('ready_for_review');
+  });
+
+  it('a pull request main has not left behind is not called out of date', async () => {
+    const { runId } = await w.verifiedRun(['t_k']);
+    expect((await pr(runId)).status).toBe(200);
+    expect((await w.assembly().tick()).assembled).toEqual([]);
+    const { card, merged } = await views(runId);
+    expect(card).toMatchObject({ kind: 'merge_review', chip: 'Merge readiness' });
+    expect(merged.value).toBe('Awaiting a human merge');
   });
 });
 
@@ -200,7 +193,6 @@ describe('what never moves', () => {
     expect((await w.status('t_m')).status).toBe('merged');
     expect(await w.count('events')).toBe(events);
     expect(await w.count('candidates', `sha <> '${sha}'`)).toBe(0);
-    expect((await live())[0]!['detail']).not.toHaveProperty('mainMoved');
   });
 
   it('a merge a person made of something else stops the driver: only they can say what it means', async () => {
@@ -229,18 +221,6 @@ describe('what never moves', () => {
       expect(await valid(sha)).not.toBeNull();
     } finally {
       w.git('update-ref', 'refs/heads/main', w.baseSha);
-    }
-  });
-
-  it('a policy that withholds replanning withholds the rebuild', async () => {
-    const deny = await World.create({ policy: { ...API_POLICY, operations: { assign_replan_tasks: 'deny' } } as Policy });
-    try {
-      await deny.reset();
-      const res = await post(deny.app, '/v1/runs/run_a/rebuild', { expectedPlanRevision: 0, idempotencyKey: 'p' });
-      expect(res.status).toBe(403);
-      expect(res.body.error.code).toBe('policy_denied');
-    } finally {
-      await deny.destroy();
     }
   });
 });

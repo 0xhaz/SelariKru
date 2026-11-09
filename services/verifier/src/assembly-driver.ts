@@ -13,10 +13,10 @@
  * - An infrastructure failure (`INFRASTRUCTURE_FAILURES`, a stale git lock, a moved artifact directory, a tip that cannot be read) is no verdict. It writes
  *   no failure row and no event, keeps its count and next time on a `retrying` row, and is tried again on a doubling delay. Past the bound the parts move to
  *   `blocked` with the reason, one `task.blocked` each, so the owner sees it and can re-verify.
- * - Main moving (architecture section 6 rule 8): a live candidate built on anything but the target's current tip is stale. With no open pull request it is rebuilt here, through `assembleCandidate`:
- *   verified parts go back to `verifying` and no worker runs. A failed verdict on a part that had been verified blocks it (`reverification_failed`); nothing starts a repair. A conflict and an
- *   infrastructure failure take the paths above. With a pull request open nothing moves until the owner asks: rebuilding would pull the commit out from under a person reviewing it, so the fact is
- *   written once per tip and the card says so. A merged run is never touched. A tip that cannot be read concludes nothing and writes nothing.
+ * - Main moving (architecture section 6 rule 8): a live candidate built on anything but the target's current tip is stale, and is rebuilt here through `assembleCandidate`, whether or not a
+ *   pull request is open: verified parts go back to `verifying` and no worker runs. A failed verdict on a part that had been verified blocks it (`reverification_failed`); nothing starts a repair. A
+ *   conflict and an infrastructure failure take the paths above. An open pull request keeps the old commit: agents never close one, `candidate_changed` refuses a new one until a person does, and a
+ *   merge of the old one records `stale_candidate`. A merged run is never touched. A tip that cannot be read concludes nothing and writes nothing.
  *
  * Imports are relative for the same reason as `service.ts`.
  */
@@ -78,7 +78,7 @@ interface TaskRow { readonly spec: TaskSpec; readonly status: string; readonly a
 type Part = { readonly taskId: string; readonly revision: number; readonly attemptId: string };
 interface Due { readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string; readonly partsKey: string; readonly parts: readonly Part[]; readonly baseMoved: boolean }
 type TipReader = (target: string) => Promise<string>;
-interface LiveCandidate { readonly candidateId: string; readonly sha: string; readonly baseSha: string; readonly target: string; readonly parts: readonly Part[]; readonly detail: { readonly mainMoved?: { readonly tipSha?: string }; readonly rebuildRequested?: unknown } }
+interface LiveCandidate { readonly baseSha: string; readonly target: string; readonly parts: readonly Part[] }
 /** Nothing to do, due, or a failure before assembly could start (the tip could not be read). */
 type Assessment = { readonly kind: 'idle' } | { readonly kind: 'due'; readonly due: Due } | { readonly kind: 'infrastructure'; readonly partsKey: string; readonly parts: readonly Part[]; readonly pinnedBaseSha: string; readonly target: string; readonly reason: string; readonly message: string };
 const RETRY_STATUS = 'retrying';
@@ -159,11 +159,6 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
 
   const dueKeys = (target: string, pinnedBaseSha: string, parts: readonly TaskRow[]) => sha256(JSON.stringify({ pinnedBaseSha, target, parts: parts.map((t) => [t.spec.taskId, t.spec.revision, t.attemptId, t.manifest]).sort() }));
   const pinnedBaseOf = (tasks: readonly TaskRow[], fallback: TaskRow): string => (tasks.find((t) => DONE_STATUSES.has(t.status) && t.spec.role !== 'integration') ?? fallback).spec.baseSha;
-  /** Set when the row is a live candidate and the fact is new for this tip. Never written twice for one tip, so a poll costs no write. */
-  const noteMainMoved = (projectId: string, candidateId: string, tipSha: string) => db.execute(sql`
-    UPDATE candidates SET detail = jsonb_set(detail, '{mainMoved}', jsonb_build_object('tipSha', ${tipSha}::text, 'observedAt', ${now().toISOString()}::text))
-    WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${candidateId} AND status = 'assembled' AND detail -> 'mainMoved' ->> 'tipSha' IS DISTINCT FROM ${tipSha}::text`);
-
   /** A live candidate whose base is no longer the target's tip. Idle unless it should be rebuilt now; a tip that cannot be read is idle too, and nothing about it is recorded. */
   async function assessMoved(projectId: string, runId: string, tasks: readonly TaskRow[], live: LiveCandidate, tip: TipReader): Promise<Assessment> {
     const [run] = await db.execute(sql`SELECT lifecycle FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
@@ -176,18 +171,9 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     } catch {
       return { kind: 'idle' };
     }
-    if (tipSha === '') return { kind: 'idle' };
-    if (tipSha === live.baseSha) {
-      if (live.detail.mainMoved !== undefined) await db.execute(sql`UPDATE candidates SET detail = detail - 'mainMoved' WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${live.candidateId}`);
-      return { kind: 'idle' };
-    }
-    const [pr] = await db.execute(sql`SELECT status, candidate_sha FROM change_requests WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
+    if (tipSha === '' || tipSha === live.baseSha) return { kind: 'idle' };
+    const [pr] = await db.execute(sql`SELECT status FROM change_requests WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
     if (pr && MERGED_PR_STATUSES.has(String(pr['status']))) return { kind: 'idle' };
-    // Open on a different commit is a pull request nobody is reviewing this candidate through: `candidate_changed` already names it.
-    if (pr && pr['status'] === 'open' && pr['candidate_sha'] === live.sha && live.detail.rebuildRequested === undefined) {
-      await noteMainMoved(projectId, live.candidateId, tipSha);
-      return { kind: 'idle' };
-    }
     const partTasks = live.parts.map((p) => tasks.find((t) => t.spec.taskId === p.taskId && t.spec.revision === p.revision && t.attemptId === p.attemptId));
     if (partTasks.length === 0 || partTasks.some((t) => t === undefined || (t.status !== 'verifying' && t.status !== 'verified') || t.manifest === null)) return { kind: 'idle' };
     // Work still running belongs in the next candidate, which the ordinary path builds on the tip when it finishes.
@@ -209,13 +195,13 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const tasks = await loadRunTasks(db, tenantId, projectId, runId);
     // A verifying part with no published change set cannot enter a candidate; it counts as unfinished below.
     const waiting = tasks.filter((t) => t.status === 'verifying' && t.attemptId !== null && t.manifest !== null);
-    const liveRows = await db.execute(sql`SELECT candidate_id, sha, base_sha, target, parts, detail FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
+    const liveRows = await db.execute(sql`SELECT base_sha, target, parts FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
     const live = new Set(liveRows.flatMap((r) => (r['parts'] as Part[]).map(partKey)));
     if (waiting.every((t) => live.has(partKey({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! })))) {
       // Nothing is waiting to be built, so the only work left here is a candidate the target has moved past. More than one live candidate is not a state to act on.
       if (liveRows.length !== 1) return { kind: 'idle' };
       const row = liveRows[0]!;
-      return assessMoved(projectId, runId, tasks, { candidateId: String(row['candidate_id']), sha: String(row['sha']), baseSha: String(row['base_sha']), target: String(row['target']), parts: row['parts'] as Part[], detail: row['detail'] as LiveCandidate['detail'] }, tip);
+      return assessMoved(projectId, runId, tasks, { baseSha: String(row['base_sha']), target: String(row['target']), parts: row['parts'] as Part[] }, tip);
     }
 
     const waitingIds = new Set(waiting.map((t) => t.spec.taskId));

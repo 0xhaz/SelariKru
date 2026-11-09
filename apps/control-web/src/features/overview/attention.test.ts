@@ -198,10 +198,17 @@ describe('attention queue', () => {
     expect(buildAttention(snapshot, nowMs, nowMs).map((i) => i.kind)).toEqual(['information']);
   });
 
+  it('does not call a run ready for review while its open pull request holds code from before main moved', () => {
+    const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
+    s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+    (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'open', candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: null, observedAt: iso(0), outOfDate: { reason: 'main_moved', at: iso(0), rebuiltSha: 'c'.repeat(40) } }];
+    expect(buildAttention(s, NOW, NOW).find((i) => i.id === 'review:run')).toMatchObject({ title: 'Pull request #7 no longer holds the verified code', nextAction: 'Close pull request #7 on GitHub, then open the new one.' });
+  });
+
   describe('a record that no longer stands', () => {
     const shaped = (recordValid: boolean, lifecycle: 'ready_for_review' | 'merged' = 'ready_for_review') => {
       const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
-      s.runs['run'] = { ...s.runs['run']!, lifecycle, criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(30), recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [], mainMoved: null }, criteria: [{ criterionId: 'FB-01', description: null, state: 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
+      s.runs['run'] = { ...s.runs['run']!, lifecycle, criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(30), recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state: 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
       return s;
     };
 

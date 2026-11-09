@@ -380,23 +380,23 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
       fingerprint: ['recon', cr.status, cr.observedHeadSha, cr.mergeCommitSha, cr.candidateSha].join('|'),
     }];
   }
-  // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.
-  if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) return [];
-  const moved = cr?.status === 'open' ? cr.mainMoved : null;
-  if (cr && moved) {
+  // Shown from the moment the rebuild starts, whatever the lifecycle: this pull request must never read as ready while it holds code the run has moved on from.
+  if (cr?.status === 'open' && cr.outOfDate) {
+    const { rebuiltSha, at } = cr.outOfDate;
+    const passed = rebuiltSha !== null && run.lifecycle === 'ready_for_review' && !recordNoLongerValid(run);
+    const stage = rebuiltSha === null ? 'The rebuilt commit does not exist yet.' : passed ? 'The rebuilt code has passed verification.' : 'The rebuilt code has not passed verification yet.';
     return [{
-      ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Main moved', tone: 'warning', title: `Main moved since pull request #${cr.prNumber} was verified`,
-      summary: `${evidence}, on a commit built before main moved. SelariKru has not verified this change against what is on main now.`,
-      consequence: 'Merging now is only as safe as GitHub\'s own up-to-date rule. Nothing here rebuilds the commit under your review unless you ask.', note: 'Merging is a human action on GitHub.',
-      facts: [{ label: 'Target branch', value: cr.baseRef, mono: true }, { label: 'Verified on', value: short(moved.baseSha), mono: true }, { label: 'Main is now at', value: short(moved.tipSha), mono: true }, { label: 'Candidate', value: short(cr.candidateSha), mono: true }],
-      details: [{ label: 'Candidate', value: cr.candidateSha }, { label: 'Main is now at', value: moved.tipSha }, { label: 'Pull request URL', value: cr.url }, { label: 'Main moved, observed', value: moved.observedAt }],
-      actions: [prLink(cr, options.mode, simulated), {
-        kind: 'command', id: 'rebuild', label: 'Rebuild on current main', style: 'primary', disabledReason: paused, intent: { command: 'run.rebuild', expectedRevision: run.planRevision, args: { runId: run.runId } },
-        confirm: { title: `Rebuild while pull request #${cr.prNumber} is open?`, consequence: `The run leaves review until the rebuilt commit has a verdict, and no worker runs. Pull request #${cr.prNumber} keeps the old commit: close it to open one for the rebuilt candidate.`, keepLabel: 'Keep the pull request as it is' },
-      }],
-      since: moved.observedAt, fingerprint: ['review-moved', cr.status, cr.candidateSha, moved.tipSha].join('|'),
+      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Pull request out of date', tone: 'warning', title: `Pull request #${cr.prNumber} no longer holds the verified code`,
+      summary: `Main moved, so the code was rebuilt on the new main. This pull request still holds the old commit. ${stage}`,
+      consequence: 'A merge of this pull request would not be recorded for this run, and no task would count as merged.',
+      note: `Close pull request #${cr.prNumber} on GitHub, and open the new one once verification passes. Agents never close pull requests.`,
+      facts: [{ label: 'Status', value: 'Out of date: main moved' }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Verification of the rebuild', value: passed ? 'Passed' : 'Not passed yet' }],
+      details: [{ label: 'Old commit', value: cr.candidateSha }, { label: 'Rebuilt commit', value: rebuiltSha ?? 'None' }, { label: 'Pull request URL', value: cr.url }],
+      actions: [prLink(cr, options.mode, simulated)], since: at, fingerprint: ['out-of-date', cr.prNumber, cr.candidateSha, rebuiltSha, passed].join('|'),
     }];
   }
+  // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.
+  if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) return [];
   if (cr && cr.status === 'open') {
     return [{
       ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Merge readiness', tone: 'success', title: `Pull request #${cr.prNumber} is ready for your review`,

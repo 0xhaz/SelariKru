@@ -203,7 +203,7 @@ function mergeFlow(): Fixture {
 const CANDIDATE = 'c'.repeat(40);
 const PR_URL = 'https://github.com/selarikru-demo/feedback-board/pull/12';
 const changeRequest = (b: FixtureBuilder, over: Partial<ChangeRequestView> = {}): ChangeRequestView => ({
-  runId: b.runId, prNumber: 12, url: PR_URL, status: 'open', candidateSha: CANDIDATE, baseRef: 'main', observedHeadSha: CANDIDATE, mergeCommitSha: null, observedAt: fixtureTime(66), mainMoved: null, ...over,
+  runId: b.runId, prNumber: 12, url: PR_URL, status: 'open', candidateSha: CANDIDATE, baseRef: 'main', observedHeadSha: CANDIDATE, mergeCommitSha: null, observedAt: fixtureTime(66), outOfDate: null, ...over,
 });
 
 /** Approvals a person can act on. Cloud starts wait at claim with no attempt, as the scheduler does; worker requests interrupt their attempt. */

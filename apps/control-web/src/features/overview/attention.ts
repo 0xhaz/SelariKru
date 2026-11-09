@@ -297,12 +297,14 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const why = stopped.length === cancelled.length ? 'stopped for budget' : stopped.length === 0 ? 'cancelled' : 'cancelled or stopped for budget';
     const criteria = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : null;
     const uncovered = stopped.some((t) => !reducedScopeCovers(run, t));
+    // Main moved and the code was rebuilt: what is open on GitHub is not what was verified.
+    const outOfDate = snapshot.changeRequests.find((c) => c.runId === run.runId && c.status === 'open' && c.outOfDate !== null);
     items.push(make({
       id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
-      title: 'Run is ready for your review',
+      title: outOfDate ? `Pull request #${outOfDate.prNumber} no longer holds the verified code` : 'Run is ready for your review',
       // Budget-stopped work never reads as done: this run did not deliver everything it planned.
       detail: undelivered ? `${cancelled.length > 0 ? `${stoppedWord} not delivered: ${why}.` : 'Some planned work was not delivered.'}${criteria ? ` ${criteria}` : ' Not every planned task is verified.'}` : (criteria ?? 'Every task is verified at the current revision. Per-criterion evidence is not connected.'),
-      consequence: 'Nothing merges without you. Agents never merge.', nextAction: uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
+      consequence: 'Nothing merges without you. Agents never merge.', nextAction: outOfDate ? `Close pull request #${outOfDate.prNumber} on GitHub, then open the new one.` : uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
     }));
   }
 

@@ -41,8 +41,8 @@ export interface CandidateModel {
   readonly anchor: string;
   readonly facts: readonly { readonly label: string; readonly value: string }[];
   readonly flaky: readonly string[];
-  /** Main moved past this candidate's base while a pull request is open. Null: not observed. */
-  readonly mainMoved: { readonly tipShort: string; readonly note: string } | null;
+  /** An open pull request still holds the code from before main moved. Null: none does. */
+  readonly outOfDateNote: string | null;
   /** A link to the commit on GitHub. Only an observed pull request makes it a real address. */
   readonly commitHref: string | null;
 }
@@ -104,6 +104,8 @@ function verifiedState(run: RunView, evidence: RunEvidenceView | null): Delivery
   return { ...base, value: 'Not verified', tone: 'neutral', detail: `0 of ${total} approved criteria verified yet.${shortfall}`, established: false };
 }
 
+const outOfDateText = (prName: string): string => `Main moved and the code was rebuilt. ${prName} no longer holds the verified code. Close it, and open the new one once verification passes.`;
+
 function mergedState(run: RunView, snapshot: ProjectViewSnapshot, simulated: boolean): DeliveryState {
   const base = { key: 'merged' as const, title: 'Merged' };
   const cr = snapshot.changeRequests.find((c) => c.runId === run.runId);
@@ -112,6 +114,7 @@ function mergedState(run: RunView, snapshot: ProjectViewSnapshot, simulated: boo
   if (cr?.status === 'merged') return { ...base, value: 'Merged', tone: 'success', detail: `${prName} was merged by a person on GitHub${cr.mergeCommitSha ? ` as ${shortSha(cr.mergeCommitSha)}` : ''}.`, established: true, link: prLink };
   if (cr?.status === 'merged_sha_mismatch') return { ...base, value: 'Merge not recorded', tone: 'danger', detail: `${prName} merged a commit that is not the verified one, so no merge is recorded.`, established: false, link: prLink };
   if (cr?.status === 'stale_candidate') return { ...base, value: 'Not merged', tone: 'warning', detail: `${prName} no longer holds the run's candidate.`, established: false, link: prLink };
+  if (cr?.status === 'open' && cr.outOfDate) return { ...base, value: 'Pull request out of date', tone: 'warning', detail: outOfDateText(prName), established: false, link: prLink };
   if (cr?.status === 'open') return { ...base, value: 'Awaiting a human merge', tone: 'neutral', detail: `${prName} is open. Merging happens on GitHub; agents never merge.`, established: false, link: prLink };
   if (cr) return { ...base, value: 'Not merged', tone: 'neutral', detail: `${prName} is ${cr.status}.`, established: false, link: prLink };
   return { ...base, value: 'Not merged', tone: 'neutral', detail: 'No pull request has been opened for this run.', established: false, link: null };
@@ -155,7 +158,7 @@ function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectV
   const commitHref = !simulated && cr ? `${cr.url.replace(/\/pull\/\d+$/, '')}/commit/${c.sha}` : null;
   return {
     sha: c.sha, short: shortSha(c.sha), statusLabel: c.live ? 'Current' : (c.status === 'rejected' ? 'Rejected' : c.status), live: c.live, recordValid: c.recordValid, anchor: CANDIDATE_ANCHOR, commitHref, flaky: c.flaky,
-    mainMoved: c.mainMoved ? { tipShort: shortSha(c.mainMoved.tipSha), note: `Main moved to ${shortSha(c.mainMoved.tipSha)} since this was verified. It has not been verified against that commit; merging now is only as safe as GitHub's own up-to-date rule.` } : null,
+    outOfDateNote: cr?.status === 'open' && cr.outOfDate ? outOfDateText(`Pull request #${cr.prNumber}`) : null,
     facts: [
       { label: 'Base commit', value: c.baseSha }, { label: 'Tree', value: c.treeSha ?? 'Not recorded' }, { label: 'Target branch', value: c.target },
       { label: 'Verification record', value: c.recordId ?? 'Not recorded' }, { label: 'Verified on', value: c.verifierHost ?? 'Not recorded' }, { label: 'Check manifest', value: c.checkManifestSha256 ? `sha256:${c.checkManifestSha256.slice(0, 16)}` : 'Not recorded' }, { label: 'Verifier', value: c.verifierSha256 ? `sha256:${c.verifierSha256.slice(0, 16)}` : 'Not recorded' },

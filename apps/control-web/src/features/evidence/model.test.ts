@@ -8,21 +8,27 @@ const criterion = (id: string, over: Partial<CriterionEvidenceView> = {}): Crite
   check: { checkRunId: `chk_${id}`, checkId: id, checkVersion: '1', taskId: 't1', revision: 1, attemptId: 'att', recordId: 'ver_1', verificationAttempt: 1, at: '2026-11-09T01:00:00.000Z' }, ...over,
 });
 const evidence = (criteria: CriterionEvidenceView[], live = true, recordValid = true): RunEvidenceView => ({
-  candidate: { sha: SHA, status: live ? 'assembled' : 'rejected', live, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: 'h', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: ['FB-02'], mainMoved: null }, criteria,
+  candidate: { sha: SHA, status: live ? 'assembled' : 'rejected', live, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: 'h', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: ['FB-02'] }, criteria,
 });
 function snap(run: Partial<RunView>, over: Partial<ProjectViewSnapshot> = {}): ProjectViewSnapshot {
   const base: RunView = { runId: 'r1', lifecycle: 'ready_for_review', planRevision: 1, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null, ...run };
   return { ...emptySnapshot({ projectId: 'p', observedAt: '2026-11-09T01:00:00.000Z', provenance: 'observed' }), runs: { r1: base }, ...over };
 }
 const states = (m: NonNullable<ReturnType<typeof buildEvidence>>) => Object.fromEntries(m.states.map((s) => [s.key, s]));
-const cr = (status: string, over = {}) => ({ runId: 'r1', prNumber: 12, url: 'https://github.com/acme/app/pull/12', status, candidateSha: SHA, baseRef: 'main', observedHeadSha: SHA, mergeCommitSha: null, observedAt: '2026-11-09T01:00:00.000Z', mainMoved: null, ...over });
+const cr = (status: string, over = {}) => ({ runId: 'r1', prNumber: 12, url: 'https://github.com/acme/app/pull/12', status, candidateSha: SHA, baseRef: 'main', observedHeadSha: SHA, mergeCommitSha: null, observedAt: '2026-11-09T01:00:00.000Z', outOfDate: null, ...over });
 
-describe('a candidate main has moved past', () => {
-  it('names the new tip and says it was not verified against it', () => {
-    const e = evidence([]);
-    const m = buildEvidence(snap({ evidence: { ...e, candidate: { ...e.candidate!, mainMoved: { tipSha: 'c'.repeat(40), observedAt: '2026-11-09T00:00:00.000Z' } } } }), { mode: 'live' } as never);
-    expect(m?.candidate?.mainMoved?.note).toContain('has not been verified against that commit');
-    expect(buildEvidence(snap({ evidence: e }), { mode: 'live' } as never)?.candidate?.mainMoved).toBeNull();
+describe('a pull request main has left behind', () => {
+  const outOfDate = { reason: 'main_moved' as const, at: '2026-11-09T02:00:00.000Z', rebuiltSha: 'c'.repeat(40) };
+  it('says so in the delivery state and on the candidate, and never reads as awaiting a merge', () => {
+    const m = buildEvidence(snap({ evidence: evidence([]) }, { changeRequests: [cr('open', { outOfDate })] }), null)!;
+    expect(states(m)['merged']).toMatchObject({ value: 'Pull request out of date', tone: 'warning', established: false });
+    expect(states(m)['merged']!.detail).toContain('no longer holds the verified code');
+    expect(m.candidate?.outOfDateNote).toContain('Close it, and open the new one once verification passes');
+  });
+  it('stays quiet for a pull request that still holds the code', () => {
+    const m = buildEvidence(snap({ evidence: evidence([]) }, { changeRequests: [cr('open')] }), null)!;
+    expect(states(m)['merged']!.value).toBe('Awaiting a human merge');
+    expect(m.candidate?.outOfDateNote).toBeNull();
   });
 });
 
