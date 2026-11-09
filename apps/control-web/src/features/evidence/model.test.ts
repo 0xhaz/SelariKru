@@ -18,17 +18,21 @@ const states = (m: NonNullable<ReturnType<typeof buildEvidence>>) => Object.from
 const cr = (status: string, over = {}) => ({ runId: 'r1', prNumber: 12, url: 'https://github.com/acme/app/pull/12', status, candidateSha: SHA, baseRef: 'main', observedHeadSha: SHA, mergeCommitSha: null, observedAt: '2026-11-09T01:00:00.000Z', outOfDate: null, ...over });
 
 describe('a pull request main has left behind', () => {
-  const outOfDate = { reason: 'main_moved' as const, at: '2026-11-09T02:00:00.000Z', rebuiltSha: 'c'.repeat(40) };
+  const outOfDate = { reason: 'main_moved' as const, at: '2026-11-09T02:00:00.000Z', rebuiltSha: 'c'.repeat(40), rebuild: 'verified' as const };
   it('says so in the delivery state and on the candidate, and never reads as awaiting a merge', () => {
     const m = buildEvidence(snap({ evidence: evidence([]) }, { changeRequests: [cr('open', { outOfDate })] }), null)!;
     expect(states(m)['merged']).toMatchObject({ value: 'Pull request out of date', tone: 'warning', established: false });
     expect(states(m)['merged']!.detail).toContain('no longer holds the verified code');
-    expect(m.candidate?.outOfDateNote).toContain('Close it, and open the new one once verification passes');
+    expect(m.candidate?.outOfDateNote).toContain('Close it, and open the new one.');
   });
   it('stays quiet for a pull request that still holds the code', () => {
     const m = buildEvidence(snap({ evidence: evidence([]) }, { changeRequests: [cr('open')] }), null)!;
     expect(states(m)['merged']!.value).toBe('Awaiting a human merge');
     expect(m.candidate?.outOfDateNote).toBeNull();
+  });
+  it('does not say awaiting a merge while the run is out of review', () => {
+    const m = buildEvidence(snap({ evidence: evidence([]), lifecycle: 'running' }, { changeRequests: [cr('open')] }), null)!;
+    expect(states(m)['merged']).toMatchObject({ value: 'Not ready to merge', tone: 'warning' });
   });
 });
 

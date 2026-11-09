@@ -41,7 +41,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
 const gitEnv = { PATH: process.env['PATH'] ?? '', HOME: tmpdir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
 
 export class CandidateNotVerifiable extends Error {
-  constructor(readonly reason: 'not_found' | 'not_assembled' | 'lease_held' | 'lease_lost' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
+  constructor(readonly reason: 'not_found' | 'not_assembled' | 'lease_held' | 'lease_lost' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed' | 'superseded', message: string) {
     super(message);
   }
 }
@@ -51,6 +51,8 @@ export interface RunnerInput {
   readonly candidateDir: string;
   /** A path in a verifier-owned directory outside the candidate. */
   readonly resultsPath: string;
+  /** Aborted when the candidate has been superseded, so a long run on an old tip stops early. */
+  readonly signal?: AbortSignal;
 }
 export interface RunnerOutput {
   readonly exitCode: number | null;
@@ -86,6 +88,10 @@ export interface VerificationDeps {
   readonly logLimitBytes?: number;
   /** The per-candidate verification lease. Renewed during the run, so a crash frees the candidate within this window. Default `VERIFICATION_LEASE_SECONDS`. */
   readonly leaseSeconds?: number;
+  /** Asked during the run. False: this candidate no longer matters (main moved or it was rebuilt), so the run is aborted and records nothing. */
+  readonly stillCurrent?: () => Promise<boolean>;
+  /** How often `stillCurrent` is asked. Default 30 s. */
+  readonly supersededCheckMs?: number;
 }
 
 /** Short, because a live run renews it every third of its length: a crash blocks the candidate only this long. */
@@ -238,6 +244,13 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
       WHERE ${candKey} AND detail -> 'verification' ->> 'holder' = ${holder}`).catch(() => undefined);
   }, Math.max(1, (leaseSeconds * 1000) / 3));
   renewer.unref();
+  const abort = new AbortController();
+  let superseded = false;
+  // A failed check is not an answer: only a definite "no longer current" stops a run.
+  const watcher = deps.stillCurrent === undefined ? null : setInterval(() => {
+    void deps.stillCurrent!().then((current) => { if (!current) { superseded = true; abort.abort(); } }, () => undefined);
+  }, deps.supersededCheckMs ?? 30_000);
+  watcher?.unref();
   try {
     const manifestBytes = await readFile(join(suiteDir, 'manifest.json'));
     const manifest = JSON.parse(manifestBytes.toString());
@@ -273,10 +286,12 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
       const resultsPath = join(outDir, `result-${n}.json`);
       let out: RunnerOutput;
       try {
-        out = await deps.runner({ candidateDir, resultsPath });
+        out = await deps.runner({ candidateDir, resultsPath, signal: abort.signal });
       } catch (e) {
         out = { exitCode: null, result: null, log: `runner failed: ${e instanceof Error ? e.message : String(e)}` };
       }
+      // No verdict and no error: the question this run was answering has gone away.
+      if (superseded) throw new CandidateNotVerifiable('superseded', 'the candidate was superseded while it was being verified');
       const ev = evaluate(out, want);
       tools = { ...tools, ...ev.tools };
       const logRef = await deps.artifacts.put(Buffer.from(boundedLog(out.log, logLimit)));
@@ -383,6 +398,7 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
     });
   } finally {
     clearInterval(renewer);
+    if (watcher !== null) clearInterval(watcher);
     await deps.db.execute(sql`UPDATE candidates SET detail = detail - 'verification' WHERE ${candKey} AND detail -> 'verification' ->> 'holder' = ${holder}`);
     for (const dir of scratch) await rm(dir, { recursive: true, force: true });
   }
@@ -416,7 +432,7 @@ export function dockerRunner(opts: { script?: string; timeoutMs?: number; docker
   const script = opts.script ?? join(pkgRoot, 'scripts/docker-verify.sh');
   const timeoutMs = opts.timeoutMs ?? 45 * 60_000;
   const docker = opts.dockerCommand ?? 'docker';
-  return ({ candidateDir, resultsPath }) => new Promise((res, rej) => {
+  return ({ candidateDir, resultsPath, signal }) => new Promise((res, rej) => {
     const name = `selarikru-verify-${randomUUID()}`;
     const p = spawn(script, [candidateDir, resultsPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -426,15 +442,19 @@ export function dockerRunner(opts: { script?: string; timeoutMs?: number; docker
     const add = (b: Buffer) => { log = (log + b.toString()).slice(-256 * 1024); };
     p.stdout.on('data', add);
     p.stderr.on('data', add);
-    const timer = setTimeout(() => {
-      log += `\n[verifier] docker run timed out after ${timeoutMs / 1000}s`;
-      // Killing the script alone would leave the container running: stop it by name, then the script (its trap removes the container).
+    // Killing the script alone would leave the container running: stop it by name, then the script (its trap removes the container).
+    const stop = (why: string): void => {
+      log += `\n[verifier] ${why}`;
       spawn(docker, ['kill', name], { stdio: 'ignore' }).on('error', () => undefined);
       p.kill('SIGKILL');
-    }, timeoutMs);
-    p.once('error', (e) => { clearTimeout(timer); rej(e); });
+    };
+    const timer = setTimeout(() => stop(`docker run timed out after ${timeoutMs / 1000}s`), timeoutMs);
+    const onAbort = (): void => stop('docker run aborted: the candidate was superseded');
+    if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+    p.once('error', (e) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); rej(e); });
     p.once('close', async (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       let result: unknown = null;
       try { result = JSON.parse(await readFile(resultsPath, 'utf8')); } catch { /* no usable result */ }
       res({ exitCode: code, result, log });

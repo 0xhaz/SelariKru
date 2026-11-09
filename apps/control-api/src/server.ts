@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import { declaredHarnessCatalog } from '@selarikru/harness-claude';
-import { createGhCliPort, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
+import { createGhCliPort, reconcileRun, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
 import { createScheduler, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
@@ -17,6 +17,7 @@ import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/ar
 import { dockerRunner, currentTrusted, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
 import { DEFAULT_VERIFICATION_RETRIES, startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
 import { ASSEMBLY_LEASE_SECONDS, startAssemblyDriver, type AssemblyDriverOptions } from '../../../services/verifier/src/assembly-driver.ts';
+import { readTip } from '../../../services/verifier/src/tip.ts';
 
 /** Starts the verification driver. Absent: nothing verifies assembled candidates in this process. */
 export type VerificationOptions = Omit<VerificationDriverOptions, 'db' | 'tenantId' | 'now'> & { intervalMs: number };
@@ -176,7 +177,11 @@ export async function startServer(options: {
   const catalog = options.harnessCatalog ?? declaredHarnessCatalog();
   const scheduler = createScheduler({ db, now, policy, catalog });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
-  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  // With GitHub on, merges land only there: the local branch says nothing about main.
+  const remote = options.github?.port;
+  const sourceRepo = options.github?.sourceRepoPath ?? options.assembly?.repoPath ?? options.verification?.repoPath;
+  const tipOf = sourceRepo || remote ? (p: { repository: string; target: string }) => readTip(sourceRepo ?? '', remote, p.repository, p.target) : undefined;
+  const app = buildApp({ tipOf, config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, artifacts: options.evidence.artifacts, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord
@@ -191,10 +196,10 @@ export async function startServer(options: {
     ? startReconciler({ db, port: options.github.port, now, intervalMs: options.github.pollIntervalMs, ...((options.onReconcileError ?? options.onError) ? { onError: (options.onReconcileError ?? options.onError)! } : {}) })
     : undefined;
   const verifications = options.verification
-    ? startVerificationDriver({ db, tenantId: config.tenantId, now, ...options.verification, ...((options.onVerificationError ?? options.onError) ? { onError: (options.onVerificationError ?? options.onError)! } : {}) })
+    ? startVerificationDriver({ db, tenantId: config.tenantId, now, ...options.verification, ...(remote ? { remote } : {}), ...((options.onVerificationError ?? options.onError) ? { onError: (options.onVerificationError ?? options.onError)! } : {}) })
     : undefined;
   const assemblies = options.assembly
-    ? startAssemblyDriver({ db, tenantId: config.tenantId, now, ...options.assembly, ...((options.onAssemblyError ?? options.onError) ? { onError: (options.onAssemblyError ?? options.onError)! } : {}) })
+    ? startAssemblyDriver({ db, tenantId: config.tenantId, now, ...options.assembly, ...(remote ? { remote, reconcile: (run: { tenantId: string; projectId: string; runId: string }) => reconcileRun(run, { db, port: remote, now }) } : {}), ...((options.onAssemblyError ?? options.onError) ? { onError: (options.onAssemblyError ?? options.onError)! } : {}) })
     : undefined;
   const address = await app.listen({ host: config.host, port: config.port });
   return {

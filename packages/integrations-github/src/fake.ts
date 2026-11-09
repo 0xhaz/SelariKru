@@ -19,6 +19,10 @@ export class FakeGitHub implements GitHubPort {
     this.pushes.push({ branch: i.branch, sha: i.sha });
     this.branches.set(i.branch, i.sha);
   }
+  /** The commits a real fetch would bring are already in the test's repository. */
+  async fetchBranch(_i: { repository: string; repoPath: string; branch: string; sha: string }): Promise<void> {
+    this.calls.push('fetchBranch');
+  }
   async branchHead(_r: string, branch: string): Promise<string | null> {
     this.calls.push('branchHead');
     return this.branches.get(branch) ?? null;

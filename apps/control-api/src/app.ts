@@ -4,7 +4,7 @@ import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { RecordStoreUnavailableError, type RecordBytes, type Scheduler, type TrustedVerifier } from '@selarikru/workflow';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type TokenVerifier } from './auth.ts';
 import { type ControlApiConfig } from './config.ts';
 import { AppError, unauthenticated } from './errors.ts';
@@ -64,6 +64,10 @@ export interface AppDeps {
   } | undefined;
   /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */
   readonly github?: GithubDeps | undefined;
+  /** The target's current tip, wherever merges really land. Absent: nothing can say whether main has moved, so nothing is allowed on that ground. */
+  readonly tipOf?: ((project: { readonly repository: string; readonly target: string }) => Promise<string>) | undefined;
+  /** Fastify's logger. Default off. */
+  readonly logger?: FastifyServerOptions['logger'];
   /** Live output. Injected by tests to shrink its limits; otherwise one is created here. */
   readonly terminal?: TerminalHub | undefined;
   /** Shrunk by tests. */
@@ -97,7 +101,7 @@ function hostName(header: string | undefined): string {
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const { config, db, verifier } = deps;
-  const app = Fastify({ exposeHeadRoutes: false, logger: false, bodyLimit: 1_000_000 });
+  const app = Fastify({ exposeHeadRoutes: false, logger: deps.logger ?? false, bodyLimit: 1_000_000 });
   app.routeTable = [];
   app.addHook('onRoute', (r) => {
     for (const method of [r.method].flat()) app.routeTable.push({ method, url: r.url });

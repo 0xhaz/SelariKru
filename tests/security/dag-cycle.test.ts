@@ -1,6 +1,6 @@
 /** Case: reject a DAG cycle. Through the owner route, the plan validator and Postgres; the scheduler then has nothing to dispatch. */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { World, specFor } from './world.ts';
+import { World } from './world.ts';
 
 let w: World;
 beforeAll(async () => { w = await World.create(); });
@@ -67,6 +67,5 @@ describe('a plan with a dependency cycle', () => {
     const runId = await w.newRun();
     const res = await w.plan(runId, [w.task(runId, 'a'), w.task(runId, 'b', { dependencies: [dep('a')] }), w.task(runId, 'c', { dependencies: [dep('b')] })]);
     expect(res.status).toBe(201);
-    expect(specFor('x').taskId).toBe('x');
   });
 });

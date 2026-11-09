@@ -124,6 +124,7 @@ export interface Candidate {
 }
 
 export type FailureReason =
+  | 'rebuild_deferred'
   | 'invalid_request'
   | 'lease_held'
   | 'lease_lost'
@@ -786,8 +787,33 @@ async function releaseLease(db: Db, run: IntegrationRun, holder: string): Promis
 
 const inList = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `);
 
+/** This run's tasks waiting for a verdict. They go into the same candidate, so a claim one of them holds is not another run's. */
+async function tasksBeingBuilt(tx: Tx, run: IntegrationRun): Promise<string[]> {
+  const rows = await tx.execute(sql`SELECT s.task_id FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision WHERE s.tenant_id = ${run.tenantId} AND s.project_id = ${run.projectId} AND r.run_id = ${run.runId} AND s.status = 'verifying'`);
+  return rows.map((r) => String(r['task_id']));
+}
+
+/** The first verified part of a to-be-rebuilt candidate that could not take its claims back. Other parts of that candidate holding the claim is no conflict. Takes the scheduler lock. */
+async function rebuildClaimConflict(tx: Tx, run: IntegrationRun, building: readonly string[]): Promise<{ readonly taskId: string; readonly resourceKey: string } | null> {
+  const rows = await tx.execute(sql`SELECT parts FROM candidates WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND target = ${run.target} AND status IN ('assembled', 'rejected') AND sha IS NOT NULL AND base_sha <> ${run.currentBaseSha} FOR UPDATE`);
+  if (rows.length === 0) return null;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
+  const parts = rows.flatMap((r) => (r['parts'] as { taskId: string; revision: number }[]) ?? []);
+  const own = new Set([...building, ...parts.map((p) => p.taskId)]);
+  for (const part of [...parts].sort((a, b) => cmp(a.taskId, b.taskId))) {
+    const [row] = await tx.execute(sql`SELECT s.status, r.spec FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision WHERE s.tenant_id = ${run.tenantId} AND s.project_id = ${run.projectId} AND s.task_id = ${part.taskId} AND s.current_revision = ${part.revision}`);
+    if (row?.['status'] !== 'verified') continue;
+    const spec = TaskSpecSchema.parse(row['spec']);
+    for (const claim of spec.resourceClaims) {
+      const live = await tx.execute(sql`SELECT task_id, mode FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key = ${claim.key} AND released_at IS NULL`);
+      if (live.some((h) => !own.has(String(h['task_id'])) && (claim.mode === 'exclusive' || h['mode'] === 'exclusive'))) return { taskId: part.taskId, resourceKey: claim.key };
+    }
+  }
+  return null;
+}
+
 /** Marks candidates, their check runs and any approval bound to their SHA as invalidated, in the caller's transaction. */
-async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['reason'], keep: { baseNot?: string; shaNot?: string }, now: Date): Promise<Invalidation | undefined> {
+async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['reason'], keep: { baseNot?: string; shaNot?: string }, now: Date, alsoOwn: readonly string[] = []): Promise<Invalidation | undefined> {
   const where = keep.baseNot !== undefined ? sql`base_sha <> ${keep.baseNot}` : sql`sha <> ${keep.shaNot!}`;
   const rows = await tx.execute(sql`
     UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now.toISOString()}::timestamptz
@@ -822,8 +848,11 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
       for (const c of spec.resourceClaims) if (want.get(c.key) !== 'exclusive') want.set(c.key, c.mode);
       let conflict: string | undefined;
       if (want.size > 0) {
-        const live = await tx.execute(sql`SELECT resource_key, mode FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key IN (${inList([...want.keys()])}) AND released_at IS NULL`);
-        conflict = [...want].find(([k, m]) => live.some((h) => h['resource_key'] === k && (m === 'exclusive' || h['mode'] === 'exclusive')))?.[0];
+        // The candidate's own parts are coming back together: their claims never conflict with each other, and one row held for a key is enough for all of them.
+        const own = [...alsoOwn, ...rows.flatMap((c) => ((c['parts'] as { taskId: string }[]) ?? []).map((p) => p.taskId))];
+        const live = await tx.execute(sql`SELECT resource_key, mode, task_id FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key IN (${inList([...want.keys()])}) AND released_at IS NULL`);
+        conflict = [...want].find(([k, m]) => live.some((h) => h['resource_key'] === k && !own.includes(String(h['task_id'])) && (m === 'exclusive' || h['mode'] === 'exclusive')))?.[0];
+        for (const k of live) if (own.includes(String(k['task_id']))) want.delete(String(k['resource_key']));
       }
       const moved = transition(state, { type: 'verification_invalidated', ...(conflict !== undefined ? { blockedReason: `resource_conflict:${conflict}` } : {}) });
       if (!moved.ok) throw new Error(`illegal reopen transition: ${JSON.stringify(moved.error)}`);
@@ -938,10 +967,16 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
     try {
       if (deps.stillDue && !(await deps.stillDue())) return { ok: false, reason: 'not_due', message: 'nothing is due to assemble' };
       if (run.pinnedBaseSha !== run.currentBaseSha || run.baseMoved === true) {
-        invalidated = await withTx(deps.db, async (tx) => {
+        // Checked before any write, under the claiming lock: a part sent back blocked would drop out of the rebuild, and a partial tree would be judged.
+        const held = await withTx(deps.db, async (tx) => {
           await fence(tx, run, holder);
-          return await invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now());
+          const building = await tasksBeingBuilt(tx, run);
+          const conflict = await rebuildClaimConflict(tx, run, building);
+          if (conflict) return conflict;
+          invalidated = await invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now(), building);
+          return null;
         });
+        if (held) return { ok: false, reason: 'rebuild_deferred', message: `waiting for ${held.resourceKey}, held by another task, before ${held.taskId} can be rebuilt` };
       }
       const { specs, completed } = await loadTasks(deps.db, run);
       if (completed.length === 0) throw new Fail('no_parts', 'no completed task has a published change set');
@@ -1001,7 +1036,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
               ELSE (jsonb_set(candidates.detail, '{history}', COALESCE(candidates.detail -> 'history', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
                 'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at)))) - 'verificationDriver' - 'verification' - 'verificationRetry' END,
             status = 'assembled', reason = NULL, parts = EXCLUDED.parts, tree_sha = EXCLUDED.tree_sha, base_sha = EXCLUDED.base_sha, updated_at = EXCLUDED.updated_at`);
-        const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at);
+        const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at, parts.map((p) => p.taskId));
         await emitCandidate(tx, run, at, 'candidate.assembled', {
           candidateId, sha, baseSha: run.currentBaseSha, treeSha, target: run.target, parts: parts.map((p) => ({ taskId: p.taskId, revision: p.revision, manifestSha256: p.manifestSha256 })),
           ...(invalidated ? { invalidated } : {}), ...(sup ? { superseded: sup } : {}),
@@ -1044,11 +1079,23 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
   const candidateId = `cand_${fail.reason}_${sha256(JSON.stringify([run.runId, run.target, run.currentBaseSha, fail.message])).slice(0, 16)}`;
   let proposalId: string | undefined;
   let proposalError: Fail | undefined;
+  // What the conflict is and between which work, independent of which commit of main exposed it: another commit landing does not make it a new conflict; a new revision of the work does.
+  const conflictKey = conflicts ? sha256(JSON.stringify([run.runId, run.target, [...conflicts].map((c) => [c.path, c.kind, [...c.taskIds].sort(cmp)]).sort((a, b) => cmp(String(a[0]), String(b[0]))), (fail.extra.parts ?? []).map((p) => JSON.stringify(p)).sort(cmp)])) : undefined;
   try {
-    await withTx(deps.db, async (tx) => {
+    const repeated = await withTx(deps.db, async (tx): Promise<{ candidateId: string; proposalId: string } | null> => {
       await fence(tx, run, holder);
       await recordIntegrationTime(tx, run, holder, startedAt, at);
       if (conflicts) {
+        const [same] = await tx.execute(sql`SELECT c.candidate_id, c.detail, p.proposal_id FROM candidates c JOIN plan_proposals p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id AND p.proposal_id = c.detail ->> 'proposalId'
+          WHERE c.tenant_id = ${run.tenantId} AND c.project_id = ${run.projectId} AND c.run_id = ${run.runId} AND c.status = 'conflicted' AND c.detail ->> 'conflictKey' = ${conflictKey!} AND p.status = 'proposed' ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE OF c, p`);
+        if (same) {
+          // The same conflict on a newer main: the open proposal now targets that main. No second proposal, no second event.
+          await tx.execute(sql`UPDATE candidates SET base_sha = ${run.currentBaseSha}, updated_at = ${at.toISOString()}::timestamptz, detail = detail || ${JSON.stringify({ ...(run.inputsKey !== undefined ? { inputsKey: run.inputsKey } : {}) })}::jsonb
+            WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${same['candidate_id'] as string}`);
+          await tx.execute(sql`UPDATE plan_proposals SET tasks = jsonb_set(tasks, '{0,baseSha}', to_jsonb(${run.currentBaseSha}::text)), detail = jsonb_set(jsonb_set(detail, '{baseSha}', to_jsonb(${run.currentBaseSha}::text)), '{resolves,baseSha}', to_jsonb(${run.currentBaseSha}::text))
+            WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND proposal_id = ${same['proposal_id'] as string}`);
+          return { candidateId: String(same['candidate_id']), proposalId: String(same['proposal_id']) };
+        }
         const { specs } = await loadTasks(deps.db, run);
         const involved = new Set(conflicts.flatMap((c) => c.taskIds));
         const refs = (fail.extra.parts ?? []).filter((p) => involved.has(p.taskId));
@@ -1067,13 +1114,15 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
       await tx.execute(sql`
         INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
         VALUES (${run.tenantId}, ${run.projectId}, ${candidateId}, ${run.runId}, ${run.target}, NULL, ${run.currentBaseSha}, NULL, '[]'::jsonb, ${status}, ${fail.reason},
-          ${JSON.stringify({ message: clip(fail.message, 400), ...(run.inputsKey !== undefined ? { inputsKey: run.inputsKey } : {}), ...(conflicts ? { conflicts, proposalId } : {}) })}::jsonb, ${at.toISOString()}::timestamptz)
+          ${JSON.stringify({ message: clip(fail.message, 400), ...(run.inputsKey !== undefined ? { inputsKey: run.inputsKey } : {}), ...(conflicts ? { conflicts, proposalId, conflictKey } : {}) })}::jsonb, ${at.toISOString()}::timestamptz)
         ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, detail = EXCLUDED.detail`);
       await emitCandidate(tx, run, at, 'candidate.failed', {
         candidateId, reason: fail.reason, message: clip(fail.message, 400), baseSha: run.currentBaseSha, target: run.target,
         ...(conflicts ? { conflicts, proposalId } : {}), ...(invalidated ? { invalidated } : {}),
       });
+      return null;
     });
+    if (repeated) return { ok: false, reason: fail.reason, message: fail.message, candidateId: repeated.candidateId, ...(conflicts ? { conflicts } : {}), proposalId: repeated.proposalId, ...(invalidated ? { invalidated } : {}) };
   } catch (err) {
     if (!(err instanceof Fail)) throw err;
     if (err.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: err.message, ...(invalidated ? { invalidated } : {}) };

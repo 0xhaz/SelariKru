@@ -66,7 +66,7 @@ describe('candidate change', () => {
   });
 
   it('a commit pushed onto the PR after verification means a merge is not recorded as this run’s', async () => {
-    const { runId, sha } = await w.verifiedRun(['t_push']);
+    const { runId } = await w.verifiedRun(['t_push']);
     expect((await pr(runId)).status).toBe(200);
     const number = w.gh.prs[0]!.number;
     w.gh.humanPushes(number, 'f'.repeat(40));
@@ -76,7 +76,6 @@ describe('candidate change', () => {
     expect((await w.status('t_push')).status).toBe('verified');
     expect(await w.lifecycle(runId)).toBe('ready_for_review');
     expect(await w.count('events', `type = 'change.merged'`)).toBe(0);
-    expect(sha).toBeTruthy();
   });
 
   it('a task cancelled while the suite runs: the verdict is born invalid and promotes nothing', async () => {

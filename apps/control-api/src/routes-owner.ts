@@ -521,6 +521,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow re-verifying', { reason: gate.reason, decision: gate.decision });
     const staleSha = await staleCandidateOf(seen.projectId, runId);
     const trusted = ctx.evidence?.trusted() ?? null;
+    // A failed rebuild can be sent back only because main has moved since its verdict. A tip that cannot be read cannot say so.
+    const [latestCandidate] = await db.execute(sql`SELECT c.status, c.base_sha, c.target, p.repository FROM candidates c JOIN projects p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id WHERE c.tenant_id = ${config.tenantId} AND c.project_id = ${seen.projectId} AND c.run_id = ${runId} AND c.sha IS NOT NULL AND c.status IN ('assembled', 'rejected') ORDER BY c.created_at DESC, c.candidate_id DESC LIMIT 1`);
+    const tip = latestCandidate?.['status'] === 'rejected' && ctx.tipOf ? await ctx.tipOf({ repository: String(latestCandidate['repository']), target: String(latestCandidate['target']) }).catch(() => null) : null;
+    const baseMoved = tip !== null && tip !== latestCandidate!['base_sha'];
     const result = await withTx(db, async (tx) => {
       const run = await requireRun(tx, config.tenantId, runId, true);
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
@@ -529,7 +533,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const scope = { tenantId: config.tenantId, projectId: run.projectId, runId };
         const stale: ReverifyOutcome = staleSha === null || trusted === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification({ now }, tx, scope, uid, newId('op'), staleSha, trusted);
         if (!stale.ok && stale.reason !== 'nothing_to_reverify') throw refuse(stale);
-        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'), trusted);
+        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'), trusted, { baseMoved });
         if (!blocked.ok && (blocked.reason !== 'nothing_to_reverify' || !stale.ok)) throw refuse(blocked);
         return { runId, reopened: [...(stale.ok ? stale.reopened : []), ...(blocked.ok ? blocked.reopened : [])] };
       });
@@ -590,7 +594,14 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
         // A rebuild for a moved main retires the pull request's candidate first, so this is true from the moment the rebuild starts. Read from candidates, not the evidence report: a run with no requirement ids has none.
         const retiredForMain = await tx.execute(sql`SELECT run_id, sha, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'invalidated' AND reason = 'base_changed' AND sha IS NOT NULL`);
-        const liveCandidates = await tx.execute(sql`SELECT run_id, sha FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'assembled' AND sha IS NOT NULL`);
+        const candidateRows = await tx.execute(sql`SELECT run_id, sha, status, updated_at, detail -> 'rebuildDeferred' AS deferred FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status IN ('assembled', 'rejected', 'failed', 'conflicted')`);
+        const whenOf = (v: unknown): number => new Date(v as string | Date).getTime();
+        /** How the rebuild that left this pull request behind is going. A failed or conflicted one is said as such; only a run actually building says it is. */
+        const rebuildState = (runId: string, retiredAt: unknown, liveSha: string | null): 'building' | 'verifying' | 'verified' | 'failed' | 'conflicted' => {
+          if (liveSha !== null) return runs.find((r) => r.runId === runId)?.lifecycle === 'ready_for_review' ? 'verified' : 'verifying';
+          const after = candidateRows.filter((c) => c['run_id'] === runId && c['status'] !== 'assembled' && whenOf(c['updated_at']) >= whenOf(retiredAt)).sort((x, y) => whenOf(y['updated_at']) - whenOf(x['updated_at']))[0];
+          return !after ? 'building' : after['status'] === 'conflicted' ? 'conflicted' : 'failed';
+        };
         const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith(reducedScopeContext('')));
         // Why each blocked task stopped: the latest blocking event names it. Statuses alone can't say.
         const blockEvents = await tx.execute(sql`
@@ -671,7 +682,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
             scopeAssessment: assessments.get(r.runId) ?? null,
             /** Every attempt of this run a person opened a shell in. All revisions: replanning a task does not erase that a person was in its sandbox. */
-            humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
+            /** Main moved, but rebuilding now would have to take a claim another task holds: nothing was touched, and the rebuild runs when it is free. */
+            rebuildDeferred: (() => {
+              const d = candidateRows.find((c) => c['run_id'] === r.runId && c['status'] === 'assembled')?.['deferred'] as { message?: unknown; at?: unknown } | null | undefined;
+              return d && typeof d.message === 'string' && typeof d.at === 'string' ? { message: d.message, at: d.at } : null;
+            })(),
+                        humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);
@@ -734,7 +750,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             /** The run's code was rebuilt on a newer main, so this open pull request no longer holds it. `rebuiltSha` is null while nothing has been built yet. */
             outOfDate: (() => {
               const retired = c.status === 'open' ? retiredForMain.find((m) => m['run_id'] === c.runId && m['sha'] === c.candidateSha) : undefined;
-              return retired ? { reason: 'main_moved', at: new Date(retired['updated_at'] as string | Date).toISOString(), rebuiltSha: (liveCandidates.find((l) => l['run_id'] === c.runId)?.['sha'] as string | undefined) ?? null } : null;
+              if (!retired) return null;
+              const rebuiltSha = (candidateRows.find((l) => l['run_id'] === c.runId && l['status'] === 'assembled')?.['sha'] as string | undefined) ?? null;
+              return { reason: 'main_moved', at: new Date(retired['updated_at'] as string | Date).toISOString(), rebuiltSha, rebuild: rebuildState(c.runId, retired['updated_at'], rebuiltSha) };
             })(),
           })),
           clientReports: reports.map((r) => ({

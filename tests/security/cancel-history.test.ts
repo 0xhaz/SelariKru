@@ -90,7 +90,6 @@ describe('cancelling work keeps its history', () => {
 
     expectPreserved(before, await history());
     expect(await w.store().get(manifest)).not.toBeNull();
-    expect(await w.count('attempts', `task_id = 't_v' AND outcome = 'succeeded'`) + await w.count('attempts', `task_id = 't_v'`)).toBeGreaterThan(0);
     expect((await w.assembly().tick()).assembled).toEqual([]);
     expect(await w.count('candidates')).toBe(0);
   });

@@ -293,6 +293,13 @@ async function dependenciesReady(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<
   return readyTasks(plan, withSelf).includes(spec.taskId);
 }
 
+async function blockedDependency(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<string | null> {
+  const ids = spec.dependencies.map((d) => d.taskId);
+  if (ids.length === 0) return null;
+  const rows = await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), inArray(schema.taskStatus.taskId, ids), eq(schema.taskStatus.status, 'blocked'))).orderBy(asc(schema.taskStatus.taskId)).limit(1);
+  return rows[0]?.taskId ?? null;
+}
+
 async function resourceConflict(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<boolean> {
   if (spec.resourceClaims.length === 0) return false;
   const active = await tx
@@ -377,7 +384,12 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   // A task the owner asked to cancel is never dispatched again.
   if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
 
-  if (!(await dependenciesReady(tx, key, spec))) return { reason: 'dependencies_unsatisfied' };
+  if (!(await dependenciesReady(tx, key, spec))) {
+    // Waiting on something that will not finish by itself is a stop, not a wait: say so once, instead of never being claimable with no reason shown.
+    const stuck = await blockedDependency(tx, key, spec);
+    if (stuck !== null) await recordBlock(tx, key, c, statusRow, `dependency_blocked:${stuck}`, null, now);
+    return { reason: 'dependencies_unsatisfied' };
+  }
   if (await resourceConflict(tx, key, spec)) return { reason: 'resource_conflict' };
 
   // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.

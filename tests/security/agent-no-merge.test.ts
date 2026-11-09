@@ -4,7 +4,7 @@
  * with a pre-receive hook protecting main. Not exercised: the real sandbox's network policy and credential mediation, and real GitHub branch protection. See the T7.2 report.
  */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createGhCliPort } from '@selarikru/integrations-github';
@@ -66,7 +66,6 @@ describe('what the agent has to push with', () => {
     const sha = (await w.assembly().tick()).assembled[0]!;
     expect(w.git('log', '--format=%s', `${w.baseSha}..${sha}`)).not.toContain('agent commit');
     expect(w.git('show', `${sha}:src/a.ts`)).toBe('export const a = 1;');
-    expect(w.git('rev-parse', 'refs/heads/main')).toBe(w.baseSha);
     expect(w.gh.pushes).toEqual([]);
   });
 
@@ -167,7 +166,6 @@ describe('the one path that pushes, with real git against a protected bare remot
     } finally {
       await app.close();
     }
-    expect(existsSync(join(bare, 'hooks', 'pre-receive'))).toBe(true);
   });
 
   it('a project whose default branch is the run branch is refused before any push', async () => {

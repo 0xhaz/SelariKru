@@ -1,3 +1,4 @@
+import { outOfDateCopy } from '../out-of-date.ts';
 import { WORKER_APPROVAL_OPERATIONS } from '@selarikru/domain';
 import { approvalStateAt, effectiveWorkerHealth, isBudgetStopped, isReverifiableReason, type ApprovalView, type CheckView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge } from '@selarikru/ui';
@@ -286,6 +287,17 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
         consequence: 'No pull request can open on this candidate.', nextAction: 'Re-verify the run, or replan or cancel its tasks.',
       }));
     }
+    // What is open on GitHub is not what was verified, whatever the run is doing now: this is true from the moment a rebuild starts, and through a failed or conflicted one.
+    const outOfDate = snapshot.changeRequests.find((c) => c.runId === run.runId && c.status === 'open' && c.outOfDate !== null);
+    if (outOfDate?.outOfDate) {
+      const copy = outOfDateCopy(outOfDate, outOfDate.outOfDate);
+      items.push(make({ id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'pull_request_out_of_date', since: outOfDate.outOfDate.at, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId).map((t) => t.taskId), owner: 'You', title: copy.title, detail: copy.summary, consequence: 'A merge of this pull request would not be recorded for this run.', nextAction: copy.next }));
+      continue;
+    }
+    if (run.rebuildDeferred) {
+      items.push(make({ id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'rebuild_deferred', since: run.rebuildDeferred.at, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId).map((t) => t.taskId), owner: 'You', title: 'Main moved, and the rebuild is waiting on a resource', detail: run.rebuildDeferred.message, consequence: 'This code has not been verified against the current main.', nextAction: 'It rebuilds on its own when the resource is free.' }));
+      continue;
+    }
     // A run the server would refuse a pull request for is not ready, whatever its lifecycle says.
     if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) continue;
     const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status !== 'superseded' && t.status !== 'cancelled');
@@ -297,14 +309,12 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const why = stopped.length === cancelled.length ? 'stopped for budget' : stopped.length === 0 ? 'cancelled' : 'cancelled or stopped for budget';
     const criteria = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : null;
     const uncovered = stopped.some((t) => !reducedScopeCovers(run, t));
-    // Main moved and the code was rebuilt: what is open on GitHub is not what was verified.
-    const outOfDate = snapshot.changeRequests.find((c) => c.runId === run.runId && c.status === 'open' && c.outOfDate !== null);
     items.push(make({
       id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
-      title: outOfDate ? `Pull request #${outOfDate.prNumber} no longer holds the verified code` : 'Run is ready for your review',
+      title: 'Run is ready for your review',
       // Budget-stopped work never reads as done: this run did not deliver everything it planned.
       detail: undelivered ? `${cancelled.length > 0 ? `${stoppedWord} not delivered: ${why}.` : 'Some planned work was not delivered.'}${criteria ? ` ${criteria}` : ' Not every planned task is verified.'}` : (criteria ?? 'Every task is verified at the current revision. Per-criterion evidence is not connected.'),
-      consequence: 'Nothing merges without you. Agents never merge.', nextAction: outOfDate ? `Close pull request #${outOfDate.prNumber} on GitHub, then open the new one.` : uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
+      consequence: 'Nothing merges without you. Agents never merge.', nextAction: uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
     }));
   }
 

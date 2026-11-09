@@ -74,6 +74,12 @@ export function createGhCliPort(options: GhCliOptions = {}): GitHubPort {
         throw new Error(message);
       }
     },
+    async fetchBranch({ repository, repoPath, branch, sha }) {
+      if (!SHA.test(sha)) throw new Error('invalid sha');
+      const name = branchOf(branch);
+      await exec('git', ['fetch', '--quiet', '--no-tags', '--no-recurse-submodules', remoteUrl(repo(repository)), `+refs/heads/${name}:refs/selarikru/upstream/${name}`], { cwd: repoPath });
+      await exec('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: repoPath });
+    },
     async findPullRequests(repository, branch) {
       const out = await exec('gh', ['pr', 'list', '--repo', repo(repository), '--head', branchOf(branch), '--state', 'all', '--limit', '20', '--json', FIELDS]);
       return (JSON.parse(out) as RawPr[]).map(toInfo);

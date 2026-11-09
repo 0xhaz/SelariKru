@@ -169,6 +169,8 @@ export type ReverifyOutcome = { readonly ok: true; readonly reopened: readonly s
  */
 export async function reopenBlockedVerification(
   ctx: { readonly now: () => Date }, tx: Tx, run: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, requestedBy: string, operationId: string, trusted: TrustedVerifier | null,
+  /** `baseMoved`: main has moved since a rebuild failed its verdict, so `reverification_failed` is reopenable too. `unbounded`: the driver's own retry, one per move of main, spends no owner re-verification. */
+  opts: { readonly baseMoved?: boolean; readonly unbounded?: boolean } = {},
 ): Promise<ReverifyOutcome> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
   const blocked = await tx.execute(sql`
@@ -179,7 +181,7 @@ export async function reopenBlockedVerification(
     ORDER BY s.task_id`);
   // The reason must come from the control plane's own verification close. A worker's reported `blocked` reason is free text (the scheduler records it
   // under its own actor, with the lease `fence` in the payload), so a worker that reports `verification_error` must not earn a re-verification.
-  const eligible = blocked.filter((b) => b['by_scheduler'] === true && isReverifiableBlock(b['reason'] as string | null));
+  const eligible = blocked.filter((b) => b['by_scheduler'] === true && (isReverifiableBlock(b['reason'] as string | null) || (opts.baseMoved === true && b['reason'] === 'reverification_failed')));
   if (eligible.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
   const now = ctx.now();
   const reopened: string[] = [];
@@ -189,13 +191,13 @@ export async function reopenBlockedVerification(
     const key: TaskKey = { tenantId: run.tenantId, projectId: run.projectId, taskId };
     const row = await lockStatusRow(tx, key);
     if (!row || row.status !== 'blocked' || row.currentRevision !== revision) continue;
-    if ((await reverifiesUsed(tx, key, revision, trusted)) >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId };
+    if (opts.unbounded !== true && (await reverifiesUsed(tx, key, revision, trusted)) >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId };
 
     const spec = TaskSpecSchema.parse(b['spec']);
     const attempts = await loadAttempts(tx, key, revision);
     const state = buildTaskState(spec, 'blocked', attempts);
     if (!state) throw new Error(`task ${taskId}: stored spec no longer valid`);
-    const moved = transition(state, { type: 'reverify_requested' });
+    const moved = transition(state, { type: 'reverify_requested', afterFailedVerdict: b['reason'] === 'reverification_failed' });
     if (!moved.ok) return { ok: false, reason: 'nothing_to_reverify', taskId };
     const attemptId = moved.value.attempts.at(-1)!.attemptId;
 

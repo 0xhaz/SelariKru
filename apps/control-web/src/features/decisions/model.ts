@@ -1,3 +1,4 @@
+import { outOfDateCopy } from '../out-of-date.ts';
 import { ADVISORY_APPROVAL_OPERATIONS, WORKER_APPROVAL_OPERATIONS, approvalUnavailableReason } from '@selarikru/domain';
 import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, verifiedCounts, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge, type Tone } from '@selarikru/ui';
@@ -380,19 +381,26 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
       fingerprint: ['recon', cr.status, cr.observedHeadSha, cr.mergeCommitSha, cr.candidateSha].join('|'),
     }];
   }
+  if (run.rebuildDeferred && !(cr?.status === 'open' && cr.outOfDate)) {
+    return [{
+      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Rebuild waiting', tone: 'warning', title: 'Main moved, and the rebuild is waiting on a resource',
+      summary: `${run.rebuildDeferred.message}. Nothing was changed: the verified commit stands, built on the old main.`,
+      consequence: 'It rebuilds on its own when the resource is free. Until then this code has not been verified against the current main.', note: null,
+      facts: [{ label: 'Status', value: 'Rebuild deferred' }], details: [{ label: 'Why', value: run.rebuildDeferred.message }], actions: cr ? [prLink(cr, options.mode, simulated)] : [], since: run.rebuildDeferred.at, fingerprint: ['rebuild-deferred', run.rebuildDeferred.message].join('|'),
+    }];
+  }
   // Shown from the moment the rebuild starts, whatever the lifecycle: this pull request must never read as ready while it holds code the run has moved on from.
   if (cr?.status === 'open' && cr.outOfDate) {
-    const { rebuiltSha, at } = cr.outOfDate;
-    const passed = rebuiltSha !== null && run.lifecycle === 'ready_for_review' && !recordNoLongerValid(run);
-    const stage = rebuiltSha === null ? 'The rebuilt commit does not exist yet.' : passed ? 'The rebuilt code has passed verification.' : 'The rebuilt code has not passed verification yet.';
+    const { rebuiltSha, at, rebuild } = cr.outOfDate;
+    const copy = outOfDateCopy(cr, cr.outOfDate);
     return [{
-      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Pull request out of date', tone: 'warning', title: `Pull request #${cr.prNumber} no longer holds the verified code`,
-      summary: `Main moved, so the code ${rebuiltSha === null ? 'is being rebuilt' : 'was rebuilt'} on the new main. This pull request still holds the old commit. ${stage}`,
+      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Pull request out of date', tone: 'warning', title: copy.title,
+      summary: copy.summary,
       consequence: 'A merge of this pull request would not be recorded for this run, and no task would count as merged.',
-      note: `Close pull request #${cr.prNumber} on GitHub, and open the new one once verification passes. Agents never close pull requests.`,
-      facts: [{ label: 'Status', value: 'Out of date: main moved' }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Verification of the rebuild', value: passed ? 'Passed' : 'Not passed yet' }],
+      note: `${copy.next} Agents never close pull requests.`,
+      facts: [{ label: 'Status', value: 'Out of date: main moved' }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Rebuild', value: rebuild }],
       details: [{ label: 'Old commit', value: cr.candidateSha }, { label: 'Rebuilt commit', value: rebuiltSha ?? 'None' }, { label: 'Pull request URL', value: cr.url }],
-      actions: [prLink(cr, options.mode, simulated)], since: at, fingerprint: ['out-of-date', cr.prNumber, cr.candidateSha, rebuiltSha, passed].join('|'),
+      actions: [prLink(cr, options.mode, simulated)], since: at, fingerprint: ['out-of-date', cr.prNumber, cr.candidateSha, rebuiltSha, rebuild].join('|'),
     }];
   }
   // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.

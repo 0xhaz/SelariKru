@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { checkEventAuthority } from '@selarikru/domain';
 import { processPendingDeliveries, reconcileRun, signBody } from '@selarikru/integrations-github';
 import { applyVerification } from '@selarikru/workflow';
-import { owner, post, PROJECT, sql, TENANT, WEBHOOK_SECRET, World, toolUse } from './world.ts';
+import { post, PROJECT, sql, TENANT, WEBHOOK_SECRET, World, toolUse } from './world.ts';
 
 let w: World;
 beforeAll(async () => { w = await World.create(); });
@@ -126,6 +126,5 @@ describe('the only way to verified', () => {
     expect((await w.verification(passing).tick()).verified).toBe(sha);
     expect((await w.status('t_real')).status).toBe('verified');
     expect(await verifiedCriteria(runId)).toMatchObject({ verified: 1 });
-    expect(owner()).toBeDefined();
   });
 });

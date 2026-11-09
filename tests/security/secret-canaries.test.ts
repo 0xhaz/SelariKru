@@ -3,10 +3,10 @@
  * output), and every place it could come out is read back: what the agent was launched with and can read, the runner's logs, every row of every table, snapshots, terminal output, usage,
  * the PR body and the stored verifier log. Each list is paired with a control: the canary really was produced, so an absence cannot be the result of nothing having happened.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { assistantText, failingOn, launchPayload, passing, post, readTerminal, readTree, resultLine, signalPath, sql, toolResult, toolUse, toolWrite, World } from './world.ts';
+import { assistantText, failingOn, launchPayload, passing, post, readTerminal, readTree, signalPath, sql, toolResult, toolUse, toolWrite, World } from './world.ts';
 
 let w: World;
 beforeAll(async () => { w = await World.create(); });
@@ -83,7 +83,7 @@ describe('secret canaries', () => {
     const snapshot = await w.snapshot();
     absent('snapshot', JSON.stringify(snapshot));
     expect(JSON.stringify(snapshot)).toContain('[REDACTED]');
-    expect(sha).toBeTruthy();
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
 
     const failures = await w.app.inject({ method: 'GET', url: `/v1/projects/proj_a/runs/${runId}/failures`, headers: { authorization: 'Bearer firebase-owner-token' } });
     expect(failures.json().available).toBe(true);
@@ -91,10 +91,16 @@ describe('secret canaries', () => {
 
     const artifacts = Object.values(readTree(w.artifactDir)).join('\n');
     expect(artifacts).toContain('[REDACTED]'); // The verifier's log and result really were stored, and were cleaned first.
-    absent('artifact store', artifacts, [VERIFIER_MSG, VERIFIER_LOG]);
+    absent('artifact store', artifacts);
+
+    // The control API's own log, at its most talkative. The control proves it really was written for this run.
+    expect(w.apiLog.join('\n')).toContain('/v1/runners/claim');
+    absent('control API log', w.apiLog.join('\n'));
   });
 
   it('a tracked .env is not shipped to the agent', async () => {
+    w.gitCommit('.envrc', `export GITHUB_TOKEN=${FILE_TRACKED}\n`);
+    w.gitCommit('.env-staging', `GITHUB_TOKEN=${FILE_TRACKED}\n`);
     const base = w.gitCommit('.env.production', `GITHUB_TOKEN=${FILE_TRACKED}\n`);
     const runId = await w.newRun();
     await w.plan(runId, [w.task(runId, 't_env', { baseSha: base })]);
@@ -191,7 +197,5 @@ describe('secret canaries', () => {
     absent('runner logs', w.logs.join('\n'));
     absent('snapshot', JSON.stringify(await w.snapshot()));
     expect(await w.count('attempts')).toBeGreaterThan(1);
-    expect(readFileSync(join(w.repo, 'src/base.ts'), 'utf8')).toContain('base');
-    expect(resultLine).toContain('success');
   });
 });

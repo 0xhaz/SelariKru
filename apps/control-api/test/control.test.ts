@@ -17,7 +17,7 @@ const POLICY_ALLOW = { ...API_POLICY, operations: { ...API_POLICY.operations, te
 
 beforeAll(async () => {
   t = await setupTestDb();
-  h = makeHarness(t, {}, POLICY_ALLOW, { controlLimits: { ...DEFAULT_CONTROL_LIMITS, sweepMs: 20, ackTimeoutMs: 150, pingMs: 60_000, authTimeoutMs: 300, openTimeoutMs: 2_000 } });
+  h = makeHarness(t, {}, POLICY_ALLOW, { controlLimits: { ...DEFAULT_CONTROL_LIMITS, sweepMs: 20, ackTimeoutMs: 1_000, pingMs: 60_000, authTimeoutMs: 300, openTimeoutMs: 2_000 } });
   hub = attachSpy.mock.contexts.at(-1) as unknown as typeof hub;
   base = await h.app.listen({ port: 0, host: '127.0.0.1' });
   wsBase = base.replace('http', 'ws');

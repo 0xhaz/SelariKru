@@ -182,10 +182,10 @@ describe('blocked work', () => {
   });
 
   describe('an open pull request main has left behind', () => {
-    const left = (lifecycle: 'running' | 'ready_for_review', rebuiltSha: string | null) => {
+    const left = (lifecycle: 'running' | 'ready_for_review', rebuiltSha: string | null, rebuild: 'building' | 'verifying' | 'verified' | 'failed' | 'conflicted' = rebuiltSha === null ? 'building' : lifecycle === 'ready_for_review' ? 'verified' : 'verifying') => {
       const s = snapshotOf({ tasks: [task('t', { status: lifecycle === 'running' ? 'verifying' : 'verified', aggregateRevision: 4 })] });
       s.runs['run'] = { ...s.runs['run']!, lifecycle };
-      (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'open', candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: null, observedAt: iso(0), outOfDate: { reason: 'main_moved', at: iso(0), rebuiltSha } }];
+      (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'open', candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: null, observedAt: iso(0), outOfDate: { reason: 'main_moved', at: iso(0), rebuiltSha, rebuild } }];
       return s;
     };
     const card = (s: ReturnType<typeof left>) => build(s).cards.find((c) => c.id === 'review:run')!;
@@ -206,6 +206,13 @@ describe('blocked work', () => {
       expect(c.summary).toContain('Main moved, so the code was rebuilt');
       expect(c.summary).toContain('The rebuilt code has passed verification.');
       expect(c.actions.filter((a) => a.kind === 'command')).toEqual([]);
+    });
+    it('names a failed and a conflicted rebuild as such, and neither says it is being rebuilt', () => {
+      const failed = card(left('running', null, 'failed'));
+      expect(failed.summary).toContain('the rebuild failed');
+      const conflicted = card(left('running', null, 'conflicted'));
+      expect(conflicted.summary).toContain('could not be rebuilt: it conflicts with main');
+      for (const c of [failed, conflicted]) expect(c.summary).not.toContain('is being rebuilt');
     });
   });
 

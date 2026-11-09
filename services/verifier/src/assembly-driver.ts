@@ -20,17 +20,14 @@
  *
  * Imports are relative for the same reason as `service.ts`.
  */
-import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { promisify } from 'node:util';
+import { createHash, randomUUID } from 'node:crypto';
 import { TaskSpecSchema, type TaskSpec } from '../../../packages/domain/src/index.ts';
 import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
-import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
+import { closeVerificationWithoutVerdict, reopenBlockedVerification } from '../../workflow/src/verification.ts';
 import { assembleCandidate, type IntegrationDeps } from './integrate.ts';
+import { readTip, type RemoteTips } from './tip.ts';
 
-const execFileP = promisify(execFile);
 /** The integration lease held by a driven assembly: short, because it renews while live, so a crash frees the target within this window. */
 export const ASSEMBLY_LEASE_SECONDS = 120;
 /** Further tries after the first infrastructure failure, and the delay before the first of them (doubling): 31 minutes in all, enough for a restart. */
@@ -45,8 +42,8 @@ const REBUILDABLE_LIFECYCLES = ['planning', 'running', 'blocked', 'ready_for_rev
 const MERGED_PR_STATUSES = new Set(['merged', 'merged_sha_mismatch']);
 /** Runs looked at per pass for a moved base. One git read per target branch, however many runs share it. */
 const MOVED_SCAN_LIMIT = 200;
-const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,240}$/;
-const gitEnv = { PATH: process.env['PATH'] ?? '/usr/bin:/bin', HOME: tmpdir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', LC_ALL: 'C' };
+/** A failed verdict on a rebuild can be retried only while the run is still being worked. */
+const RETRYABLE_LIFECYCLES = ['running', 'blocked'];
 
 export interface AssemblyDriverOptions extends Pick<IntegrationDeps, 'db' | 'artifacts' | 'now' | 'workRoot' | 'protectedPaths' | 'leaseSeconds' | 'beforePublish'> {
   readonly tenantId: string;
@@ -58,6 +55,10 @@ export interface AssemblyDriverOptions extends Pick<IntegrationDeps, 'db' | 'art
   readonly infrastructureBackoffSeconds?: number;
   /** Called once each time an infrastructure failure is scheduled for another try (the count changed), never per poll. `reason` is a code, not free text. */
   readonly onRetry?: (info: { readonly runId: string; readonly reason: string; readonly count: number; readonly maxRetries: number }) => void;
+  /** With GitHub enabled: where the tip is read and the commit fetched from. Absent: the local branch is main. */
+  readonly remote?: RemoteTips;
+  /** Reads an open pull request's real state before a rebuild, so a merge that already landed is recorded as one instead of retired as stale. */
+  readonly reconcile?: (run: { readonly tenantId: string; readonly projectId: string; readonly runId: string }) => Promise<unknown>;
 }
 
 export interface AssemblyTick {
@@ -76,11 +77,11 @@ export interface AssemblyDriver {
 
 interface TaskRow { readonly spec: TaskSpec; readonly status: string; readonly attemptId: string | null; readonly manifest: string | null }
 type Part = { readonly taskId: string; readonly revision: number; readonly attemptId: string };
-interface Due { readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string; readonly partsKey: string; readonly parts: readonly Part[]; readonly baseMoved: boolean }
-type TipReader = (target: string) => Promise<string>;
+interface Due { readonly repository: string; readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string; readonly partsKey: string; readonly parts: readonly Part[]; readonly baseMoved: boolean }
+type TipReader = (repository: string, target: string) => Promise<string>;
 interface LiveCandidate { readonly baseSha: string; readonly target: string; readonly parts: readonly Part[] }
 /** Nothing to do, due, or a failure before assembly could start (the tip could not be read). */
-type Assessment = { readonly kind: 'idle' } | { readonly kind: 'due'; readonly due: Due } | { readonly kind: 'infrastructure'; readonly partsKey: string; readonly parts: readonly Part[]; readonly pinnedBaseSha: string; readonly target: string; readonly reason: string; readonly message: string };
+type Assessment = { readonly kind: 'idle' } | { readonly kind: 'due'; readonly due: Due } | { readonly kind: 'reopen' } | { readonly kind: 'infrastructure'; readonly partsKey: string; readonly parts: readonly Part[]; readonly pinnedBaseSha: string; readonly target: string; readonly reason: string; readonly message: string };
 const RETRY_STATUS = 'retrying';
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
@@ -116,12 +117,6 @@ function heldByDependency(tasks: readonly TaskRow[], waitingFor: ReadonlySet<str
     }
   }
   return held;
-}
-
-async function resolveTip(repoPath: string, target: string): Promise<string> {
-  if (!SAFE_BRANCH.test(target) || target.includes('..')) throw new Error(`refusing an unsafe target branch name`);
-  const { stdout } = await execFileP('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${target}^{commit}`], { cwd: repoPath, env: gitEnv, encoding: 'utf8' });
-  return stdout.trim();
 }
 
 export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<AssemblyDriver, 'tick'> {
@@ -163,21 +158,33 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
   async function assessMoved(projectId: string, runId: string, tasks: readonly TaskRow[], live: LiveCandidate, tip: TipReader): Promise<Assessment> {
     const [run] = await db.execute(sql`SELECT lifecycle FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
     if (!run || !REBUILDABLE_LIFECYCLES.includes(String(run['lifecycle']))) return { kind: 'idle' };
-    const [project] = await db.execute(sql`SELECT default_branch FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
+    const [project] = await db.execute(sql`SELECT default_branch, repository FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
     if (!project || String(project['default_branch']) !== live.target) return { kind: 'idle' };
+    const repository = String(project['repository']);
     let tipSha: string;
     try {
-      tipSha = await tip(live.target);
+      tipSha = await tip(repository, live.target);
     } catch {
       return { kind: 'idle' };
     }
     if (tipSha === '' || tipSha === live.baseSha) return { kind: 'idle' };
-    const [pr] = await db.execute(sql`SELECT status FROM change_requests WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
+    const readPr = async () => (await db.execute(sql`SELECT status FROM change_requests WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`))[0];
+    let pr = await readPr();
+    // The move of main may be this very pull request being merged. Ask GitHub first: if it cannot say, nothing is retired on a guess.
+    if (pr?.['status'] === 'open' && options.reconcile) {
+      try {
+        await options.reconcile({ tenantId, projectId, runId });
+      } catch {
+        return { kind: 'idle' };
+      }
+      pr = await readPr();
+    }
     if (pr && MERGED_PR_STATUSES.has(String(pr['status']))) return { kind: 'idle' };
     const partTasks = live.parts.map((p) => tasks.find((t) => t.spec.taskId === p.taskId && t.spec.revision === p.revision && t.attemptId === p.attemptId));
     if (partTasks.length === 0 || partTasks.some((t) => t === undefined || (t.status !== 'verifying' && t.status !== 'verified') || t.manifest === null)) return { kind: 'idle' };
-    // Work still running belongs in the next candidate, which the ordinary path builds on the tip when it finishes.
-    if (tasks.some((t) => !SETTLED_STATUSES.has(t.status) || (t.status === 'verifying' && t.manifest === null))) return { kind: 'idle' };
+    // Work under way belongs in the next candidate, which the ordinary path builds on the tip when it finishes. A task only waiting on these parts' verdict cannot finish first, so it does not hold them up.
+    const held = heldByDependency(tasks, new Set(live.parts.map((p) => p.taskId)));
+    if (tasks.some((t) => (!SETTLED_STATUSES.has(t.status) || (t.status === 'verifying' && t.manifest === null)) && !(held.has(t.spec.taskId) && (t.status === 'planned' || t.status === 'ready')))) return { kind: 'idle' };
     const present = partTasks as TaskRow[];
     const pinnedBaseSha = pinnedBaseOf(tasks, present[0]!);
     const partsKey = dueKeys(live.target, pinnedBaseSha, present);
@@ -187,11 +194,23 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const inputsKey = sha256(JSON.stringify({ partsKey, currentBaseSha: tipSha }));
     const handled = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status IN ('failed', 'conflicted') AND detail ->> 'inputsKey' = ${inputsKey} LIMIT 1`);
     if (handled.length > 0) return { kind: 'idle' };
-    return { kind: 'due', due: { target: live.target, pinnedBaseSha, currentBaseSha: tipSha, inputsKey, partsKey, parts: live.parts.map(({ taskId, revision, attemptId }) => ({ taskId, revision, attemptId })), baseMoved: true } };
+    return { kind: 'due', due: { repository, target: live.target, pinnedBaseSha, currentBaseSha: tipSha, inputsKey, partsKey, parts: live.parts.map(({ taskId, revision, attemptId }) => ({ taskId, revision, attemptId })), baseMoved: true } };
+  }
+
+  /** A rebuild whose verdict failed gets another chance once main has moved again: the verdict was about the old tip. A tip that cannot be read concludes nothing. */
+  async function assessFailedRebuild(projectId: string, runId: string, tasks: readonly TaskRow[], tip: TipReader): Promise<Assessment> {
+    if (!tasks.some((t) => t.status === 'blocked')) return { kind: 'idle' };
+    const [run] = await db.execute(sql`SELECT lifecycle FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`);
+    if (!run || !RETRYABLE_LIFECYCLES.includes(String(run['lifecycle']))) return { kind: 'idle' };
+    const [latest] = await db.execute(sql`SELECT c.status, c.base_sha, c.target, p.repository FROM candidates c JOIN projects p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id
+      WHERE c.tenant_id = ${tenantId} AND c.project_id = ${projectId} AND c.run_id = ${runId} AND c.sha IS NOT NULL AND c.status IN ('assembled', 'rejected') ORDER BY c.created_at DESC, c.candidate_id DESC LIMIT 1`);
+    if (latest?.['status'] !== 'rejected') return { kind: 'idle' };
+    const at = await tip(String(latest['repository']), String(latest['target'])).catch(() => null);
+    return at === null || at === String(latest['base_sha']) ? { kind: 'idle' } : { kind: 'reopen' };
   }
 
   /** What assembling this run would mean right now, or null when nothing is due. */
-  async function assess(projectId: string, runId: string, tip: TipReader = (t) => resolveTip(repoPath, t)): Promise<Assessment> {
+  async function assess(projectId: string, runId: string, tip: TipReader = (r, t) => readTip(repoPath, options.remote, r, t)): Promise<Assessment> {
     const tasks = await loadRunTasks(db, tenantId, projectId, runId);
     // A verifying part with no published change set cannot enter a candidate; it counts as unfinished below.
     const waiting = tasks.filter((t) => t.status === 'verifying' && t.attemptId !== null && t.manifest !== null);
@@ -199,6 +218,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const live = new Set(liveRows.flatMap((r) => (r['parts'] as Part[]).map(partKey)));
     if (waiting.every((t) => live.has(partKey({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! })))) {
       // Nothing is waiting to be built, so the only work left here is a candidate the target has moved past. More than one live candidate is not a state to act on.
+      if (liveRows.length === 0) return assessFailedRebuild(projectId, runId, tasks, tip);
       if (liveRows.length !== 1) return { kind: 'idle' };
       const row = liveRows[0]!;
       return assessMoved(projectId, runId, tasks, { baseSha: String(row['base_sha']), target: String(row['target']), parts: row['parts'] as Part[] }, tip);
@@ -209,9 +229,10 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const unfinished = tasks.filter((t) => !SETTLED_STATUSES.has(t.status) || (t.status === 'verifying' && t.manifest === null));
     if (unfinished.some((t) => !held.has(t.spec.taskId))) return { kind: 'idle' };
 
-    const project = await db.execute(sql`SELECT default_branch FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
+    const project = await db.execute(sql`SELECT default_branch, repository FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
     if (project.length === 0) return { kind: 'idle' };
     const target = String(project[0]!['default_branch']);
+    const repository = String(project[0]!['repository']);
     // The run's base: what its workers were planned on. A resolution task is built later on a newer tip and does not define it.
     const pinnedBaseSha = pinnedBaseOf(tasks, waiting[0]!);
     const parts = waiting.map((t) => ({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! }));
@@ -224,19 +245,23 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
 
     let currentBaseSha: string;
     try {
-      currentBaseSha = await tip(target);
+      currentBaseSha = await tip(repository, target);
     } catch (e) {
       return { kind: 'infrastructure', partsKey, parts, pinnedBaseSha, target, reason: 'base_unavailable', message: `the tip of ${target} could not be read: ${e instanceof Error ? e.message.slice(0, 200) : 'error'}` };
     }
     const inputsKey = sha256(JSON.stringify({ partsKey, currentBaseSha }));
     const handled = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status IN ('failed', 'conflicted') AND detail ->> 'inputsKey' = ${inputsKey} LIMIT 1`);
     if (handled.length > 0) return { kind: 'idle' };
-    return { kind: 'due', due: { target, pinnedBaseSha, currentBaseSha, inputsKey, partsKey, parts, baseMoved: false } };
+    return { kind: 'due', due: { repository, target, pinnedBaseSha, currentBaseSha, inputsKey, partsKey, parts, baseMoved: false } };
   }
 
   async function assembleRun(projectId: string, runId: string, tip: TipReader): Promise<{ sha?: string; failure?: string; retrying?: string }> {
     const assessed = await assess(projectId, runId, tip);
     if (assessed.kind === 'idle') return {};
+    if (assessed.kind === 'reopen') {
+      const reopened = await withTx(db, (tx) => reopenBlockedVerification({ now }, tx, { tenantId, projectId, runId }, 'integration', `op_rebuild_retry_${randomUUID()}`, null, { baseMoved: true, unbounded: true }));
+      return reopened.ok ? assembleRun(projectId, runId, tip) : {};
+    }
     if (assessed.kind === 'infrastructure') {
       const a = assessed;
       const done = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, a.target, a.partsKey, a.parts, a.pinnedBaseSha, a.reason, a.message));
@@ -244,6 +269,18 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
       return done.outcome === 'blocked' ? { failure: `assembly_infrastructure:${a.reason}` } : { retrying: a.reason };
     }
     const { due } = assessed;
+    if (options.remote) {
+      try {
+        await options.remote.fetchBranch({ repository: due.repository, repoPath, branch: due.target, sha: due.currentBaseSha });
+      } catch (e) {
+        // A rebuild has retired nothing yet, so a failed fetch leaves everything as it was. Work with no candidate at all waits like any other infrastructure failure.
+        if (due.baseMoved) return {};
+        const message = `the tip of ${due.target} could not be fetched: ${redactSecrets(e instanceof Error ? e.message : 'error').slice(0, 200)}`;
+        const done = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, due.target, due.partsKey, due.parts, due.pinnedBaseSha, 'base_unavailable', message));
+        if (done.outcome === 'retrying') options.onRetry?.({ runId, reason: 'base_unavailable', count: done.count, maxRetries });
+        return done.outcome === 'blocked' ? { failure: 'assembly_infrastructure:base_unavailable' } : { retrying: 'base_unavailable' };
+      }
+    }
     let deferred: { readonly reason: string; readonly outcome: 'retrying' | 'blocked' } | undefined;
     const r = await assembleCandidate(
       { tenantId, projectId, runId, target: due.target, pinnedBaseSha: due.pinnedBaseSha, currentBaseSha: due.currentBaseSha, repoPath, inputsKey: due.inputsKey, ...(due.baseMoved ? { baseMoved: true } : {}) },
@@ -259,6 +296,11 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
       },
     );
     if (r.ok) { await clearRetry(projectId, runId, due.target); return { sha: r.sha }; }
+    if (r.reason === 'rebuild_deferred') {
+      // Written once per reason. The candidate stands untouched; the next pass tries again.
+      await db.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{rebuildDeferred}', jsonb_build_object('message', ${r.message}::text, 'at', ${now().toISOString()}::text)) WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND detail -> 'rebuildDeferred' ->> 'message' IS DISTINCT FROM ${r.message}::text`);
+      return {};
+    }
     if (deferred) return deferred.outcome === 'blocked' ? { failure: `assembly_infrastructure:${deferred.reason}` } : { retrying: deferred.reason };
     // Another pass holds or took the work: nothing happened here and nothing is recorded.
     if (r.reason === 'lease_held' || r.reason === 'lease_lost' || r.reason === 'not_due') return {};
@@ -274,18 +316,20 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
         JOIN runs ru ON ru.tenant_id = r.tenant_id AND ru.project_id = r.project_id AND ru.run_id = r.run_id
         WHERE s.tenant_id = ${tenantId} AND s.status = 'verifying' AND ru.lifecycle IN ('planning', 'running', 'blocked')
         ORDER BY r.project_id, r.run_id`);
-      // One git read per target branch per pass. A tip that cannot be read stays out of the scan, so it costs nothing and concludes nothing.
+      // One tip read per repository and branch per pass. A tip that cannot be read stays out of the scan, so it costs nothing and concludes nothing.
       const tips = new Map<string, Promise<string>>();
-      const tip: TipReader = (t) => { let p = tips.get(t); if (!p) { p = resolveTip(repoPath, t); tips.set(t, p); } return p; };
+      const tip: TipReader = (r, t) => { const k = `${r}\0${t}`; let p = tips.get(k); if (!p) { p = readTip(repoPath, options.remote, r, t); tips.set(k, p); } return p; };
       const scanned = await db.execute(sql`
-        SELECT c.project_id, c.run_id, c.target, c.base_sha
+        SELECT c.project_id, c.run_id, c.target, c.base_sha, p.repository
         FROM candidates c JOIN runs ru ON ru.tenant_id = c.tenant_id AND ru.project_id = c.project_id AND ru.run_id = c.run_id
         JOIN projects p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id AND p.default_branch = c.target
-        WHERE c.tenant_id = ${tenantId} AND c.status = 'assembled' AND c.sha IS NOT NULL AND ru.lifecycle IN ('planning', 'running', 'blocked', 'ready_for_review')
+        WHERE c.tenant_id = ${tenantId} AND c.sha IS NOT NULL AND (
+          (c.status = 'assembled' AND ru.lifecycle IN ('planning', 'running', 'blocked', 'ready_for_review'))
+          OR (c.status = 'rejected' AND ru.lifecycle IN ('running', 'blocked') AND EXISTS (SELECT 1 FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision WHERE s.tenant_id = c.tenant_id AND s.project_id = c.project_id AND r.run_id = c.run_id AND s.status = 'blocked')))
         ORDER BY c.updated_at, c.candidate_id LIMIT ${MOVED_SCAN_LIMIT}`);
       const due = new Map(runs.map((r) => [`${String(r['project_id'])}\0${String(r['run_id'])}`, r]));
       for (const c of scanned) {
-        const at = await tip(String(c['target'])).catch(() => null);
+        const at = await tip(String(c['repository']), String(c['target'])).catch(() => null);
         if (at !== null && at !== String(c['base_sha'])) due.set(`${String(c['project_id'])}\0${String(c['run_id'])}`, c);
       }
       const assembled: string[] = [];

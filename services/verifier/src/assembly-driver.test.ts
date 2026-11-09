@@ -169,7 +169,9 @@ describe('assembly driver', () => {
     try {
       expect(await events('candidate.failed')).toBe(1);
       await driver.tick();
-      expect(await events('candidate.failed')).toBe(2);
+      // Judged again on the new tip. The same conflict between the same work is one conflict, now recorded against the new tip.
+      expect(await events('candidate.failed')).toBe(1);
+      expect(await q(`SELECT base_sha FROM candidates WHERE status = 'conflicted'`)).toEqual([{ base_sha: moved }]);
     } finally {
       git(repo, 'reset', '-q', '--hard', baseSha);
     }

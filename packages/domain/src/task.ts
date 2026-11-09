@@ -96,7 +96,8 @@ export type TaskEvent =
   /** The evidence behind a verified task was invalidated. It goes back to `verifying`, or to `blocked` when its claims cannot be re-acquired. */
   | { type: 'verification_invalidated'; blockedReason?: string }
   /** The owner sent work blocked by a verifier or assembly failure back for a verdict. The attempt that finished waits for one again; no worker runs. */
-  | { type: 'reverify_requested' }
+  /** `afterFailedVerdict`: main has moved since this work failed its verdict, so that verdict is about an old tip and the work gets another. */
+  | { type: 'reverify_requested'; afterFailedVerdict?: boolean }
   | { type: 'retry_requested' }
   /** The scheduler refused a further attempt (repair or infrastructure retry): the task stops at `blocked`, keeping the reason on the event. */
   | { type: 'repair_refused'; reason: string }
@@ -217,7 +218,7 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
       if (state.status !== 'blocked') return bad('only a blocked task can be sent back for verification');
       const attempts = state.attempts.slice();
       const last = attempts[attempts.length - 1];
-      if (!last || last.outcome !== 'interrupted') return bad('there is no interrupted attempt to verify');
+      if (!last || (last.outcome !== 'interrupted' && !(event.afterFailedVerdict === true && last.outcome === 'failed'))) return bad('there is no interrupted attempt to verify');
       const { reason: _reason, ...waiting } = last;
       attempts[attempts.length - 1] = { ...waiting, outcome: 'running' };
       return move('verifying', attempts);

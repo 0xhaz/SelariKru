@@ -20,6 +20,7 @@ import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src
 import { emit } from '../../workflow/src/events.ts';
 import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
 import { CandidateNotVerifiable, VERIFICATION_LEASE_SECONDS, verifyCandidate, type VerificationDeps } from './service.ts';
+import { readTip, type RemoteTips } from './tip.ts';
 
 export interface VerificationDriverOptions extends Omit<VerificationDeps, 'db'> {
   readonly db: Db;
@@ -32,7 +33,12 @@ export interface VerificationDriverOptions extends Omit<VerificationDeps, 'db'> 
   readonly maxVerificationRetries?: number;
   /** Delay before the first re-verification; it doubles per retry. Default 60 s. */
   readonly retryBackoffSeconds?: number;
+  /** With GitHub enabled: where main's tip is read. Absent: the local branch. */
+  readonly remote?: RemoteTips;
 }
+
+/** Candidates passed over in one tick because main has moved past them. A bound on a pass, not on the queue: they are the assembly driver's to rebuild. */
+const MAX_SKIPPED_PER_TICK = 25;
 
 /** Infrastructure retries when the server starts the driver. Bounded, so a broken Docker cannot keep tasks `verifying` forever. */
 export const DEFAULT_VERIFICATION_RETRIES = 2;
@@ -87,17 +93,25 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
   const candKeyFor = (alias: string, c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>) => sql`${sql.raw(alias)}.tenant_id = ${tenantId} AND ${sql.raw(alias)}.project_id = ${c.project_id} AND ${sql.raw(alias)}.run_id = ${c.run_id} AND ${sql.raw(alias)}.sha = ${c.sha}`;
 
   /** Atomically claims the oldest due candidate. Concurrent ticks and processes cannot claim the same one. */
-  async function claimDue(holder: string): Promise<CandidateRow | null> {
+  async function claimDue(holder: string, skip: readonly string[]): Promise<CandidateRow | null> {
     const at = now();
     const rows = await db.execute(sql`
       WITH due AS (
-        SELECT c.tenant_id, c.project_id, c.candidate_id FROM candidates c WHERE c.tenant_id = ${tenantId} AND ${CANDIDATE_DUE(at)}
+        SELECT c.tenant_id, c.project_id, c.candidate_id FROM candidates c WHERE c.tenant_id = ${tenantId} AND ${CANDIDATE_DUE(at)}${skip.length > 0 ? sql` AND c.sha NOT IN (${sql.join(skip.map((s) => sql`${s}`), sql`, `)})` : sql``}
         ORDER BY c.created_at, c.candidate_id LIMIT 1 FOR UPDATE SKIP LOCKED
       )
       UPDATE candidates c SET detail = jsonb_set(c.detail, '{verificationDriver}', jsonb_build_object('holder', ${holder}::text, 'claimedAt', ${at.toISOString()}::text, 'expiresAt', ${expiry()}::text))
       FROM due WHERE c.tenant_id = due.tenant_id AND c.project_id = due.project_id AND c.candidate_id = due.candidate_id
       RETURNING c.project_id, c.run_id, c.sha, c.parts`);
     return (rows[0] as unknown as CandidateRow | undefined) ?? null;
+  }
+
+  /** False only on a definite answer: the candidate is gone or main has moved past it. A tip that cannot be read is no answer. */
+  async function stillCurrent(c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>): Promise<boolean> {
+    const [row] = await db.execute(sql`SELECT c.status, c.base_sha, c.target, p.repository FROM candidates c JOIN projects p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id WHERE c.tenant_id = ${tenantId} AND c.project_id = ${c.project_id} AND c.run_id = ${c.run_id} AND c.sha = ${c.sha}`);
+    if (!row || row['status'] !== 'assembled') return false;
+    const tip = await readTip(options.repoPath, options.remote, String(row['repository']), String(row['target'])).catch(() => null);
+    return tip === null || tip === row['base_sha'];
   }
 
   async function announce(c: CandidateRow): Promise<void> {
@@ -121,8 +135,8 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     renewer.unref();
     try {
       await announce(c);
-      const { tenantId: _t, repoPath: _r, maxVerificationRetries: _m, retryBackoffSeconds: _b, ...deps } = options;
-      await verifyCandidate({ tenantId, projectId: c.project_id, runId: c.run_id, sha: c.sha, taskId: c.parts[0]!.taskId, repoPath: options.repoPath }, { ...deps, leaseSeconds });
+      const { tenantId: _t, repoPath: _r, maxVerificationRetries: _m, retryBackoffSeconds: _b, remote: _g, ...deps } = options;
+      await verifyCandidate({ tenantId, projectId: c.project_id, runId: c.run_id, sha: c.sha, taskId: c.parts[0]!.taskId, repoPath: options.repoPath }, { ...deps, leaseSeconds, stillCurrent: () => stillCurrent(c) });
       return true;
     } catch (e) {
       if (!(e instanceof CandidateNotVerifiable)) throw e;
@@ -213,7 +227,16 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     async tick() {
       const holder = `driver:${randomUUID()}`;
       await retire();
-      const candidate = await claimDue(holder);
+      // Oldest first, passing over any candidate main has already moved past: its Docker run would answer a question nobody is asking, and the rest of the queue should not wait behind it.
+      let candidate: CandidateRow | null = null;
+      const skipped: string[] = [];
+      while (skipped.length <= MAX_SKIPPED_PER_TICK) {
+        const next = await claimDue(holder, skipped);
+        if (!next) break;
+        if (await stillCurrent(next)) { candidate = next; break; }
+        await db.execute(sql`UPDATE candidates SET detail = detail - 'verificationDriver' WHERE ${candKey(next)} AND detail -> 'verificationDriver' ->> 'holder' = ${holder}`);
+        skipped.push(next.sha);
+      }
       let verified: string | null = null;
       if (candidate) {
         try {

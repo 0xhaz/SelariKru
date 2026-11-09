@@ -26,6 +26,8 @@ export interface GitHubPort {
   pushBranch(input: { repository: string; repoPath: string; sha: string; branch: string }): Promise<void>;
   /** The commit a remote branch points at, or null when the branch does not exist. */
   branchHead(repository: string, branch: string): Promise<string | null>;
+  /** Fetches `branch` into `repoPath` under a private ref, and confirms `sha` arrived. No local branch moves. */
+  fetchBranch(input: { repository: string; repoPath: string; branch: string; sha: string }): Promise<void>;
   /** Pull requests (any state, newest first, bounded) whose head is `branch`. Empty when there is none. */
   findPullRequests(repository: string, branch: string): Promise<PullRequestInfo[]>;
   /** Opens a DRAFT pull request from `branch` into `base`. */

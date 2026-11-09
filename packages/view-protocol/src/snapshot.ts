@@ -142,6 +142,8 @@ export type RunEvidenceView = z.infer<typeof RunEvidenceViewSchema>;
 export const RunViewSchema = z
   .object({
     runId: Id,
+    /** Main moved, but rebuilding now would take a claim another task holds. Nothing was touched. */
+    rebuildDeferred: z.object({ message: z.string(), at: Iso }).strict().nullable().optional(),
     lifecycle: z.enum(RUN_STATUSES),
     planRevision: z.number().int().min(0),
     /** Latest run-level evidence (candidate assembled, change proposed or merged). Run-level events never create tasks. */
@@ -342,7 +344,7 @@ export const ChangeRequestViewSchema = z
     mergeCommitSha: z.string().nullable(),
     observedAt: Iso.nullable(),
     /** Main moved and the run's code was rebuilt, so this open pull request no longer holds it. `rebuiltSha` is null until a rebuilt commit exists. Null: it still holds the run's code. */
-    outOfDate: z.object({ reason: z.literal('main_moved'), at: Iso, rebuiltSha: Id.nullable() }).strict().nullable().default(null),
+    outOfDate: z.object({ reason: z.literal('main_moved'), at: Iso, rebuiltSha: Id.nullable(), rebuild: z.enum(['building', 'verifying', 'verified', 'failed', 'conflicted']) }).strict().nullable().default(null),
   })
   .strict();
 export type ChangeRequestView = z.infer<typeof ChangeRequestViewSchema>;

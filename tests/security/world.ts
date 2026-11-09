@@ -23,8 +23,9 @@ import { CAPS, TEST_CATALOG, TEST_DATABASE_URL, TEST_RUNNER_REPORT } from '@sela
 import { sql } from 'drizzle-orm';
 import { HttpRunnerApi, type ClaimedLease } from '../../apps/local-runner/src/api.ts';
 import { APPROVAL_SIGNAL_RELATIVE_PATH, runAttempt, type AttemptReport } from '../../apps/local-runner/src/attempt.ts';
-import { createAssemblyDriver } from '../../services/verifier/src/assembly-driver.ts';
-import { createVerificationDriver } from '../../services/verifier/src/driver.ts';
+import { createAssemblyDriver, type AssemblyDriverOptions } from '../../services/verifier/src/assembly-driver.ts';
+import { createVerificationDriver, type VerificationDriverOptions } from '../../services/verifier/src/driver.ts';
+import { resolveLocalTip } from '../../services/verifier/src/tip.ts';
 import { verifierHashes } from '../../services/verifier/src/hashing.ts';
 import { candidateContentHash, currentTrusted, loadValidRecord, type RunnerInput, type RunnerOutput } from '../../services/verifier/src/service.ts';
 
@@ -81,8 +82,12 @@ export interface WorldOptions { readonly policy?: Policy; readonly maxConcurrent
 export class World {
   readonly gh = new FakeGitHub();
   readonly logs: string[] = [];
+  /** Every line the control API's own logger wrote, at trace level. */
+  readonly apiLog: string[] = [];
   private offsetMs = 0;
   /** Stands in for a verifier build that has moved on, as `chain.test.ts` does: the hashes evidence is held to right now. */
+  /** How the control API reads main's tip. Local unless a test says otherwise. */
+  tipSource: (project: { readonly repository: string; readonly target: string }) => Promise<string> = (p) => resolveLocalTip(this.repo, p.target);
   trustOverride: ReturnType<typeof currentTrusted> | null = null;
   readonly trusted = (): ReturnType<typeof currentTrusted> => this.trustOverride ?? currentTrusted();
   readonly now = (): Date => new Date(Date.now() + this.offsetMs);
@@ -119,6 +124,8 @@ export class World {
     const store = new LocalDiskArtifactStore(this.artifactDir);
     this.scheduler = createScheduler({ catalog: TEST_CATALOG, db, now: this.now, policy: this.policy });
     return buildApp({
+      logger: { level: 'trace', stream: { write: (line: string) => { this.apiLog.push(line); } } },
+      tipOf: (p) => this.tipSource(p),
       config: testConfig({ allowedOrigins: [], caps: this.caps }), db, verifier: fakeVerifier, now: this.now, scheduler: this.scheduler, policy: this.policy, catalog: TEST_CATALOG,
       evidence: { trusted: this.trusted, artifacts: store, loadRecord: (key) => loadValidRecord(db, store, key, { trusted: this.trusted() }) },
       github: { webhookSecret: WEBHOOK_SECRET, pullRequests: { port: this.gh, repoPath: this.repo, loadRecord: (key) => loadValidRecord(db, store, key, { trusted: this.trusted() }) } },
@@ -165,6 +172,8 @@ export class World {
     await this.t.db.execute(sql`UPDATE projects SET repository = 'acme/feedback-board'`);
     this.gh.calls.length = 0; this.gh.prs.length = 0; this.gh.pushes.length = 0; this.gh.branches.clear(); this.gh.fastForwards.clear();
     this.logs.length = 0;
+    this.apiLog.length = 0;
+    this.tipSource = (p) => resolveLocalTip(this.repo, p.target);
     this.offsetMs = 0;
     this.trustOverride = null;
     this.git('reset', '-q', '--hard', this.baseSha);
@@ -220,9 +229,9 @@ export class World {
   }
 
   store(): LocalDiskArtifactStore { return new LocalDiskArtifactStore(this.artifactDir); }
-  assembly() { return createAssemblyDriver({ db: this.t.db, artifacts: this.store(), tenantId: TENANT, repoPath: this.repo, workRoot: join(this.root, 'integrate'), now: this.now }); }
-  verification(runner: (i: RunnerInput) => Promise<RunnerOutput>, maxVerificationRetries = 0) {
-    return createVerificationDriver({ db: this.t.db, artifacts: this.store(), runner, verifier: { kind: 'verifier', id: 'verifier-local-1' }, host: 'local-docker', tenantId: TENANT, repoPath: this.repo, workRoot: join(this.root, 'verify'), maxVerificationRetries, now: this.now });
+  assembly(over: Partial<Pick<AssemblyDriverOptions, 'remote' | 'reconcile'>> = {}) { return createAssemblyDriver({ db: this.t.db, artifacts: this.store(), tenantId: TENANT, repoPath: this.repo, workRoot: join(this.root, 'integrate'), now: this.now, ...over }); }
+  verification(runner: (i: RunnerInput) => Promise<RunnerOutput>, maxVerificationRetries = 0, over: Partial<Pick<VerificationDriverOptions, 'remote' | 'supersededCheckMs'>> = {}) {
+    return createVerificationDriver({ ...over, db: this.t.db, artifacts: this.store(), runner, verifier: { kind: 'verifier', id: 'verifier-local-1' }, host: 'local-docker', tenantId: TENANT, repoPath: this.repo, workRoot: join(this.root, 'verify'), maxVerificationRetries, now: this.now });
   }
 
   async claimAndComplete(taskId: string, file = `src/${taskId}.ts`): Promise<AttemptReport> {
