@@ -132,6 +132,8 @@ export class ControlHub {
   private readonly clientServer = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_FRAME_BYTES, perMessageDeflate: false });
   private readonly linkServer = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_LINK_FRAME_BYTES, perMessageDeflate: false });
   private timers: ReturnType<typeof setInterval>[] = [];
+  /** Attempts whose result is being published right now. */
+  private readonly finishing = new Set<string>();
   private closing = false;
 
   constructor(
@@ -448,6 +450,16 @@ export class ControlHub {
   }
 
   /** Immediately, and only ever after the attempt's own result or cancellation is durable. */
+  /** Runs a result's publish. Its commit ends the attempt before `endForAttempt` can run, and a sweep landing in that gap must not call a normal finish a fence. */
+  async whileFinishing<T>(attemptId: string, publish: () => Promise<T>): Promise<T> {
+    this.finishing.add(attemptId);
+    try {
+      return await publish();
+    } finally {
+      this.finishing.delete(attemptId);
+    }
+  }
+
   endForAttempt(attemptId: string, reason: ControlEndReason): void {
     for (const s of [...this.sessions.values()]) if (s.attemptId === attemptId) this.end(s, reason);
     const link = this.links.get(attemptId);
@@ -501,14 +513,16 @@ export class ControlHub {
     for (const s of [...this.sessions.values()]) {
       if (now - s.lastInputMs >= this.limits.idleMs) { this.end(s, 'idle_timeout'); continue; }
       if (now - s.startedMs >= this.limits.maxSessionMs) { this.end(s, 'session_limit'); continue; }
-      if (!(await this.stillLive(this.db, s, now))) this.end(s, 'attempt_fenced');
+      if (!(await this.stillLive(this.db, s, now)) && !this.finishing.has(s.attemptId)) this.end(s, 'attempt_fenced');
     }
     for (const [attemptId, link] of [...this.links]) {
       const [a] = await this.db.select({ fence: schema.attempts.leaseFence, endedAt: schema.attempts.endedAt, expires: schema.attempts.leaseExpiresAt }).from(schema.attempts).where(and(eq(schema.attempts.tenantId, this.ctx.config.tenantId), eq(schema.attempts.attemptId, attemptId)));
+      if (this.finishing.has(attemptId)) continue;
       if (!a || a.fence !== link.fence || a.endedAt !== null || (a.expires !== null && a.expires.getTime() <= now)) {
         // A fence can commit after the loop above read this attempt as live. Named here, or the link's close would record it as a lost link.
         for (const s of [...this.sessions.values()]) if (s.link === link) this.end(s, 'attempt_fenced');
-        this.links.delete(attemptId);
+        // A newer link for this attempt may have registered during the read above, and is not this one to remove.
+        if (this.links.get(attemptId) === link) this.links.delete(attemptId);
         link.ws.close(WS_NORMAL);
       }
     }

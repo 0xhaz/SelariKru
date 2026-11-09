@@ -95,6 +95,43 @@ describe('the results file', () => {
     expect(BenchmarkFileSchema.safeParse(unsupported).success).toBe(false);
   });
 
+  it.each(['failed', 'timed_out', 'cancelled', 'denied_start', 'abandoned'] as const)('a %s attempt that never reached verification is kept with no candidate or artifact', (status) => {
+    const honest = { ...workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', status, ms: null }), artifactReferences: [] };
+    const record = { ...honest, configuration: { ...honest.configuration, candidateSha: null }, timings: { ...honest.timings, clockDomain: null } };
+    const parsed = BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] }));
+    expect(parsed.success).toBe(true);
+    expect(workersOf(parsed.data!).attempts).toHaveLength(1);
+  });
+
+  it('a completed attempt, or one with a judged criterion, still needs its candidate and artifact', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', failedCriteria: ['FB-01'] });
+    const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...r, configuration: { ...r.configuration, candidateSha: null } })).toBe(true);
+    expect(refused({ ...r, artifactReferences: [] })).toBe(true);
+    expect(refused({ ...r, status: 'failed', configuration: { ...r.configuration, candidateSha: null } })).toBe(true);
+  });
+
+  it('a candidate on any record must be SHA-shaped, and a denied start may link its denial record', () => {
+    const denied = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', status: 'denied_start', ms: null });
+    const parse = (record: typeof denied): boolean => BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(parse({ ...denied, configuration: { ...denied.configuration, candidateSha: 'not-a-sha' } })).toBe(false);
+    expect(parse({ ...denied, artifactReferences: ['#/decisions?card=denied-1'] })).toBe(true);
+    expect(parse({ ...denied, artifactReferences: ['notes.txt'] })).toBe(false);
+  });
+
+  it('one candidate may repeat inside a trial, not across trials, and a no-change attempt on the starter is exempt', () => {
+    const a = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const b = workerRecord({ mode: 'L1', index: 1, dataKind: 'measured' });
+    const candidate = a.configuration.candidateSha!;
+    const shared = { ...b, configuration: { ...b.configuration, candidateSha: candidate } };
+    const parse = (...records: (typeof a)[]): boolean => BenchmarkFileSchema.safeParse(benchmarkFile({ records })).success;
+    expect(parse(a, { ...shared, trialId: a.trialId })).toBe(true);
+    expect(parse(a, shared)).toBe(false);
+    const starter = 'd'.repeat(40);
+    const onStarter = (r: typeof a): typeof a => ({ ...r, configuration: { ...r.configuration, starterSha: starter, candidateSha: starter } });
+    expect(parse(onStarter(a), onStarter(b))).toBe(true);
+  });
+
   it('refuses a record saying no person intervened while logging intervention or correction minutes', () => {
     const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
     const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;

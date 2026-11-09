@@ -211,7 +211,7 @@ export const BenchmarkFileSchema = z.strictObject({
   if (declared.size !== file.cohorts.length) ctx.addIssue({ code: 'custom', path: ['cohorts'], message: 'a cohort id appears twice' });
   const attemptIds = new Set<string>();
   const resultHashes = new Set<string>();
-  const candidates = new Set<string>();
+  const candidateTrials = new Map<string, string>();
   file.records.forEach((record, i) => {
     const path = ['records', i];
     const refuse = (message: string): void => { ctx.addIssue({ code: 'custom', path, message }); };
@@ -247,16 +247,24 @@ export const BenchmarkFileSchema = z.strictObject({
 
     // `measured` is a claim. A record that ran must carry what would let someone check it.
     if (measured) {
+      // A denied, abandoned or failed attempt may never have produced a candidate, and the plan keeps those records. What a reader must be able to check starts at verification.
+      const verified = record.status === 'completed' || record.quality.criteria.some((c) => c.status !== 'not_run');
       if (record.track === 'workers') {
         const candidate = record.configuration.candidateSha;
-        if (candidate === null || !COMMIT_SHA.test(candidate)) refuse('a measured attempt needs its candidate as a commit SHA');
-        // Every attempt starts clean (plan section 3), so two attempts cannot share a commit.
-        else if (candidates.has(candidate)) refuse(`candidate ${candidate} is reused by another attempt`);
-        else candidates.add(candidate);
+        if (candidate === null) {
+          if (verified) refuse('an attempt that reached verification needs its candidate commit');
+        } else if (!COMMIT_SHA.test(candidate)) refuse('a candidate must be a commit SHA');
+        else if (candidate !== record.configuration.starterSha) {
+          // Every trial starts clean (plan section 3), so two trials cannot share a commit. A no-change attempt legitimately ends on the starter.
+          const seenIn = candidateTrials.get(candidate);
+          if (seenIn !== undefined && seenIn !== record.trialId) refuse(`candidate ${candidate} is reused by another trial`);
+          candidateTrials.set(candidate, seenIn ?? record.trialId);
+        }
       }
       if (record.configuration.manifestSha256 === null) refuse('a measured attempt needs its manifest hash');
-      if (timings.clockDomain === null) refuse('a measured attempt needs its clock domain');
-      if (record.artifactReferences.length === 0 || !record.artifactReferences.every(isEvidenceReference)) refuse('a measured attempt needs artifact references starting #/ or https://');
+      if (timings.clockDomain === null && (verified || containsNumber(timings))) refuse('a measured attempt with timings needs its clock domain');
+      if (verified && record.artifactReferences.length === 0) refuse('an attempt that reached verification needs an artifact reference');
+      if (!record.artifactReferences.every(isEvidenceReference)) refuse('artifact references must start #/ or https://');
       if (record.resultSha256 === null) refuse('a measured attempt needs its result hash');
       if (record.quality.criteria.some((c) => c.status === 'passed' && (c.evidenceReferences.length === 0 || !c.evidenceReferences.every(isEvidenceReference)))) refuse('a passing criterion needs evidence references starting #/ or https://');
     }

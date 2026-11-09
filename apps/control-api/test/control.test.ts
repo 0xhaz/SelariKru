@@ -7,7 +7,7 @@ import { API_POLICY, ORIGIN, PROJECT, RUN, TENANT, bearer, enrolRunner, get, mak
 
 /** Passes through. It is how a test reaches the hub the app built, to place a commit at one exact moment of a sweep. */
 const attachSpy = vi.spyOn(ControlHub.prototype, 'attach');
-let hub: { stillLive: (...args: unknown[]) => Promise<boolean> };
+let hub: { stillLive: (...args: unknown[]) => Promise<boolean>; db: any; links: Map<string, unknown>; whileFinishing: <T>(id: string, f: () => Promise<T>) => Promise<T>; endForAttempt: (id: string, reason: 'attempt_finished') => void };
 let t: TestDb;
 let h: Harness;
 let base: string;
@@ -434,6 +434,41 @@ describe('a session', () => {
     await c.waitFor((f) => f.type === 'ended');
     expect(c.frames.find((f) => f.type === 'ended').reason).toBe('idle_timeout');
     link.close();
+  });
+
+  it('a sweep during a result publish leaves the session to end as finished', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    await hub.whileFinishing(lease.attemptId, async () => {
+      await t.db.update(schema.attempts).set({ endedAt: new Date(h.clock.now().getTime()) }).where(eq(schema.attempts.attemptId, lease.attemptId));
+      await new Promise((r) => setTimeout(r, 90)); // several 20 ms sweeps
+    });
+    hub.endForAttempt(lease.attemptId, 'attempt_finished');
+    await c.waitFor((f) => f.type === 'ended');
+    expect(c.frames.find((f) => f.type === 'ended').reason).toBe('attempt_finished');
+  });
+
+  it('a sweep does not remove a newer link registered while it was reading', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    await enter(lease.attemptId, link);
+    const replacement = { fence: lease.fence, ws: { close: () => undefined, terminate: () => undefined, readyState: 3 } };
+    const realDb = hub.db;
+    let read = false;
+    // The sweep's link read is answered as stale, with the newer link appearing during that read.
+    hub.db = new Proxy(realDb, { get(target, prop) {
+      if (prop !== 'select') return Reflect.get(target, prop);
+      return (columns: Record<string, unknown> | undefined) => {
+        if (!columns || !('fence' in columns) || 'runner' in columns) return target.select(columns);
+        hub.db = realDb;
+        return { from: () => ({ where: async () => { hub.links.set(lease.attemptId, replacement); read = true; return [{ fence: -1, endedAt: null, expires: null }]; } }) };
+      };
+    } });
+    await vi.waitFor(() => expect(read).toBe(true));
+    await new Promise((r) => setTimeout(r, 5));
+    expect(hub.links.get(lease.attemptId)).toBe(replacement);
+    hub.links.delete(lease.attemptId);
   });
 
   it('a fence committing between the session check and the link check still ends the session as fenced', async () => {
