@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 
 export interface ArtifactRef {
@@ -33,6 +34,16 @@ export class PathEscapeError extends Error {
     super(`path escapes its base: ${detail}`);
     this.name = 'PathEscapeError';
   }
+}
+
+/** The location of the artifact store on this machine, as both the runner and the control API must resolve it: `SELARIKRU_ARTIFACT_DIR`, or the shared default. */
+export function resolveArtifactDir(env: Readonly<Record<string, string | undefined>> = process.env, home: string = homedir()): string {
+  const set = env['SELARIKRU_ARTIFACT_DIR']?.trim();
+  if (set !== undefined && set !== '') {
+    if (!isAbsolute(set)) throw new Error('SELARIKRU_ARTIFACT_DIR must be an absolute path');
+    return set;
+  }
+  return join(home, '.selarikru', 'artifacts');
 }
 
 const ID = /^[0-9a-f]{64}$/;

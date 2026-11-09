@@ -1,5 +1,5 @@
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import type { LeaseRef, ResultRequest } from '@selarikru/protocol';
+import { LeaseGrantSchema, type LeaseRef, type ResultRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 
 export const ClaimedLeaseSchema = z
@@ -10,6 +10,8 @@ export const ClaimedLeaseSchema = z
     taskId: z.string().min(1),
     projectId: z.string().min(1),
     deadlineAt: z.string(),
+    /** Human grants delivered with this lease. A row this runner cannot read as a grant is dropped, so it can never be mistaken for one it holds. */
+    grants: z.array(z.unknown()).default([]).transform((rows) => rows.flatMap((r) => { const g = LeaseGrantSchema.safeParse(r); return g.success ? [g.data] : []; })),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;

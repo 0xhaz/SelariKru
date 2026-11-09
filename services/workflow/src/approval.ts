@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { canonicalJson, TaskSpecSchema, transition, type TaskStatus } from '@selarikru/domain';
+import { canonicalJson, LeaseGrantSchema, TaskSpecSchema, transition, WORKER_APPROVAL_OPERATIONS, type LeaseGrant, type TaskStatus } from '@selarikru/domain';
 import { evaluate, type Operation, type PolicyDecision, type Policy } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, gt, isNotNull, isNull, lte, or } from 'drizzle-orm';
@@ -78,6 +78,26 @@ export async function openApproval(
   return { decision, approval: { approvalId: existing.approvalId, scopeHash, actionHash, expiresAt: (existing.expiresAt ?? expiresAt).toISOString() } };
 }
 
+/** Grants a new attempt receives: every human grant for this task revision, not yet used, still within its expiry. Scheduler gates (cloud, repair) are decided at claim, not delivered. */
+export async function loadWorkerGrants(tx: Tx, key: TaskKey, revision: number, now: Date): Promise<readonly LeaseGrant[]> {
+  const rows = await tx
+    .select({ approvalId: schema.approvals.approvalId, scopeHash: schema.approvals.scopeHash, expiresAt: schema.approvals.expiresAt, detail: schema.approvals.detail })
+    .from(schema.approvals)
+    .where(and(
+      eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId),
+      eq(schema.approvals.revision, revision), eq(schema.approvals.outcome, 'granted'), isNull(schema.approvals.consumedAt),
+      or(isNull(schema.approvals.expiresAt), gt(schema.approvals.expiresAt, now)),
+    ));
+  const grants: LeaseGrant[] = [];
+  for (const r of rows) {
+    const destination = r.detail['destinationKind'] === 'network_host' && typeof r.detail['destination'] === 'string' ? { kind: 'network_host' as const, host: r.detail['destination'] } : null;
+    const parsed = LeaseGrantSchema.safeParse({ approvalId: r.approvalId, scopeHash: r.scopeHash, operation: r.detail['operation'], destination, expiresAt: r.expiresAt?.toISOString() ?? null });
+    // Not a worker operation (a scheduler gate) or an unrecognisable row: never delivered, so it can never widen what the attempt believes it holds.
+    if (parsed.success && (WORKER_APPROVAL_OPERATIONS as readonly string[]).includes(parsed.data.operation)) grants.push(parsed.data);
+  }
+  return grants.sort((a, b) => (a.approvalId < b.approvalId ? -1 : 1));
+}
+
 /** Marks every grant for this task revision as used by the attempt that just started, so a later attempt needs a fresh approval. */
 export async function consumeGrants(tx: Tx, key: TaskKey, revision: number, attemptId: string, now: Date): Promise<void> {
   await tx
@@ -100,7 +120,9 @@ export async function expireApprovals(ctx: SchedulerContext, now: Date): Promise
     .where(and(eq(schema.approvals.outcome, 'pending'), isNotNull(schema.approvals.expiresAt), lte(schema.approvals.expiresAt, now)))
     .orderBy(asc(schema.approvals.expiresAt), asc(schema.approvals.approvalId));
   const expired: string[] = [];
+  const failures: unknown[] = [];
   for (const row of due) {
+    // One row's failure (a stored spec that no longer parses, a transient error) is that row's alone: the rest of the sweep still runs.
     const closed = await withTx(ctx.db, async (tx) => {
       const key: TaskKey | null = row.taskId ? { tenantId: row.tenantId, projectId: row.projectId, taskId: row.taskId } : null;
       const task = key ? await lockStatusRow(tx, key) : undefined;
@@ -123,8 +145,9 @@ export async function expireApprovals(ctx: SchedulerContext, now: Date): Promise
         await emit(tx, { projectId: locked.projectId, runId: locked.runId, taskId: locked.runId, aggregateRevision: 0 }, now, { type: 'task.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload });
       }
       return true;
-    });
+    }).catch((e: unknown) => { failures.push(e); return false; });
     if (closed) expired.push(row.approvalId);
   }
+  if (failures.length > 0) throw new AggregateError(failures, `${failures.length} approval expiry row(s) failed (${expired.length} expired)`);
   return expired;
 }

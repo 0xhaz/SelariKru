@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { schema } from '@selarikru/persistence';
 import { reducedScopeContext } from '@selarikru/workflow';
 import { setupTestDb, resetDb, seedTask, specFor, type TestDb } from '@selarikru/workflow/test-helpers';
@@ -109,17 +109,22 @@ describe('openReviewablePr', () => {
       expect(gh.calls).toEqual([]);
     });
 
-    it('prints what was not delivered once the owner has accepted it, through the redaction', async () => {
+    it('prints what is not delivered now, not what was accepted earlier, through the redaction', async () => {
       await stop();
+      await seedTask(tdb.db, specFor('later', { requirementIds: ['FB-09'], acceptanceCheckIds: ['chk-3'] }), 'ready');
       const secret = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
-      await accept({ notDelivered: { ...notDelivered, requirementIds: ['FB-02', secret] } });
+      await tdb.db.update(schema.taskRevisions).set({ spec: specFor('stopped', { requirementIds: ['FB-02', secret] }) }).where(eq(schema.taskRevisions.taskId, 'stopped'));
+      // The accepted snapshot was frozen before 'later' moved on; the printed section must reflect the run as it stands.
+      await accept({ notDelivered: { ...notDelivered, tasks: [{ taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true }, { taskId: 'gone', revision: 1, status: 'ready', budgetStopped: false }], acceptanceCheckIds: ['chk-2'] } });
       await openReviewablePr(run, deps());
       const body = gh.prs[0]!.body;
       expect(body).toMatch(/## Not delivered/);
       expect(body).toMatch(/stopped.*cancelled/);
       expect(body).toMatch(/later.*ready/);
+      expect(body).not.toMatch(/gone/);
       expect(body).toContain('FB-02');
-      expect(body).toContain('chk-2');
+      expect(body).toContain('chk-3');
+      expect(body).not.toContain('chk-2');
       expect(body).not.toContain(secret);
     });
 

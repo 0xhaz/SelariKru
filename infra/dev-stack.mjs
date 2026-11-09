@@ -2,9 +2,9 @@
 // Run with `pnpm dev:stack`. Values come from the environment or a local, git-ignored `.env`.
 // The limit values filled in below apply to this local stack only. The API itself has no defaults.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
 
@@ -37,6 +37,26 @@ const dev = {
   SELARIKRU_EXPIRE_LEASES_INTERVAL_MS: '5000',
 };
 for (const [k, v] of Object.entries(dev)) env[k] ??= v;
+
+// The assembly and verification drivers run by default. They need a source repository and an artifact directory on this machine.
+// The artifact directory matches the runner's default (`@selarikru/artifacts` resolveArtifactDir), so workers' change sets reach the verifier with no extra step.
+env.SELARIKRU_ARTIFACT_DIR ??= join(homedir(), '.selarikru', 'artifacts');
+env.SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS ??= '5000';
+env.SELARIKRU_VERIFICATION_POLL_INTERVAL_MS ??= '5000';
+// A throwaway Feedback Board checkout in the git-ignored .local/ for the drivers to read when no source repository is configured. It is only a
+// default for this local stack: point SELARIKRU_SOURCE_REPO (and the runner's --repo) at a real checkout to run real work.
+const prepareLocalSourceRepo = () => {
+  const dir = resolve('.local/dev/source-repo');
+  if (existsSync(join(dir, '.git'))) return dir;
+  mkdirSync(dir, { recursive: true });
+  cpSync('examples/feedback-board-starter', dir, { recursive: true, filter: (src) => !/(^|\/)(node_modules|dist)$/.test(src) && !/\.sqlite(-wal|-shm)?$/.test(src) });
+  const g = (...a) => spawnSync('git', ['-c', 'user.name=SelariKru', '-c', 'user.email=dev@selarikru.invalid', ...a], { cwd: dir, stdio: 'ignore' });
+  g('init', '-q', '-b', 'main');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'Feedback Board starter');
+  return dir;
+};
+if (!env.SELARIKRU_SOURCE_REPO && !env.SELARIKRU_GITHUB_SOURCE_REPO) env.SELARIKRU_SOURCE_REPO = prepareLocalSourceRepo();
 
 const run = (cmd, args, opts = {}) => {
   const r = spawnSync(cmd, args, { stdio: 'inherit', env, ...opts });

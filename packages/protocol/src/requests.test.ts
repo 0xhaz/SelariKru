@@ -52,4 +52,10 @@ describe('runner result fields', () => {
       expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'failed', reason: 'x', reportedUsage: bad } }).success).toBe(false);
     }
   });
+
+  it('an approval destination is structured or absent, never a free string', () => {
+    const ask = (destination: unknown) => ResultRequestSchema.safeParse({ lease, result: { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination } }).success;
+    expect(ask({ kind: 'network_host', host: 'api.example.com' })).toBe(true);
+    for (const bad of ['https://api.example.com', { kind: 'network_host', host: 'API.example.com' }, { kind: 'network_host', host: '1.2.3.4' }, { kind: 'network_host', host: 'a..b' }, { kind: 'other', host: 'a.example.com' }, { kind: 'network_host', host: 'a.example.com', note: 'x' }]) expect(ask(bad)).toBe(false);
+  });
 });

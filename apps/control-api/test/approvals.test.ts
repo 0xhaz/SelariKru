@@ -36,7 +36,7 @@ const countEvents = async (type: string) => Number((await t.db.execute(sql`SELEC
 async function runnerRequest(id = 't1') {
   await seedTask(t.db, specFor(id));
   const lease = (await s.claimNext(runner('r1'), CAPS))!;
-  await s.publishResult(lease, { outcome: 'approval_requested', reason: 'needs docs.example.com', operation: 'new_domain' });
+  await s.publishResult(lease, { outcome: 'approval_requested', reason: 'needs docs.example.com', operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } });
   return { lease, row: (await approvalRows())[0]! };
 }
 const resolve = (approvalId: string, body: Record<string, unknown>) => post(h.app, `/v1/approvals/${approvalId}/resolve`, { decision: 'grant', expectedRevision: 0, ...body });
@@ -135,6 +135,17 @@ describe('approval rows through the API', () => {
     expect((await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.approvals).toEqual([]);
   });
 
+  it('the lease-expiry driver runs both sweeps even when one throws', async () => {
+    const calls: string[] = [];
+    const failing = startLeaseExpiryDriver({
+      scheduler: { expireLeases: async () => { calls.push('leases'); throw new Error('lease sweep broke'); }, expireApprovals: async () => { calls.push('approvals'); return []; } },
+      now: () => new Date(), intervalMs: 1_000_000,
+    });
+    await expect(failing.tick()).rejects.toBeInstanceOf(AggregateError);
+    expect(calls).toEqual(['leases', 'approvals']);
+    await failing.stop();
+  });
+
   it('the lease-expiry driver runs the approval sweep', async () => {
     const { row } = await runnerRequest();
     const sweep = startLeaseExpiryDriver({ scheduler: s, now: () => new Date(Date.parse(String(row['expires_at'])) + 1000), intervalMs: 1_000_000 });
@@ -166,7 +177,7 @@ describe('approval rows through the API', () => {
     const { token } = await enrolRunner(h.app);
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     const canary = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
-    await post(h.app, '/v1/runners/result', { lease: { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken }, result: { outcome: 'approval_requested', reason: `need ${canary}`, operation: 'new_domain' } }, bearer(token));
+    await post(h.app, '/v1/runners/result', { lease: { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken }, result: { outcome: 'approval_requested', reason: `need ${canary}`, operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } } }, bearer(token));
     const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
     expect(JSON.stringify(snap.body)).not.toContain(canary);
     expect(snap.body.approvals).toHaveLength(1);

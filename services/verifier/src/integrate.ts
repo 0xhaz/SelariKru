@@ -59,6 +59,11 @@ export interface IntegrationRun {
   readonly currentBaseSha: string;
   /** Local source repository holding both SHAs. */
   readonly repoPath: string;
+  /**
+   * Set by the assembly driver: names exactly what is being assembled (the parts and the bases). A failure row records it, so the driver can leave
+   * a run alone until something actually changed instead of writing a new `candidate.failed` every poll.
+   */
+  readonly inputsKey?: string;
 }
 
 export interface IntegrationDeps {
@@ -74,6 +79,8 @@ export interface IntegrationDeps {
   readonly keepClone?: boolean;
   /** Test seam: runs just before the final transaction, while the lease is still held. */
   readonly beforePublish?: () => Promise<void>;
+  /** Asked right after the lease is held, before any work. False stops here with `not_due` and records nothing, so a pass that lost a race to another assembly leaves no failure row. */
+  readonly stillDue?: () => Promise<boolean>;
 }
 
 export interface CandidatePart {
@@ -113,6 +120,7 @@ export type FailureReason =
   | 'invalid_request'
   | 'lease_held'
   | 'lease_lost'
+  | 'not_due'
   | 'no_parts'
   | 'task_spec_invalid'
   | 'manifest_missing'
@@ -907,6 +915,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
   let invalidated: Invalidation | undefined;
   try {
     try {
+      if (deps.stillDue && !(await deps.stillDue())) return { ok: false, reason: 'not_due', message: 'nothing is due to assemble' };
       if (run.pinnedBaseSha !== run.currentBaseSha) {
         invalidated = await withTx(deps.db, async (tx) => {
           await fence(tx, run, holder);
@@ -969,7 +978,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
           ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET
             detail = CASE WHEN candidates.status = 'assembled' AND candidates.parts IS NOT DISTINCT FROM EXCLUDED.parts THEN candidates.detail
               ELSE (jsonb_set(candidates.detail, '{history}', COALESCE(candidates.detail -> 'history', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
-                'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at)))) - 'verificationDriver' - 'verification' END,
+                'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at)))) - 'verificationDriver' - 'verification' - 'verificationRetry' END,
             status = 'assembled', reason = NULL, parts = EXCLUDED.parts, tree_sha = EXCLUDED.tree_sha, base_sha = EXCLUDED.base_sha, updated_at = EXCLUDED.updated_at`);
         const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at);
         await emitCandidate(tx, run, at, 'candidate.assembled', {
@@ -1032,7 +1041,7 @@ async function recordFailure(deps: IntegrationDeps, run: IntegrationRun, holder:
       await tx.execute(sql`
         INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
         VALUES (${run.tenantId}, ${run.projectId}, ${candidateId}, ${run.runId}, ${run.target}, NULL, ${run.currentBaseSha}, NULL, '[]'::jsonb, ${status}, ${fail.reason},
-          ${JSON.stringify({ message: clip(fail.message, 400), ...(conflicts ? { conflicts, proposalId } : {}) })}::jsonb, ${at.toISOString()}::timestamptz)
+          ${JSON.stringify({ message: clip(fail.message, 400), ...(run.inputsKey !== undefined ? { inputsKey: run.inputsKey } : {}), ...(conflicts ? { conflicts, proposalId } : {}) })}::jsonb, ${at.toISOString()}::timestamptz)
         ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET updated_at = EXCLUDED.updated_at, detail = EXCLUDED.detail`);
       await emitCandidate(tx, run, at, 'candidate.failed', {
         candidateId, reason: fail.reason, message: clip(fail.message, 400), baseSha: run.currentBaseSha, target: run.target,

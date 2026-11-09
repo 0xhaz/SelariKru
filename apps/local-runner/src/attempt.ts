@@ -1,9 +1,9 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { ClaudeHarnessAdapter } from '@selarikru/harness-claude';
-import { redactSecrets, type RuntimeAdapter, type SandboxHandle } from '@selarikru/protocol';
+import { redactSecrets, WORKER_APPROVAL_OPERATIONS, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
@@ -33,7 +33,7 @@ export interface AttemptDeps {
 }
 
 export interface AttemptReport {
-  readonly outcome: 'completed' | 'failed' | 'blocked' | 'lease_lost' | 'aborted';
+  readonly outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested' | 'lease_lost' | 'aborted';
   readonly reason: string | null;
   /** sha256 of the stored change manifest (artifact store), when a diff was captured. */
   readonly changeManifest: string | null;
@@ -48,7 +48,14 @@ const clip = (s: string, n = 480): string => redactSecrets(s).slice(0, n);
 /** The wire takes whole, bounded counts only. A harness number outside that is unknown; it must not get the whole result refused. */
 const wireTokens = (n: number | null): number | null => (n !== null && Number.isInteger(n) && n >= 0 && n <= 1e12 ? n : null);
 
-export function renderTaskFile(task: TaskSpec): string {
+/** Where in the workspace the agent signals an approval request (a `Write` of JSON, see `TASK.md`). Reserved: never part of a change set. */
+export const APPROVAL_SIGNAL_RELATIVE_PATH = '.selarikru/approval-request.json';
+const RESERVED_DIR = '.selarikru';
+
+const grantedLabel = (g: LeaseGrant): string => (g.destination ? `${g.operation} (destination ${g.destination.host})` : g.operation);
+
+export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[] } = {}): string {
+  const grants = opts.grants ?? [];
   return [
     `# Task: ${task.title}`,
     '',
@@ -65,6 +72,19 @@ export function renderTaskFile(task: TaskSpec): string {
     '- Do not commit, push, or change git configuration.',
     '- Work only in this directory.',
     '',
+    ...(opts.signalPath !== undefined
+      ? [
+          '## Asking for a human decision',
+          `If this task truly needs one of: ${WORKER_APPROVAL_OPERATIONS.join(', ')}, stop and ask. Do not attempt it.`,
+          'Ask by writing, with the Write tool and nothing else, exactly this path:',
+          `  ${opts.signalPath}`,
+          'with this JSON and no other fields, then end your turn:',
+          '  {"operation":"<one of the list above>","reason":"<one sentence>"}',
+          'new_domain and new_connector also need "destination":{"kind":"network_host","host":"<host name>"}.',
+          ...(grants.length > 0 ? ['', '## Already approved for this attempt', 'A person approved these. Do not ask for them again:', ...grants.map((g) => `- ${grantedLabel(g)}`)] : []),
+          '',
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -72,6 +92,9 @@ export const DEFAULT_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'] a
 
 export const AGENT_PROMPT =
   'Read TASK.md in the current directory and complete the task it describes. Follow contract/runtime.md. Change only the allowed paths listed in TASK.md. Do not commit.';
+
+const coversSignal = (grants: readonly LeaseGrant[], operation: WorkerApprovalOperation, destination: ApprovalDestination | null): boolean =>
+  grants.some((g) => g.operation === operation && (g.destination === null ? destination === null : g.destination.kind === destination?.kind && g.destination.host === destination.host));
 
 interface Flags {
   cancelled: boolean;
@@ -159,11 +182,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   // Sent once the agent started: the harness's own totals and how long setup took. The controller treats these as estimates.
   const startedMs = Date.now();
   let reportedUsage: { readonly reportedUsage: NonNullable<Extract<RunnerResult, { outcome: 'completed' }>['reportedUsage']> } | Record<string, never> = {};
-  const finish = async (outcome: 'completed' | 'failed' | 'blocked', reason: string | null, cost: number | null, manifest: string | null): Promise<AttemptReport> => {
+  const finish = async (outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested', reason: string | null, cost: number | null, manifest: string | null, approval?: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null }): Promise<AttemptReport> => {
     const result: RunnerResult =
       outcome === 'completed'
         ? { outcome, ...(manifest !== null ? { changeManifestSha256: manifest } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
-        : { outcome, reason: clip(reason ?? outcome), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage };
+        : outcome === 'approval_requested'
+          ? { outcome, reason: clip(reason ?? outcome), operation: approval!.operation, ...(approval!.destination ? { destination: approval!.destination } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
+          : { outcome, reason: clip(reason ?? outcome), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage };
     const ok = await publish(result);
     log(`${outcome}${reason ? `: ${clip(reason, 200)}` : ''}${ok ? '' : ' (result not accepted)'}`);
     return ok ? { outcome, reason: reason === null ? null : clip(reason), changeManifest: manifest } : { outcome: 'lease_lost', reason: 'result not accepted', changeManifest: manifest };
@@ -184,7 +209,16 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     const allowed = validateAllowedPaths(task.allowedPaths);
     if (!allowed.ok) return await finish('blocked', allowed.reason, null, null);
     if (!FULL_SHA.test(task.baseSha)) return await finish('blocked', 'task base is not a full commit id', null, null);
-    const taskFile = renderTaskFile(task);
+    // A grant that reaches the network is only honest if the sandbox can limit egress to exactly that destination. It cannot yet (see the runtime), so
+    // the task stops here, before any sandbox exists, and says why. An ordinary attempt never gets a network it was not granted either way.
+    const grants = lease.grants ?? [];
+    const egressGrants = grants.filter((g) => g.destination !== null);
+    if (egressGrants.length > 0 && (await deps.runtime.capabilities()).egressAllowlist !== 'enforced') {
+      return await finish('blocked', `egress_enforcement_unavailable: this runtime cannot limit a sandbox to ${egressGrants.map((g) => g.destination!.host).join(', ')}`, null, null);
+    }
+
+    const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
+    const taskFile = renderTaskFile(task, { signalPath, grants });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
       return await finish('blocked', 'task text contains a secret-shaped value; it was not sent to the agent', null, null);
     }
@@ -229,9 +263,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let refused: string | null = null;
     let cost: number | null = null;
     let mcpViolation: string[] | null = null;
+    // The agent's first approval signal ends the attempt: the runner stops it and the control plane decides whether a person is asked.
+    let approvalRequest: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string } | null = null;
+    let approvalRefused: ApprovalRefusalReason | null = null;
+    let coveredSignal = false;
     const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
     reportedUsage = { reportedUsage: { setupSeconds } };
-    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS })) {
+    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath })) {
       if (aborted()) requestStop();
       switch (ev.type) {
         case 'session_started':
@@ -243,6 +281,26 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
           break;
         case 'launch_refused':
           refused = `${ev.capability} is ${ev.status}`;
+          break;
+        case 'approval_signal':
+          // Already granted to this attempt: it may proceed. It does not ask again.
+          if (coversSignal(grants, ev.operation, ev.destination)) {
+            coveredSignal = true;
+            log(`approval signal for ${ev.operation} already covered by a grant`);
+            break;
+          }
+          if (approvalRequest === null && approvalRefused === null) {
+            approvalRequest = { operation: ev.operation, destination: ev.destination, reason: ev.reason };
+            log(`agent requested approval: ${ev.operation}`);
+            requestStop();
+          }
+          break;
+        case 'approval_refused':
+          if (approvalRequest === null && approvalRefused === null) {
+            approvalRefused = ev.why;
+            log(`approval signal refused: ${ev.why}`);
+            requestStop();
+          }
           break;
         case 'usage':
           cost = ev.usage.costUsd;
@@ -281,8 +339,17 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.cancelled) return await finish('failed', 'cancelled by owner request; agent stopped and confirmed', cost, null);
     if (flags.timedOut) return await finish('failed', 'attempt timeout reached; agent stopped and confirmed', cost, null);
     if (refused !== null) return await finish('blocked', `harness capability unavailable: ${refused}`, cost, null);
+    // A refused or requested approval is the agent's outcome even though it was stopped before producing a result.
+    if (approvalRefused !== null) return await finish('blocked', `approval_signal_refused: ${approvalRefused}`, cost, null);
+    if (approvalRequest !== null) return await finish('approval_requested', (approvalRequest as { reason: string }).reason, cost, null, approvalRequest);
     if (!resultOk) return await finish('failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote, cost, null);
     if (exitFailed) return await finish('failed', exitNote || 'agent exited with an error', cost, null);
+
+    // The signal file of a covered request is the protocol, not the agent's work; a stray copy in any other form is left for the gate to refuse.
+    if (coveredSignal) {
+      await rm(signalPath, { force: true }).catch(() => undefined);
+      await rmdir(join(workspace, RESERVED_DIR)).catch(() => undefined);
+    }
 
     // The real control: the actual diff against the shipped base, not what the agent says it did.
     let changes: FileChange[];
@@ -291,6 +358,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     } catch (err) {
       return await finish('failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`, cost, null);
     }
+    if (changes.some((c) => c.path === RESERVED_DIR || c.path.startsWith(`${RESERVED_DIR}/`))) return await finish('failed', 'a change touches the reserved .selarikru directory', cost, null);
     let check: ReturnType<typeof checkAllowedPaths>;
     try {
       check = checkAllowedPaths(changes, allowed.normalized);

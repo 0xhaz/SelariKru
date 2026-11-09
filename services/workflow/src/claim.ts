@@ -3,7 +3,7 @@ import { TaskSpecSchema, budgetUsed, readyTasks, transition, type StatusMap, typ
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
-import { approvalScopeHash, consumeGrants, findUsableGrant, openApproval, type ApprovalGate } from './approval.ts';
+import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { leaseDeadline } from './lease.ts';
@@ -448,9 +448,10 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (!fits.ok) return { reason: fits.reason };
 
   const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now);
-  // Every grant waiting on this revision is spent on this attempt: a grant releases work once.
+  // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
+  const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
-  return { lease };
+  return { lease: { ...lease, grants } };
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */

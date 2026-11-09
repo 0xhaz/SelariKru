@@ -26,8 +26,12 @@ export function startLeaseExpiryDriver(options: {
 
   const tick = async (): Promise<readonly ExpiredLease[]> => {
     try {
-      const expired = await options.scheduler.expireLeases(options.now());
-      await options.scheduler.expireApprovals(options.now());
+      // Two independent sweeps: a thrown lease sweep must not skip approvals, or the reverse. Whatever failed is reported to `onError` once both have run.
+      const failures: unknown[] = [];
+      let expired: readonly ExpiredLease[] = [];
+      try { expired = await options.scheduler.expireLeases(options.now()); } catch (e) { failures.push(e); }
+      try { await options.scheduler.expireApprovals(options.now()); } catch (e) { failures.push(e); }
+      if (failures.length > 0) throw new AggregateError(failures, `lease expiry pass: ${failures.length} sweep(s) failed`);
       return expired;
     } finally {
       count += 1;

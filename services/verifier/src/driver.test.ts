@@ -88,6 +88,65 @@ beforeEach(async () => {
 });
 
 describe('verification driver', () => {
+  it('verifier infrastructure error can be re-verified', async () => {
+    const { sha } = await assembled();
+    let clock = new Date('2026-11-09T02:00:00Z');
+    let broken = true;
+    let calls = 0;
+    const runner: VerifierRunner = async (input) => { calls += 1; return broken ? { exitCode: null, result: null, log: 'docker daemon unreachable' } : { exitCode: 0, result: resultFor(input), log: 'ran' }; };
+    const driver = createVerificationDriver(options(runner, { now: () => clock, maxVerificationRetries: 2, retryBackoffSeconds: 60 }));
+
+    const first = await driver.tick();
+    expect(first).toEqual({ verified: sha, reaped: [], retried: [sha] });
+    expect(await taskStatus('t1')).toBe('verifying');
+    expect((await q(`SELECT status, detail FROM candidates WHERE sha = '${sha}'`))[0]).toMatchObject({ status: 'assembled', detail: { verificationRetry: { count: 1 } } });
+    expect(await q(`SELECT result FROM check_runs WHERE candidate_sha = '${sha}'`)).toEqual(expect.arrayContaining([{ result: 'invalidated' }]));
+
+    // Not due before the backoff has passed.
+    expect((await driver.tick()).verified).toBeNull();
+    expect(calls).toBe(1);
+
+    broken = false;
+    clock = new Date(clock.getTime() + 61_000);
+    const second = await driver.tick();
+    expect(second).toEqual({ verified: sha, reaped: [] });
+    expect(calls).toBe(2);
+    expect(await taskStatus('t1')).toBe('verified');
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'ready_for_review' });
+    // No worker was redone: the original attempt is the only one, and it succeeded.
+    expect(await q(`SELECT attempt_id, outcome FROM attempts WHERE task_id = 't1'`)).toEqual([{ attempt_id: 'att_t1', outcome: 'succeeded' }]);
+  });
+
+  it('the re-verify retries are bounded: after the last one the candidate closes as before', async () => {
+    const { sha } = await assembled();
+    let clock = new Date('2026-11-09T02:00:00Z');
+    let calls = 0;
+    const runner: VerifierRunner = async () => { calls += 1; return { exitCode: null, result: null, log: 'docker daemon unreachable' }; };
+    const driver = createVerificationDriver(options(runner, { now: () => clock, maxVerificationRetries: 1, retryBackoffSeconds: 10 }));
+    expect((await driver.tick()).retried).toEqual([sha]);
+    clock = new Date(clock.getTime() + 11_000);
+    const last = await driver.tick();
+    expect(last.reaped).toEqual([sha]);
+    expect(last.retried).toBeUndefined();
+    expect(calls).toBe(2);
+    expect(await taskStatus('t1')).toBe('blocked');
+    expect((await q(`SELECT status FROM candidates WHERE sha = '${sha}'`))[0]).toMatchObject({ status: 'invalidated' });
+    const blocked = await q(`SELECT payload FROM events WHERE type = 'task.blocked' AND task_id = 't1'`);
+    expect(blocked).toEqual([{ payload: { reason: 'verification_error', candidateSha: sha } }]);
+  });
+
+  it('the retry count resets when the same commit is reassembled with a new binding', async () => {
+    const { sha } = await assembled();
+    const runner: VerifierRunner = async () => ({ exitCode: null, result: null, log: 'boom' });
+    const driver = createVerificationDriver(options(runner, { maxVerificationRetries: 2, retryBackoffSeconds: 3600 }));
+    expect((await driver.tick()).retried).toEqual([sha]);
+    await db.execute(sql`UPDATE attempts SET attempt_id = 'att_t1' WHERE task_id = 't1'`);
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_t1b', taskId: 't1', revision: 1, attemptNumber: 2, outcome: 'running', startedAt: new Date(), endedAt: new Date(), detail: (await q(`SELECT detail FROM attempts WHERE task_id = 't1'`))[0]!['detail'] as Record<string, unknown> });
+    await assembled();
+    const detail = (await q(`SELECT detail FROM candidates WHERE sha = '${sha}'`))[0]!['detail'] as Record<string, unknown>;
+    expect(detail['verificationRetry']).toBeUndefined();
+  });
+
   it('verification driver runs an assembled candidate once', async () => {
     const { sha } = await assembled();
     const { runner, calls } = counting();

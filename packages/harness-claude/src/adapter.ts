@@ -1,5 +1,9 @@
 import {
+  ApprovalDestinationSchema,
   redactSecrets,
+  requiresDestination,
+  WorkerApprovalOperationSchema,
+  type ApprovalRefusalReason,
   type CapabilityStatus,
   type HarnessAdapter,
   type HarnessCapabilities,
@@ -7,6 +11,8 @@ import {
   type NormalizedHarnessEvent,
   type NormalizedUsage,
   type StopAcknowledgement,
+  type ApprovalDestination,
+  type WorkerApprovalOperation,
 } from '@selarikru/protocol';
 
 /** What the runtime (local sandbox, cloud sandbox) must give the adapter. The adapter never decides where it runs. */
@@ -55,6 +61,7 @@ const MAX_IDENT_CHARS = 256;
 const MAX_PENDING_EVENTS = 1000;
 
 type Json = Record<string, unknown>;
+type ApprovalSignalOperation = WorkerApprovalOperation;
 type Draft = NormalizedHarnessEvent extends infer E ? (E extends unknown ? Omit<E, 'attemptId' | 'seq'> : never) : never;
 
 const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -86,6 +93,39 @@ function normalizeUsage(result: Json): NormalizedUsage {
     // total_cost_usd is a list-price computation (modelUsage.costBasis: list), not a billed amount.
     costBasis: cost !== null ? 'list' : null,
   };
+}
+
+/** Longest `reason` kept from an approval signal. */
+const MAX_APPROVAL_REASON_CHARS = 480;
+/** The signal file's fields; anything else in it is refused, so a typo cannot silently drop `destination`. */
+const SIGNAL_KEYS = new Set(['operation', 'destination', 'reason']);
+
+/**
+ * Reads the agent's approval signal: the content a `Write` tool call puts at the reserved path, as JSON with a closed shape. A `tool_use` block in an
+ * assistant message is what the structured stream reports (docs/evidence/spike-runtime.md section 2); that, and only that, can raise this. Text,
+ * tool results and every other event never reach here, so a model cannot ask by writing the words, and a file it merely reads cannot ask for it.
+ */
+function parseApprovalSignal(raw: unknown): { kind: 'signal'; operation: ApprovalSignalOperation; destination: ApprovalDestination | null; reason: string } | { kind: 'refused'; why: ApprovalRefusalReason } {
+  const refuse = (why: ApprovalRefusalReason) => ({ kind: 'refused' as const, why });
+  if (typeof raw !== 'string') return refuse('malformed_signal');
+  let body: unknown;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    return refuse('malformed_signal');
+  }
+  if (!isObj(body) || Object.keys(body).some((k) => !SIGNAL_KEYS.has(k))) return refuse('malformed_signal');
+  const operation = WorkerApprovalOperationSchema.safeParse(body['operation']);
+  if (!operation.success) return refuse('unknown_operation');
+  const reason = typeof body['reason'] === 'string' ? body['reason'].trim() : '';
+  if (reason === '') return refuse('missing_reason');
+  const declared = body['destination'] ?? null;
+  const parsed = declared === null ? null : ApprovalDestinationSchema.safeParse(declared);
+  if (parsed !== null && !parsed.success) return refuse('invalid_destination');
+  const needs = requiresDestination(operation.data);
+  if (needs && parsed === null) return refuse('destination_required');
+  if (!needs && parsed !== null) return refuse('destination_not_applicable');
+  return { kind: 'signal', operation: operation.data, destination: parsed?.data ?? null, reason: reason.slice(0, MAX_APPROVAL_REASON_CHARS) };
 }
 
 export class ClaudeHarnessAdapter implements HarnessAdapter {
@@ -183,6 +223,11 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
               if (id && name) toolNames.set(id, name);
               const d = { type: 'tool_call' as const, toolUseId: id, toolName: name, status: 'started' as const };
               out.push(previewsOn && b['input'] !== undefined ? { ...d, preview: preview(JSON.stringify(b['input'])) } : d);
+              // Only an assistant's tool call counts, only `Write`, and only at the exact reserved path.
+              if (type === 'assistant' && input.approvalSignalPath !== undefined && name === 'Write' && isObj(b['input']) && b['input']['file_path'] === input.approvalSignalPath) {
+                const signal = parseApprovalSignal(b['input']['content']);
+                out.push(signal.kind === 'signal' ? { type: 'approval_signal', operation: signal.operation, destination: signal.destination, reason: signal.reason } : { type: 'approval_refused', why: signal.why });
+              }
             } else if (b['type'] === 'tool_result') {
               const id = str(b['tool_use_id']);
               const d = {

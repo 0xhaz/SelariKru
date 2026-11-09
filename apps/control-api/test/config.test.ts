@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfigFromEnv, parseConfig } from '../src/index.ts';
 import { testConfig } from './helpers.ts';
-import { verificationOptionsFromEnv } from '../src/server.ts';
+import { assemblyOptionsFromEnv, verificationOptionsFromEnv } from '../src/server.ts';
 
 const ENV = {
   SELARIKRU_TENANT_ID: 'tenant_a',
@@ -61,11 +61,21 @@ describe('config', () => {
   });
 });
 
+describe('assembly driver settings', () => {
+  it('are off by default and require the repository and artifact directory when on', () => {
+    expect(assemblyOptionsFromEnv({})).toBeUndefined();
+    expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: 'soon' })).toThrow(/positive integer/);
+    expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000' })).toThrow(/SELARIKRU_SOURCE_REPO/);
+    expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_SOURCE_REPO: '/r' })).toThrow(/SELARIKRU_ARTIFACT_DIR/);
+    expect(assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_GITHUB_SOURCE_REPO: '/r', SELARIKRU_ARTIFACT_DIR: '/a' })).toMatchObject({ intervalMs: 5000, repoPath: '/r' });
+  });
+});
+
 describe('verification driver settings', () => {
   it('are off by default and require the repository and artifact directory when on', () => {
     expect(verificationOptionsFromEnv({})).toBeUndefined();
     expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: 'soon' })).toThrow(/positive integer/);
-    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000' })).toThrow(/SELARIKRU_GITHUB_SOURCE_REPO/);
+    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000' })).toThrow(/SELARIKRU_SOURCE_REPO/);
     expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r' })).toThrow(/SELARIKRU_ARTIFACT_DIR/);
     const options = verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r', SELARIKRU_ARTIFACT_DIR: '/a', SELARIKRU_VERIFIER_HOST: 'local-docker' });
     expect(options).toMatchObject({ intervalMs: 60000, repoPath: '/r', host: 'local-docker', verifier: { kind: 'verifier', id: 'verifier:local-docker' } });

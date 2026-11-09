@@ -3,7 +3,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { LocalDiskArtifactStore } from '@selarikru/artifacts';
+import { LocalDiskArtifactStore, resolveArtifactDir } from '@selarikru/artifacts';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { redactSecrets } from '@selarikru/protocol';
 import { HttpRunnerApi } from './api.ts';
@@ -13,6 +13,7 @@ import { RunnerLoop } from './loop.ts';
 const stateDir = process.env['SELARIKRU_RUNNER_HOME'] ?? join(homedir(), '.selarikru', 'runner');
 /** The SelariKru repository itself (apps/local-runner/src -> repo root): never mounted into a sandbox. */
 const platformRepo = resolve(import.meta.dirname, '..', '..', '..');
+const artifactDir = resolveArtifactDir();
 const log = (line: string): void => console.log(`${new Date().toISOString()} ${redactSecrets(line)}`);
 
 async function loadRepos(extra: readonly string[]): Promise<Record<string, string>> {
@@ -68,7 +69,7 @@ async function main(): Promise<void> {
       pollMs: Number(values.poll ?? 5000),
       log,
       attempt: {
-        api, runtime, artifacts: new LocalDiskArtifactStore(join(stateDir, 'artifacts')), workRoot, repos,
+        api, runtime, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot, repos,
         heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 40, cpus: 2, memoryMiB: 4096, log,
       },
     });

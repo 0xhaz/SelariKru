@@ -130,7 +130,7 @@ describe('publishResult', () => {
   it('approval_requested moves to awaiting_approval and records no grant', async () => {
     s = createScheduler({ db: t.db, now: clock.now, policy: { ...POLICY, operations: { new_domain: 'require_approval' } } });
     const lease = await claim();
-    expect(await s.publishResult(lease, { outcome: 'approval_requested', reason: 'need docs.example.com', operation: 'new_domain' })).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
+    expect(await s.publishResult(lease, { outcome: 'approval_requested', reason: 'need docs.example.com', operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } })).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
     expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided', 'approval.requested']);
     expect((await eventTypes(t.db)).includes('approval.granted')).toBe(false);
   });

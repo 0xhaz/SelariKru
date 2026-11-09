@@ -11,28 +11,53 @@ import { startLeaseExpiryDriver } from './expire.ts';
 import { createFirebaseVerifier } from './firebase.ts';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { dockerRunner, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
-import { startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
+import { DEFAULT_VERIFICATION_RETRIES, startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
+import { ASSEMBLY_LEASE_SECONDS, startAssemblyDriver, type AssemblyDriverOptions } from '../../../services/verifier/src/assembly-driver.ts';
 
 /** Starts the verification driver. Absent: nothing verifies assembled candidates in this process. */
 export type VerificationOptions = Omit<VerificationDriverOptions, 'db' | 'tenantId' | 'now'> & { intervalMs: number };
+
+/** Starts the assembly driver. Absent: nothing assembles finished parts into candidates in this process. */
+export type AssemblyOptions = Omit<AssemblyDriverOptions, 'db' | 'tenantId' | 'now'> & { intervalMs: number };
+
+const pollInterval = (env: NodeJS.ProcessEnv, name: string, key: string): number | undefined => {
+  const interval = env[name];
+  if (interval === undefined || interval === '') return undefined;
+  const intervalMs = /^\d+$/.test(interval) ? Number(interval) : Number.NaN;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > MAX_TIMER_MS) throw new ConfigError(`invalid configuration: ${name} must be a positive integer of milliseconds, at most 2147483647`, [], [key]);
+  return intervalMs;
+};
+
+/** The repository candidates are built from and verified against. `SELARIKRU_SOURCE_REPO`, falling back to the GitHub source repository setting. */
+const sourceRepo = (env: NodeJS.ProcessEnv): string | undefined => env['SELARIKRU_SOURCE_REPO'] || env['SELARIKRU_GITHUB_SOURCE_REPO'] || undefined;
 
 /**
  * Reads the verification driver's settings from the environment. Off unless `SELARIKRU_VERIFICATION_POLL_INTERVAL_MS` is set; when on, the source
  * repository and artifact directory are required, because a missing one would stop every verification silently.
  */
 export function verificationOptionsFromEnv(env: NodeJS.ProcessEnv): VerificationOptions | undefined {
-  const interval = env['SELARIKRU_VERIFICATION_POLL_INTERVAL_MS'];
-  if (interval === undefined || interval === '') return undefined;
-  const intervalMs = /^\d+$/.test(interval) ? Number(interval) : Number.NaN;
-  if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > MAX_TIMER_MS) {
-    throw new ConfigError('invalid configuration: SELARIKRU_VERIFICATION_POLL_INTERVAL_MS must be a positive integer of milliseconds, at most 2147483647', [], ['verificationPollIntervalMs']);
-  }
-  const repoPath = env['SELARIKRU_GITHUB_SOURCE_REPO'];
+  const intervalMs = pollInterval(env, 'SELARIKRU_VERIFICATION_POLL_INTERVAL_MS', 'verificationPollIntervalMs');
+  if (intervalMs === undefined) return undefined;
+  const repoPath = sourceRepo(env);
   const dir = env['SELARIKRU_ARTIFACT_DIR'];
-  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_GITHUB_SOURCE_REPO', ['SELARIKRU_GITHUB_SOURCE_REPO']);
+  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO or SELARIKRU_GITHUB_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
   if (!dir) throw new ConfigError('missing required configuration: SELARIKRU_ARTIFACT_DIR', ['SELARIKRU_ARTIFACT_DIR']);
   const host = env['SELARIKRU_VERIFIER_HOST'] || LOCAL_DOCKER_HOST;
-  return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), runner: dockerRunner(), verifier: { kind: 'verifier', id: `verifier:${host}` }, host };
+  const retries = env['SELARIKRU_VERIFICATION_RETRIES'];
+  const maxVerificationRetries = retries === undefined || retries === '' ? DEFAULT_VERIFICATION_RETRIES : /^\d+$/.test(retries) ? Number(retries) : Number.NaN;
+  if (!Number.isSafeInteger(maxVerificationRetries) || maxVerificationRetries < 0) throw new ConfigError('invalid configuration: SELARIKRU_VERIFICATION_RETRIES must be a non-negative integer', [], ['verificationRetries']);
+  return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), runner: dockerRunner(), verifier: { kind: 'verifier', id: `verifier:${host}` }, host, maxVerificationRetries };
+}
+
+/** The assembly driver's settings. Off unless `SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS` is set; when on, the source repository and artifact directory are required. */
+export function assemblyOptionsFromEnv(env: NodeJS.ProcessEnv): AssemblyOptions | undefined {
+  const intervalMs = pollInterval(env, 'SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS', 'assemblyPollIntervalMs');
+  if (intervalMs === undefined) return undefined;
+  const repoPath = sourceRepo(env);
+  const dir = env['SELARIKRU_ARTIFACT_DIR'];
+  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO or SELARIKRU_GITHUB_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
+  if (!dir) throw new ConfigError('missing required configuration: SELARIKRU_ARTIFACT_DIR', ['SELARIKRU_ARTIFACT_DIR']);
+  return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), leaseSeconds: ASSEMBLY_LEASE_SECONDS };
 }
 
 export interface GithubOptions {
@@ -87,6 +112,9 @@ export async function startServer(options: {
   /** Runs `verifyCandidate` for assembled candidates and reaps verifications with no verdict. Failures reach `onVerificationError`, or `onError`. */
   verification?: VerificationOptions | undefined;
   onVerificationError?: ((e: unknown) => void) | undefined;
+  /** Runs `assembleCandidate` for finished parts. Failures reach `onAssemblyError`, or `onError`. */
+  assembly?: AssemblyOptions | undefined;
+  onAssemblyError?: ((e: unknown) => void) | undefined;
 }): Promise<RunningServer> {
   const { config } = options;
   validateGithubOptions(options.github);
@@ -112,6 +140,9 @@ export async function startServer(options: {
   const verifications = options.verification
     ? startVerificationDriver({ db, tenantId: config.tenantId, now, ...options.verification, ...((options.onVerificationError ?? options.onError) ? { onError: (options.onVerificationError ?? options.onError)! } : {}) })
     : undefined;
+  const assemblies = options.assembly
+    ? startAssemblyDriver({ db, tenantId: config.tenantId, now, ...options.assembly, ...((options.onAssemblyError ?? options.onError) ? { onError: (options.onAssemblyError ?? options.onError)! } : {}) })
+    : undefined;
   const address = await app.listen({ host: config.host, port: config.port });
   return {
     address,
@@ -119,6 +150,7 @@ export async function startServer(options: {
       await driver.stop();
       await reconciler?.stop();
       await verifications?.stop();
+      await assemblies?.stop();
       await app.close();
       await close();
     },

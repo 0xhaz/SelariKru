@@ -77,7 +77,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   async capabilities(): Promise<RuntimeCapabilities> {
     const r = await this.sbx.run(['--version'], { timeoutMs: this.t.lsMs }).catch(() => null);
     const version = r && r.code === 0 ? (/v\d+\.\d+\.\d+/.exec(r.stdout)?.[0] ?? null) : null;
-    return { location: 'local', runtimeVersion: version, hostFallback: false, stopAcknowledgement: 'confirmed' };
+    return { location: 'local', runtimeVersion: version, hostFallback: false, stopAcknowledgement: 'confirmed', egressAllowlist: 'unsupported' };
   }
 
   private async list(): Promise<SbxListEntry[]> {
@@ -109,6 +109,9 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   }
 
   async create(spec: SandboxSpec): Promise<SandboxHandle> {
+    // sbx has per-sandbox deny rules (which only narrow egress) and a machine-wide allow list; it has no way to limit one sandbox to exactly a granted
+    // destination without changing global policy, so a sandbox that needs an allowlist is refused, never created under whatever is already allowed.
+    if ((spec.egressAllowlist?.length ?? 0) > 0) throw new SandboxCreateError('this runtime cannot restrict egress to a granted destination');
     const workspace = await assertSafeWorkspace(spec.workspacePath, { home: this.opts.home, forbidden: this.opts.forbidden, attemptsRoot: this.opts.attemptsRoot });
     const name = sandboxName(spec.taskId, spec.attemptId);
     await this.reconcileTask(spec.taskId);

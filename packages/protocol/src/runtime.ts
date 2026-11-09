@@ -11,6 +11,11 @@ export interface RuntimeCapabilities {
   /** Always true for sandbox runtimes: a failed sandbox never falls back to host execution. */
   readonly hostFallback: false;
   readonly stopAcknowledgement: 'confirmed' | 'requested_only';
+  /**
+   * Whether the runtime can restrict a sandbox's egress to exactly a granted set of destinations. `unsupported` means a network grant is refused
+   * (the attempt stays blocked), never run with whatever the sandbox's ambient policy happens to allow.
+   */
+  readonly egressAllowlist: 'enforced' | 'unsupported';
 }
 
 export interface SandboxSpec {
@@ -20,6 +25,8 @@ export interface SandboxSpec {
   readonly workspacePath: string;
   readonly cpus: number;
   readonly memoryMiB: number;
+  /** Destinations this sandbox's egress must be limited to. A runtime that cannot enforce it refuses to create the sandbox. */
+  readonly egressAllowlist?: readonly string[];
 }
 
 export interface SandboxHandle {

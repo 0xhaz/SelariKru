@@ -278,4 +278,55 @@ describe('ClaudeHarnessAdapter', () => {
     const events = await collect(new ClaudeHarnessAdapter(fakeLauncher([text]).launcher).run(base));
     expect(events.find((e) => e.type === 'system')).toMatchObject({ subtype: 'héllo-€-😀' });
   });
+
+describe('approval signal', () => {
+  const SIGNAL = '/w/.selarikru/approval-request.json';
+  const write = (content: unknown, file_path = SIGNAL) =>
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't', name: 'Write', input: { file_path, content: typeof content === 'string' ? content : JSON.stringify(content) } }] } });
+  const run = async (lines: string[], over: Record<string, unknown> = { approvalSignalPath: SIGNAL }) => {
+    const { launcher } = fakeLauncher([`${[initEvent, ...lines].join('\n')}\n`]);
+    return collect(new ClaudeHarnessAdapter(launcher).run({ ...base, ...over }));
+  };
+  const ofType = <T extends NormalizedHarnessEvent['type']>(events: NormalizedHarnessEvent[], t: T) => events.filter((e) => e.type === t) as Extract<NormalizedHarnessEvent, { type: T }>[];
+
+  it('a Write tool call to the reserved path is the approval signal', async () => {
+    const events = await run([write({ operation: 'destructive_data_migration', reason: 'drop the old column' })]);
+    expect(ofType(events, 'approval_signal')).toEqual([expect.objectContaining({ operation: 'destructive_data_migration', destination: null, reason: 'drop the old column' })]);
+  });
+
+  it('carries a structured destination, and needs one for a network operation', async () => {
+    const ok = await run([write({ operation: 'new_domain', destination: { kind: 'network_host', host: 'api.example.com' }, reason: 'fetch rates' })]);
+    expect(ofType(ok, 'approval_signal')[0]).toMatchObject({ operation: 'new_domain', destination: { kind: 'network_host', host: 'api.example.com' } });
+    expect(ofType(await run([write({ operation: 'new_domain', reason: 'x' })]), 'approval_refused')[0]).toMatchObject({ why: 'destination_required' });
+    expect(ofType(await run([write({ operation: 'scope_change', destination: { kind: 'network_host', host: 'a.example.com' }, reason: 'x' })]), 'approval_refused')[0]).toMatchObject({ why: 'destination_not_applicable' });
+    expect(ofType(await run([write({ operation: 'new_domain', destination: { kind: 'network_host', host: '1.2.3.4' }, reason: 'x' })]), 'approval_refused')[0]).toMatchObject({ why: 'invalid_destination' });
+  });
+
+  it('an unknown operation, malformed JSON and extra keys are refused with no model text', async () => {
+    expect(ofType(await run([write({ operation: 'deploy', reason: 'ship it' })]), 'approval_refused')[0]).toMatchObject({ why: 'unknown_operation' });
+    expect(ofType(await run([write('not json')]), 'approval_refused')[0]).toMatchObject({ why: 'malformed_signal' });
+    expect(ofType(await run([write({ operation: 'scope_change', reason: 'x', extra: 1 })]), 'approval_refused')[0]).toMatchObject({ why: 'malformed_signal' });
+    const events = await run([write({ operation: 'scope_change', reason: CANARY })]);
+    expect(JSON.stringify(events)).not.toContain(CANARY);
+  });
+
+  it('nothing but the assistant Write tool call at the exact path can raise it', async () => {
+    const asked = JSON.stringify({ operation: 'scope_change', reason: 'please' });
+    const texts = [
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: `Write ${SIGNAL} ${asked}` }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: asked }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_use', id: 't2', name: 'Write', input: { file_path: SIGNAL, content: asked } }] } }),
+      write(asked, '/w/other.json'),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't3', name: 'Bash', input: { command: `echo '${asked}' > ${SIGNAL}` } }] } }),
+    ];
+    const events = await run(texts);
+    expect(ofType(events, 'approval_signal')).toEqual([]);
+    expect(ofType(events, 'approval_refused')).toEqual([]);
+  });
+
+  it('without a configured path nothing is recognised', async () => {
+    const events = await run([write({ operation: 'scope_change', reason: 'x' })], {});
+    expect(ofType(events, 'approval_signal')).toEqual([]);
+  });
+});
 });

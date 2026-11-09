@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { schema } from '@selarikru/persistence';
-import type { Policy } from '@selarikru/policy';
+import { HUMAN_DECISION_KINDS, type Policy } from '@selarikru/policy';
+import { WORKER_APPROVAL_OPERATIONS } from '@selarikru/domain';
 import { createScheduler, type Lease, type PublishResult, type Scheduler } from './index.ts';
 import {
   CAPS, CLOUD_POLICY, POLICY, PROJECT, RUN, TENANT, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
@@ -18,8 +19,9 @@ const sched = (policy: Policy): Scheduler => createScheduler({ db: t.db, now: cl
 const useCloudRun = () => t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify(CLOUD_RUN)}::jsonb`);
 const events = async (type: string) => [...(await t.db.execute(sql`SELECT payload, actor_kind, attempt_id FROM events WHERE type = ${type} ORDER BY sequence`))];
 const approvals = async () => [...(await t.db.execute(sql`SELECT * FROM approvals ORDER BY created_at`))];
-const request = (lease: Lease, operation: string | undefined, reason = 'needs docs.example.com'): Promise<unknown> =>
-  s.publishResult(lease, { outcome: 'approval_requested', reason, ...(operation !== undefined ? { operation } : {}) } as PublishResult);
+const DOCS_HOST = { kind: 'network_host', host: 'docs.example.com' } as const;
+const request = (lease: Lease, operation: string | undefined, reason = 'needs docs.example.com', destination: typeof DOCS_HOST | null = operation === 'new_domain' ? DOCS_HOST : null): Promise<unknown> =>
+  s.publishResult(lease, { outcome: 'approval_requested', reason, ...(operation !== undefined ? { operation } : {}), ...(destination ? { destination } : {}) } as PublishResult);
 
 beforeAll(async () => { t = await setupTestDb(); });
 afterAll(async () => { await t.close(); });
@@ -34,7 +36,41 @@ async function claimOne(id = 't1'): Promise<Lease> {
   return (await s.claimNext(runner('r1'), CAPS))!;
 }
 
+describe('the worker approval vocabulary', () => {
+  it('is exactly the human-decision kinds, minus the one a grant could never satisfy', () => {
+    expect([...WORKER_APPROVAL_OPERATIONS].sort()).toEqual(HUMAN_DECISION_KINDS.filter((k) => k !== 'budget_increase').sort());
+  });
+});
+
+describe('expiry sweeps isolate each row', () => {
+  it('a row whose spec no longer parses does not stop the others expiring', async () => {
+    await s.publishResult(await claimOne('t_bad'), { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination: DOCS_HOST } as PublishResult);
+    await s.publishResult(await claimOne('t_good'), { outcome: 'approval_requested', reason: 'y', operation: 'new_domain', destination: DOCS_HOST } as PublishResult);
+    await t.db.execute(sql`UPDATE task_revisions SET spec = jsonb_set(spec, '{title}', 'null'::jsonb) WHERE task_id = 't_bad'`);
+    const past = new Date(clock.now().getTime() + 2 * 24 * 3600 * 1000);
+    await expect(s.expireApprovals(past)).rejects.toBeInstanceOf(AggregateError);
+    const rows = await approvals();
+    expect(rows.find((r) => r['task_id'] === 't_good')).toMatchObject({ outcome: 'expired' });
+    expect(rows.find((r) => r['task_id'] === 't_bad')).toMatchObject({ outcome: 'pending' });
+  });
+});
+
 describe('runner approval requests', () => {
+  it('a network request without a destination opens nothing: there is nothing a person could scope a grant to', async () => {
+    const lease = await claimOne();
+    expect(await request(lease, 'new_domain', 'needs the web', null)).toMatchObject({ ok: true, value: { taskStatus: 'blocked' } });
+    expect(await approvals()).toHaveLength(0);
+    expect((await events('task.blocked'))[0]!['payload']).toMatchObject({ reason: 'policy_denied:destination_required' });
+  });
+
+  it('the destination is part of the scope and reaches the row', async () => {
+    const lease = await claimOne();
+    await request(lease, 'new_domain');
+    const row = (await approvals())[0]!;
+    expect(row['detail']).toMatchObject({ destination: 'docs.example.com', destinationKind: 'network_host' });
+    expect((await events('approval.requested'))[0]!['payload']).toMatchObject({ destination: 'docs.example.com' });
+  });
+
   it('runner approval request creates one pending row', async () => {
     const lease = await claimOne();
     expect(await request(lease, 'new_domain')).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
@@ -58,7 +94,7 @@ describe('runner approval requests', () => {
     const [ev] = await events('approval.requested');
     expect(ev).toMatchObject({ actor_kind: 'scheduler', attempt_id: lease.attemptId });
     expect(ev!['payload']).toMatchObject({
-      approvalId: row['approval_id'], scopeHash: row['scope_hash'], expiresAt: new Date(String(row['expires_at'])).toISOString(), reason: 'needs docs.example.com', operation: 'new_domain',
+      approvalId: row['approval_id'], scopeHash: row['scope_hash'], expiresAt: new Date(String(row['expires_at'])).toISOString(), reason: 'needs docs.example.com', operation: 'new_domain', destination: 'docs.example.com',
     });
   });
 

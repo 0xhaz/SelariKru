@@ -8,7 +8,7 @@ import { initEvent } from '@selarikru/harness-claude/fixtures';
 import { SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { FakeSbx, type FakeOptions, type FakeStream } from '@selarikru/runtime-docker-local/fake-sbx';
 import type { TaskSpec } from '@selarikru/domain';
-import type { LeaseRef } from '@selarikru/protocol';
+import type { LeaseGrant, LeaseRef } from '@selarikru/protocol';
 import { LeaseLostError, type ClaimedLease, type RunnerApi, type RunnerResult } from '../src/api.ts';
 
 export const resultLine = (over: Record<string, unknown> = {}) =>
@@ -37,6 +37,7 @@ export interface WorldOptions {
   task?: Partial<TaskSpec>;
   publishThrows?: boolean;
   initMcp?: Array<{ name: string; status: string }>;
+  grants?: LeaseGrant[];
 }
 
 export async function makeWorld(o: WorldOptions = {}): Promise<World> {
@@ -89,7 +90,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
     classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
   } as TaskSpec;
-  const lease: ClaimedLease = { attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString() };
+  const lease: ClaimedLease = { attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [] };
 
   let hb = 0;
   const published: RunnerResult[] = [];

@@ -10,6 +10,8 @@
  *   tree containing that work. Its other parts are left as they are, for the next assembly.
  * - A run that yields no verdict (`error` or `skipped`) leaves its tasks `verifying` with claims held. The reaper, on every tick, moves those tasks to
  *   `blocked` and retires the candidate, so an owner can replan or cancel instead of waiting forever. It keys off durable rows, so it survives a restart.
+ * - An `error` is the verifier failing, not the candidate: it gets up to `maxVerificationRetries` further runs of the same commit, with growing delays, before
+ *   the reaper closes it. Nothing the workers did is redone. The attempts count is kept on the candidate and cleared when the binding changes.
  *
  * The injected runner is the only thing that touches Docker; tests inject a fake. Imports are relative for the same reason as `service.ts`.
  */
@@ -26,12 +28,22 @@ export interface VerificationDriverOptions extends Omit<VerificationDeps, 'db'> 
   readonly repoPath: string;
   /** How long a claim lasts between renewals; one that expires with no record is retried. Default `VERIFICATION_LEASE_SECONDS`, renewed during the run. */
   readonly leaseSeconds?: number;
+  /** Further runs after an infrastructure `error`. Default 0: the first error closes the candidate. The server wires `DEFAULT_VERIFICATION_RETRIES`. */
+  readonly maxVerificationRetries?: number;
+  /** Delay before the first re-verification; it doubles per retry. Default 60 s. */
+  readonly retryBackoffSeconds?: number;
 }
+
+/** Infrastructure retries when the server starts the driver. Bounded, so a broken Docker cannot keep tasks `verifying` forever. */
+export const DEFAULT_VERIFICATION_RETRIES = 2;
+const DEFAULT_RETRY_BACKOFF_SECONDS = 60;
 
 export interface VerificationTick {
   /** The candidate verified this tick, if any. */
   readonly verified: string | null;
   readonly reaped: readonly string[];
+  /** Candidates whose infrastructure error was scheduled for another run this tick. Absent when there were none. */
+  readonly retried?: readonly string[];
 }
 
 export interface VerificationDriver {
@@ -60,6 +72,7 @@ const CANDIDATE_DUE = (now: Date) => sql`
   c.status = 'assembled' AND c.sha IS NOT NULL
   AND NOT EXISTS (SELECT 1 ${LIVE_RECORD})
   AND (c.detail -> 'verificationDriver' IS NULL OR (c.detail -> 'verificationDriver' ->> 'expiresAt')::timestamptz <= ${now.toISOString()}::timestamptz)
+  AND (c.detail -> 'verificationRetry' IS NULL OR (c.detail -> 'verificationRetry' ->> 'notBefore')::timestamptz <= ${now.toISOString()}::timestamptz)
   AND NOT ${PART_NOT_LIVE}
   AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.parts) p JOIN task_status s ON s.tenant_id = c.tenant_id AND s.project_id = c.project_id AND s.task_id = p ->> 'taskId' AND s.current_revision = (p ->> 'revision')::int AND s.status = 'verifying')`;
 
@@ -68,6 +81,8 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
   const now = options.now ?? (() => new Date());
   const leaseSeconds = options.leaseSeconds ?? VERIFICATION_LEASE_SECONDS;
   const expiry = () => new Date(now().getTime() + leaseSeconds * 1000).toISOString();
+  const maxRetries = options.maxVerificationRetries ?? 0;
+  const backoffSeconds = options.retryBackoffSeconds ?? DEFAULT_RETRY_BACKOFF_SECONDS;
   const candKey = (c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>) => sql`tenant_id = ${tenantId} AND project_id = ${c.project_id} AND run_id = ${c.run_id} AND sha = ${c.sha}`;
 
   /** Atomically claims the oldest due candidate. Concurrent ticks and processes cannot claim the same one. */
@@ -105,7 +120,7 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     renewer.unref();
     try {
       await announce(c);
-      const { tenantId: _t, repoPath: _r, ...deps } = options;
+      const { tenantId: _t, repoPath: _r, maxVerificationRetries: _m, retryBackoffSeconds: _b, ...deps } = options;
       await verifyCandidate({ tenantId, projectId: c.project_id, runId: c.run_id, sha: c.sha, taskId: c.parts[0]!.taskId, repoPath: options.repoPath }, { ...deps, leaseSeconds });
       return true;
     } catch (e) {
@@ -132,8 +147,27 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     });
   }
 
-  /** Assembled candidates of this binding whose run applied nothing and ended `error` or `skipped`. */
-  async function reap(): Promise<string[]> {
+  /**
+   * Keeps an infrastructure error alive for another run while retries remain: its check runs are invalidated, so the candidate is due again once the delay
+   * passes. Locks the candidate first so two passes cannot both count the same error. False when the bound is reached, and the caller closes it instead.
+   */
+  async function scheduleRetry(c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>): Promise<boolean> {
+    if (maxRetries <= 0) return false;
+    return withTx(db, async (tx: Tx) => {
+      const locked = await tx.execute(sql`SELECT detail FROM candidates WHERE ${candKey(c)} AND status = 'assembled' FOR UPDATE`);
+      if (locked.length === 0) return false;
+      const retry = (locked[0]!['detail'] as { verificationRetry?: { count?: number } }).verificationRetry;
+      const count = typeof retry?.count === 'number' ? retry.count : 0;
+      if (count >= maxRetries) return false;
+      const notBefore = new Date(now().getTime() + backoffSeconds * 1000 * 2 ** count).toISOString();
+      await tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${tenantId} AND project_id = ${c.project_id} AND candidate_sha = ${c.sha} AND result <> 'invalidated'`);
+      await tx.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{verificationRetry}', jsonb_build_object('count', ${count + 1}::int, 'notBefore', ${notBefore}::text)), updated_at = ${now().toISOString()}::timestamptz WHERE ${candKey(c)}`);
+      return true;
+    });
+  }
+
+  /** Assembled candidates of this binding whose run applied nothing and ended `error` or `skipped`. An `error` with retries left is scheduled for another run instead of closing. */
+  async function reap(retried: string[] = []): Promise<string[]> {
     const rows = await db.execute(sql`
       SELECT c.project_id, c.run_id, c.sha, c.parts,
         (SELECT a.locator ->> 'result' ${LIVE_RECORD} AND a.locator ->> 'applied' = 'false' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1) AS result
@@ -145,6 +179,7 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
       const reason = row['result'] === 'error' ? 'verification_error' : row['result'] === 'skipped' ? 'verification_skipped' : null;
       if (reason === null) continue;
       const c = row as unknown as CandidateRow;
+      if (reason === 'verification_error' && (await scheduleRetry(c))) { retried.push(c.sha); continue; }
       if (await close(c, reason)) reaped.push(c.sha);
     }
     return reaped;
@@ -184,8 +219,10 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
       }
       // After the run, so a part cancelled mid-run retires its candidate on this tick and not the next.
       await retire();
-      // Closes this tick's non-verdict and any an earlier process left behind.
-      return { verified, reaped: await reap() };
+      // Closes this tick's non-verdict and any an earlier process left behind, or schedules another run of an infrastructure error.
+      const retried: string[] = [];
+      const reaped = await reap(retried);
+      return { verified, reaped, ...(retried.length > 0 ? { retried } : {}) };
     },
   };
 }

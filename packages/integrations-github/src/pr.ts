@@ -50,7 +50,7 @@ export function branchForCandidate(runId: string, sha: string): string {
 type Reader = Db | Tx;
 
 /** What the open depends on, read from `q`: the project and the run's current assembled candidate. `skip` for a trial run. */
-async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ skip: true } | { skip: false; project: typeof schema.projects.$inferSelect; sha: string; accepted: AcceptedReducedScope | null }> {
+async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ skip: true } | { skip: false; project: typeof schema.projects.$inferSelect; sha: string; accepted: AcceptedReducedScope | null; notDelivered: AcceptedReducedScope['notDelivered'] }> {
   const runQuery = q.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)));
   const row = (await (lock ? runQuery.for('no key update') : runQuery))[0];
   if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
@@ -70,7 +70,7 @@ async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ sk
     .orderBy(desc(schema.candidates.createdAt)))[0];
   if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
   if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
-  return { skip: false, project, sha: candidate.sha, accepted: decision };
+  return { skip: false, project, sha: candidate.sha, accepted: decision, notDelivered: assessed.notDelivered };
 }
 
 const MAX_ATTEMPTS = 3;
@@ -130,7 +130,7 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       if (prior.status !== 'closed' && prior.status !== 'stale_candidate') throw new PrNotAllowed('run_already_merged', `pull request #${prior.prNumber} for this run is ${prior.status}`, { prNumber: prior.prNumber });
     }
 
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, ...(state.accepted ? { notDelivered: state.accepted.notDelivered } : {}) });
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {

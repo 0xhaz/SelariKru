@@ -172,7 +172,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }
       }
       const planRevision = current + 1;
-      await tx.update(schema.runs).set({ planRevision })
+      // Accepting the first plan is what starts a run: `planning` becomes `running`, the state readiness and the PR gate require. Any later plan keeps the run's current lifecycle.
+      await tx.update(schema.runs).set({ planRevision, lifecycle: sql`CASE WHEN lifecycle = 'planning' THEN 'running' ELSE lifecycle END` })
         .where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run.runId)));
       // The API accepts the plan; the actor is the control plane acting for the authenticated owner, who is named in the payload.
       await writeEvent(tx, at, {

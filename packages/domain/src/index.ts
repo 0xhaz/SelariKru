@@ -1,4 +1,5 @@
 export * from './result.ts';
+export * from './approval.ts';
 export * from './common.ts';
 export * from './task.ts';
 export * from './run.ts';

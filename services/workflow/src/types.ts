@@ -1,6 +1,6 @@
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { Result } from '@selarikru/domain';
+import type { ApprovalDestination, LeaseGrant, Result } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
@@ -64,6 +64,8 @@ export interface Lease {
   readonly expiresAt: string;
   /** Hard stop for the attempt. Heartbeats do not move it. */
   readonly deadlineAt: string;
+  /** Human grants delivered with this lease: every unused grant for this task revision, consumed by this attempt. Set at claim; absent on a lease rebuilt from a stored attempt. */
+  readonly grants?: readonly LeaseGrant[];
 }
 
 export interface SkippedCandidate {
@@ -117,7 +119,7 @@ export type PublishResult =
   | ({ readonly outcome: 'failed'; readonly reason: string } & ReportedCost)
   | ({ readonly outcome: 'blocked'; readonly reason: string } & ReportedCost)
   /** `operation` names the policy operation asked for; `evaluate` decides. Absent or unknown is denied, and the worker's `reason` is never an operation. */
-  | ({ readonly outcome: 'approval_requested'; readonly reason: string; readonly operation?: string } & ReportedCost);
+  | ({ readonly outcome: 'approval_requested'; readonly reason: string; readonly operation?: string; readonly destination?: ApprovalDestination } & ReportedCost);
 
 export interface PublishReceipt {
   readonly attemptId: string;

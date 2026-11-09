@@ -2,6 +2,8 @@
  * Harness adapter contracts shared by every runtime (local sandbox, cloud sandbox). Types only; no I/O.
  * Capability statuses come from the T0.5 spike table and must not be upgraded beyond what it shows.
  */
+import type { ApprovalDestination, WorkerApprovalOperation } from '@selarikru/domain';
+
 export const CAPABILITY_STATUSES = ['supported', 'partial', 'unsupported', 'not established'] as const;
 export type CapabilityStatus = (typeof CAPABILITY_STATUSES)[number];
 
@@ -33,8 +35,16 @@ export interface HarnessInput {
   readonly mcp?: 'none';
   /** Explicit built-in tool list. Anything not listed (WebFetch, WebSearch, Task...) is unavailable. */
   readonly tools?: readonly string[];
+  /**
+   * Absolute path a `Write` tool call must name to count as an approval signal (see the adapter). Absent: no signal is recognised.
+   * A tool call in the structured stream is the only channel; model text never is.
+   */
+  readonly approvalSignalPath?: string;
   readonly previews?: { readonly enabled: boolean; readonly maxChars?: number };
 }
+
+export const APPROVAL_REFUSAL_REASONS = ['malformed_signal', 'unknown_operation', 'destination_required', 'destination_not_applicable', 'invalid_destination', 'missing_reason'] as const;
+export type ApprovalRefusalReason = (typeof APPROVAL_REFUSAL_REASONS)[number];
 
 export const USAGE_SOURCES = ['observed', 'estimated', 'unavailable'] as const;
 export type UsageSource = (typeof USAGE_SOURCES)[number];
@@ -77,6 +87,10 @@ export type NormalizedHarnessEvent = EventBase &
         readonly status: 'ok' | 'error';
         readonly preview?: string;
       }
+    /** The agent asked for a human decision through the structured channel. Closed-vocabulary fields only. */
+    | { readonly type: 'approval_signal'; readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string }
+    /** A tool call that targeted the signal path but failed the closed schema. Carries no model-supplied text. */
+    | { readonly type: 'approval_refused'; readonly why: ApprovalRefusalReason }
     | { readonly type: 'usage'; readonly usage: NormalizedUsage }
     | { readonly type: 'rate_limit'; readonly status: string | null }
     | {
