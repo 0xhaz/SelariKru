@@ -21,7 +21,7 @@ export function ModelCard({ onDownload }: { onDownload: () => void }) {
         <div className="mt-3">
           <div className="mb-1 flex justify-between text-sm">
             <span id="dl-label">On-device model download</span>
-            <span className="font-mono text-[13px]">{pct === null ? 'Waiting for progress' : `${pct}%`}</span>
+            <span className="font-mono text-mono">{pct === null ? 'Waiting for progress' : `${pct}%`}</span>
           </div>
           <div
             role="progressbar"
@@ -29,7 +29,7 @@ export function ModelCard({ onDownload }: { onDownload: () => void }) {
             aria-valuemin={0}
             aria-valuemax={100}
             {...(pct === null ? {} : { 'aria-valuenow': pct })}
-            className="h-2 overflow-hidden rounded-[4px] bg-bg"
+            className="h-2 overflow-hidden rounded-chip bg-bg"
           >
             <div className="progress-fill h-full bg-active" style={{ width: `${pct ?? 0}%` }} />
           </div>

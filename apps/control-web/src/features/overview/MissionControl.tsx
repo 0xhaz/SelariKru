@@ -12,40 +12,43 @@ const KIND: Readonly<Record<AttentionKind, { label: string; tone: Tone }>> = {
   decision: { label: 'Decision', tone: 'warning' },
   worker_lost: { label: 'Connection lost', tone: 'danger' },
   budget_resource: { label: 'Budget or limit', tone: 'warning' },
+  blocked: { label: 'Blocked', tone: 'neutral' },
   information: { label: 'Update', tone: 'neutral' },
 };
 const RAIL: Readonly<Record<Tone, string>> = { neutral: 'border-l-line-strong', active: 'border-l-active', success: 'border-l-success', warning: 'border-l-warning', danger: 'border-l-danger' };
 const TINT: Readonly<Record<Tone, string>> = { neutral: '', active: 'bg-active-tint', success: 'bg-success-tint', warning: 'bg-warning-tint', danger: 'bg-danger-tint' };
-const CELL: Readonly<Record<CriterionCell, string>> = { verified: 'bg-success', failed: 'bg-danger', held: 'bg-warning', active: 'bg-active', pending: 'bg-line' };
+/** Only a verified segment is filled, so zero verified can never look complete. */
+const CELL: Readonly<Record<CriterionCell, string>> = { verified: 'border-success bg-success', failed: 'border-danger', held: 'border-warning', active: 'border-active', pending: 'border-line-strong' };
 
 function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: boolean; titles: Readonly<Record<string, string>>; nowMs: number }) {
   const k = KIND[item.kind];
   const n = item.affectedTaskIds.length;
   return (
-    <li className={`rounded-[4px] border border-line border-l-4 p-3 ${RAIL[k.tone]} ${top ? TINT[k.tone] : ''}`} data-testid="attention-item" data-kind={item.kind}>
+    <li className={`wrap-anywhere rounded-chip border border-line border-l-4 p-3 ${RAIL[k.tone]} ${top ? TINT[k.tone] : ''}`} data-testid="attention-item" data-kind={item.kind}>
       <div className="grid gap-x-6 gap-y-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,20rem)]">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Chip tone={k.tone}>{k.label}</Chip>
             {item.status === 'expired' ? <Chip tone="danger">Expired</Chip> : null}
+            {item.asOfLastConfirmed ? <Chip tone="neutral">As of last confirmed state</Chip> : null}
             <span className="text-sm text-muted">
-              {item.kind === 'information' ? 'Noted' : 'Waiting'} <Timestamp iso={item.since}>{formatAge(nowMs - Date.parse(item.since))}</Timestamp>
+              {item.needsOperator ? 'Waiting' : 'Noted'} <Timestamp iso={item.since}>{formatAge(nowMs - Date.parse(item.since))}</Timestamp>
             </span>
           </div>
-          <p className={`mt-2 font-medium ${top ? 'text-lg' : ''} text-fg`}>{item.title}</p>
-          <p className="mt-0.5 text-muted">{item.detail}</p>
+          <p className={`mt-2 font-medium wrap-anywhere ${top ? 'text-lg' : ''} text-fg`}>{item.title}</p>
+          <p className="mt-0.5 wrap-anywhere text-muted">{item.detail}</p>
           <p className="mt-1 text-sm text-muted">If nothing changes: {item.consequence}</p>
         </div>
-        <div>
+        <div className="md:border-l md:border-line-strong md:pl-4">
           <p className="text-sm font-medium text-muted">Next action</p>
-          <p className="mt-0.5 text-fg">{item.nextAction}</p>
+          <p className="mt-0.5 font-semibold text-fg">{item.nextAction}</p>
         </div>
       </div>
       <details className="mt-2 text-sm text-muted">
         <summary className="cursor-pointer">Details</summary>
         <dl className="mt-2 grid gap-x-3 gap-y-1 sm:grid-cols-[auto_1fr]">
           <dt>Reason code</dt>
-          <dd className="break-all font-mono text-[13px]">{item.code ?? 'None reported'}</dd>
+          <dd className="break-all font-mono text-mono">{item.code ?? 'None reported'}</dd>
           <dt>Started</dt>
           <dd>{formatExact(item.since)}</dd>
           <dt>Affected tasks ({n})</dt>
@@ -62,10 +65,10 @@ function AttentionQueue({ items, titles, nowMs, stale }: { items: readonly Atten
   return (
     <Panel title="Attention" labelId="attention-title">
       {items.length === 0 ? (
-        <p className="text-muted">{stale ? 'No decisions were waiting at the last confirmed state.' : 'No decisions waiting.'}</p>
+        <p className="text-muted">{stale ? 'Attention is unknown until the connection returns.' : 'No decisions waiting.'}</p>
       ) : (
         <ol className="space-y-3">
-          {items.map((item, i) => <AttentionRow key={item.id} item={item} top={i === 0 && item.kind !== 'information'} titles={titles} nowMs={nowMs} />)}
+          {items.map((item, i) => <AttentionRow key={item.id} item={item} top={i === 0 && item.needsOperator} titles={titles} nowMs={nowMs} />)}
         </ol>
       )}
     </Panel>
@@ -101,13 +104,13 @@ function RunStages({ lifecycle }: { lifecycle: string }) {
 
 function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolean }) {
   const run = model.run;
-  const countable = model.tasks.filter((t) => t.cell !== null);
   return (
     <Panel title="Delivery" labelId="delivery-title">
       <p className="text-2xl font-semibold tracking-tight" data-testid="criteria">{model.criteriaLabel}</p>
-      {countable.length > 0 ? (
+      {model.criteriaNote ? <p className="mt-1 text-sm text-muted" data-testid="criteria-note">{model.criteriaNote}</p> : null}
+      {model.segments.length > 0 ? (
         <div aria-hidden="true" className="mt-3 flex max-w-md gap-1">
-          {countable.map((t) => <span key={t.taskId} className={`h-2 flex-1 rounded-[2px] ${CELL[t.cell!]}`} />)}
+          {model.segments.map((cell, i) => <span key={i} data-testid="segment" data-filled={cell === 'verified'} className={`h-2 flex-1 rounded-chip border ${CELL[cell]}`} />)}
         </div>
       ) : null}
       {run ? (
@@ -117,9 +120,9 @@ function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolea
           <RunStages lifecycle={run.lifecycle} />
         </div>
       ) : null}
-      <p className="mt-3 text-sm" data-testid="critical-path">
-        <span className="text-muted">Critical path: </span>
-        <span className={model.blocker ? 'text-warning' : 'text-muted'}>{model.blocker ?? (stale ? 'no blocker at the last confirmed state' : 'no blocker right now')}</span>
+      <p className="mt-3 text-sm" data-testid="top-blocker">
+        <span className="text-muted">Top blocker: </span>
+        <span className={model.blocker ? 'text-warning' : 'text-muted'}>{model.blocker ?? (stale ? 'unknown until the connection returns' : 'none right now')}</span>
       </p>
       {model.tasks.length > 0 ? (
         <ul className="mt-4 divide-y divide-line border-t border-line">
@@ -138,32 +141,36 @@ function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolea
   );
 }
 
-function FleetPanel({ model }: { model: FleetModel }) {
+function FleetPanel({ model, stale }: { model: FleetModel; stale: boolean }) {
   const { working, waiting, idle, lost } = model.summary;
-  const parts = [`${working} working`, `${waiting} waiting`, `${idle} idle`, ...(lost > 0 ? [`${lost} lost`] : [])];
+  const parts = [`${working} assigned`, `${waiting} waiting`, `${idle} idle`, ...(lost > 0 ? [`${lost} lost`] : [])];
   return (
-    <Panel title="Fleet" labelId="fleet-title" aside={model.rows.length > 0 ? parts.join(' · ') : null}>
+    <Panel title="Fleet" labelId="fleet-title" aside={model.rows.length > 0 ? `${stale ? 'Last confirmed: ' : ''}${parts.join(' · ')}` : null}>
       {model.rows.length === 0 ? (
         <p className="text-muted">No workers have started.</p>
       ) : (
         <ul className="space-y-3">
           {model.rows.map((w) => (
-            <li key={w.workerId} className="rounded-[4px] border border-line bg-panel-2 p-3" data-testid="fleet-row">
+            <li key={w.workerId} className="wrap-anywhere rounded-chip border border-line bg-panel-2 p-3" data-testid="fleet-row">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                 <span className="min-w-0">
                   <span className="font-medium capitalize text-fg">{w.role ?? 'Unassigned'}</span>
-                  <span className="ml-2 break-all font-mono text-[13px] text-muted">{w.workerId}</span>
+                  <span className="ml-2 break-all font-mono text-mono text-muted">{w.workerId}</span>
                 </span>
               </div>
-              {w.taskTitle ? <p className="mt-0.5 text-sm text-muted">{w.taskTitle}</p> : null}
-              <div className="mt-2 flex flex-wrap gap-2">
-                <Chip tone={w.activity.tone}>{w.activity.label}</Chip>
+              {w.taskTitle ? (
+                <p className="mt-0.5 wrap-anywhere text-sm text-muted">
+                  {w.taskTitle}
+                  {w.heartbeatAgeMs !== null && w.health.state === 'healthy' ? ` · Heartbeat ${formatAge(w.heartbeatAgeMs)} ago` : ''}
+                </p>
+              ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Chip tone={w.health.tone}>
                   {w.health.state === 'disconnected' ? (
                     <>Connection lost; state last confirmed <Timestamp iso={w.lastConfirmedAt}>{formatClock(w.lastConfirmedAt)}</Timestamp></>
                   ) : w.health.label}
                 </Chip>
-                {w.heartbeatAgeMs !== null && w.health.state === 'healthy' ? <span className="self-center text-sm text-muted">Heartbeat {formatAge(w.heartbeatAgeMs)} ago</span> : null}
+                {w.activity.reported ? <Chip tone={w.activity.tone}>{w.activity.label}</Chip> : <span className="text-sm text-muted">{w.activity.label}</span>}
               </div>
               <div className="mt-2">
                 <AxisBadges execution={w.execution} modelRoute={w.modelRoute} />
@@ -187,8 +194,8 @@ function EvidencePanel({ rows, simulated }: { rows: readonly EvidenceRow[]; simu
             <li key={r.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
               <span className="flex min-w-0 flex-wrap items-center gap-2">
                 <Chip tone={r.tone}>{r.stateLabel}</Chip>
-                <span className="text-fg">{r.summary}</span>
-                {r.subject ? <span className="text-sm text-muted">{r.subject}</span> : null}
+                {r.subject ? <span className="wrap-anywhere text-fg">{r.subject}</span> : null}
+                <span className={`wrap-anywhere ${r.subject ? 'text-sm text-muted' : 'text-fg'}`}>{r.summary}</span>
               </span>
               <span className="text-sm text-muted"><Timestamp iso={r.at}>{formatClock(r.at)}</Timestamp></span>
             </li>
@@ -214,14 +221,11 @@ function Stat({ label, value, note, chip }: { label: string; value: string; note
 
 const PROVENANCE_CHIP: Readonly<Record<string, { tone: Tone; text: string }>> = { observed: { tone: 'success', text: 'Observed' }, estimated: { tone: 'warning', text: 'Estimated' } };
 
-/** Unknown is never zero. A total only appears when every figure is known; otherwise it reads as unknown, with the known part labelled as a lower bound. */
+/** Unknown is never zero. A total only appears when every figure is known; otherwise it reads as unavailable, with any known part labelled as a lower bound. */
 function usageStat(label: string, total: UsageTotal, format: (q: string) => string) {
   if (total.figureCount === 0) return <Stat label={label} value="Not reported" />;
   if (total.total === null) {
-    const note = total.knownSubtotal !== null
-      ? `At least ${format(total.knownSubtotal)} known; ${total.unavailableCount} of ${total.figureCount} figures unavailable`
-      : 'Unavailable from the source';
-    return <Stat label={label} value="Unknown" note={note} chip={{ tone: 'neutral', text: 'Unavailable' }} />;
+    return <Stat label={label} value="Unavailable" note={total.knownSubtotal !== null ? `At least ${format(total.knownSubtotal)} known; ${total.unavailableCount} of ${total.figureCount} figures missing` : undefined} />;
   }
   return <Stat label={label} value={format(total.total)} chip={PROVENANCE_CHIP[total.provenance]} />;
 }
@@ -232,7 +236,7 @@ function ResourcesPanel({ model }: { model: UsageModel }) {
   return (
     <Panel title="Resources and usage" labelId="resources-title">
       <dl className="divide-y divide-line">
-        <Stat label="Workers running" value={String(running)} note={`${where}. Slot limit not in this view.`} />
+        <Stat label="Leases held" value={String(running)} note={`${where}. Slot limit not reported.`} />
         {usageStat('Model spend', model.spend, formatUsd)}
         {usageStat('Input tokens', model.inputTokens, formatCount)}
         {usageStat('Output tokens', model.outputTokens, formatCount)}
@@ -243,11 +247,20 @@ function ResourcesPanel({ model }: { model: UsageModel }) {
   );
 }
 
-function EmptyProject() {
+/** The way forward from an empty or unavailable screen. Under demo data the assistant is off, so that link would be a dead end. */
+function NextStep({ mode, leaveDemoHref, primary }: { mode: 'mock' | 'live'; leaveDemoHref?: string | undefined; primary?: boolean }) {
+  const cls = primary ? buttonPrimary : buttonQuiet;
+  if (mode === 'mock') return leaveDemoHref ? <a className={cls} href={leaveDemoHref}>Leave demo mode</a> : null;
+  return <a className={cls} href={hrefFor('assistant')}>Open the Assistant</a>;
+}
+
+function EmptyProject({ mode, leaveDemoHref }: { mode: 'mock' | 'live'; leaveDemoHref?: string | undefined }) {
   return (
-    <section aria-label="Project setup" className="rounded-[8px] border border-line bg-panel">
-      <EmptyState title="No run in this project yet" action={<a className={buttonPrimary} href={hrefFor('assistant')}>Open the Assistant</a>}>
-        <p>Start by drafting acceptance criteria and a task plan. Mission Control fills in once a plan is accepted and work begins.</p>
+    <section aria-label="Project setup" className="rounded-card border border-line bg-panel">
+      <EmptyState title="No run in this project yet" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} primary />}>
+        {mode === 'mock'
+          ? <p>This demo project has no run. Choose another fixture in the demo controls below, or leave demo mode to start real work in the Assistant.</p>
+          : <p>Start by drafting acceptance criteria and a task plan. Mission Control fills in once a plan is accepted and work begins.</p>}
       </EmptyState>
     </section>
   );
@@ -262,12 +275,12 @@ function ConnectionBanner({ connection, error, onRestart, observedAt }: { connec
   if (connection !== 'reconnecting' && connection !== 'dead') return null;
   const dead = connection === 'dead';
   return (
-    <section aria-labelledby={headingId} className={`mb-4 rounded-[4px] border border-l-4 p-3 ${dead ? 'border-danger bg-danger-tint' : 'border-warning bg-warning-tint'}`} data-testid="connection-banner">
+    <section aria-labelledby={headingId} className={`mb-4 rounded-chip border border-l-4 p-3 ${dead ? 'border-danger bg-danger-tint' : 'border-warning bg-warning-tint'}`} data-testid="connection-banner">
       <h2 id={headingId} className={`font-medium ${dead ? 'text-danger' : 'text-warning'}`}>{dead ? 'The event stream stopped' : 'Reconnecting to the event stream'}</h2>
       <p className="mt-0.5 text-fg">
         {dead ? 'What you see is frozen at the last confirmed state' : 'Showing the last confirmed state'}{observedAt ? ` from ${formatClock(observedAt)}` : ''}. Worker health reads as unknown, and no action is taken on stale data.
       </p>
-      {error ? <p className="mt-1 text-sm text-muted">Error category <span className="font-mono text-[13px]">{error.code}</span>{error.retryable ? ', retrying' : ', not retryable'}</p> : null}
+      {error ? <p className="mt-1 text-sm text-muted">Error category <span className="font-mono text-mono">{error.code}</span>{error.retryable ? ', retrying' : ', not retryable'}</p> : null}
       {dead ? <button type="button" className={`${buttonQuiet} mt-2`} onClick={onRestart}>Restart session</button> : null}
     </section>
   );
@@ -286,18 +299,22 @@ export interface MissionControlProps {
   readonly nowMs: number;
   readonly mode: 'mock' | 'live';
   readonly onRestart: () => void;
+  readonly leaveDemoHref?: string | undefined;
+  /** A failure while deriving the view. Thrown here so the route's error boundary, not the shell, takes it. */
+  readonly failure?: unknown;
 }
 
-export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart }: MissionControlProps) {
+export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure }: MissionControlProps) {
+  if (failure !== undefined) throw failure;
   if (!overview || !snapshot) {
     if (connection === 'unavailable') {
       return (
         <>
           <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
-          <section aria-label="Connection" className="mt-4 rounded-[8px] border border-line bg-panel">
-            <EmptyState title="Project data is unavailable" action={<a className={buttonQuiet} href={hrefFor('assistant')}>Open the Assistant</a>}>
+          <section aria-label="Connection" className="mt-4 rounded-card border border-line bg-panel">
+            <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>
-              {error ? <p className="mt-2 text-sm">Error category <span className="font-mono text-[13px]">{error.code}</span></p> : null}
+              {error ? <p className="mt-2 text-sm">Error category <span className="font-mono text-mono">{error.code}</span></p> : null}
             </EmptyState>
           </section>
         </>
@@ -315,19 +332,19 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
       <>
         <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
         <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
-        <div className="mt-4"><EmptyProject /></div>
+        <div className="mt-4"><EmptyProject mode={mode} leaveDemoHref={leaveDemoHref} /></div>
       </>
     );
   }
-  // A frozen or reconnecting screen must not reassure the operator about the present.
-  const stale = connection !== 'live';
+  // A frozen, reconnecting or liveness-stale screen must not reassure the operator about the present.
+  const stale = overview.stale;
   return (
     <>
       <div className="mb-5">
         <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
         <p className="mt-1 text-lg text-muted" data-testid="headline">
-          {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-[12px] text-warning">{toneGlyph('warning')}</span> : null}
-          {stale && overview.needsYou === 0 ? 'Nothing was waiting at the last confirmed state.' : overview.headline}
+          {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-glyph text-warning">{toneGlyph('warning')}</span> : null}
+          {overview.headline}
         </p>
       </div>
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
@@ -339,7 +356,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
             <EvidencePanel rows={overview.evidence} simulated={overview.simulated} />
           </div>
           <div className="grid gap-4">
-            <FleetPanel model={overview.fleet} />
+            <FleetPanel model={overview.fleet} stale={stale} />
             <ResourcesPanel model={overview.usage} />
           </div>
         </div>

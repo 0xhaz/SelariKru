@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 /** A labelled region of a view. The heading names the landmark, and `aside` holds a counter or qualifier beside it. */
 export function Panel({ title, labelId, aside, children, className = '' }: { title: string; labelId: string; aside?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section aria-labelledby={labelId} className={`rounded-[8px] border border-line bg-panel ${className}`}>
+    <section aria-labelledby={labelId} className={`rounded-card border border-line bg-panel ${className}`}>
       <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-3">
         <h2 id={labelId} className="text-base font-semibold text-fg">{title}</h2>
         {aside ? <div className="text-sm text-muted">{aside}</div> : null}

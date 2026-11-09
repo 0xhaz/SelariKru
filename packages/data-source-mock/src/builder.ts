@@ -29,6 +29,8 @@ export interface TaskSeed {
   readonly title: string;
   readonly role: string;
   readonly dependsOn: readonly string[];
+  /** How many acceptance criteria this task covers. Null means this scene has no per-criterion evidence. */
+  readonly criteria: number | null;
 }
 
 /** An approval's id, scope and expiry are on the server, not yet in `approval.requested`. The mock attaches them to the matching task's request. */
@@ -95,10 +97,10 @@ export class FixtureBuilder {
     return scoped(this.slug, local);
   }
 
-  task(local: string, seed: { title: string; role: string; dependsOn?: string[]; revision?: number; planRevision?: number }): this {
+  task(local: string, seed: { title: string; role: string; dependsOn?: string[]; revision?: number; planRevision?: number; criteria?: number }): this {
     this.taskSeeds.push({
       taskId: this.id(local), revision: seed.revision ?? 1, planRevision: seed.planRevision ?? 1, title: seed.title, role: seed.role,
-      dependsOn: (seed.dependsOn ?? []).map((d) => this.id(d)),
+      dependsOn: (seed.dependsOn ?? []).map((d) => this.id(d)), criteria: seed.criteria ?? null,
     });
     return this;
   }

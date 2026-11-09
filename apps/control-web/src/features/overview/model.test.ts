@@ -7,14 +7,17 @@ const criteria = (s: Parameters<typeof buildOverview>[0], now = NOW) => buildOve
 
 describe('delivery', () => {
   it('shows "n of m criteria verified", never a percentage', () => {
-    const snapshot = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b'), task('c'), task('d', { status: 'superseded' })] });
+    const snapshot = snapshotOf({ criteria: { verified: 2, total: 7 }, tasks: [task('a', { status: 'verified' }), task('b'), task('c'), task('d', { status: 'superseded' })] });
     const model = buildOverview(snapshot, NOW, NOW);
-    expect(model.delivery.criteriaLabel).toBe('1 of 3 criteria verified');
+    expect(model.delivery.criteriaLabel).toBe('2 of 7 criteria verified');
+    expect(model.delivery.criteriaNote).toBeNull();
+    expect(model.delivery.segments.filter((c) => c === 'verified')).toHaveLength(2);
+    expect(model.delivery.segments).toHaveLength(7);
     expect(JSON.stringify(model)).not.toMatch(/\d+\s?%/);
   });
 
   it('heartbeat never increments verified criteria', async () => {
-    const running = snapshotOf({ tasks: [task('a', { activeAttemptId: 'att', status: 'running' })], workers: [worker('w', { taskId: 'a', attemptId: 'att' })] });
+    const running = snapshotOf({ criteria: { verified: 0, total: 1 }, tasks: [task('a', { activeAttemptId: 'att', status: 'running' })], workers: [worker('w', { taskId: 'a', attemptId: 'att' })] });
     running.attempts['att'] = { attemptId: 'att', taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(60), endedAt: null, lastHeartbeatAt: iso(30) };
     expect(criteria(running)).toBe('0 of 1 criteria verified');
 
@@ -33,6 +36,32 @@ describe('delivery', () => {
     const merged = mergeLiveness(projectionFromSnapshot(running), fresher);
     expect(merged.snapshot.attempts['att']!.lastHeartbeatAt).toBe(iso(0));
     expect(criteria(merged.snapshot)).toBe('0 of 1 criteria verified');
+  });
+
+  it('falls back to tasks, with a visible qualifier, when per-criterion evidence is not connected', () => {
+    const { delivery } = buildOverview(snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b')] }), NOW, NOW);
+    expect(delivery.criteriaLabel).toBe('1 of 2 tasks verified');
+    expect(delivery.criteriaNote).toMatch(/per-criterion evidence is not connected/i);
+  });
+
+  it('counts only the run shown, not every run in the project', () => {
+    const snapshot = snapshotOf({ tasks: [task('a', { status: 'verified', runId: 'old' }), task('b', { status: 'verified' }), task('c')] });
+    snapshot.runs = { old: { runId: 'old', lifecycle: 'merged', planRevision: 1, latestEvidence: null, criteria: null }, ...snapshot.runs };
+    const { delivery } = buildOverview(snapshot, NOW, NOW);
+    expect(delivery.criteriaLabel).toBe('1 of 2 tasks verified');
+    expect(delivery.tasks.map((t) => t.taskId)).toEqual(['c', 'b']);
+  });
+
+  it('never marks work as filled unless it is verified', () => {
+    const { delivery } = buildOverview(snapshotOf({ tasks: [task('a'), task('b', { status: 'awaiting_approval' }), task('c', { status: 'ready' })] }), NOW, NOW);
+    expect(delivery.segments).not.toContain('verified');
+  });
+
+  it('leaves review items and closed tasks out of the top blocker', async () => {
+    const merge = await fixtureSnapshot('merge-flow');
+    expect(buildOverview(merge.snapshot, merge.nowMs, merge.nowMs).delivery.blocker).toBeNull();
+    const costs = await fixtureSnapshot('unknown-costs');
+    expect(buildOverview(costs.snapshot, costs.nowMs, costs.nowMs).delivery.blocker).toBeNull();
   });
 
   it('names the top blocker on the critical path, and says so when there is none', async () => {
@@ -59,9 +88,14 @@ describe('fleet', () => {
     expect(buildOverview(snapshot, NOW, null).fleet.rows[0]!.health).toMatchObject({ state: 'unknown', label: 'Health unknown' });
   });
 
+  it('reports a null activity as not reported, and quietly', () => {
+    const [row] = buildOverview(snapshotOf({ workers: [worker('a', { activity: null })] }), NOW, NOW).fleet.rows;
+    expect(row!.activity).toMatchObject({ label: 'Activity not reported', reported: false });
+  });
+
   it('renders a null activity as unknown, and an idle worker as idle', () => {
     const rows = buildOverview(snapshotOf({ workers: [worker('a', { activity: null }), worker('b', { activity: null, availability: 'idle', leaseHeld: false })] }), NOW, NOW).fleet.rows;
-    expect(rows.map((r) => r.activity.label)).toEqual(['Activity unknown', 'Idle']);
+    expect(rows.map((r) => r.activity.label)).toEqual(['Activity not reported', 'Idle']);
   });
 
   it('counts waiting separately from working, and a healthy wait is not urgent', async () => {
@@ -114,9 +148,38 @@ describe('evidence', () => {
 describe('headline and empty project', () => {
   it('says plainly how many things need the operator', async () => {
     const human = await fixtureSnapshot('human-wait');
-    expect(buildOverview(human.snapshot, human.nowMs, human.nowMs).headline).toMatch(/^1 item needs you\. Start with /);
+    expect(buildOverview(human.snapshot, human.nowMs, human.nowMs).headline).toBe('1 item needs you.');
     const healthy = await fixtureSnapshot('healthy-parallel-work');
     expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).headline).toBe('Nothing needs you right now.');
+  });
+
+  it('never reassures over stale data', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
+    const model = buildOverview(snapshot, nowMs + 300_000, null, { lastConfirmedMs: nowMs, stale: true });
+    expect(model.headline).toBe('Worker connections are unknown. Showing the last confirmed state.');
+    expect(model.attentionCount).toBe('Attention unknown');
+    expect(model.announcement).not.toMatch(/\b0\b/);
+  });
+
+  it('counts stale items as of the last confirmed state', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
+    const model = buildOverview(snapshot, nowMs + 300_000, null, { lastConfirmedMs: nowMs, stale: true });
+    expect(model.headline).toBe('1 item needed you at the last confirmed state. Worker connections are unknown.');
+    expect(model.attentionCount).toBe('1 at last confirmed state');
+  });
+
+  it('gives an aggregate count for the header', async () => {
+    const blocked = await fixtureSnapshot('policy-block');
+    expect(buildOverview(blocked.snapshot, blocked.nowMs, blocked.nowMs).attentionCount).toBe('2 need attention');
+    const healthy = await fixtureSnapshot('healthy-parallel-work');
+    expect(buildOverview(healthy.snapshot, healthy.nowMs, healthy.nowMs).attentionCount).toBe('None need attention');
+    const lost = await fixtureSnapshot('runner-loss');
+    expect(buildOverview(lost.snapshot, lost.nowMs, lost.nowMs).attentionCount).toBe('1 needs attention');
+  });
+
+  it('does not count Scheduler-owned waits or closed tasks as needing the operator', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('unknown-costs');
+    expect(buildOverview(snapshot, nowMs, nowMs).needsYou).toBe(0);
   });
 
   it('does not count information as needing the operator', async () => {

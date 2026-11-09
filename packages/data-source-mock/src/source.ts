@@ -2,7 +2,7 @@ import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
   isoOf, projectionFromSnapshot, sequenceToCursor,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type TaskView, type TerminalChannel,
+  type ProjectViewSnapshot, type ProjectionState, type RunView, type TaskView, type TerminalChannel,
 } from '@selarikru/view-protocol';
 import type { VirtualClock } from './clock.ts';
 import { FIXTURE_T0_MS, HUMAN, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
@@ -97,7 +97,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         const seed = seedFor(id, planRevision);
         if (seed) tasks = { ...tasks, [id]: seedTask(seed, event.runId, event.occurredAt, tasks[id]) };
       }
-      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null };
+      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null };
       snap = {
         ...snap, tasks, runs: { ...snap.runs, [event.runId]: { ...run, lifecycle: 'running', planRevision } },
         meta: { ...snap.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt },
@@ -178,6 +178,21 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     return isoOf(start + Math.floor(Math.max(0, limit - start) / HEARTBEAT_STEP_MS) * HEARTBEAT_STEP_MS);
   }
 
+  /** Per-criterion counts as a server would hold them. A scene whose tasks declare no criteria reports null: per-criterion evidence is not connected. */
+  function criteriaOf(p: Project, runId: string): RunView['criteria'] {
+    const live = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && t.status !== 'cancelled');
+    if (live.length === 0) return null;
+    let verified = 0;
+    let total = 0;
+    for (const t of live) {
+      const seed = p.fixture.tasks.filter((x) => x.taskId === t.taskId && x.revision <= t.revision).sort((a, b) => b.revision - a.revision)[0];
+      if (!seed || seed.criteria === null) return null;
+      total += seed.criteria;
+      if (t.status === 'verified' || t.status === 'merged') verified += seed.criteria;
+    }
+    return { verified, total };
+  }
+
   function snapshotOf(p: Project): ProjectViewSnapshot {
     const s = p.state.snapshot;
     const attempts = Object.fromEntries(
@@ -189,7 +204,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         return [id, w.leaseHeld && a ? { ...w, lastHeartbeatAt: a.lastHeartbeatAt } : w];
       }),
     );
-    return { ...s, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage] };
+    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id) }]));
+    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage] };
   }
 
   const prng = mulberry32(0x5e1a);

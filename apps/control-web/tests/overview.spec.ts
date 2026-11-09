@@ -18,28 +18,43 @@ test('attention sorted per design §4 order', async ({ page }) => {
   await expect(items(page)).toHaveCount(2);
   await expect(items(page).nth(0)).toHaveAttribute('data-kind', 'policy_incident');
   await expect(items(page).nth(1)).toHaveAttribute('data-kind', 'decision');
-  await expect(page.getByTestId('headline')).toContainText('2 items need you. Start with Export restricted feedback: blocked by policy');
+  await expect(page.getByTestId('headline')).toHaveText(/2 items need you\.$/);
+  await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
 });
 
 test('shows "n of m criteria verified", never a percentage', async ({ page }) => {
   await open(page, fixture('merge-flow'));
-  await expect(page.getByTestId('criteria')).toHaveText('2 of 2 criteria verified');
+  await expect(page.getByTestId('criteria')).toHaveText('5 of 5 criteria verified');
+  await expect(page.getByTestId('criteria-note')).toHaveCount(0);
   expect(await page.getByRole('main').innerText()).not.toMatch(/\d\s?%/);
 });
 
-test('heartbeat never increments verified criteria', async ({ page }) => {
+test('when per-criterion evidence is missing it counts tasks and says so', async ({ page }) => {
   await open(page, fixture('long-build-stall'));
-  await expect(page.getByTestId('criteria')).toHaveText('0 of 1 criteria verified');
-  // The silence ends at 100 s, so these steps deliver fresh heartbeats and no verdict.
+  await expect(page.getByTestId('criteria')).toHaveText('0 of 1 tasks verified');
+  await expect(page.getByTestId('criteria-note')).toContainText('Per-criterion evidence is not connected');
+});
+
+test('zero verified never looks complete: only verified segments are filled', async ({ page }) => {
+  await open(page, fixture('healthy-parallel-work'));
+  await expect(page.getByTestId('segment')).toHaveCount(5);
+  await expect(page.locator('[data-testid="segment"][data-filled="true"]')).toHaveCount(0);
+});
+
+test('heartbeat never increments verified criteria', async ({ page }) => {
+  await open(page, fixture('healthy-parallel-work'));
+  await expect(page.getByTestId('criteria')).toHaveText('0 of 5 criteria verified');
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
-  await expect(page.getByTestId('fleet-row').first()).toContainText('Healthy');
-  await expect(page.getByTestId('criteria')).toHaveText('0 of 1 criteria verified');
+  await expect(page.getByTestId('fleet-row').filter({ hasText: 'runner_cloud_1' })).toContainText('Heartbeat');
+  await expect(page.getByTestId('criteria')).toHaveText('0 of 5 criteria verified');
 });
 
 test('empty project shows next action and no fake agents', async ({ page }) => {
   await open(page, fixture('no-data'));
   await expect(page.getByText('No run in this project yet')).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Open the Assistant' })).toBeVisible();
+  // Under demo data the assistant is off, so the next action must not lead there.
+  await expect(page.getByRole('link', { name: 'Leave demo mode' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open the Assistant' })).toHaveCount(0);
   await expect(page.getByTestId('fleet-row')).toHaveCount(0);
   await expect(page.getByTestId('criteria')).toHaveCount(0);
   await expect(page.getByRole('main')).not.toContainText('$0');
@@ -90,8 +105,9 @@ test('a runner loss shows the last confirmed time and offers inspection', async 
 test('unknown costs read as unknown, never zero', async ({ page }) => {
   await open(page, fixture('unknown-costs'));
   const resources = page.getByRole('region', { name: 'Resources and usage' });
-  await expect(resources).toContainText('Unknown');
-  await expect(resources).toContainText('At least $3.74 known; 1 of 3 figures unavailable');
+  await expect(resources).toContainText('Unavailable');
+  await expect(resources).toContainText('At least $3.74 known; 1 of 3 figures missing');
+  await expect(resources).not.toContainText('Unknown');
 });
 
 test('reconnecting keeps the last confirmed state and stops claiming health', async ({ page }) => {
@@ -99,6 +115,55 @@ test('reconnecting keeps the last confirmed state and stops claiming health', as
   await expect(page.getByTestId('freshness')).toContainText('Reconnecting');
   await expect(page.getByTestId('connection-banner')).toContainText('last confirmed state');
   await expect(page.getByTestId('fleet-row').first()).toContainText('Health unknown');
+});
+
+test('a runner loss stays visible over stale data, labelled as of the last confirmed state', async ({ page }) => {
+  await open(page, `${fixture('runner-loss')}&fault=reconnecting`);
+  await expect(page.getByTestId('connection-banner')).toBeVisible();
+  await expect(items(page).first()).toHaveAttribute('data-kind', 'worker_lost');
+  await expect(items(page).first()).toContainText('As of last confirmed state');
+  await expect(page.getByTestId('headline')).toContainText('at the last confirmed state');
+});
+
+test('a view that fails to render is contained: shell and badge stay, and the other tab works', async ({ page }) => {
+  await page.goto('/?demo&fault=corrupt');
+  await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
+  await expect(page.getByTestId('demo-badge')).toBeVisible();
+  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
+});
+
+test('changing route moves focus to the main content, and first load does not', async ({ page }) => {
+  await open(page);
+  await expect(page.locator('#main')).not.toBeFocused();
+  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  await expect(page.locator('#main')).toBeFocused();
+});
+
+test('exact time appears on keyboard focus', async ({ page }) => {
+  await open(page, fixture('human-wait'));
+  const time = items(page).first().locator('time').first();
+  await time.focus();
+  await expect(items(page).first().locator('span[aria-hidden="true"]', { hasText: '2026' }).first()).toBeVisible();
+});
+
+test('a long payload wraps instead of overflowing at 375', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await open(page, fixture('failed-ci'));
+  await page.evaluate(() => {
+    const long = 'x'.repeat(240);
+    document.querySelectorAll('[data-testid="fleet-row"] span, [data-testid="attention-item"] p').forEach((el) => {
+      if (el.children.length === 0) el.textContent = long;
+    });
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('a light-theme preference is applied before any app code runs', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
+  await page.route('**/src/main.tsx*', (route) => route.abort());
+  await page.goto('/?demo');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 });
 
 test('an unavailable source says so and shows no data', async ({ page }) => {
@@ -111,7 +176,9 @@ test('an unavailable source says so and shows no data', async ({ page }) => {
 test('a dead session offers a restart and recovers through a new projection', async ({ page }) => {
   await open(page, '&fault=dead');
   await expect(page.getByTestId('freshness')).toContainText('Stream stopped');
-  await expect(page.getByTestId('headline')).toHaveText('Nothing was waiting at the last confirmed state.');
+  await expect(page.getByTestId('headline')).toHaveText('Worker connections are unknown. Showing the last confirmed state.');
+  await expect(page.getByTestId('attention-count')).toHaveText('Attention unknown');
+  await expect(page.getByRole('main')).not.toContainText('Nothing');
   await page.getByRole('button', { name: 'Restart session' }).click();
   await expect(page.getByTestId('freshness')).toContainText('Live');
   await expect(page.getByTestId('connection-banner')).toHaveCount(0);
@@ -155,6 +222,7 @@ test('with no live source the shell is honest and the assistant still works', as
   await expect(page.getByText('Project data is unavailable')).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toHaveCount(0);
   await expect(page.getByTestId('criteria')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Open the Assistant' })).toBeVisible();
   await expectNoAxeViolations(page);
 
   await page.getByRole('link', { name: 'Assistant' }).first().click();
@@ -169,4 +237,23 @@ test('with no live source the shell is honest and the assistant still works', as
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(output.getByTestId('output-list')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
+
+  // Axe on the assistant inside the shell, in both themes.
+  await expectNoAxeViolations(page);
+  await page.getByRole('button', { name: 'Light theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expectNoAxeViolations(page);
 });
+
+for (const failure of ['render', 'chunk']) {
+  test(`an assistant ${failure} failure is contained by the route boundary`, async ({ page }) => {
+    await page.addInitScript((f) => {
+      (window as unknown as { __scenario: unknown }).__scenario = { shell: true, assistantFails: f };
+    }, failure);
+    await page.goto('/tests/harness/index.html');
+    await page.getByRole('link', { name: 'Assistant' }).first().click();
+    await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
+    await page.getByRole('link', { name: 'Overview' }).click();
+    await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  });
+}

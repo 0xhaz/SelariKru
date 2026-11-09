@@ -1,6 +1,6 @@
 // Test harness: mounts the assistant with a fake adapter and fake API chosen by `window.__scenario`
 // (set by Playwright before load). Served by the dev server only; not a production build input.
-import { StrictMode } from 'react';
+import { StrictMode, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 import { RestrictedDraftHold, type AssistRequest, type AssistantProposal, type Readiness } from '@selarikru/inference-firebase-web';
 import { AssistantPanel, createApiClient, useAssistantStore, type ApiResult, type AssistantApi, type AssistantPort } from '../../src/features/assistant/index.ts';
@@ -27,6 +27,8 @@ interface Scenario {
   realApi?: { baseUrl: string; token: string };
   /** Mount inside the app shell with no projection source, as a production build runs today. */
   shell?: boolean;
+  /** Makes the assistant route fail, to exercise the route's error boundary. */
+  assistantFails?: 'render' | 'chunk';
 }
 
 declare global {
@@ -145,7 +147,11 @@ const hold = new RestrictedDraftHold();
 window.__store = useAssistantStore;
 window.__hold = hold;
 
-const panel = <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />;
+function Boom(): never {
+  throw new Error('render failed');
+}
+const ChunkFail = lazy(() => Promise.reject(new Error('Failed to fetch dynamically imported module')));
+const panel = sc.assistantFails === 'render' ? <Boom /> : sc.assistantFails === 'chunk' ? <ChunkFail /> : <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />;
 const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: { nowMs: () => Date.now() }, every: () => () => {} });
 
 createRoot(document.getElementById('root')!).render(

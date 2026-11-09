@@ -39,7 +39,7 @@ export function InferenceIndicator({ semantic }: { semantic: SemanticStatus | nu
         <dt className="text-muted">Model readiness</dt>
         <dd data-testid="inf-readiness">
           <Chip tone={readiness.tone}>{readiness.text}</Chip>
-          {cloudModel ? <span className="mt-1 block font-mono text-[13px] text-muted">cloud {cloudModel} · SDK {sdkVersion}</span> : null}
+          {cloudModel ? <span className="mt-1 block font-mono text-mono text-muted">cloud {cloudModel} · SDK {sdkVersion}</span> : null}
         </dd>
         <dt className="text-muted">Response source</dt>
         <dd data-testid="inf-source"><Chip tone={source.tone}>{source.text}</Chip></dd>
@@ -48,7 +48,7 @@ export function InferenceIndicator({ semantic }: { semantic: SemanticStatus | nu
         <dt className="text-muted">Validation</dt>
         <dd data-testid="inf-validation">{validationText(result, semantic)}</dd>
         <dt className="text-muted">Elapsed time</dt>
-        <dd data-testid="inf-elapsed" className="font-mono text-[13px]">{result && !result.demo && result.status !== 'blocked' ? formatElapsed(result.totalMs) : generating ? 'Running' : 'Not measured'}</dd>
+        <dd data-testid="inf-elapsed" className="font-mono text-mono">{result && !result.demo && result.status !== 'blocked' ? formatElapsed(result.totalMs) : generating ? 'Running' : 'Not measured'}</dd>
       </dl>
     </Card>
   );

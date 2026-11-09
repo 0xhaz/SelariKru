@@ -24,7 +24,7 @@ function base(tasks: string[] = ['t1'], provenance: 'simulated' | 'observed' = '
   const s = emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance });
   return projectionFromSnapshot({
     ...s,
-    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null } },
+    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null } },
     tasks: Object.fromEntries(tasks.map((t) => [t, task(t)])),
   });
 }

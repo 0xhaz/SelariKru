@@ -22,6 +22,8 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --radius-card: 8px;
   --radius-chip: 4px;
+  --text-mono: 13px;
+  --text-glyph: 10px;
 }
 
 :root[data-theme="light"] {

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useStore } from 'zustand';
 import { buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
-import { buildOverview } from '../features/overview/model.ts';
+import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
+import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hrefFor, useRoute, type Route } from './route.ts';
 import { useTheme } from './theme.ts';
@@ -53,7 +54,7 @@ function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionS
   return (
     <span data-testid="freshness" className="inline-flex flex-wrap items-baseline gap-x-1.5 text-sm">
       <span className={`inline-flex items-center gap-1.5 font-medium ${TONE_TEXT[c.tone]}`}>
-        <span aria-hidden="true" className="text-[10px]">{toneGlyph(c.tone)}</span>
+        <span aria-hidden="true" className="text-glyph">{toneGlyph(c.tone)}</span>
         {c.label}
       </span>
       {detail ? <span className="text-muted">{detail}</span> : null}
@@ -75,7 +76,7 @@ function Announcer({ message }: { message: string }) {
 
 function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined }) {
   return (
-    <section aria-labelledby="assistant-off" className="mx-auto mt-10 max-w-xl rounded-[8px] border border-line bg-panel p-6">
+    <section aria-labelledby="assistant-off" className="mx-auto mt-10 max-w-xl rounded-card border border-line bg-panel p-6">
       <h1 id="assistant-off" className="text-xl font-semibold">The assistant is off in demo mode</h1>
       <p className="mt-2 text-muted">The assistant talks to real models and a real control API, so it does not run on demo data. Nothing here is a live result.</p>
       {leaveDemoHref ? <p className="mt-4"><a className="text-active underline" href={leaveDemoHref}>Leave demo mode</a></p> : null}
@@ -93,21 +94,39 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
   const snapshot = state.projection?.snapshot ?? null;
   // A liveness refresh does not bump the snapshot's own time, so freshness follows the last successful load or refresh.
   const confirmedAt = state.livenessAsOfMs !== null ? new Date(state.livenessAsOfMs).toISOString() : (snapshot?.meta.observedAt ?? null);
-  const overview = useMemo(() => (snapshot ? buildOverview(snapshot, state.nowMs, liveness) : null), [snapshot, state.nowMs, liveness]);
+  const stale = connection !== 'live';
+  // Caught here so a bad snapshot reaches the route's boundary through MissionControl and cannot take the shell down.
+  const built = useMemo((): { overview: OverviewModel | null; failure?: unknown } => {
+    if (!snapshot) return { overview: null };
+    try {
+      return { overview: buildOverview(snapshot, state.nowMs, liveness, { lastConfirmedMs: state.livenessAsOfMs, stale }) };
+    } catch (failure) {
+      return { overview: null, failure };
+    }
+  }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
+  const overview = built.overview;
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
     if (route === 'assistant') setAssistantOpened(true);
   }, [route]);
+  // Keyboard and screen reader users land on the new view. Not on first load, where the browser's own start point is right.
+  const previousRoute = useRef(route);
+  useEffect(() => {
+    if (previousRoute.current === route) return;
+    previousRoute.current = route;
+    document.getElementById('main')?.focus();
+  }, [route]);
   useEffect(() => {
     document.title = route === 'assistant' ? 'Assistant · SelariKru' : 'Mission Control · SelariKru';
   }, [route]);
 
-  const announcement = `${CONNECTION[connection].label}.${overview && !overview.empty ? ` ${overview.needsYou} ${overview.needsYou === 1 ? 'item needs' : 'items need'} attention.` : ''}`;
+  const showCount = overview !== null && !overview.empty;
+  const announcement = `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
   return (
     <div className="min-h-screen">
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-[4px] focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
       <Announcer message={announcement} />
       <div className="sticky top-0 z-40 border-b border-line bg-panel">
         <header className="mx-auto flex max-w-[1320px] flex-wrap items-center gap-x-4 gap-y-1 px-4 pt-2 sm:px-6">
@@ -118,10 +137,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
           </p>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
             <DemoBadge mode={mode} />
+            {showCount ? <a data-testid="attention-count" href={hrefFor('overview')} className={`text-sm font-medium underline-offset-2 hover:underline ${overview.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{overview.attentionCount}</a> : null}
             <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />
             {account ? (
               <span className="flex items-center gap-2 text-sm">
-                <span className="hidden max-w-[16rem] truncate font-mono text-[13px] text-muted lg:inline" title={account.label}>{account.label}</span>
+                <span className="hidden max-w-[16rem] truncate font-mono text-mono text-muted lg:inline" title={account.label}>{account.label}</span>
                 <button type="button" className={buttonQuiet} onClick={account.onSignOut}>Sign out</button>
               </span>
             ) : null}
@@ -147,16 +167,26 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
             ),
           )}
         </nav>
-        <button type="button" className="shrink-0 rounded-[4px] border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
+        <button type="button" className="shrink-0 rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
           {theme === 'dark' ? 'Light theme' : 'Dark theme'}
         </button>
         </div>
       </div>
 
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
-        {route === 'overview' ? <MissionControl connection={connection} error={state.error} overview={overview} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} /> : null}
+        {route === 'overview' ? (
+          <RouteBoundary resetKey={route}>
+            <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+          </RouteBoundary>
+        ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}
-        {assistant !== null && assistantOpened ? <div hidden={route !== 'assistant'}>{assistant}</div> : null}
+        {assistant !== null && assistantOpened ? (
+          <div hidden={route !== 'assistant'}>
+            <RouteBoundary resetKey="assistant">
+              <Suspense fallback={<p role="status" className="text-muted">Loading the assistant</p>}>{assistant}</Suspense>
+            </RouteBoundary>
+          </div>
+        ) : null}
       </main>
       {devPanel ? <div className="mx-auto max-w-[1320px] px-4 pb-8 sm:px-6">{devPanel}</div> : null}
     </div>

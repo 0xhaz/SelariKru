@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, type Auth, type User } from 'firebase/auth';
 
-const input = 'w-full rounded-[4px] border border-line bg-bg px-2 py-2 text-fg';
-const button = 'rounded-[4px] px-3 py-2 text-sm font-medium disabled:opacity-50';
+const input = 'w-full rounded-chip border border-line bg-bg px-2 py-2 text-fg';
+const button = 'rounded-chip px-3 py-2 text-sm font-medium disabled:opacity-50';
 
 /** Firebase Auth gate. The signed-in frame, including sign-out, belongs to the shell. */
 export function AuthGate({ auth, emulator, children }: { auth: Auth; emulator: boolean; children: (user: User) => ReactNode }) {
@@ -32,10 +32,10 @@ export function AuthGate({ auth, emulator, children }: { auth: Auth; emulator: b
   if (user === null) {
     return (
       <main className="mx-auto max-w-sm px-4 py-12">
-        <p className="font-mono text-[13px] text-muted">SelariKru</p>
+        <p className="font-mono text-mono text-muted">SelariKru</p>
         <h1 className="text-2xl font-semibold">Sign in</h1>
         <p className="mt-1 text-muted">{emulator ? 'Using the local Firebase Auth Emulator.' : 'Use the owner account.'}</p>
-        <form className="mt-6 space-y-4 rounded-[8px] border border-line bg-panel p-4" onSubmit={(e) => void submit(e, false)}>
+        <form className="mt-6 space-y-4 rounded-card border border-line bg-panel p-4" onSubmit={(e) => void submit(e, false)}>
           <div>
             <label htmlFor="email" className="mb-1 block text-sm text-muted">Email</label>
             <input id="email" name="email" type="email" autoComplete="username" required className={input} />

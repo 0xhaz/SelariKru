@@ -24,10 +24,10 @@ export function approval(id: string, over: Partial<ApprovalView> = {}): Approval
 
 const byId = <T,>(items: readonly T[], key: (t: T) => string): Record<string, T> => Object.fromEntries(items.map((i) => [key(i), i]));
 
-export function snapshotOf(parts: { tasks?: TaskView[]; workers?: WorkerView[]; approvals?: ApprovalView[]; checks?: ProjectViewSnapshot['checks'] }): ProjectViewSnapshot {
+export function snapshotOf(parts: { tasks?: TaskView[]; workers?: WorkerView[]; approvals?: ApprovalView[]; checks?: ProjectViewSnapshot['checks']; criteria?: { verified: number; total: number } | null }): ProjectViewSnapshot {
   const base = emptySnapshot({ projectId: 'p', observedAt: iso(0), provenance: 'observed' });
   return {
-    ...base, runs: { run: { runId: 'run', lifecycle: 'running', planRevision: 1, latestEvidence: null } }, tasks: byId(parts.tasks ?? [], (t) => t.taskId), workers: byId(parts.workers ?? [], (w) => w.workerId),
+    ...base, runs: { run: { runId: 'run', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: parts.criteria ?? null } }, tasks: byId(parts.tasks ?? [], (t) => t.taskId), workers: byId(parts.workers ?? [], (w) => w.workerId),
     approvals: byId(parts.approvals ?? [], (a) => a.approvalId), checks: parts.checks ?? {},
   };
 }

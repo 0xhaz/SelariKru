@@ -7,8 +7,8 @@ import type { Scheduler } from '../shell/projection-store.ts';
  * `data-source-mock` is a devDependency for the same reason. Do not import it from any module a production build can reach.
  */
 
-export type DemoFault = 'reconnecting' | 'unavailable' | 'dead';
-export const DEMO_FAULTS: readonly DemoFault[] = ['reconnecting', 'unavailable', 'dead'];
+export type DemoFault = 'reconnecting' | 'unavailable' | 'dead' | 'corrupt';
+export const DEMO_FAULTS: readonly DemoFault[] = ['reconnecting', 'unavailable', 'dead', 'corrupt'];
 
 export interface DemoProject {
   readonly projectId: string;
@@ -30,6 +30,8 @@ export interface DemoSession {
 /** Simulated transport faults for the development panel, so every connection state can be seen. A `dead` fault clears after one restart. */
 function withFault(source: EngineeringDataSource, fault: DemoFault): EngineeringDataSource {
   const outage: DataSourceError = { code: 'unavailable', message: 'simulated outage', retryable: true };
+  // A malformed snapshot that gets past transport, so the view's error boundary can be seen.
+  if (fault === 'corrupt') return { ...source, getSnapshot: async (projectId) => ({ ...(await source.getSnapshot(projectId)), tasks: null as never }) };
   if (fault === 'unavailable') return { ...source, getSnapshot: () => Promise.reject(new Error(outage.message)) };
   if (fault === 'reconnecting') {
     let loads = 0;

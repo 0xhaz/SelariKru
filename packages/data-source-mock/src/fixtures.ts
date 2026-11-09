@@ -21,7 +21,7 @@ const tokens = (b: FixtureBuilder, t: string, a: string, prov: 'observed' | 'est
 
 function healthyParallelWork(): Fixture {
   const b = new FixtureBuilder('healthy-parallel-work', 101);
-  b.task('api', { title: 'Feedback API', role: 'backend' }).task('web', { title: 'Feedback list UI', role: 'frontend' });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3 }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2 });
   b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
   b.complete('api', 'att_api_1', 135, LOCAL).verdict('api', 'att_api_1', 160, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
   return done(b, {
@@ -40,7 +40,7 @@ function healthyParallelWork(): Fixture {
 
 function humanWait(): Fixture {
   const b = new FixtureBuilder('human-wait', 202);
-  b.task('migrate', { title: 'Add feedback table', role: 'backend' }).task('ui', { title: 'Empty states', role: 'frontend' });
+  b.task('migrate', { title: 'Add feedback table', role: 'backend', criteria: 2 }).task('ui', { title: 'Empty states', role: 'frontend', criteria: 3 });
   b.approval('apr_docs_domain', { task: 'migrate', scopeHash: 'scope-docs-domain', reason: 'allow_documentation_domain', expiresAtSec: 3640 });
   b.plan(1, ['migrate', 'ui']).ready('migrate', 5).start('migrate', 'att_mig_1', 6, LOCAL, 'local', 'cloud').ready('ui', 5).start('ui', 'att_ui_1', 7, CLOUD, 'cloud', 'cloud');
   b.emit('approval.requested', 40, { task: 'migrate', attempt: 'att_mig_1', payload: { fence: 1, reason: 'allow_documentation_domain' } });
@@ -56,7 +56,7 @@ function humanWait(): Fixture {
 
 function policyBlock(): Fixture {
   const b = new FixtureBuilder('policy-block', 303);
-  b.task('export', { title: 'Export restricted feedback', role: 'backend' }).task('report', { title: 'Weekly report job', role: 'backend' }).task('lint', { title: 'Lint cleanup', role: 'frontend' });
+  b.task('export', { title: 'Export restricted feedback', role: 'backend', criteria: 2 }).task('report', { title: 'Weekly report job', role: 'backend', criteria: 1 }).task('lint', { title: 'Lint cleanup', role: 'frontend', criteria: 1 });
   b.plan(1, ['export', 'report', 'lint']).ready('export', 5).ready('report', 5).ready('lint', 5).start('lint', 'att_lint_1', 8, LOCAL, 'local', 'cloud');
   b.emit('placement.blocked', 6, { task: 'export', payload: { reason: 'policy_denied:restricted_data_cloud_destination', mode: 'local-first' } });
   b.emit('placement.blocked', 7, { task: 'report', payload: { reason: 'approval_required:cloud_start', mode: 'local-first' } });
@@ -70,7 +70,7 @@ function policyBlock(): Fixture {
 
 function runnerLoss(): Fixture {
   const b = new FixtureBuilder('runner-loss', 404);
-  b.task('api', { title: 'Feedback API', role: 'backend' });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3 });
   b.plan(1, ['api']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud');
   b.silence('att_api_1', 46, null); // the runner stops answering; nothing is emitted until the lease reaper acts
   // The reaper's two events, as the service writes them: the attempt is interrupted, then the task is ready again.
@@ -99,9 +99,9 @@ function longBuildStall(): Fixture {
 
 function contractChange(): Fixture {
   const b = new FixtureBuilder('contract-change', 606);
-  b.task('api', { title: 'Feedback API', role: 'backend' }).task('contract', { title: 'Approve contract v1', role: 'reviewer' })
-    .task('web', { title: 'Feedback list UI', role: 'frontend', dependsOn: ['contract'] })
-    .task('web', { title: 'Feedback list UI (contract v2)', role: 'frontend', dependsOn: ['contract'], revision: 2, planRevision: 2 });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2 }).task('contract', { title: 'Approve contract v1', role: 'reviewer', criteria: 1 })
+    .task('web', { title: 'Feedback list UI', role: 'frontend', dependsOn: ['contract'], criteria: 3 })
+    .task('web', { title: 'Feedback list UI (contract v2)', role: 'frontend', dependsOn: ['contract'], revision: 2, planRevision: 2, criteria: 3 });
   b.approval('apr_contract_v2', { task: 'contract', scopeHash: 'scope-contract-v2', reason: 'approve_contract_v2', expiresAtSec: 7265 });
   b.plan(1, ['api', 'contract', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('contract', 5).start('contract', 'att_con_1', 7, CLOUD, 'cloud', 'cloud');
   b.emit('approval.requested', 40, { task: 'contract', attempt: 'att_con_1', payload: { fence: 1, reason: 'approve_contract_v2' } });
@@ -118,7 +118,7 @@ function contractChange(): Fixture {
 
 function failedCi(): Fixture {
   const b = new FixtureBuilder('failed-ci', 707);
-  b.task('api', { title: 'Feedback API', role: 'backend' });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 4 });
   b.plan(1, ['api']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud');
   b.complete('api', 'att_api_1', 50, LOCAL).verdict('api', 'att_api_1', 90, 'failed', { checkId: 'ci:unit', summary: '3 of 41 tests failed' });
   b.start('api', 'att_api_2', 135, LOCAL, 'local', 'cloud', 2);
@@ -131,7 +131,7 @@ function failedCi(): Fixture {
 
 function expiredApproval(): Fixture {
   const b = new FixtureBuilder('expired-approval', 808);
-  b.task('docs', { title: 'Fetch vendor docs', role: 'research' });
+  b.task('docs', { title: 'Fetch vendor docs', role: 'research', criteria: 1 });
   b.approval('apr_vendor_docs', { task: 'docs', scopeHash: 'scope-vendor-docs', reason: 'allow_vendor_docs_domain', expiresAtSec: 640 });
   b.plan(1, ['docs']).ready('docs', 5).start('docs', 'att_docs_1', 6, CLOUD, 'cloud', 'cloud');
   b.emit('approval.requested', 40, { task: 'docs', attempt: 'att_docs_1', payload: { fence: 1, reason: 'allow_vendor_docs_domain' } });
@@ -144,7 +144,7 @@ function expiredApproval(): Fixture {
 
 function unknownCosts(): Fixture {
   const b = new FixtureBuilder('unknown-costs', 909);
-  b.task('api', { title: 'Feedback API', role: 'backend' }).task('web', { title: 'Feedback list UI', role: 'frontend' }).task('batch', { title: 'Bulk import', role: 'backend' });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3 }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2 }).task('batch', { title: 'Bulk import', role: 'backend', criteria: 2 });
   b.plan(1, ['api', 'web', 'batch']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'unknown');
   // Two slots are taken, so `batch` is ready but waits; it starts when `web` ends its attempt.
   b.ready('batch', 5);
@@ -178,7 +178,7 @@ function noData(): Fixture {
 
 function mergeFlow(): Fixture {
   const b = new FixtureBuilder('merge-flow', 1111);
-  b.task('api', { title: 'Feedback API', role: 'backend' }).task('web', { title: 'Feedback list UI', role: 'frontend' });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3 }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2 });
   b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
   b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
   b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });

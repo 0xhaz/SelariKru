@@ -43,7 +43,7 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
           <legend className="mb-1 text-sm text-muted">Requested policy</legend>
           <div className="space-y-2">
             {MODES.map((m) => (
-              <label key={m} className={`flex cursor-pointer items-start gap-2 rounded-[4px] border px-3 py-2 ${mode === m ? 'border-active bg-panel-2' : 'border-line'}`}>
+              <label key={m} className={`flex cursor-pointer items-start gap-2 rounded-chip border px-3 py-2 ${mode === m ? 'border-active bg-panel-2' : 'border-line'}`}>
                 <input type="radio" name="policy" className="mt-1" checked={mode === m} onChange={() => set({ mode: m })} />
                 <span>
                   <span className="block text-sm font-medium">{POLICY_LABEL[m]}</span>
@@ -69,11 +69,11 @@ export function RequestForm({ target, onTarget, onGenerate }: { target: Target; 
           <legend className="mb-1 text-sm text-muted">Workflow target</legend>
           <div>
             <label htmlFor="project-id" className="mb-1 block text-sm text-muted">Project ID</label>
-            <input id="project-id" className={`${field} font-mono text-[13px]`} value={target.projectId} onChange={(e) => onTarget({ ...target, projectId: e.target.value })} />
+            <input id="project-id" className={`${field} font-mono text-mono`} value={target.projectId} onChange={(e) => onTarget({ ...target, projectId: e.target.value })} />
           </div>
           <div>
             <label htmlFor="run-id" className="mb-1 block text-sm text-muted">Run ID</label>
-            <input id="run-id" className={`${field} font-mono text-[13px]`} value={target.runId} onChange={(e) => onTarget({ ...target, runId: e.target.value })} />
+            <input id="run-id" className={`${field} font-mono text-mono`} value={target.runId} onChange={(e) => onTarget({ ...target, runId: e.target.value })} />
           </div>
         </fieldset>
 

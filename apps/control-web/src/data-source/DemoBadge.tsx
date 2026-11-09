@@ -2,8 +2,8 @@
 export function DemoBadge({ mode }: { mode: 'mock' | 'live' }) {
   if (mode !== 'mock') return null;
   return (
-    <span role="status" data-testid="demo-badge" className="inline-flex items-center gap-1.5 rounded-[4px] bg-warning px-2 py-1 text-sm font-semibold text-bg">
-      <span aria-hidden="true" className="text-[10px]">▲</span>
+    <span role="status" data-testid="demo-badge" className="inline-flex items-center gap-1.5 rounded-chip bg-warning px-2 py-1 text-sm font-semibold text-bg">
+      <span aria-hidden="true" className="text-glyph">▲</span>
       Demo data
     </span>
   );

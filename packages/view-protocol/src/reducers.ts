@@ -80,7 +80,7 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   const p = e.payload;
   const at = e.occurredAt;
   const existingRun = snap0.runs[e.runId];
-  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null };
+  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null };
   const snap: ProjectViewSnapshot = existingRun ? snap0 : { ...snap0, runs: put(snap0.runs, e.runId, run) };
   const setRun = (r: typeof run, s: ProjectViewSnapshot = snap): ProjectViewSnapshot => ({ ...s, runs: put(s.runs, e.runId, r) });
   const lifecycle = oneOf(p, 'lifecycle', RUN_STATUSES);
@@ -425,7 +425,7 @@ export function mergeLiveness(state: ProjectionState, fresh: ProjectViewSnapshot
 }
 
 /**
- * Merges the run lifecycle from a snapshot, and nothing else. Two lifecycle changes have no event (`ready_for_review` is written with the
+ * Merges the run lifecycle and criteria counts from a snapshot, and nothing else. Neither has an event of its own. Two lifecycle changes have no event (`ready_for_review` is written with the
  * last verdict, and `merged` follows `change.merged` without saying so), so the periodic refresh carries them. Only a snapshot at or past
  * the projection's cursor counts: an older one cannot move a run backwards. Event-derived state and the cursor are untouched.
  */
@@ -437,8 +437,8 @@ export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnap
   let changed = false;
   for (const r of Object.values(fresh.runs)) {
     const mine = snap.runs[r.runId];
-    if (!mine || mine.lifecycle === r.lifecycle) continue;
-    runs = put(runs, r.runId, { ...mine, lifecycle: r.lifecycle });
+    if (!mine || (mine.lifecycle === r.lifecycle && mine.criteria?.verified === r.criteria?.verified && mine.criteria?.total === r.criteria?.total)) continue;
+    runs = put(runs, r.runId, { ...mine, lifecycle: r.lifecycle, criteria: r.criteria });
     changed = true;
   }
   return changed ? { ...state, snapshot: { ...snap, runs } } : state;

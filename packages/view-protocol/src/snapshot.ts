@@ -31,6 +31,11 @@ export const RunViewSchema = z
     planRevision: z.number().int().min(0),
     /** Latest run-level evidence (candidate assembled, change proposed or merged). Run-level events never create tasks. */
     latestEvidence: EvidenceRefSchema.nullable(),
+    /**
+     * Acceptance criteria (FB-IDs) with qualifying evidence at this run's current revision. Null means per-criterion evidence is not connected:
+     * a task count is then the most that can be said. Nothing derived from liveness or activity ever feeds this.
+     */
+    criteria: z.object({ verified: z.number().int().min(0), total: z.number().int().min(0) }).strict().nullable().default(null),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;

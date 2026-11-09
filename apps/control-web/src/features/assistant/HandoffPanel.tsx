@@ -27,7 +27,7 @@ function reportFor(result: ResultMeta): ClientInferenceReport | null {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <section aria-labelledby="handoff-title" className="rounded-[8px] border border-line bg-panel p-4">
+    <section aria-labelledby="handoff-title" className="rounded-card border border-line bg-panel p-4">
       <h2 id="handoff-title" className="text-base font-semibold">Handoff to workflow</h2>
       <div className="mt-3 space-y-3">{children}</div>
     </section>
@@ -97,7 +97,7 @@ export function HandoffPanel({
     setPhase({ name: 'accepted', done: r.value, report: status });
   }
 
-  const err = error ? <p role="alert" className="rounded-[4px] border border-danger p-3 text-danger">{error}</p> : null;
+  const err = error ? <p role="alert" className="rounded-chip border border-danger p-3 text-danger">{error}</p> : null;
 
   if (phase.name === 'accepted') {
     return (
@@ -145,7 +145,7 @@ export function HandoffPanel({
         <p className="text-sm text-muted">Server review passed. These candidates are what would be created; they are not accepted yet.</p>
         <ol className="space-y-2">
           {rv.tasks.map((t) => (
-            <li key={t.taskId} className="rounded-[4px] border border-line bg-bg p-3">
+            <li key={t.taskId} className="rounded-chip border border-line bg-bg p-3">
               <p className="font-medium">{t.title}</p>
               <p className={`${mono} text-active`}>{t.requirementIds.join(', ')}</p>
             </li>
@@ -155,7 +155,7 @@ export function HandoffPanel({
           <p className="text-sm text-muted">Acknowledged: {rv.issues.map((i) => issueKey(i)).join(', ')}</p>
         ) : null}
         {change.material ? (
-          <div className="rounded-[4px] border border-warning p-3">
+          <div className="rounded-chip border border-warning p-3">
             <p className="font-medium text-warning">Criteria coverage change</p>
             {change.dropped.length > 0 ? <p>No task covers <span className={mono}>{change.dropped.join(', ')}</span>, which the project scope includes.</p> : null}
             {change.added.length > 0 ? <p>Tasks cover <span className={mono}>{change.added.join(', ')}</span>, which is outside the project scope.</p> : null}

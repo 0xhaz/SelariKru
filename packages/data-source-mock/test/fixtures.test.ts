@@ -6,7 +6,7 @@ import {
   ProjectViewEventSchema, ProjectViewSnapshotSchema, approvalStateAt, effectiveWorkerHealth, isEmptyProject, startProjection, usageFor,
   type ProjectViewSnapshot,
 } from '@selarikru/view-protocol';
-import { EXTRA_FIXTURE_IDS, FIXTURE_IDS, buildAllFixtures, buildDemoFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
+import { EXTRA_FIXTURE_IDS, FIXTURE_IDS, FIXTURE_T0_MS, buildAllFixtures, buildDemoFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
 
 const make = (fixtures?: Fixture[]) => createMockDataSource({ clock: createSeededClock(fixtureTime(0)), ...(fixtures ? { fixtures } : {}) });
 const snap = async (id: FixtureId, advanceSec = 0): Promise<{ s: ProjectViewSnapshot; nowMs: number }> => {
@@ -227,6 +227,32 @@ describe('fixtures', () => {
     expect(s.meta.cursor).toBe('0');
     expect(s.usage).toEqual([]);
     expect(usageFor(s.usage, 'cost_usd').total).toBeNull();
+  });
+});
+
+describe('criteria', () => {
+  const runOf = async (id: Parameters<typeof buildFixture>[0], advanceMs = 0) => {
+    const fixture = buildFixture(id);
+    const clock = createSeededClock(new Date(FIXTURE_T0_MS).toISOString());
+    const source = createMockDataSource({ clock, fixtures: [fixture] });
+    if (advanceMs > 0) clock.advance(advanceMs);
+    const snapshot = await source.getSnapshot(fixture.projectId);
+    source.disconnect();
+    return Object.values(snapshot.runs)[0]!;
+  };
+
+  it('counts verified criteria from verdicts, and moves only when a verdict lands', async () => {
+    expect((await runOf('healthy-parallel-work')).criteria).toEqual({ verified: 0, total: 5 });
+    expect((await runOf('healthy-parallel-work', 20_000)).criteria).toEqual({ verified: 0, total: 5 }); // completed and heartbeating, not verified
+    expect((await runOf('healthy-parallel-work', 40_000)).criteria).toEqual({ verified: 3, total: 5 });
+  });
+
+  it('excludes cancelled work from the denominator', async () => {
+    expect((await runOf('unknown-costs')).criteria).toEqual({ verified: 2, total: 5 });
+  });
+
+  it('reports null where a scene has no per-criterion evidence', async () => {
+    expect((await runOf('long-build-stall')).criteria).toBeNull();
   });
 });
 

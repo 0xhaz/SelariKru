@@ -16,9 +16,9 @@ export const toneGlyph = (tone: Tone): string => GLYPH[tone];
 /** Status chip: color is always paired with a glyph and text. */
 export function Chip({ tone, children, testId }: { tone: Tone; children: ReactNode; testId?: string }) {
   return (
-    <span data-testid={testId} className={`inline-flex items-center gap-1.5 rounded-[4px] border px-2 py-0.5 text-sm ${TONE[tone]}`}>
-      <span aria-hidden="true" className="text-[10px]">{GLYPH[tone]}</span>
-      <span>{children}</span>
+    <span data-testid={testId} className={`inline-flex max-w-full items-center gap-1.5 rounded-chip border px-2 py-0.5 text-sm ${TONE[tone]}`}>
+      <span aria-hidden="true" className="text-glyph">{GLYPH[tone]}</span>
+      <span className="min-w-0 wrap-anywhere">{children}</span>
     </span>
   );
 }

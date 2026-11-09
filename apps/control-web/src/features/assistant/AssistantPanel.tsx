@@ -141,7 +141,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
     <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="font-mono text-[13px] text-muted">SelariKru</p>
+          <p className="font-mono text-mono text-muted">SelariKru</p>
           <h1 className="text-2xl font-semibold">Assistant</h1>
           <p className="mt-1 max-w-prose text-muted">Draft requirements on this device or in the cloud. Every draft says where it came from, and only a checked task plan reaches the workflow.</p>
         </div>

@@ -1,8 +1,11 @@
 import { approvalStateAt, effectiveWorkerHealth, type ProjectViewSnapshot, type TaskView } from '@selarikru/view-protocol';
 import { formatAge } from '@selarikru/ui';
 
-/** Design section 4, highest first. The view never reorders this list; reordering changes the meaning of the queue. */
-export const ATTENTION_ORDER = ['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'information'] as const;
+/**
+ * Design section 4, highest first, with `blocked` added just above information for block reasons outside the design's list. The view never
+ * reorders this; reordering changes the meaning of the queue.
+ */
+export const ATTENTION_ORDER = ['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'blocked', 'information'] as const;
 export type AttentionKind = (typeof ATTENTION_ORDER)[number];
 
 export interface AttentionItem {
@@ -21,6 +24,10 @@ export interface AttentionItem {
   /** What happens if nobody acts. */
   readonly consequence: string;
   readonly nextAction: string;
+  /** True only when a person has to act. Scheduler-owned waits, closed tasks and updates stay visible but are not counted. */
+  readonly needsOperator: boolean;
+  /** True when this was evaluated at the last confirmed time because liveness is stale now. */
+  readonly asOfLastConfirmed: boolean;
 }
 
 const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merged', 'verified'];
@@ -29,10 +36,12 @@ const sentence = (code: string): string => {
   const words = code.replace(/[_:]+/g, ' ').trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
+const stripPrefix = (code: string): string => code.replace(/^(policy_denied|approval_required):/, '');
 
 /** Plain words for the codes the scheduler and policy engine emit. An unlisted code is spelled out, and the raw code is always in details. */
 const EXPLAIN: Readonly<Record<string, string>> = {
   restricted_data_cloud_destination: 'Restricted data may not reach a cloud destination.',
+  classification_not_cloud_eligible: 'This task\'s data classification does not allow cloud processing.',
   source_not_cloud_eligible: 'A source for this task is not eligible for cloud processing.',
   source_not_selected: 'A source for this task was not selected for this run.',
   unclassified_source: 'A source for this task has no data classification.',
@@ -41,12 +50,39 @@ const EXPLAIN: Readonly<Record<string, string>> = {
   missing_budget_limit: 'No budget limit is set, and a missing limit blocks the action.',
   'missing_limit:maxConcurrentTotal': 'No concurrency limit is set, and a missing limit blocks the action.',
   concurrency_limit_reached: 'Every coding slot is in use.',
+  no_free_slot: 'No eligible slot is free.',
   cloud_start: 'Starting a cloud worker needs your approval.',
   'configured_require_approval:start_cloud_worker': 'Starting a cloud worker needs your approval.',
+  execution_conflicts_with_role_pin: 'The task\'s execution setting conflicts with where its role is pinned.',
 };
-const stripPrefix = (code: string): string => code.replace(/^(policy_denied|approval_required):/, '');
-const explain = (code: string): string => EXPLAIN[stripPrefix(code)] ?? `${sentence(stripPrefix(code))}.`;
-const isBudgetOrLimit = (code: string): boolean => /budget|missing_limit|concurrency_limit/.test(code);
+
+function explain(code: string): string {
+  const bare = stripPrefix(code);
+  const known = EXPLAIN[bare];
+  if (known) return known;
+  const [head, ...rest] = bare.split(':');
+  const arg = rest.join(':');
+  if (head === 'resource_conflict') return arg ? `Another task holds a resource this one needs (${arg}).` : 'Another task holds a resource this one needs.';
+  if (head === 'role_not_mapped') return `The ${arg || 'task\'s'} role is not mapped to a worker location.`;
+  if (head === 'location_disabled') return `The ${arg || 'chosen'} location is disabled for this run.`;
+  if (head === 'budget') return `The run budget does not allow this: ${sentence(arg).toLowerCase()}.`;
+  return `${sentence(bare)}.`;
+}
+
+type BlockClass = 'decision' | 'repair' | 'budget' | 'wait' | 'policy' | 'blocked';
+
+/** `policy` is an allowlist: only a real policy denial or classification denial is called a policy incident. Anything unrecognized is plainly `blocked`. */
+function classify(code: string): BlockClass {
+  if (code.startsWith('approval_required:') || code === 'approval_denied') return 'decision';
+  const bare = stripPrefix(code);
+  if (bare === 'repair_budget_exhausted' || bare === 'repair_limit_exhausted') return 'repair';
+  if (bare === 'concurrency_limit_reached' || bare === 'no_free_slot') return 'wait';
+  if (bare.startsWith('budget:') || bare.startsWith('missing_budget') || bare.startsWith('missing_limit:')) return 'budget';
+  if (code.startsWith('policy_denied:') || code === 'classification_not_cloud_eligible') return 'policy';
+  return 'blocked';
+}
+
+const isRestrictedDenial = (code: string): boolean => /restricted|classification_not_cloud|source_not_cloud_eligible/.test(code);
 
 function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
   const out = [rootId];
@@ -61,63 +97,86 @@ function dependentsOf(snapshot: ProjectViewSnapshot, rootId: string): string[] {
 const whoWaits = (affected: readonly string[]): string =>
   affected.length > 1 ? `This task and ${affected.length - 1} that depend on it cannot proceed.` : 'This task cannot proceed.';
 
+type ItemInput = Omit<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed'> & Partial<Pick<AttentionItem, 'status' | 'needsOperator' | 'asOfLastConfirmed'>>;
+const make = (i: ItemInput): AttentionItem => ({ status: null, needsOperator: true, asOfLastConfirmed: false, ...i });
+
+function blockItem(task: TaskView, code: string, hit: readonly string[]): AttentionItem {
+  const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You' };
+  const name = titleOf(task);
+  switch (classify(code)) {
+    case 'decision': {
+      const denied = code === 'approval_denied';
+      return make({
+        ...base, kind: 'decision', status: 'open', title: `${name}: ${denied ? 'approval was denied' : 'needs your approval to start'}`, detail: denied ? 'A person denied the request, so the task is blocked.' : explain(code),
+        consequence: `${whoWaits(hit)} It waits rather than starting without approval.`, nextAction: denied ? 'Change the plan or cancel the task.' : 'Approve or deny the start.',
+      });
+    }
+    case 'repair':
+      return make({
+        ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: 'Its repair attempts are used up, so no further attempt will start.',
+        consequence: `${whoWaits(hit)} It stays blocked until a person changes the plan.`, nextAction: 'Inspect the failing check, then replan or cancel the task.',
+      });
+    case 'budget':
+      return make({
+        ...base, kind: 'budget_resource', title: `${name}: cannot start`, detail: explain(code),
+        consequence: `${whoWaits(hit)} A missing limit is never treated as unlimited.`, nextAction: 'Set the limit in the run policy.',
+      });
+    case 'wait':
+      return make({
+        ...base, kind: 'budget_resource', owner: 'Scheduler', needsOperator: false, title: `${name}: waiting for a slot`, detail: explain(code),
+        consequence: 'It starts when a slot frees up.', nextAction: 'No action needed unless you want to add capacity.',
+      });
+    case 'policy':
+      return make({
+        ...base, kind: 'policy_incident', title: `${name}: blocked by policy`, detail: explain(code),
+        consequence: `${whoWaits(hit)} Nothing is moved around the policy, and there is no bypass.`,
+        nextAction: isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : 'Review the effective policy for this task.',
+      });
+    case 'blocked': {
+      const conflict = code.startsWith('resource_conflict');
+      const nextAction = conflict ? 'No action needed unless the conflict does not clear.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
+      return make({
+        ...base, kind: 'blocked', owner: conflict ? 'Scheduler' : 'You', needsOperator: !conflict, title: `${name}: blocked`, detail: explain(code),
+        consequence: conflict ? 'It starts once the other task releases the resource.' : whoWaits(hit), nextAction,
+      });
+    }
+  }
+}
+
 /**
  * The attention queue, sorted by design section 4, then longest-waiting first. Time and liveness are parameters. Health is read only through
- * `effectiveWorkerHealth`, so a stale projection reads as unknown and raises no false loss.
+ * `effectiveWorkerHealth`. When our own liveness is stale, a worker's reading is taken at `lastConfirmedMs` instead and labelled as such,
+ * so a loss seen before the outage stays visible and no new one is invented from the outage itself.
  */
-export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null): AttentionItem[] {
+export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null = null): AttentionItem[] {
   const items: AttentionItem[] = [];
   const live = Object.values(snapshot.tasks).filter((t) => !CLOSED.includes(t.status));
   const affected = (t: TaskView): readonly string[] => dependentsOf(snapshot, t.taskId);
 
   for (const task of live) {
     const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
-    if (blockCode !== null) {
-      const hit = affected(task);
-      if (blockCode.startsWith('approval_required:') || blockCode === 'approval_denied') {
-        const denied = blockCode === 'approval_denied';
-        items.push({
-          id: `placement:${task.taskId}`, kind: 'decision', status: 'open', code: blockCode, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
-          title: `${titleOf(task)}: ${denied ? 'approval was denied' : 'needs your approval to start'}`, detail: denied ? 'A person denied the request, so the task is blocked.' : explain(blockCode),
-          consequence: `${whoWaits(hit)} It waits rather than starting without approval.`, nextAction: denied ? 'Change the plan or cancel the task.' : 'Approve or deny the start.',
-        });
-      } else if (isBudgetOrLimit(blockCode)) {
-        items.push({
-          id: `placement:${task.taskId}`, kind: 'budget_resource', status: null, code: blockCode, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
-          title: `${titleOf(task)}: cannot start`, detail: explain(blockCode),
-          consequence: `${whoWaits(hit)} A missing limit is never treated as unlimited.`, nextAction: 'Set the limit in the run policy.',
-        });
-      } else {
-        items.push({
-          id: `placement:${task.taskId}`, kind: 'policy_incident', status: null, code: blockCode, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
-          title: `${titleOf(task)}: blocked by policy`, detail: explain(blockCode),
-          consequence: `${whoWaits(hit)} Nothing is moved around the policy, and there is no bypass.`,
-          nextAction: blockCode.includes('restricted') ? 'Run it in a local sandbox or reclassify the source.' : 'Review the effective policy for this task.',
-        });
-      }
-    }
+    if (blockCode !== null) items.push(blockItem(task, blockCode, affected(task)));
     const latestCheck = Object.values(snapshot.checks).filter((c) => c.taskId === task.taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
     // A failed verdict is released back to `ready` for a repair, so a queued task whose latest check failed is still a failed gate.
     if (task.status === 'failed' || (task.status === 'ready' && latestCheck?.state === 'failed')) {
       const check = latestCheck?.state === 'failed' ? latestCheck : undefined;
       const hit = affected(task);
-      items.push({
-        id: `gate:${task.taskId}`, kind: 'failed_gate', status: null, code: check?.checkId ?? task.statusReason, since: check?.updatedAt ?? task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
+      items.push(make({
+        id: `gate:${task.taskId}`, kind: 'failed_gate', code: check?.checkId ?? task.statusReason, since: check?.updatedAt ?? task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
         title: `${titleOf(task)}: ${check ? 'check failed' : 'failed'}`, detail: check?.summary ?? (task.statusReason ? sentence(task.statusReason) : 'No reason was reported.'),
         consequence: `${whoWaits(hit)} It cannot reach review until the check passes.`, nextAction: 'Inspect the failing check, then let the repair attempt run.',
-      });
+      }));
     }
   }
 
-  // A budget stop is on a closed task, so it is looked up across all tasks.
+  // A budget stop is on a closed task: it stays visible as a record but nobody can act on that task now.
   for (const task of Object.values(snapshot.tasks)) {
     if (task.status !== 'cancelled' || task.cancelReason !== 'budget_exhausted') continue;
-    const hit = affected(task);
-    items.push({
-      id: `budget:${task.taskId}`, kind: 'budget_resource', status: null, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You',
+    items.push(make({
+      id: `budget:${task.taskId}`, kind: 'budget_resource', needsOperator: false, code: 'budget_exhausted', since: task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'You',
       title: `${titleOf(task)}: stopped, budget exhausted`, detail: 'The attempt was stopped when its budget ran out.',
-      consequence: 'Its work so far is preserved. It will not resume on its own.', nextAction: 'Request a scoped budget increase.',
-    });
+      consequence: 'Its work so far is preserved. It will not resume on its own.', nextAction: 'Request a scoped budget increase if you want it to run again.',
+    }));
   }
 
   for (const approval of Object.values(snapshot.approvals)) {
@@ -129,7 +188,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const name = task ? titleOf(task) : 'This run';
     const asked = approval.reason ? sentence(approval.reason) : 'Unspecified request';
     const expiresIn = state === 'pending' && approval.expiresAt !== null ? ` Expires in ${formatAge(Date.parse(approval.expiresAt) - nowMs)}.` : '';
-    items.push(
+    items.push(make(
       state === 'expired'
         ? {
             id: `decision:${approval.approvalId}`, kind: 'decision', status: 'expired', code: approval.reason, since: approval.expiresAt ?? approval.requestedAt, affectedTaskIds: hit, owner: 'You',
@@ -141,52 +200,57 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
             title: `${name}: needs your decision`, detail: `Request: ${asked}.`,
             consequence: `It stays paused until you decide.${expiresIn}`, nextAction: 'Approve or deny the request.',
           },
-    );
+    ));
   }
 
   for (const run of Object.values(snapshot.runs)) {
     if (run.lifecycle !== 'ready_for_review') continue;
     const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status !== 'superseded' && t.status !== 'cancelled');
-    items.push({
+    items.push(make({
       id: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
-      title: 'Run is ready for your review', detail: 'Every criterion is verified at the current revision.',
+      title: 'Run is ready for your review',
+      detail: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : 'Every task is verified at the current revision. Per-criterion evidence is not connected.',
       consequence: 'Nothing merges without you. Agents never merge.', nextAction: 'Review the pull request and merge it on GitHub.',
-    });
+    }));
   }
 
   for (const worker of Object.values(snapshot.workers)) {
-    const reading = effectiveWorkerHealth(worker, nowMs, livenessAsOfMs);
+    const current = effectiveWorkerHealth(worker, nowMs, livenessAsOfMs);
+    const confirmed = current.health === 'unknown' && lastConfirmedMs !== null ? effectiveWorkerHealth(worker, lastConfirmedMs, lastConfirmedMs) : null;
+    const reading = confirmed ?? current;
+    const asOfLastConfirmed = confirmed !== null;
     const task = worker.taskId !== null ? snapshot.tasks[worker.taskId] : undefined;
     if (reading.health === 'suspected_stall' && task) {
-      items.push({
-        id: `stall:${worker.workerId}`, kind: 'information', status: null, code: 'suspected_stall', since: worker.lastHeartbeatAt ?? worker.enteredStateAt, affectedTaskIds: [task.taskId], owner: 'No one yet',
-        title: `${titleOf(task)}: progress may be stalled`, detail: `No heartbeat from ${worker.workerId} for ${formatAge(reading.heartbeatAgeMs ?? 0)}. It is still connected.`,
+      const silence = reading.heartbeatAgeMs !== null ? `No heartbeat from ${worker.workerId} for ${formatAge(reading.heartbeatAgeMs)}.` : `No recent heartbeat from ${worker.workerId}.`;
+      items.push(make({
+        id: `stall:${worker.workerId}`, kind: 'information', needsOperator: false, asOfLastConfirmed, code: 'suspected_stall', since: worker.lastHeartbeatAt ?? worker.enteredStateAt, affectedTaskIds: [task.taskId], owner: 'No one yet',
+        title: `${titleOf(task)}: progress may be stalled`, detail: `${silence} It is still connected.`,
         consequence: 'Usually a long build. The task stays running and nothing has failed.', nextAction: 'No action yet. Inspect it if it stays silent.',
-      });
+      }));
     }
     if ((reading.health === 'disconnected' || reading.health === 'failed') && task && !CLOSED.includes(task.status)) {
       const replaced = task.activeAttemptId !== null && task.activeAttemptId !== worker.attemptId;
       const lastSeen = worker.lastHeartbeatAt ?? worker.enteredStateAt;
       if (replaced) {
-        items.push({
-          id: `lost:${worker.workerId}`, kind: 'information', status: null, code: worker.stateReason ?? 'runner_lost', since: lastSeen, affectedTaskIds: [task.taskId], owner: 'Scheduler',
+        items.push(make({
+          id: `lost:${worker.workerId}`, kind: 'information', needsOperator: false, asOfLastConfirmed, code: worker.stateReason ?? 'runner_lost', since: lastSeen, affectedTaskIds: [task.taskId], owner: 'Scheduler',
           title: `${titleOf(task)}: moved off a lost runner`, detail: `Runner ${worker.workerId} stopped answering and a new attempt took over.`,
           consequence: 'The earlier attempt was interrupted, and its work is not counted as verified.', nextAction: 'No action needed. Inspect the new attempt if you want detail.',
-        });
+        }));
       } else {
-        items.push({
-          id: `lost:${worker.workerId}`, kind: 'worker_lost', status: null, code: reading.health === 'failed' ? (worker.stateReason ?? 'worker_failed') : 'heartbeat_lost', since: lastSeen, affectedTaskIds: affected(task), owner: 'You',
+        items.push(make({
+          id: `lost:${worker.workerId}`, kind: 'worker_lost', asOfLastConfirmed, code: reading.health === 'failed' ? (worker.stateReason ?? 'worker_failed') : 'heartbeat_lost', since: lastSeen, affectedTaskIds: affected(task), owner: 'You',
           title: `${titleOf(task)}: ${reading.health === 'failed' ? 'worker failed' : 'connection to its runner lost'}`,
           detail: `Runner ${worker.workerId} is not answering. Its state is shown as last confirmed, and nothing is assumed about the outcome.`,
           consequence: 'If it does not return, the lease expires and the attempt is interrupted. No work is reported as done.', nextAction: 'Inspect the attempt before relaunching anything.',
-        });
+        }));
       }
     }
     if (worker.activity === 'waiting_resource' && task) {
-      items.push({
-        id: `capacity:${worker.workerId}`, kind: 'budget_resource', status: null, code: 'waiting_resource', since: worker.enteredStateAt, affectedTaskIds: [task.taskId], owner: 'Scheduler',
+      items.push(make({
+        id: `capacity:${worker.workerId}`, kind: 'budget_resource', needsOperator: false, code: 'waiting_resource', since: worker.enteredStateAt, affectedTaskIds: [task.taskId], owner: 'Scheduler',
         title: `${titleOf(task)}: waiting for capacity`, detail: 'All eligible slots are in use.', consequence: 'It starts when a slot frees up.', nextAction: 'No action needed unless you want to add capacity.',
-      });
+      }));
     }
   }
 
@@ -195,11 +259,11 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     if (run.planRevision < 2) continue;
     const mine = replanned.filter((t) => t.runId === run.runId);
     if (mine.length === 0) continue;
-    items.push({
-      id: `plan:${run.runId}`, kind: 'information', status: null, code: `plan_revision_${run.planRevision}`, since: mine.map((t) => t.enteredStatusAt).sort()[0]!, affectedTaskIds: mine.map((t) => t.taskId), owner: 'Scheduler',
+    items.push(make({
+      id: `plan:${run.runId}`, kind: 'information', needsOperator: false, code: `plan_revision_${run.planRevision}`, since: mine.map((t) => t.enteredStatusAt).sort()[0]!, affectedTaskIds: mine.map((t) => t.taskId), owner: 'Scheduler',
       title: `Plan moved to revision ${run.planRevision}`, detail: `${mine.length} task${mine.length === 1 ? ' was' : 's were'} replanned at the new revision.`,
       consequence: 'Work on the earlier revision is not reused without a new verification.', nextAction: 'Review what changed in the plan.',
-    });
+    }));
   }
 
   const rank = (k: AttentionKind): number => ATTENTION_ORDER.indexOf(k);

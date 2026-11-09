@@ -9,12 +9,12 @@ const params = (): URLSearchParams => new URLSearchParams(window.location.search
 function DevPanel({ session, fixtureId, onFixture }: { session: DemoSession; fixtureId: string; onFixture: (id: string) => void }) {
   const current = session.projects.find((p) => p.fixtureId === fixtureId);
   return (
-    <aside aria-label="Demo controls" className="rounded-[8px] border border-dashed border-line-strong p-3">
+    <aside aria-label="Demo controls" className="rounded-card border border-dashed border-line-strong p-3">
       <p className="text-sm font-medium text-muted">Development only. Not part of the product.</p>
       <div className="mt-2 flex flex-wrap items-end gap-3">
         <div>
           <label htmlFor="demo-fixture" className="mb-1 block text-sm text-muted">Fixture</label>
-          <select id="demo-fixture" value={fixtureId} onChange={(e) => onFixture(e.target.value)} className="rounded-[4px] border border-line-strong bg-bg px-2 py-2 text-fg">
+          <select id="demo-fixture" value={fixtureId} onChange={(e) => onFixture(e.target.value)} className="rounded-chip border border-line-strong bg-bg px-2 py-2 text-fg">
             {session.projects.map((p) => <option key={p.fixtureId} value={p.fixtureId}>{p.name}</option>)}
           </select>
         </div>

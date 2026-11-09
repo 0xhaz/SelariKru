@@ -26,6 +26,11 @@ body {
   outline-offset: 2px;
 }
 
+/* Focus lands on the main region after a route change. It is a landing point, not a control, so it draws no ring. */
+#main:focus-visible {
+  outline: none;
+}
+
 .progress-fill {
   transition: width 200ms ease-out;
 }

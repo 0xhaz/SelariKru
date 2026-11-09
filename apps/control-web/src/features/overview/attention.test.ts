@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { ATTENTION_ORDER, buildAttention } from './attention.ts';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task, worker } from './testing.ts';
 
+const placed = (code: string) => snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: code })] });
+const blockedBy = (code: string) => snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: code })] });
+
 describe('attention queue', () => {
   it('attention sorted per design §4 order', () => {
     // Listed worst-last, and with the oldest item at the lowest rank, so neither insertion order nor age can pass this by accident.
@@ -12,6 +15,7 @@ describe('attention queue', () => {
         task('lost', { activeAttemptId: 'a-lost', enteredStatusAt: iso(400) }),
         task('decide', { status: 'awaiting_approval', enteredStatusAt: iso(300) }),
         task('gate', { status: 'failed', statusReason: 'verification_failed', enteredStatusAt: iso(200) }),
+        task('other', { status: 'ready', placementBlock: 'location_disabled:cloud', enteredStatusAt: iso(9500) }),
         task('policy', { status: 'ready', placementBlock: 'policy_denied:restricted_data_cloud_destination', enteredStatusAt: iso(100) }),
       ],
       approvals: [approval('apr', { taskId: 'decide', taskRevision: 1 })],
@@ -21,7 +25,7 @@ describe('attention queue', () => {
       ],
     });
     const items = buildAttention(snapshot, NOW, NOW);
-    expect(items.map((i) => i.kind)).toEqual(['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'information']);
+    expect(items.map((i) => i.kind)).toEqual(['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'blocked', 'information']);
     expect(items.map((i) => i.kind)).toEqual([...ATTENTION_ORDER]);
   });
 
@@ -65,6 +69,52 @@ describe('attention queue', () => {
     expect(buildAttention(missing, NOW, NOW)[0]!.kind).toBe('budget_resource');
   });
 
+  it.each(['policy_denied:source_not_cloud_eligible', 'policy_denied:hard_deny:x', 'classification_not_cloud_eligible'])('%s is a policy incident', (code) => {
+    expect(buildAttention(placed(code), NOW, NOW)[0]!.kind).toBe('policy_incident');
+  });
+
+  it.each(['policy_denied:missing_budget_limit', 'policy_denied:budget:exceeded', 'policy_denied:missing_limit:maxConcurrentTotal', 'missing_limit:local'])('%s is a budget or limit problem the operator fixes', (code) => {
+    expect(buildAttention(placed(code), NOW, NOW)[0]).toMatchObject({ kind: 'budget_resource', needsOperator: true });
+  });
+
+  it.each(['no_free_slot', 'concurrency_limit_reached', 'policy_denied:concurrency_limit_reached'])('%s is a Scheduler-owned wait that does not need the operator', (code) => {
+    expect(buildAttention(placed(code), NOW, NOW)[0]).toMatchObject({ kind: 'budget_resource', owner: 'Scheduler', needsOperator: false });
+  });
+
+  it('maps exhausted repairs to a failed gate with a truthful action, not a budget problem', () => {
+    const [item] = buildAttention(blockedBy('repair_budget_exhausted'), NOW, NOW);
+    expect(item).toMatchObject({ kind: 'failed_gate', code: 'repair_budget_exhausted', needsOperator: true });
+    expect(item!.detail).toMatch(/repair attempts/i);
+    expect(item!.nextAction).not.toMatch(/budget increase|repair attempt run/i);
+  });
+
+  it.each([
+    ['resource_conflict:db', /resource/i, false],
+    ['role_not_mapped:backend', /backend/, true],
+    ['location_disabled:cloud', /cloud/, true],
+    ['something_new', /something new/i, true],
+  ] as const)('%s is a neutral Blocked item showing its real reason', (code, detail, needs) => {
+    const [item] = buildAttention(placed(code), NOW, NOW);
+    expect(item).toMatchObject({ kind: 'blocked', code, needsOperator: needs });
+    expect(item!.detail).toMatch(detail);
+  });
+
+  it('a restricted-data block names one action and never suggests downgrading the data', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('policy-block');
+    expect(buildAttention(snapshot, nowMs, nowMs)[0]!.nextAction).toBe('Run it in a local sandbox with a device model only.');
+  });
+
+  it('omits the silence duration when the heartbeat age is unknown', () => {
+    const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', health: 'suspected_stall', leaseHeld: false })] });
+    const [item] = buildAttention(snapshot, NOW, NOW);
+    expect(item!.detail).toBe('No recent heartbeat from w. It is still connected.');
+  });
+
+  it('a budget stop on a closed task stays visible but does not need the operator', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('unknown-costs');
+    expect(buildAttention(snapshot, nowMs, nowMs)[0]).toMatchObject({ kind: 'budget_resource', needsOperator: false });
+  });
+
   it('shows an expired approval as expired, never as granted or still open', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('expired-approval');
     expect(buildAttention(snapshot, nowMs, nowMs)[0]).toMatchObject({ kind: 'decision', status: 'expired' });
@@ -82,9 +132,21 @@ describe('attention queue', () => {
     expect(item!.nextAction).toMatch(/inspect/i);
   });
 
-  it('does not call a worker lost when our own liveness data is stale', async () => {
+  it('keeps a worker loss evaluated at the last confirmed time while liveness is stale, and labels it so', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
-    expect(buildAttention(snapshot, nowMs, null).map((i) => i.kind)).not.toContain('worker_lost');
+    const [item] = buildAttention(snapshot, nowMs + 300_000, null, nowMs);
+    expect(item).toMatchObject({ kind: 'worker_lost', asOfLastConfirmed: true });
+    expect(item!.detail).toMatch(/last confirmed/i);
+  });
+
+  it('does not invent a loss from stale liveness when the heartbeat was fine at the last confirmed time', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
+    expect(buildAttention(snapshot, nowMs + 300_000, null, nowMs).map((i) => i.kind)).toEqual([]);
+  });
+
+  it('raises no worker loss when liveness was never confirmed', async () => {
+    const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
+    expect(buildAttention(snapshot, nowMs, null, null).map((i) => i.kind)).not.toContain('worker_lost');
   });
 
   it('treats a suspected stall as information, not a failure', async () => {

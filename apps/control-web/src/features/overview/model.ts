@@ -3,7 +3,7 @@ import {
   INFERENCE_LABELS, OBSERVED_SOURCE_LABELS, effectiveWorkerHealth, isEmptyProject, usageFor, verifiedCounts,
   type ProjectViewSnapshot, type RunView, type TaskView, type UsageTotal, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
-import { ATTENTION_ORDER, buildAttention, type AttentionItem } from './attention.ts';
+import { buildAttention, type AttentionItem } from './attention.ts';
 
 export type CriterionCell = 'verified' | 'failed' | 'held' | 'active' | 'pending';
 
@@ -19,7 +19,12 @@ export interface TaskRow {
 export interface DeliveryModel {
   readonly verified: number;
   readonly total: number;
+  /** "n of m criteria verified" when per-criterion evidence exists, otherwise "n of m tasks verified". */
   readonly criteriaLabel: string;
+  /** Visible qualifier for the task-count fallback; null when the label is about criteria. */
+  readonly criteriaNote: string | null;
+  /** One cell per criterion, or per task in the fallback. Only `verified` is ever drawn filled. */
+  readonly segments: readonly CriterionCell[];
   readonly run: RunView | null;
   readonly tasks: readonly TaskRow[];
   /** The top non-informational attention item; null when nothing blocks delivery. */
@@ -30,7 +35,8 @@ export interface FleetRow {
   readonly workerId: string;
   readonly role: string | null;
   readonly taskTitle: string | null;
-  readonly activity: { readonly label: string; readonly tone: Tone };
+  /** `reported` is false when nothing has said what the worker is doing, so the view can keep that quiet. */
+  readonly activity: { readonly label: string; readonly tone: Tone; readonly reported: boolean };
   readonly health: { readonly state: WorkerHealthReading['health']; readonly label: string; readonly tone: Tone };
   readonly heartbeatAgeMs: number | null;
   /** The last time this worker's state was confirmed, for "state last confirmed at". */
@@ -68,7 +74,13 @@ export interface OverviewModel {
   readonly simulated: boolean;
   readonly attention: readonly AttentionItem[];
   readonly needsYou: number;
+  /** True while what is shown may no longer be current: the session is not live, or worker liveness is stale. */
+  readonly stale: boolean;
   readonly headline: string;
+  /** The aggregate count for the header. */
+  readonly attentionCount: string;
+  /** What to say to a screen reader about attention, once per change. */
+  readonly announcement: string;
   readonly delivery: DeliveryModel;
   readonly fleet: FleetModel;
   readonly evidence: readonly EvidenceRow[];
@@ -110,11 +122,20 @@ export function activeRun(snapshot: ProjectViewSnapshot): RunView | null {
 }
 
 function delivery(snapshot: ProjectViewSnapshot, attention: readonly AttentionItem[]): DeliveryModel {
-  const { verified, total } = verifiedCounts(snapshot);
-  const tasks = Object.values(snapshot.tasks).sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)).map(taskRow);
+  const run = activeRun(snapshot);
+  const scoped = run ? Object.values(snapshot.tasks).filter((t) => t.runId === run.runId) : Object.values(snapshot.tasks);
+  const taskCounts = verifiedCounts(snapshot, run?.runId);
+  const tasks = scoped.sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)).map(taskRow);
+  const criteria = run?.criteria ?? null;
+  const { verified, total } = criteria ?? taskCounts;
+  const blocker = attention.find((i) => i.needsOperator && i.status !== 'review')?.title ?? null;
+  const segments: CriterionCell[] = criteria
+    ? [...Array<CriterionCell>(criteria.verified).fill('verified'), ...Array<CriterionCell>(Math.max(0, criteria.total - criteria.verified)).fill('pending')]
+    : tasks.flatMap((t) => (t.cell === null ? [] : [t.cell])).sort((a, b) => Number(b === 'verified') - Number(a === 'verified'));
   return {
-    verified, total, criteriaLabel: `${verified} of ${total} criteria verified`, run: activeRun(snapshot), tasks,
-    blocker: attention.find((i) => i.kind !== 'information')?.title ?? null,
+    verified, total, run, tasks, segments, blocker,
+    criteriaLabel: criteria ? `${verified} of ${total} criteria verified` : `${verified} of ${total} tasks verified`,
+    criteriaNote: criteria ? null : 'Per-criterion evidence is not connected, so this counts tasks.',
   };
 }
 
@@ -130,14 +151,14 @@ const ACTIVITY: Readonly<Record<NonNullable<WorkerView['activity']>, { label: st
 };
 const WAITING: readonly NonNullable<WorkerView['activity']>[] = ['waiting_dependency', 'waiting_human', 'waiting_resource', 'blocked_policy'];
 
-function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): { label: string; tone: Tone } {
-  if (w.availability === 'offline') return { label: 'Offline', tone: 'neutral' };
-  if (w.activity === null) return w.availability === 'idle' ? { label: 'Idle', tone: 'neutral' } : { label: 'Activity unknown', tone: 'neutral' };
+function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetRow['activity'] {
+  if (w.availability === 'offline') return { label: 'Offline', tone: 'neutral', reported: true };
+  if (w.activity === null) return w.availability === 'idle' ? { label: 'Idle', tone: 'neutral', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
   if (w.activity === 'waiting_dependency' && w.blockedByTaskIds.length > 0) {
     const on = w.blockedByTaskIds.map((id) => snapshot.tasks[id]?.title ?? id).join(', ');
-    return { label: `Waiting on ${on}`, tone: 'neutral' };
+    return { label: `Waiting on ${on}`, tone: 'neutral', reported: true };
   }
-  return ACTIVITY[w.activity];
+  return { ...ACTIVITY[w.activity], reported: true };
 }
 
 const HEALTH: Readonly<Record<WorkerHealthReading['health'], { label: string; tone: Tone }>> = {
@@ -201,13 +222,41 @@ function usage(snapshot: ProjectViewSnapshot): UsageModel {
   };
 }
 
+const items = (n: number, verb: [string, string]): string => `${n} ${n === 1 ? `item ${verb[0]}` : `items ${verb[1]}`}`;
+
+export interface OverviewOptions {
+  /** When liveness last refreshed, whatever the session's state now. Stale worker readings are taken at this time and labelled. */
+  readonly lastConfirmedMs?: number | null;
+  /** True when the session is not live, so nothing here can be called current. */
+  readonly stale?: boolean;
+}
+
 /** Everything Mission Control shows, derived from one snapshot. Pure; time and liveness are parameters. */
-export function buildOverview(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null): OverviewModel {
-  const attention = buildAttention(snapshot, nowMs, livenessAsOfMs);
-  const needsYou = attention.filter((i) => i.kind !== ATTENTION_ORDER[ATTENTION_ORDER.length - 1]).length;
-  const headline = needsYou === 0 ? 'Nothing needs you right now.' : `${needsYou} ${needsYou === 1 ? 'item needs' : 'items need'} you. Start with ${attention[0]!.title}.`;
+export function buildOverview(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: OverviewOptions = {}): OverviewModel {
+  const attention = buildAttention(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
+  const needsYou = attention.filter((i) => i.needsOperator).length;
+  const fleetModel = fleet(snapshot, nowMs, livenessAsOfMs);
+  const workersUnknown = fleetModel.rows.some((r) => r.health.state === 'unknown');
+  const stale = options.stale === true || workersUnknown;
+
+  let headline: string;
+  let attentionCount: string;
+  let announcement: string;
+  if (stale) {
+    const workers = workersUnknown ? 'Worker connections are unknown.' : '';
+    headline = needsYou > 0
+      ? `${items(needsYou, ['needed', 'needed'])} you at the last confirmed state.${workers ? ` ${workers}` : ''}`
+      : workers ? `${workers} Showing the last confirmed state.` : 'Showing the last confirmed state, which may be out of date.';
+    attentionCount = needsYou > 0 ? `${needsYou} at last confirmed state` : 'Attention unknown';
+    announcement = needsYou > 0 ? `${items(needsYou, ['needed', 'needed'])} attention at the last confirmed state.` : 'Attention is unknown until the connection returns.';
+  } else {
+    headline = needsYou === 0 ? 'Nothing needs you right now.' : `${items(needsYou, ['needs', 'need'])} you.`;
+    attentionCount = needsYou === 0 ? 'None need attention' : `${needsYou} ${needsYou === 1 ? 'needs' : 'need'} attention`;
+    announcement = needsYou === 0 ? 'Nothing needs attention.' : `${items(needsYou, ['needs', 'need'])} attention.`;
+  }
+
   return {
-    empty: isEmptyProject(snapshot), simulated: snapshot.meta.provenance === 'simulated', attention, needsYou, headline,
-    delivery: delivery(snapshot, attention), fleet: fleet(snapshot, nowMs, livenessAsOfMs), evidence: evidence(snapshot), usage: usage(snapshot),
+    empty: isEmptyProject(snapshot), simulated: snapshot.meta.provenance === 'simulated', attention, needsYou, stale, headline, attentionCount, announcement,
+    delivery: delivery(snapshot, attention), fleet: fleetModel, evidence: evidence(snapshot), usage: usage(snapshot),
   };
 }

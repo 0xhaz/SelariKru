@@ -1,11 +1,14 @@
-import { useMemo } from 'react';
+import { lazy, useMemo } from 'react';
 import { signOut } from 'firebase/auth';
 import { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
-import { AssistantPanel, createApiClient } from '../features/assistant/index.ts';
+import { createApiClient } from '../features/assistant/api.ts';
 import { auth, createAdapter, getOwnerToken, usingAuthEmulator } from '../firebase.ts';
 import { AppShell, type AccountInfo } from './AppShell.tsx';
 import { createProjectionStore, type Scheduler } from './projection-store.ts';
+
+// Its own chunk, so a failed load is caught by the route's boundary inside the shell.
+const AssistantPanel = lazy(() => import('../features/assistant/AssistantPanel.tsx').then((m) => ({ default: m.AssistantPanel })));
 
 const every: Scheduler = (fn, ms) => {
   const id = window.setInterval(fn, ms);
