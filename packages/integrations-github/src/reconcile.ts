@@ -37,6 +37,8 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
   return withTx(deps.db, async (tx): Promise<ReconcileOutcome> => {
     const locked = (await tx.select().from(schema.changeRequests).where(where).for('update'))[0];
     if (!locked || locked.status === 'merged') return { status: 'unchanged' };
+    // The PR was read outside this transaction. If the row was replaced meanwhile (a successor candidate and PR), that read says nothing about it.
+    if (locked.prNumber !== row.prNumber || locked.candidateSha !== row.candidateSha) return { status: 'unchanged' };
     const observed = { observedHeadSha: pr.headSha, observedAt: now };
     if (pr.state === 'open') { await tx.update(schema.changeRequests).set({ ...observed, status: 'open' }).where(where); return { status: 'open' }; }
     if (pr.state === 'closed') { await tx.update(schema.changeRequests).set({ ...observed, status: 'closed' }).where(where); return { status: 'closed' }; }
@@ -117,7 +119,7 @@ export async function processPendingDeliveries(deps: ReconcileDeps): Promise<Pic
 /** Closed and stale PRs are polled too (they can be reopened and merged), bounded to the least recently observed ones. */
 export const CLOSED_POLL_LIMIT = 50;
 
-/** Reads every open PR, and the most recently observed closed ones, once. This is the local path (GitHub cannot reach localhost) and also catches missed or delayed webhooks. */
+/** Reads every open PR, and the least recently observed closed or stale ones, once. This is the local path (GitHub cannot reach localhost) and also catches missed or delayed webhooks. */
 export async function pollOpenChangeRequests(deps: ReconcileDeps): Promise<Pick<PassResult, 'polled' | 'failed' | 'errors'>> {
   const open = await deps.db.select().from(schema.changeRequests).where(eq(schema.changeRequests.status, 'open'));
   // Least recently observed first, so the bound can never starve an older row behind newer ones.

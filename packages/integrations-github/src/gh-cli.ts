@@ -68,8 +68,10 @@ export function createGhCliPort(options: GhCliOptions = {}): GitHubPort {
       try {
         await exec('git', ['push', '--no-verify', url, `${sha}:refs/heads/${name}`], { cwd: repoPath });
       } catch (e) {
-        if (/rejected|non-fast-forward|fetch first/i.test(String((e as Error).message))) throw new PushRejectedError(redactSecrets(String((e as Error).message)).slice(0, 500));
-        throw e;
+        const message = redactSecrets(String((e as Error).message)).slice(0, 500);
+        // Only a non-fast-forward refusal means the branch holds other commits. A hook or branch-protection rejection ("remote rejected") is a different failure.
+        if (/\((?:non-fast-forward|fetch first)\)|Updates were rejected because/i.test(message)) throw new PushRejectedError(message);
+        throw new Error(message);
       }
     },
     async findPullRequests(repository, branch) {

@@ -98,6 +98,22 @@ describe('gh CLI port', () => {
     expect(create.args.join(' ')).not.toContain('BODY');
   });
 
+  it('only a non-fast-forward rejection is push_rejected; a hook or protection rejection stays a distinct, redacted error', async () => {
+    const leak = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+    const failing = (message: string): GitHubPort => createGhCliPort({
+      remoteUrl: () => bare,
+      exec: async (_f, args) => { if (args[0] === 'push') throw new Error(message); return ''; },
+    });
+    const input = { repository: 'acme/r', repoPath: src, sha, branch: 'selarikru/run_c' };
+    await expect(failing(' ! [rejected]        sha -> selarikru/run_c (non-fast-forward)').pushBranch(input)).rejects.toBeInstanceOf(PushRejectedError);
+    await expect(failing(' ! [rejected]        sha -> selarikru/run_c (fetch first)').pushBranch(input)).rejects.toBeInstanceOf(PushRejectedError);
+    const hook = await failing(` ! [remote rejected] sha -> selarikru/run_c (pre-receive hook declined) token=${leak}`).pushBranch(input).catch((e: Error) => e);
+    expect(hook).toBeInstanceOf(Error);
+    expect(hook).not.toBeInstanceOf(PushRejectedError);
+    expect((hook as Error).message).toContain('remote rejected');
+    expect((hook as Error).message).not.toContain(leak);
+  });
+
   it('subprocess failure text is redacted before it becomes an error message', async () => {
     const leak = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
     // A harmless local program stands in for gh: nothing here contacts GitHub.

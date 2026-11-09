@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { sql } from 'drizzle-orm';
 import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-helpers';
 import { PrNotAllowed, branchForCandidate, openReviewablePr, type OpenPrDeps } from './pr.ts';
 import { reconcileRun } from './reconcile.ts';
@@ -236,22 +237,37 @@ describe('successor candidates', () => {
     expect(gh.prs).toHaveLength(0);
   });
 
-  it('opens for different candidates cannot both reach the push: the run row is locked and the candidate re-read', async () => {
+  it('opens for different candidates cannot both reach the push: the candidate is re-read under the run lock and a moved one restarts the attempt', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let entered!: () => void;
     const inside = new Promise<void>((r) => { entered = r; });
-    const first = openReviewablePr(run, deps({ loadRecord: async (sha) => { entered(); await gate; return record({ candidateSha: sha }); } }));
+    let loads = 0;
+    // The first open is still loading its record (no lock held, no pool connection pinned) when the candidate is rebuilt.
+    const first = openReviewablePr(run, deps({ loadRecord: async (sha) => { if (loads++ === 0) { entered(); await gate; } return record({ candidateSha: sha }); } }));
     await inside;
-    await supersedeCandidate(tdb.db); // the rebuild lands while the first open holds the lock
-    const second = openReviewablePr(run, deps(rebuilt())).then(() => 'opened', (e: PrNotAllowed) => e.reason);
-    await new Promise((r) => setTimeout(r, 150));
-    expect(gh.pushes).toEqual([]); // the second is waiting on the lock; the first has not pushed yet
+    await supersedeCandidate(tdb.db);
+    const second = await openReviewablePr(run, deps(rebuilt()));
+    expect(second).toMatchObject({ status: 'opened', candidateSha: SHA2 });
     release();
-    expect((await first).status).toBe('opened');
-    expect(await second).toBe('candidate_changed');
-    expect(gh.pushes).toEqual([{ branch: branchForCandidate(RUN, SHA), sha: SHA }]);
+    // The first open finds the candidate moved under the lock, starts over on the new one, and joins the PR the second created.
+    const done = await first;
+    expect(done).toMatchObject({ status: 'opened', candidateSha: SHA2, number: (second as { number: number }).number });
+    expect(gh.pushes).toEqual([{ branch: branchForCandidate(RUN, SHA2), sha: SHA2 }]);
     expect(gh.prs).toHaveLength(1);
+  });
+
+  it('does not hold a pool connection while the record loads', async () => {
+    const tiny = await setupTestDb(2);
+    try {
+      await resetDb(tiny.db); await seedReadyRun(tiny.db);
+      const gh2 = new FakeGitHub();
+      // With a pool of two, three concurrent opens whose record loads need a connection each would wedge if loading happened inside the transaction.
+      const loadViaDb = async (sha: string) => { await tiny.db.execute(sql`SELECT 1`); return record({ candidateSha: sha }); };
+      const results = await Promise.all([1, 2, 3].map(() => openReviewablePr(run, { db: tiny.db, port: gh2, loadRecord: loadViaDb, now: () => T0 })));
+      expect(results.every((r) => r.status === 'opened')).toBe(true);
+      expect(gh2.prs).toHaveLength(1);
+    } finally { await tiny.close(); }
   });
 });
 

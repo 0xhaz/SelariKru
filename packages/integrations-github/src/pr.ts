@@ -1,5 +1,5 @@
 import type { VerificationRecord } from '@selarikru/domain';
-import { recordOperation, schema, sql, withTx, type Db } from '@selarikru/persistence';
+import { recordOperation, schema, sql, withTx, type Db, type Tx } from '@selarikru/persistence';
 import { and, desc, eq } from 'drizzle-orm';
 import { buildPrBody, type UsageLine } from './body.ts';
 import { emitIntegration } from './events.ts';
@@ -46,13 +46,35 @@ export function branchForCandidate(runId: string, sha: string): string {
   return `selarikru/${runId}/${sha.slice(0, 12)}`;
 }
 
+type Reader = Db | Tx;
+
+/** What the open depends on, read from `q`: the project and the run's current assembled candidate. `skip` for a trial run. */
+async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ skip: true } | { skip: false; project: typeof schema.projects.$inferSelect; sha: string }> {
+  const runQuery = q.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)));
+  const row = (await (lock ? runQuery.for('no key update') : runQuery))[0];
+  if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
+  const project = (await q.select().from(schema.projects).where(and(eq(schema.projects.tenantId, run.tenantId), eq(schema.projects.projectId, run.projectId))))[0];
+  if (!project) throw new PrNotAllowed('project_missing', 'unknown project');
+  if (row.trial) return { skip: true };
+  if (row.lifecycle !== 'ready_for_review') throw new PrNotAllowed('run_not_ready', `run is ${row.lifecycle}, not ready_for_review`);
+  const candidate = (await q.select().from(schema.candidates).where(and(
+    eq(schema.candidates.tenantId, run.tenantId), eq(schema.candidates.projectId, run.projectId), eq(schema.candidates.runId, run.runId), eq(schema.candidates.status, 'assembled')))
+    .orderBy(desc(schema.candidates.createdAt)))[0];
+  if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
+  if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
+  return { skip: false, project, sha: candidate.sha };
+}
+
+const MAX_ATTEMPTS = 3;
+
 /**
  * Pushes the run's exact verified candidate to `selarikru/<runId>/<sha12>` and opens a DRAFT pull request into the project's default branch.
  *
  * - Needs a run in `ready_for_review`, an assembled candidate, and a live passing record for that candidate SHA (`loadRecord`).
  * - The repository and base branch come from the project row, never from the caller.
- * - The run row is locked for the whole operation, and the candidate and the run's recorded PR are read under that lock, so concurrent
- *   opens for different candidates cannot both reach the push.
+ * - The record is loaded before the transaction (the store takes a database handle, not `tx`). Then the run row is locked and the candidate and the
+ *   run's recorded PR are read again under that lock; a candidate that moved meanwhile restarts the attempt, so concurrent opens for different
+ *   candidates cannot both reach the push.
  * - One PR row per run. A different candidate while the recorded PR is `open` is refused (`candidate_changed`, naming the PR to close);
  *   after it is `closed` or `stale_candidate` the new candidate opens its own PR on its own branch and replaces the row; after a merge it is refused.
  * - Idempotent through `recordOperation`. If a create's response was lost, the retry queries the repository for a PR on the branch
@@ -62,28 +84,29 @@ export function branchForCandidate(runId: string, sha: string): string {
 export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promise<OpenPrResult> {
   const now = deps.now ?? (() => new Date());
   const { db, port } = deps;
-  return withTx(db, async (tx): Promise<OpenPrResult> => {
-    const runs = await tx.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)))
-      .for('no key update');
-    const row = runs[0];
-    if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
-    const project = (await tx.select().from(schema.projects).where(and(eq(schema.projects.tenantId, run.tenantId), eq(schema.projects.projectId, run.projectId))))[0];
-    if (!project) throw new PrNotAllowed('project_missing', 'unknown project');
-    if (row.trial) return { status: 'skipped', reason: 'trial' };
-    if (row.lifecycle !== 'ready_for_review') throw new PrNotAllowed('run_not_ready', `run is ${row.lifecycle}, not ready_for_review`);
-
-    const candidate = (await tx.select().from(schema.candidates).where(and(
-      eq(schema.candidates.tenantId, run.tenantId), eq(schema.candidates.projectId, run.projectId), eq(schema.candidates.runId, run.runId), eq(schema.candidates.status, 'assembled')))
-      .orderBy(desc(schema.candidates.createdAt)))[0];
-    if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
-    if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
-    const sha = candidate.sha;
-
-    const record = await deps.loadRecord(sha);
-    if (!record || record.candidateSha !== sha || record.runId !== run.runId) throw new PrNotAllowed('no_valid_record', 'no live verification record for the run candidate');
+  // The record is loaded before the transaction: the verifier's `loadValidRecord` takes a database handle, not a transaction, so loading it inside
+  // would hold one pool connection while taking a second, which can wedge the pool under concurrent opens. Under the run lock the candidate is
+  // read again; if it moved while the record was loading, the whole attempt starts over with the new candidate.
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const pre = await readState(db, run, false);
+    if (pre.skip) return { status: 'skipped', reason: 'trial' };
+    const record = await deps.loadRecord(pre.sha);
+    if (!record || record.candidateSha !== pre.sha || record.runId !== run.runId) throw new PrNotAllowed('no_valid_record', 'no live verification record for the run candidate');
     if (record.result !== 'passed' || record.results.length === 0 || record.results.some((r) => r.status !== 'passed')) {
       throw new PrNotAllowed('record_not_passing', 'the verification record is not a full pass');
     }
+    const outcome = await openUnderLock(run, deps, now, port, pre.sha, record);
+    if (outcome !== 'retry') return outcome;
+  }
+  throw new PrNotAllowed('candidate_changed', 'the run candidate kept changing while the pull request was being opened');
+}
+
+async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, port: GitHubPort, loadedSha: string, record: VerificationRecord): Promise<OpenPrResult | 'retry'> {
+  return withTx(deps.db, async (tx): Promise<OpenPrResult | 'retry'> => {
+    const state = await readState(tx, run, true);
+    if (state.skip) return { status: 'skipped', reason: 'trial' };
+    if (state.sha !== loadedSha) return 'retry';
+    const { project, sha } = state;
 
     if (!SAFE_BRANCH.test(run.runId)) throw new PrNotAllowed('unsafe_branch', 'run id cannot form a branch name');
     const branch = branchForCandidate(run.runId, sha);

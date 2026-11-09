@@ -6,7 +6,7 @@ import { openReviewablePr } from './pr.ts';
 import { FakeGitHub } from './fake.ts';
 import { handleGithubWebhook, signBody, type WebhookDeps } from './webhook.ts';
 import { processPendingDeliveries, pollOpenChangeRequests, reconcileRun, startReconciler } from './reconcile.ts';
-import { PROJECT, REPO, RUN, SHA, T0, TENANT, q, record, seedReadyRun, supersedeCandidate } from './test-fixtures.ts';
+import { PROJECT, REPO, RUN, SHA, T0, TENANT, SHA2, q, record, seedReadyRun, supersedeCandidate } from './test-fixtures.ts';
 
 const SECRET = 'whsec_test_secret_value';
 let tdb: TestDb;
@@ -197,6 +197,33 @@ describe('reconciliation', () => {
     expect(await mergedEvents()).toHaveLength(0);
     expect(await status('task_a')).toBe('verified');
     expect(await lifecycle()).toBe('running');
+  });
+
+  it('a poll that read the old PR cannot write its state onto the row that replaced it', async () => {
+    const key = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+    await tdb.db.execute(sql`UPDATE change_requests SET status = 'closed'`);
+    gh.humanMerges(1, 'a1'.repeat(20));
+    const pr2 = gh.foreignPr({ headRef: 'selarikru/run_a/222222222222', headSha: SHA2, baseRef: 'main' });
+    const realGet = gh.getPullRequest.bind(gh);
+    // The interleaving: while the poll is reading PR 1, a successor open replaces the row with candidate B and PR 2.
+    gh.getPullRequest = async (repository, number) => {
+      const seen = await realGet(repository, number);
+      if (number === 1) {
+        await supersedeCandidate(tdb.db);
+        await tdb.db.execute(sql`UPDATE change_requests SET candidate_sha = ${SHA2}, pr_number = ${pr2.number}, branch = 'selarikru/run_a/222222222222', status = 'open', merge_commit_sha = NULL`);
+      }
+      return seen;
+    };
+    expect((await reconcileRun(key, rdeps())).status).toBe('unchanged');
+    expect(await q(tdb.db, 'SELECT candidate_sha, pr_number, status, merge_commit_sha FROM change_requests')).toEqual([
+      { candidate_sha: SHA2, pr_number: pr2.number, status: 'open', merge_commit_sha: null }]);
+    expect(await mergedEvents()).toHaveLength(0);
+    // The run can still finish: a later merge of PR 2 is recorded.
+    gh.getPullRequest = realGet;
+    gh.humanMerges(pr2.number);
+    expect((await reconcileRun(key, rdeps())).status).toBe('merged');
+    expect(await status('task_a')).toBe('merged');
+    expect(await lifecycle()).toBe('merged');
   });
 
   it('a PR closed without merging leaves tasks verified', async () => {
