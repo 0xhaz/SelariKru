@@ -56,8 +56,8 @@ function checkLease(attempt: AttemptRow | undefined, statusRow: { status: string
   return null;
 }
 
-/** Renews only the active, unexpired fence. Heartbeats are not events. */
-export async function heartbeat(ctx: SchedulerContext, lease: Lease): Promise<Result<HeartbeatReceipt, LeaseConflict>> {
+/** Renews only the active, unexpired fence. Heartbeats are not events. `activity` is the tool the worker last started: a name, never its arguments. */
+export async function heartbeat(ctx: SchedulerContext, lease: Lease, activity?: string): Promise<Result<HeartbeatReceipt, LeaseConflict>> {
   return withTx(ctx.db, async (tx) => {
     const statusRow = await lockStatusRow(tx, lease);
     if (!statusRow) return err(conflict(lease, 'stale_fence'));
@@ -67,7 +67,7 @@ export async function heartbeat(ctx: SchedulerContext, lease: Lease): Promise<Re
     const expiresAt = leaseDeadline(now);
     await tx
       .update(schema.attempts)
-      .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt })
+      .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt, ...(activity !== undefined ? { lastTool: activity, lastToolAt: now } : {}) })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
     const cancelRequested = await hasCancelRequest(tx, lease, lease.revision);
     return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), cancelRequested });

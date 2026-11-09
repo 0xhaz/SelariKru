@@ -407,7 +407,7 @@ describe('commands target one project and follow the real cancel rules', () => {
     ds.clock.advance(5_000);
     const after = await ds.getSnapshot(a.projectId);
     expect(after.tasks[t.taskId]!.status).toBe('cancelled');
-    expect({ ...(await ds.getSnapshot(b.projectId)), meta: before.meta, attempts: before.attempts, workers: before.workers }).toEqual({ ...before, attempts: before.attempts, workers: before.workers });
+    expect({ ...(await ds.getSnapshot(b.projectId)), meta: before.meta, attempts: before.attempts, workers: before.workers, runners: before.runners }).toEqual({ ...before, attempts: before.attempts, workers: before.workers, runners: before.runners });
     expect((await ds.getSnapshot(b.projectId)).meta.cursor).toBe(before.meta.cursor);
     // A terminal for another project's attempt cannot be opened with this task.
     await expect(ds.openTerminal({ taskId: t.taskId, attemptId: sc('healthy-parallel-work', 'att_api_1'), expectedRevision: 0 })).rejects.toBeInstanceOf(Error);
@@ -523,5 +523,36 @@ describe('model assignment commands', () => {
     const { snap } = await setup();
     expect(snap.modelCatalog.providers.map((p) => p.provider)).toEqual(['anthropic']);
     expect(JSON.stringify(snap.modelCatalog)).not.toMatch(/codex|gpt/i);
+  });
+});
+
+describe('per-criterion evidence and activity', () => {
+  it('the fold of a verified fixture has one evidence row per counted criterion, each tied to its check and candidate', async () => {
+    const ds = make();
+    const snap = await ds.getSnapshot('demo-merge-review');
+    const run = Object.values(snap.runs)[0]!;
+    expect(run.criteria).toEqual({ verified: 5, total: 5 });
+    expect(run.evidence?.criteria.map((c) => c.criterionId)).toEqual(['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-05']);
+    for (const c of run.evidence!.criteria) expect(c).toMatchObject({ state: 'passed', verified: true, candidateSha: run.evidence!.candidate!.sha, check: { checkId: c.criterionId } });
+  });
+
+  it('a scene with no per-criterion data reports null criteria and null evidence', async () => {
+    const ds = make();
+    const run = Object.values((await ds.getSnapshot('demo-feature-delivery')).runs)[0]!;
+    expect(run.criteria).toBeNull();
+    expect(run.evidence).toBeNull();
+  });
+
+  it('every running worker reports the tool it is using, and a fixture that does not stays null', async () => {
+    const ds = make();
+    const busy = await ds.getSnapshot('demo-healthy-parallel-work');
+    for (const w of Object.values(busy.workers).filter((x) => x.leaseHeld)) expect(w.latestAction?.tool).toMatch(/^[A-Z]/);
+    const quiet = await ds.getSnapshot('demo-long-build-stall');
+    expect(Object.values(quiet.workers).find((x) => x.leaseHeld)?.latestAction).toBeNull();
+  });
+
+  it('the merge-flow candidate is assembled before any verdict', () => {
+    const types = buildFixture('merge-flow').events.map((e) => e.type);
+    expect(types.indexOf('candidate.assembled')).toBeLessThan(types.indexOf('verification.passed'));
   });
 });

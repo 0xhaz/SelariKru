@@ -12,7 +12,14 @@
     "@selarikru/protocol": "workspace:*",
     "@selarikru/runtime-docker-local": "workspace:*",
     "@selarikru/view-protocol": "workspace:*",
-    "@selarikru/data-source-mock": "workspace:*"
+    "@selarikru/data-source-mock": "workspace:*",
+    "@selarikru/data-source-live": "workspace:*",
+    "@selarikru/control-api": "workspace:*",
+    "@selarikru/domain": "workspace:*",
+    "@selarikru/integrations-github": "workspace:*",
+    "@selarikru/persistence": "workspace:*",
+    "@selarikru/workflow": "workspace:*",
+    "drizzle-orm": "0.45.4"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

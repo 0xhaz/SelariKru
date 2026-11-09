@@ -156,3 +156,31 @@ describe('commands', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 });
+
+describe('privileged actions during a drop', () => {
+  it('a reconnecting session refuses to send, and keeps the last confirmed time and state', async () => {
+    let drop: ((e: DataSourceError) => void) | null = null;
+    let executed = 0;
+    const { store, fire } = setup((s) => ({
+      ...s,
+      subscribe(p, a, on, err) { drop = err; return s.subscribe(p, a, on, err); },
+      execute(c) { executed += 1; return s.execute(c); },
+    }));
+    store.getState().start();
+    await flush();
+    expect(connectionOf(store.getState())).toBe('live');
+    const confirmed = store.getState().livenessAsOfMs;
+    expect(confirmed).not.toBeNull();
+    drop!({ code: 'disconnected', message: 'server restarting', retryable: true });
+    expect(connectionOf(store.getState())).toBe('reconnecting');
+    expect(store.getState().livenessAsOfMs).toBe(confirmed);
+    expect(store.getState().livenessForHealth()).toBeNull();
+    expect(store.getState().projection).not.toBeNull();
+    await expect(store.getState().execute({ command: 'task.cancel', expectedRevision: 0, idempotencyKey: 'k', args: { taskId: 't' } })).rejects.toBeInstanceOf(CommandNotSent);
+    expect(executed).toBe(0);
+    fire();
+    await flush();
+    expect(connectionOf(store.getState())).toBe('live');
+    store.getState().stop();
+  });
+});

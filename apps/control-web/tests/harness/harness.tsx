@@ -7,6 +7,7 @@ import { AssistantPanel, createApiClient, useAssistantStore, type ApiResult, typ
 import { AppShell } from '../../src/shell/AppShell.tsx';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
+import { createLiveDataSource } from '@selarikru/data-source-live';
 import type { EngineeringDataSource } from '@selarikru/view-protocol';
 import '../../src/index.css';
 
@@ -43,6 +44,8 @@ interface Scenario {
   rejectWith?: string;
   /** A command that never answers, to show the busy state. */
   holdExecute?: boolean;
+  /** Mounts the shell on the real live data source against a test server, recording every delivered sequence to `window.__calls.sequences`. */
+  liveApi?: { baseUrl: string; token: string; projectId: string };
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -50,7 +53,7 @@ interface Scenario {
 declare global {
   interface Window {
     __scenario?: Scenario;
-    __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[] };
+    __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[] };
     __spiedSource?: EngineeringDataSource;
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
@@ -61,7 +64,7 @@ declare global {
 }
 
 const sc: Scenario = window.__scenario ?? {};
-window.__calls = { adapter: [], api: [], commands: [] };
+window.__calls = { adapter: [], api: [], commands: [], sequences: [] };
 let device: Readiness['device'] = sc.device ?? 'available';
 
 const gate = (): { p: Promise<void>; release: () => void } => {
@@ -204,7 +207,18 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
 }
 
 const root = createRoot(document.getElementById('root')!);
-if (sc.spiedFixture) {
+if (sc.liveApi) {
+  const live = sc.liveApi;
+  const source = createLiveDataSource({ baseUrl: live.baseUrl, getToken: async () => live.token });
+  const recording: EngineeringDataSource = {
+    ...source,
+    subscribe: (p, after, onEvent, onError) => source.subscribe(p, after, (e) => { window.__calls.sequences.push(e.sequence); onEvent(e); }, onError),
+  };
+  const shellStore = createProjectionStore({ source: recording, projectId: live.projectId, clock: { nowMs: () => Date.now() }, every: (fn, ms) => { const id = window.setInterval(fn, ms); return () => window.clearInterval(id); } });
+  window.__projection = shellStore;
+  shellStore.getState().start();
+  root.render(<StrictMode><AppShell store={shellStore} mode="live" projectLabel={live.projectId} assistant={null} /></StrictMode>);
+} else if (sc.spiedFixture) {
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>

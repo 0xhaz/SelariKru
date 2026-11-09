@@ -162,7 +162,7 @@ export interface ExpiredLease {
 export interface Scheduler {
   claimNext(runner: Runner, caps: Caps): Promise<Lease | null>;
   tryClaim(runner: Runner, caps: Caps): Promise<ClaimOutcome>;
-  heartbeat(lease: Lease): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
+  heartbeat(lease: Lease, activity?: string): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
   publishResult(lease: Lease, result: PublishResult): Promise<Result<PublishReceipt, LeaseConflict>>;
   expireLeases(now: Date): Promise<readonly ExpiredLease[]>;
   /** Closes pending approvals past their expiry and blocks the tasks waiting on them. Returns the approval ids closed. */

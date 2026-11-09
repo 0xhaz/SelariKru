@@ -80,6 +80,9 @@ export const attempts = pgTable(
     /** Credential the holder presents with its fence. Never copied into events. */
     leaseToken: text('lease_token'),
     lastHeartbeatAt: tstz('last_heartbeat_at'),
+    /** The tool the worker last started, from its heartbeat. A tool name only, never arguments or output. Null: not reported. */
+    lastTool: text('last_tool'),
+    lastToolAt: tstz('last_tool_at'),
     leaseExpiresAt: tstz('lease_expires_at'),
     /** Hard stop fixed at claim. Heartbeats renew the lease, never this. */
     deadlineAt: tstz('deadline_at'),

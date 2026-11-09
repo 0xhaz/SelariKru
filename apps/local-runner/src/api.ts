@@ -36,7 +36,7 @@ export interface RunnerApi {
   /** `harnesses`: what this runner can launch now. */
   claim(harnesses?: readonly RunnerHarnessReport[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
   task(lease: LeaseRef): Promise<TaskSpec>;
-  heartbeat(lease: LeaseRef): Promise<{ cancelRequested: boolean }>;
+  heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
 }
 
@@ -79,8 +79,8 @@ export class HttpRunnerApi implements RunnerApi {
   async task(lease: LeaseRef) {
     return TaskResponseSchema.parse(await this.post('/v1/runners/task', { lease })).task;
   }
-  async heartbeat(lease: LeaseRef) {
-    const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', { lease }));
+  async heartbeat(lease: LeaseRef, activity?: string) {
+    const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', activity === undefined ? { lease } : { lease, activity }));
     return { cancelRequested: r.cancelRequested };
   }
   async result(lease: LeaseRef, result: RunnerResult) {

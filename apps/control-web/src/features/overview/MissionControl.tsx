@@ -2,7 +2,7 @@ import { AxisBadges, Chip, EmptyState, Panel, Timestamp, formatAge, formatClock,
 import type { DataSourceError, ProjectViewSnapshot, UsageTotal } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
-import { decisionHref } from '../../shell/route.ts';
+import { decisionHref, hrefFor } from '../../shell/route.ts';
 import type { AttentionItem, AttentionKind } from './attention.ts';
 import type { CriterionCell, DeliveryModel, EvidenceRow, FleetModel, OverviewModel, UsageModel } from './model.ts';
 
@@ -121,6 +121,7 @@ function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolea
           <RunStages lifecycle={run.lifecycle} />
         </div>
       ) : null}
+      {run ? <p className="mt-2 text-sm"><a data-testid="open-evidence" className="font-medium text-active underline underline-offset-2" href={`${hrefFor('evidence')}?run=${encodeURIComponent(run.runId)}`}>Open evidence</a></p> : null}
       <p className="mt-3 text-sm" data-testid="top-blocker">
         <span className="text-muted">Top blocker: </span>
         <span className={model.blocker ? 'text-warning' : 'text-muted'}>{model.blocker ?? (stale ? 'unknown until the connection returns' : 'none right now')}</span>
@@ -232,12 +233,12 @@ function usageStat(label: string, total: UsageTotal, format: (q: string) => stri
 }
 
 function ResourcesPanel({ model }: { model: UsageModel }) {
-  const { running, local, cloud, unknown } = model.capacity;
+  const { running, local, cloud, unknown, slots } = model.capacity;
   const where = [`${local} in local sandbox`, `${cloud} in cloud sandbox`, ...(unknown > 0 ? [`${unknown} location unknown`] : [])].join(', ');
   return (
     <Panel title="Resources and usage" labelId="resources-title">
       <dl className="divide-y divide-line">
-        <Stat label="Leases held" value={String(running)} note={`${where}. Slot limit not reported.`} />
+        <Stat label="Leases held" value={slots !== null ? `${running} of ${slots}` : String(running)} note={`${where}.${slots !== null ? '' : ' Slot limit not reported.'}`} />
         {usageStat('Model spend', model.spend, formatUsd)}
         {usageStat('Input tokens', model.inputTokens, formatCount)}
         {usageStat('Output tokens', model.outputTokens, formatCount)}
@@ -281,7 +282,7 @@ export interface MissionControlProps {
 export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure }: MissionControlProps) {
   if (failure !== undefined) throw failure;
   if (!overview || !snapshot) {
-    if (connection === 'unavailable') {
+    if (connection === 'unavailable' || connection === 'dead') {
       return (
         <>
           <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>

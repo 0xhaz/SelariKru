@@ -284,9 +284,9 @@ describe('model assignments', () => {
   });
 
   describe('polling runners do not grow the log', () => {
-    const enrol = async (runnerId: string, models: string[], location: 'local' | 'cloud' = 'local') => {
+    const enrol = async (runnerId: string, models: string[], location: 'local' | 'cloud' = 'local', seenAt: Date | null = clock.now()) => {
       const harnesses = [{ provider: 'anthropic', harnessVersion: '2.1.316', models }];
-      await t.db.insert(schema.runners).values({ tenantId: TENANT, runnerId, location, tokenHash: `hash-${runnerId}`, harnessReport: harnesses });
+      await t.db.insert(schema.runners).values({ tenantId: TENANT, runnerId, location, tokenHash: `hash-${runnerId}`, harnessReport: harnesses, lastSeenAt: seenAt });
       return { ...runner(runnerId, location), harnesses };
     };
     const rowRevision = async () => (await t.db.select().from(schema.taskStatus))[0]!.rowRevision;
@@ -314,6 +314,23 @@ describe('model assignments', () => {
       expect(await eventTypes(t.db)).toEqual(['placement.blocked']);
       expect(await rowRevision()).toBe(1);
       expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBe('model_not_on_runner:anthropic/claude-sonnet-5-5');
+    });
+
+    it('a runner not seen recently does not count as having the model', async () => {
+      await seedTask(t.db, specFor('t1'));
+      const lacks = await enrol('a', ['claude-opus-5-5']);
+      await enrol('old-enrolment', ['claude-sonnet-5-5'], 'local', new Date(clock.now().getTime() - 121_000));
+      await enrol('never-seen', ['claude-sonnet-5-5'], 'local', null);
+      await sched.tryClaim(lacks, CAPS);
+      expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBe('model_not_on_runner:anthropic/claude-sonnet-5-5');
+    });
+
+    it('a runner seen within the window still counts, so the task waits for it instead of blocking', async () => {
+      await seedTask(t.db, specFor('t1'));
+      const lacks = await enrol('a', ['claude-opus-5-5']);
+      await enrol('b', ['claude-sonnet-5-5'], 'local', new Date(clock.now().getTime() - 119_000));
+      await sched.tryClaim(lacks, CAPS);
+      expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBeNull();
     });
 
     it('a revoked runner does not count as having the model', async () => {

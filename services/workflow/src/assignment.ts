@@ -1,7 +1,7 @@
-import { availableCatalog, findCatalogModel, NO_HARNESS_CATALOG, type RunnerHarnessReport, type CatalogModel, type HarnessCatalog, type ModelRate, type ModelRefusalReason, type ModelSelection, type RecordedAssignment, type TaskSpec } from '@selarikru/domain';
+import { availableCatalog, findCatalogModel, NO_HARNESS_CATALOG, RUNNER_RECENT_SECONDS, type RunnerHarnessReport, type CatalogModel, type HarnessCatalog, type ModelRate, type ModelRefusalReason, type ModelSelection, type RecordedAssignment, type TaskSpec } from '@selarikru/domain';
 import { evaluate, type Policy, type PolicyDecision } from '@selarikru/policy';
 import { schema, type Executor } from '@selarikru/persistence';
-import { and, desc, eq, isNull, or } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, or } from 'drizzle-orm';
 import type { TaskKey } from './taskstate.ts';
 import type { SchedulerContext } from './types.ts';
 
@@ -71,7 +71,8 @@ export async function resolveAssignment(ctx: SchedulerContext, db: Executor, key
   if (!verdict.ok) return { ok: false, reason: blockCode(verdict.reason, selection) };
   // Declared and allowed is not enough: this runner has to be able to launch it.
   if (findCatalogModel(availableCatalog(declared, runnerReport), selection).model === null) {
-    const elsewhere = findCatalogModel(availableCatalog(declared, await loadRunnerReports(db, key.tenantId)), selection).model !== null;
+    // Only a runner seen recently counts: an old enrolment left unrevoked by a re-pair must not keep the task waiting for a machine that is gone.
+    const elsewhere = findCatalogModel(availableCatalog(declared, await loadRecentRunnerReports(db, key.tenantId, ctx.now())), selection).model !== null;
     return { ok: false, reason: blockCode('model_not_on_runner', selection), runnerOnly: elsewhere };
   }
   return { ok: true, assignment: { ...selection, source, route: verdict.model.route } };
@@ -147,6 +148,13 @@ export async function loadModelAssignments(db: Executor, tenantId: string, proje
 /** What every enrolled, unrevoked runner last reported. The catalog offered to the owner is narrowed to this. */
 export async function loadRunnerReports(db: Executor, tenantId: string): Promise<RunnerHarnessReport[]> {
   const rows = await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt)));
+  return rows.flatMap((r) => r.report ?? []);
+}
+
+/** What the unrevoked runners seen within `RUNNER_RECENT_SECONDS` last reported. One that has never been seen does not count. */
+export async function loadRecentRunnerReports(db: Executor, tenantId: string, now: Date): Promise<RunnerHarnessReport[]> {
+  const since = new Date(now.getTime() - RUNNER_RECENT_SECONDS * 1000);
+  const rows = await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt), gte(schema.runners.lastSeenAt, since)));
   return rows.flatMap((r) => r.report ?? []);
 }
 

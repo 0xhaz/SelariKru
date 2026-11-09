@@ -1,11 +1,11 @@
 import { NO_HARNESS_CATALOG, availableCatalog, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
-import { schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
+import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRunnerReports, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRunEvidence, loadRunnerReports, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -43,6 +43,11 @@ const REPLANNABLE: readonly string[] = ['planned', 'ready', 'blocked', 'awaiting
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const CANCEL_REQUEST: readonly string[] = ['running'];
 const APPROVAL_HISTORY_LIMIT = 50;
+/** Events that move a task to a new status, in time order they say when it entered it. */
+const STATUS_EVENTS = ['task.ready', 'attempt.started', 'attempt.completed', 'attempt.failed', 'approval.requested', 'approval.granted', 'approval.denied', 'task.blocked', 'verification.started', 'verification.passed', 'verification.failed', 'change.merged', 'task.cancelled', 'task.superseded', 'task.reopened'] as const;
+const TASK_EVIDENCE_EVENTS = ['attempt.started', 'attempt.completed', 'attempt.failed', 'approval.granted', 'approval.denied', 'verification.started', 'verification.passed', 'verification.failed', 'change.merged', 'change.proposed', 'candidate.assembled', 'candidate.failed', 'task.reopened'] as const;
+const RUN_EVIDENCE_EVENTS = ['candidate.assembled', 'candidate.failed', 'change.proposed', 'change.merged', 'run.reverted'] as const;
+const eventTime = (row: Record<string, unknown>): string => new Date(row['occurred_at'] as string | Date).toISOString();
 
 /** An open request for a task that was replaced or cancelled can no longer be resolved. */
 async function supersedePendingApprovals(tx: Tx, tenantId: string, projectId: string, taskId: string, at: Date): Promise<void> {
@@ -496,6 +501,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           runner: schema.attempts.runner, leaseFence: schema.attempts.leaseFence, lastHeartbeatAt: schema.attempts.lastHeartbeatAt,
           leaseExpiresAt: schema.attempts.leaseExpiresAt, deadlineAt: schema.attempts.deadlineAt, outcome: schema.attempts.outcome,
           exitReason: schema.attempts.exitReason, startedAt: schema.attempts.startedAt, endedAt: schema.attempts.endedAt,
+          lastTool: schema.attempts.lastTool, lastToolAt: schema.attempts.lastToolAt,
           modelRoute: schema.attempts.modelRoute, modelProvider: schema.attempts.modelProvider, modelId: schema.attempts.modelId, assignmentSource: schema.attempts.assignmentSource,
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
@@ -513,25 +519,74 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type IN ('task.blocked', 'task.reopened', 'approval.denied')
           ORDER BY task_id, sequence DESC`);
 
+        // The status a task is in now came with its latest status event; a row bumped for any other reason keeps its time.
+        const statusEvents = await tx.execute(sql`
+          SELECT DISTINCT ON (task_id) task_id, occurred_at FROM events
+          WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type IN ${sql.raw(`(${STATUS_EVENTS.map((t) => `'${t}'`).join(',')})`)}
+          ORDER BY task_id, sequence DESC`);
+        // The latest event of the kinds a reader treats as evidence, per task or run. Each carries its id and type: a reference to the fact, never its content.
+        const evidenceEvents = await tx.execute(sql`
+          SELECT DISTINCT ON (task_id) task_id, type, event_id, occurred_at FROM events
+          WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type IN ${sql.raw(`(${[...new Set([...TASK_EVIDENCE_EVENTS, ...RUN_EVIDENCE_EVENTS])].map((t) => `'${t}'`).join(',')})`)}
+          ORDER BY task_id, sequence DESC`);
+        // The latest verdict per task, under the same check id the reducer folds from the event, so a resync keeps the check it had.
+        const checkEvents = await tx.execute(sql`
+          SELECT DISTINCT ON (task_id) task_id, run_id, type, event_id, occurred_at, payload FROM events
+          WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type IN ('verification.started', 'verification.passed', 'verification.failed', 'candidate.failed')
+          ORDER BY task_id, sequence DESC`);
+        const runners = await tx.select({ runnerId: schema.runners.runnerId, location: schema.runners.location, label: schema.runners.label, lastSeenAt: schema.runners.lastSeenAt }).from(schema.runners)
+          .where(and(eq(schema.runners.tenantId, config.tenantId), isNull(schema.runners.revokedAt))).orderBy(asc(schema.runners.createdAt));
+        const usage = (await Promise.all(runs.map((r) => readUsageEntries(tx, { tenantId: config.tenantId, projectId, runId: r.runId })))).flat();
+
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
         const assessments = new Map<string, { notDelivered: unknown; notDeliveredHash: string; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
+        const evidence = new Map<string, Awaited<ReturnType<typeof loadRunEvidence>>>();
         for (const r of runs) {
           const assessed = await assessRunScope(tx, { tenantId: config.tenantId, projectId, runId: r.runId }).catch(() => null);
           assessments.set(r.runId, assessed && assessed.stopped.length + assessed.stopping.length > 0
             ? { notDelivered: assessed.notDelivered, notDeliveredHash: notDeliveredHash(assessed.notDelivered), deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
             : null);
+          // Per-requirement, from the verifier's own check rows. A task count never stands in for a criterion: no requirement ids means null, not a number.
+          const stoppedIds = new Set((assessed?.stopped ?? []).map((t) => t.taskId));
+          evidence.set(r.runId, await loadRunEvidence(tx, { tenantId: config.tenantId, projectId, runId: r.runId }, statuses.flatMap((s) => {
+            const row = specOf(s.taskId, s.currentRevision);
+            if (row?.runId !== r.runId) return [];
+            const requirementIds = (row.spec as { requirementIds?: unknown }).requirementIds;
+            return [{ taskId: s.taskId, revision: s.currentRevision, status: s.status, requirementIds: Array.isArray(requirementIds) ? requirementIds.filter((x): x is string => typeof x === 'string') : [], budgetStopped: stoppedIds.has(s.taskId) }];
+          })).catch(() => null));
         }
+        const refOf = (row: Record<string, unknown> | undefined) => (row ? { kind: String(row['type']), ref: String(row['event_id']), at: eventTime(row) } : null);
         return {
           projectId,
           cursor,
           generatedAt: at.toISOString(),
           /** What this machine's harness adapters declare, and what policy says about each model. Identifiers only. */
           modelCatalog: catalogView(await liveCatalog(tx), ctx.policy),
+          /** Scheduler limits, so a screen can state the slot limit rather than saying it was not reported. */
+          limits: { maxConcurrentTotal: config.caps.maxConcurrentTotal },
+          /** Enrolled, unrevoked runners with when each last called in. Never a token. */
+          runners: runners.map((r) => ({ runnerId: r.runnerId, location: r.location, label: r.label ?? null, lastSeenAt: r.lastSeenAt?.toISOString() ?? null })),
+          /** The latest verdict per task. A failed candidate, addressed to the run, is a run-level check. */
+          checks: checkEvents.map((c) => {
+            const failedCandidate = c['type'] === 'candidate.failed';
+            const taskId = String(c['task_id']);
+            const payload = c['payload'] as Record<string, unknown>;
+            const runLevel = failedCandidate && taskId === c['run_id'];
+            const summary = typeof payload['summary'] === 'string' ? payload['summary'] : typeof payload['reason'] === 'string' ? payload['reason'] : null;
+            const checkId = failedCandidate ? `candidate:${taskId}` : (typeof payload['checkId'] === 'string' ? payload['checkId'] : `${taskId}:verification`);
+            return { checkId, taskId: runLevel ? null : taskId, state: c['type'] === 'verification.started' ? 'running' : c['type'] === 'verification.passed' ? 'passed' : 'failed', summary, updatedAt: eventTime(c), evidenceRef: String(c['event_id']) };
+          }),
+          /** The ledger's current figures. Unknown stays null; nothing is summed here. */
+          usage: usage.map((u) => ({ entryId: u.entryId, runId: u.runId, taskId: u.taskId, attemptId: u.attemptId, metric: u.metric, quantity: u.quantity, provenance: u.provenance, source: u.source })),
           /** The current assignment per role and task; each carries the revision a change must send back. */
           modelAssignments: await loadModelAssignments(tx, config.tenantId, projectId),
           runs: runs.map((r) => ({
             runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null, pinnedModel: r.pinnedModel ?? null,
+            latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === r.runId && (RUN_EVIDENCE_EVENTS as readonly unknown[]).includes(e['type']))),
+            /** Criteria with qualifying evidence at this run's current revision. Null: no task names a requirement, so per-criterion evidence does not exist. */
+            criteria: evidence.get(r.runId)?.criteria ?? null,
+            evidence: evidence.get(r.runId)?.evidence ?? null,
             /** Set once the owner accepted a budget stop. `notDelivered` lists what was stopped and is never counted as verified. */
             reducedScope: reducedScopes.filter((d) => d.context === reducedScopeContext(r.runId)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.affected[0] ?? null,
             /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
@@ -551,8 +606,18 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               /** Reason code of the latest block when the task is `blocked`, e.g. `resource_conflict:repo`, `repair_budget_exhausted`, `verification_error`; null otherwise. */
               blockedReason: s.status === 'blocked' ? blockedReasonOf(blockEvents, s.taskId) : null,
               title: (spec?.spec as { title?: string } | undefined)?.title ?? null,
+              role: (spec?.spec as { role?: string } | undefined)?.role ?? null,
+              /** From the spec of the current revision. */
+              dependsOn: ((spec?.spec as { dependencies?: readonly { taskId: string }[] } | undefined)?.dependencies ?? []).map((d) => d.taskId),
+              /** When the task entered this status. Absent only for a task with no status event yet: its row was created in this state. */
+              enteredStatusAt: statusEvents.find((e) => e['task_id'] === s.taskId) ? eventTime(statusEvents.find((e) => e['task_id'] === s.taskId)!) : s.updatedAt.toISOString(),
+              latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === s.taskId)),
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
                 attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason,
+                /** Where this attempt's sandbox runs. Null: its runner is no longer enrolled. */
+                location: runners.find((r) => r.runnerId === a.runner)?.location ?? null,
+                /** The tool the worker last started: a name, never its arguments. Null: nothing reported. */
+                activity: a.lastTool !== null && a.lastToolAt !== null ? { tool: a.lastTool, at: a.lastToolAt.toISOString() } : null,
                 /** The model this attempt was recorded with, and so what its harness received. Null only for attempts from before assignments. */
                 assignment: a.modelProvider !== null && a.modelId !== null ? { provider: a.modelProvider, model: a.modelId, source: a.assignmentSource, route: a.modelRoute ?? 'unknown' } : null,
                 startedAt: a.startedAt?.toISOString() ?? null, endedAt: a.endedAt?.toISOString() ?? null,
@@ -567,7 +632,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           approvals: approvals.filter((a) => a.outcome === 'pending' || !a.taskId || statuses.some((s) => s.taskId === a.taskId && s.currentRevision === a.revision && s.status === 'blocked')).map((a) => ({
             outcome: a.outcome,
             approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, requester: a.requester, scopeHash: a.scopeHash,
-            expiresAt: a.expiresAt?.toISOString() ?? null, requestedAt: a.createdAt.toISOString(),
+            expiresAt: a.expiresAt?.toISOString() ?? null, requestedAt: a.createdAt.toISOString(), resolvedAt: a.resolvedAt?.toISOString() ?? null,
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
             reason: typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null,
             destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
@@ -576,6 +641,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           approvalHistory: resolved.map((a) => ({
             approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, outcome: a.outcome, approver: a.approver ?? null, scopeHash: a.scopeHash,
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
+            reason: typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null,
             destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
             requestedAt: a.createdAt.toISOString(), resolvedAt: a.resolvedAt?.toISOString() ?? null, consumedAt: a.consumedAt?.toISOString() ?? null, consumedBy: a.consumedBy ?? null,
           })),

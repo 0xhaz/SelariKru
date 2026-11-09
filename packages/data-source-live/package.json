@@ -1,0 +1,20 @@
+{
+  "name": "@selarikru/data-source-live",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The live EngineeringDataSource: an authenticated client of the control API's snapshot, SSE and command routes. Maps the server's answers onto the view protocol and imports no mock.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "@selarikru/view-protocol": "workspace:*" },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

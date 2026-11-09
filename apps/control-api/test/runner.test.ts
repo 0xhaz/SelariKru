@@ -258,3 +258,85 @@ async function waitFor(fn: () => Promise<void>, ms = 5000): Promise<void> {
     try { await fn(); return; } catch (e) { if (Date.now() > end) throw e; await new Promise((r) => setTimeout(r, 20)); }
   }
 }
+
+describe('freshness and activity', () => {
+  const claimOne = async (token: string) => (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease as { attemptId: string; fence: number; leaseToken: string };
+  const ref = (l: { attemptId: string; fence: number; leaseToken: string }) => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
+
+  it('a claim records when the runner was last seen, and the snapshot shows it with no token', async () => {
+    const { token, runnerId } = await enrolRunner(h.app);
+    const seenAt = async () => (await t.db.execute(sql`SELECT last_seen_at FROM runners WHERE runner_id = ${runnerId}`))[0]!['last_seen_at'];
+    expect(await seenAt()).not.toBeNull();
+    h.clock.advance(30);
+    await post(h.app, '/v1/runners/claim', {}, bearer(token));
+    const snap = (await get(h.app, '/v1/projects/proj_a/snapshot')).body;
+    expect(snap.runners).toEqual(expect.arrayContaining([expect.objectContaining({ runnerId, lastSeenAt: h.clock.now().toISOString(), location: 'local' })]));
+    expect(JSON.stringify(snap)).not.toContain(token);
+  });
+
+  it('the heartbeat carries a tool name to the snapshot, and refuses anything that is not one', async () => {
+    await seedTask(t.db, specFor('task_a'));
+    const { token } = await enrolRunner(h.app);
+    const lease = await claimOne(token);
+    expect((await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease), activity: 'Edit' }, bearer(token))).status).toBe(200);
+    const task = (await get(h.app, '/v1/projects/proj_a/snapshot')).body.tasks[0];
+    expect(task.attempts[0].activity).toEqual({ tool: 'Edit', at: h.clock.now().toISOString() });
+    for (const activity of ['rm -rf /', 'ghp_' + 'a'.repeat(36), 'Edit\nsecond line', '']) {
+      expect((await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease), activity }, bearer(token))).status).toBe(400);
+    }
+  });
+
+  it('a heartbeat with no activity leaves the last reported tool alone', async () => {
+    await seedTask(t.db, specFor('task_a'));
+    const { token } = await enrolRunner(h.app);
+    const lease = await claimOne(token);
+    await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease), activity: 'Bash' }, bearer(token));
+    h.clock.advance(10);
+    await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease) }, bearer(token));
+    expect((await get(h.app, '/v1/projects/proj_a/snapshot')).body.tasks[0].attempts[0].activity.tool).toBe('Bash');
+  });
+});
+
+describe('per-criterion evidence on the snapshot', () => {
+  const SHA = 'a'.repeat(40);
+  async function seedEvidence(status = 'assembled') {
+    await seedTask(t.db, specFor('t1', { requirementIds: ['FB-01', 'FB-02'] }), 'verified');
+    await seedTask(t.db, specFor('t2', { requirementIds: ['FB-03'] }), 'running');
+    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES ('tenant_a', 'proj_a', 'c1', 'run_a', 'main', ${SHA}, ${'b'.repeat(40)}, ${'c'.repeat(40)}, '[]'::jsonb, ${status})`);
+    for (const [check, result] of [['FB-01', 'passed'], ['FB-02', 'failed']] as const) {
+      await t.db.execute(sql`INSERT INTO check_runs (tenant_id, project_id, check_run_id, task_id, revision, attempt_id, check_id, check_version, candidate_sha, result, log_refs) VALUES ('tenant_a', 'proj_a', ${`chk_${check}`}, 't1', 1, NULL, ${check}, '1', ${SHA}, ${result}, ${JSON.stringify([{ recordId: 'ver_1', attempt: 1 }])}::jsonb)`);
+    }
+  }
+  const run = async () => (await get(h.app, '/v1/projects/proj_a/snapshot')).body.runs[0];
+
+  it('counts criteria from the per-requirement evidence, never tasks', async () => {
+    await seedEvidence();
+    const r = await run();
+    // Three criteria across two tasks, one passed: not "1 of 2 tasks".
+    expect(r.criteria).toEqual({ verified: 1, total: 3 });
+    expect(r.evidence.candidate).toMatchObject({ sha: SHA, live: true });
+    expect(r.evidence.criteria.find((c: { criterionId: string }) => c.criterionId === 'FB-01')).toMatchObject({ state: 'passed', verified: true, candidateSha: SHA, check: { checkRunId: 'chk_FB-01', recordId: 'ver_1' } });
+    expect(r.evidence.criteria.find((c: { criterionId: string }) => c.criterionId === 'FB-03')).toMatchObject({ state: 'not_run', candidateSha: null, check: null });
+  });
+
+  it('a rejected candidate keeps its results but verifies nothing', async () => {
+    await seedEvidence('rejected');
+    expect((await run()).criteria).toEqual({ verified: 0, total: 3 });
+  });
+
+  it('with no requirement ids criteria are null, not a task count', async () => {
+    await seedTask(t.db, specFor('t1'), 'verified');
+    expect((await run()).criteria).toBeNull();
+  });
+
+  it('the snapshot says when a task entered its status, the slot limit, and the route of the recorded model', async () => {
+    await seedTask(t.db, specFor('task_a'));
+    const { token } = await enrolRunner(h.app);
+    await post(h.app, '/v1/runners/claim', {}, bearer(token));
+    const snap = (await get(h.app, '/v1/projects/proj_a/snapshot')).body;
+    expect(snap.limits).toEqual({ maxConcurrentTotal: 2 });
+    expect(snap.tasks[0]).toMatchObject({ enteredStatusAt: h.clock.now().toISOString(), role: 'backend', dependsOn: [] });
+    expect(snap.tasks[0].attempts[0].assignment).toMatchObject({ route: 'cloud' });
+    expect(snap.tasks[0].attempts[0].location).toBe('local');
+  });
+});

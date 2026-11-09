@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, ModelSelectionSchema, RUN_STATUSES, TASK_STATUSES } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, RUN_STATUSES, TASK_STATUSES } from '@selarikru/domain';
 import { INFERENCE_MODES } from '@selarikru/policy';
 import { CursorSchema, ProvenanceSchema, VIEW_SCHEMA_VERSION } from './common.ts';
 import { UsageEntrySchema } from './usage.ts';
@@ -89,6 +89,44 @@ export const ReducedScopeViewSchema = z
   .strict();
 export type ReducedScopeView = z.infer<typeof ReducedScopeViewSchema>;
 
+/** One acceptance criterion and what the trusted verifier last said about it. `candidateSha` and `check` are both null, or both set: a state with no check is `not_run`. */
+export const CriterionEvidenceViewSchema = z
+  .object({
+    criterionId: Id,
+    state: z.union([CheckStatusSchema, z.literal('not_run')]),
+    /** Counted in `criteria.verified`: a pass at the current revision on a live candidate. */
+    verified: z.boolean(),
+    taskIds: z.array(Id),
+    check: z.object({ checkRunId: Id, checkId: Id, checkVersion: Id, taskId: Id, revision: z.number().int().min(1), attemptId: Id.nullable(), recordId: Id.nullable(), verificationAttempt: z.number().int().min(1), at: Iso }).strict().nullable(),
+    candidateSha: Id.nullable(),
+  })
+  .strict();
+export type CriterionEvidenceView = z.infer<typeof CriterionEvidenceViewSchema>;
+
+/** The candidate the report is about and the record that judged it. Identifiers and hashes only. */
+export const CandidateEvidenceViewSchema = z
+  .object({
+    sha: Id,
+    status: z.string().min(1),
+    /** False once the candidate was rejected or replaced: its passes count for nothing. */
+    live: z.boolean(),
+    baseSha: Id,
+    treeSha: Id.nullable(),
+    target: Id,
+    recordedAt: Iso,
+    recordId: Id.nullable(),
+    verifierHost: Id.nullable(),
+    checkManifestSha256: Id.nullable(),
+    verifierSha256: Id.nullable(),
+    /** Criteria whose result changed between suite retries. A flaky pass stays visible. */
+    flaky: z.array(Id),
+  })
+  .strict();
+export type CandidateEvidenceView = z.infer<typeof CandidateEvidenceViewSchema>;
+
+export const RunEvidenceViewSchema = z.object({ candidate: CandidateEvidenceViewSchema.nullable(), criteria: z.array(CriterionEvidenceViewSchema) }).strict();
+export type RunEvidenceView = z.infer<typeof RunEvidenceViewSchema>;
+
 export const RunViewSchema = z
   .object({
     runId: Id,
@@ -101,6 +139,8 @@ export const RunViewSchema = z
      * a task count is then the most that can be said. Nothing derived from liveness or activity ever feeds this.
      */
     criteria: z.object({ verified: z.number().int().min(0), total: z.number().int().min(0) }).strict().refine((c) => c.verified <= c.total, { message: 'verified criteria cannot exceed the total' }).nullable().default(null),
+    /** The per-criterion evidence behind `criteria`. Null exactly when `criteria` is: per-criterion evidence is not connected. */
+    evidence: RunEvidenceViewSchema.nullable().default(null),
     /** Set once the owner accepted a budget stop. Null means nobody has. */
     reducedScope: ReducedScopeViewSchema.nullable().default(null),
     /** Null means the source has not reported one (or the run has no budget stop): the not-delivered list is then unknown, and is never read as empty. */
@@ -242,6 +282,16 @@ export const CheckViewSchema = z
   .strict();
 export type CheckView = z.infer<typeof CheckViewSchema>;
 
+/** An enrolled, unrevoked runner. Its token is never part of this. Null `lastSeenAt`: it has not been seen since freshness was recorded. */
+export const RunnerViewSchema = z
+  .object({ runnerId: Id, location: z.enum(['local', 'cloud']), label: z.string().nullable(), lastSeenAt: Iso.nullable() })
+  .strict();
+export type RunnerView = z.infer<typeof RunnerViewSchema>;
+
+/** Scheduler limits the source reports. Null: not reported, which is never read as unlimited. */
+export const LimitsViewSchema = z.object({ maxConcurrentTotal: z.number().int().min(1).nullable() }).strict();
+export type LimitsView = z.infer<typeof LimitsViewSchema>;
+
 export const SnapshotMetaSchema = z
   .object({
     schemaVersion: z.literal(VIEW_SCHEMA_VERSION),
@@ -296,6 +346,8 @@ export const ProjectViewSnapshotSchema = z
     approvalHistory: z.array(ApprovalHistoryEntrySchema).default([]),
     modelCatalog: ModelCatalogViewSchema.default(UNKNOWN_MODEL_CATALOG),
     modelAssignments: z.array(ModelAssignmentViewSchema).default([]),
+    runners: z.array(RunnerViewSchema).default([]),
+    limits: LimitsViewSchema.default({ maxConcurrentTotal: null }),
   })
   .strict();
 export type ProjectViewSnapshot = z.infer<typeof ProjectViewSnapshotSchema>;
@@ -304,6 +356,6 @@ export function emptySnapshot(init: { projectId: string; observedAt: string; pro
   return {
     meta: { schemaVersion: VIEW_SCHEMA_VERSION, projectId: init.projectId, cursor: '0', observedAt: init.observedAt, provenance: init.provenance },
     assistant: { mode: null, observedSource: 'unknown' },
-    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [], modelCatalog: UNKNOWN_MODEL_CATALOG, modelAssignments: [],
+    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [], modelCatalog: UNKNOWN_MODEL_CATALOG, modelAssignments: [], runners: [], limits: { maxConcurrentTotal: null },
   };
 }

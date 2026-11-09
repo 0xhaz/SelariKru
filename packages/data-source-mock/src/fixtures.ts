@@ -92,7 +92,7 @@ function longBuildStall(): Fixture {
   b.silence('att_web_1', 56, 100); // no heartbeat for 44 s, then it resumes
   b.complete('web', 'att_web_1', 130, LOCAL);
   return done(b, {
-    id: 'long-build-stall', name: 'Long-build stall', startSec: 95, assistant: ASSISTANT_DEVICE,
+    id: 'long-build-stall', name: 'Long-build stall', startSec: 95, assistant: ASSISTANT_DEVICE, reportsActivity: false,
     description: 'No heartbeat for over 30 seconds, probably during a long build. That is a suspected stall: not a lost connection and not a failure. The task stays running; the heartbeat resumes later.',
     usage: [b.use('web', 'att_web_1', figure('cost_usd', '0.09', 'estimated', 'rate_card'))],
   });
@@ -179,12 +179,13 @@ function noData(): Fixture {
 
 function mergeFlow(): Fixture {
   const b = new FixtureBuilder('merge-flow', 1111);
-  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3 }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2 });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3, requirements: ['FB-01', 'FB-02', 'FB-03'] }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2, requirements: ['FB-04', 'FB-05'] });
   b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
-  b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
-  b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
+  // The candidate is assembled before anything judges it: verification runs on the assembled commit.
+  b.complete('api', 'att_api_1', 40, LOCAL).complete('web', 'att_web_1', 45, CLOUD).emit('candidate.assembled', 47, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+  b.verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
   // The last verdict makes the run ready for review in the same transaction, with no event: the snapshot says so.
-  b.emit('candidate.assembled', 60, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+  b.verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
   b.emit('change.proposed', 65, { actor: INTEGRATION, payload: { prNumber: 12, url: 'https://github.com/selarikru-demo/feedback-board/pull/12' } });
   // A merge seen on GitHub: a run-level event, then one per verified task. The run's `merged` follows with no event of its own.
   const merged = { prNumber: 12, url: 'https://github.com/selarikru-demo/feedback-board/pull/12', candidateSha: 'c'.repeat(40), mergeCommitSha: 'd'.repeat(40) };
@@ -273,11 +274,11 @@ function integrationBlocked(): Fixture {
 }
 
 function reviewable(b: FixtureBuilder): void {
-  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3, requirements: ['FB-01'] }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2, requirements: ['FB-02'] });
+  b.task('api', { title: 'Feedback API', role: 'backend', criteria: 3, requirements: ['FB-01', 'FB-02', 'FB-03'] }).task('web', { title: 'Feedback list UI', role: 'frontend', criteria: 2, requirements: ['FB-04', 'FB-05'] });
   b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
-  b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
-  b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
-  b.emit('candidate.assembled', 60, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+  b.complete('api', 'att_api_1', 40, LOCAL).complete('web', 'att_web_1', 45, CLOUD).emit('candidate.assembled', 47, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+  b.verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
+  b.verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
 }
 
 function mergeReview(): Fixture {

@@ -46,7 +46,7 @@ describe('delivery', () => {
 
   it('counts only the run shown, not every run in the project', () => {
     const snapshot = snapshotOf({ tasks: [task('a', { status: 'verified', runId: 'old' }), task('b', { status: 'verified' }), task('c')] });
-    snapshot.runs = { old: { runId: 'old', lifecycle: 'merged', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null }, ...snapshot.runs };
+    snapshot.runs = { old: { runId: 'old', lifecycle: 'merged', planRevision: 1, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null }, ...snapshot.runs };
     const { delivery } = buildOverview(snapshot, NOW, NOW);
     expect(delivery.criteriaLabel).toBe('1 of 2 tasks verified');
     expect(delivery.tasks.map((t) => t.taskId)).toEqual(['c', 'b']);

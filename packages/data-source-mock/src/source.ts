@@ -58,6 +58,11 @@ const HEARTBEAT_STEP_MS = 10_000;
 /** The route's `REVERIFY_LIMIT`: re-verifications per task revision. */
 const REVERIFY_LIMIT = 3;
 const NOT_OWED: readonly string[] = ['verified', 'merged', 'superseded'];
+/** Fixture activity: what a worker reports through its heartbeat, one tool name every 15 s from the attempt's start. Simulated, and only ever a tool name. */
+const TOOL_CYCLE = ['Read', 'Grep', 'Edit', 'Bash'] as const;
+const TOOL_STEP_MS = 15_000;
+/** The candidate every fixture's verdicts judge. Simulated, never a real commit. */
+const SIMULATED_CANDIDATE = 'c'.repeat(40);
 const sorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
 /** The mock's stand-in for the server's SHA-256: deterministic over the same fields, and never presented as a real digest. */
 function digest(notDelivered: NotDelivered): string {
@@ -120,7 +125,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         const seed = seedFor(id, planRevision);
         if (seed) tasks = { ...tasks, [id]: seedTask(seed, event.runId, event.occurredAt, tasks[id]) };
       }
-      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
+      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
       snap = {
         ...snap, tasks, runs: { ...snap.runs, [event.runId]: { ...run, lifecycle: 'running', planRevision } },
         meta: { ...snap.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt },
@@ -137,6 +142,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const result = applyEvent(p.state, applied);
     if (result.outcome === 'resync' || result.outcome === 'duplicate') throw new Error(`mock fixture ${p.fixture.id} is inconsistent at ${event.type}: ${result.outcome}`);
     p.state = result.state;
+    // The provider's merge record arrives when the merge does. Only the run-level event states it; merge reconciliation has no event of its own on the real server.
+    if (event.type === 'change.merged' && event.taskId === event.runId) {
+      const mergeCommitSha = typeof event.payload['mergeCommitSha'] === 'string' ? event.payload['mergeCommitSha'] : null;
+      p.changeRequests = p.changeRequests.map((c) => (c.runId === event.runId ? { ...c, status: 'merged', mergeCommitSha, observedAt: event.occurredAt } : c));
+    }
     advanceLifecycle(p, event.runId);
   }
 
@@ -217,6 +227,35 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     return { verified, total };
   }
 
+  /** Per-criterion evidence as a server would hold it. Null exactly when `criteria` is. The rows are built from the same seeds, so the two cannot disagree. */
+  function evidenceOf(p: Project, runId: string): RunView['evidence'] {
+    if (criteriaOf(p, runId) === null) return null;
+    const snap = p.state.snapshot;
+    const live = Object.values(snap.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
+    const judged = Object.values(snap.checks).some((c) => live.some((t) => t.taskId === c.taskId));
+    const candidate = judged ? {
+      sha: SIMULATED_CANDIDATE, status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: 'd'.repeat(40), target: 'main', recordedAt: Object.values(snap.checks).map((c) => c.updatedAt).sort().at(-1)!,
+      recordId: 'ver_simulated', verifierHost: 'demo-verifier', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: [],
+    } : null;
+    const criteria = live.flatMap((t) => {
+      const seed = p.fixture.tasks.filter((x) => x.taskId === t.taskId && x.revision <= t.revision).sort((a, b) => b.revision - a.revision)[0]!;
+      const check = Object.values(snap.checks).filter((c) => c.taskId === t.taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      const verified = t.status === 'verified' || t.status === 'merged';
+      const failed = t.status === 'failed' || check?.state === 'failed';
+      const count = seed.criteria ?? 0;
+      return Array.from({ length: count }, (_, i) => {
+        const criterionId = seed.requirementIds.length === count ? seed.requirementIds[i]! : `${seed.taskId.split('.').at(-1)!.toUpperCase()}-${i + 1}`;
+        const ran = (verified || failed) && check !== undefined;
+        return {
+          criterionId, state: ran ? (verified ? ('passed' as const) : ('failed' as const)) : ('not_run' as const), verified, taskIds: [t.taskId],
+          check: ran ? { checkRunId: `${check.checkId}:${criterionId}`, checkId: criterionId, checkVersion: 'demo-1', taskId: t.taskId, revision: t.revision, attemptId: t.attemptIds.at(-1) ?? null, recordId: 'ver_simulated', verificationAttempt: 1, at: check.updatedAt } : null,
+          candidateSha: ran ? SIMULATED_CANDIDATE : null,
+        };
+      });
+    });
+    return { candidate, criteria };
+  }
+
   /** The same reading as the real `assessRunScope`: what the budget stopped, and what is and is not delivered. Null when nothing was stopped. */
   function scopeAssessmentOf(p: Project, runId: string): ScopeAssessment | null {
     const tasks = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId).sort((a, b) => (a.taskId < b.taskId ? -1 : 1));
@@ -254,11 +293,17 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const workers = Object.fromEntries(
       Object.entries(s.workers).map(([id, w]) => {
         const a = w.attemptId !== null ? attempts[w.attemptId] : undefined;
-        return [id, w.leaseHeld && a ? { ...w, lastHeartbeatAt: a.lastHeartbeatAt } : w];
+        if (!w.leaseHeld || !a) return [id, w];
+        if (p.fixture.reportsActivity === false) return [id, { ...w, lastHeartbeatAt: a.lastHeartbeatAt }];
+        const worked = a.lastHeartbeatAt === null ? 0 : Math.floor((Date.parse(a.lastHeartbeatAt) - Date.parse(a.startedAt)) / TOOL_STEP_MS);
+        const latestAction = { tool: TOOL_CYCLE[worked % TOOL_CYCLE.length]!, summary: null, longRunning: false, at: isoOf(Date.parse(a.startedAt) + worked * TOOL_STEP_MS) };
+        return [id, { ...w, lastHeartbeatAt: a.lastHeartbeatAt, latestAction }];
       }),
     );
-    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
-    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s) };
+    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
+    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
+      runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
+    };
   }
 
   const prng = mulberry32(0x5e1a);

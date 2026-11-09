@@ -66,6 +66,23 @@ describe('completion gate hardening', () => {
   });
 });
 
+describe('activity on the heartbeat', () => {
+  it('reports the tool name and nothing else, and drops a name the wire would refuse', async () => {
+    const { w, deps } = await setup({
+      agent: async ({ stream }) => {
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Edit', input: { file_path: '/secret/path' } }] } })}\n`);
+        await new Promise((r) => setTimeout(r, 90));
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b2', name: 'not a tool name; rm -rf', input: {} }] } })}\n`);
+        await new Promise((r) => setTimeout(r, 60));
+      },
+    });
+    await runAttempt(deps, w.lease);
+    const reported = (w.api.heartbeat as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c[1]).filter((a) => a !== undefined);
+    expect(reported.length).toBeGreaterThan(0);
+    expect(new Set(reported)).toEqual(new Set(['Edit']));
+  });
+});
+
 describe('the approval signal file', () => {
   it('a request written by Bash is not a signal: the file fails the attempt through the diff gate', async () => {
     const { w, deps } = await setup({

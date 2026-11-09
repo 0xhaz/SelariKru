@@ -176,7 +176,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   }
 
   if (!model) {
-    if (connection === 'unavailable') {
+    if (connection === 'unavailable' || connection === 'dead') {
       return (
         <>
           <Heading count={0} paused elsewhere={0} counted={0} />

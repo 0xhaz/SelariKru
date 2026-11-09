@@ -1,6 +1,7 @@
 import type { Clock } from './common.ts';
 import { cursorToSequence } from './common.ts';
-import type { DataSourceError, EngineeringDataSource } from './data-source.ts';
+import { DataSourceException, type DataSourceError, type EngineeringDataSource } from './data-source.ts';
+import type { ProjectViewEvent } from './events.ts';
 import { applyEvent, carryResolvedApprovals, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
 
 /** `live`: subscribed. `reconnecting`: a snapshot load failed and a retry is scheduled. `dead`: the stream cannot recover; data is frozen. */
@@ -41,8 +42,15 @@ export interface SessionOptions {
 export const MAX_STUCK_RESYNCS = 5;
 /** Backoff after a failed load or a stream error doubles from the base up to this cap, then repeats at the cap with no attempt limit. */
 export const MAX_RETRY_DELAY_MS = 30_000;
-/** Errors that no retry can fix: the session is dead. Anything else retryable, and `invalid_cursor`, goes back through a snapshot. */
-const TERMINAL_CODES: readonly DataSourceError['code'][] = ['unauthorized', 'unknown_project', 'disconnected'];
+/** Whatever `retryable` says, no retry can fix these. */
+const TERMINAL_CODES: readonly DataSourceError['code'][] = ['unauthorized', 'unknown_project'];
+/**
+ * True when this error ends the session. `disconnected` is deliberately not on the list above: a dropped connection is `retryable: true` and recovers, while a source closed on
+ * purpose reports it non-retryable and lands here. `invalid_cursor` always goes back through a snapshot.
+ */
+const isTerminal = (e: DataSourceError): boolean => TERMINAL_CODES.includes(e.code) || (!e.retryable && e.code !== 'invalid_cursor');
+/** Events that change what `criteria` counts. Criteria arrive only by snapshot, so these trigger a refresh rather than waiting up to 10 s behind the task rows. */
+const CRITERIA_EVENTS: readonly ProjectViewEvent['type'][] = ['verification.passed', 'verification.failed', 'candidate.assembled', 'candidate.failed', 'task.reopened', 'task.cancelled', 'task.superseded', 'change.merged'];
 const DEFAULT_REFRESH_MS = 10_000;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 
@@ -54,7 +62,7 @@ const DEFAULT_RETRY_BASE_MS = 1_000;
  * Failures: a failed snapshot load, or a retryable error on the stream, is retried with exponential backoff (capped at 30 s, repeated with no
  * attempt limit) on the injected scheduler and resubscribes from the new cursor on success. `invalid_cursor` (the server's `cursor_ahead`) goes
  * back through a snapshot at once. The resync budget counts only resyncs that made no progress, so spaced, successful resyncs stay live.
- * The session is dead only for a terminal error (`unauthorized` and the like) or a snapshot stuck behind the triggering event: it reports
+ * A dropped connection (`disconnected`, retryable) is never fatal. The session is dead only for a terminal error (`unauthorized`, a non-retryable code, from the stream or from a snapshot load) or a snapshot stuck behind the triggering event: it reports
  * `stream_dead`, stops merging liveness (so workers cannot look healthy over frozen task state) and keeps the last state, visibly stale
  * through `status()` and `livenessAsOfMs()`.
  */
@@ -71,6 +79,9 @@ export function startProjection(source: EngineeringDataSource, projectId: string
   let unsubscribe: (() => void) | null = null;
   let cancelRetry: (() => void) | null = null;
   let cancelRefresh: () => void = () => {};
+  let criteriaRefreshing = false;
+  let criteriaAgain = false;
+  const refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS;
 
   const isLive = (): boolean => status === 'live';
   const fail = (error: DataSourceError): void => {
@@ -114,11 +125,12 @@ export function startProjection(source: EngineeringDataSource, projectId: string
         if (result.outcome === 'duplicate') return;
         current = result.state;
         hooks.onState(current);
+        if (refreshMs > 0 && result.outcome === 'applied' && CRITERIA_EVENTS.includes(event.type)) requestCriteriaRefresh();
       },
       (error) => {
         if (stopped || mine !== generation) return;
         fail(error);
-        if (TERMINAL_CODES.includes(error.code) || (!error.retryable && error.code !== 'invalid_cursor')) {
+        if (isTerminal(error)) {
           die(`event stream failed and cannot be retried (${error.code})`);
           return;
         }
@@ -168,10 +180,16 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     let snapshot;
     try {
       snapshot = await source.getSnapshot(projectId);
-    } catch {
+    } catch (e) {
       loading = false;
       if (mine !== generation || stopped) return;
-      fail({ code: 'unavailable', message: 'snapshot could not be loaded; retrying', retryable: true });
+      const detail = e instanceof DataSourceException ? e.detail : null;
+      if (detail !== null && isTerminal(detail)) {
+        fail(detail);
+        die(`snapshot could not be loaded and cannot be retried (${detail.code})`);
+        return;
+      }
+      fail(detail ?? { code: 'unavailable', message: 'snapshot could not be loaded; retrying', retryable: true });
       scheduleRetry();
       return;
     }
@@ -199,11 +217,18 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     let fresh;
     try {
       fresh = await source.getSnapshot(projectId);
-    } catch {
+    } catch (e) {
+      if (stopped || !isLive()) return;
+      if (e instanceof DataSourceException && isTerminal(e.detail)) {
+        fail(e.detail);
+        die(`snapshot could not be refreshed and cannot be retried (${e.detail.code})`);
+        return;
+      }
       fail({ code: 'refresh_failed', message: 'liveness refresh failed; heartbeat data is going stale', retryable: true });
       return;
     }
     if (stopped || !isLive() || current === null) return;
+    retries = 0; // the source answered: the next outage starts its backoff from the base
     asOf = options.clock.nowMs();
     const merged = mergeDecisionFacts(mergeRunLifecycle(mergeLiveness(current, fresh), fresh), fresh);
     if (merged !== current) {
@@ -212,8 +237,23 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     }
   }
 
+  /** One refresh at a time for a burst of verdicts: a request that lands during one runs once more after it. */
+  function requestCriteriaRefresh(): void {
+    if (criteriaRefreshing) {
+      criteriaAgain = true;
+      return;
+    }
+    criteriaRefreshing = true;
+    void refresh().finally(() => {
+      criteriaRefreshing = false;
+      if (criteriaAgain) {
+        criteriaAgain = false;
+        requestCriteriaRefresh();
+      }
+    });
+  }
+
   void load();
-  const refreshMs = options.refreshMs ?? DEFAULT_REFRESH_MS;
   cancelRefresh = refreshMs > 0 ? options.every(() => void refresh(), refreshMs) : () => {};
 
   return {

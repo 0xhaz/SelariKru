@@ -1,5 +1,6 @@
+import { RUNNER_RECENT_SECONDS } from '@selarikru/domain';
 import { LEASE_EXPIRY_MS, LIVENESS_STALE_MS, SUSPECT_AFTER_MS } from './common.ts';
-import type { ApprovalView, ProjectViewSnapshot, RunView, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
+import type { ApprovalView, ProjectViewSnapshot, RunView, RunnerView, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
 
 /** Derived reads. Time is a parameter (`nowMs`); nothing here reads a clock. */
 
@@ -29,6 +30,11 @@ export function effectiveWorkerHealth(worker: WorkerView, nowMs: number, livenes
   if (age >= LEASE_EXPIRY_MS) return { health: 'disconnected', heartbeatAgeMs: age, derived: true };
   if (age >= SUSPECT_AFTER_MS) return { health: 'suspected_stall', heartbeatAgeMs: age, derived: true };
   return { health: 'healthy', heartbeatAgeMs: age, derived: false };
+}
+
+/** Whether a runner reached the control plane recently. Uses the same window the scheduler uses, so what is shown and what is counted agree. */
+export function runnerRecent(runner: Pick<RunnerView, 'lastSeenAt'>, nowMs: number): boolean {
+  return runner.lastSeenAt !== null && nowMs - Date.parse(runner.lastSeenAt) < RUNNER_RECENT_SECONDS * 1000;
 }
 
 export type ApprovalDisplayState = 'pending' | 'granted' | 'denied' | 'expired' | 'superseded';

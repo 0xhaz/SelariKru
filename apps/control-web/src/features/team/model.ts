@@ -1,6 +1,6 @@
 import { formatAge, formatCount, formatDuration, formatExact, formatUsd, type Tone } from '@selarikru/ui';
 import {
-  approvalStateAt, effectiveWorkerHealth, usageFor,
+  approvalStateAt, effectiveWorkerHealth, runnerRecent, usageFor,
   type AttemptView, type CheckView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
 import { explain, requestText, sentence } from '../overview/attention.ts';
@@ -174,6 +174,15 @@ export interface TeamRow {
   readonly detail: WorkerDetail;
 }
 
+export interface RunnerRow {
+  readonly runnerId: string;
+  readonly label: string | null;
+  readonly location: 'local' | 'cloud';
+  /** Seen recently enough for the scheduler to count it. */
+  readonly recent: boolean;
+  readonly lastSeenAt: string | null;
+}
+
 export interface TeamModel {
   readonly empty: boolean;
   readonly simulated: boolean;
@@ -186,6 +195,8 @@ export interface TeamModel {
   /** Providers on recorded attempts; `unknown` is listed only if some worker has no record. */
   readonly providers: readonly { readonly value: string; readonly label: string }[];
   readonly assignments: AssignmentsModel;
+  /** Enrolled runners and whether each is still reachable, independently of any worker. */
+  readonly runners: readonly RunnerRow[];
 }
 
 const ACTIVITY_RANK: Readonly<Partial<Record<WorkerActivity, number>>> = { blocked_policy: 1, waiting_human: 2 };
@@ -426,7 +437,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
 
   const base = activityOf(w, snapshot);
   const activity: ActivitySignal = base.reported
-    ? { label: base.label, tone: stale ? 'neutral' : base.tone, reported: true, stale, since: formatAge(nowMs - Date.parse(w.enteredStateAt)), tool: toolOf(w) }
+    ? { label: base.label, tone: stale ? 'neutral' : base.tone, reported: true, stale, since: formatAge(nowMs - Date.parse(w.enteredStateAt)), tool: w.activity === null ? null : toolOf(w) }
     : { label: base.label, tone: 'neutral', reported: false, stale: false, since: null, tool: null };
 
   let healthNote: string | null = null;
@@ -496,8 +507,10 @@ export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, liveness
   const counts = countFleet(workers, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const parts = [[counts.working, 'assigned'], [counts.waiting, 'waiting'], [counts.idle, 'idle'], [counts.lost, 'lost']].filter(([n]) => (n as number) > 0).map(([n, label]) => `${n} ${label as string}`);
   const stale = sessionStale || rows.some((r) => r.health.state === 'unknown');
-  const summary = rows.length === 0 ? null : `${stale ? 'Last confirmed: ' : ''}${rows.length} worker${rows.length === 1 ? '' : 's'} seen: ${parts.join(', ')}.${workers.some((w) => w.activity === 'waiting_resource') ? ' Slot limit not reported.' : ''}`;
+  const summary = rows.length === 0 ? null : `${stale ? 'Last confirmed: ' : ''}${rows.length} worker${rows.length === 1 ? '' : 's'} seen: ${parts.join(', ')}.${workers.some((w) => w.activity === 'waiting_resource') && snapshot.limits.maxConcurrentTotal === null ? ' Slot limit not reported.' : ''}`;
   return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort(), runs: [...new Set(rows.flatMap((r) => (r.runId ? [r.runId] : [])))].sort(),
     providers: [...new Set(rows.map((r) => r.assignment?.provider ?? 'unknown'))].sort().map((value) => ({ value, label: value === 'unknown' ? 'Not recorded' : (snapshot.modelCatalog.providers.find((p) => p.provider === value)?.label ?? value) })),
-    assignments: buildAssignments(snapshot) };
+    assignments: buildAssignments(snapshot),
+    runners: snapshot.runners.map((r) => ({ runnerId: r.runnerId, label: r.label, location: r.location, recent: runnerRecent(r, nowMs), lastSeenAt: r.lastSeenAt })),
+  };
 }

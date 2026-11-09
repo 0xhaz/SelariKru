@@ -57,7 +57,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       if (loc !== 'local' && loc !== 'cloud') throw invalid;
       await tx.insert(schema.runners).values({
         tenantId: config.tenantId, runnerId, location: loc, tokenHash: sha256Hex(token),
-        ...(body.label !== undefined ? { label: redactSecrets(body.label) } : {}), ...(body.harnesses !== undefined ? { harnessReport: body.harnesses } : {}), createdAt: at,
+        ...(body.label !== undefined ? { label: redactSecrets(body.label) } : {}), ...(body.harnesses !== undefined ? { harnessReport: body.harnesses } : {}), createdAt: at, lastSeenAt: at,
       });
       return loc;
     });
@@ -101,7 +101,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post('/v1/runners/heartbeat', guard, async (req, reply) => {
     const runner = runnerOf(req);
     const body = parseBody(HeartbeatRequestSchema, req.body);
-    const result = await scheduler.heartbeat(await leaseFor(runner, body.lease));
+    const result = await scheduler.heartbeat(await leaseFor(runner, body.lease), body.activity);
     if (!result.ok) throw conflict(result.error);
     return reply.code(200).send(result.value);
   });

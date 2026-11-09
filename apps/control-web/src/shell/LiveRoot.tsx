@@ -1,4 +1,5 @@
-import { lazy, useMemo } from 'react';
+import { lazy, useEffect, useMemo } from 'react';
+import { createLiveDataSource } from '@selarikru/data-source-live';
 import { signOut } from 'firebase/auth';
 import { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
@@ -25,8 +26,12 @@ function App({ account }: { account: AccountInfo }) {
     projectId: (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '',
     runId: (import.meta.env.VITE_DEMO_RUN_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) || '',
   };
-  // The live projection source arrives with the live adapter (T5.6). Until then Mission Control reports itself unavailable; it never shows mock data.
-  const store = useMemo(() => createProjectionStore({ source: null, projectId: defaults.projectId, clock: { nowMs: () => Date.now() }, every }), [defaults.projectId]);
+  // No URL or project configured means no source: the shell then says data is unavailable. It never shows mock data.
+  const store = useMemo(() => createProjectionStore({ source: baseUrl && defaults.projectId ? createLiveDataSource({ baseUrl, getToken: getOwnerToken }) : null, projectId: defaults.projectId, clock: { nowMs: () => Date.now() }, every }), [baseUrl, defaults.projectId]);
+  useEffect(() => {
+    store.getState().start();
+    return () => store.getState().stop();
+  }, [store]);
   return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} />} />;
 }
 

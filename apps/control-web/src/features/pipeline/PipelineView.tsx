@@ -186,7 +186,7 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
     return (
       <>
         <Heading />
-        {connection === 'unavailable' ? (
+        {(connection === 'unavailable' || connection === 'dead') ? (
           <section aria-label="Connection" className="rounded-card border border-line bg-panel">
             <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>

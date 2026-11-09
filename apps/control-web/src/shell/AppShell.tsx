@@ -11,9 +11,11 @@ import { buildPipeline, type PipelineModel } from '../features/pipeline/model.ts
 import { pipelinePresentation } from '../features/pipeline/presentation.ts';
 import { DecisionsView } from '../features/decisions/DecisionsView.tsx';
 import { buildDecisions, type DecisionsModel } from '../features/decisions/model.ts';
+import { EvidenceView } from '../features/evidence/EvidenceView.tsx';
+import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
-import { hrefFor, useRoute, type Route } from './route.ts';
+import { hrefFor, useHashQuery, useRoute, type Route } from './route.ts';
 import { useTheme } from './theme.ts';
 
 export interface AccountInfo {
@@ -39,10 +41,11 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Team', route: 'team' },
   { label: 'Pipeline', route: 'pipeline' },
   { label: 'Decisions', route: 'decisions' },
+  { label: 'Evidence', route: 'evidence' },
   { label: 'Assistant', route: 'assistant' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', assistant: 'Assistant' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', assistant: 'Assistant' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -147,6 +150,16 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
     }
   }, [snapshot, state.nowMs, mode, connection]);
   const decisionCount = builtDecisions.decisions?.waiting ?? 0;
+  const query = useHashQuery();
+  const evidenceRun = route === 'evidence' ? query.get('run') : null;
+  const builtEvidence = useMemo((): { evidence: EvidenceModel | null; failure?: unknown } => {
+    if (route !== 'evidence' || !snapshot) return { evidence: null };
+    try {
+      return { evidence: buildEvidence(snapshot, evidenceRun) };
+    } catch (failure) {
+      return { evidence: null, failure };
+    }
+  }, [route, snapshot, evidenceRun]);
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
@@ -252,6 +265,14 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
               elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
               counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
+            />
+          </RouteBoundary>
+        ) : null}
+        {route === 'evidence' ? (
+          <RouteBoundary resetKey={`evidence:${builtEvidence.failure === undefined ? 'ok' : 'failed'}`}>
+            <EvidenceView
+              connection={connection} error={state.error} model={builtEvidence.evidence} failure={builtEvidence.failure} hasSnapshot={snapshot !== null} confirmedAt={confirmedAt} mode={mode} leaveDemoHref={leaveDemoHref}
+              checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
             />
           </RouteBoundary>
         ) : null}

@@ -66,6 +66,9 @@ importers:
 
   apps/control-web:
     dependencies:
+      '@selarikru/data-source-live':
+        specifier: workspace:*
+        version: link:../../packages/data-source-live
       '@selarikru/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -175,6 +178,22 @@ importers:
         version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
   packages/artifacts:
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  packages/data-source-live:
+    dependencies:
+      '@selarikru/view-protocol':
+        specifier: workspace:*
+        version: link:../view-protocol
     devDependencies:
       '@types/node':
         specifier: 24.19.2
@@ -464,9 +483,24 @@ importers:
 
   tests/conformance:
     dependencies:
+      '@selarikru/control-api':
+        specifier: workspace:*
+        version: link:../../apps/control-api
+      '@selarikru/data-source-live':
+        specifier: workspace:*
+        version: link:../../packages/data-source-live
       '@selarikru/data-source-mock':
         specifier: workspace:*
         version: link:../../packages/data-source-mock
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@selarikru/integrations-github':
+        specifier: workspace:*
+        version: link:../../packages/integrations-github
+      '@selarikru/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
       '@selarikru/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -476,6 +510,12 @@ importers:
       '@selarikru/view-protocol':
         specifier: workspace:*
         version: link:../../packages/view-protocol
+      '@selarikru/workflow':
+        specifier: workspace:*
+        version: link:../../services/workflow
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
     devDependencies:
       '@types/node':
         specifier: 24.19.2

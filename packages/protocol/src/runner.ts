@@ -28,7 +28,10 @@ export type LeaseRef = z.infer<typeof LeaseRefSchema>;
 /** `harnesses`: what this runner can launch now, probed on its own machine. Absent: the last report stands. */
 export const ClaimRequestSchema = z.object({ harnesses: z.array(RunnerHarnessReportSchema).max(20).optional() }).strict();
 
-export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema }).strict();
+/** The name of the tool a worker last started. A name and nothing else: no arguments, paths or output can fit, and a credential-shaped one is refused. */
+export const ToolNameSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/, 'expected a tool name').refine((n) => redactSecrets(n) === n, 'the tool name looks like a secret');
+
+export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema, activity: ToolNameSchema.optional() }).strict();
 
 export const ResultRequestSchema = z
   .object({

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
-import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
@@ -141,6 +141,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   // Heartbeat from the very start: creating a sandbox can take longer than the lease.
   let missed = 0;
   let beating = false;
+  // The tool the worker last started. The heartbeat reports its name and nothing else.
+  let activity: string | undefined;
   const beat = setInterval(() => {
     if (aborted()) {
       requestStop();
@@ -149,7 +151,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (beating) return;
     beating = true;
     deps.api
-      .heartbeat(ref)
+      .heartbeat(ref, activity)
       .then((hb) => {
         missed = 0;
         if (hb.cancelRequested) {
@@ -310,6 +312,12 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
             requestStop();
           }
           break;
+        case 'tool_call': {
+          // A name the wire would refuse is left unsaid: an odd tool name must never cost the attempt its heartbeat.
+          const name = ToolNameSchema.safeParse(ev.toolName);
+          if (name.success) activity = name.data;
+          break;
+        }
         case 'launch_refused':
           refused = ev.reason === 'capability_unavailable' ? `${ev.capability} is ${ev.status}` : `model_unsupported:${ev.provider}/${ev.model}`;
           break;

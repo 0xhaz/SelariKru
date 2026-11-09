@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { AxisBadges, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, buttonQuiet } from '@selarikru/ui';
+import { AxisBadges, Chip, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, Timestamp, buttonQuiet, formatClock } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import { WorkerDrawer } from './WorkerDrawer.tsx';
 import { ModelAssignmentsPanel } from './ModelAssignments.tsx';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
-import { NO_FILTER, SORT_KEYS, filterRows, sortRows, type FleetFilter, type SortKey, type TeamModel, type TeamRow } from './model.ts';
+import { NO_FILTER, SORT_KEYS, filterRows, sortRows, type FleetFilter, type RunnerRow, type SortKey, type TeamModel, type TeamRow } from './model.ts';
 
 const WIDE = '(min-width: 1024px)';
 
@@ -151,6 +151,29 @@ function Toolbar({ sort, onSort, filter, onFilter, roles, runs, providers, shown
   );
 }
 
+/** Runner liveness apart from any task: an enrolled runner that has gone quiet reads as such, and an old enrolment is not mistaken for capacity. */
+function RunnersPanel({ runners, simulated }: { runners: readonly RunnerRow[]; simulated: boolean }) {
+  const recent = runners.filter((r) => r.recent).length;
+  return (
+    <Panel title="Runners" labelId="team-runners-title" aside={`${recent} of ${runners.length} reachable${simulated ? ', simulated' : ''}`}>
+      <ul className="divide-y divide-line">
+        {runners.map((r) => (
+          <li key={r.runnerId} data-testid="runner-row" data-recent={r.recent} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2">
+            <span className="min-w-0">
+              <span className="break-all font-mono text-mono text-fg">{r.label ?? r.runnerId}</span>
+              <span className="ml-2 text-sm text-muted">{r.location === 'cloud' ? 'Cloud sandbox' : 'Local sandbox'}</span>
+            </span>
+            <span className="flex items-center gap-2">
+              <Chip tone={r.recent ? 'success' : 'neutral'}>{r.recent ? 'Reachable' : 'Not reachable'}</Chip>
+              <span className="text-sm text-muted">{r.lastSeenAt ? <>Last seen <Timestamp iso={r.lastSeenAt}>{formatClock(r.lastSeenAt)}</Timestamp></> : 'Not seen since it enrolled'}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Panel>
+  );
+}
+
 export interface TeamViewProps {
   readonly connection: ConnectionState;
   readonly error: DataSourceError | null;
@@ -205,7 +228,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
     return (
       <>
         <Heading />
-        {connection === 'unavailable' ? (
+        {connection === 'unavailable' || connection === 'dead' ? (
           <section aria-label="Connection" className="rounded-card border border-line bg-panel">
             <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>
@@ -241,6 +264,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
           ) : wide ? <FleetTable rows={rows} sort={sort} nowMs={nowMs} onOpen={setSelectedId} /> : <FleetCards rows={rows} nowMs={nowMs} onOpen={setSelectedId} />}
         </Panel>
       )}
+      {team.runners.length > 0 ? <div className="mt-4"><RunnersPanel runners={team.runners} simulated={team.simulated} /></div> : null}
       {selected ? <WorkerDrawer key={selected.workerId} row={selected} mode={mode} simulated={team.simulated} wide={wide} nowMs={nowMs} onClose={close} assign={assignProps} /> : null}
     </>
   );

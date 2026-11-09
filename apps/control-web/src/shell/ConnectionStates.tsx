@@ -12,7 +12,7 @@ export function NextStep({ mode, leaveDemoHref, primary }: { mode: 'mock' | 'liv
 }
 
 export const STATE_COPY = {
-  unavailable: { live: 'Live project data is not connected to this build yet. No demo or placeholder data is shown in its place.', mock: 'The demo source did not return a snapshot.' },
+  unavailable: { live: 'The project could not be loaded from the server. No demo or placeholder data is shown in its place.', mock: 'The demo source did not return a snapshot.' },
 };
 
 export function ConnectionBanner({ connection, error, onRestart, observedAt }: { connection: ConnectionState; error: DataSourceError | null; onRestart: () => void; observedAt: string | null }) {

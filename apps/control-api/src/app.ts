@@ -3,7 +3,7 @@ import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { Scheduler } from '@selarikru/workflow';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type TokenVerifier } from './auth.ts';
 import { type ControlApiConfig } from './config.ts';
@@ -65,6 +65,7 @@ export interface AppContext extends AppDeps {
   readonly openStreams: Set<() => void>;
 }
 
+const RUNNER_SEEN_WRITE_MS = 5_000;
 const ALLOWED_LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function hostName(header: string | undefined): string {
@@ -155,6 +156,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       .where(and(eq(schema.runners.tokenHash, sha256Hex(token)), eq(schema.runners.tenantId, config.tenantId), isNull(schema.runners.revokedAt)));
     const row = rows[0];
     if (!row) throw new AppError(401, 'invalid_token', 'token is not valid');
+    // The freshness signal: every authenticated runner call counts as seen. Claims arrive at poll rate, so an update is written at most once per interval.
+    const seenAt = deps.now();
+    await db.update(schema.runners).set({ lastSeenAt: seenAt }).where(and(eq(schema.runners.tenantId, row.tenantId), eq(schema.runners.runnerId, row.runnerId), or(isNull(schema.runners.lastSeenAt), lt(schema.runners.lastSeenAt, new Date(seenAt.getTime() - RUNNER_SEEN_WRITE_MS)))));
     req.principal = { kind: 'runner', runnerId: row.runnerId, tenantId: row.tenantId, location: row.location === 'cloud' ? 'cloud' : 'local' };
   };
 
@@ -170,7 +174,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerEventStream(app, ctx);
   if (deps.github) registerGithubRoutes(app, ctx, deps.github);
 
-  app.addHook('onClose', async () => {
+  // Before the HTTP server stops listening: a hijacked SSE response would otherwise keep close() waiting forever, and a restart would hang behind its own clients.
+  app.addHook('preClose', async () => {
     for (const close of [...ctx.openStreams]) close();
   });
   return app;

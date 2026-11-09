@@ -5,6 +5,10 @@ import type { ProjectViewSnapshot } from './snapshot.ts';
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
   | 'stream_dead' | 'refresh_failed' | 'snapshot_rejected';
+/**
+ * `disconnected` covers two different facts, told apart by `retryable`. Retryable: the connection dropped (a server restart, a network blip) and a reconnect can recover
+ * it. Not retryable: this data source was deliberately closed with `disconnect()`, and no retry can open it again.
+ */
 export interface DataSourceError {
   readonly code: DataSourceErrorCode;
   readonly message: string;

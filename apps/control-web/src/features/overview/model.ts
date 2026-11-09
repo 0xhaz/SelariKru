@@ -64,7 +64,7 @@ export interface UsageModel {
   readonly inputTokens: UsageTotal;
   readonly outputTokens: UsageTotal;
   readonly workerSeconds: UsageTotal;
-  readonly capacity: { readonly running: number; readonly local: number; readonly cloud: number; readonly unknown: number };
+  readonly capacity: { readonly running: number; readonly local: number; readonly cloud: number; readonly unknown: number; readonly slots: number | null };
   /** The browser assistant's own axis. `observed` is null when it has not run. */
   readonly assistant: { readonly requested: string; readonly observed: string | null };
 }
@@ -160,7 +160,11 @@ export const WAITING: readonly NonNullable<WorkerView['activity']>[] = ['waiting
 
 export function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetRow['activity'] {
   if (w.availability === 'offline') return { label: 'Offline', tone: 'neutral', reported: true };
-  if (w.activity === null) return w.availability === 'idle' ? { label: 'Idle', tone: 'neutral', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
+  if (w.activity === null) {
+    if (w.availability === 'idle') return { label: 'Idle', tone: 'neutral', reported: true };
+    // A tool name says what is running, and nothing about planning or coding, so it is shown as itself.
+    return w.latestAction !== null ? { label: `Using ${w.latestAction.tool}`, tone: 'active', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
+  }
   if (w.activity === 'waiting_dependency' && w.blockedByTaskIds.length > 0) {
     const on = w.blockedByTaskIds.map((id) => snapshot.tasks[id]?.title ?? id).join(', ');
     return { label: `Waiting on ${on}`, tone: 'neutral', reported: true };
@@ -248,7 +252,7 @@ function evidence(snapshot: ProjectViewSnapshot): EvidenceRow[] {
 }
 
 function usage(snapshot: ProjectViewSnapshot): UsageModel {
-  const capacity = { running: 0, local: 0, cloud: 0, unknown: 0 };
+  const capacity = { running: 0, local: 0, cloud: 0, unknown: 0, slots: snapshot.limits.maxConcurrentTotal };
   for (const w of Object.values(snapshot.workers)) {
     if (!w.leaseHeld) continue;
     capacity.running += 1;

@@ -76,6 +76,8 @@ export interface Fixture {
   readonly changeRequests?: readonly ChangeRequestView[];
   /** Tasks with a budget stop in flight, by when it began. A real stop writes a command row and no event until the task is cancelled, so this is snapshot data. */
   readonly budgetStopping?: Readonly<Record<string, number>>;
+  /** False: the runners here report no tool, the case a screen must still say honestly. Default true. */
+  readonly reportsActivity?: boolean;
   /** What the harness adapters report. Default `DEMO_CATALOG`. Simulated like everything here. */
   readonly modelCatalog?: ModelCatalogView;
   readonly modelAssignments?: readonly ModelAssignmentView[];

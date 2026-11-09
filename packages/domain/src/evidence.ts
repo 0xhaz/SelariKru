@@ -123,3 +123,75 @@ export const RunnerResultSchema = z
   })
   .passthrough();
 export type RunnerResult = z.infer<typeof RunnerResultSchema>;
+
+/**
+ * How long after its last call a runner still counts as reachable: two lease expiries (60 s each), so a runner busy in one long request is not written off.
+ * A longer silence means an enrolment that is probably gone, typically the old one left behind by a re-pair.
+ */
+export const RUNNER_RECENT_SECONDS = 120;
+
+/** One observation of one criterion on one candidate, as `check_runs` holds it. Invalidated rows never reach this. */
+export interface CriterionObservation {
+  readonly checkRunId: string;
+  readonly checkId: string;
+  readonly checkVersion: string;
+  readonly taskId: string;
+  readonly revision: number;
+  readonly attemptId: string | null;
+  readonly recordId: string | null;
+  /** The trusted-suite pass this row came from; a retry is a higher number. */
+  readonly verificationAttempt: number;
+  readonly candidateSha: string;
+  readonly result: CheckStatus;
+  readonly at: string;
+}
+
+export interface EvidenceTask {
+  readonly taskId: string;
+  readonly revision: number;
+  readonly status: string;
+  /** Requirement ids (FB-IDs) this task delivers, from its current spec. */
+  readonly requirementIds: readonly string[];
+  /** A task stopped for budget keeps its criteria in the total: they are still unmet. */
+  readonly budgetStopped: boolean;
+}
+
+export type CriterionState = CheckStatus | 'not_run';
+
+export interface CriterionEvidence {
+  readonly criterionId: string;
+  readonly state: CriterionState;
+  /** Counted as verified: a pass at the current task revision on a live candidate. */
+  readonly verified: boolean;
+  readonly taskIds: readonly string[];
+  /** The observation shown, or null when no check has reported on this criterion. */
+  readonly check: Omit<CriterionObservation, 'candidateSha' | 'result'> | null;
+  readonly candidateSha: string | null;
+}
+
+const WORSE: readonly CheckStatus[] = ['error', 'failed', 'skipped', 'passed'];
+
+/**
+ * Per-criterion evidence for one run. The criteria are the requirement ids of its current tasks, so a task count can never stand in for them: with no requirement ids
+ * there are no criteria and the result is null. Superseded and deliberately cancelled tasks no longer owe anything; budget-stopped ones still do. A criterion is verified
+ * only by a pass from the newest verification of a candidate that is still live, at the revision each owing task is on now. Tasks that share a criterion must all pass it.
+ */
+export function deriveRunEvidence(input: { readonly tasks: readonly EvidenceTask[]; readonly observations: readonly CriterionObservation[]; readonly candidateSha: string | null; readonly candidateLive: boolean }): { readonly criteria: readonly CriterionEvidence[]; readonly verified: number; readonly total: number } | null {
+  const owing = input.tasks.filter((t) => t.status !== 'superseded' && (t.status !== 'cancelled' || t.budgetStopped));
+  const ids = [...new Set(owing.flatMap((t) => t.requirementIds))].sort();
+  if (ids.length === 0) return null;
+  const onCandidate = input.observations.filter((o) => o.candidateSha === input.candidateSha);
+  const criteria = ids.map((criterionId): CriterionEvidence => {
+    const carriers = owing.filter((t) => t.requirementIds.includes(criterionId));
+    const taskIds = carriers.map((t) => t.taskId);
+    // The newest observation per task carrying it: a later suite pass replaces an earlier one, and an earlier task revision says nothing about this one.
+    const newest = carriers.map((t) => onCandidate.filter((o) => o.checkId === criterionId && o.taskId === t.taskId && o.revision === t.revision)
+      .sort((a, b) => b.at.localeCompare(a.at) || b.verificationAttempt - a.verificationAttempt)[0]);
+    const seen = newest.filter((o): o is CriterionObservation => o !== undefined);
+    if (seen.length === 0) return { criterionId, state: 'not_run', verified: false, taskIds, check: null, candidateSha: null };
+    const shown = [...seen].sort((a, b) => WORSE.indexOf(a.result) - WORSE.indexOf(b.result))[0]!;
+    const { candidateSha, result, ...check } = shown;
+    return { criterionId, state: result, verified: input.candidateLive && seen.length === carriers.length && seen.every((o) => o.result === 'passed'), taskIds, check, candidateSha };
+  });
+  return { criteria, verified: criteria.filter((c) => c.verified).length, total: criteria.length };
+}

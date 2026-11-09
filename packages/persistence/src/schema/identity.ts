@@ -35,6 +35,8 @@ export const runners = pgTable(
     revokedAt: tstz('revoked_at'),
     /** What this runner last said it can launch. Identifiers and a version only. Null: it has not said. */
     harnessReport: jsonb('harness_report').$type<{ provider: string; harnessVersion: string | null; models: string[] }[]>(),
+    /** When this runner last reached the control plane, from any authenticated runner call. Null: not since this column existed. */
+    lastSeenAt: tstz('last_seen_at'),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.runnerId] }),

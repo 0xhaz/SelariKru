@@ -28,6 +28,8 @@ export const REJECTION_REASONS = [
   // Named refusals of the decision routes, so a screen can say why.
   'approval_already_resolved', 'reduced_scope_changed', 'policy_denied', 'cancel_pending', 'not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict',
   'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged',
+  // Named refusals of the pull-request route: the verified candidate moved, or no valid record supports it.
+  'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate', 'pull_request_refused',
   // Named refusals of the assignment route.
   'no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'trial_model_pinned',
 ] as const;

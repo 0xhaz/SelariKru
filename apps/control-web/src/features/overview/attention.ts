@@ -102,10 +102,13 @@ const MODEL_NEXT = 'Choose a supported model in Team, then let it retry.';
 /** Choosing another model cannot fix these. The first two are what a runner found while the attempt ran; the last needs a runner, not a choice. */
 const NO_PROVIDER_NEXT = 'Connect a runner on a machine with a supported harness installed.';
 const RUN_FAULT_NEXT = 'Replan or cancel this task.';
-const modelNextAction = (code: string): string | null => {
+const RUNNER_REFUSED = ['unsupported_provider', 'unsupported_model'];
+const modelNextAction = (code: string, status: TaskView['status']): string | null => {
   const bare = stripPrefix(code);
   if (bare.startsWith('no_provider_detected')) return NO_PROVIDER_NEXT;
   if (bare.startsWith('model_mismatch') || bare.startsWith('model_unverified')) return RUN_FAULT_NEXT;
+  // A runner's refusal blocks the attempt it was on. Unlike a claim-time block, nothing tries a blocked task again: changing the model alone would not restart it.
+  if (status === 'blocked' && RUNNER_REFUSED.some((m) => bare.startsWith(m))) return RUN_FAULT_NEXT;
   return MODEL_BLOCKS.some((m) => bare.startsWith(m)) ? MODEL_NEXT : null;
 };
 
@@ -193,11 +196,11 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[]):
       return make({
         ...base, kind: 'policy_incident', title: `${name}: blocked by policy`, detail: explain(code),
         consequence: `${whoWaits(hit)} Nothing is moved around the policy, and there is no bypass.`,
-        nextAction: code.includes(RESTRICTED_MODEL) ? RESTRICTED_NEXT : isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : modelNextAction(code) ?? 'Review the effective policy for this task.',
+        nextAction: code.includes(RESTRICTED_MODEL) ? RESTRICTED_NEXT : isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : modelNextAction(code, task.status) ?? 'Review the effective policy for this task.',
       });
     case 'blocked': {
       // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
-      const nextAction = modelNextAction(code) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.');
+      const nextAction = modelNextAction(code, task.status) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.');
       return make({
         ...base, kind: 'blocked', title: `${name}: blocked`, detail: explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction,
       });

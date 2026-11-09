@@ -93,7 +93,7 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   const p = e.payload;
   const at = e.occurredAt;
   const existingRun = snap0.runs[e.runId];
-  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
+  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
   const snap: ProjectViewSnapshot = existingRun ? snap0 : { ...snap0, runs: put(snap0.runs, e.runId, run) };
   const setRun = (r: typeof run, s: ProjectViewSnapshot = snap): ProjectViewSnapshot => ({ ...s, runs: put(s.runs, e.runId, r) });
   const lifecycle = oneOf(p, 'lifecycle', RUN_STATUSES);
@@ -451,7 +451,16 @@ export function mergeLiveness(state: ProjectionState, fresh: ProjectViewSnapshot
     if (w && w.leaseHeld) workers = put(workers, w.workerId, { ...w, lastHeartbeatAt: a.lastHeartbeatAt });
     changed = true;
   }
-  return changed ? { ...state, snapshot: { ...snap, attempts, workers } } : state;
+  // What a worker is doing arrives with its heartbeat, so it is liveness too. It stays with the attempt it was reported for.
+  for (const w of Object.values(fresh.workers)) {
+    const mine = workers[w.workerId];
+    if (!mine || !mine.leaseHeld || mine.attemptId !== w.attemptId || w.latestAction === null) continue;
+    if (mine.latestAction !== null && Date.parse(w.latestAction.at) <= Date.parse(mine.latestAction.at)) continue;
+    workers = put(workers, w.workerId, { ...mine, latestAction: w.latestAction });
+    changed = true;
+  }
+  const runners = JSON.stringify(snap.runners) === JSON.stringify(fresh.runners) ? snap.runners : fresh.runners;
+  return changed || runners !== snap.runners ? { ...state, snapshot: { ...snap, attempts, workers, runners } } : state;
 }
 
 /**
@@ -467,8 +476,8 @@ export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnap
   let changed = false;
   for (const r of Object.values(fresh.runs)) {
     const mine = snap.runs[r.runId];
-    if (!mine || (mine.lifecycle === r.lifecycle && mine.criteria?.verified === r.criteria?.verified && mine.criteria?.total === r.criteria?.total)) continue;
-    runs = put(runs, r.runId, { ...mine, lifecycle: r.lifecycle, criteria: r.criteria });
+    if (!mine || (mine.lifecycle === r.lifecycle && mine.criteria?.verified === r.criteria?.verified && mine.criteria?.total === r.criteria?.total && JSON.stringify(mine.evidence) === JSON.stringify(r.evidence))) continue;
+    runs = put(runs, r.runId, { ...mine, lifecycle: r.lifecycle, criteria: r.criteria, evidence: r.evidence });
     changed = true;
   }
   return changed ? { ...state, snapshot: { ...snap, runs } } : state;
@@ -476,7 +485,7 @@ export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnap
 
 /**
  * Merges what the screens read and events do not carry: the change requests (merge reconciliation has no event), each run's reduced-scope
- * record and assessment, and the model catalog and assignments (an assignment change has no event: it is project configuration, audited in its own table). Same rule as the lifecycle merge: only a snapshot at or past the cursor counts. Returns the state unchanged when nothing differs.
+ * record and assessment, a cancel request written with no event (a budget stop), the scheduler's limits, and the model catalog and assignments (an assignment change has no event: it is project configuration, audited in its own table). Same rule as the lifecycle merge: only a snapshot at or past the cursor counts. Returns the state unchanged when nothing differs.
  */
 export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSnapshot): ProjectionState {
   const snap = state.snapshot;
@@ -494,12 +503,20 @@ export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSna
     runs = put(runs, r.runId, { ...mine, reducedScope, scopeAssessment: r.scopeAssessment });
     changed = true;
   }
+  // A budget stop writes its cancel request with no event of its own. Only ever sets one: the `task.cancelled` event is what clears it.
+  let tasks = snap.tasks;
+  for (const t of Object.values(fresh.tasks)) {
+    const mine = tasks[t.taskId];
+    if (!mine || mine.cancelRequested !== null || t.cancelRequested === null || mine.revision !== t.revision || mine.status !== 'running') continue;
+    tasks = put(tasks, t.taskId, { ...mine, cancelRequested: t.cancelRequested });
+  }
+  const limits = same(snap.limits, fresh.limits) ? snap.limits : fresh.limits;
   const changeRequests = same(snap.changeRequests, fresh.changeRequests) ? snap.changeRequests : fresh.changeRequests;
   const approvalHistory = same(snap.approvalHistory, fresh.approvalHistory) ? snap.approvalHistory : fresh.approvalHistory;
   const modelCatalog = same(snap.modelCatalog, fresh.modelCatalog) ? snap.modelCatalog : fresh.modelCatalog;
   const modelAssignments = same(snap.modelAssignments, fresh.modelAssignments) ? snap.modelAssignments : fresh.modelAssignments;
-  if (!changed && changeRequests === snap.changeRequests && approvalHistory === snap.approvalHistory && modelCatalog === snap.modelCatalog && modelAssignments === snap.modelAssignments) return state;
-  return { ...state, snapshot: { ...snap, runs, changeRequests, approvalHistory, modelCatalog, modelAssignments } };
+  if (!changed && tasks === snap.tasks && limits === snap.limits && changeRequests === snap.changeRequests && approvalHistory === snap.approvalHistory && modelCatalog === snap.modelCatalog && modelAssignments === snap.modelAssignments) return state;
+  return { ...state, snapshot: { ...snap, tasks, runs, limits, changeRequests, approvalHistory, modelCatalog, modelAssignments } };
 }
 
 const RESOLVED: readonly ApprovalView['state'][] = ['granted', 'denied', 'expired', 'superseded'];

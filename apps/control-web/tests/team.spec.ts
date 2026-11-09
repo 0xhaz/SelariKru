@@ -42,7 +42,7 @@ test('activity, health and results render separately', async ({ page }) => {
 });
 
 test('null activity renders exactly once, muted, and is never guessed', async ({ page }) => {
-  await openTeam(page, fixture('healthy-parallel-work'));
+  await openTeam(page, fixture('long-build-stall'));
   const activity = rowOf(page, 'runner_local_1').getByTestId('signal-activity');
   await expect(activity).toHaveText('Activity not reported');
   await expect(activity.locator('.text-muted')).toHaveCount(1);
@@ -70,8 +70,8 @@ test('disconnected keeps last-confirmed state with stale label', async ({ page }
   await expect(row).toContainText('State last confirmed');
   await expect(row).toContainText('Feedback API');
   await expect(row).toContainText('Local sandbox');
-  // Nothing invented: no activity, no result, and not shown healthy.
-  await expect(row.getByTestId('signal-activity')).toHaveText('Activity not reported');
+  // Nothing invented: the last tool it reported, no result, and not shown healthy.
+  await expect(row.getByTestId('signal-activity')).toHaveText(/Using /);
   await expect(row).not.toContainText('Healthy');
   await openWorker(page, 'runner_local_1');
   await expect(drawer(page).getByTestId('drawer-summary')).toContainText('Connection lost');

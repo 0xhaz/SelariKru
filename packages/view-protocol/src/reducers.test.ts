@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { EVENT_TYPES, checkEventAuthority, type Actor, type EventType } from '@selarikru/domain';
 import {
-  PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, RunViewSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
+  DataSourceException, PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, RunViewSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
   carryResolvedApprovals, isBudgetStopped, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
   type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type ProjectionState, type TaskView, type UsageEntry, type UsageFigure,
 } from './index.ts';
@@ -24,7 +24,7 @@ function base(tasks: string[] = ['t1'], provenance: 'simulated' | 'observed' = '
   const s = emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance });
   return projectionFromSnapshot({
     ...s,
-    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null } },
+    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null } },
     tasks: Object.fromEntries(tasks.map((t) => [t, task(t)])),
   });
 }
@@ -308,12 +308,12 @@ function fakeServer(initial: ProjectViewSnapshot, hooks: { heartbeatAt(attemptId
   const errors: DataSourceError[] = [];
   let fetched = 0;
   const subscribes: string[] = [];
-  const control = { failures: 0 };
+  const control: { failures: number; error: unknown } = { failures: 0, error: null };
   const source: EngineeringDataSource = {
     mode: 'mock',
     getSnapshot: async () => {
       fetched += 1;
-      if (control.failures > 0) { control.failures -= 1; throw new Error('outage'); }
+      if (control.failures > 0) { control.failures -= 1; throw control.error ?? new Error('outage'); }
       const attempts = Object.fromEntries(Object.entries(snapshot.attempts).map(([id, a]) => [id, a.outcome === 'running' && a.endedAt === null ? { ...a, lastHeartbeatAt: hooks.heartbeatAt(id) } : a]));
       return { ...snapshot, attempts };
     },
@@ -827,5 +827,141 @@ describe('model assignments on the projection', () => {
     expect(merged.snapshot.modelAssignments).toEqual([a]);
     expect(merged.snapshot.modelCatalog.status).toBe('detected');
     expect(mergeDecisionFacts(merged, fresh)).toBe(merged);
+  });
+});
+
+describe('session: drops recover, permanent errors do not', () => {
+  const at0 = (cursor: number): ProjectViewSnapshot => ({ ...base().snapshot, meta: { ...base().snapshot.meta, cursor: String(cursor) } });
+  const start = (f: ReturnType<typeof fakeServer>, timers = sched(), refreshMs = 0) => startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every: timers.every, clock: { nowMs: () => T0 }, refreshMs });
+
+  it('a retryable disconnected is a drop, not a death: it reconnects and goes live', async () => {
+    const f = fakeServer(at0(4), { heartbeatAt: () => null });
+    const timers = sched();
+    const session = start(f, timers);
+    await settle();
+    f.setSnapshot(at0(6));
+    f.streamError({ code: 'disconnected', message: 'the connection dropped', retryable: true });
+    expect(session.status()).toBe('reconnecting');
+    expect(f.errors.some((e) => e.code === 'stream_dead')).toBe(false);
+    timers.fire();
+    await settle();
+    expect(session.status()).toBe('live');
+    expect(f.subscribes).toEqual(['4', '6']);
+    session.stop();
+  });
+
+  it('a non-retryable disconnected, a closed source, ends the stream visibly', async () => {
+    const f = fakeServer(at0(4), { heartbeatAt: () => null });
+    const session = start(f);
+    await settle();
+    f.streamError({ code: 'disconnected', message: 'closed', retryable: false });
+    expect(session.status()).toBe('dead');
+    expect(f.errors.at(-1)!.code).toBe('stream_dead');
+    session.stop();
+  });
+
+  it.each(['unauthorized', 'unknown_project', 'disconnected'] as const)('a %s from the first snapshot load ends the session instead of retrying forever', async (code) => {
+    const f = fakeServer(at0(4), { heartbeatAt: () => null });
+    f.control.failures = 9;
+    f.control.error = new DataSourceException({ code, message: code, retryable: false });
+    const timers = sched();
+    const session = start(f, timers);
+    await settle();
+    expect(session.status()).toBe('dead');
+    expect(f.errors.map((e) => e.code)).toEqual([code, 'stream_dead']);
+    timers.fire();
+    await settle();
+    expect(f.control.failures).toBe(8); // no further attempt
+    session.stop();
+  });
+
+  it('a retryable snapshot failure keeps its typed error and retries', async () => {
+    const f = fakeServer(at0(4), { heartbeatAt: () => null });
+    f.control.failures = 1;
+    f.control.error = new DataSourceException({ code: 'disconnected', message: 'server restarting', retryable: true });
+    const timers = sched();
+    const session = start(f, timers);
+    await settle();
+    expect(session.status()).toBe('reconnecting');
+    expect(f.errors.map((e) => e.code)).toEqual(['disconnected']);
+    timers.fire();
+    await settle();
+    expect(session.status()).toBe('live');
+    session.stop();
+  });
+
+  it('a successful refresh resets the backoff, so the next outage retries from the base', async () => {
+    const delays: number[] = [];
+    const cancelled = { current: [] as (() => void)[] };
+    const f = fakeServer(at0(4), { heartbeatAt: () => null });
+    const every = (fn: () => void, ms: number) => { delays.push(ms); cancelled.current.push(fn); return () => {}; };
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every, clock: { nowMs: () => T0 }, refreshMs: 0, retryBaseMs: 1000 });
+    await settle();
+    f.streamError({ code: 'disconnected', message: 'drop', retryable: true });
+    expect(delays.at(-1)).toBe(1000);
+    cancelled.current.at(-1)!();
+    await settle();
+    f.streamError({ code: 'disconnected', message: 'drop', retryable: true });
+    expect(delays.at(-1)).toBe(2000);
+    cancelled.current.at(-1)!();
+    await settle();
+    await session.refresh();
+    f.streamError({ code: 'disconnected', message: 'drop', retryable: true });
+    expect(delays.at(-1)).toBe(1000);
+    session.stop();
+  });
+
+  it('criteria follow a verdict at once rather than on the next 10 s refresh', async () => {
+    const started = run(base(), [['task.ready', 2], STARTED]);
+    const f = fakeServer(started.snapshot, { heartbeatAt: () => null });
+    const session = start(f, sched(), 10_000);
+    await settle();
+    const verdict = nx(started, 'attempt.completed', 4);
+    const passed = run(started, [['attempt.completed', 4]]);
+    const event = nx(passed, 'verification.passed', 5);
+    const counted = run(passed, [['verification.passed', 5]]);
+    f.setSnapshot({ ...counted.snapshot, runs: Object.fromEntries(Object.entries(counted.snapshot.runs).map(([k, v]) => [k, { ...v, criteria: { verified: 1, total: 2 } }])) });
+    f.emit(verdict);
+    f.emit(event);
+    await settle();
+    await settle();
+    expect(Object.values(session.state()!.snapshot.runs)[0]!.criteria).toEqual({ verified: 1, total: 2 });
+    session.stop();
+  });
+});
+
+describe('liveness carries runner activity and freshness', () => {
+  const started = (): ProjectionState => run(base(), [['task.ready', 2], STARTED]);
+  const withAction = (s: ProjectionState, tool: string, at: string): ProjectViewSnapshot => ({ ...s.snapshot, workers: Object.fromEntries(Object.entries(s.snapshot.workers).map(([k, w]) => [k, { ...w, latestAction: { tool, summary: null, longRunning: false, at } }])) });
+  const worker = (s: ProjectionState) => Object.values(s.snapshot.workers)[0]!;
+
+  it('a newer tool reaches the worker; an older one does not', () => {
+    const s = started();
+    const newer = mergeLiveness(s, withAction(s, 'Edit', '2099-01-01T00:00:10.000Z'));
+    expect(worker(newer).latestAction?.tool).toBe('Edit');
+    const older = mergeLiveness(newer, withAction(s, 'Read', '2099-01-01T00:00:05.000Z'));
+    expect(worker(older).latestAction?.tool).toBe('Edit');
+  });
+
+  it('activity for another attempt stays with that attempt', () => {
+    const s = started();
+    const fresh = withAction(s, 'Edit', '2099-01-01T00:00:10.000Z');
+    const other = { ...fresh, workers: Object.fromEntries(Object.entries(fresh.workers).map(([k, w]) => [k, { ...w, attemptId: 'someone-else' }])) };
+    expect(worker(mergeLiveness(s, other)).latestAction).toBeNull();
+  });
+
+  it('runner freshness merges, and is the identity when unchanged', () => {
+    const s = started();
+    const runners = [{ runnerId: 'r', location: 'local' as const, label: null, lastSeenAt: '2099-01-01T00:00:00.000Z' }];
+    const merged = mergeLiveness(s, { ...s.snapshot, runners });
+    expect(merged.snapshot.runners).toEqual(runners);
+    expect(mergeLiveness(merged, { ...merged.snapshot })).toBe(merged);
+  });
+
+  it('a budget stop written with no event still shows as a cancel request after a refresh', () => {
+    const s = started();
+    const taskId = Object.keys(s.snapshot.tasks)[0]!;
+    const fresh = { ...s.snapshot, tasks: { ...s.snapshot.tasks, [taskId]: { ...s.snapshot.tasks[taskId]!, cancelRequested: { at: '2099-01-01T00:00:00.000Z', operationId: 'op' } } } };
+    expect(mergeDecisionFacts(s, fresh).snapshot.tasks[taskId]!.cancelRequested).toMatchObject({ operationId: 'op' });
   });
 });

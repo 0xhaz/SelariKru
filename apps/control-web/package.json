@@ -12,6 +12,7 @@
     "test:install": "playwright install chromium"
   },
   "dependencies": {
+    "@selarikru/data-source-live": "workspace:*",
     "@selarikru/domain": "workspace:*",
     "@selarikru/inference-firebase-web": "workspace:*",
     "@selarikru/policy": "workspace:*",

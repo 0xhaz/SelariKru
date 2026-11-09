@@ -18,8 +18,13 @@ describe('three separate signals', () => {
   });
 
   it('null activity is a single muted "Activity not reported", with no time or tool beside it', () => {
-    const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: null, latestAction: { tool: 'npm', summary: null, longRunning: false, at: iso(1) } })] });
+    const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: null, latestAction: null })] });
     expect(row(buildTeam(snapshot, NOW, NOW), 'w').activity).toEqual({ label: 'Activity not reported', tone: 'neutral', reported: false, stale: false, since: null, tool: null });
+  });
+
+  it('a reported tool shows as itself, once, and says nothing about planning or coding', () => {
+    const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: null, latestAction: { tool: 'Edit', summary: null, longRunning: false, at: iso(1) } })] });
+    expect(row(buildTeam(snapshot, NOW, NOW), 'w').activity).toMatchObject({ label: 'Using Edit', reported: true, tool: null });
   });
 
   it('a running check is reported as running, never as a passing result', () => {
@@ -81,12 +86,12 @@ describe('stale and disconnected workers', () => {
     expect(r.lastConfirmedAt).toBe(iso(90));
   });
 
-  it('a runner loss fixture keeps the worker and task, and invents no activity', async () => {
+  it('a runner loss fixture keeps the worker, the task and its last reported tool, and invents nothing newer', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('runner-loss');
     const r = row(buildTeam(snapshot, nowMs, nowMs), 'runner_local_1');
     expect(r.health.state).toBe('disconnected');
     expect(r.stale).toBe(true);
-    expect(r.activity).toMatchObject({ label: 'Activity not reported', reported: false });
+    expect(r.activity).toMatchObject({ label: 'Using Edit', reported: true, stale: true });
     expect(r.task?.title).toBe('Feedback API');
   });
 });
