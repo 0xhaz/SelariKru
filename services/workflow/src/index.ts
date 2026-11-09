@@ -1,3 +1,4 @@
+import { expireApprovals } from './approval.ts';
 import { claimNext, tryClaim } from './claim.ts';
 import { heartbeat, publishResult } from './lease.ts';
 import { expireLeases } from './reconcile.ts';
@@ -8,7 +9,8 @@ export * from './types.ts';
 export { claimNext, tryClaim } from './claim.ts';
 export { heartbeat, publishResult, leaseHealth, leaseDeadline, LEASE_EXPIRY_SECONDS, LEASE_SUSPECT_SECONDS, HEARTBEAT_INTERVAL_SECONDS, type LeaseHealth } from './lease.ts';
 export { expireLeases } from './reconcile.ts';
-export { APPROVAL_TTL_SECONDS, openApproval, type ApprovalGate, type OpenedApproval } from './approval.ts';
+export { APPROVAL_TTL_SECONDS, expireApprovals, openApproval, type ApprovalGate, type OpenedApproval } from './approval.ts';
+export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
 export { applyVerification, closeVerificationWithoutVerdict, markRunReadyForReview, releaseTaskClaims, type VerificationApplication, type VerificationVerdict } from './verification.ts';
@@ -24,6 +26,7 @@ export function createScheduler(ctx: SchedulerContext): Scheduler {
     heartbeat: (l) => heartbeat(ctx, l),
     publishResult: (l, r) => publishResult(ctx, l, r),
     expireLeases: (n) => expireLeases(ctx, n),
+    expireApprovals: (n) => expireApprovals(ctx, n),
     retry: (key, by, op = null, tx) => retryTask(ctx, key, by, op, tx),
   };
 }

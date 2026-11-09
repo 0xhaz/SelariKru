@@ -174,6 +174,12 @@ describe('task state machine', () => {
     expect(run(awaiting, [{ type: 'approval_granted' }]).status).toBe('ready');
   });
 
+  it('an expired approval blocks only a task awaiting approval', () => {
+    const ready = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }]);
+    expect(run(run(ready, [{ type: 'approval_requested' }]), [{ type: 'approval_expired' }]).status).toBe('blocked');
+    expect(transition(ready, { type: 'approval_expired' }).ok).toBe(false);
+  });
+
   it('an unavailable verification blocks a verifying task and spends no repair', () => {
     const running = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }, start(1)]);
     const verifying = run(running, [{ type: 'attempt_completed' }]);

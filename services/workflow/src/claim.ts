@@ -388,7 +388,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   let gate: ApprovalGate | null = null;
   if (isBlocked(placed) && placed.approval) {
     gate = cloudGate(placed.approval.op, amountMicros, placed.reason);
-    if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, gate, ctx.policy))) {
+    if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, gate, ctx.policy), now)) {
       gate = null;
       placed = placeWith(true);
     }
@@ -434,7 +434,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     let decision = evaluate(op, ctx.policy);
     if (decision.decision === 'require_approval') {
       const repair = repairGate(op, repairNumber, amountMicros, `approval_required:${decision.reason}`);
-      if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, repair, ctx.policy))) decision = applyApproval(decision, true);
+      if (await findUsableGrant(tx, key, spec.revision, approvalScopeHash(key, c.runId, spec.revision, repair, ctx.policy), now)) decision = applyApproval(decision, true);
       else return requestGate(ctx, tx, key, c, spec, state, statusRow, repair, promoted, now);
     }
     if (decision.decision !== 'allow') {

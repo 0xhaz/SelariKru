@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
+import { schema } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { createScheduler, type Lease, type PublishResult, type Scheduler } from './index.ts';
 import {
-  CAPS, CLOUD_POLICY, POLICY, RUN, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
+  CAPS, CLOUD_POLICY, POLICY, PROJECT, RUN, TENANT, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
 const POLICY_OPS: Policy = { ...POLICY, operations: { new_domain: 'require_approval', deploy: 'deny', read_approved_docs: 'allow' } };
@@ -153,16 +154,40 @@ describe('cloud require_approval', () => {
     expect(rows[1]).toMatchObject({ outcome: 'pending', scope_hash: rows[0]!['scope_hash'], consumed_at: null });
   });
 
-  it('a grant under another revision or destination releases nothing', async () => {
+  const grantFirst = async () => {
     await seedTask(t.db, specFor('c1', { execution: 'cloud' }));
     await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
     await t.db.execute(sql`UPDATE approvals SET outcome = 'granted'`);
     await t.db.execute(sql`UPDATE task_status SET status = 'ready'`);
+  };
+
+  it('a grant under another destination releases nothing', async () => {
+    await grantFirst();
     await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'C1', cloudDestination: 'cloud-sandbox-us' })}::jsonb`);
     s = sched({ ...CLOUD_APPROVAL, destinations: [{ destination: 'cloud-sandbox-us', purpose: 'execution', classifications: ['public', 'internal'] }] });
     expect(await s.claimNext(runner('cloud1', 'cloud'), CAPS)).toBeNull();
     expect((await statusOf(t.db, 'c1')).status).toBe('awaiting_approval');
     expect(await countRows(t.db, 'approvals', `outcome = 'pending'`)).toBe(1);
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+  });
+
+  it('a grant under another revision releases nothing', async () => {
+    await grantFirst();
+    await t.db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId: 'c1', revision: 2, boardId: 'b1', spec: specFor('c1', { execution: 'cloud', revision: 2 }) });
+    await t.db.execute(sql`UPDATE task_status SET current_revision = 2`);
+    expect(await s.claimNext(runner('cloud1', 'cloud'), CAPS)).toBeNull();
+    expect((await statusOf(t.db, 'c1')).status).toBe('awaiting_approval');
+    expect(await countRows(t.db, 'approvals', `outcome = 'pending' AND revision = 2`)).toBe(1);
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+    expect((await approvals())[0]!['consumed_at']).toBeNull();
+  });
+
+  it('an expired grant releases nothing', async () => {
+    await grantFirst();
+    clock.advance(24 * 3600 + 1);
+    expect(await s.claimNext(runner('cloud1', 'cloud'), CAPS)).toBeNull();
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+    expect((await statusOf(t.db, 'c1')).status).toBe('awaiting_approval');
   });
 
   it('a grant whose policy now denies the start releases nothing', async () => {
@@ -174,6 +199,37 @@ describe('cloud require_approval', () => {
     expect(await s.claimNext(runner('cloud1', 'cloud'), CAPS)).toBeNull();
     expect(await countRows(t.db, 'attempts')).toBe(0);
     expect((await approvals())[0]!['consumed_at']).toBeNull();
+  });
+});
+
+describe('approval expiry', () => {
+  it('the sweep expires a pending approval, blocks the task with a readable reason, and is idempotent', async () => {
+    const lease = await claimOne();
+    await request(lease, 'new_domain');
+    const row = (await approvals())[0]!;
+    expect(await s.expireApprovals(clock.now())).toEqual([]);
+    expect((await approvals())[0]).toMatchObject({ outcome: 'pending' });
+    clock.advance(24 * 3600);
+    expect(await s.expireApprovals(clock.now())).toEqual([row['approval_id']]);
+    expect((await approvals())[0]).toMatchObject({ outcome: 'expired' });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+    const [ev] = await events('task.blocked');
+    expect(ev!['payload']).toMatchObject({ reason: 'approval_expired', approvalId: row['approval_id'], scopeHash: row['scope_hash'] });
+    // A second pass finds nothing and writes nothing.
+    expect(await s.expireApprovals(clock.now())).toEqual([]);
+    expect(await events('task.blocked')).toHaveLength(1);
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+  });
+
+  it('leaves a task that is no longer waiting on the approval alone', async () => {
+    const lease = await claimOne();
+    await request(lease, 'new_domain');
+    await t.db.execute(sql`UPDATE task_status SET status = 'cancelled'`);
+    clock.advance(24 * 3600);
+    await s.expireApprovals(clock.now());
+    expect((await approvals())[0]).toMatchObject({ outcome: 'expired' });
+    expect((await statusOf(t.db, 't1')).status).toBe('cancelled');
+    expect(await events('task.blocked')).toHaveLength(0);
   });
 });
 

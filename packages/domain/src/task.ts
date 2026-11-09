@@ -85,6 +85,8 @@ export type TaskEvent =
   | { type: 'approval_requested' }
   | { type: 'approval_granted' }
   | { type: 'approval_denied' }
+  /** Nobody decided before the request's expiry. Never a grant: the task stops at `blocked` with a readable reason. */
+  | { type: 'approval_expired' }
   | { type: 'blocked'; reason: string }
   | { type: 'unblocked' }
   | { type: 'verification_passed' }
@@ -141,6 +143,7 @@ const SIMPLE: Partial<Record<TaskEvent['type'], { from: readonly TaskStatus[]; t
   approval_requested: { from: ['running', 'ready'], to: 'awaiting_approval' },
   approval_granted: { from: ['awaiting_approval'], to: 'ready' },
   approval_denied: { from: ['awaiting_approval'], to: 'blocked' },
+  approval_expired: { from: ['awaiting_approval'], to: 'blocked' },
   blocked: { from: ['running'], to: 'blocked' },
   unblocked: { from: ['blocked'], to: 'ready' },
   // Attempts stay as they are: a refused repair never rewrites a failure into an interruption.

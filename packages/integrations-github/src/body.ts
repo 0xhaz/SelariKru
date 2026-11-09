@@ -18,6 +18,8 @@ export interface ReviewPackage {
   readonly record: VerificationRecord;
   readonly limitations: readonly string[];
   readonly usage: readonly UsageLine[];
+  /** Present after the owner accepted a budget stop: what the run does not deliver. */
+  readonly notDelivered?: { readonly tasks: readonly { readonly taskId: string; readonly status: string; readonly budgetStopped: boolean }[]; readonly requirementIds: readonly string[]; readonly acceptanceCheckIds: readonly string[] };
 }
 
 const cell = (s: string): string => s.replace(/[\r\n|]+/g, ' ').trim();
@@ -45,6 +47,12 @@ export function buildPrBody(p: ReviewPackage): string {
   lines.push('## Limitations', '');
   if (limits.length === 0) lines.push('None recorded.');
   else for (const l of limits) lines.push(`- ${cell(l)}`);
+  if (p.notDelivered) {
+    const n = p.notDelivered;
+    lines.push('', '## Not delivered', '', 'The run was stopped by its budget and the owner accepted this reduced scope. None of the following is verified, whatever the checks above report.', '');
+    for (const t of n.tasks) lines.push(`- Task \`${cell(t.taskId)}\`: ${cell(t.status)}${t.budgetStopped ? ' (stopped by the budget)' : ''}`);
+    lines.push(`- Requirements: ${n.requirementIds.map(cell).join(', ') || 'none recorded'}`, `- Acceptance checks: ${n.acceptanceCheckIds.map(cell).join(', ') || 'none recorded'}`);
+  }
   lines.push('', '## Usage', '');
   if (p.usage.length === 0) lines.push('No usage recorded.');
   else for (const u of p.usage) lines.push(`- ${cell(u.label)}: ${u.value === null || u.provenance === 'unavailable' ? 'unavailable' : `${u.value} ${cell(u.unit)}`} (${u.provenance})`);

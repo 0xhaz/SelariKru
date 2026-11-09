@@ -1,24 +1,30 @@
 /**
- * Production driver of verification. It runs `verifyCandidate` once for each assembled candidate and closes the ones that got no verdict.
+ * Production driver of verification. It runs `verifyCandidate` once for each binding of an assembled candidate and closes the ones that got no verdict.
  *
- * - A candidate is verified at most once. A single `UPDATE ... FOR UPDATE SKIP LOCKED` claims it (`detail.verificationDriver`), and a stored
- *   verification record, whatever its result, ends the driver's interest for good. Only a crash (a claim that expired with no record) repeats a run.
+ * - A claim is a short lease (`detail.verificationDriver`), taken with `FOR UPDATE SKIP LOCKED`, renewed while the run is live and released when it ends,
+ *   however it ends. A crash frees the candidate within one lease. Together with the inner lease in `verifyCandidate` and its fence at record write, a
+ *   run that lost its hold cannot write evidence.
+ * - "Already verified" means a record of the current binding: one with live check runs. Re-assembly of the same commit (an identical repair) invalidates
+ *   those check runs, so the new binding is verified in its own right.
+ * - Every part must be live at its revision. A candidate with a part cancelled or replanned away is retired instead: verifying it could release a task on a
+ *   tree containing that work. Its other parts are left as they are, for the next assembly.
  * - A run that yields no verdict (`error` or `skipped`) leaves its tasks `verifying` with claims held. The reaper, on every tick, moves those tasks to
  *   `blocked` and retires the candidate, so an owner can replan or cancel instead of waiting forever. It keys off durable rows, so it survives a restart.
  *
  * The injected runner is the only thing that touches Docker; tests inject a fake. Imports are relative for the same reason as `service.ts`.
  */
+import { randomUUID } from 'node:crypto';
 import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { emit } from '../../workflow/src/events.ts';
 import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
-import { CandidateNotVerifiable, verifyCandidate, type VerificationDeps } from './service.ts';
+import { CandidateNotVerifiable, VERIFICATION_LEASE_SECONDS, verifyCandidate, type VerificationDeps } from './service.ts';
 
 export interface VerificationDriverOptions extends Omit<VerificationDeps, 'db'> {
   readonly db: Db;
   readonly tenantId: string;
   /** Local source repository holding the candidate commits. */
   readonly repoPath: string;
-  /** How long one claim lasts. It must exceed a whole verification; a claim that expires with no record is retried. Default 2 h, as in `verifyCandidate`. */
+  /** How long a claim lasts between renewals; one that expires with no record is retried. Default `VERIFICATION_LEASE_SECONDS`, renewed during the run. */
   readonly leaseSeconds?: number;
 }
 
@@ -31,34 +37,48 @@ export interface VerificationTick {
 export interface VerificationDriver {
   tick(): Promise<VerificationTick>;
   ticks(): number;
-  /** Stops scheduling. A verification can run for many minutes, so this waits only `graceMs` (default 30 s); a claim left behind is retried after it expires. */
+  /** Stops scheduling. A verification can run for many minutes, so this waits only `graceMs` (default 30 s); a claim left behind expires within one short lease. */
   stop(graceMs?: number): Promise<void>;
 }
 
 interface Part { readonly taskId: string; readonly revision: number; readonly attemptId: string }
 interface CandidateRow { readonly project_id: string; readonly run_id: string; readonly sha: string; readonly parts: Part[] }
 
-/** A candidate this driver still owes a run: assembled, no record of any kind, no live claim, and at least one part still waiting for a verdict. */
+/** A verification record of the candidate's current binding: re-assembly invalidates the check runs of earlier ones. */
+const LIVE_RECORD = sql`
+  FROM artifacts a WHERE a.tenant_id = c.tenant_id AND a.project_id = c.project_id AND a.run_id = c.run_id AND a.type = 'verification_record' AND a.source_revision = c.sha
+    AND EXISTS (SELECT 1 FROM check_runs r WHERE r.tenant_id = a.tenant_id AND r.project_id = a.project_id AND r.candidate_sha = c.sha AND r.result <> 'invalidated' AND jsonb_exists(a.locator -> 'checkRunIds', r.check_run_id))`;
+
+/** A part that is missing, on another revision, or in a state where a verdict on this tree would no longer mean anything. */
+const PART_NOT_LIVE = sql`
+  EXISTS (SELECT 1 FROM jsonb_array_elements(c.parts) p
+    LEFT JOIN task_status s ON s.tenant_id = c.tenant_id AND s.project_id = c.project_id AND s.task_id = p ->> 'taskId'
+    WHERE s.task_id IS NULL OR s.current_revision <> (p ->> 'revision')::int OR s.status NOT IN ('verifying', 'verified', 'merged'))`;
+
+/** Assembled, no record of this binding, no live claim, every part live, and at least one part still waiting for a verdict. */
 const CANDIDATE_DUE = (now: Date) => sql`
   c.status = 'assembled' AND c.sha IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.tenant_id = c.tenant_id AND a.project_id = c.project_id AND a.run_id = c.run_id AND a.type = 'verification_record' AND a.source_revision = c.sha)
+  AND NOT EXISTS (SELECT 1 ${LIVE_RECORD})
   AND (c.detail -> 'verificationDriver' IS NULL OR (c.detail -> 'verificationDriver' ->> 'expiresAt')::timestamptz <= ${now.toISOString()}::timestamptz)
+  AND NOT ${PART_NOT_LIVE}
   AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.parts) p JOIN task_status s ON s.tenant_id = c.tenant_id AND s.project_id = c.project_id AND s.task_id = p ->> 'taskId' AND s.current_revision = (p ->> 'revision')::int AND s.status = 'verifying')`;
 
 export function createVerificationDriver(options: VerificationDriverOptions): Pick<VerificationDriver, 'tick'> {
   const { db, tenantId } = options;
   const now = options.now ?? (() => new Date());
+  const leaseSeconds = options.leaseSeconds ?? VERIFICATION_LEASE_SECONDS;
+  const expiry = () => new Date(now().getTime() + leaseSeconds * 1000).toISOString();
+  const candKey = (c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>) => sql`tenant_id = ${tenantId} AND project_id = ${c.project_id} AND run_id = ${c.run_id} AND sha = ${c.sha}`;
 
   /** Atomically claims the oldest due candidate. Concurrent ticks and processes cannot claim the same one. */
-  async function claimDue(): Promise<CandidateRow | null> {
+  async function claimDue(holder: string): Promise<CandidateRow | null> {
     const at = now();
-    const expiresAt = new Date(at.getTime() + (options.leaseSeconds ?? 7200) * 1000).toISOString();
     const rows = await db.execute(sql`
       WITH due AS (
         SELECT c.tenant_id, c.project_id, c.candidate_id FROM candidates c WHERE c.tenant_id = ${tenantId} AND ${CANDIDATE_DUE(at)}
         ORDER BY c.created_at, c.candidate_id LIMIT 1 FOR UPDATE SKIP LOCKED
       )
-      UPDATE candidates c SET detail = jsonb_set(c.detail, '{verificationDriver}', jsonb_build_object('claimedAt', ${at.toISOString()}::text, 'expiresAt', ${expiresAt}::text))
+      UPDATE candidates c SET detail = jsonb_set(c.detail, '{verificationDriver}', jsonb_build_object('holder', ${holder}::text, 'claimedAt', ${at.toISOString()}::text, 'expiresAt', ${expiry()}::text))
       FROM due WHERE c.tenant_id = due.tenant_id AND c.project_id = due.project_id AND c.candidate_id = due.candidate_id
       RETURNING c.project_id, c.run_id, c.sha, c.parts`);
     return (rows[0] as unknown as CandidateRow | undefined) ?? null;
@@ -76,48 +96,53 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     });
   }
 
-  async function verifyOne(c: CandidateRow): Promise<void> {
-    await announce(c);
-    const { tenantId: _t, repoPath: _r, ...deps } = options;
+  /** Runs one claimed candidate. True when a run completed; false when it could not start or lost its hold. The claim is released however this ends. */
+  async function verifyOne(c: CandidateRow, holder: string): Promise<boolean> {
+    const held = sql`${candKey(c)} AND detail -> 'verificationDriver' ->> 'holder' = ${holder}`;
+    const renewer = setInterval(() => {
+      void db.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{verificationDriver,expiresAt}', to_jsonb(${expiry()}::text)) WHERE ${held}`).catch(() => undefined);
+    }, Math.max(1, (leaseSeconds * 1000) / 3));
+    renewer.unref();
     try {
-      await verifyCandidate({ tenantId, projectId: c.project_id, runId: c.run_id, sha: c.sha, taskId: c.parts[0]!.taskId, repoPath: options.repoPath }, { ...deps, leaseSeconds: options.leaseSeconds ?? 7200 });
+      await announce(c);
+      const { tenantId: _t, repoPath: _r, ...deps } = options;
+      await verifyCandidate({ tenantId, projectId: c.project_id, runId: c.run_id, sha: c.sha, taskId: c.parts[0]!.taskId, repoPath: options.repoPath }, { ...deps, leaseSeconds });
+      return true;
     } catch (e) {
-      if (e instanceof CandidateNotVerifiable) {
-        // The candidate's commit could not be exported: no run happened and none can.
-        if (e.reason === 'export_failed') await close(c, 'verification_export_failed');
-        return; // Anything else (re-assembled, another process holds it) is already someone else's state to handle.
-      }
-      throw e;
+      if (!(e instanceof CandidateNotVerifiable)) throw e;
+      // The commit could not be exported: no run happened and none can. Anything else (re-assembled, another holder) is someone else's state to handle.
+      if (e.reason === 'export_failed') await close(c, 'verification_export_failed');
+      return false;
+    } finally {
+      clearInterval(renewer);
+      await db.execute(sql`UPDATE candidates SET detail = detail - 'verificationDriver' WHERE ${held}`).catch(() => undefined);
     }
   }
 
   /** In one transaction: lock the candidate, close its waiting parts, retire it. A candidate no longer assembled is left alone. */
   async function close(c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha' | 'parts'>, reason: string): Promise<boolean> {
     return withTx(db, async (tx: Tx) => {
-      const key = sql`tenant_id = ${tenantId} AND project_id = ${c.project_id} AND run_id = ${c.run_id} AND sha = ${c.sha}`;
-      const locked = await tx.execute(sql`SELECT 1 FROM candidates WHERE ${key} AND status = 'assembled' FOR UPDATE`);
+      const locked = await tx.execute(sql`SELECT 1 FROM candidates WHERE ${candKey(c)} AND status = 'assembled' FOR UPDATE`);
       if (locked.length === 0) return false;
       for (const p of c.parts) {
         await closeVerificationWithoutVerdict({ now }, tx, { tenantId, projectId: c.project_id, taskId: p.taskId }, { reason, candidateSha: c.sha, expect: { revision: p.revision, attemptId: p.attemptId } });
       }
-      await tx.execute(sql`UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now().toISOString()}::timestamptz WHERE ${key}`);
+      await tx.execute(sql`UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now().toISOString()}::timestamptz WHERE ${candKey(c)}`);
       return true;
     });
   }
 
-  /** Assembled candidates whose only records applied nothing, and whose checks say `error` or `skipped`. */
+  /** Assembled candidates of this binding whose run applied nothing and ended `error` or `skipped`. */
   async function reap(): Promise<string[]> {
     const rows = await db.execute(sql`
       SELECT c.project_id, c.run_id, c.sha, c.parts,
-        (SELECT array_agg(DISTINCT r.result) FROM check_runs r WHERE r.tenant_id = c.tenant_id AND r.project_id = c.project_id AND r.candidate_sha = c.sha) AS results
+        (SELECT a.locator ->> 'result' ${LIVE_RECORD} AND a.locator ->> 'applied' = 'false' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1) AS result
       FROM candidates c
       WHERE c.tenant_id = ${tenantId} AND c.status = 'assembled' AND c.sha IS NOT NULL
-        AND EXISTS (SELECT 1 FROM artifacts a WHERE a.tenant_id = c.tenant_id AND a.project_id = c.project_id AND a.run_id = c.run_id AND a.type = 'verification_record' AND a.source_revision = c.sha AND a.locator ->> 'applied' = 'false')
-        AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.tenant_id = c.tenant_id AND a.project_id = c.project_id AND a.run_id = c.run_id AND a.type = 'verification_record' AND a.source_revision = c.sha AND a.locator ->> 'applied' = 'true')`);
+        AND NOT EXISTS (SELECT 1 ${LIVE_RECORD} AND a.locator ->> 'applied' = 'true')`);
     const reaped: string[] = [];
     for (const row of rows) {
-      const results = (row['results'] as string[] | null) ?? [];
-      const reason = results.includes('error') ? 'verification_error' : results.includes('skipped') && !results.includes('failed') ? 'verification_skipped' : null;
+      const reason = row['result'] === 'error' ? 'verification_error' : row['result'] === 'skipped' ? 'verification_skipped' : null;
       if (reason === null) continue;
       const c = row as unknown as CandidateRow;
       if (await close(c, reason)) reaped.push(c.sha);
@@ -125,20 +150,42 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     return reaped;
   }
 
+  /** Retires assembled candidates that have a part no longer live and no record of this binding. Their other parts wait for the next assembly. */
+  async function retire(): Promise<void> {
+    await withTx(db, async (tx: Tx) => {
+      const at = now();
+      const rows = await tx.execute(sql`
+        UPDATE candidates c SET status = 'invalidated', reason = 'candidate_part_not_live', updated_at = ${at.toISOString()}::timestamptz
+        WHERE c.tenant_id = ${tenantId} AND c.status = 'assembled' AND c.sha IS NOT NULL AND NOT EXISTS (SELECT 1 ${LIVE_RECORD}) AND ${PART_NOT_LIVE}
+        RETURNING c.candidate_id, c.project_id, c.run_id, c.sha`);
+      for (const r of rows) {
+        await emit(tx, { projectId: String(r['project_id']), runId: String(r['run_id']), taskId: String(r['run_id']), aggregateRevision: 0 }, at, {
+          type: 'candidate.failed', attemptId: null, actor: { kind: 'integration', id: 'verification_driver' },
+          payload: { candidateId: r['candidate_id'], reason: 'candidate_part_not_live', sha: r['sha'] },
+        });
+      }
+    });
+  }
+
   return {
     async tick() {
-      const candidate = await claimDue();
+      const holder = `driver:${randomUUID()}`;
+      await retire();
+      const candidate = await claimDue(holder);
+      let verified: string | null = null;
       if (candidate) {
         try {
-          await verifyOne(candidate);
+          if (await verifyOne(candidate, holder)) verified = candidate.sha;
         } catch (e) {
           // Whatever went wrong here, closing the already-recorded non-verdicts must still happen.
           await reap();
           throw e;
         }
       }
+      // After the run, so a part cancelled mid-run retires its candidate on this tick and not the next.
+      await retire();
       // Closes this tick's non-verdict and any an earlier process left behind.
-      return { verified: candidate?.sha ?? null, reaped: await reap() };
+      return { verified, reaped: await reap() };
     },
   };
 }

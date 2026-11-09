@@ -157,6 +157,8 @@ export interface Scheduler {
   heartbeat(lease: Lease): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
   publishResult(lease: Lease, result: PublishResult): Promise<Result<PublishReceipt, LeaseConflict>>;
   expireLeases(now: Date): Promise<readonly ExpiredLease[]>;
+  /** Closes pending approvals past their expiry and blocks the tasks waiting on them. Returns the approval ids closed. */
+  expireApprovals(now: Date): Promise<readonly string[]>;
   /** Owner-requested retry of a failed task. Emits `task.ready` as the scheduler. `tx` joins the caller's transaction. */
   retry(key: { tenantId: string; projectId: string; taskId: string }, requestedBy: string, operationId?: string | null, tx?: Tx): Promise<Result<RetryReceipt, RetryRefusal>>;
 }

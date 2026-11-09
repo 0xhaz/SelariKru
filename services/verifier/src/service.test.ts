@@ -236,7 +236,7 @@ describe('verifyCandidate', () => {
     await db.execute(sql`UPDATE task_status SET status = 'cancelled', row_revision = row_revision + 1 WHERE task_id = 't1'`);
     const events = await q(`SELECT 1 FROM events`);
     const record = await verifyCandidate(ref(cand), deps(async (i) => ok(i)));
-    expect(record.taskOutcomes[0]).toMatchObject({ taskId: 't1', applied: false, taskStatus: 'cancelled', reason: 'not_verifying' });
+    expect(record.taskOutcomes[0]).toMatchObject({ taskId: 't1', applied: false, taskStatus: 'cancelled', reason: 'candidate_part_not_live' });
     expect(await status('t1')).toBe('cancelled');
     expect(await q(`SELECT 1 FROM events`)).toHaveLength(events.length);
     expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
@@ -326,7 +326,7 @@ describe('verdicts are bound to the attempt they judged', () => {
     expect(passed.taskOutcomes[0]).toMatchObject({ applied: true, taskStatus: 'verified' });
   });
 
-  it('a part cancelled mid-suite keeps the run out of ready_for_review', async () => {
+  it('a part cancelled mid-suite releases no part of the candidate and keeps the run out of ready_for_review', async () => {
     await addDone('t1', { 'src/a.txt': 'a\n' });
     await addDone('t2', { 'src/b.txt': 'b\n' });
     const c = await assemble();
@@ -334,8 +334,10 @@ describe('verdicts are bound to the attempt they judged', () => {
       await db.execute(sql`UPDATE task_status SET status = 'cancelled', row_revision = row_revision + 1 WHERE task_id = 't2'`);
       return ok(i);
     }));
-    expect(rec.taskOutcomes.find((o) => o.taskId === 't2')).toMatchObject({ applied: false, reason: 'not_verifying' });
-    expect(await status('t1')).toBe('verified');
+    expect(rec.taskOutcomes.find((o) => o.taskId === 't2')).toMatchObject({ applied: false, reason: 'candidate_part_not_live' });
+    // The tree still contains t2's cancelled work, so t1 cannot be released on it.
+    expect(rec.taskOutcomes.find((o) => o.taskId === 't1')).toMatchObject({ applied: false, reason: 'candidate_part_not_live' });
+    expect(await status('t1')).toBe('verifying');
     expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
   });
 });

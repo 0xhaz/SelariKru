@@ -6,6 +6,7 @@ import { reconcileRun } from '@selarikru/integrations-github';
 import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { startLeaseExpiryDriver } from '../src/expire.ts';
 import { CAPS, PROJECT, RUN, TENANT, API_POLICY, enrolRunner, bearer, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 const POLICY_OPS: Policy = { ...API_POLICY, ...POLICY, operations: { assign_replan_tasks: 'allow', new_domain: 'require_approval', deploy: 'deny' } };
@@ -94,6 +95,54 @@ describe('approval rows through the API', () => {
     expect((await approvalRows())[0]).toMatchObject({ outcome: 'pending' });
   });
 
+  it('a row that names no operation cannot be granted, but can be denied', async () => {
+    await seedTask(t.db, specFor('t9'), 'awaiting_approval');
+    const seed = (id: string) => t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, outcome) VALUES (${TENANT}, ${PROJECT}, ${id}, ${RUN}, 't9', 1, 'worker', 'ah', ${`scope-${id}`}, 'pending')`);
+    await seed('a-no-op');
+    const res = await resolve('a-no-op', { scopeHash: 'scope-a-no-op', expectedRevision: 0, idempotencyKey: 'n1' });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatchObject({ code: 'policy_denied', details: { reason: 'approval_operation_missing' } });
+    expect((await statusOf('t9'))['status']).toBe('awaiting_approval');
+    const denied = await resolve('a-no-op', { decision: 'deny', scopeHash: 'scope-a-no-op', expectedRevision: 0, idempotencyKey: 'n2' });
+    expect(denied.status).toBe(200);
+    expect((await statusOf('t9'))['status']).toBe('blocked');
+  });
+
+  it('an expired approval cannot be granted before or after the sweep, but can still be denied', async () => {
+    const { row } = await runnerRequest();
+    const id = String(row['approval_id']);
+    const scopeHash = row['scope_hash'];
+    h.clock.advance(24 * 3600 + 1);
+    // Not swept yet: the clock alone refuses the grant.
+    const early = await resolve(id, { scopeHash, expectedRevision: Number((await statusOf('t1'))['row_revision']), idempotencyKey: 'e1' });
+    expect(early.status).toBe(409);
+    expect(early.body.error.code).toBe('approval_expired');
+    expect(await s.expireApprovals(new Date(Date.parse('2026-11-08T06:00:00.000Z') + 2 * 24 * 3600 * 1000))).toEqual([id]);
+    const rev = Number((await statusOf('t1'))['row_revision']);
+    expect((await statusOf('t1'))['status']).toBe('blocked');
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.body.tasks.find((x: { taskId: string }) => x.taskId === 't1').blockedReason).toBe('approval_expired');
+    expect(snap.body.approvals).toEqual([expect.objectContaining({ approvalId: id, outcome: 'expired' })]);
+    const late = await resolve(id, { scopeHash, expectedRevision: rev, idempotencyKey: 'e2' });
+    expect(late.status).toBe(409);
+    expect(late.body.error.code).toBe('approval_expired');
+    expect(await countEvents('approval.granted')).toBe(0);
+    const denied = await resolve(id, { decision: 'deny', scopeHash, expectedRevision: rev, idempotencyKey: 'e3' });
+    expect(denied.status).toBe(200);
+    expect((await approvalRows())[0]).toMatchObject({ outcome: 'denied', approver: 'owner_uid_1' });
+    expect(await countEvents('approval.denied')).toBe(1);
+    expect((await statusOf('t1'))['status']).toBe('blocked');
+    expect((await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.approvals).toEqual([]);
+  });
+
+  it('the lease-expiry driver runs the approval sweep', async () => {
+    const { row } = await runnerRequest();
+    const sweep = startLeaseExpiryDriver({ scheduler: s, now: () => new Date(Date.parse(String(row['expires_at'])) + 1000), intervalMs: 1_000_000 });
+    await sweep.tick();
+    await sweep.stop();
+    expect((await approvalRows())[0]).toMatchObject({ outcome: 'expired' });
+  });
+
   it('cancelling a task closes its open approval', async () => {
     const { row } = await runnerRequest();
     const rev = Number((await statusOf('t1'))['row_revision']);
@@ -173,7 +222,7 @@ describe('budget-stopped runs', () => {
     await seedStopped();
     const res = await accept('a1');
     expect(res.status).toBe(201);
-    expect(res.body.notDelivered).toEqual({ taskIds: ['stopped'], requirementIds: ['FB-02', 'FB-03'], acceptanceCheckIds: ['chk-2'] });
+    expect(res.body.notDelivered).toEqual({ tasks: [{ taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-02', 'FB-03'], acceptanceCheckIds: ['chk-2'] });
     // FB-03 is shared with a verified task, but a stopped task still owed it: it stays not delivered.
     expect(res.body.deliveredRequirementIds).toEqual(['FB-01']);
     expect((await statusOf('stopped'))['status']).toBe('cancelled');
@@ -194,6 +243,21 @@ describe('budget-stopped runs', () => {
     const again = await accept('a2');
     expect(again.status).toBe(403);
     expect(again.body.error.details.reason).toBe('already_accepted');
+  });
+
+  it('an unstarted task sharing a requirement keeps it not delivered, and is listed with its status', async () => {
+    await seedStopped();
+    await seedTask(t.db, specFor('later', { requirementIds: ['FB-01'] }), 'ready');
+    await seedTask(t.db, specFor('never', { requirementIds: ['FB-07'] }), 'planned');
+    const res = await accept('u1');
+    expect(res.status).toBe(201);
+    expect(res.body.notDelivered.tasks).toEqual([
+      { taskId: 'later', revision: 1, status: 'ready', budgetStopped: false },
+      { taskId: 'never', revision: 1, status: 'planned', budgetStopped: false },
+      { taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true },
+    ]);
+    expect(res.body.notDelivered.requirementIds).toEqual(['FB-01', 'FB-02', 'FB-03', 'FB-07']);
+    expect(res.body.deliveredRequirementIds).toEqual([]);
   });
 
   it('refuses a run with no budget stop, a stale plan, and a stop still in flight', async () => {

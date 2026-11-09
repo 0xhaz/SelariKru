@@ -10,11 +10,11 @@ export interface LeaseExpiryDriver {
 }
 
 /**
- * Calls `scheduler.expireLeases(now())` on an interval. Passes never overlap (each is scheduled after the last one
+ * Calls `scheduler.expireLeases(now())`, then the approval expiry sweep, on an interval. Passes never overlap (each is scheduled after the last one
  * ends), a failing pass is reported and retried on the next interval, and time comes from the injected clock.
  */
 export function startLeaseExpiryDriver(options: {
-  scheduler: Pick<Scheduler, 'expireLeases'>;
+  scheduler: Pick<Scheduler, 'expireLeases' | 'expireApprovals'>;
   now: () => Date;
   intervalMs: number;
   onError?: (error: unknown) => void;
@@ -26,7 +26,9 @@ export function startLeaseExpiryDriver(options: {
 
   const tick = async (): Promise<readonly ExpiredLease[]> => {
     try {
-      return await options.scheduler.expireLeases(options.now());
+      const expired = await options.scheduler.expireLeases(options.now());
+      await options.scheduler.expireApprovals(options.now());
+      return expired;
     } finally {
       count += 1;
     }

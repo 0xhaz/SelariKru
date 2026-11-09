@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-helpers';
+import { schema } from '@selarikru/persistence';
+import { reducedScopeContext } from '@selarikru/workflow';
+import { setupTestDb, resetDb, seedTask, specFor, type TestDb } from '@selarikru/workflow/test-helpers';
 import { PrNotAllowed, branchForCandidate, openReviewablePr, type OpenPrDeps } from './pr.ts';
 import { reconcileRun } from './reconcile.ts';
 import { buildPrBody } from './body.ts';
@@ -88,6 +90,49 @@ describe('openReviewablePr', () => {
     expect(body).toMatch(/Local compute.*unavailable/);
     expect(body).not.toMatch(/Local compute[^\n]*\b0\b/);
     expect(body).toMatch(/human/i);
+  });
+
+  describe('budget-stopped work', () => {
+    const notDelivered = { tasks: [{ taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true }, { taskId: 'later', revision: 1, status: 'ready', budgetStopped: false }], requirementIds: ['FB-02', 'FB-09'], acceptanceCheckIds: ['chk-2'] };
+    const stop = async () => {
+      await seedTask(tdb.db, specFor('stopped', { requirementIds: ['FB-02'] }), 'cancelled');
+      await tdb.db.insert(schema.taskCommands).values({ tenantId: TENANT, projectId: PROJECT, operationId: 'op_b', taskId: 'stopped', revision: 1, command: 'cancel', state: 'cancelled', requestedBy: 'budget_enforcer', requestedAt: T0, detail: { reason: 'budget_exhausted' } });
+    };
+    const accept = (over: Record<string, unknown> = {}) => tdb.db.insert(schema.decisions).values({
+      tenantId: TENANT, projectId: PROJECT, decisionId: 'dec_1', context: reducedScopeContext(RUN), options: [], rationale: 'ok', author: 'owner',
+      affected: [{ decisionId: 'dec_1', runId: RUN, planRevision: 0, notDelivered, deliveredRequirementIds: [], acceptedAt: T0.toISOString(), acceptedBy: 'owner', ...over }],
+    });
+
+    it('refuses the PR while budget-stopped work has no accepted decision', async () => {
+      await stop();
+      await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'reduced_scope_not_accepted', detail: { taskIds: ['stopped'] } });
+      expect(gh.calls).toEqual([]);
+    });
+
+    it('prints what was not delivered once the owner has accepted it, through the redaction', async () => {
+      await stop();
+      const secret = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+      await accept({ notDelivered: { ...notDelivered, requirementIds: ['FB-02', secret] } });
+      await openReviewablePr(run, deps());
+      const body = gh.prs[0]!.body;
+      expect(body).toMatch(/## Not delivered/);
+      expect(body).toMatch(/stopped.*cancelled/);
+      expect(body).toMatch(/later.*ready/);
+      expect(body).toContain('FB-02');
+      expect(body).toContain('chk-2');
+      expect(body).not.toContain(secret);
+    });
+
+    it('a decision that does not cover a later stop does not satisfy the gate', async () => {
+      await stop();
+      await accept({ notDelivered: { tasks: [], requirementIds: [], acceptanceCheckIds: [] } });
+      await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'reduced_scope_not_accepted' });
+    });
+
+    it('a run with no budget stop opens as before, with no such section', async () => {
+      await openReviewablePr(run, deps());
+      expect(gh.prs[0]!.body).not.toMatch(/Not delivered/);
+    });
   });
 
   it('requires a live passing record for the run candidate', async () => {

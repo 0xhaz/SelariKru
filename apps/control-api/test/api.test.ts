@@ -339,8 +339,8 @@ describe('task commands', () => {
 describe('approvals', () => {
   it('grants with a matching scope hash and revision, as the human principal', async () => {
     await seedTask(t.db, specFor('t1'), 'awaiting_approval');
-    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, outcome)
-      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', 1, 'worker', 'ah', 'scope1', 'pending')`);
+    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, outcome, detail)
+      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', 1, 'worker', 'ah', 'scope1', 'pending', '{"operation":"start_cloud_worker"}'::jsonb)`);
     const bad = await post(h.app, '/v1/approvals/a1/resolve', { decision: 'grant', scopeHash: 'other', expectedRevision: 0, idempotencyKey: 'r0' });
     expect(bad.status).toBe(409);
     expect(bad.body.error.code).toBe('scope_mismatch');
@@ -361,8 +361,8 @@ describe('approvals bound to revisions', () => {
     await t.db.execute(sql`INSERT INTO task_revisions (tenant_id, project_id, run_id, task_id, revision, board_id, spec)
       SELECT tenant_id, project_id, run_id, task_id, 2, board_id, jsonb_set(spec, '{revision}', '2') FROM task_revisions WHERE task_id = 't1'`);
     await t.db.execute(sql`UPDATE task_status SET current_revision = 2 WHERE task_id = 't1'`);
-    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, expected_revisions, outcome)
-      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', ${over.revision ?? 2}, 'worker', 'ah', 'scope1', ${JSON.stringify(over.expected ?? {})}::jsonb, 'pending')`);
+    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, expected_revisions, outcome, detail)
+      VALUES ('tenant_a', ${PROJECT}, 'a1', ${RUN}, 't1', ${over.revision ?? 2}, 'worker', 'ah', 'scope1', ${JSON.stringify(over.expected ?? {})}::jsonb, 'pending', '{"operation":"start_cloud_worker"}'::jsonb)`);
   }
   const resolve = (key: string) => post(h.app, '/v1/approvals/a1/resolve', { decision: 'grant', scopeHash: 'scope1', expectedRevision: 0, idempotencyKey: key });
 

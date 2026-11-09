@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { canonicalJson } from '@selarikru/domain';
+import { canonicalJson, TaskSpecSchema, transition, type TaskStatus } from '@selarikru/domain';
 import { evaluate, type Operation, type PolicyDecision, type Policy } from '@selarikru/policy';
-import { schema, type Tx } from '@selarikru/persistence';
-import { and, eq, isNull } from 'drizzle-orm';
-import type { TaskKey } from './taskstate.ts';
+import { schema, withTx, type Tx } from '@selarikru/persistence';
+import { and, asc, eq, gt, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { emit, SCHEDULER_ACTOR } from './events.ts';
+import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type TaskKey } from './taskstate.ts';
 import type { SchedulerContext } from './types.ts';
 
 /** How long a request stays approvable. An expired request can no longer be granted; it never becomes a grant by itself. */
@@ -33,14 +34,15 @@ export function approvalScopeHash(key: TaskKey, runId: string, revision: number,
   return hash({ v: 1, tenantId: key.tenantId, projectId: key.projectId, runId, taskId: key.taskId, revision, policyVersion: policy?.policyVersion ?? null, operation: gate.op.kind, detail: gate.detail });
 }
 
-/** A human grant for exactly this revision and scope that no attempt has used yet. */
-export async function findUsableGrant(tx: Tx, key: TaskKey, revision: number, scopeHash: string): Promise<{ approvalId: string } | undefined> {
+/** A human grant for exactly this revision and scope, still within its expiry, that no attempt has used yet. */
+export async function findUsableGrant(tx: Tx, key: TaskKey, revision: number, scopeHash: string, now: Date): Promise<{ approvalId: string } | undefined> {
   const rows = await tx
     .select({ approvalId: schema.approvals.approvalId })
     .from(schema.approvals)
     .where(and(
       eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId),
       eq(schema.approvals.revision, revision), eq(schema.approvals.scopeHash, scopeHash), eq(schema.approvals.outcome, 'granted'), isNull(schema.approvals.consumedAt),
+      or(isNull(schema.approvals.expiresAt), gt(schema.approvals.expiresAt, now)),
     ))
     .limit(1);
   return rows[0];
@@ -85,4 +87,44 @@ export async function consumeGrants(tx: Tx, key: TaskKey, revision: number, atte
       eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId),
       eq(schema.approvals.revision, revision), eq(schema.approvals.outcome, 'granted'), isNull(schema.approvals.consumedAt),
     ));
+}
+
+/**
+ * Closes every pending approval past its expiry: `outcome = expired`, and a task still waiting on it moves to `blocked` with `task.blocked` reason
+ * `approval_expired`. Each row is its own transaction, status row before approval row, as the grant route locks them. A repeat finds nothing.
+ */
+export async function expireApprovals(ctx: SchedulerContext, now: Date): Promise<readonly string[]> {
+  const due = await ctx.db
+    .select({ tenantId: schema.approvals.tenantId, projectId: schema.approvals.projectId, approvalId: schema.approvals.approvalId, taskId: schema.approvals.taskId, runId: schema.approvals.runId, revision: schema.approvals.revision })
+    .from(schema.approvals)
+    .where(and(eq(schema.approvals.outcome, 'pending'), isNotNull(schema.approvals.expiresAt), lte(schema.approvals.expiresAt, now)))
+    .orderBy(asc(schema.approvals.expiresAt), asc(schema.approvals.approvalId));
+  const expired: string[] = [];
+  for (const row of due) {
+    const closed = await withTx(ctx.db, async (tx) => {
+      const key: TaskKey | null = row.taskId ? { tenantId: row.tenantId, projectId: row.projectId, taskId: row.taskId } : null;
+      const task = key ? await lockStatusRow(tx, key) : undefined;
+      const where = and(eq(schema.approvals.tenantId, row.tenantId), eq(schema.approvals.projectId, row.projectId), eq(schema.approvals.approvalId, row.approvalId));
+      const locked = (await tx.select().from(schema.approvals).where(where).for('update'))[0];
+      // Recheck under the lock: a decision may have landed since the scan.
+      if (!locked || locked.outcome !== 'pending' || !locked.expiresAt || locked.expiresAt.getTime() > now.getTime()) return false;
+      await tx.update(schema.approvals).set({ outcome: 'expired' }).where(where);
+      const payload = { reason: 'approval_expired', approvalId: locked.approvalId, scopeHash: locked.scopeHash, expiresAt: locked.expiresAt.toISOString() };
+      if (key && task && task.status === 'awaiting_approval' && task.currentRevision === locked.revision) {
+        const revision = await tx.select({ spec: schema.taskRevisions.spec, runId: schema.taskRevisions.runId }).from(schema.taskRevisions).where(and(
+          eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, key.taskId), eq(schema.taskRevisions.revision, task.currentRevision)));
+        const state = buildTaskState(TaskSpecSchema.parse(revision[0]!.spec), task.status as TaskStatus, await loadAttempts(tx, key, task.currentRevision));
+        if (!state) throw new Error(`task ${key.taskId}: stored spec no longer valid`);
+        const moved = transition(state, { type: 'approval_expired' });
+        if (!moved.ok) throw new Error(`illegal approval expiry: ${JSON.stringify(moved.error)}`);
+        const aggregateRevision = await setStatus(tx, key, task.rowRevision, moved.value.status, now);
+        await emit(tx, { projectId: key.projectId, runId: revision[0]!.runId, taskId: key.taskId, aggregateRevision }, now, { type: 'task.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload });
+      } else if (!key && locked.runId) {
+        await emit(tx, { projectId: locked.projectId, runId: locked.runId, taskId: locked.runId, aggregateRevision: 0 }, now, { type: 'task.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload });
+      }
+      return true;
+    });
+    if (closed) expired.push(row.approvalId);
+  }
+  return expired;
 }

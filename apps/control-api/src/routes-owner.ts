@@ -5,8 +5,8 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { leaseHealth, releaseTaskClaims } from '@selarikru/workflow';
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, reducedScopeContext, releaseTaskClaims, type AcceptedReducedScope } from '@selarikru/workflow';
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 import type { AppContext } from './app.ts';
@@ -49,8 +49,6 @@ async function supersedePendingApprovals(tx: Tx, tenantId: string, projectId: st
     eq(schema.approvals.tenantId, tenantId), eq(schema.approvals.projectId, projectId), eq(schema.approvals.taskId, taskId), eq(schema.approvals.outcome, 'pending')));
 }
 
-const reducedScopeContext = (runId: string): string => `reduced_scope:${runId}`;
-const BUDGET_STOP_REASON = 'budget_exhausted';
 
 /**
  * `approvals.expected_revisions` maps what the approver saw to its revision: `planRevision` for the run's plan, any other
@@ -298,8 +296,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       if (found.length === 0) throw new AppError(404, 'approval_not_found', 'no such approval');
       const approval = found[0]!;
       return idempotent(tx, { tenantId: config.tenantId, projectId: approval.projectId, key: `approval.resolve:${approvalId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
-        if (approval.outcome !== 'pending') throw new AppError(409, 'approval_already_resolved', 'this approval already has an outcome', { outcome: approval.outcome });
-        if (approval.expiresAt && approval.expiresAt.getTime() <= at.getTime()) throw new AppError(409, 'approval_expired', 'this approval has expired');
+        // An expired request is never a grant, but the owner may still record a denial for it.
+        const expired = approval.outcome === 'expired' || (approval.outcome === 'pending' && approval.expiresAt !== null && approval.expiresAt.getTime() <= at.getTime());
+        if (approval.outcome !== 'pending' && approval.outcome !== 'expired') throw new AppError(409, 'approval_already_resolved', 'this approval already has an outcome', { outcome: approval.outcome });
+        if (expired && body.decision === 'grant') throw new AppError(409, 'approval_expired', 'this approval has expired');
         if (approval.scopeHash !== body.scopeHash) throw new AppError(409, 'scope_mismatch', 'the scope hash does not match the approval');
         if (!approval.runId) throw new AppError(422, 'invalid_request', 'approval is not run-scoped');
 
@@ -308,19 +308,22 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           throw new AppError(409, 'stale_revision', 'the approval is for a different task revision', { approvalRevision: approval.revision, currentRevision: task.currentRevision });
         }
         // The request's task must still be waiting on this decision; anything else (cancelled, replanned away) cannot be released by it.
-        if (task && task.status !== 'awaiting_approval') {
+        if (task && task.status !== 'awaiting_approval' && approval.outcome !== 'expired') {
           throw new AppError(409, 'stale_revision', 'the task is no longer waiting on this approval', { status: task.status });
         }
         await checkExpectedRevisions(tx, approval.expectedRevisions, approval.projectId, approval.runId, config.tenantId);
         const expected = task ? task.rowRevision : 0;
         if (body.expectedRevision !== expected) throw staleRevision(expected, 'the approval target');
 
-        // Policy may have changed since the request. A grant may not outrun a deny, so a stored parameterless operation is re-judged here (the
-        // scheduler re-judges cloud starts and repairs at claim). Rows carry the operation only when `openApproval` created them.
+        // Policy may have changed since the request, so a grant cannot outrun a deny. A stored parameterless operation is re-judged here; the scheduler
+        // re-judges cloud starts and repairs at claim. A row that names no operation cannot be judged, so it cannot be granted.
         const operation = approval.detail['operation'];
-        if (typeof operation === 'string' && operation !== 'start_cloud_worker' && operation !== 'repair_within_limits' && body.decision === 'grant') {
-          const current = evaluate({ kind: operation, actor: 'agent' } as unknown as Operation, ctx.policy);
-          if (current.decision !== 'require_approval') throw new AppError(403, 'policy_denied', 'policy no longer allows granting this', { reason: current.reason, decision: current.decision });
+        if (body.decision === 'grant') {
+          if (typeof operation !== 'string') throw new AppError(403, 'policy_denied', 'this approval names no operation', { reason: 'approval_operation_missing' });
+          if (operation !== 'start_cloud_worker' && operation !== 'repair_within_limits') {
+            const current = evaluate({ kind: operation, actor: 'agent' } as unknown as Operation, ctx.policy);
+            if (current.decision !== 'require_approval') throw new AppError(403, 'policy_denied', 'policy no longer allows granting this', { reason: current.reason, decision: current.decision });
+          }
         }
 
         const granted = body.decision === 'grant';
@@ -365,35 +368,22 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.accept_reduced_scope:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
         const planRevision = run.planRevision ?? 0;
         if (body.expectedPlanRevision !== planRevision) throw staleRevision(planRevision, 'the plan');
-        const tasksIn = (status: string) => tx.select({ taskId: schema.taskStatus.taskId, revision: schema.taskStatus.currentRevision, spec: schema.taskRevisions.spec }).from(schema.taskStatus)
-          .innerJoin(schema.taskRevisions, and(
-            eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId),
-            eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
-          .where(and(eq(schema.taskStatus.tenantId, config.tenantId), eq(schema.taskStatus.projectId, run.projectId), eq(schema.taskRevisions.runId, runId), eq(schema.taskStatus.status, status)));
-        const commands = await tx.select().from(schema.taskCommands).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, run.projectId), eq(schema.taskCommands.command, 'cancel')));
-        const isBudgetStop = (c: (typeof commands)[number]) => c.detail['reason'] === BUDGET_STOP_REASON;
-        const stopped = (await tasksIn('cancelled')).filter((t) => commands.some((c) => isBudgetStop(c) && c.state === 'cancelled' && c.taskId === t.taskId && c.revision === t.revision));
-        if (stopped.length === 0) throw new AppError(403, 'command_not_allowed', 'this run has no budget-stopped work to accept', { reason: 'not_budget_stopped' });
+        const scope = { tenantId: config.tenantId, projectId: run.projectId, runId };
+        const assessed = await assessRunScope(tx, scope);
+        if (assessed.stopped.length === 0) throw new AppError(403, 'command_not_allowed', 'this run has no budget-stopped work to accept', { reason: 'not_budget_stopped' });
         // A stop still in flight is not yet the final reduced scope.
-        const stillStopping = (await tasksIn('running')).filter((t) => commands.some((c) => isBudgetStop(c) && c.state === 'cancel_requested' && c.taskId === t.taskId && c.revision === t.revision));
-        if (stillStopping.length > 0) throw new AppError(403, 'cancel_pending', 'a budget stop is still in progress', { taskIds: stillStopping.map((t) => t.taskId) });
-        const decided = await tx.select({ id: schema.decisions.decisionId }).from(schema.decisions).where(and(
-          eq(schema.decisions.tenantId, config.tenantId), eq(schema.decisions.projectId, run.projectId), eq(schema.decisions.context, reducedScopeContext(runId))));
-        if (decided.length > 0) throw new AppError(403, 'command_not_allowed', 'reduced scope was already accepted for this run', { reason: 'already_accepted' });
+        if (assessed.stopping.length > 0) throw new AppError(403, 'cancel_pending', 'a budget stop is still in progress', { taskIds: assessed.stopping });
+        if (acceptanceCovers(await loadAcceptedReducedScope(tx, scope), assessed.stopped)) throw new AppError(403, 'command_not_allowed', 'reduced scope was already accepted for this run', { reason: 'already_accepted' });
 
-        const specOf = (t: { spec: unknown }) => TaskSpecSchema.parse(t.spec);
-        const notDelivered = { taskIds: stopped.map((t) => t.taskId).sort(), requirementIds: [...new Set(stopped.flatMap((t) => specOf(t).requirementIds))].sort(), acceptanceCheckIds: [...new Set(stopped.flatMap((t) => specOf(t).acceptanceCheckIds))].sort() };
-        // Delivered means verified by a task that was not stopped; a criterion shared with a stopped task stays not delivered.
-        const verified = [...(await tasksIn('verified')), ...(await tasksIn('merged'))];
-        const deliveredRequirementIds = [...new Set(verified.flatMap((t) => specOf(t).requirementIds))].filter((id) => !notDelivered.requirementIds.includes(id)).sort();
+        const { notDelivered, deliveredRequirementIds } = assessed;
         const decisionId = newId('dec');
         const note = body.note === undefined ? null : redactSecrets(body.note);
-        const accepted = { runId, planRevision, notDelivered, deliveredRequirementIds, acceptedAt: at.toISOString(), acceptedBy: uid };
+        const accepted: AcceptedReducedScope = { decisionId, runId, planRevision, notDelivered, deliveredRequirementIds, acceptedAt: at.toISOString(), acceptedBy: uid };
         await tx.insert(schema.decisions).values({
           tenantId: config.tenantId, projectId: run.projectId, decisionId, context: reducedScopeContext(runId), options: [], rationale: note ?? 'Accepted the run at reduced scope after a budget stop.', author: uid, affected: [accepted],
         });
         await writeEvent(tx, at, { projectId: run.projectId, runId, taskId: runId, aggregateRevision: planRevision, type: 'run.reduced_scope_accepted', actor: { kind: 'human', id: uid }, payload: { decisionId, notDelivered, deliveredRequirementIds, ...(note !== null ? { note } : {}) } });
-        return { decisionId, ...accepted };
+        return accepted;
       });
     });
     return reply.code(201).send(result);
@@ -421,10 +411,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           exitReason: schema.attempts.exitReason, startedAt: schema.attempts.startedAt, endedAt: schema.attempts.endedAt,
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
-        const approvals = await tx.select().from(schema.approvals).where(and(scope(schema.approvals), eq(schema.approvals.outcome, 'pending')));
+        const approvals = await tx.select().from(schema.approvals).where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['pending', 'expired'])));
         const reports = await tx.select().from(schema.clientReports).where(scope(schema.clientReports)).orderBy(desc(schema.clientReports.createdAt)).limit(50);
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
-        const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith('reduced_scope:'));
+        const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith(reducedScopeContext('')));
         // Why each blocked task stopped: the latest blocking event names it. Statuses alone can't say.
         const blockEvents = await tx.execute(sql`
           SELECT DISTINCT ON (task_id) task_id, type, payload FROM events
@@ -439,7 +429,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           runs: runs.map((r) => ({
             runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null,
             /** Set once the owner accepted a budget stop. `notDelivered` lists what was stopped and is never counted as verified. */
-            reducedScope: reducedScopes.find((d) => d.context === `reduced_scope:${r.runId}`)?.affected[0] ?? null,
+            reducedScope: reducedScopes.filter((d) => d.context === reducedScopeContext(r.runId)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.affected[0] ?? null,
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);
@@ -465,7 +455,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               cancel: cancel ? { state: 'cancel_requested', operationId: cancel.operationId, requestedAt: cancel.requestedAt.toISOString() } : null,
             };
           }),
-          approvals: approvals.map((a) => ({
+          // Open requests, and expired ones whose task is still blocked on them: those can still be denied.
+          approvals: approvals.filter((a) => a.outcome === 'pending' || !a.taskId || statuses.some((s) => s.taskId === a.taskId && s.currentRevision === a.revision && s.status === 'blocked')).map((a) => ({
+            outcome: a.outcome,
             approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, requester: a.requester, scopeHash: a.scopeHash,
             expiresAt: a.expiresAt?.toISOString() ?? null, requestedAt: a.createdAt.toISOString(),
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,

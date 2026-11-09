@@ -40,7 +40,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
 const gitEnv = { PATH: process.env['PATH'] ?? '', HOME: tmpdir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
 
 export class CandidateNotVerifiable extends Error {
-  constructor(readonly reason: 'not_found' | 'not_assembled' | 'lease_held' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
+  constructor(readonly reason: 'not_found' | 'not_assembled' | 'lease_held' | 'lease_lost' | 'task_not_in_candidate' | 'invalid_request' | 'export_failed', message: string) {
     super(message);
   }
 }
@@ -83,9 +83,15 @@ export interface VerificationDeps {
   /** Extra runs after a run with failed checks. Every run is kept. Default 0. */
   readonly flakyRetries?: number;
   readonly logLimitBytes?: number;
-  /** How long the per-candidate verification lease lasts. It must exceed the runner timeout. Default 2 h. */
+  /** The per-candidate verification lease. Renewed during the run, so a crash frees the candidate within this window. Default `VERIFICATION_LEASE_SECONDS`. */
   readonly leaseSeconds?: number;
 }
+
+/** Short, because a live run renews it every third of its length: a crash blocks the candidate only this long. */
+export const VERIFICATION_LEASE_SECONDS = 120;
+
+/** A part must still be this revision and in one of these states for a verdict on the candidate to mean anything. */
+export const LIVE_PART_STATUSES: readonly string[] = ['verifying', 'verified', 'merged'];
 
 /** The host this build verifies on until the cloud backend exists. */
 export const LOCAL_DOCKER_HOST = 'local-docker';
@@ -213,7 +219,7 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
   const baseSha = String(row['base_sha']);
   const treeSha = String(row['tree_sha']);
   const holder = `verify:${randomUUID()}`;
-  const leaseSeconds = deps.leaseSeconds ?? 7200;
+  const leaseSeconds = deps.leaseSeconds ?? VERIFICATION_LEASE_SECONDS;
   const candKey = sql`tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha}`;
   // One verification per candidate at a time: otherwise two runs can disagree about the same SHA.
   const taken = await deps.db.execute(sql`
@@ -223,27 +229,37 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
     RETURNING 1`);
   if (taken.length === 0) throw new CandidateNotVerifiable('lease_held', 'another verification holds this candidate');
 
-  const manifestBytes = await readFile(join(suiteDir, 'manifest.json'));
-  const manifest = JSON.parse(manifestBytes.toString());
-  const hashes = verifierHashes(pkgRoot, repoRoot);
-  const fixtures = await readFixtures(manifest.fixtures);
-
-  const contractRevisions = new Set<string>();
-  for (const p of parts) {
-    const r = await deps.db.execute(sql`SELECT spec FROM task_revisions WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} AND revision = ${p.revision}`);
-    const spec = r[0] ? TaskSpecSchema.safeParse(r[0]['spec']) : null;
-    if (spec?.success) for (const c of spec.data.contractRefs) contractRevisions.add(`${c.artifactId}@${c.sha256}`);
-  }
-
-  const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-verify');
-  await mkdir(parent, { recursive: true });
-  const candidateDir = await mkdtemp(join(parent, 'verify-cand-'));
-  const outDir = await mkdtemp(join(parent, 'verify-out-'));
-  const recordId = `ver_${randomUUID()}`;
-  const runs: VerificationRun[] = [];
-  const pending: { type: string; id: string; sha256: string; locator: Record<string, unknown> }[] = [];
-  let tools: Record<string, string> = {};
+  // Renewal stops at the first sign the lease is gone; the fence at record write is what actually protects the evidence.
+  const scratch: string[] = [];
+  const renewer = setInterval(() => {
+    void deps.db.execute(sql`
+      UPDATE candidates SET detail = jsonb_set(detail, '{verification,expiresAt}', to_jsonb(${new Date(now().getTime() + leaseSeconds * 1000).toISOString()}::text))
+      WHERE ${candKey} AND detail -> 'verification' ->> 'holder' = ${holder}`).catch(() => undefined);
+  }, Math.max(1, (leaseSeconds * 1000) / 3));
+  renewer.unref();
   try {
+    const manifestBytes = await readFile(join(suiteDir, 'manifest.json'));
+    const manifest = JSON.parse(manifestBytes.toString());
+    const hashes = verifierHashes(pkgRoot, repoRoot);
+    const fixtures = await readFixtures(manifest.fixtures);
+
+    const contractRevisions = new Set<string>();
+    for (const p of parts) {
+      const r = await deps.db.execute(sql`SELECT spec FROM task_revisions WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} AND revision = ${p.revision}`);
+      const spec = r[0] ? TaskSpecSchema.safeParse(r[0]['spec']) : null;
+      if (spec?.success) for (const c of spec.data.contractRefs) contractRevisions.add(`${c.artifactId}@${c.sha256}`);
+    }
+
+    const parent = deps.workRoot ?? join(tmpdir(), 'selarikru-verify');
+    await mkdir(parent, { recursive: true });
+    const candidateDir = await mkdtemp(join(parent, 'verify-cand-'));
+    scratch.push(candidateDir);
+    const outDir = await mkdtemp(join(parent, 'verify-out-'));
+    scratch.push(outDir);
+    const recordId = `ver_${randomUUID()}`;
+    const runs: VerificationRun[] = [];
+    const pending: { type: string; id: string; sha256: string; locator: Record<string, unknown> }[] = [];
+    let tools: Record<string, string> = {};
     await exportTree(candidate.repoPath, candidate.sha, treeSha, candidateDir);
     const want: Expected = {
       manifestSha: sha256(manifestBytes), verifierSha: hashes.verifierSha256, image: manifest.tools.playwrightImage,
@@ -287,14 +303,24 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
         metric: 'worker_seconds', quantity: (spentMs / 1000).toFixed(3), provenance: 'observed', source: 'verifier', phase: 'active', host: deps.host.startsWith('local') ? 'local' : 'cloud', basis: 'measured', recordedAt: now(),
       });
       const cur = await tx.execute(sql`
-        SELECT status FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
-      const live = cur[0]?.['status'] === 'assembled';
+        SELECT status, detail -> 'verification' ->> 'holder' AS holder FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
+      // The fence: a run that lost its lease (expired and taken, or the candidate re-assembled) writes nothing at all.
+      if (cur[0]?.['holder'] !== holder) throw new CandidateNotVerifiable('lease_lost', 'this verification no longer holds the candidate');
+      const assembled = cur[0]?.['status'] === 'assembled';
+      // A part cancelled or replanned during the run means the tree contains work that is no longer wanted: the verdict can release nothing.
+      let partsLive = true;
+      for (const p of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
+        const row = await tx.execute(sql`SELECT status, current_revision FROM task_status WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} FOR UPDATE`);
+        if (row.length === 0 || Number(row[0]!['current_revision']) !== p.revision || !LIVE_PART_STATUSES.includes(String(row[0]!['status']))) partsLive = false;
+      }
+      const live = assembled && partsLive;
+      const notLiveReason = assembled ? 'candidate_part_not_live' : 'candidate_invalidated';
       const taskOutcomes: TaskOutcome[] = [];
       for (const p of parts) {
         const key = { tenantId: candidate.tenantId, projectId: candidate.projectId, taskId: p.taskId };
         if (!live) {
           const s = await tx.execute(sql`SELECT status FROM task_status WHERE tenant_id = ${key.tenantId} AND project_id = ${key.projectId} AND task_id = ${key.taskId}`);
-          taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: false, taskStatus: String(s[0]?.['status'] ?? 'unknown'), reason: 'candidate_invalidated' });
+          taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: false, taskStatus: String(s[0]?.['status'] ?? 'unknown'), reason: notLiveReason });
           continue;
         }
         const failedChecks = last.results.filter((r) => r.status !== 'passed').map((r) => r.checkId);
@@ -350,14 +376,14 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
       }
       await tx.insert(schema.artifacts).values({
         tenantId: candidate.tenantId, projectId: candidate.projectId, artifactId: recordId, runId: candidate.runId, type: 'verification_record', sha256: recordRef.sha256,
-        sourceRevision: candidate.sha, classification: 'internal', locator: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, host: deps.host, applied: anyApplied, checkRunIds },
+        sourceRevision: candidate.sha, classification: 'internal', locator: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, host: deps.host, applied: anyApplied, result: overall, checkRunIds },
       });
       return record;
     });
   } finally {
-    await rm(candidateDir, { recursive: true, force: true });
-    await rm(outDir, { recursive: true, force: true });
+    clearInterval(renewer);
     await deps.db.execute(sql`UPDATE candidates SET detail = detail - 'verification' WHERE ${candKey} AND detail -> 'verification' ->> 'holder' = ${holder}`);
+    for (const dir of scratch) await rm(dir, { recursive: true, force: true });
   }
 }
 

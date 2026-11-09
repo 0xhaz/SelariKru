@@ -1,12 +1,13 @@
 import type { VerificationRecord } from '@selarikru/domain';
 import { recordOperation, schema, sql, withTx, type Db, type Tx } from '@selarikru/persistence';
+import { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, desc, eq } from 'drizzle-orm';
 import { buildPrBody, type UsageLine } from './body.ts';
 import { emitIntegration } from './events.ts';
 import { PushRejectedError, type GitHubPort, type PullRequestInfo } from './port.ts';
 
 
-export type PrRefusal = 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open' | 'candidate_changed' | 'foreign_pr' | 'target_mismatch' | 'run_already_merged' | 'push_rejected';
+export type PrRefusal = 'reduced_scope_not_accepted' | 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open' | 'candidate_changed' | 'foreign_pr' | 'target_mismatch' | 'run_already_merged' | 'push_rejected';
 
 export class PrNotAllowed extends Error {
   constructor(readonly reason: PrRefusal, message: string, /** Reason-specific facts, e.g. the open PR to close for `candidate_changed`. */ readonly detail: Readonly<Record<string, unknown>> = {}) {
@@ -49,7 +50,7 @@ export function branchForCandidate(runId: string, sha: string): string {
 type Reader = Db | Tx;
 
 /** What the open depends on, read from `q`: the project and the run's current assembled candidate. `skip` for a trial run. */
-async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ skip: true } | { skip: false; project: typeof schema.projects.$inferSelect; sha: string }> {
+async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ skip: true } | { skip: false; project: typeof schema.projects.$inferSelect; sha: string; accepted: AcceptedReducedScope | null }> {
   const runQuery = q.select().from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)));
   const row = (await (lock ? runQuery.for('no key update') : runQuery))[0];
   if (!row) throw new PrNotAllowed('run_missing', 'unknown run');
@@ -57,12 +58,19 @@ async function readState(q: Reader, run: OpenPrRun, lock: boolean): Promise<{ sk
   if (!project) throw new PrNotAllowed('project_missing', 'unknown project');
   if (row.trial) return { skip: true };
   if (row.lifecycle !== 'ready_for_review') throw new PrNotAllowed('run_not_ready', `run is ${row.lifecycle}, not ready_for_review`);
+  // Work the budget stopped must be accepted by the owner before a review can present what is left as the run's result.
+  const assessed = await assessRunScope(q, run);
+  const stoppedIds = [...assessed.stopped.map((t) => t.taskId), ...assessed.stopping];
+  const decision = stoppedIds.length > 0 ? await loadAcceptedReducedScope(q, run) : null;
+  if (stoppedIds.length > 0 && (assessed.stopping.length > 0 || !acceptanceCovers(decision, assessed.stopped))) {
+    throw new PrNotAllowed('reduced_scope_not_accepted', 'budget-stopped work has no accepted reduced-scope decision', { taskIds: stoppedIds });
+  }
   const candidate = (await q.select().from(schema.candidates).where(and(
     eq(schema.candidates.tenantId, run.tenantId), eq(schema.candidates.projectId, run.projectId), eq(schema.candidates.runId, run.runId), eq(schema.candidates.status, 'assembled')))
     .orderBy(desc(schema.candidates.createdAt)))[0];
   if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
   if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
-  return { skip: false, project, sha: candidate.sha };
+  return { skip: false, project, sha: candidate.sha, accepted: decision };
 }
 
 const MAX_ATTEMPTS = 3;
@@ -122,7 +130,7 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       if (prior.status !== 'closed' && prior.status !== 'stale_candidate') throw new PrNotAllowed('run_already_merged', `pull request #${prior.prNumber} for this run is ${prior.status}`, { prNumber: prior.prNumber });
     }
 
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage });
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, ...(state.accepted ? { notDelivered: state.accepted.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {
