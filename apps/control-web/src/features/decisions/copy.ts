@@ -10,6 +10,7 @@ export function outcomeMessage(card: DecisionCardModel, action: Extract<Decision
     case 'task.cancel': return receipt.execution === 'cancel_requested' ? `Cancel requested for ${name}. It is not stopped until the runner confirms.` : `${name} was cancelled.`;
     case 'run.accept_reduced_scope': return 'Reduced scope accepted. The undelivered work stays listed as not delivered.';
     case 'run.reverify': return 'Sent back for verification. No worker was started.';
+    case 'run.start_new': return 'New run started with the recorded budget ceiling. It has no plan yet; plan it in the Assistant.';
     case 'run.open_pull_request': return 'Draft pull request opened. Merging stays on GitHub.';
     default: return 'Recorded.';
   }
@@ -37,6 +38,9 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   nothing_to_reverify: { text: 'Nothing here can be re-verified any more. The block may already be cleared.', changed: false },
   reverify_limit_reached: { text: 'This task has used its re-verifications under this verifier. Replan or cancel it instead.', changed: false },
   resource_conflict: { text: 'Re-verifying is waiting on a resource another task holds. Try again when it is free.', changed: false },
+  outside_recorded_limits: { text: 'This project has no recorded budget ceiling and location to start a run under, so no run was started. Finish the setup first.', changed: false },
+  onboarding_not_activated: { text: 'This project has not finished setup, so no run was started.', changed: false },
+  template_not_supported: { text: 'This project is a plan only: its template cannot start a run yet.', changed: false },
   run_not_ready: { text: 'This run is not ready for a pull request.', changed: false },
   reduced_scope_not_accepted: { text: 'Accept the reduced scope first: a pull request cannot open while budget-stopped work is undecided.', changed: false },
   run_already_merged: { text: 'A pull request for this run was already merged.', changed: false },

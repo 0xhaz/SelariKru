@@ -394,6 +394,26 @@ describe('streaming and resync', () => {
 });
 
 describe('commands target one project and follow the real cancel rules', () => {
+  it('run.start_new opens a fresh run in planning in that project only, and replays by key', async () => {
+    const ds = make();
+    const a = buildFixture('runner-loss');
+    const b = buildFixture('healthy-parallel-work');
+    const beforeB = Object.keys((await ds.getSnapshot(b.projectId)).runs);
+    const before = Object.keys((await ds.getSnapshot(a.projectId)).runs);
+    const start = { command: 'run.start_new' as const, expectedRevision: 0, idempotencyKey: 'new-run-1', args: { projectId: a.projectId, title: 'Follow-up run' } };
+    const first = await ds.execute(start);
+    expect(first).toMatchObject({ accepted: true, execution: 'applied', simulated: true, replayed: false });
+    ds.clock.advance(5_000);
+    const after = await ds.getSnapshot(a.projectId);
+    const added = Object.values(after.runs).filter((r) => !before.includes(r.runId));
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ lifecycle: 'planning', planRevision: 0 });
+    expect(await ds.execute(start)).toMatchObject({ accepted: true, replayed: true });
+    expect(Object.keys((await ds.getSnapshot(a.projectId)).runs)).toHaveLength(before.length + 1);
+    expect(Object.keys((await ds.getSnapshot(b.projectId)).runs)).toEqual(beforeB);
+    expect(await ds.execute({ ...start, idempotencyKey: 'x', args: { projectId: 'nope', title: 'T' } })).toMatchObject({ accepted: false, rejection: 'unknown_target' });
+  });
+
   const cancel = (taskId: string, rev: number, key: string) => ({ command: 'task.cancel' as const, expectedRevision: rev, idempotencyKey: key, args: { taskId } });
 
   it('cancelling a task in one fixture changes that fixture only', async () => {

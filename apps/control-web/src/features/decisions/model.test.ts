@@ -131,9 +131,9 @@ describe('budget stop', () => {
     return s;
   };
 
-  it('offers reduced scope, replan and cancel, and lists what is not delivered', () => {
+  it('offers reduced scope, a new run and cancel, and lists what is not delivered', () => {
     const card = build(stopped()).cards.find((c) => c.kind === 'budget_stop')!;
-    expect(labels(card)).toEqual(['Accept reduced scope', 'Replan in the Assistant', 'Cancel "Waiting work"']);
+    expect(labels(card)).toEqual(['Accept reduced scope', 'Start a new run', 'Cancel "Waiting work"']);
     expect(card.notDelivered?.tasks.map((t) => t.title)).toEqual(['Stopped work', 'Waiting work']);
     expect(card.notDelivered?.requirementIds).toEqual(['FB-2']);
     expect(card.notDelivered?.acceptanceCheckIds).toEqual(['chk-2']);
@@ -504,7 +504,42 @@ describe('a budget refusal on a task', () => {
     const cards = build(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] })).cards;
     const card = cards.find((c) => c.id === 'placement:t')!;
     expect(card.summary).toMatch(/exceed/i);
-    expect(card.facts.find((f) => f.label === 'Next')!.value).toMatch(/cheaper model/i);
+    expect(card.facts.find((f) => f.label === 'Next')!.value).toMatch(/start a new run/i);
+  });
+});
+
+describe('after the run budget is spent', () => {
+  const START = { kind: 'command', intent: { command: 'run.start_new', expectedRevision: 0, args: { projectId: 'p', title: 'Follow-up run' } } };
+  const cases: [string, ReturnType<typeof snapshotOf>][] = [
+    ['repair budget exhausted', snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_budget_exhausted' })] })],
+    ['repair limit exhausted', snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_limit_exhausted' })] })],
+    ['a budget refusal', snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] })],
+  ];
+  it.each(cases)('%s offers a new run and cancel, not a replan that would be refused', (_n, snap) => {
+    const card = build(snap).cards.find((c) => c.id === 'placement:t')!;
+    expect(labels(card)).toEqual(['Start a new run', 'Cancel task']);
+    expect(action(card, 'Start a new run')).toMatchObject(START);
+    expect(action(card, 'Start a new run').disabledReason).toBeNull();
+    expect(card.facts.find((f) => f.label === 'Next')!.value).toMatch(/start a new run/i);
+    expect(card.consequence + card.summary).not.toMatch(/replan/i);
+  });
+  it('is enabled under demo data, where the mock mirrors it', () => {
+    const card = build(cases[0]![1], { mode: 'mock' }).cards.find((c) => c.id === 'placement:t')!;
+    expect(action(card, 'Start a new run').disabledReason).toBeNull();
+  });
+  it('is held while the connection is not live', () => {
+    const card = build(cases[0]![1], { connection: 'reconnecting' } as Partial<DecisionOptions>).cards.find((c) => c.id === 'placement:t')!;
+    expect(action(card, 'Start a new run').disabledReason).not.toBeNull();
+  });
+  it('a budget stop offers accept, a new run and cancel, and no replan', () => {
+    const s = snapshotOf({ tasks: [task('b', { status: 'cancelled', cancelReason: 'budget_exhausted', title: 'Stopped work' })] });
+    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [{ taskId: 'b', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: [], acceptanceCheckIds: [] }, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+    const card = build(s).cards.find((c) => c.kind === 'budget_stop')!;
+    expect(labels(card)).toEqual(['Accept reduced scope', 'Start a new run']);
+    expect(action(card, 'Start a new run')).toMatchObject(START);
+  });
+  it('other blocks keep their replan', () => {
+    expect(labels(build(snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'resource_conflict:db' })] })).cards[0]!)).toContain('Replan in the Assistant');
   });
 });
 

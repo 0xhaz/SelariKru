@@ -94,9 +94,14 @@ function routeOf(c: AuthorizedViewCommand): Route {
     case 'run.accept_reduced_scope': return { path: `/v1/runs/${enc(c.args.runId)}/accept-reduced-scope`, body: { expectedPlanRevision: c.expectedRevision, notDeliveredHash: c.args.notDeliveredHash, ...(c.args.note !== undefined ? { note: c.args.note } : {}), ...key } };
     case 'run.reverify': return { path: `/v1/runs/${enc(c.args.runId)}/reverify`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
     case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: {} };
+    // Needs the project's recorded setup first, so `execute` builds this route itself.
+    case 'run.start_new': throw new Error('run.start_new is routed by execute');
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
   }
 }
+
+/** The placement a project's recorded execution choice gets: the same mapping onboarding used for its first run. Local gets none. */
+const PLACEMENT_FOR: Readonly<Record<string, string | null>> = { local: null, cloud: 'C1', hybrid: 'H2' };
 
 interface Accepted { readonly operationId: string | null; readonly execution: CommandReceipt['execution'] }
 
@@ -104,6 +109,7 @@ function acceptedOf(c: AuthorizedViewCommand, body: Record<string, unknown>): Ac
   const op = (k: string): string | null => (typeof body[k] === 'string' ? (body[k] as string) : null);
   if (c.command === 'task.cancel' || c.command === 'task.retry') return { operationId: op('operationId'), execution: body['state'] === 'cancel_requested' ? 'cancel_requested' : 'applied' };
   if (c.command === 'run.accept_reduced_scope') return { operationId: op('decisionId'), execution: 'applied' };
+  if (c.command === 'run.start_new') return { operationId: op('runId'), execution: 'applied' };
   return { operationId: null, execution: 'applied' };
 }
 
@@ -289,7 +295,30 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       if (!parsed.success) return refuse(typeof key === 'string' ? key : 'invalid', 'invalid_command');
       assertOpen();
       const c = parsed.data;
-      const route = routeOf(c);
+      let route: Route;
+      try {
+        if (c.command === 'run.start_new') {
+          // The ceiling and the location are the owner's recorded setup. Read here, and sent as the run's own limits; the route checks them again.
+          const setup = await request(`/v1/onboarding/${encodeURIComponent(c.args.projectId)}`);
+          type Setup = { costPlan?: { agentBudgetUsd?: unknown } | null; execution?: { execution?: unknown } | null } | null;
+          let view = null as Setup;
+          if (setup.ok) view = (await setup.json().catch(() => null)) as Setup;
+          else {
+            const wire = await readWireError(setup);
+            if (setup.status === 401 || isTransient(setup.status) || AUTH_CODES.includes(wire.code)) throw fail(toDataSourceError(wire));
+          }
+          const ceiling = view?.costPlan?.agentBudgetUsd;
+          const execution = view?.execution?.execution;
+          // No recorded ceiling or location is a refusal here, not a guess: a missing limit is never unlimited.
+          if (typeof ceiling !== 'number' || typeof execution !== 'string' || !Object.hasOwn(PLACEMENT_FOR, execution)) return refuse(c.idempotencyKey, 'outside_recorded_limits');
+          const mode = PLACEMENT_FOR[execution];
+          route = { path: `/v1/projects/${encodeURIComponent(c.args.projectId)}/runs`, body: { idempotencyKey: c.idempotencyKey, title: c.args.title, budgetLimitUsd: ceiling, ...(mode ? { placement: { mode } } : {}) } };
+        } else {
+          route = routeOf(c);
+        }
+      } catch (e) {
+        throw e instanceof DataSourceException ? e : fail(fromThrown(e));
+      }
       let res: Response;
       try {
         res = await request(route.path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(route.body) });

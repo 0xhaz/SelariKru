@@ -308,10 +308,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed';
+  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created';
   function appendCommandEvent(p: Project, taskId: string, type: CommandEvent, payload: Record<string, unknown>, o: { delayMs?: number; revisionStep?: number; attemptId?: string | null; system?: boolean } = {}): void {
     const task = p.state.snapshot.tasks[taskId];
-    const runId = task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
+    const runId = type === 'run.created' ? taskId : task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
     const at = isoOf(timeOf(p) + (o.delayMs ?? 0));
     const event: ProjectViewEvent = {
       schemaVersion: 1, eventId: seededId(prng, 'evt'), projectId: p.fixture.projectId, runId, taskId, attemptId: o.attemptId ?? null, type, sequence: 0,
@@ -359,6 +359,12 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const snap = p.state.snapshot;
     const op = `op_${seededId(prng, 'sim')}`;
     if (c.command === 'assignment.set') return setAssignment(p, c, op);
+    // Mirrors the owner route: a new run, in planning, with no plan. The demo has no recorded ceiling to enforce.
+    if (c.command === 'run.start_new') {
+      const runId = `run_${seededId(prng, 'sim')}`;
+      appendCommandEvent(p, runId, 'run.created', { title: c.args.title, lifecycle: 'planning' });
+      return receipt(c.idempotencyKey, { operationId: runId, accepted: true, execution: 'applied' });
+    }
     if (c.command === 'run.accept_reduced_scope' || c.command === 'run.reverify' || c.command === 'run.open_pull_request') {
       const r = snap.runs[c.args.runId];
       if (!r) return rejected(c.idempotencyKey, 'unknown_target');

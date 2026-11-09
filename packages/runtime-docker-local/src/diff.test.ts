@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkAllowedPaths, computeChanges, readRegularFile, snapshotTree, validateAllowedPaths } from './diff.ts';
 
@@ -106,5 +107,18 @@ describe('post-run diff', () => {
     expect(() => checkAllowedPaths([], ['../x'])).toThrow();
     expect(() => checkAllowedPaths([], ['/etc'])).toThrow();
     expect(() => checkAllowedPaths([], ['a/../b'])).toThrow();
+  });
+
+  it("applies the Feedback Board shell's own .gitignore: pnpm's store and build output are ignored, real code under a nested dist/ is not", async () => {
+    const shellIgnore = await readFile(fileURLToPath(new URL('../../../examples/feedback-board-starter/.gitignore', import.meta.url)));
+    await put('.gitignore', shellIgnore.toString());
+    const base = await snapshotTree(dir);
+    await put('.pnpm-store/v10/files/00/abc', 'store');
+    await put('node_modules/p/index.js', 'junk');
+    await put('dist/index.html', 'built');
+    await put('server/dist/real.ts', 'real code');
+    const changes = await computeChanges(base, dir, new Map([['.gitignore', shellIgnore]]));
+    expect(changes.map((c) => c.path)).toEqual(['server/dist/real.ts']);
+    expect(checkAllowedPaths(changes, ['src']).violations.map((v) => v.reason)).toEqual(['outside_allowed_paths']);
   });
 });

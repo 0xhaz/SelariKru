@@ -183,7 +183,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
     case 'repair':
       return make({
         ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: `Its repair attempts are used up, so no further attempt will start.${lastFailure ? ` The last attempt ended with: ${explain(lastFailure)}` : ''}`,
-        consequence: `${whoWaits(hit)} It stays blocked until a person changes the plan.`, nextAction: 'Inspect the failing check, then replan or cancel the task.',
+        consequence: `${whoWaits(hit)} This run's budget is spent, so it stays blocked.`, nextAction: "Inspect the failing check. This run's budget is spent, and cancelling frees nothing. Start a new run to try again; the work so far stays on record.",
       });
     case 'budget': {
       const exceeds = code.endsWith('budget:exceeds_limit');
@@ -191,7 +191,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
       return make({
         ...base, kind: 'budget_resource', title: `${name}: cannot start`, detail: explain(code),
         consequence: `${whoWaits(hit)} ${exceeds ? 'It will not start over budget.' : unknownCost ? 'An unknown cost is never treated as zero.' : 'A missing limit is never treated as unlimited.'}`,
-        nextAction: exceeds ? 'Holds stay at their worst case and do not come back, so this will not clear by itself. Request a scoped budget increase, or assign a cheaper model and replan.' : unknownCost ? 'Resolve the missing usage figures, then retry.' : 'Set the limit in the run policy.',
+        nextAction: exceeds ? "Holds stay at their worst case and do not come back, so this run's budget is spent and will not clear by itself. Start a new run, which gets a fresh budget at or under the project's ceiling." : unknownCost ? 'Resolve the missing usage figures, then retry.' : 'Set the limit in the run policy.',
       });
     }
     case 'wait':

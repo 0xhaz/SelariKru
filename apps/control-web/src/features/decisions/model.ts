@@ -138,6 +138,18 @@ function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task',
   };
 }
 
+/**
+ * Once a run's budget is spent, every hold stays at its worst case and none is released: a replan is refused as over budget, and cancelling frees nothing. What works is a new run,
+ * through the same owner route as any run, which the server holds to the project's recorded ceiling. The command carries no budget; the data source reads the ceiling.
+ */
+function newRunAction(snapshot: ProjectViewSnapshot, paused: string | null): DecisionAction {
+  return {
+    kind: 'command', id: 'start-new-run', label: 'Start a new run', style: 'primary', disabledReason: paused,
+    intent: { command: 'run.start_new', expectedRevision: 0, args: { projectId: snapshot.meta.projectId, title: 'Follow-up run' } },
+    confirm: { title: 'Start a new run?', consequence: "This run's budget stays spent and its work stays on record. The new run gets a fresh budget at or under this project's recorded ceiling, and starts with no plan.", keepLabel: 'Not now' },
+  };
+}
+
 const openCancel = (t: TaskView, paused: string | null): readonly DecisionAction[] => (isClosedTask(t) ? [] : [cancelAction(t, paused)]);
 
 function githubLink(url: string): string | null {
@@ -263,7 +275,8 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     const hit = dependentsOf(snapshot, task.taskId);
     const item = blockItem(task, code, hit);
     const policy = classifyBlock(code) === 'policy';
-    const actions: DecisionAction[] = [replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused)];
+    const spent = classifyBlock(code) === 'repair' || code.endsWith('budget:exceeds_limit');
+    const actions: DecisionAction[] = [spent ? newRunAction(snapshot, paused) : replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused)];
     out.push({
       id: `placement:${task.taskId}`, kind: policy ? 'policy_deny' : 'blocked', chip: policy ? 'Policy denied' : code === 'approval_denied' ? 'Denied' : 'Blocked', tone: policy ? 'danger' : 'warning', state: 'open',
       title: policy ? `${titleOf(task)}: denied by policy` : item.title, summary: item.detail, consequence: item.consequence, reason: null, advisory: null,
@@ -336,7 +349,7 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
       intent: { command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, args: { runId: run.runId, notDeliveredHash: assessment?.notDeliveredHash ?? 'unknown' } },
       confirm: { title: 'Accept this run at reduced scope?', consequence: `${n} task${n === 1 ? '' : 's'}${reqs} will be recorded as not delivered. A pull request can then open without them. This cannot be undone.`, keepLabel: 'Keep deciding' },
     },
-    replanAction(options.mode, paused, { runId: run.runId }),
+    newRunAction(snapshot, paused),
     ...tasks.filter((t) => !isClosedTask(t)).map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`)),
   ];
   const stoppedNames = stopped.map(titleOf).join(', ');

@@ -87,4 +87,58 @@ describe('transport errors', () => {
   it('wording never decides: a network failure that mentions a token is a drop', async () => {
     expect(await err(withToken(new TypeError('failed to fetch token')).getSnapshot('p'))).toMatchObject({ code: 'disconnected', retryable: true });
   });
+
+  describe('run.start_new goes through the owner route under the recorded ceiling', () => {
+    const start = { command: 'run.start_new' as const, expectedRevision: 0, idempotencyKey: 'k-new', args: { projectId: 'p1', title: 'Follow-up run' } };
+    const onboarding = (over: Record<string, unknown> = {}) => ({ projectId: 'p1', costPlan: { agentBudgetUsd: 25 }, execution: { execution: 'local', inference: 'PREFER_ON_DEVICE' }, ...over });
+    function recording(replies: Record<string, () => Response>) {
+      const calls: { method: string; path: string; body: unknown; auth: string | null }[] = [];
+      const fetch = (async (url: string, init: RequestInit = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ method: init.method ?? 'GET', path, body: init.body ? JSON.parse(init.body as string) : null, auth: new Headers(init.headers).get('authorization') });
+        return (replies[`${init.method ?? 'GET'} ${path}`] ?? (() => new Response('{}', { status: 404 })))();
+      }) as unknown as typeof globalThis.fetch;
+      return { calls, source: createLiveDataSource({ baseUrl: 'http://x', getToken: async () => 'tok', fetch }) };
+    }
+    const json = (body: unknown, status = 200) => () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+    it('reads the ceiling, then creates the run with it, the same key and the title', async () => {
+      const { calls, source } = recording({ 'GET /v1/onboarding/p1': json(onboarding()), 'POST /v1/projects/p1/runs': json({ runId: 'run_9', budget: { status: 'set', limitUsd: 25 } }, 201) });
+      expect(await source.execute(start)).toMatchObject({ accepted: true, execution: 'applied', operationId: 'run_9', rejection: null });
+      expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['GET /v1/onboarding/p1', 'POST /v1/projects/p1/runs']);
+      expect(calls[1]!.body).toEqual({ idempotencyKey: 'k-new', title: 'Follow-up run', budgetLimitUsd: 25 });
+      expect(calls.every((c) => c.auth === 'Bearer tok')).toBe(true);
+    });
+
+    it('places a cloud or hybrid project the way its recorded setup was placed', async () => {
+      for (const [execution, mode] of [['cloud', 'C1'], ['hybrid', 'H2']] as const) {
+        const { calls, source } = recording({ 'GET /v1/onboarding/p1': json(onboarding({ execution: { execution, inference: 'PREFER_ON_DEVICE' } })), 'POST /v1/projects/p1/runs': json({ runId: 'r', budget: {} }, 201) });
+        await source.execute(start);
+        expect(calls[1]!.body).toMatchObject({ budgetLimitUsd: 25, placement: { mode } });
+      }
+    });
+
+    it('sends nothing when no ceiling or setup is recorded: a missing limit is never unlimited', async () => {
+      for (const view of [onboarding({ costPlan: null }), onboarding({ costPlan: { agentBudgetUsd: null } }), onboarding({ execution: null })]) {
+        const { calls, source } = recording({ 'GET /v1/onboarding/p1': json(view) });
+        expect(await source.execute(start)).toMatchObject({ accepted: false, rejection: 'outside_recorded_limits' });
+        expect(calls.map((c) => c.method)).toEqual(['GET']);
+      }
+      const none = recording({});
+      expect(await none.source.execute(start)).toMatchObject({ accepted: false, rejection: 'outside_recorded_limits' });
+    });
+
+    it('reads the route\'s own refusals', async () => {
+      const refuse = (code: string, status: number) => json({ error: { code, message: 'no' } }, status);
+      for (const [code, status, rejection] of [['outside_recorded_limits', 422, 'outside_recorded_limits'], ['onboarding_not_activated', 409, 'onboarding_not_activated'], ['policy_denied', 403, 'policy_denied']] as const) {
+        const { source } = recording({ 'GET /v1/onboarding/p1': json(onboarding()), 'POST /v1/projects/p1/runs': refuse(code, status) });
+        expect(await source.execute(start)).toMatchObject({ accepted: false, rejection });
+      }
+    });
+
+    it('a 429 while reading the ceiling is not a refusal', async () => {
+      const { source } = recording({ 'GET /v1/onboarding/p1': json({}, 429) });
+      await expect(source.execute(start)).rejects.toBeInstanceOf(DataSourceException);
+    });
+  });
 });

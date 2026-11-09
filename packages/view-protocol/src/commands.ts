@@ -17,6 +17,8 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   // Run-level commands. `expectedRevision` is the plan revision the caller saw. There is no merge command, and there never will be: people merge on GitHub.
   z.object({ command: z.literal('run.accept_reduced_scope'), ...base, args: z.object({ runId: Id, notDeliveredHash: Id, note: z.string().max(2000).optional() }).strict() }).strict(),
   z.object({ command: z.literal('run.reverify'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
+  // Starts a new run in a project whose earlier run has spent its budget. `expectedRevision` is not used (a new run has none) and is sent as 0; the server sets the budget at the project's recorded ceiling.
+  z.object({ command: z.literal('run.start_new'), ...base, args: z.object({ projectId: Id, title: z.string().trim().min(1).max(200) }).strict() }).strict(),
   z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
   // Sets or removes one assignment; `expectedRevision` is that assignment's revision (0 if never set). It applies to the next attempt only, and has no secret fields.
   z.object({ command: z.literal('assignment.set'), ...base, args: z.object({ projectId: Id, scope: z.enum(ASSIGNMENT_SCOPES), key: Id, selection: ModelSelectionSchema.nullable() }).strict() }).strict(),
@@ -27,6 +29,8 @@ export const REJECTION_REASONS = [
   'stale_revision', 'unknown_target', 'not_allowed', 'invalid_command', 'approval_expired', 'scope_mismatch',
   // Named refusals of the decision routes, so a screen can say why.
   'approval_already_resolved', 'reduced_scope_changed', 'policy_denied', 'cancel_pending', 'not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict',
+  // Named refusals of starting a new run: the project's recorded setup does not allow it.
+  'outside_recorded_limits', 'onboarding_not_activated', 'template_not_supported',
   'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged',
   // Named refusals of the pull-request route: the verified candidate moved, or no valid record supports it.
   'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate', 'pull_request_refused',

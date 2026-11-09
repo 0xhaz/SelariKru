@@ -555,6 +555,29 @@ describe('fix round 1', () => {
     expect((await run({ budgetLimitUsd: 25 })).status).toBe(201);
   });
 
+  it('a new run after the first one is spent is the request the Decisions action sends: the recorded ceiling, once per key', async () => {
+    const h = harness();
+    let v = await configuredWithRunner(h);
+    v = (await check(h, v)).body;
+    v = (await activate(h, v)).body;
+    // What the live data source reads before it asks: the ceiling and the placement, from the owner's own view.
+    const seen = (await get(h.app, `/v1/onboarding/${v.projectId}`)).body;
+    expect(seen.costPlan.agentBudgetUsd).toBe(25);
+    expect(seen.execution.execution).toBe('local');
+    const body = { idempotencyKey: 'decision-new-run', title: 'Follow-up run', budgetLimitUsd: seen.costPlan.agentBudgetUsd };
+    const first = await post(h.app, `/v1/projects/${v.projectId}/runs`, body);
+    expect(first.status).toBe(201);
+    expect(first.body).toMatchObject({ budget: { status: 'set', limitUsd: 25 } });
+    expect(first.body.runId).not.toBe(v.firstRunId);
+    const again = await post(h.app, `/v1/projects/${v.projectId}/runs`, body);
+    expect(again.body.runId).toBe(first.body.runId);
+    const runs = await t.db.select().from(schema.runs).where(eq(schema.runs.projectId, v.projectId));
+    expect(runs.map((r) => r.runId).sort()).toEqual([v.firstRunId, first.body.runId].sort());
+    expect(runs.find((r) => r.runId === first.body.runId)).toMatchObject({ lifecycle: 'planning', budget: { limitUsd: 25 } });
+    // The ceiling still binds: a retry cannot be turned into a bigger run.
+    expect((await post(h.app, `/v1/projects/${v.projectId}/runs`, { ...body, idempotencyKey: 'decision-new-run-2', budgetLimitUsd: 25.01 })).body.error.code).toBe('outside_recorded_limits');
+  });
+
   it('a cancelled project does not hold the checkout', async () => {
     const h = harness();
     const first = await configured(h);

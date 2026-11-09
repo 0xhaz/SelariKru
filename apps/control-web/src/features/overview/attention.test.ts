@@ -102,6 +102,16 @@ describe('attention queue', () => {
     expect(item!.nextAction).not.toMatch(/budget increase|repair attempt run/i);
   });
 
+  it('after repairs run out it says the run budget is spent and points to a new run, never to a replan that would be refused', () => {
+    for (const code of ['repair_budget_exhausted', 'repair_limit_exhausted']) {
+      const [item] = buildAttention(blockedBy(code), NOW, NOW);
+      const said = `${item!.consequence} ${item!.nextAction}`;
+      expect(said, code).toMatch(/budget is spent/i);
+      expect(said, code).toMatch(/start a new run/i);
+      expect(said, code).not.toMatch(/replan/i);
+    }
+  });
+
   it.each([
     ['resource_conflict:db', /resource/i, true],
     ['role_not_mapped:backend', /backend/, true],
@@ -400,7 +410,9 @@ describe('a budget refusal', () => {
     const [item] = buildAttention(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] }), NOW, NOW);
     expect(item).toMatchObject({ kind: 'budget_resource', needsOperator: true, decisionId: 'placement:t' });
     expect(item!.nextAction).toMatch(/budget/i);
-    expect(item!.nextAction).toMatch(/cheaper model/i);
+    expect(item!.nextAction).toMatch(/budget is spent/i);
+    expect(item!.nextAction).toMatch(/start a new run/i);
+    expect(item!.nextAction).not.toMatch(/replan|budget increase|cheaper model/i);
   });
   it('a missing limit stays a setting to fix, not a decision', () => {
     expect(blockItem(attentionTask(), 'missing_budget_limit', ['t']).decisionId).toBeNull();
