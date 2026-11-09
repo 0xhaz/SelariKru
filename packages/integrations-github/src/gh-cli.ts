@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { redactSecrets } from '@selarikru/protocol';
 import type { GitHubPort, PullRequestInfo, PullRequestState } from './port.ts';
 
 /** Runs a program with an argument array. No shell is ever involved. */
@@ -7,7 +8,7 @@ export type Exec = (file: string, args: readonly string[], opts?: { cwd?: string
 export const defaultExec: Exec = (file, args, opts = {}) =>
   new Promise((resolve, reject) => {
     const child = execFile(file, [...args], { cwd: opts.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }, maxBuffer: 8 * 1024 * 1024, timeout: 120_000 }, (error, stdout, stderr) => {
-      if (error) reject(new Error(`${file} ${args[0] ?? ''} failed: ${String(stderr || error.message).slice(0, 500)}`));
+      if (error) reject(new Error(`${file} ${args[0] ?? ''} failed: ${redactSecrets(String(stderr || error.message)).slice(0, 500)}`));
       else resolve(stdout);
     });
     if (opts.input !== undefined) child.stdin?.end(opts.input);
@@ -17,7 +18,7 @@ export const defaultExec: Exec = (file, args, opts = {}) =>
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,150}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const FIELDS = 'number,url,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit';
+const FIELDS = 'number,url,state,isDraft,headRefName,headRefOid,baseRefName,isCrossRepository,mergeCommit';
 
 export interface GhCliOptions {
   readonly exec?: Exec;
@@ -26,13 +27,13 @@ export interface GhCliOptions {
 }
 
 interface RawPr {
-  number: number; url: string; state: string; isDraft: boolean; headRefName: string; headRefOid: string; baseRefName: string; mergeCommit: { oid?: string } | null;
+  number: number; url: string; state: string; isDraft: boolean; headRefName: string; headRefOid: string; baseRefName: string; isCrossRepository: boolean; mergeCommit: { oid?: string } | null;
 }
 
 function toInfo(raw: RawPr): PullRequestInfo {
   const state: PullRequestState = raw.state === 'MERGED' ? 'merged' : raw.state === 'CLOSED' ? 'closed' : 'open';
   return {
-    number: raw.number, url: raw.url, state, draft: raw.isDraft, headRef: raw.headRefName, headSha: raw.headRefOid, baseRef: raw.baseRefName,
+    number: raw.number, url: raw.url, state, draft: raw.isDraft, headRef: raw.headRefName, headSha: raw.headRefOid, baseRef: raw.baseRefName, isCrossRepository: raw.isCrossRepository === true,
     mergeCommitSha: state === 'merged' ? (raw.mergeCommit?.oid ?? null) : null,
   };
 }
@@ -65,10 +66,9 @@ export function createGhCliPort(options: GhCliOptions = {}): GitHubPort {
       // No force: a branch that moved elsewhere makes this fail rather than being overwritten.
       await exec('git', ['push', '--no-verify', url, `${sha}:refs/heads/${name}`], { cwd: repoPath });
     },
-    async findPullRequest(repository, branch) {
-      const out = await exec('gh', ['pr', 'list', '--repo', repo(repository), '--head', branchOf(branch), '--state', 'all', '--limit', '1', '--json', FIELDS]);
-      const list = JSON.parse(out) as RawPr[];
-      return list[0] ? toInfo(list[0]) : null;
+    async findPullRequests(repository, branch) {
+      const out = await exec('gh', ['pr', 'list', '--repo', repo(repository), '--head', branchOf(branch), '--state', 'all', '--limit', '20', '--json', FIELDS]);
+      return (JSON.parse(out) as RawPr[]).map(toInfo);
     },
     async createDraftPullRequest({ repository, branch, base, title, body }) {
       const r = repo(repository);

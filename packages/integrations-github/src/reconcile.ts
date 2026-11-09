@@ -1,6 +1,7 @@
-import { schema, sql, withTx, type Db } from '@selarikru/persistence';
+import { schema, withTx, type Db } from '@selarikru/persistence';
+import { redactSecrets } from '@selarikru/protocol';
 import { markTaskMerged } from '@selarikru/workflow';
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { emitIntegration, INTEGRATION_ACTOR } from './events.ts';
 import type { GitHubPort } from './port.ts';
 import { INTEGRATION } from './webhook.ts';
@@ -17,7 +18,7 @@ export interface RunKey {
   readonly runId: string;
 }
 
-export type ReconcileOutcome = { readonly status: 'merged' | 'open' | 'closed' | 'sha_mismatch' | 'unchanged' | 'unknown' };
+export type ReconcileOutcome = { readonly status: 'merged' | 'open' | 'closed' | 'sha_mismatch' | 'stale' | 'unchanged' | 'unknown' };
 
 /**
  * Brings a run's recorded change state in line with GitHub. The merged state comes only from `port.getPullRequest` (state and exact head
@@ -39,18 +40,29 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
     const observed = { observedHeadSha: pr.headSha, observedAt: now };
     if (pr.state === 'open') { await tx.update(schema.changeRequests).set({ ...observed, status: 'open' }).where(where); return { status: 'open' }; }
     if (pr.state === 'closed') { await tx.update(schema.changeRequests).set({ ...observed, status: 'closed' }).where(where); return { status: 'closed' }; }
-    if (pr.headSha !== locked.candidateSha) {
+    // The candidate this PR carries must still be the run's live one; a merge of an invalidated candidate is not recorded.
+    const live = (await tx.select({ id: schema.candidates.candidateId, parts: schema.candidates.parts }).from(schema.candidates).where(and(
+      eq(schema.candidates.tenantId, key.tenantId), eq(schema.candidates.projectId, key.projectId), eq(schema.candidates.runId, key.runId),
+      eq(schema.candidates.sha, locked.candidateSha), eq(schema.candidates.status, 'assembled'))))[0];
+    if (!live) {
+      await tx.update(schema.changeRequests).set({ ...observed, status: 'stale_candidate', mergeCommitSha: pr.mergeCommitSha }).where(where);
+      return { status: 'stale' };
+    }
+    // The merged head must be exactly the candidate and the merge must have gone into the intended base.
+    if (pr.headSha !== locked.candidateSha || pr.baseRef !== locked.baseRef) {
       await tx.update(schema.changeRequests).set({ ...observed, status: 'merged_sha_mismatch', mergeCommitSha: pr.mergeCommitSha }).where(where);
       return { status: 'sha_mismatch' };
     }
     await tx.update(schema.changeRequests).set({ ...observed, status: 'merged', mergeCommitSha: pr.mergeCommitSha }).where(where);
     const payload = { prNumber: pr.number, url: pr.url, candidateSha: locked.candidateSha, mergeCommitSha: pr.mergeCommitSha };
     await emitIntegration(tx, key, now, 'change.merged', payload);
-    const tasks = await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus)
+    const partIds = (live.parts as { taskId?: unknown }[]).map((p) => p.taskId).filter((id): id is string => typeof id === 'string');
+    const tasks = partIds.length === 0 ? [] : await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus)
       .innerJoin(schema.taskRevisions, and(
         eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId),
         eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
-      .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskRevisions.runId, key.runId), eq(schema.taskStatus.status, 'verified')))
+      .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskRevisions.runId, key.runId),
+        eq(schema.taskStatus.status, 'verified'), inArray(schema.taskStatus.taskId, partIds)))
       .orderBy(schema.taskStatus.taskId);
     for (const t of tasks) await markTaskMerged(tx, { tenantId: key.tenantId, projectId: key.projectId, taskId: t.taskId }, now, INTEGRATION_ACTOR, payload);
     await tx.update(schema.runs).set({ lifecycle: 'merged' }).where(and(
@@ -60,6 +72,8 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
 }
 
 export interface PassResult {
+  /** Redacted messages of the failures in this pass. */
+  readonly errors: readonly string[];
   readonly processed: number;
   readonly ignored: number;
   readonly polled: number;
@@ -70,10 +84,10 @@ export interface PassResult {
  * Works through webhook hints (`received` deliveries): each triggers an authoritative reconcile of the PR it names. A hint for a PR we
  * did not open is marked `ignored`. A failed read keeps the hint `received` with its error, to be retried.
  */
-export async function processPendingDeliveries(deps: ReconcileDeps): Promise<Pick<PassResult, 'processed' | 'ignored' | 'failed'>> {
+export async function processPendingDeliveries(deps: ReconcileDeps): Promise<Pick<PassResult, 'processed' | 'ignored' | 'failed' | 'errors'>> {
   const rows = await deps.db.select().from(schema.integrationDeliveries).where(and(eq(schema.integrationDeliveries.integration, INTEGRATION), eq(schema.integrationDeliveries.status, 'received')))
     .orderBy(schema.integrationDeliveries.updatedAt, schema.integrationDeliveries.deliveryId);
-  const out = { processed: 0, ignored: 0, failed: 0 };
+  const out = { processed: 0, ignored: 0, failed: 0, errors: [] as string[] };
   const mark = (r: (typeof rows)[number], status: string, error: string | null) =>
     deps.db.update(schema.integrationDeliveries).set({ status, lastError: error, attempts: r.attempts + 1, updatedAt: deps.now() }).where(and(
       eq(schema.integrationDeliveries.tenantId, r.tenantId), eq(schema.integrationDeliveries.projectId, r.projectId), eq(schema.integrationDeliveries.deliveryId, r.deliveryId)));
@@ -88,21 +102,28 @@ export async function processPendingDeliveries(deps: ReconcileDeps): Promise<Pic
       await mark(r, 'processed', null);
       out.processed += 1;
     } catch (e) {
-      await mark(r, 'received', String((e as Error).message).slice(0, 500));
+      const message = redactSecrets(String((e as Error).message)).slice(0, 500);
+      await mark(r, 'received', message);
       out.failed += 1;
+      out.errors.push(message);
     }
   }
   return out;
 }
 
-/** Reads every open PR once. This is the local path (GitHub cannot reach localhost) and also catches missed or delayed webhooks. */
-export async function pollOpenChangeRequests(deps: ReconcileDeps): Promise<Pick<PassResult, 'polled' | 'failed'>> {
+/** Closed PRs are polled too (they can be reopened and merged), bounded to the most recently observed ones. */
+export const CLOSED_POLL_LIMIT = 50;
+
+/** Reads every open PR, and the most recently observed closed ones, once. This is the local path (GitHub cannot reach localhost) and also catches missed or delayed webhooks. */
+export async function pollOpenChangeRequests(deps: ReconcileDeps): Promise<Pick<PassResult, 'polled' | 'failed' | 'errors'>> {
   const open = await deps.db.select().from(schema.changeRequests).where(eq(schema.changeRequests.status, 'open'));
-  let failed = 0;
-  for (const cr of open) {
-    try { await reconcileRun({ tenantId: cr.tenantId, projectId: cr.projectId, runId: cr.runId }, deps); } catch { failed += 1; }
+  const closed = await deps.db.select().from(schema.changeRequests).where(eq(schema.changeRequests.status, 'closed'))
+    .orderBy(desc(schema.changeRequests.observedAt)).limit(CLOSED_POLL_LIMIT);
+  const errors: string[] = [];
+  for (const cr of [...open, ...closed]) {
+    try { await reconcileRun({ tenantId: cr.tenantId, projectId: cr.projectId, runId: cr.runId }, deps); } catch (e) { errors.push(redactSecrets(String((e as Error).message)).slice(0, 500)); }
   }
-  return { polled: open.length, failed };
+  return { polled: open.length + closed.length, failed: errors.length, errors };
 }
 
 export interface ReconcilerDriver {
@@ -122,7 +143,9 @@ export function startReconciler(options: ReconcileDeps & { intervalMs: number; o
     try {
       const a = await processPendingDeliveries(options);
       const b = await pollOpenChangeRequests(options);
-      return { ...a, polled: b.polled, failed: a.failed + b.failed };
+      const errors = [...a.errors, ...b.errors];
+      for (const message of errors) options.onError?.(new Error(message));
+      return { ...a, polled: b.polled, failed: a.failed + b.failed, errors };
     } finally { count += 1; }
   };
   const schedule = (): void => {

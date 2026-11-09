@@ -34,6 +34,7 @@ export const ERROR_CODES = [
   'approval_expired',
   'lease_conflict',
   'actor_not_permitted',
+  'pull_request_not_allowed',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

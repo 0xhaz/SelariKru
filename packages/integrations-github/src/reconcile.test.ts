@@ -5,7 +5,7 @@ import { openReviewablePr } from './pr.ts';
 import { FakeGitHub } from './fake.ts';
 import { handleGithubWebhook, signBody, type WebhookDeps } from './webhook.ts';
 import { processPendingDeliveries, pollOpenChangeRequests, reconcileRun, startReconciler } from './reconcile.ts';
-import { PROJECT, REPO, RUN, SHA, T0, TENANT, q, record, seedReadyRun } from './test-fixtures.ts';
+import { PROJECT, REPO, RUN, SHA, T0, TENANT, q, record, seedReadyRun, supersedeCandidate } from './test-fixtures.ts';
 
 const SECRET = 'whsec_test_secret_value';
 let tdb: TestDb;
@@ -25,7 +25,7 @@ const status = async (id: string) => String((await q(tdb.db, `SELECT status FROM
 const lifecycle = async () => String((await q(tdb.db, 'SELECT lifecycle FROM runs'))[0]!['lifecycle']);
 const mergedEvents = async () => q(tdb.db, "SELECT task_id, actor_kind FROM events WHERE type = 'change.merged' ORDER BY sequence");
 
-beforeAll(async () => { tdb = await setupTestDb(); });
+beforeAll(async () => { tdb = await setupTestDb(8); });
 afterAll(async () => { await tdb.close(); });
 beforeEach(async () => {
   await resetDb(tdb.db); gh = new FakeGitHub(); await seedReadyRun(tdb.db);
@@ -44,6 +44,12 @@ describe('webhook', () => {
     expect((await deliver(body, 'd5', { signature: 'sha256=zz' })).status).toBe(401);
     expect((await deliver(body, 'd6', { signature: 'sha1=' + createHmac('sha1', SECRET).update(body).digest('hex') })).status).toBe(401);
     expect(await q(tdb.db, 'SELECT delivery_id FROM integration_deliveries')).toEqual([{ delivery_id: 'd1' }]);
+  });
+
+  it('a missing, empty or non-Buffer body is 401, not a server error', async () => {
+    expect((await handleGithubWebhook({ rawBody: undefined as unknown as Buffer, headers: {} }, wh())).status).toBe(401);
+    expect((await handleGithubWebhook({ rawBody: 'text' as unknown as Buffer, headers: { 'x-hub-signature-256': signBody(SECRET, Buffer.alloc(0)) } }, wh())).status).toBe(401);
+    expect((await deliver(Buffer.alloc(0), 'e1', { signature: null })).status).toBe(401);
   });
 
   it('rejects unknown events, repositories and malformed bodies', async () => {
@@ -105,6 +111,66 @@ describe('reconciliation', () => {
     expect(await mergedEvents()).toEqual([]);
     expect(await status('task_a')).toBe('verified');
     expect((await q(tdb.db, 'SELECT status FROM change_requests'))[0]).toEqual({ status: 'merged_sha_mismatch' });
+  });
+
+  it('a human merge of the old PR after the candidate was invalidated changes nothing', async () => {
+    await supersedeCandidate(tdb.db);
+    gh.humanMerges(1);
+    const out = await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps());
+    expect(out.status).toBe('stale');
+    expect(await mergedEvents()).toHaveLength(0);
+    expect(await status('task_a')).toBe('verified');
+    expect(await status('task_b')).toBe('verified');
+    expect(await lifecycle()).toBe('ready_for_review');
+    expect((await q(tdb.db, 'SELECT status FROM change_requests'))[0]).toEqual({ status: 'stale_candidate' });
+  });
+
+  it('a PR retargeted to another base and merged with the candidate head is not recorded as merged', async () => {
+    gh.humanRetargets(1, 'develop');
+    gh.humanMerges(1);
+    expect((await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps())).status).toBe('sha_mismatch');
+    expect(await mergedEvents()).toHaveLength(0);
+    expect(await status('task_a')).toBe('verified');
+    expect(await lifecycle()).toBe('ready_for_review');
+  });
+
+  it('merges only the tasks that are parts of the candidate', async () => {
+    await tdb.db.execute(await import('drizzle-orm').then((m) => m.sql`UPDATE candidates SET parts = '[{"taskId":"task_a"}]'::jsonb`));
+    gh.humanMerges(1);
+    expect((await reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps())).status).toBe('merged');
+    expect(await status('task_a')).toBe('merged');
+    expect(await status('task_b')).toBe('verified');
+  });
+
+  it('polling observes close, reopen and merge of a closed PR', async () => {
+    const driver = startReconciler({ ...rdeps(), intervalMs: 3_600_000 });
+    try {
+      gh.humanCloses(1);
+      await driver.tick();
+      expect((await q(tdb.db, 'SELECT status FROM change_requests'))[0]).toEqual({ status: 'closed' });
+      gh.humanReopens(1);
+      gh.humanMerges(1);
+      const r = await driver.tick();
+      expect(r.polled).toBe(1);
+      expect(await status('task_a')).toBe('merged');
+    } finally { await driver.stop(); }
+  });
+
+  it('reports failures through onError on the timer path and redacts secrets from stored errors', async () => {
+    const leak = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
+    gh.getPullRequest = async () => { throw new Error(`gh failed token=${leak}`); };
+    await deliver(payload('closed'), 'fail-1');
+    const errors: unknown[] = [];
+    const driver = startReconciler({ ...rdeps(), intervalMs: 3_600_000, onError: (e) => errors.push(e) });
+    try {
+      const r = await driver.tick();
+      expect(r.failed).toBe(2);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.map(String).join('\n')).not.toContain(leak);
+    } finally { await driver.stop(); }
+    const row = (await q(tdb.db, "SELECT last_error, status FROM integration_deliveries WHERE delivery_id = 'fail-1'"))[0]!;
+    expect(row['status']).toBe('received');
+    expect(String(row['last_error'])).not.toContain(leak);
   });
 
   it('a PR closed without merging leaves tasks verified', async () => {

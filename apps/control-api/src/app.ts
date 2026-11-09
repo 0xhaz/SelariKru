@@ -1,3 +1,5 @@
+import type { VerificationRecord } from '@selarikru/domain';
+import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { Scheduler } from '@selarikru/workflow';
@@ -7,7 +9,7 @@ import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type Token
 import { type ControlApiConfig } from './config.ts';
 import { AppError, unauthenticated } from './errors.ts';
 import { registerOwnerRoutes } from './routes-owner.ts';
-import { registerGithubWebhook } from './routes-github.ts';
+import { registerGithubRoutes } from './routes-github.ts';
 import { registerProposalRoutes } from './routes-proposals.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
@@ -24,6 +26,19 @@ declare module 'fastify' {
   }
 }
 
+export interface GithubDeps {
+  /** Registers `POST /v1/webhooks/github`. The secret comes from configuration, never a request. */
+  readonly webhookSecret?: string | undefined;
+  /** Registers the owner route that opens a run's draft PR. The target repository still comes from the project row. */
+  readonly pullRequests?: {
+    readonly port: GitHubPort;
+    /** Local source repository that holds the candidate commits. */
+    readonly repoPath: string;
+    /** The authoritative live record for a candidate (the verifier's `loadValidRecord`). */
+    readonly loadRecord: (key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>;
+  } | undefined;
+}
+
 export interface AppDeps {
   readonly config: ControlApiConfig;
   readonly db: Db;
@@ -35,7 +50,7 @@ export interface AppDeps {
   /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
   readonly planConfig?: PlanConfigSource | undefined;
   /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */
-  readonly github?: { readonly webhookSecret: string } | undefined;
+  readonly github?: GithubDeps | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -151,7 +166,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
-  if (deps.github) registerGithubWebhook(app, ctx, deps.github.webhookSecret);
+  if (deps.github) registerGithubRoutes(app, ctx, deps.github);
 
   app.addHook('onClose', async () => {
     for (const close of [...ctx.openStreams]) close();

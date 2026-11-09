@@ -40,6 +40,13 @@ describe('POST /v1/webhooks/github', () => {
     expect(await deliveries()).toEqual([]);
   });
 
+  it('an empty body, no content type or a non-JSON type is 401, not a server error', async () => {
+    expect((await h.app.inject({ method: 'POST', url: '/v1/webhooks/github' })).statusCode).toBe(401);
+    expect((await send(Buffer.alloc(0), { 'x-github-event': 'pull_request', 'x-github-delivery': 'z1' })).statusCode).toBe(401);
+    expect((await send(body, { 'content-type': 'text/plain', 'x-github-event': 'pull_request', 'x-github-delivery': 'z2' })).statusCode).toBe(401);
+    expect(await deliveries()).toEqual([]);
+  });
+
   it('is not registered without a configured secret', async () => {
     const plain = makeHarness(t);
     const res = await plain.app.inject({ method: 'POST', url: '/v1/webhooks/github', payload: body, headers: { 'content-type': 'application/json' } });

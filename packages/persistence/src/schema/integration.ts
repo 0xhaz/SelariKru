@@ -70,7 +70,7 @@ export const planProposals = pgTable(
 
 /**
  * The reviewable change (pull request) opened for a run's verified candidate. One per run. `status` is what the last authoritative read of the
- * provider said (`open`, `closed`, `merged`) or `merged_sha_mismatch` when the merged head is not the candidate; it is never set from a webhook body.
+ * provider said (`open`, `closed`, `merged`) `merged_sha_mismatch` when the merged head or base is not the intended one, or `stale_candidate` when the candidate is no longer the run's live one; it is never set from a webhook body.
  */
 export const changeRequests = pgTable(
   'change_requests',
@@ -80,6 +80,8 @@ export const changeRequests = pgTable(
     repository: text('repository').notNull(),
     candidateSha: text('candidate_sha').notNull(),
     branch: text('branch').notNull(),
+    /** The branch the PR was opened into (the project's default branch at open). A merge into any other base is not recorded. */
+    baseRef: text('base_ref').notNull(),
     prNumber: integer('pr_number').notNull(),
     url: text('url').notNull(),
     status: text('status').notNull(),

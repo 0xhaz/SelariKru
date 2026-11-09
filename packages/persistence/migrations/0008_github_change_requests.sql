@@ -5,6 +5,7 @@ CREATE TABLE "change_requests" (
 	"repository" text NOT NULL,
 	"candidate_sha" text NOT NULL,
 	"branch" text NOT NULL,
+	"base_ref" text NOT NULL,
 	"pr_number" integer NOT NULL,
 	"url" text NOT NULL,
 	"status" text NOT NULL,

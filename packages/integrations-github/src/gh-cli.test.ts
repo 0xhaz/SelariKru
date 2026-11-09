@@ -27,7 +27,7 @@ beforeAll(() => {
 });
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-const PR_JSON = { number: 7, url: 'https://github.com/acme/r/pull/7', state: 'OPEN', isDraft: true, headRefName: 'selarikru/run_a', headRefOid: 'a'.repeat(40), baseRefName: 'main', mergeCommit: null };
+const PR_JSON = { isCrossRepository: false, number: 7, url: 'https://github.com/acme/r/pull/7', state: 'OPEN', isDraft: true, headRefName: 'selarikru/run_a', headRefOid: 'a'.repeat(40), baseRefName: 'main', mergeCommit: null };
 
 function recorder(answers: (args: readonly string[]) => string = () => '[]'): { exec: Exec; calls: { file: string; args: string[]; input?: string }[] } {
   const calls: { file: string; args: string[]; input?: string }[] = [];
@@ -66,16 +66,16 @@ describe('gh CLI port', () => {
       await expect(port.pushBranch({ repository: 'acme/r', repoPath: src, sha, branch })).rejects.toThrow(/branch/);
     }
     await expect(port.pushBranch({ repository: 'acme/r', repoPath: src, sha: 'not-a-sha', branch: 'selarikru/x' })).rejects.toThrow(/sha/);
-    await expect(port.findPullRequest('not a repo', 'selarikru/x')).rejects.toThrow(/repository/);
+    await expect(port.findPullRequests('not a repo', 'selarikru/x')).rejects.toThrow(/repository/);
   });
 
   it('invokes gh without a shell, with arguments as an array, and maps PR JSON', async () => {
     const r = recorder(() => JSON.stringify([PR_JSON]));
     const port = createGhCliPort({ exec: r.exec });
-    const pr = await port.findPullRequest('acme/r', 'selarikru/run_a');
-    expect(pr).toEqual({ number: 7, url: PR_JSON.url, state: 'open', draft: true, headRef: 'selarikru/run_a', headSha: 'a'.repeat(40), baseRef: 'main', mergeCommitSha: null });
+    const prs = await port.findPullRequests('acme/r', 'selarikru/run_a');
+    expect(prs).toEqual([{ number: 7, url: PR_JSON.url, state: 'open', draft: true, headRef: 'selarikru/run_a', headSha: 'a'.repeat(40), baseRef: 'main', isCrossRepository: false, mergeCommitSha: null }]);
     expect(r.calls[0]!.file).toBe('gh');
-    expect(r.calls[0]!.args).toEqual(expect.arrayContaining(['pr', 'list', '--repo', 'acme/r', '--head', 'selarikru/run_a', '--state', 'all']));
+    expect(r.calls[0]!.args).toEqual(expect.arrayContaining(['pr', 'list', '--repo', 'acme/r', '--head', 'selarikru/run_a', '--state', 'all', '--limit', '20', '--json', expect.stringContaining('isCrossRepository')]));
   });
 
   it('maps merged and closed states and merge commit', async () => {
@@ -107,7 +107,7 @@ describe('gh CLI port', () => {
     const port: GitHubPort = createGhCliPort({ exec: r.exec, remoteUrl: () => bare });
     await port.pushBranch({ repository: 'acme/r', repoPath: src, sha, branch: 'selarikru/run_a' }).catch(() => undefined);
     await port.branchHead('acme/r', 'selarikru/run_a');
-    await port.findPullRequest('acme/r', 'selarikru/run_a');
+    await port.findPullRequests('acme/r', 'selarikru/run_a');
     await port.createDraftPullRequest({ repository: 'acme/r', branch: 'selarikru/run_a', base: 'main', title: 'T', body: 'B' });
     await port.getPullRequest('acme/r', 7);
     for (const c of r.calls) expect(c.args.join(' ')).not.toMatch(/\bmerge\b|--auto|--squash|--rebase|--admin|api\b/i);

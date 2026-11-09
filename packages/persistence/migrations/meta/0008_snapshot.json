@@ -1,5 +1,5 @@
 {
-  "id": "8a79cc57-e2e3-41e6-8b21-1f1bbaa628c6",
+  "id": "002903ea-5ef4-4d52-9270-793b95d40a0f",
   "prevId": "c53feb7d-ccfe-4b0c-bc22-25ca23a18766",
   "version": "7",
   "dialect": "postgresql",
@@ -2879,6 +2879,12 @@
         },
         "branch": {
           "name": "branch",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_ref": {
+          "name": "base_ref",
           "type": "text",
           "primaryKey": false,
           "notNull": true

@@ -44,7 +44,7 @@ const one = (v: string | string[] | undefined): string | undefined => (Array.isA
  * Unsigned deliveries are 401; unsupported events 422; a repository that is not a project's configured repository 404.
  */
 export async function handleGithubWebhook(req: WebhookRequest, deps: WebhookDeps): Promise<WebhookResponse> {
-  if (!verifySignature(deps.secret, req.rawBody, one(req.headers['x-hub-signature-256']))) return { status: 401, body: { error: 'invalid_signature' } };
+  if (!Buffer.isBuffer(req.rawBody) || !verifySignature(deps.secret, req.rawBody, one(req.headers['x-hub-signature-256']))) return { status: 401, body: { error: 'invalid_signature' } };
   const deliveryId = one(req.headers['x-github-delivery']);
   if (!deliveryId || deliveryId.length > 200) return { status: 400, body: { error: 'missing_delivery_id' } };
   const event = one(req.headers['x-github-event']);

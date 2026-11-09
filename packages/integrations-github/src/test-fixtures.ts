@@ -30,7 +30,7 @@ export async function seedReadyRun(db: Db, over: { trial?: boolean; defaultBranc
   await db.update(schema.projects).set({ repository: REPO, defaultBranch: over.defaultBranch ?? 'main' }).where(eq(schema.projects.projectId, PROJECT));
   await db.update(schema.runs).set({ lifecycle: over.lifecycle ?? 'ready_for_review', trial: over.trial ?? false }).where(and(eq(schema.runs.projectId, PROJECT), eq(schema.runs.runId, RUN)));
   for (const id of ['task_a', 'task_b']) await seedTask(db, specFor(id, { baseSha: BASE }), over.taskStatus ?? 'verified');
-  await db.insert(schema.candidates).values({ tenantId: TENANT, projectId: PROJECT, candidateId: 'cand_1', runId: RUN, target: 'main', sha: SHA, baseSha: BASE, treeSha: 'c'.repeat(40), status: 'assembled' });
+  await db.insert(schema.candidates).values({ tenantId: TENANT, projectId: PROJECT, candidateId: 'cand_1', runId: RUN, target: 'main', sha: SHA, baseSha: BASE, treeSha: 'c'.repeat(40), parts: [{ taskId: 'task_a' }, { taskId: 'task_b' }], status: 'assembled' });
 }
 
 export const q = async (db: Db, text: string): Promise<Record<string, unknown>[]> => [...(await db.execute(sql.raw(text)))];
@@ -40,4 +40,12 @@ export async function setRun(db: Db, set: { lifecycle?: string; trial?: boolean 
 }
 export async function setDefaultBranch(db: Db, defaultBranch: string): Promise<void> {
   await db.update(schema.projects).set({ defaultBranch }).where(eq(schema.projects.projectId, PROJECT));
+  await db.update(schema.candidates).set({ target: defaultBranch }).where(eq(schema.candidates.projectId, PROJECT));
+}
+
+export const SHA2 = '2'.repeat(40);
+/** The integration controller rebuilt the candidate: the old one is invalidated and a new assembled sibling replaces it. */
+export async function supersedeCandidate(db: Db, sha: string = SHA2): Promise<void> {
+  await db.update(schema.candidates).set({ status: 'invalidated' }).where(eq(schema.candidates.candidateId, 'cand_1'));
+  await db.insert(schema.candidates).values({ tenantId: TENANT, projectId: PROJECT, candidateId: 'cand_2', runId: RUN, target: 'main', sha, baseSha: BASE, treeSha: 'c'.repeat(40), parts: [{ taskId: 'task_a' }, { taskId: 'task_b' }], status: 'assembled' });
 }

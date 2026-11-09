@@ -3,14 +3,14 @@ import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-help
 import { PrNotAllowed, openReviewablePr, type OpenPrDeps } from './pr.ts';
 import { buildPrBody } from './body.ts';
 import { FakeGitHub } from './fake.ts';
-import { PROJECT, REPO, RUN, SHA, T0, TENANT, q, record, seedReadyRun, setDefaultBranch, setRun } from './test-fixtures.ts';
+import { PROJECT, REPO, RUN, SHA, T0, TENANT, SHA2, q, record, seedReadyRun, setDefaultBranch, setRun, supersedeCandidate } from './test-fixtures.ts';
 
 let tdb: TestDb;
 let gh: FakeGitHub;
 const run = { tenantId: TENANT, projectId: PROJECT, runId: RUN, repoPath: '/repos/source' };
 const deps = (over: Partial<OpenPrDeps> = {}): OpenPrDeps => ({ db: tdb.db, port: gh, loadRecord: async () => record(), now: () => T0, ...over });
 
-beforeAll(async () => { tdb = await setupTestDb(); });
+beforeAll(async () => { tdb = await setupTestDb(8); });
 afterAll(async () => { await tdb.close(); });
 beforeEach(async () => { await resetDb(tdb.db); gh = new FakeGitHub(); await seedReadyRun(tdb.db); });
 
@@ -23,7 +23,7 @@ describe('openReviewablePr', () => {
     expect(gh.prs[0]).toMatchObject({ draft: true, headRef: `selarikru/${RUN}`, baseRef: 'main' });
     const rows = await q(tdb.db, 'SELECT * FROM change_requests');
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ run_id: RUN, candidate_sha: SHA, pr_number: 1, status: 'open', repository: REPO });
+    expect(rows[0]).toMatchObject({ run_id: RUN, candidate_sha: SHA, pr_number: 1, status: 'open', repository: REPO, base_ref: 'main' });
     const ev = await q(tdb.db, "SELECT actor_kind FROM events WHERE type = 'change.proposed'");
     expect(ev).toEqual([{ actor_kind: 'integration' }]);
   });
@@ -129,6 +129,67 @@ describe('openReviewablePr', () => {
     }
     expect(gh.calls).toEqual([]);
     expect(await q(tdb.db, 'SELECT 1 FROM change_requests')).toHaveLength(0);
+  });
+});
+
+describe('candidate identity', () => {
+  const rebuilt = (): Partial<OpenPrDeps> => ({ loadRecord: async (sha) => record({ candidateSha: sha }) });
+
+  it('refuses a rebuilt sibling candidate with candidate_changed on every retry, without pushing or adopting', async () => {
+    await openReviewablePr(run, deps());
+    await supersedeCandidate(tdb.db);
+    const pushes = gh.pushes.length;
+    const calls = gh.calls.length;
+    for (let i = 0; i < 3; i++) {
+      await expect(openReviewablePr(run, deps(rebuilt()))).rejects.toMatchObject({ reason: 'candidate_changed' });
+    }
+    expect(gh.pushes.length).toBe(pushes);
+    expect(gh.calls.length).toBe(calls);
+    expect(gh.prs).toHaveLength(1);
+    expect(await q(tdb.db, 'SELECT candidate_sha FROM change_requests')).toEqual([{ candidate_sha: SHA }]);
+  });
+
+  it('refuses a fast-forward candidate too and leaves the row unchanged', async () => {
+    await openReviewablePr(run, deps());
+    gh.fastForwards.add(`${SHA}>${SHA2}`);
+    await supersedeCandidate(tdb.db);
+    await expect(openReviewablePr(run, deps(rebuilt()))).rejects.toMatchObject({ reason: 'candidate_changed' });
+    expect(gh.branches.get(`selarikru/${RUN}`)).toBe(SHA);
+    expect(await q(tdb.db, 'SELECT candidate_sha, status FROM change_requests')).toEqual([{ candidate_sha: SHA, status: 'open' }]);
+  });
+
+  it('the fake rejects a non-fast-forward push like git does', async () => {
+    await gh.pushBranch({ repository: REPO, repoPath: '/r', sha: SHA, branch: 'b' });
+    await expect(gh.pushBranch({ repository: REPO, repoPath: '/r', sha: SHA2, branch: 'b' })).rejects.toThrow(/non-fast-forward/);
+  });
+
+  it('refuses a candidate built for a target other than the default branch', async () => {
+    await tdb.db.execute(await import('drizzle-orm').then((m) => m.sql`UPDATE candidates SET target = 'develop'`));
+    await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'target_mismatch' });
+    expect(gh.calls).toEqual([]);
+  });
+});
+
+describe('adoption', () => {
+  const branch = `selarikru/${RUN}`;
+  for (const [name, over] of [
+    ['a different head SHA', { headSha: '9'.repeat(40) }],
+    ['a different base', { headSha: SHA, baseRef: 'develop' }],
+    ['a cross-repository head', { headSha: SHA, isCrossRepository: true }],
+  ] as const) {
+    it(`refuses to adopt a PR with ${name}`, async () => {
+      gh.foreignPr({ headRef: branch, ...over });
+      await expect(openReviewablePr(run, deps())).rejects.toMatchObject({ reason: 'foreign_pr' });
+      expect(await q(tdb.db, 'SELECT 1 FROM change_requests')).toHaveLength(0);
+      expect(gh.calls).not.toContain('createDraftPullRequest');
+    });
+  }
+
+  it('adopts the matching PR even when a stranger also has one on the branch name', async () => {
+    gh.foreignPr({ headRef: branch, headSha: SHA, baseRef: 'main' });
+    gh.foreignPr({ headRef: branch, headSha: '9'.repeat(40), isCrossRepository: true });
+    const r = await openReviewablePr(run, deps());
+    expect(r.status === 'opened' && r.adopted).toBe(true);
   });
 });
 

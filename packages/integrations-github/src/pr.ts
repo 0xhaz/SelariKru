@@ -6,7 +6,7 @@ import { emitIntegration } from './events.ts';
 import type { GitHubPort, PullRequestInfo } from './port.ts';
 
 
-export type PrRefusal = 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open';
+export type PrRefusal = 'project_missing' | 'run_missing' | 'run_not_ready' | 'no_candidate' | 'no_valid_record' | 'record_not_passing' | 'branch_is_default' | 'unsafe_branch' | 'pr_not_open' | 'candidate_changed' | 'foreign_pr' | 'target_mismatch';
 
 export class PrNotAllowed extends Error {
   constructor(readonly reason: PrRefusal, message: string) {
@@ -72,6 +72,7 @@ export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promis
     .orderBy(desc(schema.candidates.createdAt));
   const candidate = cands[0];
   if (!candidate?.sha) throw new PrNotAllowed('no_candidate', 'the run has no assembled candidate');
+  if (candidate.target !== project.defaultBranch) throw new PrNotAllowed('target_mismatch', `the candidate was built for ${candidate.target}, not the default branch ${project.defaultBranch}`);
   const sha = candidate.sha;
 
   const record = await deps.loadRecord(sha);
@@ -91,22 +92,30 @@ export async function openReviewablePr(run: OpenPrRun, deps: OpenPrDeps): Promis
 
   return withTx(db, (tx) =>
     recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {
+      // One PR per run, for one candidate. A rebuilt candidate (even a fast-forward of the old one) never reuses or moves the old PR's branch.
+      const prior = (await tx.select().from(schema.changeRequests).where(and(
+        eq(schema.changeRequests.tenantId, run.tenantId), eq(schema.changeRequests.projectId, run.projectId), eq(schema.changeRequests.runId, run.runId))))[0];
+      if (prior && prior.candidateSha !== sha) throw new PrNotAllowed('candidate_changed', `a pull request is already open for candidate ${prior.candidateSha}`);
       // Pushing the same commit again is a no-op, so this is safe on every retry. Never forced.
       await port.pushBranch({ repository, repoPath: run.repoPath, sha, branch });
       // Query before creating: a previous attempt may have created the PR and lost the response.
-      const existing = await port.findPullRequest(repository, branch);
+      const found = await port.findPullRequests(repository, branch);
       let pr: PullRequestInfo;
       let adopted = false;
-      if (existing) {
-        if (existing.state !== 'open') throw new PrNotAllowed('pr_not_open', `the pull request on ${branch} is ${existing.state}`);
-        pr = existing;
+      if (found.length > 0) {
+        const open = found.filter((f) => f.state === 'open');
+        if (open.length === 0) throw new PrNotAllowed('pr_not_open', `the pull request on ${branch} is ${found[0]!.state}`);
+        // Adopt only our own PR: same repository, exactly the candidate at its head, into the project's default branch.
+        const ours = open.find((f) => !f.isCrossRepository && f.headSha === sha && f.baseRef === project.defaultBranch);
+        if (!ours) throw new PrNotAllowed('foreign_pr', `a pull request on ${branch} is not the one opened for this candidate`);
+        pr = ours;
         adopted = true;
       } else {
         pr = await port.createDraftPullRequest({ repository, branch, base: project.defaultBranch, title, body });
       }
       await tx.execute(sql`
-        INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, pr_number, url, status, observed_head_sha, observed_at)
-        VALUES (${run.tenantId}, ${run.projectId}, ${run.runId}, ${repository}, ${sha}, ${branch}, ${pr.number}, ${pr.url}, 'open', ${pr.headSha || null}, ${now().toISOString()}::timestamptz)
+        INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, base_ref, pr_number, url, status, observed_head_sha, observed_at)
+        VALUES (${run.tenantId}, ${run.projectId}, ${run.runId}, ${repository}, ${sha}, ${branch}, ${project.defaultBranch}, ${pr.number}, ${pr.url}, 'open', ${pr.headSha || null}, ${now().toISOString()}::timestamptz)
         ON CONFLICT (tenant_id, project_id, run_id) DO NOTHING`);
       await emitIntegration(tx, { projectId: run.projectId, runId: run.runId }, now(), 'change.proposed', { prNumber: pr.number, url: pr.url, branch, candidateSha: sha, draft: true, adopted });
       return { status: 'opened' as const, number: pr.number, url: pr.url, branch, candidateSha: sha, adopted };
