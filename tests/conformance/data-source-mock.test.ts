@@ -16,6 +16,7 @@ dataSourceConformance('mock over the ten named fixtures', async () => {
     budgetStopProjectId: 'demo-budget-stop',
     reverifyProjectId: 'demo-integration-blocked',
     reviewProjectId: 'demo-merge-review',
+    failedProjectId: 'demo-failed-ci',
     unknownProjectId: 'demo-does-not-exist',
     clockFor: (projectId) => source.clockFor(projectId),
     async advance() {

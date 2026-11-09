@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRunEvidence, loadRunnerReports, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -43,6 +43,12 @@ const REPLANNABLE: readonly string[] = ['planned', 'ready', 'blocked', 'awaiting
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const CANCEL_REQUEST: readonly string[] = ['running'];
 const APPROVAL_HISTORY_LIMIT = 50;
+/** Runs whose scope and evidence a snapshot reads. An older run keeps its rows but reports neither, so the cost of a refresh does not grow with the project's history. */
+const SNAPSHOT_EVIDENCE_RUNS = 20;
+const FAILURE_LIMIT = 200;
+const FAILURE_TEXT_LIMIT = 2000;
+/** Redacted before it is bounded, so a cut can never split a secret past the pattern. */
+const failureText = (text: string): string => redactSecrets(text).slice(0, FAILURE_TEXT_LIMIT);
 /** Events that move a task to a new status, in time order they say when it entered it. */
 const STATUS_EVENTS = ['task.ready', 'attempt.started', 'attempt.completed', 'attempt.failed', 'approval.requested', 'approval.granted', 'approval.denied', 'task.blocked', 'verification.started', 'verification.passed', 'verification.failed', 'change.merged', 'task.cancelled', 'task.superseded', 'task.reopened'] as const;
 const TASK_EVIDENCE_EVENTS = ['attempt.started', 'attempt.completed', 'attempt.failed', 'approval.granted', 'approval.denied', 'verification.started', 'verification.passed', 'verification.failed', 'change.merged', 'change.proposed', 'candidate.assembled', 'candidate.failed', 'task.reopened'] as const;
@@ -93,8 +99,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
   const declared = ctx.catalog ?? NO_HARNESS_CATALOG;
-  /** What can actually be launched: the adapters this build declares, narrowed to what enrolled runners report. */
-  const liveCatalog = async (tx: Executor) => availableCatalog(declared, await loadRunnerReports(tx, config.tenantId));
+  /** What can actually be launched: the adapters this build declares, narrowed to what recently seen runners report. A model only an old enrolment reports cannot start. */
+  const liveCatalog = async (tx: Executor) => availableCatalog(declared, await loadRecentRunnerReports(tx, config.tenantId, now()));
 
   /** A refused selection as a typed error, so the screen can say which check failed. */
   const refuseSelection = async (tx: Executor, selection: { provider: string; model: string }): Promise<AppError | null> => {
@@ -481,6 +487,26 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     return reply.code(200).send(result);
   });
 
+  // ---- verification failures ---------------------------------------------------------------------------------
+  /** Why a run's criteria failed, in the verifier's words. Candidate code influences those words, so they are redacted and bounded here and only ever rendered as text. */
+  app.get('/v1/projects/:id/runs/:runId/failures', auth, async (req) => {
+    const projectId = idParam(req);
+    const runId = (req.params as { runId: string }).runId;
+    await requireProject(db, config.tenantId, projectId);
+    const [run] = await db.select({ runId: schema.runs.runId }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, runId)));
+    if (!run) throw new AppError(404, 'run_not_found', 'no such run in this project');
+    const [candidate] = await db.execute(sql`
+      SELECT sha FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
+      ORDER BY created_at DESC, candidate_id DESC LIMIT 1`);
+    const sha = candidate ? String(candidate['sha']) : null;
+    const record = sha !== null ? await ctx.evidence?.loadRecord({ tenantId: config.tenantId, projectId, sha }) : null;
+    if (!record) return { candidateSha: sha, available: false, failures: [] };
+    return {
+      candidateSha: sha, available: true,
+      failures: record.results.flatMap((r) => r.failures.map((f) => ({ criterionId: r.checkId, test: failureText(f.test), status: f.status, message: failureText(f.message) }))).slice(0, FAILURE_LIMIT),
+    };
+  });
+
   // ---- snapshot ----------------------------------------------------------------------------------------------
   app.get('/v1/projects/:id/snapshot', auth, async (req) => {
     const projectId = idParam(req);
@@ -542,19 +568,18 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
         const assessments = new Map<string, { notDelivered: unknown; notDeliveredHash: string; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
         const evidence = new Map<string, Awaited<ReturnType<typeof loadRunEvidence>>>();
-        for (const r of runs) {
+        for (const r of runs.slice(-SNAPSHOT_EVIDENCE_RUNS)) {
           const assessed = await assessRunScope(tx, { tenantId: config.tenantId, projectId, runId: r.runId }).catch(() => null);
           assessments.set(r.runId, assessed && assessed.stopped.length + assessed.stopping.length > 0
             ? { notDelivered: assessed.notDelivered, notDeliveredHash: notDeliveredHash(assessed.notDelivered), deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
             : null);
           // Per-requirement, from the verifier's own check rows. A task count never stands in for a criterion: no requirement ids means null, not a number.
-          const stoppedIds = new Set((assessed?.stopped ?? []).map((t) => t.taskId));
           evidence.set(r.runId, await loadRunEvidence(tx, { tenantId: config.tenantId, projectId, runId: r.runId }, statuses.flatMap((s) => {
             const row = specOf(s.taskId, s.currentRevision);
             if (row?.runId !== r.runId) return [];
             const requirementIds = (row.spec as { requirementIds?: unknown }).requirementIds;
-            return [{ taskId: s.taskId, revision: s.currentRevision, status: s.status, requirementIds: Array.isArray(requirementIds) ? requirementIds.filter((x): x is string => typeof x === 'string') : [], budgetStopped: stoppedIds.has(s.taskId) }];
-          })).catch(() => null));
+            return [{ taskId: s.taskId, revision: s.currentRevision, status: s.status, requirementIds: Array.isArray(requirementIds) ? requirementIds.filter((x): x is string => typeof x === 'string') : [] }];
+          }), ctx.evidence?.trusted() ?? null).catch(() => null));
         }
         const refOf = (row: Record<string, unknown> | undefined) => (row ? { kind: String(row['type']), ref: String(row['event_id']), at: eventTime(row) } : null);
         return {

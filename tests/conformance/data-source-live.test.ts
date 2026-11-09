@@ -10,7 +10,8 @@ import { dataSourceConformance } from './data-source.ts';
 
 const SHA = 'a'.repeat(40);
 const TRUSTED = { checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64) };
-const ids = { busy: 'proj_busy', prePlan: 'proj_preplan', empty: 'proj_empty', approval: 'proj_approval', expired: 'proj_expired', budget: 'proj_budget', reverify: 'proj_reverify', review: 'proj_review' } as const;
+const FAILED_SHA = 'f'.repeat(40);
+const ids = { failed: 'proj_failed', busy: 'proj_busy', prePlan: 'proj_preplan', empty: 'proj_empty', approval: 'proj_approval', expired: 'proj_expired', budget: 'proj_budget', reverify: 'proj_reverify', review: 'proj_review' } as const;
 
 let shared: TestDb | null = null;
 afterAll(async () => { await shared?.close(); });
@@ -30,7 +31,8 @@ dataSourceConformance('live, over the real control API on Postgres', async () =>
     runs: [{ attempt: 1, startedAt: '2026-11-09T01:00:00Z', finishedAt: '2026-11-09T01:01:00Z', exitCode: 0, infrastructureError: null, results: [], resultArtifactId: null, logArtifactId: null }],
     flaky: [], taskOutcomes: [], artifactIds: [], verifier: { kind: 'verifier', id: 'verifier-local-1' },
   });
-  const h = makeHarness(t, {}, allow, { github: { pullRequests: { port: gh, repoPath: '/repos/source', loadRecord: async () => record } } });
+  const failedRecord = VerificationRecordSchema.parse({ ...record, recordId: 'rec_2', candidateSha: FAILED_SHA, result: 'failed', results: [{ checkId: 'FB-02', status: 'failed', tests: [{ runner: 'vitest', title: 'rejects', status: 'failed' }], failures: [{ test: 'FB-02 reject', status: 'failed', message: 'AssertionError: expected 400' }], evidenceReferences: [] }] });
+  const h = makeHarness(t, {}, allow, { github: { pullRequests: { port: gh, repoPath: '/repos/source', loadRecord: async () => record } }, evidence: { trusted: () => TRUSTED, loadRecord: async (key) => (key.sha === FAILED_SHA ? failedRecord : record) } });
   const base = await h.app.listen({ port: 0, host: '127.0.0.1' });
   const source = createLiveDataSource({ baseUrl: base, getToken: async () => OWNER_TOKEN });
   const nowDate = () => h.clock.now();
@@ -91,11 +93,15 @@ dataSourceConformance('live, over the real control API on Postgres', async () =>
   await seedTask(specFor('api', { projectId: ids.review, runId: 'run_review', baseSha: 'b'.repeat(40), requirementIds: ['FB-01'] }), 'verified');
   await t.db.insert(schema.candidates).values({ tenantId: TENANT, projectId: ids.review, candidateId: 'cand_1', runId: 'run_review', target: 'main', sha: SHA, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), parts: [{ taskId: 'api' }], status: 'assembled' });
 
+  await seedRun(ids.failed, 'run_failed', 'running');
+  await seedTask(spec(ids.failed, 'run_failed', 'failed_api', ['FB-02']), 'ready');
+  await t.db.insert(schema.candidates).values({ tenantId: TENANT, projectId: ids.failed, candidateId: 'cand_f', runId: 'run_failed', target: 'main', sha: FAILED_SHA, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), parts: [{ taskId: 'failed_api' }], status: 'rejected' });
+
   let planned = false;
   return {
     source,
     busyProjectId: ids.busy, prePlanProjectId: ids.prePlan, emptyProjectId: ids.empty, pendingApprovalProjectId: ids.approval, expiredApprovalProjectId: ids.expired,
-    budgetStopProjectId: ids.budget, reverifyProjectId: ids.reverify, reviewProjectId: ids.review, unknownProjectId: 'proj_does_not_exist',
+    budgetStopProjectId: ids.budget, reverifyProjectId: ids.reverify, reviewProjectId: ids.review, failedProjectId: ids.failed, unknownProjectId: 'proj_does_not_exist',
     clockFor: () => ({ nowMs: () => h.clock.now().getTime() }),
     /** Real writes through the real routes: the runner reports back, the second task is claimed, and the waiting plan is accepted. */
     async advance() {

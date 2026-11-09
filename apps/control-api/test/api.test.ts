@@ -36,6 +36,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', '/v1/tasks/t1/client-reports'],
   ['POST', '/v1/approvals/a1/resolve'],
   ['GET', `/v1/projects/${PROJECT}/snapshot`],
+  ['GET', `/v1/projects/${PROJECT}/runs/${RUN}/failures`],
   ['GET', `/v1/projects/${PROJECT}/events?after=0`],
   ['POST', '/v1/runners/pairing-codes'],
 ];

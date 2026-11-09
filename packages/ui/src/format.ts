@@ -29,3 +29,8 @@ export function formatExact(iso: string): string {
 export function formatClock(iso: string): string {
   return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
+
+/** A day and a time, for anything a reader may look at days later. */
+export function formatDayTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}

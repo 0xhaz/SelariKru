@@ -2,7 +2,7 @@ import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { Scheduler } from '@selarikru/workflow';
+import type { Scheduler, TrustedVerifier } from '@selarikru/workflow';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type TokenVerifier } from './auth.ts';
@@ -51,6 +51,13 @@ export interface AppDeps {
   readonly catalog?: HarnessCatalog | undefined;
   /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
   readonly planConfig?: PlanConfigSource | undefined;
+  /** The bar evidence is held to. Absent: nothing can be trusted, so no criterion counts as verified and no failure can be quoted. */
+  readonly evidence?: {
+    /** The trusted hashes of this build. Cached by the caller: the snapshot reads them every refresh. */
+    readonly trusted: () => TrustedVerifier;
+    /** The verifier's `loadValidRecord`. */
+    readonly loadRecord: (key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>;
+  } | undefined;
   /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */
   readonly github?: GithubDeps | undefined;
 }
@@ -63,6 +70,8 @@ export interface AppContext extends AppDeps {
   readonly enroll: Guard;
   readonly corsHeaders: (origin: string | null) => Record<string, string>;
   readonly openStreams: Set<() => void>;
+  /** Set once shutdown began, so a stream that was still being set up closes instead of holding the server open. */
+  readonly lifecycle: { closing: boolean };
 }
 
 const RUNNER_SEEN_WRITE_MS = 5_000;
@@ -167,7 +176,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (!bearerToken(req.headers.authorization)) throw unauthenticated('a pairing code is required');
   };
 
-  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set() };
+  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false } };
   registerOwnerRoutes(app, ctx);
   registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
@@ -176,6 +185,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   // Before the HTTP server stops listening: a hijacked SSE response would otherwise keep close() waiting forever, and a restart would hang behind its own clients.
   app.addHook('preClose', async () => {
+    ctx.lifecycle.closing = true;
     for (const close of [...ctx.openStreams]) close();
   });
   return app;

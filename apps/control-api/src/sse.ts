@@ -54,6 +54,7 @@ export function registerEventStream(app: FastifyInstance, ctx: AppContext): void
     };
     ctx.openStreams.add(close);
     req.raw.on('close', close);
+    if (ctx.lifecycle.closing) close();
 
     const write = async (chunk: string): Promise<void> => {
       if (!raw.write(chunk) && !closed) await new Promise<void>((res) => raw.once('drain', () => res()));

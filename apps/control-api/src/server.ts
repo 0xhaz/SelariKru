@@ -6,7 +6,7 @@ import { declaredHarnessCatalog } from '@selarikru/harness-claude';
 import { createGhCliPort, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
-import { createScheduler } from '@selarikru/workflow';
+import { createScheduler, type TrustedVerifier } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
 import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
@@ -14,7 +14,7 @@ import { ConfigError, type ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
 import { createFirebaseVerifier } from './firebase.ts';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
-import { dockerRunner, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
+import { dockerRunner, currentTrusted, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
 import { DEFAULT_VERIFICATION_RETRIES, startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
 import { ASSEMBLY_LEASE_SECONDS, startAssemblyDriver, type AssemblyDriverOptions } from '../../../services/verifier/src/assembly-driver.ts';
 
@@ -92,6 +92,21 @@ export function assemblyOptionsFromEnv(env: NodeJS.ProcessEnv): AssemblyOptions 
   return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), leaseSeconds: ASSEMBLY_LEASE_SECONDS };
 }
 
+/**
+ * What the snapshot and the failures route hold evidence to. The hashes are read once: they cover this process's own verifier code, and the snapshot asks for them on every refresh.
+ * The pull-request route keeps its own check per use.
+ */
+export function evidenceOptionsFromEnv(env: NodeJS.ProcessEnv): EvidenceOptions {
+  const artifacts = new LocalDiskArtifactStore(resolveArtifactDir(env));
+  const trusted = currentTrusted();
+  return { trusted: () => trusted, loadRecord: (db, key) => loadValidRecord(db, artifacts, key) };
+}
+
+export interface EvidenceOptions {
+  trusted: () => TrustedVerifier;
+  loadRecord: (db: Db, key: { tenantId: string; projectId: string; sha: string }) => Promise<VerificationRecord | null>;
+}
+
 export interface GithubOptions {
   webhookSecret?: string | undefined;
   port?: GitHubPort | undefined;
@@ -143,6 +158,8 @@ export async function startServer(options: {
    * opens a run's draft PR; `loadRecord` is the verifier's `loadValidRecord` bound to its artifact store.
    */
   github?: GithubOptions | undefined;
+  /** What evidence is held to. Absent: no criterion can be counted as verified. */
+  evidence?: EvidenceOptions | undefined;
   /** Runs `verifyCandidate` for assembled candidates and reaps verifications with no verdict. Failures reach `onVerificationError`, or `onError`. */
   verification?: VerificationOptions | undefined;
   onVerificationError?: ((e: unknown) => void) | undefined;
@@ -158,7 +175,7 @@ export async function startServer(options: {
   const catalog = options.harnessCatalog ?? declaredHarnessCatalog();
   const scheduler = createScheduler({ db, now, policy, catalog });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
-  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, evidence: options.evidence ? { trusted: options.evidence.trusted, loadRecord: (key) => options.evidence!.loadRecord(db, key) } : undefined, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord

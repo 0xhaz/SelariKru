@@ -4,11 +4,11 @@ import { buildEvidence, checkAnchor } from './model.ts';
 
 const SHA = 'a'.repeat(40);
 const criterion = (id: string, over: Partial<CriterionEvidenceView> = {}): CriterionEvidenceView => ({
-  criterionId: id, state: 'passed', verified: true, taskIds: ['t1'], candidateSha: SHA,
+  criterionId: id, description: null, state: 'passed', verified: true, taskIds: ['t1'], candidateSha: SHA,
   check: { checkRunId: `chk_${id}`, checkId: id, checkVersion: '1', taskId: 't1', revision: 1, attemptId: 'att', recordId: 'ver_1', verificationAttempt: 1, at: '2026-11-09T01:00:00.000Z' }, ...over,
 });
-const evidence = (criteria: CriterionEvidenceView[], live = true): RunEvidenceView => ({
-  candidate: { sha: SHA, status: live ? 'assembled' : 'rejected', live, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', verifierHost: 'h', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: ['FB-02'] }, criteria,
+const evidence = (criteria: CriterionEvidenceView[], live = true, recordValid = true): RunEvidenceView => ({
+  candidate: { sha: SHA, status: live ? 'assembled' : 'rejected', live, baseSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: 'h', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: ['FB-02'] }, criteria,
 });
 function snap(run: Partial<RunView>, over: Partial<ProjectViewSnapshot> = {}): ProjectViewSnapshot {
   const base: RunView = { runId: 'r1', lifecycle: 'ready_for_review', planRevision: 1, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null, ...run };
@@ -25,7 +25,7 @@ describe('buildEvidence', () => {
       expect(row.evidence?.checkHref).toContain(encodeURIComponent(`chk_${row.criterionId}`));
       expect(row.evidence?.candidateHref).toContain(SHA);
       expect(row.evidence?.candidateSha).toBe(SHA);
-      expect(m.checks.some((c) => c.anchor === checkAnchor(`chk_${row.criterionId}`))).toBe(true);
+      expect(row.evidence?.anchor).toBe(checkAnchor(`chk_${row.criterionId}`));
     }
     expect(m.candidate).toMatchObject({ sha: SHA, flaky: ['FB-02'] });
   });
@@ -33,7 +33,6 @@ describe('buildEvidence', () => {
   it('a criterion no check has reported on has no link, and is not called verified', () => {
     const m = buildEvidence(snap({ criteria: { verified: 0, total: 1 }, evidence: evidence([criterion('FB-01', { state: 'not_run', verified: false, check: null, candidateSha: null })]) }), null)!;
     expect(m.criteria[0]).toMatchObject({ evidence: null, stateLabel: 'No check yet', verified: false });
-    expect(m.checks).toEqual([]);
   });
 
   it('verified, merged, deployed render as distinct states', () => {
@@ -65,6 +64,36 @@ describe('buildEvidence', () => {
     const run = { criteria: { verified: 1, total: 1 }, evidence: evidence([criterion('FB-01')]) };
     expect(buildEvidence(snap(run), null)!.candidate!.commitHref).toBeNull();
     expect(buildEvidence(snap(run, { changeRequests: [cr('open')] }), null)!.candidate!.commitHref).toBe(`https://github.com/acme/app/commit/${SHA}`);
+  });
+
+  it('a stopped criterion stays in the total, is listed, and a run missing one is not called Verified', () => {
+    const notDelivered = criterion('FB-02', { state: 'not_delivered', verified: false, check: null, candidateSha: null });
+    const m = buildEvidence(snap({ criteria: { verified: 1, total: 2 }, evidence: evidence([criterion('FB-01'), notDelivered]) }), null)!;
+    expect(m.coverage).toBe('1 of 2 approved criteria verified');
+    expect(states(m)['verified']).toMatchObject({ value: 'Partly verified', established: false });
+    expect(states(m)['verified']!.detail).toMatch(/1 not delivered/);
+    expect(m.notDelivered).toEqual(['FB-02']);
+    expect(m.criteria[1]).toMatchObject({ stateLabel: 'Not delivered', evidence: null });
+  });
+
+  it('only an accepted reduced scope can say verified with a criterion missing, and it says so', () => {
+    const notDelivered = criterion('FB-02', { state: 'not_delivered', verified: false, check: null, candidateSha: null });
+    const accepted = { decisionId: 'd', runId: 'r1', planRevision: 1, notDelivered: { tasks: [], requirementIds: ['FB-02'], acceptanceCheckIds: [] }, deliveredRequirementIds: ['FB-01'], acceptedAt: '2026-11-09T01:00:00.000Z', acceptedBy: 'o', note: null };
+    expect(states(buildEvidence(snap({ criteria: { verified: 1, total: 2 }, evidence: evidence([criterion('FB-01'), notDelivered]), reducedScope: accepted }), null)!)['verified']).toMatchObject({ value: 'Verified at reduced scope', established: true });
+    const other = { ...accepted, notDelivered: { ...accepted.notDelivered, requirementIds: ['FB-09'] } };
+    expect(states(buildEvidence(snap({ criteria: { verified: 1, total: 2 }, evidence: evidence([criterion('FB-01'), notDelivered]), reducedScope: other }), null)!)['verified']).toMatchObject({ value: 'Partly verified' });
+  });
+
+  it('a passing row whose record no longer stands says so and is not called verified', () => {
+    const m = buildEvidence(snap({ criteria: { verified: 0, total: 1 }, evidence: evidence([criterion('FB-01', { verified: false })], true, false) }), null)!;
+    expect(states(m)['verified']).toMatchObject({ value: 'Record no longer valid', established: false });
+    expect(m.criteria[0]).toMatchObject({ stateLabel: 'Record no longer valid', tone: 'warning' });
+  });
+
+  it('a pass on a rejected candidate is muted, and a flaky criterion is marked', () => {
+    const m = buildEvidence(snap({ criteria: { verified: 0, total: 2 }, evidence: evidence([criterion('FB-01', { verified: false }), criterion('FB-02', { verified: false })], false) }), null)!;
+    expect(m.criteria[0]).toMatchObject({ stateLabel: 'Passed', tone: 'neutral', flaky: false });
+    expect(m.criteria[1]).toMatchObject({ flaky: true });
   });
 
   it('a project with no run has no report', () => {

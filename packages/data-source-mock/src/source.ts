@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel,
 } from '@selarikru/view-protocol';
-import { approvalUnavailableReason } from '@selarikru/domain';
+import { approvalUnavailableReason, criterionDescription } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -213,8 +213,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   /** Per-criterion counts as a server would hold them. A scene whose tasks declare no criteria reports null: per-criterion evidence is not connected. */
   function criteriaOf(p: Project, runId: string): RunView['criteria'] {
-    // Budget-stopped work keeps its criteria in the total: they are still unmet. Superseded and deliberately cancelled work does not.
-    const live = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
+    // Approved criteria are the denominator: stopped work keeps its criteria in the total. Only superseded work leaves.
+    const live = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'superseded');
     if (live.length === 0) return null;
     let verified = 0;
     let total = 0;
@@ -231,11 +231,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   function evidenceOf(p: Project, runId: string): RunView['evidence'] {
     if (criteriaOf(p, runId) === null) return null;
     const snap = p.state.snapshot;
-    const live = Object.values(snap.tasks).filter((t) => t.runId === runId && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
+    const live = Object.values(snap.tasks).filter((t) => t.runId === runId && t.status !== 'superseded');
     const judged = Object.values(snap.checks).some((c) => live.some((t) => t.taskId === c.taskId));
     const candidate = judged ? {
       sha: SIMULATED_CANDIDATE, status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: 'd'.repeat(40), target: 'main', recordedAt: Object.values(snap.checks).map((c) => c.updatedAt).sort().at(-1)!,
-      recordId: 'ver_simulated', verifierHost: 'demo-verifier', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: [],
+      recordId: 'ver_simulated', recordValid: true, verifierHost: 'demo-verifier', checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64), flaky: [],
     } : null;
     const criteria = live.flatMap((t) => {
       const seed = p.fixture.tasks.filter((x) => x.taskId === t.taskId && x.revision <= t.revision).sort((a, b) => b.revision - a.revision)[0]!;
@@ -245,9 +245,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const count = seed.criteria ?? 0;
       return Array.from({ length: count }, (_, i) => {
         const criterionId = seed.requirementIds.length === count ? seed.requirementIds[i]! : `${seed.taskId.split('.').at(-1)!.toUpperCase()}-${i + 1}`;
-        const ran = (verified || failed) && check !== undefined;
+        const ran = (verified || failed) && check !== undefined && t.status !== 'cancelled';
+        if (t.status === 'cancelled') return { criterionId, description: criterionDescription(criterionId), state: 'not_delivered' as const, verified: false, taskIds: [t.taskId], check: null, candidateSha: null };
         return {
-          criterionId, state: ran ? (verified ? ('passed' as const) : ('failed' as const)) : ('not_run' as const), verified, taskIds: [t.taskId],
+          criterionId, description: criterionDescription(criterionId), state: ran ? (verified ? ('passed' as const) : ('failed' as const)) : ('not_run' as const), verified, taskIds: [t.taskId],
           check: ran ? { checkRunId: `${check.checkId}:${criterionId}`, checkId: criterionId, checkVersion: 'demo-1', taskId: t.taskId, revision: t.revision, attemptId: t.attemptIds.at(-1) ?? null, recordId: 'ver_simulated', verificationAttempt: 1, at: check.updatedAt } : null,
           candidateSha: ran ? SIMULATED_CANDIDATE : null,
         };
@@ -446,6 +447,15 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
     async getSnapshot(projectId) {
       return snapshotOf(project(projectId));
+    },
+
+    async getRunFailures(projectId, runId) {
+      const p = project(projectId);
+      if (!p.state.snapshot.runs[runId]) throw fail('unavailable', `no run ${runId} in this project`);
+      const evidence = evidenceOf(p, runId);
+      const failed = evidence?.criteria.filter((c) => c.state === 'failed') ?? [];
+      // Fixture text, angle brackets included, because real failure text is not ours to trust and must render as text.
+      return { candidateSha: evidence?.candidate?.sha ?? null, available: true, failures: failed.map((c) => ({ criterionId: c.criterionId, test: `${c.criterionId} acceptance`, status: 'failed' as const, message: 'AssertionError: expected <li> to contain "Saved" (simulated)' })) };
     },
 
     subscribe(projectId, afterCursor, onEvent, onError) {

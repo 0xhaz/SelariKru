@@ -178,8 +178,8 @@ export interface RunnerRow {
   readonly runnerId: string;
   readonly label: string | null;
   readonly location: 'local' | 'cloud';
-  /** Seen recently enough for the scheduler to count it. */
-  readonly recent: boolean;
+  /** `unknown` while our own connection is down: a runner's silence is then our outage, not its absence. */
+  readonly reachability: 'reachable' | 'not_reachable' | 'unknown';
   readonly lastSeenAt: string | null;
 }
 
@@ -197,6 +197,8 @@ export interface TeamModel {
   readonly assignments: AssignmentsModel;
   /** Enrolled runners and whether each is still reachable, independently of any worker. */
   readonly runners: readonly RunnerRow[];
+  /** A count of reachable runners, or says the count is unknown. Never a count taken during our own outage. */
+  readonly runnersSummary: string;
 }
 
 const ACTIVITY_RANK: Readonly<Partial<Record<WorkerActivity, number>>> = { blocked_policy: 1, waiting_human: 2 };
@@ -511,6 +513,7 @@ export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, liveness
   return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort(), runs: [...new Set(rows.flatMap((r) => (r.runId ? [r.runId] : [])))].sort(),
     providers: [...new Set(rows.map((r) => r.assignment?.provider ?? 'unknown'))].sort().map((value) => ({ value, label: value === 'unknown' ? 'Not recorded' : (snapshot.modelCatalog.providers.find((p) => p.provider === value)?.label ?? value) })),
     assignments: buildAssignments(snapshot),
-    runners: snapshot.runners.map((r) => ({ runnerId: r.runnerId, label: r.label, location: r.location, recent: runnerRecent(r, nowMs), lastSeenAt: r.lastSeenAt })),
+    runners: snapshot.runners.map((r) => ({ runnerId: r.runnerId, label: r.label, location: r.location, reachability: sessionStale ? 'unknown' as const : runnerRecent(r, nowMs) ? 'reachable' as const : 'not_reachable' as const, lastSeenAt: r.lastSeenAt })),
+    runnersSummary: sessionStale ? 'Reachability unknown until the connection returns' : `${snapshot.runners.filter((r) => runnerRecent(r, nowMs)).length} of ${snapshot.runners.length} reachable`,
   };
 }

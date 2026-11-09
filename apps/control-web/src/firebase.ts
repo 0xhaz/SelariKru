@@ -29,6 +29,7 @@ export function createAdapter(): FirebaseHybridAssistantAdapter {
 
 export const getOwnerToken = async (): Promise<string> => {
   const user = auth.currentUser;
-  if (!user) throw new Error('not signed in');
+  // Firebase's own code for this state, so callers read one vocabulary.
+  if (!user) throw Object.assign(new Error('not signed in'), { code: 'auth/no-current-user' });
   return user.getIdToken();
 };

@@ -1,10 +1,10 @@
-import { useEffect, useId, useRef, useState } from 'react';
-import { Chip, EmptyState, Panel, Timestamp, formatClock, toneGlyph, TONE_TEXT } from '@selarikru/ui';
-import type { DataSourceError } from '@selarikru/view-protocol';
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Chip, EmptyState, Panel, Timestamp, formatDayTime, toneGlyph, TONE_TEXT } from '@selarikru/ui';
+import type { CriterionFailureView, DataSourceError, RunFailuresView } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
-import type { CandidateModel, CheckRow, CriterionRow, DeliveryState, EvidenceModel } from './model.ts';
-import { CANDIDATE_ANCHOR, checkAnchor } from './model.ts';
+import type { CandidateModel, CriterionRow, DeliveryState, EvidenceModel } from './model.ts';
+import { CANDIDATE_ANCHOR } from './model.ts';
 
 function Facts({ facts }: { facts: readonly { label: string; value: string }[] }) {
   return (
@@ -48,76 +48,130 @@ function ShaLink({ row }: { row: CriterionRow }) {
   return <a data-testid="criterion-candidate" className="font-mono text-mono text-active underline underline-offset-2" href={row.evidence.candidateHref} title={row.evidence.candidateSha}>{row.evidence.candidateShort}</a>;
 }
 
-function CriteriaTable({ rows }: { rows: readonly CriterionRow[] }) {
+function StateChips({ row }: { row: CriterionRow }) {
   return (
-    <>
-      <table className="hidden w-full border-collapse text-left text-sm md:table">
-        <caption className="sr-only">Each acceptance criterion, its result, its check and the candidate commit it was judged on</caption>
-        <thead>
-          <tr className="border-b border-line text-muted">
-            <th scope="col" className="py-2 pr-3 font-medium">Criterion</th>
-            <th scope="col" className="py-2 pr-3 font-medium">Result</th>
-            <th scope="col" className="py-2 pr-3 font-medium">Task</th>
-            <th scope="col" className="py-2 pr-3 font-medium">Check</th>
-            <th scope="col" className="py-2 pr-3 font-medium">Candidate</th>
-            <th scope="col" className="py-2 font-medium">Judged</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.criterionId} data-testid="criterion" data-criterion={r.criterionId} data-state={r.state} className="border-b border-line align-top last:border-0">
-              <th scope="row" className="py-2.5 pr-3 font-mono text-mono font-semibold text-fg">{r.criterionId}</th>
-              <td className="py-2.5 pr-3 whitespace-nowrap"><Chip tone={r.tone}>{r.stateLabel}</Chip></td>
-              <td className="py-2.5 pr-3 text-muted">{r.tasks.join(', ')}</td>
-              <td className="py-2.5 pr-3"><CheckLink row={r} /></td>
-              <td className="py-2.5 pr-3"><ShaLink row={r} /></td>
-              <td className="py-2.5 whitespace-nowrap text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatClock(r.evidence.at)}</Timestamp> : 'Not yet'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <ul className="space-y-2 md:hidden">
-        {rows.map((r) => (
-          <li key={r.criterionId} data-testid="criterion-card" data-criterion={r.criterionId} className="rounded-chip border border-line bg-panel-2 p-3 text-sm">
+    <span className="inline-flex shrink-0 flex-wrap items-center gap-1.5 whitespace-nowrap">
+      <Chip tone={row.tone}>{row.stateLabel}</Chip>
+      {row.flaky ? <Chip tone="warning">Flaky</Chip> : null}
+    </span>
+  );
+}
+
+interface FailureState { readonly loading: boolean; readonly available: boolean | null; readonly failures: readonly CriterionFailureView[] }
+
+/** The verifier's words on why this failed. Candidate code can shape them, so they are text nodes only: never markup, and never a link. */
+function FailureList({ state, criterionId }: { state: FailureState; criterionId: string }) {
+  if (state.loading) return <p role="status" className="mt-2 text-sm text-muted">Loading why it failed</p>;
+  if (state.available === false) return <p className="mt-2 text-sm text-muted">The failure details are not available: the verification record no longer stands.</p>;
+  if (state.available === null) return <p className="mt-2 text-sm text-muted">The failure details could not be loaded.</p>;
+  const mine = state.failures.filter((f) => f.criterionId === criterionId);
+  if (mine.length === 0) return <p className="mt-2 text-sm text-muted">No failure text was recorded for this criterion.</p>;
+  return (
+    <ul className="mt-2 space-y-2" data-testid="failure-list">
+      {mine.map((f, i) => (
+        <li key={i} className="rounded-chip border border-l-4 border-line border-l-danger bg-panel p-2 text-sm">
+          <p className="font-medium text-fg">{f.test}</p>
+          <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-mono text-muted">{f.message}</pre>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function CriterionDetail({ row, failures }: { row: CriterionRow; failures: FailureState }) {
+  if (!row.evidence) return null;
+  return (
+    <div className="rounded-chip bg-panel-2 p-3">
+      {row.state === 'failed' || row.state === 'error' ? <FailureList state={failures} criterionId={row.criterionId} /> : null}
+      <Facts facts={row.evidence.facts} />
+    </div>
+  );
+}
+
+function Disclosure({ row, open, onToggle }: { row: CriterionRow; open: boolean; onToggle: () => void }) {
+  if (!row.evidence) return <span className="font-mono text-mono font-semibold text-fg">{row.criterionId}</span>;
+  return (
+    <button type="button" aria-expanded={open} aria-controls={row.evidence.anchor} onClick={onToggle} className="inline-flex items-center gap-1 font-mono text-mono font-semibold text-fg hover:text-active">
+      <span aria-hidden="true" className="inline-block w-3 text-muted">{open ? '▾' : '▸'}</span>
+      {row.criterionId}
+    </button>
+  );
+}
+
+function CriteriaTable({ rows, openIds, onToggle, failures }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState }) {
+  return (
+    <table className="w-full border-collapse text-left text-sm">
+      <caption className="sr-only">Each acceptance criterion, its result, its check and the candidate commit it was judged on</caption>
+      <thead>
+        <tr className="border-b border-line text-muted">
+          <th scope="col" className="py-2 pr-3 font-medium">Criterion</th>
+          <th scope="col" className="py-2 pr-3 font-medium">Result</th>
+          <th scope="col" className="py-2 pr-3 font-medium">Task</th>
+          <th scope="col" className="py-2 pr-3 font-medium">Check</th>
+          <th scope="col" className="py-2 pr-3 font-medium">Candidate</th>
+          <th scope="col" className="py-2 font-medium">Judged</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => {
+          const open = openIds.has(r.criterionId);
+          return (
+            <Fragment key={r.criterionId}>
+              <tr data-testid="criterion" data-criterion={r.criterionId} data-state={r.state} className="border-b border-line align-top">
+                <th scope="row" className="min-w-[9rem] py-2.5 pr-3 font-normal">
+                  <Disclosure row={r} open={open} onToggle={() => onToggle(r.criterionId)} />
+                  {r.description ? <span className="mt-0.5 block pl-4 text-muted">{r.description}</span> : null}
+                </th>
+                <td className="whitespace-nowrap py-2.5 pr-3"><StateChips row={r} /></td>
+                <td className="py-2.5 pr-3 text-muted">{r.tasks.join(', ')}</td>
+                <td className="py-2.5 pr-3"><CheckLink row={r} /></td>
+                <td className="py-2.5 pr-3"><ShaLink row={r} /></td>
+                <td className="whitespace-nowrap py-2.5 text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatDayTime(r.evidence.at)}</Timestamp> : 'Not yet'}</td>
+              </tr>
+              {r.evidence ? (
+                <tr id={r.evidence.anchor} tabIndex={-1} hidden={!open} className="scroll-mt-40 border-b border-line outline-none">
+                  <td colSpan={6} className="pb-3 pt-1"><CriterionDetail row={r} failures={failures} /></td>
+                </tr>
+              ) : null}
+            </Fragment>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function CriteriaCards({ rows, openIds, onToggle, failures }: { rows: readonly CriterionRow[]; openIds: ReadonlySet<string>; onToggle: (id: string) => void; failures: FailureState }) {
+  return (
+    <ul className="space-y-2">
+      {rows.map((r) => {
+        const open = openIds.has(r.criterionId);
+        return (
+          <li key={r.criterionId} data-testid="criterion" data-criterion={r.criterionId} data-state={r.state} className="rounded-chip border border-line bg-panel-2 p-3 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-mono text-mono font-semibold text-fg">{r.criterionId}</span>
-              <Chip tone={r.tone}>{r.stateLabel}</Chip>
+              <Disclosure row={r} open={open} onToggle={() => onToggle(r.criterionId)} />
+              <StateChips row={r} />
             </div>
+            {r.description ? <p className="mt-1 text-fg">{r.description}</p> : null}
             <p className="mt-1 text-muted">{r.tasks.join(', ')}</p>
-            <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span className="text-muted">Check <CheckLink row={r} /></span><span className="text-muted">Candidate <ShaLink row={r} /></span></p>
+            <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span className="text-muted">Check <CheckLink row={r} /></span><span className="text-muted">Candidate <ShaLink row={r} /></span>{r.evidence ? <span className="text-muted">Judged <Timestamp iso={r.evidence.at}>{formatDayTime(r.evidence.at)}</Timestamp></span> : null}</p>
+            {r.evidence ? <div id={r.evidence.anchor} tabIndex={-1} hidden={!open} className="mt-2 scroll-mt-40 outline-none"><CriterionDetail row={r} failures={failures} /></div> : null}
           </li>
-        ))}
-      </ul>
-    </>
+        );
+      })}
+    </ul>
   );
 }
 
-function CheckList({ checks, target }: { checks: readonly CheckRow[]; target: string | null }) {
-  return (
-    <Panel title="Checks" labelId="evidence-checks-title" aside={`${checks.length} recorded`}>
-      <ul className="space-y-2">
-        {checks.map((c) => (
-          <li key={c.checkRunId} id={c.anchor} tabIndex={-1} className="scroll-mt-40 rounded-chip border border-line outline-none">
-            <details open={target === c.checkRunId} className="group p-3">
-              <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2">
-                <span className="font-mono text-mono font-semibold text-fg">{c.criterionId}</span>
-                <Chip tone={c.tone}>{c.stateLabel}</Chip>
-              </summary>
-              <Facts facts={c.facts} />
-            </details>
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  );
-}
-
-function CandidatePanel({ candidate }: { candidate: CandidateModel }) {
+function CandidatePanel({ candidate, simulated }: { candidate: CandidateModel; simulated: boolean }) {
   return (
     <section aria-labelledby="evidence-candidate-title" id={CANDIDATE_ANCHOR} tabIndex={-1} className="scroll-mt-40 rounded-card border border-line bg-panel outline-none">
       <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-line px-4 py-3">
         <h2 id="evidence-candidate-title" className="text-base font-semibold text-fg">Candidate</h2>
-        <Chip tone={candidate.live ? 'success' : 'warning'}>{candidate.statusLabel}</Chip>
+        <span className="inline-flex items-center gap-2">
+          {simulated ? <span className="text-sm text-muted">Simulated, not evidence</span> : null}
+          <Chip tone={candidate.live && candidate.recordValid ? 'success' : 'warning'}>{candidate.live && !candidate.recordValid ? 'Record no longer valid' : candidate.statusLabel}</Chip>
+        </span>
       </header>
       <div className="p-4">
         <p className="break-all font-mono text-lg font-semibold text-fg" data-testid="candidate-sha">{candidate.sha}</p>
@@ -129,13 +183,26 @@ function CandidatePanel({ candidate }: { candidate: CandidateModel }) {
   );
 }
 
+const MEDIUM = '(min-width: 768px)';
+function useIsWide(): boolean {
+  const [wide, setWide] = useState(() => window.matchMedia(MEDIUM).matches);
+  useEffect(() => {
+    const query = window.matchMedia(MEDIUM);
+    const onChange = (): void => setWide(query.matches);
+    onChange();
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return wide;
+}
+
 function RunPicker({ model, onChange }: { model: EvidenceModel; onChange: (id: string) => void }) {
   const id = useId();
   if (model.runOptions.length < 2) return null;
   return (
-    <div className="mt-2 flex items-center gap-2">
-      <label htmlFor={id} className="text-sm text-muted">Run</label>
-      <select id={id} value={model.runId} onChange={(e) => onChange(e.target.value)} className="rounded-chip border border-line-strong bg-bg px-2 py-1 text-sm text-fg">
+    <div className="mt-2 flex min-w-0 items-center gap-2">
+      <label htmlFor={id} className="shrink-0 text-sm text-muted">Run</label>
+      <select id={id} value={model.runId} onChange={(e) => onChange(e.target.value)} className="min-w-0 max-w-full rounded-chip border border-line-strong bg-bg px-2 py-1 text-sm text-fg">
         {model.runOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
       </select>
     </div>
@@ -153,25 +220,53 @@ export interface EvidenceViewProps {
   readonly leaveDemoHref?: string | undefined;
   readonly checkTarget: string | null;
   readonly candidateTarget: string | null;
+  readonly onLoadFailures: (runId: string) => Promise<RunFailuresView>;
   readonly onRestart: () => void;
   readonly onChooseRun: (runId: string) => void;
 }
 
 /** What each acceptance criterion has been shown to do, the check that says so and the exact commit it judged. Read-only: nothing here can decide or change anything. */
-export function EvidenceView({ connection, error, model, failure, hasSnapshot, confirmedAt, mode, leaveDemoHref, checkTarget, candidateTarget, onRestart, onChooseRun }: EvidenceViewProps) {
+export function EvidenceView({ connection, error, model, failure, hasSnapshot, confirmedAt, mode, leaveDemoHref, checkTarget, candidateTarget, onLoadFailures, onRestart, onChooseRun }: EvidenceViewProps) {
   if (failure !== undefined) throw failure;
-  const [openCheck, setOpenCheck] = useState<string | null>(checkTarget);
+  const wide = useIsWide();
   const scrolled = useRef<string | null>(null);
+  const [toggled, setToggled] = useState<ReadonlySet<string>>(new Set());
+  const toggle = useCallback((id: string) => setToggled((prior) => { const next = new Set(prior); if (next.has(id)) next.delete(id); else next.add(id); return next; }), []);
+  const rows = model?.criteria ?? [];
+  const failedKey = rows.filter((r) => r.state === 'failed' || r.state === 'error').map((r) => r.criterionId).join(',');
+  // A failed criterion is open from the start, and the one a link names is open. A person's click turns either one the other way.
+  const openIds = useMemo(() => {
+    const base = new Set(failedKey === '' ? [] : failedKey.split(','));
+    const target = checkTarget === null ? undefined : rows.find((r) => r.evidence?.checkId === checkTarget);
+    if (target) base.add(target.criterionId);
+    for (const id of toggled) { if (base.has(id)) base.delete(id); else base.add(id); }
+    return base;
+  }, [failedKey, checkTarget, rows, toggled]);
+  useEffect(() => { setToggled(new Set()); }, [checkTarget]);
+
+  const [failures, setFailures] = useState<FailureState>({ loading: false, available: null, failures: [] });
+  const live = connection === 'live';
+  const failureKey = model && failedKey !== '' && live ? `${model.runId}:${model.candidate?.sha ?? ''}:${failedKey}` : null;
   useEffect(() => {
-    setOpenCheck(checkTarget);
-    const anchor = checkTarget !== null ? checkAnchor(checkTarget) : candidateTarget !== null ? CANDIDATE_ANCHOR : null;
+    if (failureKey === null || !model) return;
+    let cancelled = false;
+    setFailures({ loading: true, available: null, failures: [] });
+    onLoadFailures(model.runId).then(
+      (r) => { if (!cancelled) setFailures({ loading: false, available: r.available, failures: r.failures }); },
+      () => { if (!cancelled) setFailures({ loading: false, available: null, failures: [] }); },
+    );
+    return () => { cancelled = true; };
+  }, [failureKey]);
+
+  useEffect(() => {
+    const anchor = checkTarget !== null ? rows.find((r) => r.evidence?.checkId === checkTarget)?.evidence?.anchor ?? null : candidateTarget !== null ? CANDIDATE_ANCHOR : null;
     if (anchor === null || scrolled.current === `${anchor}:${checkTarget}:${candidateTarget}`) return;
     const el = document.getElementById(anchor);
     if (!el) return;
     scrolled.current = `${anchor}:${checkTarget}:${candidateTarget}`;
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
-  }, [checkTarget, candidateTarget, model?.runId, model?.checks.length]);
+  }, [checkTarget, candidateTarget, model?.runId, rows.length]);
 
   const heading = <h1 className="text-2xl font-semibold tracking-tight">Evidence</h1>;
   if (!model) {
@@ -207,23 +302,22 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
         <RunPicker model={model} onChange={onChooseRun} />
       </div>
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
-      <div className="grid gap-4">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
         <DeliveryStrip states={model.states} />
         {model.connected ? (
-          <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-            <div className="grid gap-4">
-              <Panel title="Acceptance criteria" labelId="evidence-criteria-title" aside={model.counts.map((c) => `${c.n} ${c.label}`).join(', ')}>
-                <CriteriaTable rows={model.criteria} />
+          <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
+              <Panel title="Acceptance criteria" labelId="evidence-criteria-title" aside={`${model.simulated ? 'Simulated, not evidence. ' : ''}${model.counts.map((c) => `${c.n} ${c.label}`).join(', ')}`}>
+                {wide ? <CriteriaTable rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} /> : <CriteriaCards rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} />}
               </Panel>
-              {model.checks.length > 0 ? <CheckList checks={model.checks} target={openCheck} /> : null}
             </div>
             <div className="grid gap-4">
-              {model.candidate ? <CandidatePanel candidate={model.candidate} /> : (
+              {model.candidate ? <CandidatePanel candidate={model.candidate} simulated={model.simulated} /> : (
                 <Panel title="Candidate" labelId="evidence-candidate-none"><p className="text-muted">No candidate has been assembled for this run yet, so there is nothing to judge.</p></Panel>
               )}
               {model.notDelivered.length > 0 ? (
                 <Panel title="Not delivered" labelId="evidence-not-delivered">
-                  <p className="text-sm text-muted">These stay unmet. Accepting a reduced scope records it; it does not verify anything.</p>
+                  <p className="text-sm text-muted">{model.reducedScopeAccepted ? 'You accepted the reduced scope. These stay unmet: accepting records it and verifies nothing.' : 'These approved criteria are unmet because their work was stopped. They stay in the total.'}</p>
                   <p className="mt-2 font-mono text-mono text-fg">{model.notDelivered.join(', ')}</p>
                 </Panel>
               ) : null}
@@ -231,7 +325,7 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
           </div>
         ) : (
           <section aria-label="Criteria" className="rounded-card border border-line bg-panel">
-            <EmptyState title="Per-criterion evidence is not connected for this run"><p>This run's tasks name no acceptance criteria, so there is nothing to report against. Tasks are not counted in their place.</p></EmptyState>
+            <EmptyState title="Per-criterion evidence is not available for this run"><p>Its tasks name no acceptance criteria, or the run is older than the report window, so there is nothing to report against. Tasks are not counted in their place.</p></EmptyState>
           </section>
         )}
       </div>

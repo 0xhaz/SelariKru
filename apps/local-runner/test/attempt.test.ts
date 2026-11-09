@@ -78,7 +78,40 @@ describe('activity on the heartbeat', () => {
     });
     await runAttempt(deps, w.lease);
     const reported = (w.api.heartbeat as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c[1]).filter((a) => a !== undefined);
-    expect(reported.length).toBeGreaterThan(0);
+    // Reported once for the one start: a heartbeat afterwards says only that the runner is alive.
+    expect(reported).toEqual(['Edit']);
+  });
+
+  it('a tool that hangs is reported once while heartbeats continue', async () => {
+    const { w, deps } = await setup({
+      agent: async ({ stream }) => {
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: {} }] } })}\n`);
+        await new Promise((r) => setTimeout(r, 200));
+      },
+    });
+    await runAttempt(deps, w.lease);
+    const calls = (w.api.heartbeat as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+    expect(calls.filter((c) => c[1] !== undefined).map((c) => c[1])).toEqual(['Bash']);
+  });
+
+  it('a second start of the same tool is a new report, and a failed heartbeat keeps it pending', async () => {
+    let failOnce = true;
+    const { w, deps } = await setup({
+      heartbeat: async () => {
+        if (failOnce) { failOnce = false; throw new Error('blip'); }
+        return { cancelRequested: false };
+      },
+      agent: async ({ stream }) => {
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Edit', input: {} }] } })}\n`);
+        await new Promise((r) => setTimeout(r, 70));
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b2', name: 'Edit', input: {} }] } })}\n`);
+        await new Promise((r) => setTimeout(r, 70));
+      },
+    });
+    await runAttempt(deps, w.lease);
+    const reported = (w.api.heartbeat as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c[1]).filter((a) => a !== undefined);
+    expect(reported.length).toBeGreaterThanOrEqual(2);
     expect(new Set(reported)).toEqual(new Set(['Edit']));
   });
 });

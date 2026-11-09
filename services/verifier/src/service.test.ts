@@ -12,7 +12,8 @@ import { schema, sql, type Db } from '../../../packages/persistence/src/index.ts
 import { PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
 import { verifierHashes } from './hashing.ts';
 import { assembleCandidate } from './integrate.ts';
-import { CandidateNotVerifiable, candidateContentHash, dockerRunner, loadValidRecord, verifyCandidate, type RunnerInput, type RunnerOutput, type VerificationDeps } from './service.ts';
+import { loadRunEvidence } from '../../workflow/src/evidence.ts';
+import { CandidateNotVerifiable, candidateContentHash, currentTrusted, dockerRunner, loadValidRecord, verifyCandidate, type RunnerInput, type RunnerOutput, type VerificationDeps } from './service.ts';
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = resolve(pkgRoot, '../..');
@@ -297,6 +298,35 @@ describe('verifyCandidate', () => {
 });
 
 const loadKey = (c: { sha: string }) => ({ tenantId: TENANT, projectId: PROJECT, sha: c.sha });
+
+describe('per-criterion evidence over a real verification', () => {
+  it('two parts, a shared requirement and a failed-then-passed retry read as verified, flaky, on the real record', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' }, { requirementIds: ['FB-01', 'FB-02'] });
+    await addDone('t2', { 'src/b.txt': 'b\n' }, { requirementIds: ['FB-02', 'FB-03'] });
+    const cand = await assemble();
+    let calls = 0;
+    await verifyCandidate(ref(cand), deps(async (i) => ok(i, ++calls === 1 ? { 'FB-02': 'failed' } : {}), { flakyRetries: 1 }));
+    expect(calls).toBe(2);
+    const tasks = async (t1 = 'verified') => [
+      { taskId: 't1', revision: 1, status: t1, requirementIds: ['FB-01', 'FB-02'] },
+      { taskId: 't2', revision: 1, status: await status('t2'), requirementIds: ['FB-02', 'FB-03'] },
+    ];
+    expect(await status('t1')).toBe('verified');
+    const scope = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+    const result = (await loadRunEvidence(db, scope, await tasks(), currentTrusted()))!;
+    expect(result.criteria).toEqual({ verified: 3, total: 3 });
+    expect(result.evidence.candidate).toMatchObject({ sha: cand.sha, recordValid: true, flaky: ['FB-02'] });
+    const shared = result.evidence.criteria.find((c) => c.criterionId === 'FB-02')!;
+    expect(shared).toMatchObject({ state: 'passed', verified: true, taskIds: ['t1', 't2'], candidateSha: cand.sha });
+    // The retry's result is the one shown, not the failure before it.
+    expect(shared.check?.verificationAttempt).toBe(2);
+    expect(shared.check?.recordId).toBe(result.evidence.candidate!.recordId);
+
+    // Another verifier build, or a part not finished, and the same rows count for nothing.
+    expect((await loadRunEvidence(db, scope, await tasks(), { ...currentTrusted(), verifierSha256: 'f'.repeat(64) }))!.criteria.verified).toBe(0);
+    expect((await loadRunEvidence(db, scope, await tasks('running'), currentTrusted()))!.criteria.verified).toBe(1); // FB-03 alone is carried only by t2
+  });
+});
 
 describe('verdicts are bound to the attempt they judged', () => {
   it('repair then re-verify: the failed candidate is consumed and cannot verify the repair attempt', async () => {

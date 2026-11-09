@@ -421,3 +421,22 @@ describe('model assignment', () => {
     expect(taskTarget(trial.tasks['b']!, trial)).toMatchObject({ pinned: { provider: 'anthropic' } });
   });
 });
+
+describe('runners during our own outage', () => {
+  const r = (lastSeenAt: string | null) => ({ runnerId: 'r', location: 'local' as const, label: null, lastSeenAt });
+  const snap = (runners: ReturnType<typeof r>[]) => ({ ...snapshotOf({}), runners });
+
+  it('reads recent and silent runners when the connection is up', () => {
+    const m = buildTeam(snap([r(iso(100)), r(new Date(NOW - 500_000).toISOString())]), NOW, NOW);
+    expect(m.runners.map((x) => x.reachability)).toEqual(['reachable', 'not_reachable']);
+    expect(m.runnersSummary).toBe('1 of 2 reachable');
+  });
+
+  it('says unknown, keeps last seen, and counts nothing when our connection is down', () => {
+    const m = buildTeam(snap([r(iso(100)), r(new Date(NOW - 500_000).toISOString())]), NOW, null, { stale: true });
+    expect(m.runners.map((x) => x.reachability)).toEqual(['unknown', 'unknown']);
+    expect(m.runners[0]!.lastSeenAt).toBe(iso(100));
+    expect(m.runnersSummary).not.toMatch(/of 2/);
+    expect(m.runnersSummary).toMatch(/unknown/i);
+  });
+});

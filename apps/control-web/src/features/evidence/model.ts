@@ -21,19 +21,13 @@ export interface CriterionRow {
   readonly state: CriterionEvidenceView['state'];
   readonly stateLabel: string;
   readonly tone: Tone;
+  readonly description: string | null;
   readonly verified: boolean;
-  /** What ties this criterion to its evidence. Null only for a criterion no check has reported on. */
-  readonly evidence: { readonly checkId: string; readonly checkHref: string; readonly candidateSha: string; readonly candidateShort: string; readonly candidateHref: string; readonly at: string } | null;
+  /** Its result changed between suite retries. A flaky pass stays visible. */
+  readonly flaky: boolean;
+  /** What ties this criterion to its evidence. Null for a criterion no check has reported on, or that was not delivered. */
+  readonly evidence: { readonly checkId: string; readonly checkHref: string; readonly anchor: string; readonly candidateSha: string; readonly candidateShort: string; readonly candidateHref: string; readonly at: string; readonly facts: readonly { readonly label: string; readonly value: string }[] } | null;
   readonly tasks: readonly string[];
-}
-
-export interface CheckRow {
-  readonly checkRunId: string;
-  readonly anchor: string;
-  readonly criterionId: string;
-  readonly stateLabel: string;
-  readonly tone: Tone;
-  readonly facts: readonly { readonly label: string; readonly value: string }[];
 }
 
 export interface CandidateModel {
@@ -41,6 +35,8 @@ export interface CandidateModel {
   readonly short: string;
   readonly statusLabel: string;
   readonly live: boolean;
+  /** False: the record no longer stands, so this candidate's passes count for nothing. */
+  readonly recordValid: boolean;
   readonly anchor: string;
   readonly facts: readonly { readonly label: string; readonly value: string }[];
   readonly flaky: readonly string[];
@@ -59,13 +55,14 @@ export interface EvidenceModel {
   readonly coverage: string;
   readonly counts: readonly { readonly label: string; readonly n: number; readonly tone: Tone }[];
   readonly criteria: readonly CriterionRow[];
-  readonly checks: readonly CheckRow[];
   readonly candidate: CandidateModel | null;
   readonly notDelivered: readonly string[];
+  readonly reducedScopeAccepted: boolean;
 }
 
 export const shortSha = (sha: string): string => sha.slice(0, 12);
 const CRITERION_STATE: Readonly<Record<CriterionEvidenceView['state'], { label: string; tone: Tone }>> = {
+  not_delivered: { label: 'Not delivered', tone: 'warning' },
   passed: { label: 'Passed', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, skipped: { label: 'Skipped', tone: 'warning' }, error: { label: 'Verifier error', tone: 'warning' }, not_run: { label: 'No check yet', tone: 'neutral' },
 };
 
@@ -78,13 +75,19 @@ export const candidateHref = (runId: string, sha: string): string => evidenceHre
 
 function verifiedState(run: RunView, evidence: RunEvidenceView | null): DeliveryState {
   const base = { key: 'verified' as const, title: 'Verified', link: null };
-  if (!run.criteria || !evidence) return { ...base, value: 'Not connected', tone: 'neutral', detail: 'This run has no per-criterion evidence. Task counts are not criteria, so none is shown.', established: false };
+  if (!run.criteria || !evidence) return { ...base, value: 'Not connected', tone: 'neutral', detail: 'No per-criterion evidence for this run: its tasks name no criteria, or it is older than the report window. Tasks are not counted in their place.', established: false };
   const { verified, total } = run.criteria;
   const at = evidence.candidate ? ` at candidate ${shortSha(evidence.candidate.sha)}` : '';
-  if (evidence.candidate && !evidence.candidate.live) return { ...base, value: 'Not verified', tone: 'warning', detail: `The last candidate was ${evidence.candidate.status}, so its passes count for nothing. ${verified} of ${total} criteria verified.`, established: false };
-  if (total > 0 && verified === total) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} criteria passed${at}.`, established: true };
-  if (verified > 0) return { ...base, value: 'Partly verified', tone: 'warning', detail: `${verified} of ${total} criteria passed${at}.`, established: false };
-  return { ...base, value: 'Not verified', tone: 'neutral', detail: `0 of ${total} criteria verified yet.`, established: false };
+  if (evidence.candidate && !evidence.candidate.live) return { ...base, value: 'Not verified', tone: 'warning', detail: `The last candidate was ${evidence.candidate.status}, so its passes count for nothing. ${verified} of ${total} approved criteria verified.`, established: false };
+  if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verification record for candidate ${shortSha(evidence.candidate.sha)} no longer stands, so its passes do not count. 0 of ${total} approved criteria verified.`, established: false };
+  if (total > 0 && verified === total) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} approved criteria passed${at}.`, established: true };
+  const missing = evidence.criteria.filter((c) => c.state === 'not_delivered').map((c) => c.criterionId);
+  const accepted = run.reducedScope?.notDelivered.requirementIds ?? [];
+  // The only way to say Verified with a criterion missing: the owner accepted exactly that, and the words say so.
+  if (missing.length > 0 && verified === total - missing.length && missing.every((id) => accepted.includes(id))) return { ...base, value: 'Verified at reduced scope', tone: 'warning', detail: `${verified} of ${total} approved criteria passed${at}. ${missing.length} not delivered, as you accepted.`, established: true };
+  const shortfall = missing.length > 0 ? ` ${missing.length} not delivered.` : '';
+  if (verified > 0) return { ...base, value: 'Partly verified', tone: 'warning', detail: `${verified} of ${total} approved criteria passed${at}.${shortfall}`, established: false };
+  return { ...base, value: 'Not verified', tone: 'neutral', detail: `0 of ${total} approved criteria verified yet.${shortfall}`, established: false };
 }
 
 function mergedState(run: RunView, snapshot: ProjectViewSnapshot, simulated: boolean): DeliveryState {
@@ -108,26 +111,25 @@ function chosenRun(snapshot: ProjectViewSnapshot, wanted: string | null): RunVie
   return runs.find((r) => r.runId === wanted) ?? runs.filter((r) => !['merged', 'failed', 'cancelled'].includes(r.lifecycle)).at(-1) ?? runs.at(-1) ?? null;
 }
 
-function rowsOf(run: RunView, evidence: RunEvidenceView, titles: Readonly<Record<string, string>>): { criteria: CriterionRow[]; checks: CheckRow[] } {
-  const criteria: CriterionRow[] = evidence.criteria.map((c) => {
+function rowsOf(run: RunView, evidence: RunEvidenceView, titles: Readonly<Record<string, string>>): CriterionRow[] {
+  const rejected = evidence.candidate !== null && !evidence.candidate.live;
+  return evidence.criteria.map((c) => {
     const shape = CRITERION_STATE[c.state];
+    // A pass that does not count must not look like one that does: on a rejected candidate it is muted, on a live one it says why.
+    const uncounted = c.state === 'passed' && !c.verified;
+    const stateLabel = uncounted && !rejected ? 'Record no longer valid' : shape.label;
+    const tone: Tone = uncounted ? (rejected ? 'neutral' : 'warning') : shape.tone;
     return {
-      criterionId: c.criterionId, state: c.state, stateLabel: shape.label, tone: shape.tone, verified: c.verified, tasks: c.taskIds.map((id) => titles[id] ?? id),
-      evidence: c.check && c.candidateSha ? { checkId: c.check.checkRunId, checkHref: checkHref(run.runId, c.check.checkRunId), candidateSha: c.candidateSha, candidateShort: shortSha(c.candidateSha), candidateHref: candidateHref(run.runId, c.candidateSha), at: c.check.at } : null,
+      criterionId: c.criterionId, description: c.description, state: c.state, stateLabel, tone, verified: c.verified, flaky: evidence.candidate?.flaky.includes(c.criterionId) ?? false, tasks: c.taskIds.map((id) => titles[id] ?? id),
+      evidence: c.check && c.candidateSha ? {
+        checkId: c.check.checkRunId, checkHref: checkHref(run.runId, c.check.checkRunId), anchor: checkAnchor(c.check.checkRunId), candidateSha: c.candidateSha, candidateShort: shortSha(c.candidateSha), candidateHref: candidateHref(run.runId, c.candidateSha), at: c.check.at,
+        facts: [
+          { label: 'Check run', value: c.check.checkRunId }, { label: 'Check', value: `${c.check.checkId} (version ${c.check.checkVersion})` }, { label: 'Task', value: `${titles[c.check.taskId] ?? c.check.taskId}, revision ${c.check.revision}` },
+          { label: 'Attempt', value: c.check.attemptId ?? 'Not recorded' }, { label: 'Suite run', value: String(c.check.verificationAttempt) }, { label: 'Verification record', value: c.check.recordId ?? 'Not recorded' },
+        ],
+      } : null,
     };
   });
-  const checks: CheckRow[] = evidence.criteria.flatMap((c) => {
-    if (!c.check) return [];
-    const shape = CRITERION_STATE[c.state];
-    return [{
-      checkRunId: c.check.checkRunId, anchor: checkAnchor(c.check.checkRunId), criterionId: c.criterionId, stateLabel: shape.label, tone: shape.tone,
-      facts: [
-        { label: 'Check run', value: c.check.checkRunId }, { label: 'Check', value: `${c.check.checkId} (version ${c.check.checkVersion})` }, { label: 'Task', value: `${titles[c.check.taskId] ?? c.check.taskId}, revision ${c.check.revision}` },
-        { label: 'Attempt', value: c.check.attemptId ?? 'Not recorded' }, { label: 'Suite run', value: String(c.check.verificationAttempt) }, { label: 'Verification record', value: c.check.recordId ?? 'Not recorded' },
-      ],
-    }];
-  });
-  return { criteria, checks };
 }
 
 function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectViewSnapshot, simulated: boolean): CandidateModel | null {
@@ -137,7 +139,7 @@ function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectV
   // Only an opened pull request put this commit on GitHub, and only it knows the repository's address.
   const commitHref = !simulated && cr ? `${cr.url.replace(/\/pull\/\d+$/, '')}/commit/${c.sha}` : null;
   return {
-    sha: c.sha, short: shortSha(c.sha), statusLabel: c.live ? 'Live' : (c.status === 'rejected' ? 'Rejected' : c.status), live: c.live, anchor: CANDIDATE_ANCHOR, commitHref, flaky: c.flaky,
+    sha: c.sha, short: shortSha(c.sha), statusLabel: c.live ? 'Current' : (c.status === 'rejected' ? 'Rejected' : c.status), live: c.live, recordValid: c.recordValid, anchor: CANDIDATE_ANCHOR, commitHref, flaky: c.flaky,
     facts: [
       { label: 'Base commit', value: c.baseSha }, { label: 'Tree', value: c.treeSha ?? 'Not recorded' }, { label: 'Target branch', value: c.target },
       { label: 'Verification record', value: c.recordId ?? 'Not recorded' }, { label: 'Verified on', value: c.verifierHost ?? 'Not recorded' }, { label: 'Check manifest', value: c.checkManifestSha256 ? `sha256:${c.checkManifestSha256.slice(0, 16)}` : 'Not recorded' }, { label: 'Verifier', value: c.verifierSha256 ? `sha256:${c.verifierSha256.slice(0, 16)}` : 'Not recorded' },
@@ -152,15 +154,15 @@ export function buildEvidence(snapshot: ProjectViewSnapshot, wantedRunId: string
   const simulated = snapshot.meta.provenance === 'simulated';
   const titles = Object.fromEntries(Object.values(snapshot.tasks).map((t) => [t.taskId, t.title ?? t.taskId]));
   const evidence = run.evidence;
-  const { criteria, checks } = evidence ? rowsOf(run, evidence, titles) : { criteria: [], checks: [] };
+  const criteria = evidence ? rowsOf(run, evidence, titles) : [];
   const n = (s: CriterionEvidenceView['state']): number => criteria.filter((c) => c.state === s).length;
-  const counts = evidence ? ([{ label: 'passed', n: n('passed'), tone: 'success' }, { label: 'failed', n: n('failed'), tone: 'danger' }, { label: 'skipped', n: n('skipped'), tone: 'warning' }, { label: 'verifier error', n: n('error'), tone: 'warning' }, { label: 'no check yet', n: n('not_run'), tone: 'neutral' }] as const).filter((c) => c.n > 0) : [];
-  const accepted = run.reducedScope;
-  const notDelivered = accepted?.notDelivered.requirementIds ?? run.scopeAssessment?.notDelivered.requirementIds ?? [];
+  const counts = evidence ? ([{ label: 'passed', n: n('passed'), tone: 'success' }, { label: 'failed', n: n('failed'), tone: 'danger' }, { label: 'skipped', n: n('skipped'), tone: 'warning' }, { label: 'verifier error', n: n('error'), tone: 'warning' }, { label: 'no check yet', n: n('not_run'), tone: 'neutral' }, { label: 'not delivered', n: n('not_delivered'), tone: 'warning' }] as const).filter((c) => c.n > 0) : [];
+  const notDelivered = [...new Set([...criteria.filter((c) => c.state === 'not_delivered').map((c) => c.criterionId), ...(run.reducedScope?.notDelivered.requirementIds ?? run.scopeAssessment?.notDelivered.requirementIds ?? [])])].sort();
   return {
     runId: run.runId, runLabel: run.runId, simulated, connected: evidence !== null, runOptions: Object.values(snapshot.runs).map((r) => ({ id: r.runId, label: r.runId })),
     states: [verifiedState(run, evidence), mergedState(run, snapshot, simulated), DEPLOYED],
-    coverage: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified` : 'Per-criterion evidence is not connected',
-    counts, criteria, checks, candidate: evidence ? candidateOf(evidence, run, snapshot, simulated) : null, notDelivered,
+    coverage: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} approved criteria verified` : 'Per-criterion evidence is not connected',
+    reducedScopeAccepted: run.reducedScope !== null,
+    counts, criteria, candidate: evidence ? candidateOf(evidence, run, snapshot, simulated) : null, notDelivered,
   };
 }

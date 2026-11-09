@@ -1,6 +1,6 @@
 import {
-  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS,
-  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type TerminalChannel,
+  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
+  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView, type TerminalChannel,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
@@ -39,20 +39,27 @@ async function readWireError(res: Response): Promise<WireError> {
   return { status: res.status, code: body?.error?.code ?? 'internal_error', message: body?.error?.message ?? res.statusText, details: body?.error?.details };
 }
 
+/** A request the server timed out, throttled or could not serve. Nothing about the request was refused, so it can be tried again. */
+const isTransient = (status: number): boolean => status === 408 || status === 429 || status >= 500;
+
 /** Status and code as the view's error. A server that is restarting or unreachable is a drop, so it is retryable; only what no retry can fix is not. */
 function toDataSourceError(e: WireError): DataSourceError {
   if (e.status === 401 || e.status === 403 || AUTH_CODES.includes(e.code)) return { code: 'unauthorized', message: e.message, retryable: false };
   if (e.code === 'project_not_found') return { code: 'unknown_project', message: e.message, retryable: false };
   if (e.code === 'cursor_ahead') return { code: 'invalid_cursor', message: e.message, retryable: false };
-  if (e.status >= 500) return { ...DROPPED, message: `the server responded ${e.status}` };
+  if (isTransient(e.status)) return { ...DROPPED, message: `the server responded ${e.status}` };
   return { code: 'unavailable', message: e.message, retryable: false };
 }
 
-/** A token the SDK could not get over the network is a drop like any other. A token that does not exist, or that Firebase refuses, is a permanent stop. */
+/** Firebase Auth codes a retry can fix. Any other `auth/` code (signed out, expired account, revoked token) needs a person. */
+const TRANSIENT_AUTH_CODES: readonly string[] = ['auth/network-request-failed', 'auth/too-many-requests', 'auth/internal-error', 'auth/timeout'];
+
+/** A failed fetch is a drop. A Firebase Auth error is read by its code, never by its wording. */
 function fromThrown(e: unknown): DataSourceError {
   if (e instanceof DataSourceException) return e.detail;
-  const text = e instanceof Error ? `${e.name} ${e.message}` : String(e);
-  return /token|sign/i.test(text) && !/network/i.test(text) ? { code: 'unauthorized', message: 'no owner token is available', retryable: false } : DROPPED;
+  const code = (e as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && code.startsWith('auth/') && !TRANSIENT_AUTH_CODES.includes(code)) return { code: 'unauthorized', message: `the owner's sign-in cannot be used (${code})`, retryable: false };
+  return DROPPED;
 }
 
 function rejectionOf(e: WireError): RejectionReason {
@@ -157,6 +164,22 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       }
       for (const a of Object.values(snapshot.attempts)) attemptOwners.set(a.attemptId, a.taskId);
       return snapshot;
+    },
+
+    async getRunFailures(projectId, runId): Promise<RunFailuresView> {
+      assertOpen();
+      let res: Response;
+      try {
+        res = await request(`/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/failures`);
+      } catch (e) {
+        throw fail(fromThrown(e));
+      }
+      if (!res.ok) throw fail(toDataSourceError(await readWireError(res)));
+      try {
+        return RunFailuresViewSchema.parse(await res.json());
+      } catch {
+        throw fail({ code: 'invalid_event', message: 'the server sent failure details this build cannot read', retryable: false });
+      }
     },
 
     subscribe(projectId, afterCursor, onEvent, onError) {
@@ -276,7 +299,7 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       if (!res.ok) {
         const wire = await readWireError(res);
         // No retry changes a refusal. A login problem or an unreachable server is not a refusal: the caller must not read it as one.
-        if (res.status === 401 || res.status >= 500 || AUTH_CODES.includes(wire.code)) throw fail(toDataSourceError(wire));
+        if (res.status === 401 || isTransient(res.status) || AUTH_CODES.includes(wire.code)) throw fail(toDataSourceError(wire));
         return refuse(c.idempotencyKey, rejectionOf(wire));
       }
       const accepted = acceptedOf(c, ((await res.json().catch(() => ({}))) as Record<string, unknown>) ?? {});

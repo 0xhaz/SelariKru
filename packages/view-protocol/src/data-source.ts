@@ -1,6 +1,6 @@
 import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, TerminalChannel } from './commands.ts';
 import type { ProjectViewEvent } from './events.ts';
-import type { ProjectViewSnapshot } from './snapshot.ts';
+import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -21,6 +21,8 @@ export interface EngineeringDataSource {
   getSnapshot(projectId: string): Promise<ProjectViewSnapshot>;
   /** Replays events after `afterCursor`, then delivers new ones, in sequence order. Returns the unsubscribe function. */
   subscribe(projectId: string, afterCursor: string, onEvent: (event: ProjectViewEvent) => void, onError: (error: DataSourceError) => void): () => void;
+  /** Why a run's criteria failed, from its current verification record. Read on demand: it is not state, and is too large to carry in every snapshot. */
+  getRunFailures(projectId: string, runId: string): Promise<RunFailuresView>;
   execute(command: AuthorizedViewCommand): Promise<CommandReceipt>;
   openTerminal(session: AuthorizedTerminalRequest): Promise<TerminalChannel>;
   disconnect(): void;

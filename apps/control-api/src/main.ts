@@ -1,6 +1,6 @@
 import { describeError } from './log.ts';
 import { ConfigError, loadConfigFromEnv } from './config.ts';
-import { assemblyOptionsFromEnv, githubOptionsFromEnv, startServer, verificationOptionsFromEnv } from './server.ts';
+import { assemblyOptionsFromEnv, evidenceOptionsFromEnv, githubOptionsFromEnv, startServer, verificationOptionsFromEnv } from './server.ts';
 
 try {
   const config = loadConfigFromEnv(process.env);
@@ -12,6 +12,7 @@ try {
     policyFile: process.env['SELARIKRU_POLICY_FILE'] || undefined,
     planConfigFile: process.env['SELARIKRU_PLAN_CONFIG_FILE'] || undefined,
     github: githubOptionsFromEnv(process.env),
+    evidence: evidenceOptionsFromEnv(process.env),
     verification: verificationOptionsFromEnv(process.env),
     assembly: (() => {
       const options = assemblyOptionsFromEnv(process.env);

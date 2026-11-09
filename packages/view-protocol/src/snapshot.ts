@@ -89,11 +89,13 @@ export const ReducedScopeViewSchema = z
   .strict();
 export type ReducedScopeView = z.infer<typeof ReducedScopeViewSchema>;
 
-/** One acceptance criterion and what the trusted verifier last said about it. `candidateSha` and `check` are both null, or both set: a state with no check is `not_run`. */
+/** One acceptance criterion and what the trusted verifier last said about it. `candidateSha` and `check` are both null, or both set: no check is `not_run`, or `not_delivered` for work that was stopped. */
 export const CriterionEvidenceViewSchema = z
   .object({
     criterionId: Id,
-    state: z.union([CheckStatusSchema, z.literal('not_run')]),
+    /** What the criterion asks for. Null when none is known. */
+    description: z.string().nullable().default(null),
+    state: z.union([CheckStatusSchema, z.literal('not_run'), z.literal('not_delivered')]),
     /** Counted in `criteria.verified`: a pass at the current revision on a live candidate. */
     verified: z.boolean(),
     taskIds: z.array(Id),
@@ -115,6 +117,8 @@ export const CandidateEvidenceViewSchema = z
     target: Id,
     recordedAt: Iso,
     recordId: Id.nullable(),
+    /** The record still stands on the pull-request route's bar. False: nothing on this candidate counts, whatever its checks said. */
+    recordValid: z.boolean().default(false),
     verifierHost: Id.nullable(),
     checkManifestSha256: Id.nullable(),
     verifierSha256: Id.nullable(),
@@ -123,6 +127,14 @@ export const CandidateEvidenceViewSchema = z
   })
   .strict();
 export type CandidateEvidenceView = z.infer<typeof CandidateEvidenceViewSchema>;
+
+/** One failed test's words from the sealed verification record, redacted and bounded by the server. Candidate code influences this text: it is only ever shown as text. */
+export const CriterionFailureViewSchema = z.object({ criterionId: Id, test: z.string(), status: CheckStatusSchema, message: z.string() }).strict();
+export type CriterionFailureView = z.infer<typeof CriterionFailureViewSchema>;
+
+/** `available` is false when the record is no longer valid, so there is nothing that can honestly be quoted. */
+export const RunFailuresViewSchema = z.object({ candidateSha: Id.nullable(), available: z.boolean(), failures: z.array(CriterionFailureViewSchema) }).strict();
+export type RunFailuresView = z.infer<typeof RunFailuresViewSchema>;
 
 export const RunEvidenceViewSchema = z.object({ candidate: CandidateEvidenceViewSchema.nullable(), criteria: z.array(CriterionEvidenceViewSchema) }).strict();
 export type RunEvidenceView = z.infer<typeof RunEvidenceViewSchema>;

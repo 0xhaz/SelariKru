@@ -24,7 +24,7 @@ test('each criterion links to check and candidate SHA', async ({ page }) => {
     await expect(row.getByTestId('criterion-candidate')).toHaveAttribute('href', /candidate=c{40}/);
   }
   await rows.first().getByTestId('criterion-check').click();
-  await expect(page.locator('details[open]')).toContainText('Verification record');
+  await expect(page.locator('tr[id^="check-"]:not([hidden])').first()).toContainText('Verification record');
   await rows.first().getByTestId('criterion-candidate').click();
   await expect(page.getByTestId('candidate-sha')).toHaveText('c'.repeat(40));
   await axe(page);
@@ -38,6 +38,16 @@ test('verified, merged, deployed render as distinct states', async ({ page }) =>
   await expect(state(page, 'merged')).toHaveAttribute('data-established', 'false');
   await expect(state(page, 'deployed')).toContainText('Not established');
   await expect(state(page, 'deployed')).toHaveAttribute('data-established', 'false');
+  await axe(page);
+});
+
+test('a failed criterion says why, as text only, with no markup from the failure message', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, 'failed-ci');
+  const list = page.getByTestId('failure-list').first();
+  await expect(list).toBeVisible();
+  await expect(list).toContainText('expected <li> to contain');
+  await expect(list.locator('li li')).toHaveCount(0);
   await axe(page);
 });
 

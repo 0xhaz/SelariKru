@@ -152,46 +152,65 @@ export interface EvidenceTask {
   readonly status: string;
   /** Requirement ids (FB-IDs) this task delivers, from its current spec. */
   readonly requirementIds: readonly string[];
-  /** A task stopped for budget keeps its criteria in the total: they are still unmet. */
-  readonly budgetStopped: boolean;
 }
 
-export type CriterionState = CheckStatus | 'not_run';
+export type CriterionState = CheckStatus | 'not_run' | 'not_delivered';
+
+/** What each Feedback Board acceptance criterion asks for, as approved in the brief. A criterion outside this list simply has no description. */
+const CRITERION_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  'FB-01': 'Create feedback with a trimmed title of 3 to 120 characters and an optional description',
+  'FB-02': 'Reject invalid titles, oversized descriptions, wrong types and invalid statuses',
+  'FB-03': 'List feedback newest first, breaking equal timestamps by item ID',
+  'FB-04': 'New feedback starts Open; updates permit Open, Planned or Done',
+  'FB-05': 'Filter by status; status counts describe the full dataset',
+  'FB-06': 'Saved feedback and status survive a browser reload and an API restart',
+  'FB-07': 'Loading, empty and failed states are usable; failed writes do not appear saved',
+  'FB-08': 'Controls have accessible names, work from the keyboard and render text as text',
+};
+export const criterionDescription = (id: string): string | null => CRITERION_DESCRIPTIONS[id] ?? null;
 
 export interface CriterionEvidence {
   readonly criterionId: string;
+  readonly description: string | null;
   readonly state: CriterionState;
-  /** Counted as verified: a pass at the current task revision on a live candidate. */
+  /** Counted as verified: the same bar as opening a pull request (see `deriveRunEvidence`). */
   readonly verified: boolean;
   readonly taskIds: readonly string[];
-  /** The observation shown, or null when no check has reported on this criterion. */
+  /** The observation shown, or null when no check has reported on this criterion or it was not delivered. */
   readonly check: Omit<CriterionObservation, 'candidateSha' | 'result'> | null;
   readonly candidateSha: string | null;
 }
 
 const WORSE: readonly CheckStatus[] = ['error', 'failed', 'skipped', 'passed'];
+const FINISHED: readonly string[] = ['verified', 'merged'];
 
 /**
- * Per-criterion evidence for one run. The criteria are the requirement ids of its current tasks, so a task count can never stand in for them: with no requirement ids
- * there are no criteria and the result is null. Superseded and deliberately cancelled tasks no longer owe anything; budget-stopped ones still do. A criterion is verified
- * only by a pass from the newest verification of a candidate that is still live, at the revision each owing task is on now. Tasks that share a criterion must all pass it.
+ * Per-criterion evidence for one run. The denominator is the approved criteria: the requirement ids of its current tasks, so a task count can never stand in for them, and
+ * stopping work never shrinks it. With no requirement ids the result is null. Only superseded work leaves: its requirements were replaced by the revised plan. A criterion that a
+ * cancelled task carries, alone or shared, was not delivered, whether or not another task reached it.
+ *
+ * A criterion is verified only on the same bar as opening a pull request: a pass from the newest verification, on a candidate still live, under a record that is still valid, at the
+ * revision each owing task is on now, and with every task carrying it `verified` or `merged`.
  */
-export function deriveRunEvidence(input: { readonly tasks: readonly EvidenceTask[]; readonly observations: readonly CriterionObservation[]; readonly candidateSha: string | null; readonly candidateLive: boolean }): { readonly criteria: readonly CriterionEvidence[]; readonly verified: number; readonly total: number } | null {
-  const owing = input.tasks.filter((t) => t.status !== 'superseded' && (t.status !== 'cancelled' || t.budgetStopped));
+export function deriveRunEvidence(input: { readonly tasks: readonly EvidenceTask[]; readonly observations: readonly CriterionObservation[]; readonly candidateSha: string | null; readonly candidateLive: boolean; readonly recordValid: boolean }): { readonly criteria: readonly CriterionEvidence[]; readonly verified: number; readonly total: number } | null {
+  const owing = input.tasks.filter((t) => t.status !== 'superseded');
   const ids = [...new Set(owing.flatMap((t) => t.requirementIds))].sort();
   if (ids.length === 0) return null;
   const onCandidate = input.observations.filter((o) => o.candidateSha === input.candidateSha);
   const criteria = ids.map((criterionId): CriterionEvidence => {
     const carriers = owing.filter((t) => t.requirementIds.includes(criterionId));
     const taskIds = carriers.map((t) => t.taskId);
+    const base = { criterionId, description: criterionDescription(criterionId), taskIds };
+    if (carriers.some((t) => t.status === 'cancelled')) return { ...base, state: 'not_delivered', verified: false, check: null, candidateSha: null };
     // The newest observation per task carrying it: a later suite pass replaces an earlier one, and an earlier task revision says nothing about this one.
     const newest = carriers.map((t) => onCandidate.filter((o) => o.checkId === criterionId && o.taskId === t.taskId && o.revision === t.revision)
       .sort((a, b) => b.at.localeCompare(a.at) || b.verificationAttempt - a.verificationAttempt)[0]);
     const seen = newest.filter((o): o is CriterionObservation => o !== undefined);
-    if (seen.length === 0) return { criterionId, state: 'not_run', verified: false, taskIds, check: null, candidateSha: null };
+    if (seen.length === 0) return { ...base, state: 'not_run', verified: false, check: null, candidateSha: null };
     const shown = [...seen].sort((a, b) => WORSE.indexOf(a.result) - WORSE.indexOf(b.result))[0]!;
     const { candidateSha, result, ...check } = shown;
-    return { criterionId, state: result, verified: input.candidateLive && seen.length === carriers.length && seen.every((o) => o.result === 'passed'), taskIds, check, candidateSha };
+    const verified = input.candidateLive && input.recordValid && carriers.every((t) => FINISHED.includes(t.status)) && seen.length === carriers.length && seen.every((o) => o.result === 'passed');
+    return { ...base, state: result, verified, check, candidateSha };
   });
   return { criteria, verified: criteria.filter((c) => c.verified).length, total: criteria.length };
 }

@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { appendEvent, withTx } from '@selarikru/persistence';
 import { startLeaseExpiryDriver } from '../src/index.ts';
-import { bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+import { API_POLICY, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 import { createScheduler } from '@selarikru/workflow';
 import { TEST_CATALOG, POLICY } from '@selarikru/workflow/test-helpers';
 
@@ -291,42 +292,89 @@ describe('freshness and activity', () => {
     const { token } = await enrolRunner(h.app);
     const lease = await claimOne(token);
     await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease), activity: 'Bash' }, bearer(token));
-    h.clock.advance(10);
-    await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease) }, bearer(token));
-    expect((await get(h.app, '/v1/projects/proj_a/snapshot')).body.tasks[0].attempts[0].activity.tool).toBe('Bash');
+    const started = h.clock.now().toISOString();
+    for (let i = 0; i < 3; i += 1) {
+      h.clock.advance(10);
+      await post(h.app, '/v1/runners/heartbeat', { lease: ref(lease) }, bearer(token));
+    }
+    const attempt = (await get(h.app, '/v1/projects/proj_a/snapshot')).body.tasks[0].attempts[0];
+    // A hung tool: heartbeats keep arriving, the time it started does not move.
+    expect(attempt.activity).toEqual({ tool: 'Bash', at: started });
+    expect(attempt.lastHeartbeatAt).toBe(h.clock.now().toISOString());
   });
 });
 
 describe('per-criterion evidence on the snapshot', () => {
   const SHA = 'a'.repeat(40);
-  async function seedEvidence(status = 'assembled') {
-    await seedTask(t.db, specFor('t1', { requirementIds: ['FB-01', 'FB-02'] }), 'verified');
+  const TRUSTED = { checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64) };
+  const trustedHarness = (trusted = TRUSTED): Harness => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => trusted, loadRecord: async () => null } });
+
+  /** A candidate with its applied record, check rows and verdict, exactly as the verifier leaves them. */
+  async function seedEvidence(over: { candidate?: string; applied?: boolean; firstTaskStatus?: string } = {}) {
+    await seedTask(t.db, specFor('t1', { requirementIds: ['FB-01', 'FB-02'] }), over.firstTaskStatus ?? 'verified');
     await seedTask(t.db, specFor('t2', { requirementIds: ['FB-03'] }), 'running');
-    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES ('tenant_a', 'proj_a', 'c1', 'run_a', 'main', ${SHA}, ${'b'.repeat(40)}, ${'c'.repeat(40)}, '[]'::jsonb, ${status})`);
+    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES ('tenant_a', 'proj_a', 'c1', 'run_a', 'main', ${SHA}, ${'b'.repeat(40)}, ${'c'.repeat(40)}, '[]'::jsonb, ${over.candidate ?? 'assembled'})`);
+    const ids = ['chk_FB-01', 'chk_FB-02'];
     for (const [check, result] of [['FB-01', 'passed'], ['FB-02', 'failed']] as const) {
       await t.db.execute(sql`INSERT INTO check_runs (tenant_id, project_id, check_run_id, task_id, revision, attempt_id, check_id, check_version, candidate_sha, result, log_refs) VALUES ('tenant_a', 'proj_a', ${`chk_${check}`}, 't1', 1, NULL, ${check}, '1', ${SHA}, ${result}, ${JSON.stringify([{ recordId: 'ver_1', attempt: 1 }])}::jsonb)`);
     }
+    await t.db.execute(sql`INSERT INTO artifacts (tenant_id, project_id, artifact_id, run_id, type, sha256, source_revision, classification, locator) VALUES ('tenant_a', 'proj_a', 'ver_1', 'run_a', 'verification_record', ${'9'.repeat(64)}, ${SHA}, 'internal', ${JSON.stringify({ recordId: 'ver_1', candidateSha: SHA, applied: over.applied ?? true, checkRunIds: ids })}::jsonb)`);
+    await withTx(t.db, (tx) => appendEvent(tx, { schemaVersion: 1, eventId: 'evt_verdict', projectId: 'proj_a', runId: 'run_a', taskId: 't1', attemptId: null, type: 'verification.passed', sequence: 0, aggregateRevision: 1, actor: { kind: 'verifier', id: 'v' }, occurredAt: h.clock.now().toISOString(), receivedAt: h.clock.now().toISOString(), causationId: null, traceId: 't', payload: { recordId: 'ver_1', candidateSha: SHA, ...TRUSTED, host: 'local-docker', flaky: [] } }));
   }
-  const run = async () => (await get(h.app, '/v1/projects/proj_a/snapshot')).body.runs[0];
+  const run = async (harness = trustedHarness()) => { await harness.app.ready(); const r = (await get(harness.app, '/v1/projects/proj_a/snapshot')).body.runs[0]; await harness.app.close(); return r; };
 
   it('counts criteria from the per-requirement evidence, never tasks', async () => {
     await seedEvidence();
     const r = await run();
-    // Three criteria across two tasks, one passed: not "1 of 2 tasks".
     expect(r.criteria).toEqual({ verified: 1, total: 3 });
-    expect(r.evidence.candidate).toMatchObject({ sha: SHA, live: true });
+    expect(r.evidence.candidate).toMatchObject({ sha: SHA, live: true, recordValid: true, recordId: 'ver_1' });
     expect(r.evidence.criteria.find((c: { criterionId: string }) => c.criterionId === 'FB-01')).toMatchObject({ state: 'passed', verified: true, candidateSha: SHA, check: { checkRunId: 'chk_FB-01', recordId: 'ver_1' } });
     expect(r.evidence.criteria.find((c: { criterionId: string }) => c.criterionId === 'FB-03')).toMatchObject({ state: 'not_run', candidateSha: null, check: null });
   });
 
   it('a rejected candidate keeps its results but verifies nothing', async () => {
-    await seedEvidence('rejected');
+    await seedEvidence({ candidate: 'rejected' });
     expect((await run()).criteria).toEqual({ verified: 0, total: 3 });
+  });
+
+  it('a passing row on a task still running is shown and not counted', async () => {
+    await seedEvidence({ firstTaskStatus: 'running' });
+    const r = await run();
+    expect(r.criteria).toEqual({ verified: 0, total: 3 });
+    expect(r.evidence.criteria[0]).toMatchObject({ criterionId: 'FB-01', state: 'passed', verified: false });
+  });
+
+  it('a verdict with applied false is not a valid record and counts for nothing', async () => {
+    await seedEvidence({ applied: false });
+    const r = await run();
+    expect(r.criteria.verified).toBe(0);
+    expect(r.evidence.candidate.recordValid).toBe(false);
+  });
+
+  it('a verifier hash change makes the record no longer valid', async () => {
+    await seedEvidence();
+    const r = await run(trustedHarness({ ...TRUSTED, verifierSha256: '2'.repeat(64) }));
+    expect(r.criteria.verified).toBe(0);
+    expect(r.evidence.candidate.recordValid).toBe(false);
+    expect(r.evidence.criteria[0]).toMatchObject({ state: 'passed', verified: false });
+  });
+
+  it('with nothing to trust, nothing counts', async () => {
+    await seedEvidence();
+    expect((await get(h.app, '/v1/projects/proj_a/snapshot')).body.runs[0].criteria).toEqual({ verified: 0, total: 3 });
   });
 
   it('with no requirement ids criteria are null, not a task count', async () => {
     await seedTask(t.db, specFor('t1'), 'verified');
     expect((await run()).criteria).toBeNull();
+  });
+
+  it('a cancelled task keeps its criteria in the denominator; a superseded one does not', async () => {
+    await seedTask(t.db, specFor('t1', { requirementIds: ['FB-01'] }), 'cancelled');
+    await seedTask(t.db, specFor('t2', { requirementIds: ['FB-02'] }), 'superseded');
+    const r = await run();
+    expect(r.criteria).toEqual({ verified: 0, total: 1 });
+    expect(r.evidence.criteria[0]).toMatchObject({ criterionId: 'FB-01', state: 'not_delivered' });
   });
 
   it('the snapshot says when a task entered its status, the slot limit, and the route of the recorded model', async () => {
@@ -338,5 +386,44 @@ describe('per-criterion evidence on the snapshot', () => {
     expect(snap.tasks[0]).toMatchObject({ enteredStatusAt: h.clock.now().toISOString(), role: 'backend', dependsOn: [] });
     expect(snap.tasks[0].attempts[0].assignment).toMatchObject({ route: 'cloud' });
     expect(snap.tasks[0].attempts[0].location).toBe('local');
+  });
+
+  it('a model only a stale enrolment reports is not offered', async () => {
+    await t.db.execute(sql`DELETE FROM runners`);
+    await enrolRunner(h.app);
+    expect((await get(h.app, '/v1/projects/proj_a/snapshot')).body.modelCatalog.providers.length).toBeGreaterThan(0);
+    h.clock.advance(121);
+    expect((await get(h.app, '/v1/projects/proj_a/snapshot')).body.modelCatalog.providers).toEqual([]);
+  });
+});
+
+describe('verification failures', () => {
+  const SHA = 'a'.repeat(40);
+  const secret = `ghp_${'a'.repeat(36)}`;
+  const withRecord = (failures: { test: string; status: 'failed'; message: string }[]) => makeHarness(t, {}, API_POLICY, { evidence: { trusted: () => ({ checkManifestSha256: 'x', verifierSha256: 'y' }), loadRecord: async () => ({ results: [{ checkId: 'FB-02', status: 'failed', tests: [], failures, evidenceReferences: [] }] }) as never } });
+  const seedCandidate = () => t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status) VALUES ('tenant_a', 'proj_a', 'c1', 'run_a', 'main', ${SHA}, ${'b'.repeat(40)}, ${'c'.repeat(40)}, '[]'::jsonb, 'rejected')`);
+  const URL = '/v1/projects/proj_a/runs/run_a/failures';
+
+  it('returns the failure text redacted and bounded, and needs the owner', async () => {
+    await seedCandidate();
+    const harness = withRecord([{ test: 'FB-02 reject', status: 'failed', message: `leaked ${secret} ${'x'.repeat(5000)}` }]);
+    await harness.app.ready();
+    expect((await harness.app.inject({ method: 'GET', url: URL })).statusCode).toBe(401);
+    const { body } = await get(harness.app, URL);
+    await harness.app.close();
+    expect(body).toMatchObject({ candidateSha: SHA, available: true });
+    expect(body.failures[0].criterionId).toBe('FB-02');
+    expect(body.failures[0].message).not.toContain(secret);
+    expect(body.failures[0].message.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('a record that no longer stands quotes nothing', async () => {
+    await seedCandidate();
+    expect((await get(h.app, URL)).body).toEqual({ candidateSha: SHA, available: false, failures: [] });
+  });
+
+  it('is scoped to the project', async () => {
+    await t.db.execute(sql`INSERT INTO projects (tenant_id, project_id, repository, default_branch, classification) VALUES ('tenant_a', 'proj_b', 'r', 'main', 'internal')`);
+    expect((await get(h.app, '/v1/projects/proj_b/runs/run_a/failures')).status).toBe(404);
   });
 });

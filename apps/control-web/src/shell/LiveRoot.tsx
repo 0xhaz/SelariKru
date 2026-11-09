@@ -38,7 +38,7 @@ function App({ account }: { account: AccountInfo }) {
 export default function LiveRoot() {
   return (
     <AuthGate auth={auth} emulator={usingAuthEmulator}>
-      {(user) => <App account={{ label: user.email ?? user.uid, onSignOut: () => void signOut(auth) }} />}
+      {(user) => <App key={user.uid} account={{ label: user.email ?? user.uid, onSignOut: () => void signOut(auth) }} />}
     </AuthGate>
   );
 }

@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { deriveRunEvidence, type CriterionObservation, type EvidenceTask } from './evidence.ts';
 
 const SHA = 'a'.repeat(40);
-const task = (taskId: string, requirementIds: string[], over: Partial<EvidenceTask> = {}): EvidenceTask => ({ taskId, revision: 1, status: 'verified', requirementIds, budgetStopped: false, ...over });
+const task = (taskId: string, requirementIds: string[], over: Partial<EvidenceTask> = {}): EvidenceTask => ({ taskId, revision: 1, status: 'verified', requirementIds, ...over });
 const seen = (checkId: string, taskId: string, result: CriterionObservation['result'], over: Partial<CriterionObservation> = {}): CriterionObservation => ({
   checkRunId: `chk_${checkId}_${taskId}`, checkId, checkVersion: '1', taskId, revision: 1, attemptId: 'att', recordId: 'ver', verificationAttempt: 1, candidateSha: SHA, result, at: '2026-11-09T01:00:00.000Z', ...over,
 });
-const derive = (tasks: EvidenceTask[], observations: CriterionObservation[], candidateLive = true) => deriveRunEvidence({ tasks, observations, candidateSha: SHA, candidateLive });
+const derive = (tasks: EvidenceTask[], observations: CriterionObservation[], candidateLive = true, recordValid = true) => deriveRunEvidence({ tasks, observations, candidateSha: SHA, candidateLive, recordValid });
 
 describe('deriveRunEvidence', () => {
   it('counts criteria, never tasks', () => {
@@ -20,7 +20,7 @@ describe('deriveRunEvidence', () => {
   });
 
   it('a criterion with no check is not_run with no candidate named', () => {
-    expect(derive([task('a', ['FB-01'], { status: 'running' })], [])?.criteria?.[0]).toEqual({ criterionId: 'FB-01', state: 'not_run', verified: false, taskIds: ['a'], check: null, candidateSha: null });
+    expect(derive([task('a', ['FB-01'], { status: 'running' })], [])?.criteria?.[0]).toEqual({ criterionId: 'FB-01', description: expect.any(String), state: 'not_run', verified: false, taskIds: ['a'], check: null, candidateSha: null });
   });
 
   it('every criterion with a check carries that check and the candidate', () => {
@@ -51,8 +51,37 @@ describe('deriveRunEvidence', () => {
     expect(derive([task('a', ['FB-01'])], [seen('FB-01', 'a', 'skipped')])).toMatchObject({ verified: 0, total: 1 });
   });
 
-  it('superseded and cancelled work owes nothing; budget-stopped work stays owed', () => {
-    expect(derive([task('a', ['FB-01'], { status: 'superseded' }), task('b', ['FB-02'], { status: 'cancelled' })], [])).toBeNull();
-    expect(derive([task('a', ['FB-01'], { status: 'cancelled', budgetStopped: true })], [])).toMatchObject({ verified: 0, total: 1 });
+  it('superseded work owes nothing, and only it', () => {
+    expect(derive([task('a', ['FB-01'], { status: 'superseded' })], [])).toBeNull();
+  });
+
+  it('a cancelled task keeps its own requirement in the denominator as not delivered', () => {
+    const r = derive([task('a', ['FB-01'], { status: 'verified' }), task('b', ['FB-02'], { status: 'cancelled' })], [seen('FB-01', 'a', 'passed')]);
+    expect(r).toMatchObject({ verified: 1, total: 2 });
+    expect(r!.criteria[1]).toMatchObject({ criterionId: 'FB-02', state: 'not_delivered', verified: false, check: null, candidateSha: null, taskIds: ['b'] });
+  });
+
+  it('a cancelled task carrying a shared requirement leaves it not delivered, even when another task passed it', () => {
+    const r = derive([task('a', ['FB-01']), task('b', ['FB-01'], { status: 'cancelled' })], [seen('FB-01', 'a', 'passed')]);
+    expect(r).toMatchObject({ verified: 0, total: 1 });
+    expect(r!.criteria[0]).toMatchObject({ state: 'not_delivered', taskIds: ['a', 'b'] });
+  });
+
+  it('a superseded carrier of a shared requirement does not count against it', () => {
+    expect(derive([task('a', ['FB-01']), task('b', ['FB-01'], { status: 'superseded' })], [seen('FB-01', 'a', 'passed')])).toMatchObject({ verified: 1, total: 1 });
+  });
+
+  it('a pass on a task that has not reached verified is shown but not counted', () => {
+    const r = derive([task('a', ['FB-01'], { status: 'running' })], [seen('FB-01', 'a', 'passed')]);
+    expect(r).toMatchObject({ verified: 0, total: 1 });
+    expect(r!.criteria[0]).toMatchObject({ state: 'passed', verified: false });
+  });
+
+  it('a pass under a record that is no longer valid is shown but not counted', () => {
+    expect(derive([task('a', ['FB-01'])], [seen('FB-01', 'a', 'passed')], true, false)).toMatchObject({ verified: 0, total: 1 });
+  });
+
+  it('every known criterion carries its description, and an unknown one none', () => {
+    expect(derive([task('a', ['FB-01', 'X-9'])], [])!.criteria.map((c) => c.description)).toEqual([expect.stringMatching(/feedback/i), null]);
   });
 });

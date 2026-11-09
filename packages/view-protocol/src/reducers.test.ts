@@ -193,7 +193,7 @@ describe('approvals', () => {
       mode: 'mock',
       getSnapshot: async () => snapshots[Math.min(served++, 1)]!,
       subscribe: (_p, _c, onEvent) => { push = onEvent; return () => { push = null; }; },
-      execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
+      getRunFailures: async () => { throw new Error('unused'); }, execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
     };
     const session = startProjection(source, 'p1', { onState: () => {}, onError: () => {} }, NO_REFRESH());
     await settle();
@@ -318,7 +318,7 @@ function fakeServer(initial: ProjectViewSnapshot, hooks: { heartbeatAt(attemptId
       return { ...snapshot, attempts };
     },
     subscribe: (_p, after, onEvent, onError) => { subscribes.push(after); live += 1; push = onEvent; pushErr = onError; let off = false; return () => { if (off) return; off = true; live -= 1; if (push === onEvent) push = null; }; },
-    execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
+    getRunFailures: async () => { throw new Error('unused'); }, execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
   };
   return { source, errors, subscribes, control, streamError: (e: DataSourceError) => pushErr?.(e), liveSubscriptions: () => live, setSnapshot: (s: ProjectViewSnapshot) => { snapshot = s; }, emit: (e: ProjectViewEvent) => push?.(e), fetched: () => fetched };
 }
@@ -556,7 +556,7 @@ describe('session survival', () => {
         let off = false;
         return () => { if (!off) { off = true; live -= 1; } };
       },
-      execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
+      getRunFailures: async () => { throw new Error('unused'); }, execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
     };
     const session = startProjection(source, 'p1', { onState: () => {}, onError: () => {} }, NO_REFRESH());
     await settle();

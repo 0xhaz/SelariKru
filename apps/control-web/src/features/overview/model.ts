@@ -142,7 +142,7 @@ function delivery(snapshot: ProjectViewSnapshot, attention: readonly AttentionIt
   return {
     verified, total, run, tasks, segments, blocker,
     criteriaLabel: criteria ? `${verified} of ${total} criteria verified` : `${verified} of ${total} tasks verified`,
-    criteriaNote: criteria ? null : 'Per-criterion evidence is not connected, so this counts tasks.',
+    criteriaNote: criteria ? null : 'Per-criterion evidence is not connected, so this counts tasks. Cancelled tasks are left out of this count.',
   };
 }
 

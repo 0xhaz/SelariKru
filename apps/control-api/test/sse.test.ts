@@ -1,6 +1,6 @@
 import { appendEvent, withTx } from '@selarikru/persistence';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { OWNER_TOKEN, PROJECT, RUN, makeHarness, resetDb, setupTestDb, type Harness, type TestDb } from './helpers.ts';
+import { API_POLICY, OWNER_TOKEN, OWNER_UID, PROJECT, RUN, makeHarness, resetDb, setupTestDb, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 let h: Harness;
@@ -91,4 +91,19 @@ describe('SSE', () => {
     const frames = await readFrames(res, 1);
     expect(frames.map((f) => f.data.sequence)).toEqual([3]);
   });
+
+  it('a stream still being set up when shutdown begins closes itself rather than holding the server open', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const slow = makeHarness(t, {}, API_POLICY, { verifier: { verifyToken: async () => { await gate; return { uid: OWNER_UID }; } } });
+    const url = await slow.app.listen({ port: 0, host: '127.0.0.1' });
+    const opening = fetch(`${url}/v1/projects/${PROJECT}/events`, { headers: { authorization: `Bearer ${OWNER_TOKEN}` } }).then((r) => r.text()).catch(() => '');
+    await new Promise((r) => setTimeout(r, 50));
+    const closing = slow.app.close();
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    await closing;
+    await opening;
+    expect(true).toBe(true);
+  }, 10_000);
 });

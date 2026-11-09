@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type SessionStatus } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -30,6 +30,8 @@ export interface ProjectionStoreState {
   refresh(): void;
   /** Replaces the projection from a fresh snapshot, after a command was refused. */
   resync(): void;
+  /** Why a run's criteria failed, from the current verification record. */
+  loadFailures(runId: string): Promise<RunFailuresView>;
 }
 
 export type ProjectionStore = StoreApi<ProjectionStoreState>;
@@ -114,6 +116,10 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
       },
       resync() {
         void session?.resync();
+      },
+      async loadFailures(runId) {
+        if (!source) throw new CommandNotSent();
+        return source.getRunFailures(projectId, runId);
       },
     };
   });

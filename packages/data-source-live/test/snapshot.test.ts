@@ -1,6 +1,7 @@
 import { ProjectViewSnapshotSchema } from '@selarikru/view-protocol';
 import { describe, expect, it } from 'vitest';
-import { toViewSnapshot, type RawSnapshot } from '../src/index.ts';
+import { createLiveDataSource, toViewSnapshot, type RawSnapshot } from '../src/index.ts';
+import { DataSourceException } from '@selarikru/view-protocol';
 
 const T = '2026-11-09T01:00:00.000Z';
 const attempt = (over = {}) => ({ attemptId: 'a1', number: 1, runner: 'r1', fence: 1, outcome: 'running', exitReason: null, location: 'local' as const, activity: null, assignment: { provider: 'anthropic', model: 'sonnet', source: 'role', route: 'cloud' }, startedAt: T, endedAt: null, lastHeartbeatAt: T, ...over });
@@ -58,5 +59,32 @@ describe('toViewSnapshot', () => {
 
   it('a shape the view was not built for throws instead of reaching a screen', () => {
     expect(() => toViewSnapshot(raw({ limits: { maxConcurrentTotal: 'lots' } }))).toThrow();
+  });
+});
+
+describe('transport errors', () => {
+  const source = (status: number) => createLiveDataSource({ baseUrl: 'http://x', getToken: async () => 't', fetch: (async () => new Response(JSON.stringify({ error: { code: 'x', message: 'no' } }), { status })) as typeof fetch });
+  const err = (p: Promise<unknown>) => p.then(() => null, (e: DataSourceException) => e.detail);
+
+  it.each([408, 429, 500, 503])('a %i is retryable', async (status) => {
+    expect(await err(source(status).getSnapshot('p'))).toMatchObject({ code: 'disconnected', retryable: true });
+  });
+
+  it('a 400 or 403 is not', async () => {
+    expect(await err(source(403).getSnapshot('p'))).toMatchObject({ code: 'unauthorized', retryable: false });
+    expect(await err(source(400).getSnapshot('p'))).toMatchObject({ retryable: false });
+  });
+
+  it('a 429 on a command is not a refusal: it throws, so the screen cannot read it as one', async () => {
+    await expect(source(429).execute({ command: 'task.cancel', expectedRevision: 0, idempotencyKey: 'k', args: { taskId: 't' } })).rejects.toBeInstanceOf(DataSourceException);
+  });
+
+  const withToken = (error: unknown) => createLiveDataSource({ baseUrl: 'http://x', getToken: async () => { throw error; }, fetch: (async () => new Response('{}')) as typeof fetch });
+  it.each([['auth/network-request-failed', true], ['auth/too-many-requests', true], ['auth/user-token-expired', false], ['auth/no-current-user', false]] as const)('Firebase %s retryable: %s', async (code, retryable) => {
+    expect(await err(withToken(Object.assign(new Error('Sign-in token problem'), { code })).getSnapshot('p'))).toMatchObject({ retryable });
+  });
+
+  it('wording never decides: a network failure that mentions a token is a drop', async () => {
+    expect(await err(withToken(new TypeError('failed to fetch token')).getSnapshot('p'))).toMatchObject({ code: 'disconnected', retryable: true });
   });
 });

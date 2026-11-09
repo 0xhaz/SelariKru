@@ -141,8 +141,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   // Heartbeat from the very start: creating a sandbox can take longer than the lease.
   let missed = 0;
   let beating = false;
-  // The tool the worker last started. The heartbeat reports its name and nothing else.
-  let activity: string | undefined;
+  // The tool the worker last started, reported once per start. The heartbeat carries its name and nothing else; a heartbeat with no activity says only that the runner is alive,
+  // so a hung tool keeps the time it started. It stays pending until a heartbeat lands, and a newer start is never cleared by an older one's answer.
+  let pendingActivity: { readonly tool: string; readonly start: number } | null = null;
+  let toolStarts = 0;
   const beat = setInterval(() => {
     if (aborted()) {
       requestStop();
@@ -150,10 +152,12 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     if (beating) return;
     beating = true;
+    const sending = pendingActivity;
     deps.api
-      .heartbeat(ref, activity)
+      .heartbeat(ref, sending?.tool)
       .then((hb) => {
         missed = 0;
+        if (sending !== null && pendingActivity?.start === sending.start) pendingActivity = null;
         if (hb.cancelRequested) {
           flags.cancelled = true;
           log('cancel requested by the owner; stopping the agent');
@@ -315,7 +319,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
         case 'tool_call': {
           // A name the wire would refuse is left unsaid: an odd tool name must never cost the attempt its heartbeat.
           const name = ToolNameSchema.safeParse(ev.toolName);
-          if (name.success) activity = name.data;
+          if (name.success) pendingActivity = { tool: name.data, start: (toolStarts += 1) };
           break;
         }
         case 'launch_refused':

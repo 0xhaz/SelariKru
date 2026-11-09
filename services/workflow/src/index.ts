@@ -17,7 +17,7 @@ export { retryTask } from './retry.ts';
 export { applyVerification, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, REVERIFY_LIMIT, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
-export { loadRunEvidence, type RunEvidence } from './evidence.ts';
+export { loadRunEvidence, type RunEvidence, type TrustedVerifier } from './evidence.ts';
 export { reconcileObservedCost, runUsageLines, stopForExhaustedBudget, type ObservedCost, type ReconcileResult, type RunUsageLine } from './usage.ts';
 
 /** Binds the operations to a database and clock. Instances hold no state: any instance sees every lease. */

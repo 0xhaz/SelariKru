@@ -272,7 +272,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
           <RouteBoundary resetKey={`evidence:${builtEvidence.failure === undefined ? 'ok' : 'failed'}`}>
             <EvidenceView
               connection={connection} error={state.error} model={builtEvidence.evidence} failure={builtEvidence.failure} hasSnapshot={snapshot !== null} confirmedAt={confirmedAt} mode={mode} leaveDemoHref={leaveDemoHref}
-              checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
+              checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onLoadFailures={state.loadFailures} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
             />
           </RouteBoundary>
         ) : null}

@@ -23,6 +23,8 @@ export interface DataSourceUnderTest {
   readonly reverifyProjectId?: string;
   /** A run ready for review with no pull request yet. */
   readonly reviewProjectId?: string;
+  /** A run whose latest candidate failed a criterion, in `getRunFailures`. Optional. */
+  readonly failedProjectId?: string;
   /** The project's own clock, for a session's liveness stamps. A live source passes `{ nowMs: () => Date.now() }`. */
   clockFor(projectId: string): { nowMs(): number };
   /** Makes the next batch of events available (the mock moves its virtual clock; a live fixture server writes events). */
@@ -301,6 +303,17 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const after = await ds.source.getSnapshot(ds.reviewProjectId);
       expect(after.changeRequests[0]).toMatchObject({ runId: ready.runId, status: 'open' });
       expect(await ds.source.execute({ command: 'run.merge', expectedRevision: 0, idempotencyKey: 'm', args: { runId: ready.runId } } as never)).toMatchObject({ accepted: false, rejection: 'invalid_command' });
+    });
+
+    it('getRunFailures says why a criterion failed and is refused for a run it does not know', async () => {
+      const ds = await setup();
+      if (!ds.failedProjectId) return;
+      const snap = await ds.source.getSnapshot(ds.failedProjectId);
+      const failures = await ds.source.getRunFailures(ds.failedProjectId, firstRun(snap).runId);
+      expect(failures.available).toBe(true);
+      expect(failures.failures.length).toBeGreaterThan(0);
+      expect(failures.failures[0]!.message.length).toBeGreaterThan(0);
+      await expect(ds.source.getRunFailures(ds.failedProjectId, 'no-such-run')).rejects.toBeInstanceOf(DataSourceException);
     });
 
     it('openTerminal returns a bounded, closable channel for a known attempt and refuses an unknown one', async () => {
