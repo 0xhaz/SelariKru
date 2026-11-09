@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '@selarikru/artifacts';
+import { cachedHarnessReport } from '@selarikru/harness-claude';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { redactSecrets } from '@selarikru/protocol';
 import { HttpRunnerApi } from './api.ts';
@@ -67,6 +68,8 @@ async function main(): Promise<void> {
       api,
       runtime,
       pollMs: Number(values.poll ?? 5000),
+      // Probed on this machine's host. The CLI inside the sandbox image can differ; the init-event check is what proves the model that actually ran.
+      harnessReport: cachedHarnessReport(),
       log,
       attempt: {
         api, runtime, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot, repos,

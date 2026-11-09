@@ -1,10 +1,10 @@
 import { createScheduler } from '@selarikru/workflow';
-import { TEST_CATALOG, CAPS, POLICY, TENANT, PROJECT, RUN, resetDb, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '@selarikru/workflow/test-helpers';
+import { TEST_CATALOG, TEST_RUNNER_REPORT, CAPS, POLICY, TENANT, PROJECT, RUN, resetDb, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '@selarikru/workflow/test-helpers';
 import type { Policy } from '@selarikru/policy';
 import type { FastifyInstance } from 'fastify';
 import { buildApp, type AppDeps, type ControlApiConfig, type TokenVerifier } from '../src/index.ts';
 
-export { TEST_CATALOG, PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, testClock };
+export { TEST_CATALOG, TEST_RUNNER_REPORT, PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, testClock };
 export type { TestClock, TestDb };
 
 export const OWNER_UID = 'owner_uid_1';
@@ -74,9 +74,9 @@ export async function get(app: FastifyInstance, url: string, headers: Record<str
 }
 
 /** Pair and enrol a runner through the real routes; returns its token. */
-export async function enrolRunner(app: FastifyInstance, location: 'local' | 'cloud' = 'local'): Promise<{ runnerId: string; token: string }> {
+export async function enrolRunner(app: FastifyInstance, location: 'local' | 'cloud' = 'local', harnesses: readonly unknown[] = TEST_RUNNER_REPORT): Promise<{ runnerId: string; token: string }> {
   const code = await post(app, '/v1/runners/pairing-codes', { location });
-  const enrolled = await post(app, '/v1/runners/enroll', {}, bearer(code.body.pairingCode));
+  const enrolled = await post(app, '/v1/runners/enroll', { harnesses }, bearer(code.body.pairingCode));
   return { runnerId: enrolled.body.runnerId, token: enrolled.body.token };
 }
 

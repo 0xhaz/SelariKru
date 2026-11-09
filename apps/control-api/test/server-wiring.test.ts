@@ -95,3 +95,21 @@ describe('real-run seed', () => {
     expect(settings.allowedPaths).toEqual(['src', 'public']);
   });
 });
+
+describe('the API host', () => {
+  it('starts and serves with no `claude` on its PATH, and reports nothing until a runner does', async () => {
+    const path = process.env['PATH'];
+    process.env['PATH'] = '';
+    try {
+      await withServer({}, async (address) => {
+        const res = await fetch(`${address}/v1/projects/proj_a/snapshot`, { headers: { authorization: `Bearer ${OWNER_TOKEN}` } });
+        expect(res.status).toBe(200);
+        const catalog = ((await res.json()) as { modelCatalog: { status: string; providers: unknown[]; detail: string } }).modelCatalog;
+        expect(catalog).toMatchObject({ status: 'none', providers: [] });
+        expect(catalog.detail).toMatch(/No runner has reported/);
+      });
+    } finally {
+      process.env['PATH'] = path;
+    }
+  });
+});

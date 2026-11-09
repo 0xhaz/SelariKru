@@ -28,6 +28,8 @@ export const ModelCatalogViewSchema = z
   .object({
     status: z.enum(CATALOG_STATUSES),
     detail: z.string().nullable(),
+    /** What a role with no assignment runs. Null: the project has no default. */
+    projectDefault: ModelSelectionSchema.nullable().default(null),
     providers: z.array(z.object({
       provider: Id, label: z.string().min(1), harnessVersion: z.string().nullable(),
       models: z.array(z.object({ modelId: Id, label: z.string().min(1), route: ModelRouteSchema, allowedByPolicy: z.boolean(), policyReason: z.string().nullable() }).strict()),
@@ -35,7 +37,7 @@ export const ModelCatalogViewSchema = z
   })
   .strict();
 export type ModelCatalogView = z.infer<typeof ModelCatalogViewSchema>;
-export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, providers: [] };
+export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, projectDefault: null, providers: [] };
 
 /** The current assignment for a role or task. `revision` is what a change must send back. Null provider and model: removed, listed only for its revision. */
 export const ModelAssignmentViewSchema = z
@@ -175,7 +177,7 @@ export const WorkerViewSchema = z
     execution: ExecutionLocationSchema,
     /** Axis two: where the worker's model calls go. A local worker may call a cloud model. Unknown stays unknown. */
     modelRoute: ModelRouteSchema,
-    /** The model recorded on this worker's attempt. Null: none recorded, and the provider stays unknown. */
+    /** The model recorded on this worker's current attempt or, once idle, its previous one (see `attemptId`). Null: none recorded, and the provider stays unknown. */
     assignment: RecordedModelSchema.nullable().default(null),
     blockedByTaskIds: z.array(Id),
     blockedByApprovalId: Id.nullable(),

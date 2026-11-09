@@ -1,4 +1,4 @@
-import { ApprovalDestinationSchema, WorkerApprovalOperationSchema } from '@selarikru/domain';
+import { ApprovalDestinationSchema, RunnerHarnessReportSchema, WorkerApprovalOperationSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 
@@ -25,7 +25,8 @@ export const LeaseRefSchema = z
   .strict();
 export type LeaseRef = z.infer<typeof LeaseRefSchema>;
 
-export const ClaimRequestSchema = z.object({}).strict();
+/** `harnesses`: what this runner can launch now, probed on its own machine. Absent: the last report stands. */
+export const ClaimRequestSchema = z.object({ harnesses: z.array(RunnerHarnessReportSchema).max(20).optional() }).strict();
 
 export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema }).strict();
 

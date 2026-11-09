@@ -83,7 +83,7 @@ export interface Fixture {
 
 /** Claude only: no provider is listed that is not installed. Opus is marked not allowed so the demo can show a refused choice. */
 export const DEMO_CATALOG: ModelCatalogView = {
-  status: 'detected', detail: null,
+  status: 'detected', detail: null, projectDefault: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
   providers: [{
     provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316',
     models: [

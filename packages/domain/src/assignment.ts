@@ -54,7 +54,7 @@ export interface CatalogProvider {
 export const CATALOG_STATUSES = ['detected', 'none', 'unknown'] as const;
 export type CatalogStatus = (typeof CATALOG_STATUSES)[number];
 
-/** Real availability, read from the adapters. `none`: nothing is installed. `unknown`: detection could not finish. Either way nothing is offered. */
+/** Which adapters and models exist. Built from what this build declares, narrowed by runner reports (`availableCatalog`). `none`: nothing to offer. `unknown`: not established. Either way nothing is offered. */
 export interface HarnessCatalog {
   readonly status: CatalogStatus;
   readonly detail: string | null;
@@ -64,8 +64,30 @@ export interface HarnessCatalog {
 export const NO_HARNESS_CATALOG: HarnessCatalog = { status: 'unknown', detail: 'No harness catalog was provided to this process.', providers: [] };
 
 /** Typed reasons a selection cannot be used. Each is a stable code the screen can explain. */
-export const MODEL_REFUSAL_REASONS = ['no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'model_not_assigned', 'trial_model_not_pinned'] as const;
+export const MODEL_REFUSAL_REASONS = ['no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'model_not_assigned', 'trial_model_not_pinned', 'model_not_on_runner', 'restricted_requires_device_model', 'model_route_unknown'] as const;
 export type ModelRefusalReason = (typeof MODEL_REFUSAL_REASONS)[number];
+
+/** What a runner says it can launch, probed on the runner's own machine. Identifiers and a version only. Absent or empty means it can run nothing. */
+export const RunnerHarnessReportSchema = z
+  .object({ provider: Ident, harnessVersion: z.string().regex(/^\d+\.\d+\.\d+$/).nullable(), models: z.array(Ident).max(100) })
+  .strict();
+export type RunnerHarnessReport = z.infer<typeof RunnerHarnessReportSchema>;
+
+/**
+ * What the declared adapters can do, narrowed to what runners report. The result is what may be offered or launched. A version here is the runner's, never the control plane's.
+ * `declared` says which adapters this build knows; only a report says one is installed anywhere.
+ */
+export function availableCatalog(declared: HarnessCatalog, reports: readonly RunnerHarnessReport[]): HarnessCatalog {
+  if (declared.status !== 'detected') return declared;
+  const providers = declared.providers.flatMap((p) => {
+    const mine = reports.filter((r) => r.provider === p.provider);
+    const models = p.models.filter((m) => mine.some((r) => r.models.includes(m.id)));
+    if (models.length === 0) return [];
+    const versions = [...new Set(mine.map((r) => r.harnessVersion))];
+    return [{ ...p, models, harnessVersion: versions.length === 1 ? (versions[0] ?? null) : null }];
+  });
+  return providers.length > 0 ? { status: 'detected', detail: null, providers } : { status: 'none', detail: 'No runner has reported an installed harness, so no model can be assigned or started.', providers: [] };
+}
 
 export const findCatalogModel = (catalog: HarnessCatalog, s: ModelSelection): { provider: CatalogProvider; model: CatalogModel } | { provider: CatalogProvider | null; model: null } => {
   const provider = catalog.providers.find((p) => p.provider === s.provider) ?? null;

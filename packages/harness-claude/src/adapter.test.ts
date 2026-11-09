@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { NormalizedHarnessEvent } from '@selarikru/protocol';
 import { ClaudeHarnessAdapter, type HarnessLauncher, type LaunchedProcess, type LaunchSpec } from './adapter.ts';
-import { detectClaude, detectHarnesses } from './catalog.ts';
+import { cachedHarnessReport, claudeProvider, declaredHarnessCatalog, detectClaude, detectHarnesses } from './catalog.ts';
 import { CANARY, fullRun, initEvent } from './fixtures.ts';
 import { decodeUtf8Stream } from './decode.ts';
 
@@ -378,5 +378,39 @@ describe('detection', () => {
 
     const empty = await detectHarnesses([]);
     expect(empty).toMatchObject({ status: 'none', providers: [] });
+  });
+});
+
+describe('the runner probe', () => {
+  const found = { status: 'detected' as const, detail: null, providers: [claudeProvider('2.1.316')] };
+  const report = [{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'] }];
+  const stuck = { status: 'unknown' as const, detail: 'slow', providers: [] };
+
+  it('a slow probe is retried soon, and does not stick until a restart', async () => {
+    let at = 0;
+    const answers = [stuck, found];
+    const detect = vi.fn(async () => answers.shift()!);
+    const probe = cachedHarnessReport(detect, { now: () => at, retryMs: 100, refreshMs: 1000 });
+    expect(await probe()).toEqual([]);
+    at = 50;
+    expect(await probe()).toEqual([]);
+    expect(detect).toHaveBeenCalledTimes(1);
+    at = 150;
+    expect(await probe()).toEqual(report);
+  });
+
+  it('keeps the last good answer through a slow probe, and drops it when the CLI is gone', async () => {
+    let at = 0;
+    const answers = [found, stuck, { status: 'none' as const, detail: null, providers: [] }];
+    const probe = cachedHarnessReport(async () => answers.shift()!, { now: () => at, retryMs: 10, refreshMs: 10 });
+    expect(await probe()).toEqual(report);
+    at = 20;
+    expect(await probe()).toEqual(report);
+    at = 40;
+    expect(await probe()).toEqual([]);
+  });
+
+  it('the control plane\'s list claims no installed version', () => {
+    expect(declaredHarnessCatalog().providers[0]!.harnessVersion).toBeNull();
   });
 });

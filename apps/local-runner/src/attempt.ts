@@ -283,7 +283,9 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let cost: number | null = null;
     let mcpViolation: string[] | null = null;
     // A worker silently running a different model from the record is the failure this feature exists to prevent: it stops here and is reported, never tolerated.
-    let modelMismatch: string | null = null;
+    let modelFault: string | null = null;
+    // No init event means nothing ever said which model ran, so the attempt cannot count as done.
+    let initSeen = false;
     // The agent's first approval signal ends the attempt: the runner stops it and the control plane decides whether a person is asked.
     let approvalRequest: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string } | null = null;
     let approvalRefused: ApprovalRefusalReason | null = null;
@@ -297,9 +299,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       switch (ev.type) {
         case 'session_started':
           log(`session: mode=${ev.permissionMode ?? 'unknown'} connectedMcp=${ev.connectedMcpServers === null ? 'unreported' : JSON.stringify(ev.connectedMcpServers)}`);
-          if (ev.model !== null && ev.model !== assignment.model) {
-            modelMismatch = `model_mismatch: recorded ${assignment.model}, the stream reports ${ev.model}`;
-            log(modelMismatch);
+          initSeen = ev.initObserved;
+          if (ev.initObserved && ev.model !== assignment.model) {
+            modelFault = ev.model === null ? `model_unverified: recorded ${assignment.model}, the stream did not say which model ran` : `model_mismatch: recorded ${assignment.model}, the stream reports ${ev.model}`;
+            log(modelFault);
             requestStop();
           }
           if (ev.connectedMcpServers !== null && ev.connectedMcpServers.length > 0) {
@@ -371,7 +374,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (!confirmed) return await finish('failed', 'agent stop was not confirmed; the workspace is not trusted', cost, null);
     if (mcpViolation !== null) return await finish('failed', `unexpected MCP server connected: ${(mcpViolation as string[]).join(', ')}`, cost, null);
-    if (modelMismatch !== null) return await finish('failed', modelMismatch, cost, null);
+    // Blocked, not failed: this is a configuration fault, and repairs would only repeat it.
+    if (modelFault !== null) return await finish('blocked', modelFault, cost, null);
     if (flags.cancelled) return await finish('failed', 'cancelled by owner request; agent stopped and confirmed', cost, null);
     if (flags.timedOut) return await finish('failed', 'attempt timeout reached; agent stopped and confirmed', cost, null);
     if (refused !== null) return await finish('blocked', `harness capability unavailable: ${refused}`, cost, null);
@@ -381,6 +385,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (approvalRequest !== null) return await finish('approval_requested', (approvalRequest as { reason: string }).reason, cost, null, approvalRequest);
     if (!resultOk) return await finish('failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote, cost, null);
     if (exitFailed) return await finish('failed', exitNote || 'agent exited with an error', cost, null);
+    if (!initSeen) return await finish('blocked', `model_unverified: recorded ${assignment.model}, the stream never reported a model`, cost, null);
 
     // The signal file of a covered request is the protocol, not the agent's work; a stray copy in any other form is left for the gate to refuse.
     if (coveredSignal) {

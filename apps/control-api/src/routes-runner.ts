@@ -53,7 +53,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       if (loc !== 'local' && loc !== 'cloud') throw invalid;
       await tx.insert(schema.runners).values({
         tenantId: config.tenantId, runnerId, location: loc, tokenHash: sha256Hex(token),
-        ...(body.label !== undefined ? { label: redactSecrets(body.label) } : {}), createdAt: at,
+        ...(body.label !== undefined ? { label: redactSecrets(body.label) } : {}), ...(body.harnesses !== undefined ? { harnessReport: body.harnesses } : {}), createdAt: at,
       });
       return loc;
     });
@@ -65,8 +65,11 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   app.post('/v1/runners/claim', guard, async (req, reply) => {
     const runner = runnerOf(req);
-    parseBody(ClaimRequestSchema, req.body);
-    const outcome = await scheduler.tryClaim(runner, config.caps);
+    const body = parseBody(ClaimRequestSchema, req.body);
+    const where = and(eq(schema.runners.tenantId, runner.tenantId), eq(schema.runners.runnerId, runner.runnerId));
+    if (body.harnesses !== undefined) await db.update(schema.runners).set({ harnessReport: body.harnesses }).where(where);
+    const harnesses = body.harnesses ?? (await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(where))[0]?.report ?? [];
+    const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
     if (outcome.ok) return reply.code(200).send({ lease: outcome.lease, reason: null, skipped: outcome.skipped });
     return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped });
   });

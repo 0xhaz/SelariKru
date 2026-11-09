@@ -156,6 +156,8 @@ export interface TeamRow {
   readonly modelRoute: WorkerView['modelRoute'];
   /** What the worker's attempt was recorded to run. Null: no record, so provider and model are unknown. */
   readonly assignment: WorkerView['assignment'];
+  /** The recorded model as the badge should word it: an idle worker's is its previous attempt's, not a current fact. */
+  readonly modelDetail: string | null;
   /** The current or last task's own model assignment, when it can still take one. */
   readonly overrideTarget: AssignmentTarget | null;
   /** True when what is shown is the last confirmed state: the connection is lost, or the session or liveness is stale. */
@@ -439,7 +441,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   return {
     workerId: w.workerId, role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
-    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, overrideTarget: focus ? taskTarget(focus, snapshot) : null, stale, lastConfirmedAt,
+    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
     blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
     detail: {

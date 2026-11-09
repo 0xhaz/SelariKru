@@ -172,7 +172,7 @@ function unknownCosts(): Fixture {
 
 function noData(): Fixture {
   return {
-    id: 'no-data', name: 'No data', projectId: 'demo-no-data', startSec: 0, modelCatalog: { status: 'none', detail: 'No provider was detected on this machine: the `claude` CLI was not found.', providers: [] }, events: [], usage: [], assistant: { mode: null, observedSource: 'unknown' }, tasks: [], approvals: [], silences: {},
+    id: 'no-data', name: 'No data', projectId: 'demo-no-data', startSec: 0, modelCatalog: { status: 'none', detail: 'No runner has reported an installed harness, so no model can be assigned or started.', projectDefault: null, providers: [] }, events: [], usage: [], assistant: { mode: null, observedSource: 'unknown' }, tasks: [], approvals: [], silences: {},
     description: 'A project with no runs, tasks, workers or usage. Empty states render as empty, not as zeros.',
   };
 }

@@ -2,7 +2,7 @@ import { evaluate, type Policy } from '@selarikru/policy';
 import { schema } from '@selarikru/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { CAPS, POLICY, PROJECT, RUN, TENANT, TEST_CATALOG, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
+import { CAPS, POLICY, PROJECT, RUN, TENANT, TEST_CATALOG, capsWith, reservedTotal, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
 import { createScheduler, validateSelection, worstCaseHold, type Lease, type Scheduler } from './index.ts';
 
 const SONNET = { provider: 'anthropic', model: 'claude-sonnet-5-5' };
@@ -157,16 +157,35 @@ describe('model assignments', () => {
   describe('worst-case budget hold', () => {
     const cap = 1_000_000;
 
-    it('holds the cap on the reference model and scales by list rate where one is known', async () => {
+    const HAIKU = { provider: 'anthropic', model: 'claude-haiku-5-5' };
+    const priced = { ...TEST_CATALOG, providers: [{ ...TEST_CATALOG.providers[0]!, models: TEST_CATALOG.providers[0]!.models.map((m) => (m.id === HAIKU.model ? { ...m, rate: { inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5, source: 'test-table' } } : m)) }, TEST_CATALOG.providers[1]!] };
+
+    it('holds the cap on the reference model and more on a dearer one', () => {
       expect(worstCaseHold(cap, SONNET, TEST_CATALOG, POLICY)).toMatchObject({ amountMicros: cap, basis: 'known_rate' });
       expect(worstCaseHold(cap, OPUS, TEST_CATALOG, POLICY)).toMatchObject({ amountMicros: 2 * cap, basis: 'known_rate', rateSource: 'test-table' });
     });
 
-    it('stays conservative with no rate, and never below the cap, and never calls a rate observed', () => {
-      const unknown = worstCaseHold(cap, { provider: 'anthropic', model: 'claude-haiku-5-5' }, TEST_CATALOG, POLICY);
-      expect(unknown).toEqual({ amountMicros: 2 * cap, basis: 'conservative', rateSource: null });
-      const noReference = worstCaseHold(cap, OPUS, TEST_CATALOG, { ...POLICY, models: { allowed: POLICY.models.allowed } });
-      expect(noReference).toEqual({ amountMicros: cap, basis: 'conservative', rateSource: null });
+    it('never holds less than the cap for a cheaper known rate', () => {
+      expect(worstCaseHold(cap, HAIKU, priced, POLICY)).toEqual({ amountMicros: cap, basis: 'known_rate', rateSource: 'test-table' });
+    });
+
+    it('stays conservative with no rate for the model, and says so', () => {
+      expect(worstCaseHold(cap, HAIKU, TEST_CATALOG, POLICY)).toEqual({ amountMicros: 2 * cap, basis: 'conservative', rateSource: null });
+    });
+
+    it('with no reference it holds the cap and does not call that conservative', () => {
+      expect(worstCaseHold(cap, OPUS, TEST_CATALOG, { ...POLICY, models: { allowed: POLICY.models.allowed } })).toEqual({ amountMicros: cap, basis: 'no_reference', rateSource: null });
+    });
+
+    it('a cheap model cannot start more work than the budget holds at the cap', async () => {
+      await t.db.update(schema.runs).set({ budget: { limitUsd: 2 } }).where(eq(schema.runs.runId, RUN));
+      for (let i = 0; i < 10; i += 1) await seedTask(t.db, specFor(`t${i}`, { maxCostUsd: 1 }));
+      await assign('role', 'backend', HAIKU);
+      const cheap = createScheduler({ db: t.db, now: clock.now, policy: { ...POLICY, models: { ...POLICY.models, allowed: [...POLICY.models.allowed, HAIKU] } }, catalog: priced });
+      let started = 0;
+      for (let i = 0; i < 10; i += 1) if ((await cheap.tryClaim(runner(`r${i}`), capsWith(20))).ok) started += 1;
+      expect(started).toBe(2);
+      expect(await reservedTotal(t.db)).toBe(2);
     });
 
     it('the reservation follows the assigned model, and stays an estimate', async () => {
@@ -188,6 +207,52 @@ describe('model assignments', () => {
       expect(out.skipped[0]!.reason).toBe('budget:exceeds_limit');
       expect(await countRows(t.db, 'attempts')).toBe(0);
     });
+  });
+
+  describe('the inference route against the data', () => {
+    const DEVICE = { provider: 'test-device', model: 'device-1' };
+
+    it('restricted work on a cloud model is refused from a local runner, typed, with no attempt or reservation', async () => {
+      await seedTask(t.db, specFor('t1', { classification: 'restricted' }));
+      const out = await sched.tryClaim(runner('r1', 'local'), CAPS);
+      expect(out.skipped[0]!.reason).toBe('model_blocked:restricted_requires_device_model:anthropic/claude-sonnet-5-5');
+      expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBe('restricted_requires_device_model:anthropic/claude-sonnet-5-5');
+      expect(await eventTypes(t.db)).toEqual(['placement.blocked']);
+      expect(await countRows(t.db, 'attempts')).toBe(0);
+      expect(await countRows(t.db, 'budget_reservations')).toBe(0);
+    });
+
+    it('takes the label from stored data, so a task cannot lower it', async () => {
+      await t.db.update(schema.projects).set({ classification: 'restricted' });
+      await seedTask(t.db, specFor('t1', { classification: 'internal' }));
+      expect((await sched.tryClaim(runner('r1', 'local'), CAPS)).skipped[0]!.reason).toMatch(/^model_blocked:restricted_requires_device_model/);
+    });
+
+    it('restricted work on a device model can run', async () => {
+      await seedTask(t.db, specFor('t1', { classification: 'restricted', execution: 'local' }));
+      await assign('role', 'backend', DEVICE);
+      const out = await sched.tryClaim(runner('d1'), CAPS);
+      expect(out.ok && out.lease.assignment).toEqual({ ...DEVICE, source: 'role', route: 'device' });
+    });
+
+    it('a model whose route is unknown is refused for any data', async () => {
+      const unknownRoute = { ...TEST_CATALOG, providers: [{ ...TEST_CATALOG.providers[0]!, models: TEST_CATALOG.providers[0]!.models.map((m) => ({ ...m, route: 'unknown' as const })) }] };
+      await seedTask(t.db, specFor('t1', { classification: 'public' }));
+      const s = createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: unknownRoute });
+      expect((await s.tryClaim(runner('r1'), CAPS)).skipped[0]!.reason).toBe('model_blocked:model_route_unknown:anthropic/claude-sonnet-5-5');
+      expect(await countRows(t.db, 'attempts')).toBe(0);
+    });
+  });
+
+  it('a runner without the model is refused before launch, typed, and one that has it can still claim', async () => {
+    await seedTask(t.db, specFor('t1'));
+    const without = { ...runner('r1'), harnesses: [{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-opus-5-5'] }] };
+    expect((await sched.tryClaim(without, CAPS)).skipped[0]!.reason).toBe('model_blocked:model_not_on_runner:anthropic/claude-sonnet-5-5');
+    expect((await sched.tryClaim({ ...runner('r2'), harnesses: undefined }, CAPS)).skipped[0]!.reason).toBe('model_blocked:model_not_on_runner:anthropic/claude-sonnet-5-5');
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+    const able = await sched.tryClaim(runner('r3'), CAPS);
+    expect(able.ok).toBe(true);
+    expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBeNull();
   });
 
   it('validateSelection is the single check, and policy has the last word', () => {

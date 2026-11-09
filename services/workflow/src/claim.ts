@@ -6,7 +6,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
-import { resolveAssignment, worstCaseHold, type WorstCaseHold } from './assignment.ts';
+import { resolveAssignment, routeRefusal, worstCaseHold, type WorstCaseHold } from './assignment.ts';
 import { leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
@@ -377,7 +377,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (await resourceConflict(tx, key, spec)) return { reason: 'resource_conflict' };
 
   // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
-  const assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel });
+  const assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);
   if (!assigned.ok) {
     await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
     return { reason: `model_blocked:${assigned.reason}` };
@@ -390,6 +390,12 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const position = await lockBudget(tx, budgetScope);
   const cfg = runPlacement(ctx, c);
   const resolved = await resolveSources(tx, key, spec);
+  // Placement decides where the worker runs; this decides where its model calls may go. The two are judged separately, and a local sandbox does not make a cloud model local.
+  const refusedRoute = routeRefusal(assigned.assignment, resolved.classification);
+  if (refusedRoute !== null) {
+    await recordBlock(tx, key, c, statusRow, refusedRoute, null, now);
+    return { reason: `model_blocked:${refusedRoute}` };
+  }
   const capacity = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
   const placeWith = (approved: boolean) => place({ ...spec, classification: resolved.classification }, capacity!, ctx.policy, {
     sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position), approved,

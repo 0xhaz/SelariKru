@@ -1,5 +1,5 @@
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest } from '@selarikru/protocol';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest, type RunnerHarnessReport } from '@selarikru/protocol';
 import { z } from 'zod';
 
 export const ClaimedLeaseSchema = z
@@ -33,7 +33,8 @@ export class LeaseLostError extends Error {
 
 /** Everything the runner asks of the control plane. Every call is an outbound request. */
 export interface RunnerApi {
-  claim(): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
+  /** `harnesses`: what this runner can launch now. */
+  claim(harnesses?: readonly RunnerHarnessReport[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
   task(lease: LeaseRef): Promise<TaskSpec>;
   heartbeat(lease: LeaseRef): Promise<{ cancelRequested: boolean }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
@@ -71,8 +72,8 @@ export class HttpRunnerApi implements RunnerApi {
     return res.json();
   }
 
-  async claim() {
-    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', {}));
+  async claim(harnesses?: readonly RunnerHarnessReport[]) {
+    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', harnesses === undefined ? {} : { harnesses }));
     return { lease: r.lease, reason: r.reason ?? null };
   }
   async task(lease: LeaseRef) {

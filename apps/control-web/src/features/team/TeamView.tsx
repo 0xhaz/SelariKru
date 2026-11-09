@@ -75,7 +75,7 @@ function FleetTable({ rows, sort, nowMs, onOpen }: { rows: readonly TeamRow[]; s
             <td className="px-3 py-3"><ActivitySignalView row={row} /></td>
             <td className="px-3 py-3"><HealthSignalView row={row} nowMs={nowMs} /></td>
             <td className="px-3 py-3"><ResultSignalView row={row} nowMs={nowMs} /></td>
-            <td className="px-3 py-3"><AxisBadges stacked execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} /></td>
+            <td className="px-3 py-3"><AxisBadges stacked execution={row.execution} modelRoute={row.modelRoute} model={row.modelDetail} /></td>
           </tr>
         ))}
       </tbody>
@@ -94,7 +94,7 @@ function FleetCards({ rows, nowMs, onOpen }: { rows: readonly TeamRow[]; nowMs: 
             <div><dt className="mb-1 text-sm font-medium text-muted">Health</dt><dd className="m-0"><HealthSignalView row={row} nowMs={nowMs} /></dd></div>
             <div><dt className="mb-1 text-sm font-medium text-muted">Results</dt><dd className="m-0"><ResultSignalView row={row} nowMs={nowMs} /></dd></div>
           </dl>
-          <div className="mt-3 border-t border-line pt-2"><AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} /></div>
+          <div className="mt-3 border-t border-line pt-2"><AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.modelDetail} /></div>
         </li>
       ))}
     </ul>

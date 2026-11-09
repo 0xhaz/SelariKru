@@ -399,13 +399,17 @@ test.describe('model assignment', () => {
     await page.goto('/tests/harness/index.html#/team');
     await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
     const row = assignmentRow(page, 'backend');
-    await expect(row.getByTestId('assignment-current')).toContainText('Using the project default');
+    await expect(row.getByTestId('assignment-current')).toHaveText('Using the project default: Sonnet 5.5');
+    await expect(row.getByRole('button', { name: 'Save for Backend' })).toBeDisabled();
     await page.getByLabel('Model for Backend').selectOption('claude-haiku-5-5');
     await row.getByRole('button', { name: 'Save for Backend' }).click();
     await expect(row.getByTestId('assignment-feedback')).toContainText('Applies to the next attempt');
     await expect(row.getByTestId('assignment-current')).toContainText('claude-haiku-5-5');
+    await row.getByRole('button', { name: 'Use project default' }).click();
+    await expect(row.getByTestId('assignment-current')).toHaveText('Using the project default: Sonnet 5.5');
+    await expect(page.getByLabel('Model for Backend')).toHaveValue('claude-sonnet-5-5');
     const commands = await page.evaluate(() => (window as unknown as { __calls: { commands: { command: { command: string; args: unknown } }[] } }).__calls.commands);
-    expect(commands).toHaveLength(1);
+    expect(commands).toHaveLength(2);
     expect(commands[0]!.command).toMatchObject({ command: 'assignment.set', expectedRevision: 0, args: { scope: 'role', key: 'backend', selection: { provider: 'anthropic', model: 'claude-haiku-5-5' } } });
   });
 
@@ -427,6 +431,15 @@ test.describe('model assignment', () => {
     await expect(assignmentRow(page, 'backend').getByTestId('assignment-feedback')).toContainText('Policy does not allow');
   });
 
+  test('restricted work blocked on a cloud model says so plainly', async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work', taskPatch: { 'healthy-parallel-work.api': { placementBlock: 'restricted_requires_device_model:anthropic/claude-sonnet-5-5' } } };
+    });
+    await page.goto('/tests/harness/index.html#/team');
+    await rowOf(page, 'runner_local_1').locator('[data-open-worker="runner_local_1"]').click();
+    await expect(drawer(page).getByLabel('Blockers')).toContainText('Only cloud models are available now, so this task cannot run.');
+  });
+
   test('offers no provider that is not installed', async ({ page }) => {
     await openTeam(page, fixture('healthy-parallel-work'));
     await expect(page.getByLabel('Provider for Backend').locator('option')).toHaveText(['Claude']);
@@ -435,7 +448,7 @@ test.describe('model assignment', () => {
 
   test('says so when no provider is detected', async ({ page }) => {
     await openTeam(page, fixture('no-data'));
-    await expect(page.getByTestId('assignment-unavailable')).toContainText('No provider was detected');
+    await expect(page.getByTestId('assignment-unavailable')).toContainText('No runner has reported');
     await expect(page.getByLabel(/Model for/)).toHaveCount(0);
   });
 

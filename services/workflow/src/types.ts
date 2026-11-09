@@ -1,6 +1,6 @@
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, Result } from '@selarikru/domain';
+import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, Result, RunnerHarnessReport } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
@@ -10,6 +10,8 @@ export interface Runner {
   readonly runnerId: string;
   readonly tenantId: string;
   readonly location: RunnerLocation;
+  /** What this runner reports it can launch. Absent or empty: it can launch nothing, so no claim can start. */
+  readonly harnesses?: readonly RunnerHarnessReport[] | undefined;
 }
 
 /** Limits supplied by configuration. A missing limit denies claiming; it is never unlimited. */
@@ -41,7 +43,7 @@ export interface SchedulerContext {
    * which denies cloud placement. Missing is never unlimited.
    */
   readonly placement?: PlacementConfig | undefined;
-  /** What the installed harness adapters declare. Absent reads as nothing detected, which blocks every claim. Missing is never unlimited. */
+  /** What this build's harness adapters declare. Each claim narrows it to what the claiming runner reports. Absent blocks every claim: missing is never unlimited. */
   readonly catalog?: HarnessCatalog | undefined;
   /** How long an approval request stays grantable. Default `APPROVAL_TTL_SECONDS`. */
   readonly approvalTtlSeconds?: number | undefined;

@@ -1,11 +1,11 @@
-import { NO_HARNESS_CATALOG, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
-import { schema, withTx, type Tx } from '@selarikru/persistence';
+import { NO_HARNESS_CATALOG, availableCatalog, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRunnerReports, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -87,11 +87,13 @@ const ASSIGNABLE_TASK: readonly string[] = ['planned', 'ready', 'running', 'awai
 export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
-  const catalog = ctx.catalog ?? NO_HARNESS_CATALOG;
+  const declared = ctx.catalog ?? NO_HARNESS_CATALOG;
+  /** What can actually be launched: the adapters this build declares, narrowed to what enrolled runners report. */
+  const liveCatalog = async (tx: Executor) => availableCatalog(declared, await loadRunnerReports(tx, config.tenantId));
 
   /** A refused selection as a typed error, so the screen can say which check failed. */
-  const refuseSelection = (selection: { provider: string; model: string }): AppError | null => {
-    const verdict = validateSelection(selection, catalog, ctx.policy);
+  const refuseSelection = async (tx: Executor, selection: { provider: string; model: string }): Promise<AppError | null> => {
+    const verdict = validateSelection(selection, await liveCatalog(tx), ctx.policy);
     if (verdict.ok) return null;
     if (verdict.reason === 'model_not_allowed') return new AppError(403, 'model_not_allowed', 'policy does not allow this model', { reason: verdict.decision?.reason, provider: selection.provider, model: selection.model });
     return new AppError(422, verdict.reason === 'no_provider_detected' ? 'no_provider_detected' : verdict.reason === 'unsupported_provider' ? 'unsupported_provider' : 'unsupported_model', `cannot assign ${selection.provider}/${selection.model}: ${verdict.reason}`, { provider: selection.provider, model: selection.model });
@@ -113,8 +115,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const current = await assignmentRevision(tx, config.tenantId, projectId, body.scope, body.key);
         if (body.expectedRevision !== current) throw staleRevision(current, 'this assignment');
         if (body.scope === 'task') {
-          const row = await requireTaskStatus(tx, config.tenantId, body.key);
-          if (row.projectId !== projectId) throw new AppError(404, 'task_not_found', 'no such task in this project');
+          const [row] = await tx.select().from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, config.tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.taskId, body.key)));
+          if (!row) throw new AppError(404, 'task_not_found', 'no such task in this project');
           const specRow = await loadSpecRow(tx, { tenantId: config.tenantId, projectId, taskId: body.key, revision: row.currentRevision });
           const run = specRow ? await requireRun(tx, config.tenantId, specRow.runId) : null;
           if (!run) throw new AppError(404, 'task_not_found', 'task revision is missing');
@@ -122,7 +124,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           if (!ASSIGNABLE_TASK.includes(row.status)) throw new AppError(403, 'command_not_allowed', `cannot assign a model to a task that is ${row.status}`, { status: row.status });
         }
         if (body.selection !== null) {
-          const refused = refuseSelection(body.selection);
+          const refused = await refuseSelection(tx, body.selection);
           if (refused) throw refused;
         }
         const revision = current + 1;
@@ -150,7 +152,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };
         const pinnedModel = body.pinnedModel ?? null;
         if (pinnedModel !== null) {
-          const refused = refuseSelection(pinnedModel);
+          const refused = await refuseSelection(tx, pinnedModel);
           if (refused) throw refused;
         }
         await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement, trial: body.trial === true, pinnedModel });
@@ -525,7 +527,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           cursor,
           generatedAt: at.toISOString(),
           /** What this machine's harness adapters declare, and what policy says about each model. Identifiers only. */
-          modelCatalog: catalogView(catalog, ctx.policy),
+          modelCatalog: catalogView(await liveCatalog(tx), ctx.policy),
           /** The current assignment per role and task; each carries the revision a change must send back. */
           modelAssignments: await loadModelAssignments(tx, config.tenantId, projectId),
           runs: runs.map((r) => ({

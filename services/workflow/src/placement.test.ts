@@ -158,7 +158,12 @@ describe('placement in claimNext', () => {
   let clock: TestClock;
   beforeAll(async () => { t = await setupTestDb(); });
   afterAll(async () => { await t.close(); });
-  beforeEach(async () => { clock = testClock(); await resetDb(t.db); });
+  beforeEach(async () => {
+    clock = testClock();
+    await resetDb(t.db);
+    // Placement is judged here, so every role uses a device model: the model-route rule (assignment.test.ts) cannot pre-empt what these tests are about.
+    for (const role of ['backend', 'frontend', 'worker']) await t.db.insert(schema.modelAssignments).values({ tenantId: TENANT, projectId: PROJECT, scopeKind: 'role', scopeKey: role, revision: 1, provider: 'test-device', model: 'device-1', updatedBy: 'test' });
+  });
   const sched = (mode: keyof typeof PLACEMENT_MODES, p: Policy | undefined = CLOUD_POLICY as Policy) =>
     createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: p, placement: { mode: PLACEMENT_MODES[mode], cloudDestination: 'cloud-sandbox-eu' } });
   const cloud = (id: string) => runner(id, 'cloud');

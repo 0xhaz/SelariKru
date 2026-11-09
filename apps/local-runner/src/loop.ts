@@ -1,4 +1,4 @@
-import type { RuntimeAdapter } from '@selarikru/protocol';
+import type { RunnerHarnessReport, RuntimeAdapter } from '@selarikru/protocol';
 import { runAttempt, type AttemptDeps } from './attempt.ts';
 import type { RunnerApi } from './api.ts';
 
@@ -11,6 +11,8 @@ export interface LoopDeps {
   readonly runtime: SweepingRuntime;
   readonly attempt: AttemptDeps;
   readonly pollMs: number;
+  /** What this machine can launch, sent with every claim so the scheduler never hands it a model it cannot run. */
+  readonly harnessReport?: () => Promise<readonly RunnerHarnessReport[]>;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly log: (line: string) => void;
 }
@@ -43,7 +45,7 @@ export class RunnerLoop {
     let failures = 0;
     while (!signal.aborted) {
       try {
-        const claim = await this.d.api.claim();
+        const claim = await this.d.api.claim(await this.d.harnessReport?.());
         failures = 0;
         if (claim.lease) {
           this.d.log(`claimed ${claim.lease.taskId} as ${claim.lease.attemptId}`);

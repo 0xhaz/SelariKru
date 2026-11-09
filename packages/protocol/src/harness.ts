@@ -76,6 +76,8 @@ export type NormalizedHarnessEvent = EventBase &
         /** As observed in the stream; null if the stream never said. Never assumed. */
         readonly permissionMode: string | null;
         readonly model: string | null;
+        /** False when the stream ended with no init event: this event is then a placeholder and proves nothing about the model. */
+        readonly initObserved: boolean;
         /** Names of MCP servers the init event reports as connected; null when the stream never said. */
         readonly connectedMcpServers: readonly string[] | null;
       }

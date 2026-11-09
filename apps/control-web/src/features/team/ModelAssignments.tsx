@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt } from '@selarikru/view-protocol';
 import { CommandNotSent } from '../../shell/projection-store.ts';
@@ -21,16 +21,23 @@ interface AssignProps {
 
 const text = (t: AssignmentTarget): string => (t.scope === 'role' ? roleName(t.label) : t.label);
 
-function choiceFor(providers: readonly ProviderChoice[], current: AssignmentTarget['current']): { provider: string; model: string } {
-  const provider = providers.find((p) => p.provider === current?.provider) ?? providers[0]!;
-  const model = provider.models.find((m) => m.modelId === current?.model) ?? provider.models.find((m) => m.allowed) ?? provider.models[0]!;
+const sameModel = (a: AssignmentTarget['current'], b: AssignmentTarget['current']): boolean => a !== null && b !== null && a.provider === b.provider && a.model === b.model;
+
+/** What the dropdowns show: what applies now, so an untouched row has nothing to save. */
+function choiceFor(providers: readonly ProviderChoice[], target: AssignmentTarget): { provider: string; model: string } {
+  const applies = target.current ?? target.inherited;
+  const provider = providers.find((p) => p.provider === applies?.provider) ?? providers[0]!;
+  const model = provider.models.find((m) => m.modelId === applies?.model) ?? provider.models.find((m) => m.allowed) ?? provider.models[0]!;
   return { provider: provider.provider, model: model.modelId };
 }
 
 /** One assignment: provider, model, and a Save whose outcome is reported beside it. Only a person pressing Save sends anything. */
 function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, onResync }: AssignProps & { target: AssignmentTarget }) {
   const ids = useMemo(() => `${target.scope}-${target.key}`.replace(/[^A-Za-z0-9_-]/g, '_'), [target.scope, target.key]);
-  const [choice, setChoice] = useState(() => choiceFor(model.providers, target.current));
+  const [choice, setChoice] = useState(() => choiceFor(model.providers, target));
+  // A save, a clear or a resync changes what applies: the dropdowns follow it rather than holding an old choice.
+  const appliesKey = `${target.revision}|${target.current?.provider}/${target.current?.model}|${target.inherited?.provider}/${target.inherited?.model}`;
+  useEffect(() => { setChoice(choiceFor(model.providers, target)); }, [appliesKey]);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'refused'; text: string } | null>(null);
   // One key per intended change, kept across a network failure so a retry cannot apply it twice.
@@ -38,7 +45,7 @@ function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, on
   const provider = model.providers.find((p) => p.provider === choice.provider) ?? model.providers[0]!;
   const chosen = provider.models.find((m) => m.modelId === choice.model) ?? provider.models[0]!;
   const refusal = chosen.allowed ? null : chosen.refusal;
-  const unchanged = target.current?.provider === choice.provider && target.current?.model === choice.model;
+  const unchanged = sameModel(choice, target.current ?? target.inherited);
   const blocked = disabledReason ?? (refusal !== null ? 'Choose a model policy allows.' : null);
   const noun = text(target);
   // The panel header already says when a role's change applies; a task's override sits alone in the drawer, so it says so itself.

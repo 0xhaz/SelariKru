@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { effectiveWorkerHealth, type AttemptView, type TaskView, type UsageEntry } from '@selarikru/view-protocol';
 import { NOW, fixtureSnapshot, iso, snapshotOf, task, worker } from '../overview/testing.ts';
 import { taskTarget } from './assignments.ts';
+import { classifyBlock, explain } from '../overview/attention.ts';
 import { NO_FILTER, buildTeam, filterRows, sortRows, type TeamRow } from './model.ts';
 
 const row = (model: ReturnType<typeof buildTeam>, id: string): TeamRow => model.rows.find((r) => r.workerId === id)!;
@@ -349,7 +350,7 @@ describe('fix round 1: wording and scope', () => {
 });
 
 describe('model assignment', () => {
-  const emptyCatalog = { status: 'none' as const, detail: 'Claude Code was not found on this machine.', providers: [] };
+  const emptyCatalog = { status: 'none' as const, detail: 'No runner has reported an installed harness.', projectDefault: null, providers: [] };
 
   it('assignment is recorded on the attempt and shown on the inference badge', () => {
     const w = worker('w', { taskId: 'a', attemptId: 'att', assignment: { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' }, modelRoute: 'cloud', execution: 'local' });
@@ -362,6 +363,21 @@ describe('model assignment', () => {
     const model = buildTeam(snapshotOf({ tasks: [task('a')], workers: [w] }), NOW, NOW);
     expect(row(model, 'w')).toMatchObject({ modelRoute: 'unknown', assignment: null });
     expect(model.providers).toEqual([{ value: 'unknown', label: 'Not recorded' }]);
+  });
+
+  it('an idle worker\'s model is labelled as the previous attempt\'s', () => {
+    const recorded = { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' as const };
+    const idle = worker('w', { availability: 'idle', taskId: null, attemptId: null, assignment: recorded });
+    expect(row(buildTeam(snapshotOf({ workers: [idle] }), NOW, NOW), 'w').modelDetail).toBe('claude-opus-5-5 (previous attempt)');
+    const busy = worker('w', { taskId: 'a', attemptId: 'att', assignment: recorded });
+    expect(row(buildTeam(snapshotOf({ tasks: [task('a')], workers: [busy] }), NOW, NOW), 'w').modelDetail).toBe('claude-opus-5-5');
+  });
+
+  it('a restricted task on a cloud model says plainly that it cannot run', () => {
+    const code = 'restricted_requires_device_model:anthropic/claude-sonnet-5-5';
+    expect(explain(code)).toMatch(/Only cloud models are available now, so this task cannot run/);
+    expect(classifyBlock(code)).toBe('policy');
+    expect(classifyBlock('model_not_on_runner:anthropic/x')).toBe('blocked');
   });
 
   it('filters by provider, and keeps the workers with no record behind Not recorded', () => {
@@ -380,12 +396,12 @@ describe('model assignment', () => {
   });
 
   it('never offers a provider the adapter did not declare, and marks policy refusals', () => {
-    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: { status: 'detected' as const, detail: null, providers: [{ provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316', models: [{ modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud' as const, allowedByPolicy: true, policyReason: null }, { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud' as const, allowedByPolicy: false, policyReason: 'model_not_allowed' }] }] } };
+    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: { status: 'detected' as const, detail: null, projectDefault: { provider: 'anthropic', model: 'claude-sonnet-5-5' }, providers: [{ provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316', models: [{ modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud' as const, allowedByPolicy: true, policyReason: null }, { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud' as const, allowedByPolicy: false, policyReason: 'model_not_allowed' }] }] } };
     const { assignments } = buildTeam(snap, NOW, NOW);
     expect(assignments.available).toBe(true);
     expect(assignments.providers.map((p) => p.provider)).toEqual(['anthropic']);
     expect(assignments.providers[0]!.models[1]).toMatchObject({ allowed: false, refusal: expect.stringMatching(/Policy does not allow/) });
-    expect(assignments.roles).toEqual([expect.objectContaining({ scope: 'role', key: 'backend', current: null, revision: 0 })]);
+    expect(assignments.roles).toEqual([expect.objectContaining({ scope: 'role', key: 'backend', current: null, revision: 0, fallback: 'Using the project default: Sonnet 5.5', inherited: { provider: 'anthropic', model: 'claude-sonnet-5-5' } })]);
   });
 
   it('a removed assignment keeps its revision for the next change', () => {

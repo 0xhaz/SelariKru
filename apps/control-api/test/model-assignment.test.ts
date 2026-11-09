@@ -4,7 +4,7 @@ import { CAPS, POLICY, RUN } from '@selarikru/workflow/test-helpers';
 import { createScheduler } from '@selarikru/workflow';
 import { evaluate, parsePolicy } from '@selarikru/policy';
 import { loadDefaultPolicy } from '@selarikru/policy/load';
-import { API_POLICY, PROJECT, TEST_CATALOG, bearer, makeHarness, owner, post, resetDb, seedTask, setupTestDb, specFor, type TestDb } from './helpers.ts';
+import { API_POLICY, PROJECT, TEST_CATALOG, TEST_RUNNER_REPORT, enrolRunner, bearer, makeHarness, owner, post, resetDb, seedTask, setupTestDb, specFor, type TestDb } from './helpers.ts';
 
 const SONNET = { provider: 'anthropic', model: 'claude-sonnet-5-5' };
 const OPUS = { provider: 'anthropic', model: 'claude-opus-5-5' };
@@ -16,7 +16,7 @@ describe('POST /v1/projects/:id/model-assignments', () => {
   let h: ReturnType<typeof makeHarness>;
   beforeAll(async () => { t = await setupTestDb(); });
   afterAll(async () => { await t.close(); });
-  beforeEach(async () => { await resetDb(t.db); h = makeHarness(t); });
+  beforeEach(async () => { await resetDb(t.db); h = makeHarness(t); await enrolRunner(h.app); });
 
   const stored = () => t.db.execute(sql`SELECT scope_kind, scope_key, revision, provider, model, updated_by FROM model_assignments ORDER BY scope_key, revision`);
 
@@ -63,7 +63,33 @@ describe('POST /v1/projects/:id/model-assignments', () => {
     expect(r.status).toBe(422);
     expect(r.body.error.code).toBe('no_provider_detected');
     const snap = await none.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() });
-    expect(snap.json().modelCatalog).toEqual({ status: 'none', detail: 'not installed here', providers: [] });
+    expect(snap.json().modelCatalog).toEqual({ status: 'none', detail: 'not installed here', projectDefault: API_POLICY.models.default, providers: [] });
+  });
+
+  it('offers only what enrolled runners report, and no report means nothing is offered', async () => {
+    await resetDb(t.db);
+    await t.db.execute(sql`DELETE FROM runners`);
+    const empty = makeHarness(t);
+    const refused = await post(empty.app, url, body());
+    expect(refused.status).toBe(422);
+    expect(refused.body.error.code).toBe('no_provider_detected');
+    let snap = (await empty.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json();
+    expect(snap.modelCatalog).toMatchObject({ status: 'none', providers: [] });
+    expect(snap.modelCatalog.detail).toMatch(/No runner has reported/);
+    await enrolRunner(empty.app, 'local', [{ provider: 'anthropic', harnessVersion: '9.9.9', models: ['claude-opus-5-5'] }]);
+    snap = (await empty.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json();
+    expect(snap.modelCatalog.providers[0]).toMatchObject({ harnessVersion: '9.9.9', models: [{ modelId: 'claude-opus-5-5' }] });
+    expect((await post(empty.app, url, body({ selection: SONNET, idempotencyKey: 'k9' }))).body.error.code).toBe('unsupported_model');
+  });
+
+  it('a task override is looked up in this project only', async () => {
+    await seedTask(t.db, specFor('t1'));
+    const other = await post(h.app, url.replace(PROJECT, 'proj_b'), body({ scope: 'task', key: 't1' }));
+    expect(other.status).toBe(404);
+    await t.db.execute(sql`INSERT INTO projects (tenant_id, project_id, repository, default_branch, classification) VALUES ('tenant_a', 'proj_b', 'r', 'main', 'internal')`);
+    const wrong = await post(h.app, url.replace(PROJECT, 'proj_b'), body({ scope: 'task', key: 't1', idempotencyKey: 'x2' }));
+    expect(wrong.status).toBe(404);
+    expect(wrong.body.error.code).toBe('task_not_found');
   });
 
   it('a policy that denies the operation is a policy refusal', async () => {
@@ -99,7 +125,7 @@ describe('POST /v1/projects/:id/model-assignments', () => {
     await post(h.app, url, body());
     await seedTask(t.db, specFor('t1'));
     const scheduler = createScheduler({ db: t.db, now: h.clock.now, policy: POLICY, catalog: TEST_CATALOG });
-    const out = await scheduler.tryClaim({ runnerId: 'r1', tenantId: 'tenant_a', location: 'local' }, CAPS);
+    const out = await scheduler.tryClaim({ runnerId: 'r1', tenantId: 'tenant_a', location: 'local', harnesses: TEST_RUNNER_REPORT }, CAPS);
     expect(out.ok).toBe(true);
     const snap = (await h.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json();
     expect(snap.modelCatalog.status).toBe('detected');
@@ -116,7 +142,7 @@ describe('benchmark trials through the API', () => {
   let h: ReturnType<typeof makeHarness>;
   beforeAll(async () => { t = await setupTestDb(); });
   afterAll(async () => { await t.close(); });
-  beforeEach(async () => { await resetDb(t.db); h = makeHarness(t); });
+  beforeEach(async () => { await resetDb(t.db); h = makeHarness(t); await enrolRunner(h.app); });
 
   const runs = `/v1/projects/${PROJECT}/runs`;
 

@@ -319,7 +319,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
             <div><dt className="mb-1 text-sm font-medium text-muted">Results</dt><dd className="m-0"><ResultSignalView row={row} nowMs={nowMs} /></dd></div>
           </dl>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-line pt-2">
-            <AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} />
+            <AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.modelDetail} />
             <p className="text-sm text-muted" data-testid="drawer-confirmed">Last confirmed <Exact iso={row.lastConfirmedAt} /></p>
           </div>
         </header>

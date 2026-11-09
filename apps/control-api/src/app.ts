@@ -47,7 +47,7 @@ export interface AppDeps {
   readonly scheduler: Scheduler;
   /** Project policy, already loaded. Absent policy denies every policy-gated command. */
   readonly policy: Policy | undefined;
-  /** What the installed harness adapters declare. Absent reads as nothing detected: no model can be assigned and no claim can start. */
+  /** What this build's harness adapters declare. Narrowed by runner reports before anything is offered. Absent: no model can be assigned and no claim can start. */
   readonly catalog?: HarnessCatalog | undefined;
   /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
   readonly planConfig?: PlanConfigSource | undefined;

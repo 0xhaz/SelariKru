@@ -33,6 +33,8 @@ export const runners = pgTable(
     tokenHash: text('token_hash').notNull(),
     createdAt: createdAt(),
     revokedAt: tstz('revoked_at'),
+    /** What this runner last said it can launch. Identifiers and a version only. Null: it has not said. */
+    harnessReport: jsonb('harness_report').$type<{ provider: string; harnessVersion: string | null; models: string[] }[]>(),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.runnerId] }),

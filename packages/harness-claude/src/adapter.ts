@@ -206,6 +206,7 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
       harnessVersion: init ? str(init['claude_code_version']) : null,
       permissionMode: init ? str(init['permissionMode']) : null,
       model: init ? str(init['model']) : null,
+      initObserved: init !== null,
       connectedMcpServers: init && Array.isArray(init['mcp_servers'])
         ? init['mcp_servers'].filter(isObj).filter((s) => s['status'] === 'connected').map((s) => str(s['name']) ?? 'unknown')
         : null,

@@ -40,7 +40,7 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   run_not_ready: { text: 'This run is not ready for a pull request.', changed: false },
   reduced_scope_not_accepted: { text: 'Accept the reduced scope first: a pull request cannot open while budget-stopped work is undecided.', changed: false },
   run_already_merged: { text: 'A pull request for this run was already merged.', changed: false },
-  no_provider_detected: { text: 'No provider was detected on this machine, so no model can be assigned.', changed: false },
+  no_provider_detected: { text: 'No runner has reported an installed harness, so no model can be assigned.', changed: false },
   unsupported_provider: { text: 'That provider is not installed here, or cannot run a chosen model. Nothing was saved.', changed: false },
   unsupported_model: { text: 'That model is not one the installed harness offers. Nothing was saved.', changed: false },
   model_not_allowed: { text: 'Policy does not allow that model, so it was not saved. No approval can override it.', changed: false },

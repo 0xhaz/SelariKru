@@ -37,8 +37,10 @@ export interface WorldOptions {
   task?: Partial<TaskSpec>;
   publishThrows?: boolean;
   initMcp?: Array<{ name: string; status: string }>;
-  /** The model the scripted init event reports. Default: the fixture's. */
-  initModel?: string;
+  /** The model the scripted init event reports. Default: the fixture's. Null: an init event naming no model. */
+  initModel?: string | null;
+  /** The stream sends no init event at all. */
+  noInit?: boolean;
   grants?: LeaseGrant[];
   /** Null: a lease with no recorded model. */
   assignment?: RecordedAssignment | null;
@@ -71,7 +73,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
         await writeFile(join(cwd, rel), body);
       };
       void (async () => {
-        stream.push(`${o.initMcp || o.initModel ? JSON.stringify({ ...JSON.parse(initEvent), ...(o.initMcp ? { mcp_servers: o.initMcp } : {}), ...(o.initModel ? { model: o.initModel } : {}) }) : initEvent}\n`);
+        if (!o.noInit) stream.push(`${o.initMcp || o.initModel !== undefined ? JSON.stringify({ ...JSON.parse(initEvent), ...(o.initMcp ? { mcp_servers: o.initMcp } : {}), ...(o.initModel !== undefined ? { model: o.initModel } : {}) }) : initEvent}\n`);
         const keepOpen = o.agent ? (await o.agent({ stream, cwd, write })) === false : false;
         if (keepOpen) return;
         stream.push(`${resultLine()}\n`);

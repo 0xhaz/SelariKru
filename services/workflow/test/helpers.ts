@@ -76,7 +76,7 @@ export function testClock(start = '2026-11-08T06:00:00.000Z'): TestClock {
   return { now: () => new Date(t), advance: (s) => { t += s * 1000; } };
 }
 
-export const TEST_MODELS = { allowed: [{ provider: 'anthropic', model: 'claude-sonnet-5-5' }, { provider: 'anthropic', model: 'claude-opus-5-5' }], default: { provider: 'anthropic', model: 'claude-sonnet-5-5' } };
+export const TEST_MODELS = { allowed: [{ provider: 'anthropic', model: 'claude-sonnet-5-5' }, { provider: 'anthropic', model: 'claude-opus-5-5' }, { provider: 'test-device', model: 'device-1' }], default: { provider: 'anthropic', model: 'claude-sonnet-5-5' } };
 /** A fixed catalog for tests. Real availability is read by the adapter; tests must not depend on what this machine has installed. */
 export const TEST_CATALOG: HarnessCatalog = {
   status: 'detected', detail: null,
@@ -87,6 +87,10 @@ export const TEST_CATALOG: HarnessCatalog = {
       { id: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud', rate: { inputUsdPerMTok: 4, outputUsdPerMTok: 20, source: 'test-table' } },
       { id: 'claude-haiku-5-5', label: 'Haiku 5.5', route: 'cloud', rate: null },
     ],
+  }, {
+    // For tests of restricted data, which may only reach a device model. No such adapter exists in the product.
+    provider: 'test-device', label: 'Test device', harnessVersion: null, modelSelection: 'supported',
+    models: [{ id: 'device-1', label: 'Device 1', route: 'device', rate: null }],
   }],
 };
 export const POLICY = { policyVersion: 'test.1', models: TEST_MODELS, limits: { repairAttempts: 2 } } as const satisfies Policy;
@@ -95,7 +99,9 @@ export const CLOUD_POLICY = {
   policyVersion: 'test.cloud.1', models: TEST_MODELS, limits: { repairAttempts: 2, maxConcurrentTotal: 2 }, selectedSources: [`repo:${PROJECT}`],
   destinations: [{ destination: 'cloud-sandbox-eu', purpose: 'execution', classifications: ['public', 'internal'] }],
 } as const satisfies Policy;
-export const runner = (id: string, location: Runner['location'] = 'local'): Runner => ({ runnerId: id, tenantId: TENANT, location });
+/** A runner that reports every model in `TEST_CATALOG`. */
+export const TEST_RUNNER_REPORT = TEST_CATALOG.providers.map((p) => ({ provider: p.provider, harnessVersion: p.harnessVersion, models: p.models.map((m) => m.id) }));
+export const runner = (id: string, location: Runner['location'] = 'local'): Runner => ({ runnerId: id, tenantId: TENANT, location, harnesses: TEST_RUNNER_REPORT });
 export const CAPS = { maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 } satisfies Caps;
 export const capsWith = (maxConcurrentTotal: number) => ({ ...CAPS, maxConcurrentTotal });
 

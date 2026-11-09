@@ -24,8 +24,8 @@ describe('assigned model reaches the harness', () => {
     await app.listen({ host: '127.0.0.1', port: 0 });
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;
-    const { token } = await enrolRunner(app, 'local');
-    return { app, api: new HttpRunnerApi(`http://127.0.0.1:${port}`, token) };
+    const { token, runnerId } = await enrolRunner(app, 'local');
+    return { app, runnerId, api: new HttpRunnerApi(`http://127.0.0.1:${port}`, token) };
   };
   const deps = (world: World, api: AttemptDeps['api'], over: Partial<AttemptDeps> = {}): AttemptDeps => ({
     api, runtime: world.runtime, artifacts: world.artifacts, workRoot: world.workRoot, repos: { [PROJECT]: world.repo, [world.task.projectId]: world.repo }, heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: () => undefined, ...over,
@@ -60,9 +60,42 @@ describe('assigned model reaches the harness', () => {
     const world = (w = await makeWorld({ assignment: { ...OPUS, source: 'role', route: 'cloud' }, agent: async () => undefined }));
     // The scripted init event reports claude-sonnet-5-5; this attempt was recorded as opus.
     const report = await runAttempt(deps(world, world.api), world.lease);
-    expect(report.outcome).toBe('failed');
+    expect(report.outcome).toBe('blocked');
     expect(report.reason).toMatch(/^model_mismatch: recorded claude-opus-5-5, the stream reports claude-sonnet-5-5/);
-    expect(world.api.published[0]).toMatchObject({ outcome: 'failed' });
+    expect(world.api.published[0]).toMatchObject({ outcome: 'blocked' });
+  });
+
+  it('an init event that names no model stops the attempt as unverified', async () => {
+    const world = (w = await makeWorld({ initModel: null }));
+    const report = await runAttempt(deps(world, world.api), world.lease);
+    expect(report.outcome).toBe('blocked');
+    expect(report.reason).toMatch(/^model_unverified: recorded claude-sonnet-5-5/);
+  });
+
+  it('an attempt whose stream never sent an init event cannot complete', async () => {
+    const world = (w = await makeWorld({ noInit: true }));
+    const report = await runAttempt(deps(world, world.api), world.lease);
+    expect(report.outcome).toBe('blocked');
+    expect(report.reason).toMatch(/^model_unverified: .*never reported a model/);
+  });
+
+  it('a runner sends its report with each claim, and one without the model is refused', async () => {
+    const world = (w = await makeWorld({}));
+    await seedTask(t.db, specFor('t1', { baseSha: world.sha, allowedPaths: ['src'] }), 'ready');
+    const { app, api, runnerId } = await apiFor();
+    try {
+      const without = await api.claim([{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-haiku-5-5'] }]);
+      expect(without.lease).toBeNull();
+      const row = (await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 't1'`))[0]!;
+      expect(row['placement_block']).toBe('model_not_on_runner:anthropic/claude-sonnet-5-5');
+      expect(await t.db.execute(sql`SELECT 1 FROM attempts`)).toHaveLength(0);
+      const stored = (await t.db.execute(sql`SELECT harness_report FROM runners WHERE runner_id = ${runnerId}`))[0]!;
+      expect(stored['harness_report']).toEqual([{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-haiku-5-5'] }]);
+      const able = await api.claim([{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-sonnet-5-5'] }]);
+      expect(able.lease?.assignment?.model).toBe('claude-sonnet-5-5');
+    } finally {
+      await app.close();
+    }
   });
 
   it('refuses a model it cannot launch before any sandbox exists', async () => {
@@ -92,7 +125,7 @@ describe('assigned model reaches the harness', () => {
         cancel: async (attemptId) => ({ attemptId, status: 'stop_requested', terminationConfirmed: false, detail: null }),
         async *run(input) {
           received.push(input.model);
-          yield { type: 'session_started', attemptId: input.attemptId, seq: 0, harnessVersion: null, permissionMode: null, model: 'test-1', connectedMcpServers: [] };
+          yield { type: 'session_started', attemptId: input.attemptId, seq: 0, harnessVersion: null, permissionMode: null, model: 'test-1', initObserved: true, connectedMcpServers: [] };
           yield { type: 'result', attemptId: input.attemptId, seq: 1, subtype: 'success', isError: false, terminalReason: null, numTurns: 1, durationMs: 1 };
           yield { type: 'exit', attemptId: input.attemptId, seq: 2, code: 0, signal: null, failed: false };
         },

@@ -84,10 +84,12 @@ describe('claim preconditions', () => {
     expect(await hybrid.claimNext(runner('r2', 'cloud'), CAPS)).not.toBeNull();
   });
 
-  it('a restricted task is never claimable by a cloud runner', async () => {
+  it('a restricted task is never claimable by a cloud runner, nor on a cloud model from a local one', async () => {
     await seedTask(t.db, specFor('t1', { classification: 'restricted' }));
     expect(await s.claimNext(runner('r1', 'cloud'), CAPS)).toBeNull();
-    expect(await s.claimNext(runner('r2', 'local'), CAPS)).not.toBeNull();
+    expect(await s.tryClaim(runner('r2', 'local'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'model_blocked:restricted_requires_device_model:anthropic/claude-sonnet-5-5' }] });
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+    expect(await countRows(t.db, 'budget_reservations')).toBe(0);
   });
 
   it('a status row behind the latest task revision is not claimable', async () => {

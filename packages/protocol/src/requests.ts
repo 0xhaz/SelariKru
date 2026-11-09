@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SCOPES, ModelSelectionSchema, TaskSpecSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RunnerHarnessReportSchema, TaskSpecSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 
@@ -170,7 +170,7 @@ export type ClientInferenceReport = z.infer<typeof ClientInferenceReportSchema>;
 export const PairingCodeRequestSchema = z.object({ location: z.enum(['local', 'cloud']) }).strict();
 export const PairingCodeResponseSchema = z.object({ pairingCode: z.string(), location: z.enum(['local', 'cloud']), expiresAt: z.string() }).strict();
 
-export const EnrollRequestSchema = z.object({ label: z.string().min(1).max(64).optional() }).strict();
+export const EnrollRequestSchema = z.object({ label: z.string().min(1).max(64).optional(), harnesses: z.array(RunnerHarnessReportSchema).max(20).optional() }).strict();
 export const EnrollResponseSchema = z
   .object({ runnerId: z.string(), token: z.string(), location: z.enum(['local', 'cloud']), tenantId: z.string() })
   .strict();
