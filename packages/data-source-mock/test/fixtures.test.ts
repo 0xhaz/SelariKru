@@ -374,7 +374,7 @@ describe('streaming and resync', () => {
     ds.clock.advance(15_000); // the request is at 40 s
     await settle();
     expect(session.resyncCount()).toBe(1);
-    expect(session.state()!.snapshot.approvals[sc('human-wait', 'apr_docs_domain')]).toMatchObject({ state: 'pending', reason: 'Needs the documentation site to confirm the error codes.' });
+    expect(session.state()!.snapshot.approvals[sc('human-wait', 'apr_docs_domain')]).toMatchObject({ state: 'pending', reason: 'Backfilling rewrites every row of the feedback table.' });
     expect(session.state()!.snapshot.tasks[sc('human-wait', 'migrate')]!.status).toBe('awaiting_approval');
     session.stop();
   });
@@ -451,5 +451,36 @@ describe('purity of reducers and fixtures', () => {
         expect(text, `${dir}/${file}`).not.toMatch(/Date\.now\(|Math\.random\(|new Date\(\)|performance\.now\(|crypto\.randomUUID/);
       }
     }
+  });
+
+  describe('decision routes', () => {
+    const source = (f: Fixture) => {
+      const clock = createSeededClock(fixtureTime(0));
+      return { clock, ds: createMockDataSource({ clock, fixtures: [f] }) };
+    };
+
+    it('a stop arriving between render and accept is refused; a stop still in flight is cancel_pending', async () => {
+      const f = { ...buildFixture('budget-stop'), startSec: 78 };
+      const { clock, ds } = source(f);
+      const run = Object.values((await ds.getSnapshot(f.projectId)).runs)[0]!;
+      expect(run.scopeAssessment!.stoppingTaskIds).toEqual([scoped('budget-stop', 'docs')]);
+      const args = { runId: run.runId, notDeliveredHash: run.scopeAssessment!.notDeliveredHash };
+      expect(await ds.execute({ command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, idempotencyKey: 'a', args })).toMatchObject({ rejection: 'cancel_pending' });
+      clock.advance(10_000); // the docs task is now cancelled, so the list the person read is out of date
+      const res = await ds.execute({ command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, idempotencyKey: 'b', args });
+      expect(res).toMatchObject({ accepted: false, rejection: 'reduced_scope_changed' });
+      const fresh = Object.values((await ds.getSnapshot(f.projectId)).runs)[0]!;
+      expect(fresh.reducedScope).toBeNull();
+      expect(await ds.execute({ command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, idempotencyKey: 'c', args: { runId: run.runId, notDeliveredHash: fresh.scopeAssessment!.notDeliveredHash } })).toMatchObject({ accepted: true });
+    });
+
+    it('a request for an operation that cannot take effect is refused a grant', async () => {
+      const base = buildFixture('expired-approval');
+      const f = { ...base, startSec: 100, approvals: base.approvals.map((a) => ({ ...a, operation: 'new_domain', destination: 'docs.example.com' })) };
+      const { ds } = source(f);
+      const snap = await ds.getSnapshot(f.projectId);
+      const a = Object.values(snap.approvals)[0]!;
+      expect(await ds.execute({ command: 'approval.grant', expectedRevision: snap.tasks[a.taskId!]!.aggregateRevision, idempotencyKey: 'g', args: { approvalId: a.approvalId, scopeHash: a.scopeHash! } })).toMatchObject({ rejection: 'policy_denied' });
+    });
   });
 });

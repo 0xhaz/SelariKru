@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -42,10 +42,11 @@ const REPLANNABLE: readonly string[] = ['planned', 'ready', 'blocked', 'awaiting
 // Only a running task has a live attempt to stop. Every other active status has none, so cancel is immediate.
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const CANCEL_REQUEST: readonly string[] = ['running'];
+const APPROVAL_HISTORY_LIMIT = 50;
 
 /** An open request for a task that was replaced or cancelled can no longer be resolved. */
-async function supersedePendingApprovals(tx: Tx, tenantId: string, projectId: string, taskId: string): Promise<void> {
-  await tx.update(schema.approvals).set({ outcome: 'superseded' }).where(and(
+async function supersedePendingApprovals(tx: Tx, tenantId: string, projectId: string, taskId: string, at: Date): Promise<void> {
+  await tx.update(schema.approvals).set({ outcome: 'superseded', resolvedAt: at }).where(and(
     eq(schema.approvals.tenantId, tenantId), eq(schema.approvals.projectId, projectId), eq(schema.approvals.taskId, taskId), eq(schema.approvals.outcome, 'pending')));
 }
 
@@ -153,7 +154,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         existing.set(t.taskId, row);
       }
       // Pending approvals for a replaced task revision are void; they can no longer be resolved.
-      for (const taskId of existing.keys()) await supersedePendingApprovals(tx, config.tenantId, projectId, taskId);
+      for (const taskId of existing.keys()) await supersedePendingApprovals(tx, config.tenantId, projectId, taskId, at);
       for (const t of tasks) {
         await tx.insert(schema.taskRevisions).values({ tenantId: config.tenantId, projectId, runId: run.runId, taskId: t.taskId, revision: t.revision, boardId: t.boardId, spec: t });
       }
@@ -235,7 +236,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             throw new AppError(403, 'command_not_allowed', `cannot cancel a task that is ${row.status}`, { status: row.status });
           }
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
-          await supersedePendingApprovals(tx, config.tenantId, row.projectId, taskId);
+          await supersedePendingApprovals(tx, config.tenantId, row.projectId, taskId, at);
           // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.
           await releaseTaskClaims(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId }, row.currentRevision, at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });
@@ -330,7 +331,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }
 
         const granted = body.decision === 'grant';
-        await tx.update(schema.approvals).set({ outcome: granted ? 'granted' : 'denied', approver: uid })
+        await tx.update(schema.approvals).set({ outcome: granted ? 'granted' : 'denied', approver: uid, resolvedAt: at })
           .where(and(eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.projectId, approval.projectId), eq(schema.approvals.approvalId, approvalId)));
 
         let taskStatus: string | null = task?.status ?? null;
@@ -379,6 +380,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (acceptanceCovers(await loadAcceptedReducedScope(tx, scope), assessed.stopped)) throw new AppError(403, 'command_not_allowed', 'reduced scope was already accepted for this run', { reason: 'already_accepted' });
 
         const { notDelivered, deliveredRequirementIds } = assessed;
+        // The list the owner read must still be the list that is true now. A stop landing after the render changes it, and the owner has to look again.
+        const currentHash = notDeliveredHash(notDelivered);
+        if (body.notDeliveredHash !== currentHash) throw new AppError(409, 'reduced_scope_changed', 'what was not delivered changed since it was shown', { currentHash });
         const decisionId = newId('dec');
         const note = body.note === undefined ? null : redactSecrets(body.note);
         const accepted: AcceptedReducedScope = { decisionId, runId, planRevision, notDelivered, deliveredRequirementIds, acceptedAt: at.toISOString(), acceptedBy: uid };
@@ -436,6 +440,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
         const approvals = await tx.select().from(schema.approvals).where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['pending', 'expired'])));
+        // Bounded and project-scoped. Resolved rows are for the record: only the open ones above can still be acted on.
+        const resolved = await tx.select().from(schema.approvals)
+          .where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['granted', 'denied', 'expired', 'superseded'])))
+          .orderBy(sql`${schema.approvals.resolvedAt} DESC NULLS LAST`, desc(schema.approvals.createdAt)).limit(APPROVAL_HISTORY_LIMIT);
         const reports = await tx.select().from(schema.clientReports).where(scope(schema.clientReports)).orderBy(desc(schema.clientReports.createdAt)).limit(50);
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
         const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith(reducedScopeContext('')));
@@ -447,11 +455,11 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
-        const assessments = new Map<string, { notDelivered: unknown; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
+        const assessments = new Map<string, { notDelivered: unknown; notDeliveredHash: string; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
         for (const r of runs) {
           const assessed = await assessRunScope(tx, { tenantId: config.tenantId, projectId, runId: r.runId }).catch(() => null);
           assessments.set(r.runId, assessed && assessed.stopped.length + assessed.stopping.length > 0
-            ? { notDelivered: assessed.notDelivered, deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
+            ? { notDelivered: assessed.notDelivered, notDeliveredHash: notDeliveredHash(assessed.notDelivered), deliveredRequirementIds: assessed.deliveredRequirementIds, stopped: assessed.stopped, stoppingTaskIds: assessed.stopping }
             : null);
         }
         return {
@@ -497,6 +505,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
             reason: typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null,
             destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
+          })),
+          /** The most recent resolved requests, newest first. A grant is a record; `consumedAt` says whether an attempt used it. */
+          approvalHistory: resolved.map((a) => ({
+            approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, outcome: a.outcome, approver: a.approver ?? null, scopeHash: a.scopeHash,
+            operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
+            destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
+            requestedAt: a.createdAt.toISOString(), resolvedAt: a.resolvedAt?.toISOString() ?? null, consumedAt: a.consumedAt?.toISOString() ?? null, consumedBy: a.consumedBy ?? null,
           })),
           /** The reviewable change for each run. `merged_sha_mismatch` and `stale_candidate` tell the owner a merge was not recorded and why. */
           changeRequests: changes.map((c) => ({

@@ -1,4 +1,5 @@
-import { approvalStateAt, effectiveWorkerHealth, isReverifiableReason, type CheckView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
+import { WORKER_APPROVAL_OPERATIONS } from '@selarikru/domain';
+import { approvalStateAt, effectiveWorkerHealth, isBudgetStopped, isReverifiableReason, type ApprovalView, type CheckView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge } from '@selarikru/ui';
 
 /**
@@ -123,6 +124,12 @@ export function decisionIdForBlock(task: Pick<TaskView, 'taskId' | 'runId'>, cod
 }
 
 /** True when a recorded acceptance names this budget-stopped task at this revision. */
+/** A request's words as a person should read them: a worker's free text is labelled as such, and is never reworded. */
+export function requestText(a: Pick<ApprovalView, 'operation' | 'reason'>): string {
+  if (a.reason === null) return 'Unspecified request';
+  return a.operation !== null && (WORKER_APPROVAL_OPERATIONS as readonly string[]).includes(a.operation) ? `Worker-supplied reason: ${a.reason}` : sentence(a.reason);
+}
+
 export const reducedScopeCovers = (run: RunView | undefined, task: Pick<TaskView, 'taskId' | 'revision'>): boolean =>
   run?.reducedScope?.notDelivered.tasks.some((t) => t.taskId === task.taskId && t.revision === task.revision) ?? false;
 
@@ -201,7 +208,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
 
   // A budget stop is on a closed task, so it blocks nothing now. While its run is open the operator still has to choose: fund it or accept reduced scope.
   for (const task of Object.values(snapshot.tasks)) {
-    if (task.status !== 'cancelled' || task.cancelReason !== 'budget_exhausted') continue;
+    if (!isBudgetStopped(task, snapshot.runs[task.runId])) continue;
     const runState = snapshot.runs[task.runId]?.lifecycle;
     const runOpen = runState !== 'merged' && runState !== 'failed' && runState !== 'cancelled';
     const accepted = reducedScopeCovers(snapshot.runs[task.runId], task);
@@ -219,18 +226,19 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     if (task && isClosedTask(task)) continue;
     const hit = task ? affected(task) : Object.values(snapshot.tasks).filter((t) => t.runId === approval.runId && !isClosedTask(t)).map((t) => t.taskId);
     const name = task ? titleOf(task) : 'This run';
-    const asked = approval.reason ? sentence(approval.reason) : 'Unspecified request';
+    const asked = requestText(approval);
+    const askedLine = asked.startsWith('Worker-supplied') ? asked : `Request: ${asked}.`;
     const expiresIn = state === 'pending' && approval.expiresAt !== null ? ` Expires in ${formatAge(Date.parse(approval.expiresAt) - nowMs)}.` : '';
     items.push(make(
       state === 'expired'
         ? {
             id: `decision:${approval.approvalId}`, decisionId: `decision:${approval.approvalId}`, kind: 'decision', status: 'expired', code: approval.reason, since: approval.expiresAt ?? approval.requestedAt, affectedTaskIds: hit, owner: 'You',
-            title: `${name}: approval expired`, detail: `Request: ${asked}.`,
+            title: `${name}: approval expired`, detail: askedLine,
             consequence: 'It stays paused. An expired approval is never treated as granted.', nextAction: 'Request approval again if the task still needs it.',
           }
         : {
             id: `decision:${approval.approvalId}`, decisionId: `decision:${approval.approvalId}`, kind: 'decision', status: 'open', code: approval.reason, since: approval.requestedAt, affectedTaskIds: hit, owner: 'You',
-            title: `${name}: needs your decision`, detail: `Request: ${asked}.`,
+            title: `${name}: needs your decision`, detail: askedLine,
             consequence: `It stays paused until you decide.${expiresIn}`, nextAction: 'Approve or deny the request.',
           },
     ));
@@ -239,16 +247,19 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
   for (const run of Object.values(snapshot.runs)) {
     if (run.lifecycle !== 'ready_for_review') continue;
     const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status !== 'superseded' && t.status !== 'cancelled');
-    const stopped = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'cancelled' && t.cancelReason === 'budget_exhausted');
-    const undelivered = stopped.length > 0 || (run.reducedScope?.notDelivered.tasks.length ?? 0) > 0;
-    const stoppedWord = stopped.length === 1 ? '1 task was' : `${stopped.length} tasks were`;
+    // A cancelled task is undelivered whatever cancelled it; only a budget stop also needs the reduced scope accepted.
+    const cancelled = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'cancelled');
+    const stopped = cancelled.filter((t) => isBudgetStopped(t, run));
+    const undelivered = cancelled.length > 0 || (run.reducedScope?.notDelivered.tasks.length ?? 0) > 0;
+    const stoppedWord = cancelled.length === 1 ? '1 task was' : `${cancelled.length} tasks were`;
+    const why = stopped.length === cancelled.length ? 'stopped for budget' : stopped.length === 0 ? 'cancelled' : 'cancelled or stopped for budget';
     const criteria = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision.` : null;
     const uncovered = stopped.some((t) => !reducedScopeCovers(run, t));
     items.push(make({
       id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'ready_for_review', since: run.latestEvidence?.at ?? snapshot.meta.observedAt, affectedTaskIds: tasks.map((t) => t.taskId), owner: 'You',
       title: 'Run is ready for your review',
       // Budget-stopped work never reads as done: this run did not deliver everything it planned.
-      detail: undelivered ? `${stopped.length > 0 ? `${stoppedWord} not delivered: stopped for budget.` : 'Some planned work was not delivered.'}${criteria ? ` ${criteria}` : ' Not every planned task is verified.'}` : (criteria ?? 'Every task is verified at the current revision. Per-criterion evidence is not connected.'),
+      detail: undelivered ? `${cancelled.length > 0 ? `${stoppedWord} not delivered: ${why}.` : 'Some planned work was not delivered.'}${criteria ? ` ${criteria}` : ' Not every planned task is verified.'}` : (criteria ?? 'Every task is verified at the current revision. Per-criterion evidence is not connected.'),
       consequence: 'Nothing merges without you. Agents never merge.', nextAction: uncovered ? 'Accept the reduced scope before a pull request can open.' : 'Review the pull request and merge it on GitHub.',
     }));
   }

@@ -130,7 +130,7 @@ export async function expireApprovals(ctx: SchedulerContext, now: Date): Promise
       const locked = (await tx.select().from(schema.approvals).where(where).for('update'))[0];
       // Recheck under the lock: a decision may have landed since the scan.
       if (!locked || locked.outcome !== 'pending' || !locked.expiresAt || locked.expiresAt.getTime() > now.getTime()) return false;
-      await tx.update(schema.approvals).set({ outcome: 'expired' }).where(where);
+      await tx.update(schema.approvals).set({ outcome: 'expired', resolvedAt: now }).where(where);
       const payload = { reason: 'approval_expired', approvalId: locked.approvalId, scopeHash: locked.scopeHash, expiresAt: locked.expiresAt.toISOString() };
       if (key && task && task.status === 'awaiting_approval' && task.currentRevision === locked.revision) {
         const revision = await tx.select({ spec: schema.taskRevisions.spec, runId: schema.taskRevisions.runId }).from(schema.taskRevisions).where(and(

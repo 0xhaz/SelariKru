@@ -1,11 +1,9 @@
 import type { AuthorizedViewCommand, CommandReceipt } from '@selarikru/view-protocol';
 import type { DecisionAction, DecisionCardModel } from './model.ts';
 
-const cardName = (card: DecisionCardModel): string => card.title.replace(/^"|"$/g, '');
-
 /** What a person hears and reads after a command was accepted. Granted and executed are different records, so this says only what was recorded. */
 export function outcomeMessage(card: DecisionCardModel, action: Extract<DecisionAction, { kind: 'command' }>, command: AuthorizedViewCommand, receipt: CommandReceipt): string {
-  const name = cardName(card);
+  const name = card.title;
   switch (command.command) {
     case 'approval.grant': return `${action.label} recorded for ${name}. The scheduler picks it up; that is not the same as it running.`;
     case 'approval.deny': return `Denial recorded for ${name}.`;
@@ -28,6 +26,8 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   scope_mismatch: { text: 'This request changed; review the updated details. Nothing was decided.', changed: true },
   approval_expired: { text: 'This request expired while you were deciding, so it was not granted. It can only be denied now.', changed: true },
   unknown_target: { text: 'This no longer exists on the server. Nothing was decided.', changed: true },
+  approval_already_resolved: { text: 'This request was already decided, so nothing new was recorded.', changed: false },
+  reduced_scope_changed: { text: 'This request changed: what was not delivered is different now. Nothing was accepted; review the updated list.', changed: true },
   not_allowed: { text: 'The server refused this, and nothing was recorded.', changed: false },
   invalid_command: { text: 'The server could not read this command, and nothing was recorded.', changed: false },
   policy_denied: { text: 'Policy does not allow this, so it was not recorded. No approval can override it.', changed: false },
@@ -44,3 +44,7 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
 
 export const rejectionView = (rejection: CommandReceipt['rejection']): RejectionView => REJECTION[rejection ?? 'not_allowed'];
 export const NETWORK_MESSAGE = 'The server could not be reached, so we cannot say whether this was recorded. Trying again is safe.';
+/** Nothing left the browser: different from a request that went out and got no answer. */
+export const NOT_SENT_MESSAGE = 'Not sent: the connection dropped before this could go out, so nothing was decided.';
+export const CHANGED_NOT_SENT_MESSAGE = 'This request changed while you were deciding. Nothing was sent; review it again.';
+export const GONE_NOT_SENT_MESSAGE = 'That request is no longer waiting. Nothing was sent.';

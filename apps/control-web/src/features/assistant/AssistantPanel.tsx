@@ -34,6 +34,20 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
   const reqRef = useRef(0);
   const [target, setTarget] = useState<Target>({ projectId: defaults?.projectId ?? '', runId: defaults?.runId ?? '' });
   const [announce, setAnnounce] = useState('');
+  // Arriving from a Decisions card: the run is filled in, and the task being replanned is named.
+  const [replanFor, setReplanFor] = useState<{ runId: string; taskId: string | null } | null>(null);
+  useEffect(() => {
+    const read = (): void => {
+      const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
+      const run = params.get('run');
+      if (!run) return;
+      setTarget((t) => ({ ...t, runId: run }));
+      setReplanFor({ runId: run, taskId: params.get('task') });
+    };
+    read();
+    window.addEventListener('hashchange', read);
+    return () => window.removeEventListener('hashchange', read);
+  }, []);
   const brief = briefById(briefId);
   const effectiveDemo = demo && !brief.restricted;
   const heldRef = useRef<string | null>(null);
@@ -148,6 +162,7 @@ export function AssistantPanel({ adapter, api, hold, defaults }: AssistantPanelP
         {effectiveDemo ? <Chip tone="warning">Demo data</Chip> : null}
       </header>
       <p role="status" aria-live="polite" className="sr-only">{announce}</p>
+      {replanFor ? <p data-testid="replan-context" className="mb-4 rounded-chip border border-active bg-active-tint p-3 text-fg">Replanning {replanFor.taskId ? <>task <span className="font-mono text-mono">{replanFor.taskId}</span> in </> : null}run <span className="font-mono text-mono">{replanFor.runId}</span>. Draft a task plan below; a new revision replaces the current one once you accept it.</p> : null}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <div className="space-y-4">
           <RequestForm target={target} onTarget={setTarget} onGenerate={() => void onGenerate()} />

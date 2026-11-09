@@ -72,6 +72,8 @@ export interface Fixture {
   readonly silences: Readonly<Record<string, Silence>>;
   /** What the provider has said about a run's pull request. Reconciliation has no event, so this is snapshot data. */
   readonly changeRequests?: readonly ChangeRequestView[];
+  /** Tasks with a budget stop in flight, by when it began. A real stop writes a command row and no event until the task is cancelled, so this is snapshot data. */
+  readonly budgetStopping?: Readonly<Record<string, number>>;
 }
 
 /** Ids are namespaced per fixture so a command or terminal request can only ever match one project. */
@@ -95,6 +97,7 @@ export class FixtureBuilder {
   readonly taskSeeds: TaskSeed[] = [];
   readonly approvalSeeds: ApprovalSeed[] = [];
   readonly silences: Record<string, Silence> = {};
+  readonly budgetStopping: Record<string, number> = {};
   private readonly next: () => number;
   private readonly revisions = new Map<string, number>();
 
@@ -118,6 +121,12 @@ export class FixtureBuilder {
 
   approval(local: string, seed: { task: string | null; scopeHash: string; reason: string; expiresAtSec: number; operation?: string; destination?: string }): this {
     this.approvalSeeds.push({ approvalId: this.id(local), taskId: seed.task === null ? null : this.id(seed.task), scopeHash: seed.scopeHash, reason: seed.reason, expiresAt: fixtureTime(seed.expiresAtSec), operation: seed.operation ?? null, destination: seed.destination ?? null });
+    return this;
+  }
+
+  /** A budget stop is in flight from `fromSec`; the fixture's later `task.cancelled` ends it. */
+  stopping(taskLocal: string, fromSec: number): this {
+    this.budgetStopping[this.id(taskLocal)] = fromSec;
     return this;
   }
 

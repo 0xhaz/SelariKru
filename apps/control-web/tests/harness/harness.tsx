@@ -41,6 +41,8 @@ interface Scenario {
   fault?: 'reconnecting' | 'dead';
   /** Refuses commands with this rejection, to exercise a server refusal. */
   rejectWith?: string;
+  /** A command that never answers, to show the busy state. */
+  holdExecute?: boolean;
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -53,6 +55,7 @@ declare global {
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
     __store: typeof useAssistantStore;
+    __projection?: ProjectionStore;
     __hold: RestrictedDraftHold;
   }
 }
@@ -184,6 +187,7 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
+      if (sc.holdExecute) return new Promise(() => {});
       if (sc.rejectWith) return Promise.resolve({ idempotencyKey: command.idempotencyKey, operationId: null, accepted: false, execution: 'rejected', rejection: sc.rejectWith as never, replayed: false, simulated: true });
       return session.source.execute(command);
     },
@@ -195,6 +199,7 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
   window.__spiedSource = source;
   const spied = createProjectionStore({ source, projectId: project.projectId, clock: session.clockFor(project.projectId), every: session.every });
   spied.getState().start();
+  window.__projection = spied;
   return { store: spied, label: project.name };
 }
 

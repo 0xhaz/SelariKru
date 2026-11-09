@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { DataSourceException, startProjection, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type SessionStatus } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type SessionStatus } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -33,6 +33,14 @@ export interface ProjectionStoreState {
 }
 
 export type ProjectionStore = StoreApi<ProjectionStoreState>;
+
+/** The store refused to send a command because the session is not live. Nothing left the browser, unlike a request that went out and got no answer. */
+export class CommandNotSent extends Error {
+  constructor() {
+    super('the session is not live, so the command was not sent');
+    this.name = 'CommandNotSent';
+  }
+}
 
 export function connectionOf(s: Pick<ProjectionStoreState, 'hasSource' | 'status' | 'loaded' | 'projection'>): ConnectionState {
   if (!s.hasSource) return 'unavailable';
@@ -98,7 +106,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         open();
       },
       async execute(command) {
-        if (!source || connectionOf(get()) !== 'live') throw new DataSourceException({ code: 'disconnected', message: 'the session is not live', retryable: true });
+        if (!source || connectionOf(get()) !== 'live') throw new CommandNotSent();
         return source.execute(command);
       },
       refresh() {

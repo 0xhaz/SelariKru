@@ -31,6 +31,7 @@ export const ERROR_CODES = [
   'idempotency_key_conflict',
   'scope_mismatch',
   'approval_already_resolved',
+  'reduced_scope_changed',
   'approval_expired',
   'lease_conflict',
   'actor_not_permitted',

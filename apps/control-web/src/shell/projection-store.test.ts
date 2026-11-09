@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildFixture, createMockDataSource, createSeededClock, FIXTURE_T0_MS } from '@selarikru/data-source-mock';
 import { DataSourceException, type DataSourceError, type EngineeringDataSource } from '@selarikru/view-protocol';
-import { connectionOf, createProjectionStore, type Scheduler } from './projection-store.ts';
+import { CommandNotSent, connectionOf, createProjectionStore, type Scheduler } from './projection-store.ts';
 
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 10; i += 1) await Promise.resolve();
@@ -145,5 +145,14 @@ describe('with no data source at all', () => {
     store.getState().start();
     expect(connectionOf(store.getState())).toBe('unavailable');
     expect(store.getState().projection).toBeNull();
+  });
+});
+
+describe('commands', () => {
+  it('refuses to send while the session is not live, and says nothing was sent', async () => {
+    const execute = vi.fn();
+    const store = createProjectionStore({ source: { mode: 'mock', getSnapshot: () => new Promise(() => {}), subscribe: () => () => {}, execute, openTerminal: vi.fn(), disconnect: vi.fn() } as never, projectId: 'p', clock: { nowMs: () => 0 }, every: () => () => {} });
+    await expect(store.getState().execute({ command: 'task.cancel', expectedRevision: 0, idempotencyKey: 'k', args: { taskId: 't' } })).rejects.toBeInstanceOf(CommandNotSent);
+    expect(execute).not.toHaveBeenCalled();
   });
 });

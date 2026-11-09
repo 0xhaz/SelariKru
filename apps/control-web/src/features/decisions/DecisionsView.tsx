@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Chip, EmptyState, Panel, Timestamp, formatAge } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
-import type { ConnectionState } from '../../shell/projection-store.ts';
+import { CommandNotSent, type ConnectionState } from '../../shell/projection-store.ts';
+import { hrefFor } from '../../shell/route.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
 import { DecisionCard } from './DecisionCard.tsx';
-import { NETWORK_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
+import { CHANGED_NOT_SENT_MESSAGE, GONE_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
 import type { DecisionAction, DecisionCardModel, DecisionsModel } from './model.ts';
 
 type CommandAction = Extract<DecisionAction, { kind: 'command' }>;
@@ -17,7 +18,7 @@ function focusById(id: string): void {
   requestAnimationFrame(() => document.getElementById(id)?.focus());
 }
 
-function Heading({ count, paused }: { count: number; paused: boolean }) {
+function Heading({ count, paused, elsewhere, counted }: { count: number; paused: boolean; elsewhere: number; counted: number }) {
   return (
     <div className="mb-5">
       <h1 id="decisions-heading" tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">Decisions</h1>
@@ -25,6 +26,8 @@ function Heading({ count, paused }: { count: number; paused: boolean }) {
         {count === 0 ? 'Nothing is waiting for you.' : `${count} ${count === 1 ? 'decision is' : 'decisions are'} waiting for you.`}
         {paused ? ' Decisions are paused until the connection is live.' : ''}
       </p>
+      {elsewhere > 0 ? <p className="mt-1 text-sm text-muted" data-testid="decisions-elsewhere">{elsewhere} more {elsewhere === 1 ? 'item needs' : 'items need'} you but {elsewhere === 1 ? 'has' : 'have'} no decision here: <a className="text-active underline underline-offset-2" href={hrefFor('overview')}>see Mission Control</a>.</p> : null}
+      {counted > count ? <p className="mt-1 text-sm text-muted" data-testid="decisions-grouped">The header counts {counted} items; some share one decision here.</p> : null}
     </div>
   );
 }
@@ -40,6 +43,10 @@ export interface DecisionsViewProps {
   readonly leaveDemoHref?: string | undefined;
   /** What the run is doing while the queue is empty, so a quiet screen still answers "are we progressing?". */
   readonly delivery: { readonly criteria: string; readonly blocker: string | null } | null;
+  /** Items needing a person that this queue has no card for, so the header's attention count and this one can be told apart. */
+  readonly elsewhere: number;
+  /** How many of the attention items that need a person do have a card. Several can share one, such as two tasks stopped by one budget. */
+  readonly counted: number;
   readonly onRestart: () => void;
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
@@ -50,7 +57,7 @@ export interface DecisionsViewProps {
  * The queue of things only a person can decide. Inspecting never resolves anything: a command is sent only by pressing a button that names its outcome, and
  * a button is on only while the session is live and the card still matches what the person last looked at.
  */
-export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, onRestart, onExecute, onRefresh, onResync }: DecisionsViewProps) {
+export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync }: DecisionsViewProps) {
   if (failure !== undefined) throw failure;
 
   // The fingerprint a person last acknowledged per card. A change on screen is held back until they have looked again.
@@ -58,7 +65,8 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
   const [refused, setRefused] = useState<Readonly<Record<string, string>>>({});
   const [busy, setBusy] = useState<Readonly<Record<string, string>>>({});
-  const [confirming, setConfirming] = useState<{ card: DecisionCardModel; action: CommandAction } | null>(null);
+  // Ids only: the dialog always reads the live card, so it can never confirm something that has changed.
+  const [confirming, setConfirming] = useState<{ cardId: string; actionId: string; fingerprint: string | null } | null>(null);
   const [status, setStatus] = useState('');
   // One key per intended outcome, kept across a network failure so a retry cannot apply twice.
   const keys = useRef(new Map<string, string>());
@@ -70,6 +78,11 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     const next = new Set([...changedHere].filter((id) => ids.has(id)));
     let changed = next.size !== changedHere.size;
     for (const c of cards) {
+      // Nothing known yet means nothing to compare: the first real reading is not a change.
+      if (c.fingerprint === null) {
+        seen.current.delete(c.id);
+        continue;
+      }
       const was = seen.current.get(c.id);
       if (was === undefined) seen.current.set(c.id, c.fingerprint);
       else if (was !== c.fingerprint && !next.has(c.id)) {
@@ -96,8 +109,27 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     }
   }, [cards]);
 
+  // A dialog is only good for the card as it was when opened, and only while the session is live.
+  const liveConfirm = confirming ? (cards?.find((c) => c.id === confirming.cardId) ?? null) : null;
+  const liveAction = liveConfirm?.actions.find((a): a is CommandAction => a.kind === 'command' && a.id === confirming?.actionId) ?? null;
+  const confirmStale = confirming !== null && (connection !== 'live' || liveConfirm === null || liveAction === null || liveConfirm.fingerprint !== confirming.fingerprint);
+  useEffect(() => {
+    if (!confirming || !confirmStale) return;
+    setConfirming(null);
+    if (liveConfirm === null) {
+      setStatus(GONE_NOT_SENT_MESSAGE);
+      return;
+    }
+    const offline = connection !== 'live';
+    const message = offline ? NOT_SENT_MESSAGE : CHANGED_NOT_SENT_MESSAGE;
+    setRefused((r) => ({ ...r, [liveConfirm.id]: message }));
+    if (!offline) setChangedHere((s) => new Set(s).add(liveConfirm.id));
+    setStatus(message);
+    focusById(`feedback-${liveConfirm.id}`);
+  }, [confirming, confirmStale, liveConfirm, connection]);
+
   const review = useCallback((card: DecisionCardModel) => {
-    seen.current.set(card.id, card.fingerprint);
+    if (card.fingerprint !== null) seen.current.set(card.id, card.fingerprint);
     setChangedHere((s) => { const n = new Set(s); n.delete(card.id); return n; });
     setRefused((r) => { const { [card.id]: _gone, ...rest } = r; return rest; });
     focusById(`${card.id}-title`);
@@ -114,10 +146,11 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     let receipt: CommandReceipt;
     try {
       receipt = await onExecute(command);
-    } catch {
+    } catch (e) {
       setBusy((b) => { const { [card.id]: _x, ...rest } = b; return rest; });
-      setRefused((r) => ({ ...r, [card.id]: NETWORK_MESSAGE }));
-      setStatus(NETWORK_MESSAGE);
+      const message = e instanceof CommandNotSent ? NOT_SENT_MESSAGE : NETWORK_MESSAGE;
+      setRefused((r) => ({ ...r, [card.id]: message }));
+      setStatus(message);
       focusById(`feedback-${card.id}`);
       return;
     }
@@ -146,7 +179,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     if (connection === 'unavailable') {
       return (
         <>
-          <Heading count={0} paused />
+          <Heading count={0} paused elsewhere={0} counted={0} />
           <section aria-label="Connection" className="rounded-card border border-line bg-panel">
             <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>
@@ -167,7 +200,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   const live = connection === 'live';
   return (
     <>
-      <Heading count={model.waiting} paused={model.paused !== null} />
+      <Heading count={model.waiting} paused={model.paused !== null} elsewhere={elsewhere} counted={counted} />
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
       {/* One polite line per decision. Clock ticks and heartbeats write nothing here. */}
       <p role="status" aria-live="polite" data-testid="decision-status" className={status ? 'mb-4 rounded-chip border border-active bg-active-tint p-3 text-fg' : 'sr-only'}>{status}</p>
@@ -201,7 +234,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
                   busyId={busy[card.id] ?? null}
                   nowMs={nowMs}
                   feedback={feedback}
-                  onCommand={(a) => { if (a.confirm) setConfirming({ card, action: a }); else void dispatch(card, a); }}
+                  onCommand={(a) => { if (a.confirm) setConfirming({ cardId: card.id, actionId: a.id, fingerprint: card.fingerprint }); else void dispatch(card, a); }}
                   onReview={() => review(card)}
                 />
               </li>
@@ -212,15 +245,18 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
 
       {model.history.length > 0 ? (
         <div className="mt-6">
-          <Panel title="Recorded in this session" labelId="decisions-history" aside="A grant is a record; the work runs separately">
+          <Panel title="Decision history" labelId="decisions-history" aside="Recent, from the server and this session. A grant is a record; the work runs separately.">
             <ul className="divide-y divide-line">
               {model.history.map((h) => (
-                <li key={h.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2" data-testid="history-entry">
-                  <span className="flex min-w-0 flex-wrap items-center gap-2">
-                    <Chip tone={h.tone}>{h.outcome}</Chip>
-                    <span className="wrap-anywhere text-fg">{h.subject}</span>
-                  </span>
-                  <span className="text-sm text-muted"><Timestamp iso={h.at}>{`${formatAge(nowMs - Date.parse(h.at))} ago`}</Timestamp></span>
+                <li key={h.id} className="py-2" data-testid="history-entry">
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <span className="flex min-w-0 flex-wrap items-center gap-2">
+                      <Chip tone={h.tone}>{h.outcome}</Chip>
+                      <span className="wrap-anywhere text-fg">{h.subject}</span>
+                    </span>
+                    <span className="text-sm text-muted">{h.at ? <Timestamp iso={h.at}>{`${formatAge(nowMs - Date.parse(h.at))} ago`}</Timestamp> : 'Time not recorded'}</span>
+                  </div>
+                  <p className="mt-1 text-sm text-muted wrap-anywhere">{h.approver ? `By ${h.approver}` : 'Approver not reported yet'}. {h.scope ? `${h.scope}. ` : 'Scope not recorded. '}{h.execution}</p>
                 </li>
               ))}
             </ul>
@@ -228,12 +264,12 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
         </div>
       ) : null}
 
-      {confirming ? (
+      {confirming && !confirmStale && liveConfirm && liveAction?.confirm ? (
         <ConfirmDialog
-          copy={confirming.action.confirm!}
-          confirmLabel={confirming.action.label}
+          copy={liveAction.confirm}
+          confirmLabel={liveAction.label}
           onKeep={() => setConfirming(null)}
-          onConfirm={() => { const c = confirming; setConfirming(null); void dispatch(c.card, c.action); }}
+          onConfirm={() => { setConfirming(null); void dispatch(liveConfirm, liveAction); }}
         />
       ) : null}
     </>

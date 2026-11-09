@@ -13,7 +13,7 @@ const CLOUD = 'runner_cloud_1';
 const ASSISTANT_DEVICE = { mode: 'PREFER_ON_DEVICE', observedSource: 'on_device' } as const;
 
 function done(b: FixtureBuilder, f: Omit<Fixture, 'projectId' | 'events' | 'tasks' | 'approvals' | 'silences'>): Fixture {
-  return { ...f, projectId: b.projectId, events: b.buildEvents(), tasks: b.taskSeeds, approvals: b.approvalSeeds, silences: b.silences };
+  return { ...f, projectId: b.projectId, events: b.buildEvents(), tasks: b.taskSeeds, approvals: b.approvalSeeds, silences: b.silences, budgetStopping: b.budgetStopping };
 }
 const tokens = (b: FixtureBuilder, t: string, a: string, prov: 'observed' | 'estimated' | 'unavailable', src: string, qty: [string | null, string | null]) => [
   b.use(t, a, figure('input_tokens', qty[0], prov, src)),
@@ -42,15 +42,15 @@ function healthyParallelWork(): Fixture {
 function humanWait(): Fixture {
   const b = new FixtureBuilder('human-wait', 202);
   b.task('migrate', { title: 'Add feedback table', role: 'backend', criteria: 2 }).task('ui', { title: 'Empty states', role: 'frontend', criteria: 3 });
-  b.approval('apr_docs_domain', { task: 'migrate', scopeHash: 'scope-docs-domain', reason: 'Needs the documentation site to confirm the error codes.', expiresAtSec: 3640, operation: 'new_domain', destination: 'docs.example.com' });
+  b.approval('apr_docs_domain', { task: 'migrate', scopeHash: 'scope-docs-domain', reason: 'Backfilling rewrites every row of the feedback table.', expiresAtSec: 3640, operation: 'destructive_data_migration' });
   b.plan(1, ['migrate', 'ui']).ready('migrate', 5).start('migrate', 'att_mig_1', 6, LOCAL, 'local', 'cloud').ready('ui', 5).start('ui', 'att_ui_1', 7, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'migrate', attempt: 'att_mig_1', payload: { fence: 1, reason: 'Needs the documentation site to confirm the error codes.' } });
+  b.emit('approval.requested', 40, { task: 'migrate', attempt: 'att_mig_1', payload: { fence: 1, reason: 'Backfilling rewrites every row of the feedback table.', operation: 'destructive_data_migration' } });
   // A grant releases the task to `ready` by itself; the scheduler then claims it again.
   b.emit('approval.granted', 150, { task: 'migrate', actor: HUMAN, payload: { approvalId: b.id('apr_docs_domain'), scopeHash: 'scope-docs-domain', actionHash: 'action-docs-domain' } });
   b.start('migrate', 'att_mig_2', 155, LOCAL, 'local', 'cloud', 2);
   return done(b, {
     id: 'human-wait', name: 'Human wait', startSec: 90, assistant: ASSISTANT_DEVICE,
-    description: 'One task waits for a person to allow a documentation domain. Its worker shows waiting_human; the other keeps working.',
+    description: 'One task waits for a person to record a decision on a destructive migration. Its worker shows waiting_human; the other keeps working.',
     usage: [b.use('migrate', 'att_mig_1', figure('cost_usd', '0.11', 'estimated', 'rate_card')), b.use('ui', 'att_ui_1', figure('cost_usd', '0.19', 'estimated', 'rate_card'))],
   });
 }
@@ -105,7 +105,7 @@ function contractChange(): Fixture {
     .task('web', { title: 'Feedback list UI (contract v2)', role: 'frontend', dependsOn: ['contract'], revision: 2, planRevision: 2, criteria: 3 });
   b.approval('apr_contract_v2', { task: 'contract', scopeHash: 'scope-contract-v2', reason: 'The contract renames a field that clients depend on.', expiresAtSec: 7265, operation: 'breaking_api_change' });
   b.plan(1, ['api', 'contract', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('contract', 5).start('contract', 'att_con_1', 7, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'contract', attempt: 'att_con_1', payload: { fence: 1, reason: 'The contract renames a field that clients depend on.' } });
+  b.emit('approval.requested', 40, { task: 'contract', attempt: 'att_con_1', payload: { fence: 1, reason: 'The contract renames a field that clients depend on.', operation: 'breaking_api_change' } });
   // The revised plan is a single event. Nothing says which tasks changed except the ids; the snapshot carries the new revision.
   b.plan(2, ['web'], 60);
   b.emit('approval.granted', 140, { task: 'contract', actor: HUMAN, payload: { approvalId: b.id('apr_contract_v2'), scopeHash: 'scope-contract-v2', actionHash: 'action-contract-v2' } });
@@ -132,10 +132,10 @@ function failedCi(): Fixture {
 
 function expiredApproval(): Fixture {
   const b = new FixtureBuilder('expired-approval', 808);
-  b.task('docs', { title: 'Fetch vendor docs', role: 'research', criteria: 1 });
-  b.approval('apr_vendor_docs', { task: 'docs', scopeHash: 'scope-vendor-docs', reason: 'Needs the vendor API documentation to write the client.', expiresAtSec: 640, operation: 'new_domain', destination: 'docs.vendor.example' });
+  b.task('docs', { title: 'Vendor API client', role: 'backend', criteria: 1 });
+  b.approval('apr_vendor_docs', { task: 'docs', scopeHash: 'scope-vendor-docs', reason: 'The client changes its public response shape.', expiresAtSec: 640, operation: 'breaking_api_change' });
   b.plan(1, ['docs']).ready('docs', 5).start('docs', 'att_docs_1', 6, CLOUD, 'cloud', 'cloud');
-  b.emit('approval.requested', 40, { task: 'docs', attempt: 'att_docs_1', payload: { fence: 1, reason: 'Needs the vendor API documentation to write the client.' } });
+  b.emit('approval.requested', 40, { task: 'docs', attempt: 'att_docs_1', payload: { fence: 1, reason: 'The client changes its public response shape.', operation: 'breaking_api_change' } });
   return done(b, {
     id: 'expired-approval', name: 'Expired approval', startSec: 700, assistant: { mode: 'PREFER_IN_CLOUD', observedSource: 'in_cloud' },
     description: 'An approval request passed its expiry. It reads as expired and the task stays awaiting approval; expiry is an explicit outcome and never a grant.',
@@ -242,13 +242,17 @@ function budgetStop(): Fixture {
   const b = new FixtureBuilder('budget-stop', 1515);
   b.task('api', { title: 'Feedback API', role: 'backend', criteria: 2, requirements: ['FB-01', 'FB-02'], checks: ['chk-api'] })
     .task('search', { title: 'Search index', role: 'backend', criteria: 2, requirements: ['FB-03'], checks: ['chk-search-1', 'chk-search-2'] })
-    .task('web', { title: 'Search results UI', role: 'frontend', dependsOn: ['search'], criteria: 1, requirements: ['FB-04'], checks: ['chk-web-1'] });
-  b.plan(1, ['api', 'search', 'web']).ready('api', 3).start('api', 'att_api_1', 4, LOCAL, 'local', 'cloud').ready('search', 4).start('search', 'att_search_1', 5, CLOUD, 'cloud', 'cloud');
+    .task('web', { title: 'Search results UI', role: 'frontend', dependsOn: ['search'], criteria: 1, requirements: ['FB-04'], checks: ['chk-web-1'] })
+    .task('docs', { title: 'Public changelog', role: 'docs', criteria: 1, requirements: ['FB-05'], checks: ['chk-docs-1'] });
+  b.plan(1, ['api', 'search', 'web', 'docs']).ready('api', 3).start('api', 'att_api_1', 4, LOCAL, 'local', 'cloud').ready('search', 4).start('search', 'att_search_1', 5, CLOUD, 'cloud', 'cloud');
   b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 55, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
   b.emit('task.cancelled', 70, { task: 'search', attempt: 'att_search_1', actor: REAPER, payload: { reason: 'budget_exhausted', attemptId: b.id('att_search_1'), cause: 'budget_exhausted' } });
+  // A second stop lands later and takes a while: a client that opens the fixture before 85 s sees it in flight.
+  b.ready('docs', 41).start('docs', 'att_docs_1', 42, LOCAL, 'local', 'cloud').stopping('docs', 75);
+  b.emit('task.cancelled', 85, { task: 'docs', attempt: 'att_docs_1', actor: REAPER, payload: { reason: 'budget_exhausted', attemptId: b.id('att_docs_1'), cause: 'budget_exhausted' } });
   return done(b, {
     id: 'budget-stop', name: 'Budget stop', startSec: 90, assistant: ASSISTANT_DEVICE,
-    description: 'The run budget ran out while the search index was being built. The API is verified; the search index and its dependent UI are not delivered.',
+    description: 'The run budget ran out while the search index was being built. The API is verified; the search index, its dependent UI and the changelog are not delivered.',
     usage: [b.use('search', 'att_search_1', figure('cost_usd', '2.50', 'estimated', 'rate_card')), b.use('api', 'att_api_1', figure('cost_usd', '0.42', 'estimated', 'rate_card'))],
   });
 }

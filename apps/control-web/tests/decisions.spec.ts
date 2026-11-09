@@ -100,7 +100,7 @@ test('a confirmed denial records one command, keeps its key, and moves focus to 
   const title = await first.getByRole('heading', { level: 2 }).innerText();
   await first.getByRole('button', { name: 'Deny and block task' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Deny and block task' }).click();
-  await expect(page.getByTestId('decision-status')).toContainText('Denial recorded');
+  await expect(page.getByTestId('decision-status')).toHaveText('Denial recorded for Start "Search index" in a cloud sandbox.');
   await expect(page.getByTestId('history-entry')).toContainText(['Denied']);
   await expect(page.locator(':focus')).toHaveRole('heading');
   expect(await page.locator(':focus').innerText()).not.toEqual(title);
@@ -148,5 +148,83 @@ test('a deep link from Mission Control lands on the card', async ({ page }) => {
   await page.goto('/tests/harness/index.html#/overview');
   await page.getByTestId('decision-link').first().click();
   await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
-  await expect(page.locator(':focus')).toContainText('vendor');
+  await expect(page.locator(':focus')).toContainText('Vendor');
+});
+
+async function openDeny(page: Page): Promise<void> {
+  await card(page, 'approval').first().getByRole('button', { name: 'Deny and block task' }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+}
+
+test('a confirm dialog closes and says so when the request changes under it, and sends nothing', async ({ page }) => {
+  await open(page, { spiedFixture: 'decision-queue' });
+  await openDeny(page);
+  await page.evaluate(() => {
+    const store = (window as unknown as { __projection: { getState(): { projection: { snapshot: { approvals: Record<string, { scopeHash: string }> } } }; setState(s: unknown): void } }).__projection;
+    const p = store.getState().projection;
+    const [id, a] = Object.entries(p.snapshot.approvals)[0]!;
+    store.setState({ projection: { ...p, snapshot: { ...p.snapshot, approvals: { ...p.snapshot.approvals, [id]: { ...a, scopeHash: 'moved' } } } } });
+  });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('request-changed').first()).toContainText('This request changed');
+  await expect(page.getByTestId('card-feedback').first()).toContainText('Nothing was sent');
+  expect(await commands(page)).toEqual([]);
+});
+
+test('a confirm dialog closes when the session stops being live, with not-sent copy', async ({ page }) => {
+  await open(page, { spiedFixture: 'decision-queue' });
+  await openDeny(page);
+  await page.evaluate(() => (window as unknown as { __projection: { setState(s: unknown): void } }).__projection.setState({ status: 'reconnecting' }));
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('card-feedback').first()).toContainText('Not sent');
+  await expect(page.getByTestId('card-feedback').first()).not.toContainText('cannot say');
+  expect(await commands(page)).toEqual([]);
+});
+
+test('a busy decision shows it is sending', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue', holdExecute: true }; });
+  await page.goto('/tests/harness/index.html#/decisions');
+  const c = card(page, 'approval').first();
+  await c.getByRole('button', { name: 'Grant cloud start' }).click();
+  await expect(c.getByRole('button', { name: /Grant cloud start/ })).toHaveAttribute('data-busy', 'true');
+  await expect(c).toContainText('Sending');
+});
+
+test('history keeps a decision after a resync', async ({ page }) => {
+  await open(page, { spiedFixture: 'decision-queue' });
+  await card(page, 'approval').first().getByRole('button', { name: 'Deny and block task' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Deny and block task' }).click();
+  const entry = page.getByTestId('history-entry');
+  await expect(entry.first()).toContainText('Denied');
+  await page.evaluate(() => (window as unknown as { __projection: { getState(): { resync(): void } } }).__projection.getState().resync());
+  await expect(entry.first()).toContainText('Denied');
+  await expect(entry.first()).toContainText('By demo-operator');
+  await expect(page.getByRole('region', { name: 'Decision history' })).toContainText('A grant is a record');
+});
+
+test('the queue says how it differs from the header count', async ({ page }) => {
+  await open(page, { spiedFixture: 'policy-block' });
+  await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
+  await expect(page.getByTestId('decisions-count')).toContainText('1');
+  await expect(page.getByTestId('decisions-elsewhere')).toContainText('1 more item needs you');
+});
+
+test('two stops sharing one decision say why the counts differ', async ({ page }) => {
+  await open(page, { spiedFixture: 'budget-stop' });
+  await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
+  await expect(page.getByTestId('decisions-count')).toContainText('1');
+  await expect(page.getByTestId('decisions-grouped')).toContainText('The header counts 2 items');
+});
+
+test('a policy-denied card does not read as queued', async ({ page }) => {
+  await open(page, { spiedFixture: 'policy-block' });
+  await expect(card(page, 'policy_deny').first()).toContainText('Held by policy');
+  await expect(card(page, 'policy_deny').first()).not.toContainText('Queued');
+});
+
+test('replan opens the Assistant with the run and task filled in', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { shell: true }; });
+  await page.goto('/tests/harness/index.html#/assistant?run=run-42&task=task-7');
+  await expect(page.getByTestId('replan-context')).toContainText('task-7');
+  await expect(page.getByLabel('Run ID', { exact: false })).toHaveValue('run-42');
 });

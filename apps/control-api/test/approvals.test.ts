@@ -227,7 +227,37 @@ describe('budget-stopped runs', () => {
     });
     await t.db.execute(sql`UPDATE runs SET plan_revision = 1`);
   };
-  const accept = (idempotencyKey: string, expectedPlanRevision = 1) => post(h.app, `/v1/runs/${RUN}/accept-reduced-scope`, { idempotencyKey, expectedPlanRevision });
+  const shownHash = async (): Promise<string> => (await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.runs.find((r: { runId: string }) => r.runId === RUN)?.scopeAssessment?.notDeliveredHash ?? 'none-shown';
+  // A real client sends the hash that came with the list it showed.
+  const accept = async (idempotencyKey: string, expectedPlanRevision = 1, notDeliveredHash?: string) => post(h.app, `/v1/runs/${RUN}/accept-reduced-scope`, { idempotencyKey, expectedPlanRevision, notDeliveredHash: notDeliveredHash ?? (await shownHash()) });
+
+  it('refuses an acceptance of a list that is no longer the current one', async () => {
+    await seedStopped();
+    const shown = await shownHash();
+    expect(shown).toMatch(/^[0-9a-f]{64}$/);
+    // A further budget stop lands between the render and the click: another task no longer delivered.
+    await t.db.execute(sql`UPDATE task_status SET status = 'cancelled' WHERE task_id = 'done'`);
+    await t.db.insert(schema.taskCommands).values({ tenantId: TENANT, projectId: PROJECT, operationId: 'op_late', taskId: 'done', revision: 1, command: 'cancel', state: 'cancelled', requestedBy: 'budget_enforcer', requestedAt: new Date(), detail: { reason: 'budget_exhausted' } });
+    const res = await accept('moved', 1, shown);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('reduced_scope_changed');
+    expect(await countEvents('run.reduced_scope_accepted')).toBe(0);
+    const fresh = await shownHash();
+    expect(fresh).not.toBe(shown);
+    expect((await accept('after-review', 1, fresh)).status).toBe(201);
+  });
+
+  it('a resolved approval comes back in the bounded, project-scoped history with approver, time and execution', async () => {
+    await t.db.insert(schema.approvals).values([
+      { tenantId: TENANT, projectId: PROJECT, approvalId: 'h-granted', runId: RUN, requester: 'scheduler', approver: 'owner_uid_1', actionHash: 'a', scopeHash: 's1', outcome: 'granted', resolvedAt: new Date('2026-11-16T10:00:00Z'), consumedAt: new Date('2026-11-16T10:01:00Z'), consumedBy: 'att_9', detail: { operation: 'start_cloud_worker', reason: 'r' } },
+      { tenantId: TENANT, projectId: PROJECT, approvalId: 'h-denied', runId: RUN, requester: 'scheduler', approver: 'owner_uid_1', actionHash: 'a', scopeHash: 's2', outcome: 'denied', resolvedAt: new Date('2026-11-16T11:00:00Z'), detail: { operation: 'breaking_api_change', reason: 'r' } },
+      { tenantId: TENANT, projectId: PROJECT, approvalId: 'h-open', runId: RUN, requester: 'scheduler', actionHash: 'a', scopeHash: 's3', outcome: 'pending', detail: {} },
+    ]);
+    const body = (await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body as { approvalHistory: Array<Record<string, unknown>> };
+    expect(body.approvalHistory.map((a) => a['approvalId'])).toEqual(['h-denied', 'h-granted']);
+    expect(body.approvalHistory[1]).toMatchObject({ outcome: 'granted', approver: 'owner_uid_1', resolvedAt: '2026-11-16T10:00:00.000Z', consumedAt: '2026-11-16T10:01:00.000Z', consumedBy: 'att_9', operation: 'start_cloud_worker', scopeHash: 's1' });
+  });
+
 
   it('accepted reduced scope never counts stopped criteria as verified', async () => {
     await seedStopped();

@@ -252,4 +252,37 @@ describe('attention queue', () => {
       expect(items[0]!.status).toBe('expired');
     });
   });
+
+  describe('a snapshot shaped like the real route', () => {
+    const realShape = (lifecycle: 'running' | 'ready_for_review' = 'running') => {
+      const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle, scopeAssessment: { notDelivered: { tasks: [{ taskId: 'b', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: [], acceptanceCheckIds: [] }, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+      return s;
+    };
+
+    it('finds a budget stop with no cancel reason on the task', () => {
+      expect(buildAttention(realShape(), NOW, NOW).find((i) => i.id === 'budget:b')).toMatchObject({ needsOperator: true, decisionId: 'scope:run' });
+    });
+
+    it('does not say every task is verified', () => {
+      const review = buildAttention(realShape('ready_for_review'), NOW, NOW).find((i) => i.id === 'review:run')!;
+      expect(review.detail).not.toMatch(/every task is verified/i);
+      expect(review.detail).toMatch(/not delivered/i);
+      expect(review.nextAction).toMatch(/reduced scope/i);
+    });
+
+    it('a plain cancel is undelivered too, and needs no reduced scope', () => {
+      const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+      const review = buildAttention(s, NOW, NOW).find((i) => i.id === 'review:run')!;
+      expect(review.detail).not.toMatch(/every task is verified/i);
+      expect(review.detail).toMatch(/not delivered/i);
+      expect(review.nextAction).not.toMatch(/reduced scope/i);
+    });
+
+    it('labels worker free text as worker-supplied', () => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'awaiting_approval' })], approvals: [approval('apr', { taskId: 't', taskRevision: 1, operation: 'breaking_api_change', reason: 'Clients will break.' })] });
+      expect(buildAttention(s, NOW, NOW)[0]!.detail).toBe('Worker-supplied reason: Clients will break.');
+    });
+  });
 });

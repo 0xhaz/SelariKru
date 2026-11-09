@@ -249,6 +249,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
             <DecisionsView
               connection={connection} error={state.error} model={builtDecisions.decisions} failure={builtDecisions.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} leaveDemoHref={leaveDemoHref}
               delivery={overview ? { criteria: overview.delivery.criteriaLabel, blocker: overview.delivery.blocker } : null}
+              elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
+              counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
             />
           </RouteBoundary>

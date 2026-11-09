@@ -308,7 +308,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       let approvals = snap.approvals;
       if (reason === 'approval_expired') {
         const lapsed = str(p, 'approvalId') !== null ? snap.approvals[str(p, 'approvalId')!] : Object.values(snap.approvals).filter((a) => a.taskId === task.taskId && a.state === 'pending').at(-1);
-        if (lapsed && lapsed.state === 'pending') approvals = put(approvals, lapsed.approvalId, { ...lapsed, state: 'expired' as const });
+        if (lapsed && lapsed.state === 'pending') approvals = put(approvals, lapsed.approvalId, { ...lapsed, state: 'expired' as const, resolvedAt: at });
       }
       return commit({ ...moveTask(task, 'blocked', reason, at), activeAttemptId: null }, { ...snap, attempts, workers, approvals });
     }
@@ -483,6 +483,22 @@ export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSna
     changed = true;
   }
   const changeRequests = same(snap.changeRequests, fresh.changeRequests) ? snap.changeRequests : fresh.changeRequests;
-  if (!changed && changeRequests === snap.changeRequests) return state;
-  return { ...state, snapshot: { ...snap, runs, changeRequests } };
+  const approvalHistory = same(snap.approvalHistory, fresh.approvalHistory) ? snap.approvalHistory : fresh.approvalHistory;
+  if (!changed && changeRequests === snap.changeRequests && approvalHistory === snap.approvalHistory) return state;
+  return { ...state, snapshot: { ...snap, runs, changeRequests, approvalHistory } };
+}
+
+const RESOLVED: readonly ApprovalView['state'][] = ['granted', 'denied', 'expired', 'superseded'];
+
+/**
+ * Keeps approvals resolved during this session across a snapshot replacement. A snapshot lists only open approvals, so a resync would otherwise forget a
+ * decision the person just made until the server's history reports it. Open requests always come from the snapshot.
+ */
+export function carryResolvedApprovals(previous: ProjectViewSnapshot | null, fresh: ProjectViewSnapshot): ProjectViewSnapshot {
+  if (previous === null) return fresh;
+  let approvals = fresh.approvals;
+  for (const a of Object.values(previous.approvals)) {
+    if (RESOLVED.includes(a.state) && a.resolvedAt !== null && !approvals[a.approvalId]) approvals = put(approvals, a.approvalId, a);
+  }
+  return approvals === fresh.approvals ? fresh : { ...fresh, approvals };
 }

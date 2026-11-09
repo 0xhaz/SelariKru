@@ -1,6 +1,6 @@
 import { formatAge, type Tone } from '@selarikru/ui';
 import { approvalStateAt, isEmptyProject, type AttemptView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
-import { atFailedGate, blockItem, buildAttention, classifyBlock, explain, isClosedTask, latestCheckOf, sentence, type AttentionItem } from '../overview/attention.ts';
+import { atFailedGate, blockItem, buildAttention, classifyBlock, explain, isClosedTask, latestCheckOf, requestText, sentence, type AttentionItem } from '../overview/attention.ts';
 import { activeRun, taskRow } from '../overview/model.ts';
 import { checksOf, readCheck } from '../team/model.ts';
 import type { LayoutInput } from './layout.ts';
@@ -329,7 +329,7 @@ function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): W
     const open = Object.values(ctx.snapshot.approvals).filter((a) => a.taskId === t.taskId).map((a) => ({ a, state: approvalStateAt(a, ctx.nowMs) })).filter((x) => x.state === 'pending' || x.state === 'expired');
     if (open.length > 0) {
       const latest = open.sort((x, y) => y.a.requestedAt.localeCompare(x.a.requestedAt))[0]!;
-      const asked = latest.a.reason ? sentence(latest.a.reason) : 'Unspecified request';
+      const asked = requestText(latest.a);
       reasons.push(reason('approval', latest.state === 'expired' ? `A request expired and was not granted: ${asked}.` : `Waiting for your decision: ${asked}.`, { code: latest.a.reason, canApprove: latest.state === 'pending' }));
     } else if (t.status === 'awaiting_approval') {
       reasons.push(reason('approval', 'It is waiting for approval, and the request is not in this snapshot.'));
@@ -544,7 +544,7 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
   let replan: ReplanSummary | null = null;
   if (run && run.planRevision >= 2) {
     const titleOf = (t: TaskView): string => t.title ?? t.taskId;
-    const decisions = Object.values(snapshot.approvals).filter((a) => a.runId === run.runId && (approvalStateAt(a, nowMs) === 'pending')).map((a) => (a.reason ? sentence(a.reason) : 'Unspecified request'));
+    const decisions = Object.values(snapshot.approvals).filter((a) => a.runId === run.runId && (approvalStateAt(a, nowMs) === 'pending')).map(requestText);
     replan = {
       planRevision: run.planRevision,
       replanned: tasks.filter((t) => t.revision > 1 && t.status !== 'superseded').map(titleOf),

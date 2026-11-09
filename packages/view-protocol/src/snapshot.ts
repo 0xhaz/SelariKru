@@ -38,6 +38,8 @@ export type NotDelivered = z.infer<typeof NotDeliveredSchema>;
 export const ScopeAssessmentSchema = z
   .object({
     notDelivered: NotDeliveredSchema,
+    /** The digest of `notDelivered`. An acceptance sends it back, so it can only record the list that was shown. */
+    notDeliveredHash: Id,
     deliveredRequirementIds: z.array(z.string()),
     stopped: z.array(z.object({ taskId: Id, revision: z.number().int().min(1) }).strict()),
     /** Tasks with a budget stop still in flight: the scope is not final and cannot be accepted yet. */
@@ -175,6 +177,26 @@ export const ApprovalViewSchema = z
   .strict();
 export type ApprovalView = z.infer<typeof ApprovalViewSchema>;
 
+/** A request that was resolved. Snapshots return the recent ones; the open ones are in `approvals`. A grant is a record: `consumedAt` is when an attempt used it. */
+export const ApprovalHistoryEntrySchema = z
+  .object({
+    approvalId: Id,
+    runId: z.string().nullable(),
+    taskId: z.string().nullable(),
+    revision: z.number().int().min(1).nullable(),
+    outcome: z.enum(['granted', 'denied', 'expired', 'superseded']),
+    approver: z.string().nullable(),
+    scopeHash: z.string().nullable(),
+    operation: z.string().nullable(),
+    destination: z.string().nullable(),
+    requestedAt: Iso,
+    resolvedAt: Iso.nullable(),
+    consumedAt: Iso.nullable(),
+    consumedBy: z.string().nullable(),
+  })
+  .strict();
+export type ApprovalHistoryEntry = z.infer<typeof ApprovalHistoryEntrySchema>;
+
 export const CheckViewSchema = z
   .object({
     checkId: Id,
@@ -238,6 +260,8 @@ export const ProjectViewSnapshotSchema = z
     usage: z.array(UsageEntrySchema),
     /** One per run at most. Merge reconciliation has no event of its own, so this slot arrives by snapshot and the refresh carries it. */
     changeRequests: z.array(ChangeRequestViewSchema).default([]),
+    /** Recent resolved approvals, newest first and bounded by the source. */
+    approvalHistory: z.array(ApprovalHistoryEntrySchema).default([]),
   })
   .strict();
 export type ProjectViewSnapshot = z.infer<typeof ProjectViewSnapshotSchema>;
@@ -246,6 +270,6 @@ export function emptySnapshot(init: { projectId: string; observedAt: string; pro
   return {
     meta: { schemaVersion: VIEW_SCHEMA_VERSION, projectId: init.projectId, cursor: '0', observedAt: init.observedAt, provenance: init.provenance },
     assistant: { mode: null, observedSource: 'unknown' },
-    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [],
+    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [],
   };
 }

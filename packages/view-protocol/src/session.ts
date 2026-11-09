@@ -1,7 +1,7 @@
 import type { Clock } from './common.ts';
 import { cursorToSequence } from './common.ts';
 import type { DataSourceError, EngineeringDataSource } from './data-source.ts';
-import { applyEvent, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
+import { applyEvent, carryResolvedApprovals, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
 
 /** `live`: subscribed. `reconnecting`: a snapshot load failed and a retry is scheduled. `dead`: the stream cannot recover; data is frozen. */
 export type SessionStatus = 'live' | 'reconnecting' | 'dead';
@@ -187,7 +187,7 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     }
     // Progress resets the stuck-resync budget; only snapshots that go nowhere count against it.
     if (current === null || nextSeq > cursorToSequence(current.snapshot.meta.cursor)) stuck = 0;
-    current = projectionFromSnapshot(snapshot);
+    current = projectionFromSnapshot(carryResolvedApprovals(current?.snapshot ?? null, snapshot));
     asOf = options.clock.nowMs();
     setStatus('live');
     hooks.onState(current);

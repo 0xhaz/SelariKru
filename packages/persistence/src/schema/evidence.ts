@@ -72,6 +72,8 @@ export const approvals = pgTable(
     /** Set when the attempt this grant released starts. A grant releases work once; a later attempt needs a new approval. */
     consumedAt: tstz('consumed_at'),
     consumedBy: text('consumed_by'),
+    /** When the outcome left `pending`: granted, denied, expired or superseded. Null on rows closed before this column existed. */
+    resolvedAt: tstz('resolved_at'),
     createdAt: createdAt(),
   },
   (t) => [

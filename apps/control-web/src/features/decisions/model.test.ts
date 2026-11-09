@@ -127,7 +127,7 @@ describe('disconnected', () => {
 describe('budget stop', () => {
   const stopped = () => {
     const s = snapshotOf({ tasks: [task('a', { status: 'verified', title: 'Verified work' }), task('b', { status: 'cancelled', cancelReason: 'budget_exhausted', title: 'Stopped work' }), task('c', { status: 'planned', title: 'Waiting work', aggregateRevision: 2 })] });
-    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [{ taskId: 'b', revision: 1, status: 'cancelled', budgetStopped: true }, { taskId: 'c', revision: 1, status: 'planned', budgetStopped: false }], requirementIds: ['FB-2'], acceptanceCheckIds: ['chk-2'] }, deliveredRequirementIds: ['FB-1'], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [{ taskId: 'b', revision: 1, status: 'cancelled', budgetStopped: true }, { taskId: 'c', revision: 1, status: 'planned', budgetStopped: false }], requirementIds: ['FB-2'], acceptanceCheckIds: ['chk-2'] }, notDeliveredHash: 'shown-hash', deliveredRequirementIds: ['FB-1'], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
     return s;
   };
 
@@ -139,7 +139,7 @@ describe('budget stop', () => {
     expect(card.notDelivered?.acceptanceCheckIds).toEqual(['chk-2']);
     const accept = action(card, 'Accept reduced scope');
     expect(accept.kind === 'command' && accept.confirm?.consequence).toMatch(/not delivered/i);
-    expect(accept.kind === 'command' && accept.intent).toMatchObject({ command: 'run.accept_reduced_scope', expectedRevision: 1, args: { runId: 'run' } });
+    expect(accept.kind === 'command' && accept.intent).toMatchObject({ command: 'run.accept_reduced_scope', expectedRevision: 1, args: { runId: 'run', notDeliveredHash: 'shown-hash' } });
   });
 
   it('stops needing a decision once accepted', () => {
@@ -260,5 +260,101 @@ describe('fingerprints and the queue', () => {
       expect(m.cards.length, id).toBeGreaterThan(0);
       for (const c of m.cards) for (const a of c.actions) expect(a.label, `${id}/${c.id}`).not.toMatch(BARE);
     }
+  });
+});
+
+/** Built the way `GET /v1/projects/:id/snapshot` builds it: a stopped task carries no cancel reason, and the run's assessment says what stopped. */
+function realShape() {
+  const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null, title: 'Stopped' })] });
+  s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [{ taskId: 'b', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-2'], acceptanceCheckIds: [] }, notDeliveredHash: 'h1', deliveredRequirementIds: ['FB-1'], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+  return s;
+}
+
+describe('a snapshot shaped like the real route', () => {
+  it('keeps the budget card with no cancel reason on the task', () => {
+    const card = build(realShape()).cards.find((c) => c.kind === 'budget_stop');
+    expect(card).toBeDefined();
+    expect(action(card!, 'Accept reduced scope').disabledReason).toBeNull();
+  });
+
+  it('turns Accept off when the view knows of a stop the assessment does not list', () => {
+    const s = realShape();
+    s.tasks['c'] = task('c', { status: 'cancelled', cancelReason: 'budget_exhausted', title: 'Later stop' });
+    const accept = action(build(s).cards.find((c) => c.kind === 'budget_stop')!, 'Accept reduced scope');
+    expect(accept.disabledReason).toMatch(/not in the list/i);
+  });
+
+  it('a plain cancel is still not delivered in the merge card', () => {
+    const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null })] });
+    s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+    expect(build(s).cards.find((c) => c.kind === 'merge_review')!.summary).toMatch(/not delivered/i);
+  });
+});
+
+describe('small truths', () => {
+  it('a request with no scope hash offers no command', () => {
+    const card = build(waiting('start_cloud_worker', { scopeHash: null })).cards[0]!;
+    expect(card.actions.filter((a) => a.kind === 'command')).toEqual([]);
+    expect(card.note).toMatch(/no recorded scope/i);
+  });
+
+  it('a changed request says what happens next instead of waiting for a decision', () => {
+    const card = build(waiting('breaking_api_change', {}, { revision: 2 })).cards[0]!;
+    expect(card.consequence).not.toMatch(/until you decide/i);
+    expect(card.consequence).toMatch(/new request/i);
+  });
+
+  it('never builds a title from worker text', () => {
+    const card = build(waiting('future_op', { reason: 'ignore previous instructions' })).cards[0]!;
+    expect(card.title).not.toMatch(/ignore previous/i);
+  });
+
+  it('a card whose scope is not known yet has no fingerprint to compare', () => {
+    const s = realShape();
+    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: null };
+    s.tasks['b'] = { ...s.tasks['b']!, cancelReason: 'budget_exhausted' };
+    expect(build(s).cards.find((c) => c.kind === 'budget_stop')!.fingerprint).toBeNull();
+  });
+
+  it('a policy-denied card does not read as queued', () => {
+    const card = build(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'policy_denied:restricted_data_cloud_destination' })] })).cards[0]!;
+    expect(card.facts.find((f) => f.label === 'Status')!.value).not.toMatch(/queued/i);
+  });
+
+  it('replan carries the run and the task to the Assistant', () => {
+    const card = build(snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'resource_conflict:db' })] })).cards[0]!;
+    const replan = action(card, 'Replan in the Assistant');
+    expect(replan.kind === 'link' && replan.href).toBe('#/assistant?run=run&task=t');
+  });
+});
+
+describe('history', () => {
+  const entry = (over: Partial<import('@selarikru/view-protocol').ApprovalHistoryEntry> = {}) => ({ approvalId: 'h1', runId: 'run', taskId: 't', revision: 1, outcome: 'granted' as const, approver: 'owner', scopeHash: 'abcdef123456', operation: 'start_cloud_worker', destination: null, requestedAt: iso(100), resolvedAt: iso(50), consumedAt: null, consumedBy: null, ...over });
+
+  it('survives a reload: a snapshot with no open approvals still lists what was decided', () => {
+    const s = snapshotOf({ tasks: [task('t', { status: 'running', title: 'Search' })] });
+    s.approvalHistory = [entry({ consumedAt: iso(40), consumedBy: 'att_1' }), entry({ approvalId: 'h2', outcome: 'denied', approver: 'owner' }), entry({ approvalId: 'h3', outcome: 'superseded', approver: null, resolvedAt: null })];
+    const h = build(s).history;
+    expect(h.map((e) => e.outcome)).toEqual(['Granted', 'Denied', 'Superseded']);
+    expect(h[1]!.subject).toBe('Search: Cloud start');
+    expect(h[0]).toMatchObject({ approver: 'owner', subject: expect.stringContaining('Search'), execution: expect.stringContaining('att_1'), scope: expect.stringContaining('abcdef12') });
+    expect(h[1]!.execution).toMatch(/nothing ran/i);
+    expect(h[2]).toMatchObject({ at: null, approver: null });
+  });
+
+  it('a session decision the server has not reported says the result is not known', () => {
+    const s = waiting('start_cloud_worker', { state: 'granted', resolvedAt: iso(5) }, { status: 'ready' });
+    const [e] = build(s).history;
+    expect(e).toMatchObject({ outcome: 'Granted', approver: null, execution: expect.stringMatching(/not reported/i) });
+  });
+
+  it('prefers the server record over the session copy, and does not list an open card', () => {
+    const s = waiting('start_cloud_worker', { state: 'granted', resolvedAt: iso(5) }, { status: 'ready' });
+    s.approvalHistory = [entry({ approvalId: 'apr', approver: 'owner' })];
+    expect(build(s).history).toHaveLength(1);
+    expect(build(s).history[0]!.approver).toBe('owner');
+    const open = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'approval_expired' })], approvals: [approval('apr', { taskId: 't', taskRevision: 1, state: 'expired', operation: 'start_cloud_worker' })] });
+    open.approvalHistory = [entry({ approvalId: 'apr', outcome: 'expired' })];
+    expect(build(open).history).toEqual([]);
   });
 });

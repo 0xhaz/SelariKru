@@ -1,5 +1,5 @@
 import { LEASE_EXPIRY_MS, LIVENESS_STALE_MS, SUSPECT_AFTER_MS } from './common.ts';
-import type { ApprovalView, ProjectViewSnapshot, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
+import type { ApprovalView, ProjectViewSnapshot, RunView, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
 
 /** Derived reads. Time is a parameter (`nowMs`); nothing here reads a clock. */
 
@@ -39,6 +39,17 @@ export function approvalStateAt(approval: ApprovalView, nowMs: number): Approval
   return approval.state;
 }
 
+/**
+ * True when a budget stop ended this task. A snapshot says so through the run's assessment or its recorded acceptance, because it carries no cancel reason on
+ * the task; an event says so through `cancelReason`. A plain cancel is none of these.
+ */
+export function isBudgetStopped(task: Pick<TaskView, 'taskId' | 'revision' | 'status' | 'cancelReason'>, run: Pick<RunView, 'scopeAssessment' | 'reducedScope'> | undefined): boolean {
+  if (task.status !== 'cancelled') return false;
+  if (task.cancelReason === 'budget_exhausted') return true;
+  const same = (t: { taskId: string; revision: number }): boolean => t.taskId === task.taskId && t.revision === task.revision;
+  return (run?.scopeAssessment?.stopped.some(same) ?? false) || (run?.reducedScope?.notDelivered.tasks.some((t) => t.budgetStopped && same(t)) ?? false);
+}
+
 /** Blocks that a re-verification can send back without a worker. The same rule as `isReverifiableBlock` on the server. */
 export const isReverifiableReason = (code: string | null): boolean => code === 'verification_error' || (code?.startsWith('assembly_infrastructure:') ?? false);
 
@@ -53,7 +64,7 @@ export function tasksByStatus(snapshot: ProjectViewSnapshot): Record<string, rea
  * acceptance is still unmet, and leaving it out would make a run look closer to done. No percentage is derived from tokens or time.
  */
 export function verifiedCounts(snapshot: ProjectViewSnapshot, runId?: string): { verified: number; total: number } {
-  const live = Object.values(snapshot.tasks).filter((t) => (runId === undefined || t.runId === runId) && t.status !== 'superseded' && (t.status !== 'cancelled' || t.cancelReason === 'budget_exhausted'));
+  const live = Object.values(snapshot.tasks).filter((t) => (runId === undefined || t.runId === runId) && t.status !== 'superseded' && (t.status !== 'cancelled' || isBudgetStopped(t, snapshot.runs[t.runId])));
   return { verified: live.filter((t) => t.status === 'verified' || t.status === 'merged').length, total: live.length };
 }
 

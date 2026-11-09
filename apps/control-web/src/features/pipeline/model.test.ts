@@ -471,3 +471,11 @@ describe('fixtures', () => {
     expect(m.rows[0]!.rail).toBe('danger');
   });
 });
+
+describe('a snapshot shaped like the real route', () => {
+  it('sends a budget stop with no cancel reason to the Decisions card', () => {
+    const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null })] });
+    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [], requirementIds: [], acceptanceCheckIds: [] }, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+    expect(buildPipeline(s, NOW, NOW).rows.find((r) => r.taskId === 'b')!.decisionId).toBe('scope:run');
+  });
+});

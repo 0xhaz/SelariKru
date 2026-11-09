@@ -204,7 +204,8 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
     });
 
     const firstRun = (snap: ProjectViewSnapshot) => Object.values(snap.runs)[0]!;
-    const runCommand = (command: 'run.accept_reduced_scope' | 'run.reverify' | 'run.open_pull_request', runId: string, expectedRevision: number, key: string) => ({ command, expectedRevision, idempotencyKey: key, args: { runId } });
+    const runCommand = (command: 'run.reverify' | 'run.open_pull_request', runId: string, expectedRevision: number, key: string) => ({ command, expectedRevision, idempotencyKey: key, args: { runId } });
+    const acceptCommand = (run: { runId: string; scopeAssessment: { notDeliveredHash: string } | null }, expectedRevision: number, key: string, hash?: string) => ({ command: 'run.accept_reduced_scope' as const, expectedRevision, idempotencyKey: key, args: { runId: run.runId, notDeliveredHash: hash ?? run.scopeAssessment?.notDeliveredHash ?? 'none' } });
 
     it('a grant needs the exact revision and scope, and a deny replays by key', async () => {
       const ds = await setup();
@@ -220,8 +221,11 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const granted = await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'g-ok', args });
       expect(granted).toMatchObject({ accepted: true, execution: 'applied' });
       expect((await ds.source.execute({ command: 'approval.grant', expectedRevision: t.aggregateRevision, idempotencyKey: 'g-ok', args })).replayed).toBe(true);
-      expect(await ds.source.execute({ command: 'approval.deny', expectedRevision: t.aggregateRevision + 1, idempotencyKey: 'g-after', args })).toMatchObject({ accepted: false, rejection: 'not_allowed' });
-      expect((await ds.source.getSnapshot(ds.pendingApprovalProjectId)).approvals[a.approvalId]!.state).toBe('granted');
+      expect(await ds.source.execute({ command: 'approval.deny', expectedRevision: t.aggregateRevision + 1, idempotencyKey: 'g-after', args })).toMatchObject({ accepted: false, rejection: 'approval_already_resolved' });
+      const resolved = await ds.source.getSnapshot(ds.pendingApprovalProjectId);
+      expect(resolved.approvals[a.approvalId]!.state).toBe('granted');
+      // A later load, like a reload of the page, still reports the decision.
+      expect(resolved.approvalHistory.find((h) => h.approvalId === a.approvalId)).toMatchObject({ outcome: 'granted', approver: expect.any(String), resolvedAt: expect.any(String) });
     });
 
     it('a request that names no operation, or one that cannot take effect, is refused a grant but can be denied', async () => {
@@ -253,20 +257,21 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const run = firstRun(snap);
       expect(run.reducedScope).toBeNull();
       expect(run.scopeAssessment?.notDelivered.tasks.some((t) => t.budgetStopped)).toBe(true);
-      expect(await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision + 3, 'rs-stale'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
-      const ok = await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision, 'rs-ok'));
+      expect(await ds.source.execute(acceptCommand(run, run.planRevision + 3, 'rs-stale'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
+      expect(await ds.source.execute(acceptCommand(run, run.planRevision, 'rs-moved', 'not-the-shown-list'))).toMatchObject({ accepted: false, rejection: 'reduced_scope_changed' });
+      const ok = await ds.source.execute(acceptCommand(run, run.planRevision, 'rs-ok'));
       expect(ok).toMatchObject({ accepted: true, execution: 'applied' });
       await ds.settle();
       const after = firstRun(await ds.source.getSnapshot(ds.budgetStopProjectId));
       expect(after.reducedScope?.notDelivered).toEqual(run.scopeAssessment!.notDelivered);
-      expect(await ds.source.execute(runCommand('run.accept_reduced_scope', run.runId, run.planRevision, 'rs-twice'))).toMatchObject({ accepted: false, rejection: 'already_accepted' });
+      expect(await ds.source.execute(acceptCommand(run, run.planRevision, 'rs-twice'))).toMatchObject({ accepted: false, rejection: 'already_accepted' });
     });
 
     it('reduced scope is refused for a run with no budget stop, and a run-level command on an unknown run is unknown_target', async () => {
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const clean = ds.reviewProjectId ? await ds.source.getSnapshot(ds.reviewProjectId) : snap;
-      if (ds.reviewProjectId) expect(await ds.source.execute(runCommand('run.accept_reduced_scope', firstRun(clean).runId, firstRun(clean).planRevision, 'ns'))).toMatchObject({ accepted: false, rejection: 'not_budget_stopped' });
+      if (ds.reviewProjectId) expect(await ds.source.execute(acceptCommand(firstRun(clean), firstRun(clean).planRevision, 'ns'))).toMatchObject({ accepted: false, rejection: 'not_budget_stopped' });
       expect(await ds.source.execute(runCommand('run.reverify', 'no-such-run', 0, 'u'))).toMatchObject({ accepted: false, rejection: 'unknown_target' });
     });
 

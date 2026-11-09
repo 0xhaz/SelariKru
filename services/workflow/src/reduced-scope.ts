@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { TaskSpecSchema } from '@selarikru/domain';
 import { schema, type Executor } from '@selarikru/persistence';
 import { and, eq } from 'drizzle-orm';
@@ -34,6 +35,12 @@ export interface RunScopeAssessment extends ReducedScope {
   readonly stopped: readonly { readonly taskId: string; readonly revision: number }[];
   /** Tasks with a budget stop still in flight. */
   readonly stopping: readonly string[];
+}
+
+/** A stable digest of a not-delivered list: what the owner was shown, compared with what is true at the moment of acceptance. */
+export function notDeliveredHash(notDelivered: ReducedScope['notDelivered']): string {
+  const tasks = [...notDelivered.tasks].sort((a, b) => (a.taskId < b.taskId ? -1 : 1)).map((t) => [t.taskId, t.revision, t.status, t.budgetStopped]);
+  return createHash('sha256').update(JSON.stringify({ tasks, requirementIds: [...notDelivered.requirementIds].sort(), acceptanceCheckIds: [...notDelivered.acceptanceCheckIds].sort() })).digest('hex');
 }
 
 const NOT_OWED: readonly string[] = ['verified', 'merged', 'superseded'];

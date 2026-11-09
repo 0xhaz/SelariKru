@@ -1,9 +1,8 @@
 import { useId } from 'react';
-import { Chip, RAIL_SHADOW, Timestamp, buttonPrimary, buttonQuiet, formatAge, type Tone } from '@selarikru/ui';
+import { Chip, RAIL_SHADOW, Timestamp, buttonDanger, buttonPrimary, buttonQuiet, formatAge, type Tone } from '@selarikru/ui';
 import type { DecisionAction, DecisionCardModel, Fact, NotDeliveredModel } from './model.ts';
 
-const dangerButton = 'inline-flex items-center justify-center rounded-chip border border-danger px-3 py-2 text-sm font-medium text-danger hover:bg-danger-tint disabled:cursor-not-allowed disabled:opacity-50';
-const STYLE: Readonly<Record<DecisionAction['style'], string>> = { primary: buttonPrimary, quiet: buttonQuiet, danger: dangerButton };
+const STYLE: Readonly<Record<DecisionAction['style'], string>> = { primary: buttonPrimary, quiet: buttonQuiet, danger: buttonDanger };
 
 function ActionControl({ action, busyId, cardId, describedBy, onCommand }: { action: DecisionAction; busyId: string | null; cardId: string; describedBy: string | undefined; onCommand: (a: Extract<DecisionAction, { kind: 'command' }>) => void }) {
   const cls = `${STYLE[action.style]} w-full text-center`;
@@ -22,10 +21,11 @@ function ActionControl({ action, busyId, cardId, describedBy, onCommand }: { act
       disabled={action.disabledReason !== null}
       aria-disabled={busyId !== null ? true : undefined}
       aria-describedby={describedBy}
-      className={cls}
+      data-busy={busy}
+      className={`${cls} ${busyId !== null ? 'cursor-wait opacity-60' : ''}`}
       onClick={() => { if (busyId === null) onCommand(action); }}
     >
-      {action.label}{busy ? <span className="sr-only"> (working)</span> : null}
+      {action.label}{busy ? <><span aria-hidden="true" className="ml-1.5">· Sending</span><span className="sr-only"> (sending)</span></> : null}
     </button>
   );
 }

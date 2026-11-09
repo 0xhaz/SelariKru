@@ -114,6 +114,8 @@ export const AcceptReducedScopeRequestSchema = z
     /** The run's plan revision as the owner reviewed it. A stale value is a 409. */
     expectedPlanRevision: Revision,
     idempotencyKey: Key,
+    /** The hash of the not-delivered list the owner was shown. A list that has since changed is a 409, so an acceptance can only record what was read. */
+    notDeliveredHash: z.string().min(1).max(128),
     note: z.string().min(1).max(2000).optional(),
   })
   .strict();

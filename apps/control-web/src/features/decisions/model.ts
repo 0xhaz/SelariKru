@@ -1,5 +1,5 @@
 import { ADVISORY_APPROVAL_OPERATIONS, WORKER_APPROVAL_OPERATIONS, approvalUnavailableReason } from '@selarikru/domain';
-import { approvalStateAt, isEmptyProject, isReverifiableReason, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
+import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge, type Tone } from '@selarikru/ui';
 import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, isClosedTask, reducedScopeCovers, sentence } from '../overview/attention.ts';
 import { hrefFor } from '../../shell/route.ts';
@@ -56,16 +56,23 @@ export interface DecisionCardModel {
   readonly changed: { readonly title: string; readonly body: string } | null;
   readonly actions: readonly DecisionAction[];
   readonly since: string;
-  /** Changes when anything a person relied on changes; a clock tick does not. */
-  readonly fingerprint: string;
+  /** Changes when anything a person relied on changes; a clock tick does not. Null while what the card shows is not known yet, so there is nothing to compare. */
+  readonly fingerprint: string | null;
 }
 
 export interface HistoryEntry {
   readonly id: string;
   readonly outcome: string;
   readonly subject: string;
-  readonly at: string;
+  /** Null when the record does not say when. */
+  readonly at: string | null;
   readonly tone: Tone;
+  /** Null when the record does not say who. */
+  readonly approver: string | null;
+  /** What the decision covered, or null when the record does not say. */
+  readonly scope: string | null;
+  /** A grant is a record; this says what became of it, or that it is not known. */
+  readonly execution: string;
 }
 
 export interface DecisionsModel {
@@ -113,9 +120,10 @@ const WORKER_REASON = 'Reason given by the worker (worker-supplied, not verified
 const REPLAN_OFF = 'Replanning runs through the Assistant, which is off under demo data.';
 const CANCEL_CONSEQUENCE = 'It stops for good. Work so far stays on record, but it only runs again through a new plan revision.';
 
-function replanAction(mode: DecisionOptions['mode'], paused: string | null): DecisionAction {
+function replanAction(mode: DecisionOptions['mode'], paused: string | null, target: { readonly runId: string; readonly taskId?: string }): DecisionAction {
   const disabledReason = mode === 'mock' ? REPLAN_OFF : paused;
-  return { kind: 'link', id: 'replan', label: 'Replan in the Assistant', style: 'quiet', href: hrefFor('assistant'), external: false, disabledReason };
+  const query = new URLSearchParams({ run: target.runId, ...(target.taskId !== undefined ? { task: target.taskId } : {}) });
+  return { kind: 'link', id: 'replan', label: 'Replan in the Assistant', style: 'quiet', href: `${hrefFor('assistant')}?${query.toString()}`, external: false, disabledReason };
 }
 
 function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task'): DecisionAction {
@@ -162,7 +170,9 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
   const blockedReason = paused ?? changedReason;
 
   const unavailable = a.operation !== null ? approvalUnavailableReason(a.operation) : null;
-  const note = a.operation === null
+  const note = a.scopeHash === null
+    ? 'This request has no recorded scope, so what a decision would cover is not known and it cannot be decided here.'
+    : a.operation === null
     ? 'This request names no operation, so policy cannot judge it and it cannot be granted.'
     : unavailable === 'egress_enforcement_unavailable'
       ? 'A network grant cannot take effect yet: this sandbox cannot limit egress to one host.'
@@ -171,8 +181,8 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
         : null;
 
   const actions: DecisionAction[] = [];
-  const scopeHash = a.scopeHash ?? a.approvalId;
-  if (!expired && note === null && a.operation !== null) {
+  const scopeHash = a.scopeHash;
+  if (scopeHash !== null && !expired && note === null && a.operation !== null) {
     const advisory = ADVISORY_OPS.includes(a.operation);
     const label = op?.grant ?? `Grant ${sentence(a.operation).toLowerCase()}`;
     actions.push({
@@ -183,14 +193,16 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
   }
   const swept = expired && task?.status !== 'awaiting_approval';
   const denyLabel = swept || task === undefined ? 'Record denial' : 'Deny and block task';
-  actions.push({
-    kind: 'command', id: 'deny', label: denyLabel, style: 'danger', disabledReason: blockedReason,
-    intent: { command: 'approval.deny', expectedRevision: task?.aggregateRevision ?? 0, args: { approvalId: a.approvalId, scopeHash } },
-    confirm: { title: `${denyLabel} for "${name}"?`, consequence: swept ? 'The denial is recorded and the task stays blocked. It only continues through a new plan revision.' : 'The task moves to blocked. It only continues through a new plan revision.', keepLabel: 'Keep pending' },
-  });
+  if (scopeHash !== null) {
+    actions.push({
+      kind: 'command', id: 'deny', label: denyLabel, style: 'danger', disabledReason: blockedReason,
+      intent: { command: 'approval.deny', expectedRevision: task?.aggregateRevision ?? 0, args: { approvalId: a.approvalId, scopeHash } },
+      confirm: { title: `${denyLabel} for "${name}"?`, consequence: swept ? 'The denial is recorded and the task stays blocked. It only continues through a new plan revision.' : 'The task moves to blocked. It only continues through a new plan revision.', keepLabel: 'Keep pending' },
+    });
+  }
   if (task) {
     actions.push(...(changed ? [{ kind: 'link', id: 'review-task', label: 'Review the updated task', style: 'quiet', href: `${hrefFor('pipeline')}?task=${encodeURIComponent(task.taskId)}`, external: false, disabledReason: null } as DecisionAction] : []));
-    if (expired) actions.push(replanAction(options.mode, paused), ...openCancel(task, paused));
+    if (expired) actions.push(replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused));
   }
 
   const hit = task ? dependentsOf(snapshot, task.taskId) : Object.values(snapshot.tasks).filter((t) => t.runId === a.runId && !isClosedTask(t)).map((t) => t.taskId);
@@ -209,9 +221,10 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
   ];
   return {
     id: `decision:${a.approvalId}`, kind: 'approval', chip: expired ? 'Expired approval' : 'Approval', tone: expired ? 'danger' : 'warning', state: changed ? 'changed' : expired ? 'expired' : 'open',
-    title: op?.title(name, a.destination) ?? `${sentence(a.reason ?? a.operation ?? 'Unspecified request')} (${name})`,
+    // Never built from `reason`, which may be a worker's free text; that appears only under its own label.
+    title: op?.title(name, a.destination) ?? (a.operation !== null ? `${sentence(a.operation)} for "${name}"` : `Unnamed request for "${name}"`),
     summary: op?.consequence ?? 'A worker asked for something a person must decide.',
-    consequence: expired ? 'It stays paused. An expired approval is never treated as granted.' : `It stays paused until you decide.${a.expiresAt !== null ? ` Expires ${expiry}.` : ''}`,
+    consequence: changed ? 'Nothing is decided. If the updated task still needs this, it raises a new request here.' : expired ? 'It stays paused. An expired approval is never treated as granted.' : `It stays paused until you decide.${a.expiresAt !== null ? ` Expires ${expiry}.` : ''}`,
     reason, advisory: a.operation !== null && ADVISORY_OPS.includes(a.operation) ? ADVISORY_TEXT : null, note, facts, notDelivered: null, changed, actions, since: a.requestedAt,
     details: [
       { label: 'Approval ID', value: a.approvalId }, { label: 'Scope hash', value: a.scopeHash ?? 'Not recorded' }, { label: 'Operation', value: a.operation ?? 'None' },
@@ -237,12 +250,12 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     const hit = dependentsOf(snapshot, task.taskId);
     const item = blockItem(task, code, hit);
     const policy = classifyBlock(code) === 'policy';
-    const actions: DecisionAction[] = [replanAction(options.mode, paused), ...openCancel(task, paused)];
+    const actions: DecisionAction[] = [replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused)];
     out.push({
       id: `placement:${task.taskId}`, kind: policy ? 'policy_deny' : 'blocked', chip: policy ? 'Policy denied' : code === 'approval_denied' ? 'Denied' : 'Blocked', tone: policy ? 'danger' : 'warning', state: 'open',
       title: policy ? `${titleOf(task)}: denied by policy` : item.title, summary: item.detail, consequence: item.consequence, reason: null, advisory: null,
       note: policy ? `No approval can override this policy denial. ${item.nextAction}` : null,
-      facts: [{ label: 'Task', value: `${titleOf(task)}, revision ${task.revision}` }, { label: 'Status', value: STATUS_WORD[task.status] ?? task.status }, { label: 'Next', value: item.nextAction }],
+      facts: [{ label: 'Task', value: `${titleOf(task)}, revision ${task.revision}` }, { label: 'Status', value: policy ? 'Held by policy; it cannot start' : (STATUS_WORD[task.status] ?? task.status) }, { label: 'Next', value: item.nextAction }],
       details: [{ label: 'Reason code', value: code }, { label: 'Task ID', value: task.taskId }, { label: 'Expected revision', value: String(task.aggregateRevision) }], notDelivered: null, changed: null, actions, since: task.enteredStatusAt,
       fingerprint: ['block', code, task.revision, task.aggregateRevision, task.status].join('|'),
     });
@@ -253,7 +266,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     const names = tasks.map(titleOf).join(', ');
     const actions: DecisionAction[] = [
       { kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId } }, confirm: null },
-      replanAction(options.mode, paused),
+      replanAction(options.mode, paused, { runId }),
       ...tasks.flatMap((t) => (tasks.length > 1 ? [cancelAction(t, paused, `Cancel "${titleOf(t)}"`)] : [cancelAction(t, paused)])),
     ];
     const codes = tasks.map((t) => t.statusReason ?? 'unknown').join(', ');
@@ -272,7 +285,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
 function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: DecisionOptions, paused: string | null): DecisionCardModel | null {
   if (run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled') return null;
   const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId);
-  const stopped = tasks.filter((t) => t.status === 'cancelled' && t.cancelReason === 'budget_exhausted');
+  const stopped = tasks.filter((t) => isBudgetStopped(t, run));
   if (stopped.length === 0 || stopped.every((t) => reducedScopeCovers(run, t))) return null;
   const assessment = run.scopeAssessment;
   const titleById = (id: string): string => snapshot.tasks[id]?.title ?? id;
@@ -281,15 +294,17 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
     : null;
   const stoppingNow = assessment !== null && assessment.stoppingTaskIds.length > 0;
   const n = notDelivered?.tasks.length ?? 0;
-  const acceptOff = paused ?? (notDelivered === null ? 'What was not delivered is not known yet, so this cannot be accepted.' : stoppingNow ? 'A budget stop is still stopping work, so the final scope is not known yet.' : null);
+  const unlisted = assessment !== null && stopped.some((t) => !assessment.stopped.some((s) => s.taskId === t.taskId && s.revision === t.revision));
+  const acceptOff = paused ?? (notDelivered === null ? 'What was not delivered is not known yet, so this cannot be accepted.' : stoppingNow ? 'A budget stop is still stopping work, so the final scope is not known yet.' : unlisted ? 'A task stopped that is not in the list below yet. Wait for the updated list, then accept.' : null);
   const reqs = notDelivered ? `, ${notDelivered.requirementIds.length} requirement${notDelivered.requirementIds.length === 1 ? '' : 's'}` : '';
   const actions: DecisionAction[] = [
     {
       kind: 'command', id: 'accept', label: 'Accept reduced scope', style: 'primary', disabledReason: acceptOff,
-      intent: { command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, args: { runId: run.runId } },
+      // The hash that came with this list goes back, so the server can refuse if the list has changed.
+      intent: { command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, args: { runId: run.runId, notDeliveredHash: assessment?.notDeliveredHash ?? 'unknown' } },
       confirm: { title: 'Accept this run at reduced scope?', consequence: `${n} task${n === 1 ? '' : 's'}${reqs} will be recorded as not delivered. A pull request can then open without them. This cannot be undone.`, keepLabel: 'Keep deciding' },
     },
-    replanAction(options.mode, paused),
+    replanAction(options.mode, paused, { runId: run.runId }),
     ...tasks.filter((t) => !isClosedTask(t)).map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`)),
   ];
   const stoppedNames = stopped.map(titleOf).join(', ');
@@ -298,7 +313,7 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
     summary: `${stoppedNames} ${stopped.length === 1 ? 'was' : 'were'} stopped. Work so far is preserved, and the stopped work stays unmet.`,
     consequence: 'Nothing resumes on its own, and no pull request can open until you decide.', reason: null, advisory: null, note: null, facts: [{ label: 'Plan revision', value: String(run.planRevision) }, { label: 'Delivered requirements', value: assessment ? (assessment.deliveredRequirementIds.join(', ') || 'None') : 'Not known yet' }],
     details: [{ label: 'Run ID', value: run.runId }, { label: 'Expected plan revision', value: String(run.planRevision) }], notDelivered, changed: null, actions, since: stopped.map((t) => t.enteredStatusAt).sort()[0]!,
-    fingerprint: ['scope', run.planRevision, JSON.stringify(assessment), JSON.stringify(run.reducedScope?.decisionId)].join('|'),
+    fingerprint: assessment === null ? null : ['scope', run.planRevision, assessment.notDeliveredHash, assessment.stoppingTaskIds.join(','), run.reducedScope?.decisionId ?? ''].join('|'),
   };
 }
 
@@ -311,9 +326,9 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   const cr = snapshot.changeRequests.find((c) => c.runId === run.runId);
   const simulated = snapshot.meta.provenance === 'simulated';
   const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId);
-  const stopped = tasks.filter((t) => t.status === 'cancelled' && t.cancelReason === 'budget_exhausted');
-  const uncovered = stopped.some((t) => !reducedScopeCovers(run, t));
-  const scopeNote = run.reducedScope ? `Accepted at reduced scope: ${run.reducedScope.notDelivered.tasks.length} planned task${run.reducedScope.notDelivered.tasks.length === 1 ? ' is' : 's are'} not delivered.` : uncovered ? 'Some planned work was stopped for budget and is not delivered.' : null;
+  const uncovered = tasks.some((t) => isBudgetStopped(t, run) && !reducedScopeCovers(run, t));
+  const cancelled = tasks.filter((t) => t.status === 'cancelled').length;
+  const scopeNote = run.reducedScope ? `Accepted at reduced scope: ${run.reducedScope.notDelivered.tasks.length} planned task${run.reducedScope.notDelivered.tasks.length === 1 ? ' is' : 's are'} not delivered.` : uncovered ? 'Some planned work was stopped for budget and is not delivered.' : cancelled > 0 ? `${cancelled} planned task${cancelled === 1 ? ' was' : 's were'} cancelled and ${cancelled === 1 ? 'is' : 'are'} not delivered.` : null;
   const evidence = run.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified at the current revision` : `${tasks.filter((t) => t.status === 'verified' || t.status === 'merged').length} of ${tasks.filter((t) => t.status !== 'superseded').length} tasks verified; per-criterion evidence is not connected`;
   const base = { state: 'open' as const, reason: null, advisory: null, notDelivered: null, changed: null };
 
@@ -349,6 +364,22 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   }];
 }
 
+const OUTCOME: Readonly<Record<Exclude<ApprovalView['state'], 'pending'>, string>> = { granted: 'Granted', denied: 'Denied', expired: 'Expired', superseded: 'Superseded' };
+const OUTCOME_TONE: Readonly<Record<Exclude<ApprovalView['state'], 'pending'>, Tone>> = { granted: 'success', denied: 'danger', expired: 'neutral', superseded: 'neutral' };
+
+const OPERATION_NAME: Readonly<Record<string, string>> = { start_cloud_worker: 'Cloud start', repair_within_limits: 'Repair attempt', breaking_api_change: 'Breaking API change', destructive_data_migration: 'Destructive data migration' };
+const operationName = (operation: string | null): string => (operation === null ? 'Request' : (OPERATION_NAME[operation] ?? sentence(operation)));
+
+function scopeLine(scopeHash: string | null, revision: number | null, destination: string | null): string | null {
+  const parts = [revision !== null ? `Task revision ${revision}` : null, scopeHash !== null ? `scope ${scopeHash.slice(0, 8)}` : null, destination].filter((p): p is string => p !== null);
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+function executionOf(h: ApprovalHistoryEntry): string {
+  if (h.outcome === 'granted') return h.consumedAt !== null ? `Used by attempt ${h.consumedBy ?? 'not recorded'}.` : 'No attempt has used this grant yet.';
+  return h.outcome === 'superseded' ? 'Replaced before a decision, so nothing ran from it.' : 'Nothing ran from this request.';
+}
+
 const RANK: Readonly<Record<CardKind, number>> = { policy_deny: 0, reconciliation: 1, approval: 2, budget_stop: 3, blocked: 4, reverify: 4, merge_review: 5 };
 
 /**
@@ -371,19 +402,32 @@ export function buildDecisions(snapshot: ProjectViewSnapshot, nowMs: number, opt
   const expiredLast = (c: DecisionCardModel): number => (c.state === 'expired' ? 1 : 0);
   cards.sort((a, b) => RANK[a.kind] - RANK[b.kind] || expiredLast(a) - expiredLast(b) || a.since.localeCompare(b.since) || a.id.localeCompare(b.id));
 
+  // What the server reports first; decisions made in this session fill in what it has not reported yet. A request still on a card is not history.
+  const open = new Set(cards.map((c) => c.id));
   const history: HistoryEntry[] = [];
+  const seen = new Set<string>();
+  const nameOf = (taskId: string | null): string => (taskId ? (snapshot.tasks[taskId]?.title ?? taskId) : 'This run');
+  for (const h of snapshot.approvalHistory) {
+    if (open.has(`decision:${h.approvalId}`)) continue;
+    seen.add(h.approvalId);
+    history.push({
+      id: h.approvalId, outcome: OUTCOME[h.outcome], subject: `${nameOf(h.taskId)}: ${operationName(h.operation)}`, at: h.resolvedAt, tone: OUTCOME_TONE[h.outcome], approver: h.approver,
+      scope: scopeLine(h.scopeHash, h.revision, h.destination), execution: executionOf(h),
+    });
+  }
   for (const a of Object.values(snapshot.approvals)) {
-    if (a.state === 'pending' || a.resolvedAt === null) continue;
-    const name = a.taskId ? (snapshot.tasks[a.taskId]?.title ?? a.taskId) : 'This run';
-    const outcome = a.state === 'granted' ? 'Granted' : a.state === 'denied' ? 'Denied' : a.state === 'expired' ? 'Expired' : 'Superseded';
-    history.push({ id: a.approvalId, outcome, subject: `${name}: ${sentence(a.operation ?? a.reason ?? 'request')}`, at: a.resolvedAt, tone: a.state === 'granted' ? 'success' : a.state === 'denied' ? 'danger' : 'neutral' });
+    if (a.state === 'pending' || a.resolvedAt === null || seen.has(a.approvalId) || open.has(`decision:${a.approvalId}`)) continue;
+    history.push({
+      id: a.approvalId, outcome: OUTCOME[a.state], subject: `${nameOf(a.taskId)}: ${operationName(a.operation)}`, at: a.resolvedAt, tone: OUTCOME_TONE[a.state], approver: null,
+      scope: scopeLine(a.scopeHash, a.taskRevision, a.destination), execution: 'The execution result is not reported yet.',
+    });
   }
   for (const run of Object.values(snapshot.runs)) {
     if (!run.reducedScope) continue;
     const n = run.reducedScope.notDelivered.tasks.length;
-    history.push({ id: run.reducedScope.decisionId, outcome: 'Accepted reduced scope', subject: `${n} task${n === 1 ? '' : 's'} not delivered`, at: run.reducedScope.acceptedAt, tone: 'neutral' });
+    history.push({ id: run.reducedScope.decisionId, outcome: 'Accepted reduced scope', subject: `${n} task${n === 1 ? '' : 's'} not delivered`, at: run.reducedScope.acceptedAt, tone: 'neutral', approver: run.reducedScope.acceptedBy, scope: `Plan revision ${run.reducedScope.planRevision}`, execution: 'Recorded. No task changed.' });
   }
-  history.sort((a, b) => b.at.localeCompare(a.at));
+  history.sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''));
 
   return { cards, history, waiting: cards.length, paused, empty: isEmptyProject(snapshot), simulated: snapshot.meta.provenance === 'simulated' };
 }

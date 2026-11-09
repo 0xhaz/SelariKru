@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { EVENT_TYPES, checkEventAuthority, type Actor, type EventType } from '@selarikru/domain';
 import {
   PROJECTED_EVENT_TYPES, ProjectViewEventSchema, ProjectViewSnapshotSchema, RunViewSchema, applyEvent, applyEvents, approvalStateAt, effectiveWorkerHealth, emptySnapshot,
-  mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
+  carryResolvedApprovals, isBudgetStopped, mergeDecisionFacts, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, startProjection, sumUsage, usageFor, verifiedCounts,
   type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type ProjectionState, type TaskView, type UsageEntry, type UsageFigure,
 } from './index.ts';
 
@@ -732,7 +732,7 @@ describe('decision facts', () => {
 
   it('the refresh merges changeRequests, reducedScope and the scope assessment only from a snapshot at or past the cursor', () => {
     const s = base();
-    const assessment = { notDelivered: nd, deliveredRequirementIds: [], stopped: [{ taskId: 't1', revision: 1 }], stoppingTaskIds: [] };
+    const assessment = { notDelivered: nd, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 't1', revision: 1 }], stoppingTaskIds: [] };
     const fresh = withFacts('0', { changeRequests: [change], runs: { r1: { ...s.snapshot.runs['r1']!, scopeAssessment: assessment } } });
     const merged = mergeDecisionFacts(s, fresh);
     expect(merged.snapshot.changeRequests).toEqual([change]);
@@ -754,5 +754,34 @@ describe('decision facts', () => {
     await session.resync();
     expect(session.state()!.snapshot.changeRequests).toEqual([change]);
     session.stop();
+  });
+});
+
+describe('history and real-shape snapshots', () => {
+  const entry = { approvalId: 'a1', runId: 'r1', taskId: 't1', revision: 1, outcome: 'denied' as const, approver: 'u', scopeHash: 's', operation: 'breaking_api_change', destination: null, requestedAt: at(1), resolvedAt: at(2), consumedAt: null, consumedBy: null };
+
+  it('recognises a budget stop from the assessment when the task carries no cancel reason, and not a plain cancel', () => {
+    const t = task('t1', { status: 'cancelled', cancelReason: null });
+    const run = { scopeAssessment: { notDelivered: { tasks: [], requirementIds: [], acceptanceCheckIds: [] }, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 't1', revision: 1 }], stoppingTaskIds: [] }, reducedScope: null };
+    expect(isBudgetStopped(t, run)).toBe(true);
+    expect(isBudgetStopped(t, { scopeAssessment: null, reducedScope: null })).toBe(false);
+    expect(isBudgetStopped(task('t1', { status: 'running' }), run)).toBe(false);
+  });
+
+  it('a resolved approval survives a snapshot replacement, and an open one comes only from the snapshot', () => {
+    const a = (id: string, state: 'denied' | 'pending') => ({ approvalId: id, taskId: 't1', taskRevision: 1, runId: 'r1', scopeHash: 's', reason: null, operation: null, destination: null, requester: null, state, requestedAt: at(1), expiresAt: null, resolvedAt: state === 'denied' ? at(2) : null });
+    const before = { ...base().snapshot, approvals: { done: a('done', 'denied'), open: a('open', 'pending') } };
+    const fresh = base().snapshot;
+    const kept = carryResolvedApprovals(before, fresh);
+    expect(Object.keys(kept.approvals)).toEqual(['done']);
+    expect(carryResolvedApprovals(null, fresh)).toBe(fresh);
+  });
+
+  it('the refresh brings in new approval history', () => {
+    const s = base();
+    const fresh = { ...s.snapshot, approvalHistory: [entry] };
+    const merged = mergeDecisionFacts(s, fresh);
+    expect(merged.snapshot.approvalHistory).toEqual([entry]);
+    expect(mergeDecisionFacts(merged, fresh)).toBe(merged);
   });
 });

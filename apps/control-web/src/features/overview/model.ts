@@ -1,6 +1,6 @@
 import type { Tone } from '@selarikru/ui';
 import {
-  INFERENCE_LABELS, OBSERVED_SOURCE_LABELS, effectiveWorkerHealth, isEmptyProject, usageFor, verifiedCounts,
+  INFERENCE_LABELS, OBSERVED_SOURCE_LABELS, effectiveWorkerHealth, isBudgetStopped, isEmptyProject, usageFor, verifiedCounts,
   type ProjectViewSnapshot, type RunView, type TaskView, type UsageTotal, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
 import { buildAttention, classifyBlock, isClosedTask, type AttentionItem } from './attention.ts';
@@ -109,7 +109,7 @@ const CELL: Readonly<Partial<Record<TaskView['status'], CriterionCell>>> = {
 };
 const ORDER: readonly TaskView['status'][] = ['failed', 'blocked', 'awaiting_approval', 'running', 'verifying', 'ready', 'planned', 'verified', 'merged', 'cancelled', 'superseded'];
 
-export function taskRow(t: TaskView): TaskRow {
+export function taskRow(t: TaskView, run?: RunView): TaskRow {
   // A closed task's stored block is history. A wait for a slot is healthy and clears by itself.
   const blocked = t.placementBlock !== null && !isClosedTask(t);
   const slotWait = blocked && classifyBlock(t.placementBlock!) === 'wait';
@@ -118,7 +118,7 @@ export function taskRow(t: TaskView): TaskRow {
   const label = slotWait ? 'Waiting for a slot' : placed ? 'Cannot be placed' : t.status === 'superseded' && t.supersededByRevision !== null ? `Superseded by revision ${t.supersededByRevision}` : s.label;
   const tone: Tone = placed ? (t.placementBlock!.startsWith('approval_required:') ? 'warning' : 'danger') : s.tone;
   // Work stopped for budget still counts towards delivery, as unmet.
-  const cell = placed || (t.status === 'cancelled' && t.cancelReason === 'budget_exhausted') ? 'held' : (CELL[t.status] ?? null);
+  const cell = placed || isBudgetStopped(t, run) ? 'held' : (CELL[t.status] ?? null);
   return { taskId: t.taskId, title: t.title ?? t.taskId, role: t.role, statusLabel: label, tone, cell };
 }
 
@@ -132,7 +132,7 @@ function delivery(snapshot: ProjectViewSnapshot, attention: readonly AttentionIt
   const run = activeRun(snapshot);
   const scoped = run ? Object.values(snapshot.tasks).filter((t) => t.runId === run.runId) : Object.values(snapshot.tasks);
   const taskCounts = verifiedCounts(snapshot, run?.runId);
-  const tasks = scoped.sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)).map(taskRow);
+  const tasks = scoped.sort((a, b) => ORDER.indexOf(a.status) - ORDER.indexOf(b.status)).map((t) => taskRow(t, snapshot.runs[t.runId]));
   const criteria = run?.criteria ?? null;
   const { verified, total } = criteria ?? taskCounts;
   const blocker = attention.find((i) => i.needsOperator && i.status !== 'review' && !i.closedRecord)?.title ?? null;

@@ -10,7 +10,7 @@ export { claimNext, tryClaim } from './claim.ts';
 export { heartbeat, publishResult, leaseHealth, leaseDeadline, LEASE_EXPIRY_SECONDS, LEASE_SUSPECT_SECONDS, HEARTBEAT_INTERVAL_SECONDS, type LeaseHealth } from './lease.ts';
 export { expireLeases } from './reconcile.ts';
 export { APPROVAL_TTL_SECONDS, expireApprovals, openApproval, type ApprovalGate, type OpenedApproval } from './approval.ts';
-export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
+export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
 export { applyVerification, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, REVERIFY_LIMIT, type VerificationApplication, type VerificationVerdict } from './verification.ts';

@@ -4,4 +4,4 @@ export { AxisBadges } from './AxisBadges.tsx';
 export { Timestamp } from './Timestamp.tsx';
 export { formatAge, formatClock, formatCount, formatDuration, formatExact, formatUsd } from './format.ts';
 export { contrastRatio } from './contrast.ts';
-export { buttonPrimary, buttonQuiet } from './button.ts';
+export { buttonDanger, buttonDangerSolid, buttonPrimary, buttonQuiet } from './button.ts';

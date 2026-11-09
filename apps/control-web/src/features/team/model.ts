@@ -3,7 +3,7 @@ import {
   approvalStateAt, effectiveWorkerHealth, usageFor,
   type AttemptView, type CheckView, type ProjectViewSnapshot, type TaskView, type UsageEntry, type UsageProvenance, type WorkerActivity, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
-import { explain, sentence } from '../overview/attention.ts';
+import { explain, requestText, sentence } from '../overview/attention.ts';
 import { activityOf, countFleet, taskRow, workerHealthDisplay, type WorkerHealthDisplay } from '../overview/model.ts';
 
 export type SortKey = 'attention' | 'role' | 'task' | 'activity' | 'runtime' | 'progress';
@@ -300,7 +300,7 @@ function blockersOf(w: WorkerView, held: TaskView | undefined, snapshot: Project
   const out: Blocker[] = [];
   if (w.blockedByApprovalId !== null) {
     const a = snapshot.approvals[w.blockedByApprovalId];
-    out.push({ kind: 'Waiting on a person', text: a?.reason ? sentence(a.reason) : 'A decision is pending', code: a?.reason ?? w.blockedByApprovalId });
+    out.push({ kind: 'Waiting on a person', text: a?.reason ? requestText(a) : 'A decision is pending', code: a?.reason ?? w.blockedByApprovalId });
   }
   for (const id of w.blockedByTaskIds) {
     const t = snapshot.tasks[id];
@@ -323,8 +323,8 @@ function timelineOf(w: WorkerView, focus: TaskView | undefined, snapshot: Projec
       if (a.endedAt) out.push({ at: a.endedAt, label: `Attempt ${a.number} ended: ${a.outcome}`, detail: a.exitReason ? explain(a.exitReason) : null, source: 'Scheduler' });
     }
     for (const a of Object.values(snapshot.approvals).filter((x) => x.taskId === focus.taskId)) {
-      out.push({ at: a.requestedAt, label: 'Permission requested', detail: a.reason ? sentence(a.reason) : null, source: 'Worker' });
-      if (a.resolvedAt) out.push({ at: a.resolvedAt, label: `Permission ${a.state}`, detail: a.reason ? sentence(a.reason) : null, source: 'Decision' });
+      out.push({ at: a.requestedAt, label: 'Permission requested', detail: a.reason ? requestText(a) : null, source: 'Worker' });
+      if (a.resolvedAt) out.push({ at: a.resolvedAt, label: `Permission ${a.state}`, detail: a.reason ? requestText(a) : null, source: 'Decision' });
     }
     for (const c of checksOf(snapshot, focus.taskId)) out.push({ at: c.updatedAt, label: `Check ${c.state}`, detail: c.summary, source: 'Verifier' });
   }
@@ -361,7 +361,7 @@ function permissionsOf(focus: TaskView | undefined, snapshot: ProjectViewSnapsho
   if (!focus) return [];
   return Object.values(snapshot.approvals).filter((a) => a.taskId === focus.taskId).sort((a, b) => b.requestedAt.localeCompare(a.requestedAt)).map((a) => {
     const state = APPROVAL[approvalStateAt(a, nowMs)]!;
-    return { approvalId: a.approvalId, state: state.label, tone: state.tone, reason: a.reason ? sentence(a.reason) : 'No reason recorded', reasonCode: a.reason, scopeHash: a.scopeHash, requestedAt: a.requestedAt, expiresAt: a.expiresAt, resolvedAt: a.resolvedAt };
+    return { approvalId: a.approvalId, state: state.label, tone: state.tone, reason: a.reason ? requestText(a) : 'No reason recorded', reasonCode: a.reason, scopeHash: a.scopeHash, requestedAt: a.requestedAt, expiresAt: a.expiresAt, resolvedAt: a.resolvedAt };
   });
 }
 

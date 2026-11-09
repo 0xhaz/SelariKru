@@ -214,3 +214,14 @@ describe('headline and empty project', () => {
     expect(model.delivery.total).toBe(0);
   });
 });
+
+describe('a snapshot shaped like the real route', () => {
+  it('a budget stop with no cancel reason keeps its criteria unmet and asks for a decision', () => {
+    const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'cancelled', cancelReason: null })] });
+    s.runs['run'] = { ...s.runs['run']!, scopeAssessment: { notDelivered: { tasks: [], requirementIds: [], acceptanceCheckIds: [] }, notDeliveredHash: 'h', deliveredRequirementIds: [], stopped: [{ taskId: 'b', revision: 1 }], stoppingTaskIds: [] } };
+    const m = buildOverview(s, NOW, NOW);
+    expect(m.needsYou).toBe(1);
+    expect(m.delivery.segments).toContain('held');
+    expect(m.delivery.criteriaLabel).toMatch(/^1 of 2/);
+  });
+});

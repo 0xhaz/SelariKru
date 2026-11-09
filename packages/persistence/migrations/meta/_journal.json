@@ -78,6 +78,13 @@
       "when": 1794208556366,
       "tag": "0010_approval_release_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794217189356,
+      "tag": "0011_approval_resolved_at",
+      "breakpoints": true
     }
   ]
 }

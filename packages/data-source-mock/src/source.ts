@@ -54,6 +54,13 @@ const HEARTBEAT_STEP_MS = 10_000;
 const REVERIFY_LIMIT = 3;
 const NOT_OWED: readonly string[] = ['verified', 'merged', 'superseded'];
 const sorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
+/** The mock's stand-in for the server's SHA-256: deterministic over the same fields, and never presented as a real digest. */
+function digest(notDelivered: NotDelivered): string {
+  const text = JSON.stringify([notDelivered.tasks.map((t) => [t.taskId, t.revision, t.status, t.budgetStopped]), notDelivered.requirementIds, notDelivered.acceptanceCheckIds]);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193) >>> 0;
+  return `simulated-${h.toString(16)}`;
+}
 
 const fail = (code: DataSourceError['code'], message: string, retryable = false): DataSourceException => new DataSourceException({ code, message, retryable });
 
@@ -218,11 +225,20 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       acceptanceCheckIds: sorted(owed.flatMap((t) => seedOf(t)?.acceptanceCheckIds ?? [])),
     };
     const deliveredRequirementIds = sorted(tasks.filter((t) => t.status === 'verified' || t.status === 'merged').flatMap((t) => seedOf(t)?.requirementIds ?? [])).filter((id) => !requirementIds.includes(id));
-    return { notDelivered, deliveredRequirementIds, stopped: stopped.map((t) => ({ taskId: t.taskId, revision: t.revision })), stoppingTaskIds: tasks.filter((t) => t.status === 'running' && t.cancelRequested !== null && t.cancelReason === 'budget_exhausted').map((t) => t.taskId) };
+    return { notDelivered, notDeliveredHash: digest(notDelivered), deliveredRequirementIds, stopped: stopped.map((t) => ({ taskId: t.taskId, revision: t.revision })), stoppingTaskIds: tasks.filter((t) => t.status === 'running' && (p.fixture.budgetStopping?.[t.taskId] ?? Number.POSITIVE_INFINITY) * 1000 + FIXTURE_T0_MS <= timeOf(p)).map((t) => t.taskId) };
   }
 
   /** True when the recorded acceptance names every task the budget stopped, at the revision it was stopped at. */
   const acceptanceCovers = (run: RunView, stopped: ScopeAssessment['stopped']): boolean => run.reducedScope !== null && stopped.every((s) => run.reducedScope!.notDelivered.tasks.some((t) => t.taskId === s.taskId && t.revision === s.revision));
+
+  /** What the real snapshot returns for resolved requests, newest first. */
+  function historyOf(s: ProjectViewSnapshot): ProjectViewSnapshot['approvalHistory'] {
+    return Object.values(s.approvals)
+      .filter((a): a is typeof a & { state: 'granted' | 'denied' | 'expired' | 'superseded' } => a.state !== 'pending')
+      .sort((a, b) => (b.resolvedAt ?? '').localeCompare(a.resolvedAt ?? '') || a.approvalId.localeCompare(b.approvalId))
+      .slice(0, 50)
+      .map((a) => ({ approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.taskRevision, outcome: a.state, approver: a.state === 'granted' || a.state === 'denied' ? 'demo-operator' : null, scopeHash: a.scopeHash, operation: a.operation, destination: a.destination, requestedAt: a.requestedAt, resolvedAt: a.resolvedAt, consumedAt: null, consumedBy: null }));
+  }
 
   function snapshotOf(p: Project): ProjectViewSnapshot {
     const s = p.state.snapshot;
@@ -236,7 +252,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       }),
     );
     const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
-    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })) };
+    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s) };
   }
 
   const prng = mulberry32(0x5e1a);
@@ -273,6 +289,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         if (!assessed) return rejected(c.idempotencyKey, 'not_budget_stopped');
         if (assessed.stoppingTaskIds.length > 0) return rejected(c.idempotencyKey, 'cancel_pending');
         if (acceptanceCovers(r, assessed.stopped)) return rejected(c.idempotencyKey, 'already_accepted');
+        if (c.args.notDeliveredHash !== assessed.notDeliveredHash) return rejected(c.idempotencyKey, 'reduced_scope_changed');
         appendCommandEvent(p, r.runId, 'run.reduced_scope_accepted', { decisionId: `dec_${seededId(prng, 'sim')}`, notDelivered: assessed.notDelivered, deliveredRequirementIds: assessed.deliveredRequirementIds, ...(c.args.note !== undefined ? { note: c.args.note } : {}) });
         return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
       }
@@ -325,7 +342,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const task = approval.taskId ? snap.tasks[approval.taskId] : undefined;
     // The same order of checks as `POST /v1/approvals/:id/resolve`.
     const expired = approvalStateAt(approval, timeOf(p)) === 'expired';
-    if (!expired && approval.state !== 'pending') return rejected(c.idempotencyKey, 'not_allowed');
+    if (!expired && approval.state !== 'pending') return rejected(c.idempotencyKey, 'approval_already_resolved');
     if (expired && c.command === 'approval.grant') return rejected(c.idempotencyKey, 'approval_expired');
     if (approval.scopeHash !== c.args.scopeHash) return rejected(c.idempotencyKey, 'scope_mismatch');
     if (task && approval.taskRevision !== task.revision) return rejected(c.idempotencyKey, 'stale_revision');
