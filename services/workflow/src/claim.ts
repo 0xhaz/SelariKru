@@ -527,7 +527,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
-    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable,
+    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial,
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

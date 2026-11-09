@@ -8,7 +8,7 @@ import { AppShell } from '../../src/shell/AppShell.tsx';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
-import type { EngineeringDataSource, TerminalState } from '@selarikru/view-protocol';
+import type { EngineeringDataSource, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlState, TerminalState } from '@selarikru/view-protocol';
 import '../../src/index.css';
 
 type Op = 'draftBrief' | 'suggestCriteria' | 'draftTaskPlan';
@@ -34,6 +34,10 @@ interface Scenario {
   assistantFails?: 'render' | 'chunk';
   /** Replaces the spied source's terminal with a scripted channel: its lines arrive first, then its state. */
   terminal?: { status: TerminalState['status']; reason?: TerminalState['reason']; lastLineAt?: string | null; dropped?: number; simulated?: boolean; lines?: string[] };
+  /** Replaces the spied source's control mode with a scripted channel. */
+  control?: { phase: TerminalControlState['phase']; reason?: TerminalControlState['reason']; echo?: boolean | null };
+  /** Field overrides by attempt id in that fixture's snapshots. */
+  attemptPatch?: Record<string, Record<string, unknown>>;
   /** Mount the shell on the mock source with its command methods wrapped in spies, recording to `window.__calls.commands`. */
   spiedFixture?: string;
   /** Overrides `dependsOn` by task id in that fixture's snapshots, to show unknown dependencies and cycles. */
@@ -191,9 +195,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     getSnapshot: async (projectId) => {
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
-      if (!sc.dependsOn && !sc.taskPatch) return base;
+      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch) return base;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
-      return { ...base, tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])) };
+      return { ...base, tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
@@ -204,6 +208,24 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     getRunFailures: (projectId, runId) => {
       if (refuseFailureLoads) return Promise.reject(new Error('refused by the test'));
       return session.source.getRunFailures(projectId, runId);
+    },
+    openTerminalControl: (request): TerminalControlChannel => {
+      window.__calls.commands.push({ method: 'openTerminalControl', request });
+      const script = sc.control ?? { phase: 'refused' as const, reason: 'demo' as const };
+      let state: TerminalControlState = { phase: 'connecting', reason: null, echo: null };
+      const handlers = new Set<(s: TerminalControlState) => void>();
+      const inputs = new Set<(o: TerminalControlInputOutcome) => void>();
+      const set = (s: TerminalControlState): void => { state = s; for (const h of handlers) h(state); };
+      (window as unknown as { __controlSet: (s: TerminalControlState) => void }).__controlSet = set;
+      setTimeout(() => set({ phase: script.phase, reason: script.reason ?? null, echo: script.echo ?? (script.phase === 'on' ? true : null) }), 10);
+      return {
+        simulated: false,
+        onState: (h) => { handlers.add(h); queueMicrotask(() => h(state)); return () => handlers.delete(h); },
+        onInput: (h) => { inputs.add(h); (window as unknown as { __controlOutcome: (o: TerminalControlInputOutcome) => void }).__controlOutcome = h; return () => inputs.delete(h); },
+        send: (line) => window.__calls.commands.push({ method: 'controlSend', line }),
+        interrupt: () => window.__calls.commands.push({ method: 'controlInterrupt' }),
+        close: () => window.__calls.commands.push({ method: 'controlClose' }),
+      };
     },
     openTerminal: async (request) => {
       window.__calls.commands.push({ method: 'openTerminal', request });

@@ -59,6 +59,8 @@ export interface EvidenceModel {
   readonly candidate: CandidateModel | null;
   readonly notDelivered: readonly string[];
   readonly reducedScopeAccepted: boolean;
+  /** Attempts of this run a person typed into, as they happened. A verifier pass does not clear this: the recorded model cannot vouch for what a person ran. */
+  readonly humanIntervened: readonly { readonly attemptId: string; readonly taskId: string; readonly at: string }[];
 }
 
 export const shortSha = (sha: string): string => sha.slice(0, 12);
@@ -174,6 +176,7 @@ export function buildEvidence(snapshot: ProjectViewSnapshot, wantedRunId: string
     states: [verifiedState(run, evidence), mergedState(run, snapshot, simulated), DEPLOYED],
     coverage: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} approved criteria verified` : 'Per-criterion evidence is not connected',
     reducedScopeAccepted: run.reducedScope !== null,
+    humanIntervened: Object.values(snapshot.attempts).filter((a) => a.humanIntervenedAt && snapshot.tasks[a.taskId]?.runId === run.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt! })).sort((x, y) => x.at.localeCompare(y.at)),
     counts, criteria, candidate: evidence ? candidateOf(evidence, run, snapshot, simulated) : null, notDelivered,
   };
 }

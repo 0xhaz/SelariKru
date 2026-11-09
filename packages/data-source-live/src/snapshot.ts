@@ -5,7 +5,7 @@ interface RawAttempt {
   attemptId: string; number: number; runner: string | null; fence: number | null; outcome: string | null; exitReason: string | null;
   location: 'local' | 'cloud' | null; activity: { tool: string; at: string } | null;
   assignment: { provider: string; model: string; source: string; route?: string } | null;
-  startedAt: string | null; endedAt: string | null; lastHeartbeatAt: string | null;
+  startedAt: string | null; endedAt: string | null; lastHeartbeatAt: string | null; humanIntervenedAt?: string | null;
 }
 interface RawTask {
   taskId: string; runId: string | null; revision: number; aggregateRevision: number; status: TaskView['status']; placementBlock: string | null; blockedReason: string | null;
@@ -89,7 +89,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
     for (const a of started) {
       attempts[a.attemptId] = {
         attemptId: a.attemptId, taskId: t.taskId, number: a.number, fence: a.fence, outcome: outcomeOf(a, t), exitReason: a.exitReason, runnerId: a.runner, startedAt: a.startedAt,
-        endedAt: a.endedAt, lastHeartbeatAt: a.lastHeartbeatAt, assignment: recordedModel(a),
+        endedAt: a.endedAt, lastHeartbeatAt: a.lastHeartbeatAt, assignment: recordedModel(a), humanIntervenedAt: a.humanIntervenedAt ?? null,
       };
     }
     tasks[t.taskId] = {

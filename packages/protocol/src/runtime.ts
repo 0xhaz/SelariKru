@@ -86,6 +86,20 @@ export interface RuntimeSnapshot {
   readonly observedAt: string;
 }
 
+export type ControlShellEvent =
+  | { readonly kind: 'output'; readonly text: string }
+  | { readonly kind: 'ack'; readonly seq: number; readonly echo: boolean | null }
+  | { readonly kind: 'echo'; readonly on: boolean }
+  | { readonly kind: 'exited' };
+
+/** A PTY shell inside one attempt's own sandbox, for a person in control mode. `ack.echo` is whether the shell was echoing when that input reached the PTY; null when it could not be read. */
+export interface ControlShell {
+  readonly events: AsyncIterable<ControlShellEvent>;
+  input(seq: number, data: string): void;
+  /** Bounded. Ends the shell inside the sandbox, not just the host client. */
+  close(): Promise<void>;
+}
+
 export interface RuntimeAdapter {
   capabilities(): Promise<RuntimeCapabilities>;
   /** Idempotent by `spec` identity: an existing sandbox under the same stable name is reconciled (destroyed) first. */
@@ -96,4 +110,6 @@ export interface RuntimeAdapter {
   inspect(handle: SandboxHandle): Promise<RuntimeSnapshot>;
   /** Idempotent: destroying an absent sandbox succeeds. */
   destroy(handle: SandboxHandle): Promise<void>;
+  /** A shell in this sandbox for a control session. Only the sandbox, never the host. Absent: this runtime cannot open one. */
+  openControlShell?(handle: SandboxHandle, sessionId: string): Promise<ControlShell>;
 }

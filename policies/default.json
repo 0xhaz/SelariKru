@@ -1,5 +1,5 @@
 {
-  "policyVersion": "2026-11-09.1",
+  "policyVersion": "2026-11-09.2",
   "operations": {
     "read_approved_docs": "allow",
     "run_scoped_tests": "allow",
@@ -21,7 +21,8 @@
     "deploy": "deny",
     "merge_protected_branch": "deny",
     "modify_policy": "deny",
-    "modify_credentials": "deny"
+    "modify_credentials": "deny",
+    "terminal_control": "deny"
   },
   "limits": {
     "maxConcurrentTotal": 2,

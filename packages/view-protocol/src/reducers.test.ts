@@ -965,3 +965,18 @@ describe('liveness carries runner activity and freshness', () => {
     expect(mergeDecisionFacts(s, fresh).snapshot.tasks[taskId]!.cancelRequested).toMatchObject({ operationId: 'op' });
   });
 });
+
+describe('control mode events', () => {
+  it('marks the attempt, once, and a later session does not move the time', () => {
+    const snap = emptySnapshot({ projectId: 'p', observedAt: '2026-11-08T06:00:00.000Z', provenance: 'observed' });
+    const base = { ...snap, tasks: { t1: { taskId: 't1', runId: 'r', revision: 1, aggregateRevision: 3, title: null, role: null, dependsOn: [], status: 'running', statusReason: null, placementBlock: null, cancelRequested: null, cancelReason: null, supersededByRevision: null, attemptIds: ['a1'], activeAttemptId: 'a1', enteredStatusAt: '2026-11-08T06:00:00.000Z', latestEvidence: null } }, attempts: { a1: { attemptId: 'a1', taskId: 't1', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'x', startedAt: '2026-11-08T06:00:00.000Z', endedAt: null, lastHeartbeatAt: null, assignment: null, humanIntervenedAt: null } } } as never;
+    const ev = (seq: number, type: string, at: string) => ({ schemaVersion: 1, eventId: `e${seq}`, projectId: 'p', runId: 'r', taskId: 't1', attemptId: 'a1', type, sequence: seq, aggregateRevision: 3, actor: { kind: 'human', id: 'o' }, occurredAt: at, receivedAt: at, causationId: null, traceId: 't', payload: {}, provenance: 'observed' });
+    let state = projectionFromSnapshot(base);
+    let r = applyEvent(state, ev(1, 'attempt.human_intervened', '2026-11-08T06:01:00.000Z') as never);
+    expect(r.state.snapshot.attempts['a1']!.humanIntervenedAt).toBe('2026-11-08T06:01:00.000Z');
+    state = r.state;
+    r = applyEvent(state, ev(2, 'attempt.human_intervened', '2026-11-08T06:02:00.000Z') as never);
+    expect(r.state.snapshot.attempts['a1']!.humanIntervenedAt).toBe('2026-11-08T06:01:00.000Z');
+    expect(applyEvent(r.state, ev(3, 'terminal.control_ended', '2026-11-08T06:03:00.000Z') as never).outcome).not.toBe('resync');
+  });
+});

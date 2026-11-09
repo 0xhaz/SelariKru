@@ -135,6 +135,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const published = await scheduler.publishResult(await leaseFor(runner, body.lease), result);
     if (!published.ok) throw conflict(published.error);
     ctx.terminal.markEnded(body.lease.attemptId);
+    ctx.control.endForAttempt(body.lease.attemptId, 'attempt_finished');
     return reply.code(200).send(published.value);
   });
 

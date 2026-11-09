@@ -22,6 +22,16 @@ export interface SbxCommandRunner {
   stream(args: readonly string[]): SbxStream;
 }
 
+/** Where the sandbox name sits in `exec [-i] [-w DIR] NAME command...`. */
+export function execNameIndex(args: readonly string[]): number {
+  let i = 1;
+  for (;;) {
+    if (args[i] === '-i') i += 1;
+    else if (args[i] === '-w') i += 2;
+    else return i;
+  }
+}
+
 export class UnsafeSbxCommandError extends Error {
   constructor(detail: string) {
     super(`refused sbx command: ${detail}`);
@@ -53,9 +63,8 @@ export function assertSafeSbxArgs(args: readonly string[]): void {
       return;
     }
     case 'exec': {
-      // exec [-w DIR] NAME command...
-      const nameAt = args[1] === '-w' ? 3 : 1;
-      ours(args[nameAt]);
+      // Only `-i` and `-w DIR` are recognized here. Anything else, including `--user`, `-t`, `--privileged` or `--env`, leaves the name check to fail on the flag itself.
+      ours(args[execNameIndex(args)]);
       return;
     }
     case 'stop':

@@ -57,6 +57,8 @@ export interface EventSpec {
   readonly runId: string;
   readonly taskId: string;
   readonly aggregateRevision: number;
+  /** The attempt the event is about, when it has one. */
+  readonly attemptId?: string;
   readonly type: EventType;
   /** Derived from the authenticated principal by the route, never from a request body. */
   readonly actor: Actor;
@@ -72,7 +74,7 @@ export async function writeEvent(tx: Tx, now: Date, spec: EventSpec): Promise<Ev
     projectId: spec.projectId,
     runId: spec.runId,
     taskId: spec.taskId,
-    attemptId: null,
+    attemptId: spec.attemptId ?? null,
     type: spec.type,
     sequence: 0,
     aggregateRevision: spec.aggregateRevision,

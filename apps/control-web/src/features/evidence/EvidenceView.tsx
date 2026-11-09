@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Chip, EmptyState, Panel, Timestamp, formatDayTime, toneGlyph, TONE_TEXT } from '@selarikru/ui';
+import { Chip, EmptyState, Panel, Timestamp, formatDayTime, formatExact, toneGlyph, TONE_TEXT } from '@selarikru/ui';
 import type { CriterionFailureView, DataSourceError, RunFailuresView } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
@@ -318,6 +318,14 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
               {model.candidate ? <CandidatePanel candidate={model.candidate} simulated={model.simulated} /> : (
                 <Panel title="Candidate" labelId="evidence-candidate-none"><p className="text-muted">No candidate has been assembled for this run yet, so there is nothing to judge.</p></Panel>
               )}
+              {model.humanIntervened.length > 0 ? (
+                <Panel title="Human intervention" labelId="evidence-human" aside={`${model.humanIntervened.length} ${model.humanIntervened.length === 1 ? 'attempt' : 'attempts'}`}>
+                  <p className="text-sm text-muted">A person typed into a shell in these attempts' sandboxes. The recorded model cannot vouch for what was run, and any change it made was still judged by the diff gate and the verifier.</p>
+                  <ul className="mt-2 space-y-1" data-testid="evidence-human">
+                    {model.humanIntervened.map((h) => <li key={h.attemptId} className="font-mono text-mono text-fg">{h.attemptId} (task {h.taskId}) at {formatExact(h.at)}</li>)}
+                  </ul>
+                </Panel>
+              ) : null}
               {model.notDelivered.length > 0 ? (
                 <Panel title="Not delivered" labelId="evidence-not-delivered">
                   <p className="text-sm text-muted">{model.reducedScopeAccepted ? 'You accepted the reduced scope. These stay unmet: accepting records it and verifies nothing.' : 'These approved criteria are unmet because their work was stopped. They stay in the total.'}</p>

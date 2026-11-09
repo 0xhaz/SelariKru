@@ -7,6 +7,7 @@ import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets,
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
+import { ControlBridge, type ControlDeps } from './control.ts';
 import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
 /** A harness this runner can start. It declares the models it runs, so an unsupported one is refused before any sandbox exists. */
@@ -43,6 +44,8 @@ export interface AttemptDeps {
   readonly tools?: readonly string[];
   /** Multiplier on the attempt timeout, for tests only. */
   readonly timeoutScale?: number;
+  /** How a person reaches this attempt's sandbox shell in control mode. Absent: this runner offers no control mode. */
+  readonly control?: ControlDeps;
   /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
   readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
 }
@@ -130,7 +133,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   let launcher: RuntimeHarnessLauncher | null = null;
   let feed: TerminalFeed | null = null;
   let stopping: Promise<unknown> | null = null;
+  let control: ControlBridge | null = null;
   const requestStop = (): void => {
+    // Before the worker: nobody should be typing into an attempt that is stopping.
+    void control?.shutdown();
     if (stopping === null && launcher?.current) stopping = launcher.stop(lease.attemptId).catch(() => undefined);
   };
 
@@ -307,6 +313,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The claim decided this from every source's label. Work that may not leave this machine never turns previews on, so there is nothing to upload.
     feed = lease.streamable === true ? new TerminalFeed(deps.api, ref, log, deps.terminalFeedLimits) : null;
     feed?.start();
+    // The lease says the control plane could allow this at all (streamable, not a trial). Whether it does is decided for each ticket.
+    if (deps.control && lease.controllable === true) {
+      control = new ControlBridge({ connect: deps.control.connectorFor(ref), runtime: deps.runtime, handle, log, ...(deps.control.limits !== undefined ? { limits: deps.control.limits } : {}) });
+      control.start();
+    }
     for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath, ...(feed !== null ? { previews: { enabled: true, maxChars: TERMINAL_PREVIEW_CHARS, raw: true } } : {}) })) {
       feed?.onEvent(ev);
       if (aborted()) requestStop();
@@ -380,6 +391,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
           break;
       }
     }
+    // Any session ends the moment the worker does: the shell must be gone before the workspace is read.
+    await control?.shutdown();
     if (stopping) await stopping;
     await feed?.close();
 
@@ -440,6 +453,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     return await finish('completed', null, cost, manifest);
   } finally {
+    await control?.shutdown();
     feed?.abort();
     clearInterval(beat);
     deps.signal?.removeEventListener('abort', onAbort);

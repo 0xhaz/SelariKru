@@ -53,6 +53,9 @@ export const ControlApiConfigSchema = z
     if (c.mode === 'hosted' && c.allowedOrigins.length === 0) {
       ctx.addIssue({ code: 'custom', path: ['allowedOrigins'], message: 'hosted mode needs an explicit origin allowlist' });
     }
+    if (c.allowedOrigins.some((o) => o.includes('*'))) {
+      ctx.addIssue({ code: 'custom', path: ['allowedOrigins'], message: 'origins are exact: no wildcard' });
+    }
     if (c.caps.infraRetryBackoffMaxSeconds < c.caps.infraRetryBackoffSeconds) {
       ctx.addIssue({ code: 'custom', path: ['caps', 'infraRetryBackoffMaxSeconds'], message: 'must be at least infraRetryBackoffSeconds' });
     }

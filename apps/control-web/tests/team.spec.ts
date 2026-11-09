@@ -672,3 +672,165 @@ test.describe('model assignment', () => {
     await expectNoAxeViolations(page);
   });
 });
+
+// ---- control mode ----------------------------------------------------------------------------------------------------------------
+const CONTROL_SHOTS = process.env['T510_SHOTS'];
+async function controlShot(page: Page, name: string): Promise<void> {
+  if (CONTROL_SHOTS) await page.screenshot({ path: `${CONTROL_SHOTS}/${name}.png`, fullPage: false });
+}
+const controlCalls = (page: Page, method: string) => page.evaluate((m) => window.__calls.commands.filter((c) => (c as { method: string }).method === m).length, method);
+
+async function controlPage(page: Page, control: Record<string, unknown>, theme?: 'light', extra: Record<string, unknown> = {}): Promise<void> {
+  await page.addInitScript(({ c, l, x }) => {
+    if (l) localStorage.setItem('selarikru.theme', 'light');
+    (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait', terminal: { status: 'live', lastLineAt: '2026-11-08T06:00:01.000Z', lines: ['[shell] /work $', '[shell] git status', 'worker output line'] }, control: c, ...x };
+  }, { c: control, l: theme === 'light', x: extra });
+  await page.goto('/tests/harness/index.html#/team');
+  await rows(page).first().locator('[data-open-worker]').click();
+  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  await expect(drawer(page).getByTestId('terminal-panel')).toHaveAttribute('data-status', 'live');
+}
+
+test('control mode: the read-only view has no way to send anything until a person has confirmed', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(panel.getByTestId('control-input')).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  // Confirm names the consequence.
+  const dialog = page.getByRole('dialog', { name: /Type into this worker/ });
+  await expect(dialog).toContainText('human-intervened');
+  await expect(dialog).toContainText('recorded model cannot vouch');
+  await expect(dialog).toContainText('cannot answer a decision, grant access or pass a check');
+  await expect(panel.getByTestId('control-input')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Stay read-only' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(await controlCalls(page, 'openTerminalControl')).toBe(0);
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-banner')).toContainText('Control mode on');
+  await expect(panel.getByTestId('control-honest')).toContainText('recorded model cannot vouch');
+  expect(await controlCalls(page, 'openTerminalControl')).toBe(1);
+  await expectNoAxeViolations(page);
+});
+
+test('control mode: lines go through the channel, and the Enter key only sends a line', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await panel.getByTestId('control-input').fill('git status');
+  await panel.getByTestId('control-input').press('Enter');
+  await expect.poll(() => controlCalls(page, 'controlSend')).toBe(1);
+  await panel.getByRole('button', { name: 'Interrupt (Ctrl-C)' }).click();
+  await expect.poll(() => controlCalls(page, 'controlInterrupt')).toBe(1);
+  await expect(panel.getByTestId('control-input')).toHaveValue('');
+});
+
+test('control mode: a prompt with echo off hides the field and says the line will not be recorded', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'text');
+  await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'on', reason: null, echo: false }));
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'password');
+  await expect(panel.getByTestId('control-hidden-note')).toContainText('not recorded');
+});
+
+test('control mode: leaving it, and closing the drawer, end it', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await panel.getByRole('button', { name: 'Leave control mode' }).click();
+  await expect.poll(() => controlCalls(page, 'controlClose')).toBe(1);
+  await expect(panel.getByTestId('control-ended')).toContainText('You left');
+  await expect(panel.getByTestId('control-on')).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Dismiss' }).click();
+
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-banner')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect.poll(() => controlCalls(page, 'controlClose')).toBe(2);
+});
+
+for (const [name, control, expected] of [
+  ['the session is refused by policy', { phase: 'refused', reason: 'policy_denied' }, 'policy does not allow'],
+  ['a trial refuses control mode', { phase: 'refused', reason: 'trial' }, 'benchmark trial never takes human input'],
+  ['restricted work refuses control mode', { phase: 'refused', reason: 'restricted' }, 'restricted or secret'],
+] as const) {
+  test(`control mode: ${name}`, async ({ page }) => {
+    await controlPage(page, control);
+    const panel = drawer(page).getByTestId('terminal-panel');
+    await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+    await page.getByRole('button', { name: 'Take control' }).click();
+    await expect(panel.getByTestId('control-refused')).toContainText(expected);
+    await expect(panel.getByTestId('control-input')).toHaveCount(0);
+  });
+}
+
+test('control mode: a session that the attempt ends says why, and a marked attempt is shown in the drawer', async ({ page }) => {
+  await controlPage(page, { phase: 'on' }, undefined, { attemptPatch: { '*': { humanIntervenedAt: '2026-11-08T06:00:30.000Z' } } });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(drawer(page).getByTestId('drawer-human-intervened')).toContainText('cannot vouch');
+  await expect(panel.getByTestId('control-marked')).toContainText('Human-intervened');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-banner')).toBeVisible();
+  await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'ended', reason: 'attempt_fenced', echo: null }));
+  await expect(panel.getByTestId('control-ended')).toContainText('fenced or cancelled');
+  await expect(panel.getByTestId('control-on')).toHaveCount(0);
+});
+
+test.describe('control mode screenshots', () => {
+  const states: readonly (readonly [string, Record<string, unknown>])[] = [['on', { phase: 'on' }], ['refused', { phase: 'refused', reason: 'policy_denied' }], ['ended', { phase: 'on' }]];
+  for (const width of [1440, 375]) {
+    test(`confirm at ${width}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await controlPage(page, { phase: 'on' });
+      await drawer(page).getByRole('button', { name: 'Take control of the shell' }).click();
+      await expect(page.getByRole('dialog', { name: /Type into this worker/ })).toBeVisible();
+      await controlShot(page, `confirm-${width}`);
+      await expectNoAxeViolations(page);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+    for (const [state, control] of states) {
+      test(`${state} at ${width}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await controlPage(page, control);
+        const panel = drawer(page).getByTestId('terminal-panel');
+        await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+        await page.getByRole('button', { name: 'Take control' }).click();
+        if (state === 'ended') {
+          await expect(panel.getByTestId('control-banner')).toBeVisible();
+          await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'ended', reason: 'attempt_fenced', echo: null }));
+          await expect(panel.getByTestId('control-ended')).toBeVisible();
+        } else if (state === 'on') await expect(panel.getByTestId('control-banner')).toBeVisible();
+        else await expect(panel.getByTestId('control-refused')).toBeVisible();
+        await controlShot(page, `${state}-${width}`);
+        await expectNoAxeViolations(page);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      });
+    }
+  }
+  for (const [state, control] of [['confirm', { phase: 'on' }], ...states] as const) {
+    test(`${state} in the light theme at 1440`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await controlPage(page, control, 'light');
+      const panel = drawer(page).getByTestId('terminal-panel');
+      await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+      if (state !== 'confirm') {
+        await page.getByRole('button', { name: 'Take control' }).click();
+        if (state === 'ended') {
+          await expect(panel.getByTestId('control-banner')).toBeVisible();
+          await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'ended', reason: 'attempt_fenced', echo: null }));
+          await expect(panel.getByTestId('control-ended')).toBeVisible();
+        } else if (state === 'on') await expect(panel.getByTestId('control-banner')).toBeVisible();
+        else await expect(panel.getByTestId('control-refused')).toBeVisible();
+      } else await expect(page.getByRole('dialog', { name: /Type into this worker/ })).toBeVisible();
+      await controlShot(page, `${state}-1440-light`);
+      await expectNoAxeViolations(page);
+    });
+  }
+});

@@ -24,6 +24,8 @@ export interface RealRunConfig {
   readonly baseSha: string;
   readonly allowedPaths: readonly string[];
   readonly budgetLimitUsd: number;
+  /** `SELARIKRU_REAL_TERMINAL_CONTROL=1` lets a person take control of a running worker in this rehearsal. Off otherwise. */
+  readonly terminalControl?: boolean;
 }
 
 const REPOSITORY = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
@@ -74,7 +76,7 @@ export function readRealRunConfig(env: Env): RealRunConfig {
   const projectId = env['SELARIKRU_REAL_PROJECT_ID']?.trim() || 'proj_real_local';
   const runId = env['SELARIKRU_REAL_RUN_ID']?.trim() || 'run_real_local';
   if (!SAFE_ID.test(projectId) || !SAFE_ID.test(runId)) throw new ConfigError('invalid configuration: the real-run project and run ids must be plain identifiers', [], ['SELARIKRU_REAL_PROJECT_ID']);
-  return { tenantId: need(env, 'SELARIKRU_TENANT_ID'), ownerUid: need(env, 'SELARIKRU_OWNER_UID'), projectId, runId, repository, defaultBranch, baseSha, allowedPaths, budgetLimitUsd };
+  return { tenantId: need(env, 'SELARIKRU_TENANT_ID'), ownerUid: need(env, 'SELARIKRU_OWNER_UID'), projectId, runId, repository, defaultBranch, baseSha, allowedPaths, budgetLimitUsd, terminalControl: env['SELARIKRU_REAL_TERMINAL_CONTROL'] === '1' };
 }
 
 /** Inserts the project and its run when absent. A project already pointed elsewhere is refused, never rewritten. Safe to repeat. */
@@ -101,7 +103,8 @@ export function writeRealRunFiles(dir: string, cfg: RealRunConfig): { planConfig
   const timeoutSeconds = base.limits?.attemptTimeoutSeconds;
   if (timeoutSeconds === undefined) throw new Error('policies/default.json has no attemptTimeoutSeconds');
   if (evaluate({ kind: 'create_draft_pr' }, base).decision !== 'allow') throw new Error('policies/default.json does not allow create_draft_pr');
-  const policy = { ...base, policyVersion: POLICY_VERSION };
+  // Control mode stays off unless the operator opts in: it opens a shell, so a real-run rehearsal does not grant it by default.
+  const policy = { ...base, policyVersion: POLICY_VERSION, operations: { ...base.operations, terminal_control: cfg.terminalControl ? 'allow' : 'deny' } };
   const planConfig = {
     projects: {
       [cfg.projectId]: {

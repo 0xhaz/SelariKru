@@ -204,6 +204,8 @@ export const AttemptViewSchema = z
     lastHeartbeatAt: Iso.nullable(),
     /** The model recorded on this attempt at claim. */
     assignment: RecordedModelSchema.nullable().default(null),
+    /** When a person first entered control mode on this attempt. Set durably, and never cleared. Absent or null: no person typed into its sandbox. */
+    humanIntervenedAt: Iso.nullable().optional(),
   })
   .strict();
 export type AttemptView = z.infer<typeof AttemptViewSchema>;

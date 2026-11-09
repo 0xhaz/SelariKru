@@ -379,6 +379,14 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       return commit(withEvidence(moveTask(task, status, blocked, at), e.type));
     }
 
+    case 'attempt.human_intervened': {
+      if (!attempt) return commit(task);
+      return commit(task, { ...snap, attempts: put(snap.attempts, attempt.attemptId, { ...attempt, humanIntervenedAt: attempt.humanIntervenedAt ?? at }) });
+    }
+
+    case 'terminal.control_ended':
+      return commit(task);
+
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.
       const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' = e.type;

@@ -94,6 +94,8 @@ export const attempts = pgTable(
     assignmentSource: text('assignment_source'),
     baseSha: text('base_sha'),
     headSha: text('head_sha'),
+    /** When a person first entered control mode here. Set in the transaction that consumes the ticket, before any shell exists, and never cleared. */
+    humanIntervenedAt: tstz('human_intervened_at'),
     /** Domain AttemptRecord outcome. Null only for rows written before the scheduler owned attempts. */
     outcome: text('outcome'),
     exitReason: text('exit_reason'),

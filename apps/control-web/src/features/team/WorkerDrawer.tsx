@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import type { AuthorizedTerminalRequest, TerminalChannel } from '@selarikru/view-protocol';
+import type { AuthorizedTerminalRequest, TerminalChannel, TerminalControlChannel } from '@selarikru/view-protocol';
 import { AxisBadges, Chip, buttonQuiet, formatExact, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { decisionHref } from '../../shell/route.ts';
@@ -193,7 +193,7 @@ const MIN_WIDTH = 440;
 const maxWidth = (): number => Math.max(MIN_WIDTH, Math.min(window.innerWidth - 120, 1100));
 const clampWidth = (w: number): number => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
-export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign, onOpenTerminal }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps; onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel> }) {
+export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign, onOpenTerminal, onOpenTerminalControl }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps; onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>; onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -346,19 +346,20 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
           ))}
         </div>
 
+        {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person typed into this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
           {tab === 'task' ? <TaskPanel detail={detail} row={row} assign={assign} /> : null}
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
           {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
-          {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} /> : null}
+          {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} onOpenControl={onOpenTerminalControl} humanIntervenedAt={row.humanIntervenedAt} /> : null}
           {tab === 'permissions' ? <PermissionsPanel detail={detail} /> : null}
           {tab === 'sandbox' ? <Facts facts={[...detail.sandbox]} /> : null}
           {tab === 'usage' ? <UsagePanel detail={detail} /> : null}
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          Inspecting is read-only. Closing this does not affect the worker; a model saved here applies only to its next attempt.
+          Inspecting is read-only unless you take control in the Terminal tab, and closing this ends that. It never stops the worker; a model saved here applies only to its next attempt.
         </footer>
       </div>
     </dialog>

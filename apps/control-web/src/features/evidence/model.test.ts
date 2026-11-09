@@ -126,3 +126,15 @@ describe('buildEvidence', () => {
     expect(buildEvidence(emptySnapshot({ projectId: 'p', observedAt: '2026-11-09T01:00:00.000Z', provenance: 'observed' }), null)).toBeNull();
   });
 });
+
+describe('human intervention', () => {
+  it('lists this run\'s attempts a person typed into, and no other run\'s', () => {
+    const empty = emptySnapshot({ projectId: 'p', observedAt: '2026-11-09T01:00:00.000Z', provenance: 'observed' });
+    const run = (id: string): RunView => ({ runId: id, lifecycle: 'verifying' as RunView['lifecycle'], planRevision: 1, latestEvidence: null, criteria: null, evidence: null, reducedScope: null, scopeAssessment: null, pinnedModel: null });
+    const task = (taskId: string, runId: string) => ({ taskId, runId, revision: 1, aggregateRevision: 1, title: null, role: null, dependsOn: [], status: 'running' as const, statusReason: null, placementBlock: null, cancelRequested: null, cancelReason: null, supersededByRevision: null, attemptIds: [], activeAttemptId: null, enteredStatusAt: '2026-11-09T01:00:00.000Z', latestEvidence: null });
+    const attempt = (attemptId: string, taskId: string, humanIntervenedAt: string | null) => ({ attemptId, taskId, number: 1, fence: 1, outcome: 'running' as const, exitReason: null, runnerId: 'r', startedAt: '2026-11-09T01:00:00.000Z', endedAt: null, lastHeartbeatAt: null, assignment: null, humanIntervenedAt });
+    const snapshot: ProjectViewSnapshot = { ...empty, runs: { r1: run('r1'), r2: run('r2') }, tasks: { t1: task('t1', 'r1'), t2: task('t2', 'r2') }, attempts: { a1: attempt('a1', 't1', '2026-11-09T01:05:00.000Z'), a2: attempt('a2', 't2', '2026-11-09T01:06:00.000Z'), a3: attempt('a3', 't1', null) } };
+    const model = buildEvidence(snapshot, 'r1')!;
+    expect(model.humanIntervened).toEqual([{ attemptId: 'a1', taskId: 't1', at: '2026-11-09T01:05:00.000Z' }]);
+  });
+});

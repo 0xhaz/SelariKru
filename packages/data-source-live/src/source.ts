@@ -1,8 +1,9 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
+  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
+import { openLiveControl, type WebSocketFactory } from './control.ts';
 import { openLiveTerminal } from './terminal.ts';
 
 export interface LiveDataSourceOptions {
@@ -12,6 +13,8 @@ export interface LiveDataSourceOptions {
   readonly fetch?: typeof fetch;
   /** No bytes for this long means the connection is gone, even if the socket never says so. The server sends a keepalive inside this. Default 45 000. */
   readonly streamIdleMs?: number;
+  /** Test seam for control mode's WebSocket. */
+  readonly makeSocket?: WebSocketFactory;
 }
 
 export interface LiveDataSource extends EngineeringDataSource {
@@ -321,6 +324,18 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       });
       streams.add(channel.closeNow);
       return channel;
+    },
+
+    openTerminalControl(session: AuthorizedTerminalRequest): TerminalControlChannel {
+      const owner = attemptOwners.get(session.attemptId);
+      if (!owner || owner.taskId !== session.taskId) {
+        const refused: TerminalControlChannel = { simulated: false, onState: (h) => { queueMicrotask(() => h({ phase: 'refused', reason: 'attempt_not_running', echo: null })); return () => undefined; }, onInput: () => () => undefined, send: () => undefined, interrupt: () => undefined, close: () => undefined };
+        return refused;
+      }
+      const channel = openLiveControl({ baseUrl: options.baseUrl, request: { ...session, projectId: owner.projectId }, fetchAuthed: request, makeSocket: options.makeSocket ?? ((url) => new WebSocket(url)) });
+      const close = (): void => channel.close();
+      streams.add(close);
+      return { ...channel, close: () => { streams.delete(close); channel.close(); } };
     },
 
     disconnect() {

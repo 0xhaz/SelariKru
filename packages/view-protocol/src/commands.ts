@@ -78,3 +78,38 @@ export interface TerminalChannel {
   onState(handler: (state: TerminalState) => void): () => void;
   close(): void;
 }
+
+/** Why a control session is not on, or ended. `demo`: mock data, which has no shell. */
+export type TerminalControlReason =
+  // Refused before a session began.
+  | 'demo' | 'ticket_invalid' | 'policy_denied' | 'trial' | 'restricted' | 'attempt_not_running' | 'session_active' | 'unavailable' | 'unauthorized' | 'connection_failed'
+  // Why a session that began has ended.
+  | 'left' | 'connection_lost' | 'idle_timeout' | 'session_limit' | 'attempt_finished' | 'attempt_fenced' | 'shell_exited' | 'shell_unavailable' | 'runner_link_lost' | 'audit_failed' | 'input_limit' | 'server_shutdown' | 'server_restarted';
+
+export type TerminalControlInputOutcome = 'recorded' | 'withheld_echo_off' | 'withheld_unconfirmed' | 'interrupt' | 'rate_limited' | 'too_long';
+
+/** Where control mode stands. `on` is claimed only after the sandbox's shell has answered. */
+export interface TerminalControlState {
+  readonly phase: 'connecting' | 'on' | 'refused' | 'ended';
+  readonly reason: TerminalControlReason | null;
+  /** Null: not known yet. False: the shell is reading something it does not want shown, such as a password. */
+  readonly echo: boolean | null;
+}
+
+/**
+ * A control session on one attempt. Output keeps arriving on the read-only channel, unchanged, marked as shell output; this is only the way in. Lines typed here are audited by the server, and
+ * nothing here can resolve a decision, a grant or a check.
+ */
+export interface TerminalControlChannel {
+  readonly simulated: boolean;
+  /** Delivers the current state immediately, then every change. */
+  onState(handler: (state: TerminalControlState) => void): () => void;
+  /** What the server did with each line, by the order they were sent. */
+  onInput(handler: (outcome: TerminalControlInputOutcome) => void): () => void;
+  /** One line. Only while `on`. */
+  send(line: string): void;
+  /** Ctrl-C. */
+  interrupt(): void;
+  /** Leaves control mode. Idempotent. */
+  close(): void;
+}

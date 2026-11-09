@@ -149,3 +149,33 @@ describe('the terminal upload schema', () => {
     expect(TerminalUploadRequestSchema.safeParse({ lease, seq: 0, lines: Array.from({ length: 101 }, () => ({ at: '2026-11-09T00:00:00.000Z', text: 'x' })), dropped: 0, ended: false }).success).toBe(false);
   });
 });
+
+describe('prompts without a newline', () => {
+  it('releases a short prompt, and hides a credential that follows a named one', () => {
+    const r = new TerminalRedactor();
+    r.write('Continue? ');
+    expect(r.releasePrompt()).toBe('Continue? ');
+    r.write('y\nDatabase password: ');
+    expect(r.releasePrompt()).toBe('Database password: ');
+    expect(r.write('hunter2\n')).toEqual(['[REDACTED]']);
+  });
+
+  it('holds anything that is not a prompt or that redaction changes: a name and value split by a pause is never shown in part', () => {
+    const r = new TerminalRedactor();
+    r.write('downloading 40');
+    expect(r.releasePrompt()).toBeNull();
+    const t = new TerminalRedactor();
+    t.write('API_KEY=abc123');
+    expect(t.releasePrompt()).toBeNull();
+    expect(t.write('def456\n')).toEqual(['API_KEY=[REDACTED]']);
+    const long = new TerminalRedactor();
+    long.write(`${'x'.repeat(400)}: `);
+    expect(long.releasePrompt()).toBeNull();
+  });
+
+  it('never releases while a private key is withheld', () => {
+    const r = new TerminalRedactor();
+    r.write('-----BEGIN PRIVATE KEY-----\nabc: ');
+    expect(r.releasePrompt()).toBeNull();
+  });
+});

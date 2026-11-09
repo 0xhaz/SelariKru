@@ -14,6 +14,7 @@ import { registerProposalRoutes } from './routes-proposals.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerEventStream } from './sse.ts';
+import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
 
 declare module 'fastify' {
@@ -65,6 +66,8 @@ export interface AppDeps {
   readonly github?: GithubDeps | undefined;
   /** Live output. Injected by tests to shrink its limits; otherwise one is created here. */
   readonly terminal?: TerminalHub | undefined;
+  /** Shrunk by tests. */
+  readonly controlLimits?: ControlLimits | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -79,6 +82,8 @@ export interface AppContext extends AppDeps {
   readonly lifecycle: { closing: boolean };
   /** Live worker output. Never domain state: it lives only in this process. */
   readonly terminal: TerminalHub;
+  /** Control sessions: a person typing into one attempt's sandbox. */
+  readonly control: ControlHub;
 }
 
 const RUNNER_SEEN_WRITE_MS = 5_000;
@@ -145,6 +150,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   app.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: { code: 'not_found', message: 'no such route' } }));
 
+  /** The check behind a runner token, wherever it arrives. */
+  const verifyRunnerToken = async (token: string): Promise<{ runnerId: string; tenantId: string; location: 'local' | 'cloud' } | null> => {
+    if (!token.startsWith(RUNNER_TOKEN_PREFIX)) return null;
+    const [row] = await db.select().from(schema.runners).where(and(eq(schema.runners.tokenHash, sha256Hex(token)), eq(schema.runners.tenantId, config.tenantId), isNull(schema.runners.revokedAt)));
+    return row ? { runnerId: row.runnerId, tenantId: row.tenantId, location: row.location === 'cloud' ? 'cloud' : 'local' } : null;
+  };
+
   const owner: Guard = async (req) => {
     const token = bearerToken(req.headers.authorization);
     if (!token) throw unauthenticated();
@@ -187,12 +199,16 @@ export function buildApp(deps: AppDeps): FastifyInstance {
 
   const terminal = deps.terminal ?? new TerminalHub(() => deps.now().getTime());
   terminal.startSweeper();
-  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false }, terminal };
+  const control = new ControlHub(db, { config, now: deps.now, policy: deps.policy, terminal }, verifyRunnerToken, deps.controlLimits ?? DEFAULT_CONTROL_LIMITS);
+  control.attach(app.server, (host) => config.mode !== 'local' || ALLOWED_LOCAL_HOSTS.has(hostName(host)), origins);
+  app.addHook('onReady', async () => { await control.reapOrphans().catch(() => undefined); });
+  const ctx: AppContext = { ...deps, owner, runner, enroll, corsHeaders, openStreams: new Set(), lifecycle: { closing: false }, terminal, control };
   registerOwnerRoutes(app, ctx);
   registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
+  registerControlRoutes(app, ctx);
   if (deps.github) registerGithubRoutes(app, ctx, deps.github);
 
   // Before the HTTP server stops listening: a hijacked SSE response would otherwise keep close() waiting forever, and a restart would hang behind its own clients.
@@ -200,6 +216,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     ctx.lifecycle.closing = true;
     for (const close of [...ctx.openStreams]) close();
     terminal.stop();
+    control.stop();
   });
   return app;
 }

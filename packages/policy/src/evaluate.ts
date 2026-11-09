@@ -16,7 +16,7 @@ export interface PolicyDecision {
 }
 
 export type Operation =
-  | { kind: 'read_approved_docs' | 'run_scoped_tests' | 'edit_scoped_dev_branch' | 'create_draft_pr' | 'append_artifacts' | 'assign_replan_tasks' }
+  | { kind: 'read_approved_docs' | 'run_scoped_tests' | 'edit_scoped_dev_branch' | 'create_draft_pr' | 'append_artifacts' | 'assign_replan_tasks' | 'terminal_control' }
   /** Assigning or launching one model. `selection` null removes an assignment, so only the operation's treatment is judged. */
   | { kind: 'assign_model'; selection: { provider: string; model: string } | null }
   | { kind: 'repair_within_limits'; attempt: number; estimatedCost: number | null; remainingBudget: number | null }

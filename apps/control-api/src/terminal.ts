@@ -1,4 +1,4 @@
-import { TerminalRedactor, type TerminalUploadRequest } from '@selarikru/protocol';
+import { TerminalRedactor, redactControlOutputLine, type TerminalLine, type TerminalUploadRequest } from '@selarikru/protocol';
 import { schema } from '@selarikru/persistence';
 import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
@@ -225,6 +225,19 @@ export class TerminalHub {
     }
     if (created || wasSilent || batch.dropped > 0 || channel.ended !== wasEnded) this.broadcastState(channel);
     if (channel.ended && !wasEnded) this.closeClients(channel);
+  }
+
+  /**
+   * Output from a person's shell on this attempt. Each line is already redacted, line-buffered, by the runner, and is read again here on its own: the channel's stateful redactor belongs to the worker's
+   * output, and interleaving a shell through it would corrupt its held state. Shown under a prefix so nobody takes it for what the worker itself did.
+   */
+  publishControl(projectId: string, attemptId: string, lines: readonly TerminalLine[], dropped: number): void {
+    const channel = this.channels.get(attemptId);
+    if (!channel || channel.projectId !== projectId || channel.ended) return;
+    channel.lastUploadMs = this.nowMs();
+    channel.dropped += dropped;
+    for (const line of lines) this.addLine(channel, line.at, `[shell] ${redactControlOutputLine(line.text)}`);
+    if (dropped > 0) this.broadcastState(channel);
   }
 
   private createChannel(projectId: string, attemptId: string, now: number): AttemptChannel {

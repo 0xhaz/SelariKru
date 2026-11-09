@@ -8,6 +8,7 @@ import { cachedHarnessReport } from '@selarikru/harness-claude';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { redactSecrets } from '@selarikru/protocol';
 import { HttpRunnerApi } from './api.ts';
+import { wsControlConnector } from './control.ts';
 import { loadCredentials, pair } from './credentials.ts';
 import { RunnerLoop } from './loop.ts';
 
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
     if (caps.runtimeVersion === null) throw new Error('sbx is not available; install and sign in to Docker Sandboxes. There is no host-mode fallback.');
     log(`sbx ${caps.runtimeVersion}; ${Object.keys(repos).length} project source(s) configured; outbound connections only`);
     const api = new HttpRunnerApi(creds.apiBaseUrl, creds.token);
+    const dialControl = wsControlConnector(creds.apiBaseUrl, creds.token);
     const ctl = new AbortController();
     // First signal: stop the running agent with a bounded stop, destroy its sandbox, exit. A second one exits at once.
     const shutdown = (): void => {
@@ -73,7 +75,7 @@ async function main(): Promise<void> {
       log,
       attempt: {
         api, runtime, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot, repos,
-        heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 40, cpus: 2, memoryMiB: 4096, log,
+        heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 40, cpus: 2, memoryMiB: 4096, log, control: { connectorFor: dialControl },
       },
     });
     await loop.run(ctl.signal);

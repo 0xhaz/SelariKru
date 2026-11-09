@@ -133,7 +133,11 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
     const granted = await tx.select({ taskId: schema.approvals.taskId, approver: schema.approvals.approver, detail: schema.approvals.detail }).from(schema.approvals).where(and(
       eq(schema.approvals.tenantId, run.tenantId), eq(schema.approvals.projectId, run.projectId), eq(schema.approvals.runId, run.runId), eq(schema.approvals.outcome, 'granted'))).orderBy(schema.approvals.createdAt, schema.approvals.approvalId);
     const grants = granted.flatMap((a) => (typeof a.detail['operation'] === 'string' ? [{ operation: a.detail['operation'], taskId: a.taskId, approver: a.approver }] : []));
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
+    const intervened = await tx.select({ attemptId: schema.attempts.attemptId, taskId: schema.attempts.taskId, at: schema.attempts.humanIntervenedAt, runId: schema.taskRevisions.runId }).from(schema.attempts).innerJoin(schema.taskRevisions, and(
+      eq(schema.taskRevisions.tenantId, schema.attempts.tenantId), eq(schema.taskRevisions.projectId, schema.attempts.projectId), eq(schema.taskRevisions.taskId, schema.attempts.taskId), eq(schema.taskRevisions.revision, schema.attempts.revision)))
+      .where(and(eq(schema.attempts.tenantId, run.tenantId), eq(schema.attempts.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.attempts.humanIntervenedAt} IS NOT NULL`)).orderBy(schema.attempts.humanIntervenedAt, schema.attempts.attemptId);
+    const humanIntervention = intervened.map((h) => ({ attemptId: h.attemptId, taskId: h.taskId, at: h.at!.toISOString() }));
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, humanIntervention, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {

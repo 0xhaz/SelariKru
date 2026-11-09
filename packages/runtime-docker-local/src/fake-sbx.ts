@@ -1,5 +1,5 @@
 import type { AttemptExit } from '@selarikru/protocol';
-import { assertSafeSbxArgs, type SbxCommandRunner, type SbxResult, type SbxStream } from './sbx.ts';
+import { assertSafeSbxArgs, execNameIndex, type SbxCommandRunner, type SbxResult, type SbxStream } from './sbx.ts';
 
 export interface FakeSandbox {
   status: 'running' | 'stopped';
@@ -112,7 +112,7 @@ export class FakeSbx implements SbxCommandRunner {
         return ok(`Created sandbox ${name}\n`);
       }
       case 'exec': {
-        const name = args[args.indexOf('exec') + (args[1] === '-w' ? 3 : 1)]!;
+        const name = args[execNameIndex(args)]!;
         const sb = this.sandboxes.get(name);
         if (!sb) return fail('error: sandbox not found', 125);
         sb.status = 'running';
@@ -148,7 +148,7 @@ export class FakeSbx implements SbxCommandRunner {
     this.calls.push([...args]);
     const s = new FakeStream(args);
     this.streams.push(s);
-    const name = args[args.indexOf('exec') + (args[1] === '-w' ? 3 : 1)]!;
+    const name = args[execNameIndex(args)]!;
     const sb = this.sandboxes.get(name);
     if (this.options.failExec || !sb) {
       queueMicrotask(() => s.end(125));

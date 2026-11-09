@@ -26,6 +26,7 @@ export interface World {
   lease: ClaimedLease;
   task: TaskSpec;
   logs: string[];
+  controlStreams: FakeStream[];
   cleanup(): Promise<void>;
 }
 
@@ -44,6 +45,10 @@ export interface WorldOptions {
   grants?: LeaseGrant[];
   /** What the claim decided about output leaving the machine. Default true. */
   streamable?: boolean;
+  /** Called when a control shell is opened, so a test can stand in for the guest helper. */
+  onControlStream?: (stream: FakeStream, args: readonly string[]) => void;
+  /** What the claim decided about hosting a control session. Default false. */
+  controllable?: boolean;
   /** Null: a lease with no recorded model. */
   assignment?: RecordedAssignment | null;
 }
@@ -66,9 +71,11 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
 
   const workRoot = join(root, 'work');
   const logs: string[] = [];
+  const controlStreams: FakeStream[] = [];
   const fake: FakeOptions = {
     ...o.fake,
     onStream: (stream, args) => {
+      if (args[1] === '-i') { controlStreams.push(stream); o.onControlStream?.(stream, args); return; }
       const cwd = args[2]!;
       const write = async (rel: string, body: string) => {
         await mkdir(dirname(join(cwd, rel)), { recursive: true });
@@ -98,7 +105,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
     classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
   } as TaskSpec;
-  const lease: ClaimedLease = { streamable: o.streamable ?? true, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment };
+  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment };
 
   let hb = 0;
   const published: RunnerResult[] = [];
@@ -121,7 +128,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
   } as unknown as World['api'];
 
   return {
-    root, repo, sha, workRoot, sbx, runtime, artifacts, api, lease, task, logs,
+    root, repo, sha, workRoot, sbx, runtime, artifacts, api, lease, task, logs, controlStreams,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }

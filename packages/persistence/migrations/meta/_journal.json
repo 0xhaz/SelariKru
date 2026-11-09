@@ -106,6 +106,13 @@
       "when": 1794224705512,
       "tag": "0014_runner_freshness_and_activity",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1794235932972,
+      "tag": "0015_terminal_control",
+      "breakpoints": true
     }
   ]
 }

@@ -16,6 +16,8 @@ export const ClaimedLeaseSchema = z
     assignment: RecordedAssignmentSchema.nullable().default(null),
     /** Whether this attempt's output may leave the machine, decided at claim from every source's label. Absent: it may not. */
     streamable: z.boolean().default(false),
+    /** Whether this attempt can host a control session at all. The control API still re-checks policy and the rest for every ticket. Absent: it cannot. */
+    controllable: z.boolean().default(false),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;

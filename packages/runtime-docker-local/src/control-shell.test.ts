@@ -1,0 +1,97 @@
+import { describe, expect, it } from 'vitest';
+import type { ControlShellEvent } from '@selarikru/protocol';
+import { CONTROL_HELPER, SbxControlShell, controlKillArgs, controlShellArgs } from './control-shell.ts';
+import { FakeSbx } from './fake-sbx.ts';
+import { assertSafeSbxArgs, UnsafeSbxCommandError } from './sbx.ts';
+import { SbxRuntimeAdapter } from './adapter.ts';
+import type { FakeStream } from './fake-sbx.ts';
+
+const NAME = 'selarikru-t12345678-a87654321';
+
+describe('the control shell command', () => {
+  it('only goes through the allow-listed exec, in the named sandbox, with no host path and no privilege flag', () => {
+    expect(() => assertSafeSbxArgs(controlShellArgs(NAME, '/ws', 'ctl_1'))).not.toThrow();
+    expect(() => assertSafeSbxArgs(['exec', '-i', '-w', '/ws', 'hq-askwell-jim', 'sh'])).toThrow(UnsafeSbxCommandError);
+    for (const bad of [['exec', '-u', 'root', NAME, 'sh'], ['exec', '-t', NAME, 'sh'], ['exec', '--privileged', NAME, 'sh'], ['exec', '-e', 'X=1', NAME, 'sh']]) {
+      expect(() => assertSafeSbxArgs(bad)).toThrow(UnsafeSbxCommandError);
+    }
+  });
+
+  it('a session id can never become part of a shell command', () => {
+    expect(() => controlShellArgs(NAME, '/ws', 'x; rm -rf /')).toThrow();
+    expect(() => controlKillArgs(NAME, '$(reboot)')).toThrow();
+  });
+
+  it('the helper runs a non-readline bash and never writes typed input anywhere', () => {
+    expect(CONTROL_HELPER).toContain("'--noediting'");
+    expect(CONTROL_HELPER).toContain("HISTFILE='/dev/null'");
+    expect(CONTROL_HELPER).not.toMatch(/open\(.*typed|log/);
+  });
+});
+
+function shellOver(runner: FakeSbx, args: string[]) {
+  const stream = runner.stream(args) as FakeStream;
+  return { stream, shell: new SbxControlShell(stream, runner, NAME, 'ctl_1', 50) };
+}
+
+async function collect(events: AsyncIterable<ControlShellEvent>, n: number): Promise<ControlShellEvent[]> {
+  const out: ControlShellEvent[] = [];
+  for await (const e of events) { out.push(e); if (out.length >= n) break; }
+  return out;
+}
+
+describe('the shell frames', () => {
+  const setup = () => {
+    const runner = new FakeSbx();
+    runner.addForeign(NAME);
+    return { runner, ...shellOver(runner, controlShellArgs(NAME, '/ws', 'ctl_1')) };
+  };
+
+  it('reads echo, output and acks, and ignores anything else', async () => {
+    const { stream, shell } = setup();
+    stream.push('{"e":1}\n');
+    stream.push(`{"o":"${Buffer.from('hi\n').toString('base64')}"}\nnot json\n{"unknown":1}\n`);
+    stream.push('{"a":3,"e":0}\n');
+    stream.end(0);
+    const got = await collect(shell.events, 5);
+    expect(got).toEqual([{ kind: 'echo', on: true }, { kind: 'output', text: 'hi\n' }, { kind: 'ack', seq: 3, echo: false }, { kind: 'exited' }]);
+  });
+
+  it('a multi-byte character split across frames is rejoined', async () => {
+    const { stream, shell } = setup();
+    const bytes = Buffer.from('café', 'utf8');
+    stream.push(`{"o":"${bytes.subarray(0, 4).toString('base64')}"}\n`);
+    stream.push(`{"o":"${bytes.subarray(4).toString('base64')}"}\n`);
+    stream.end(0);
+    const got = await collect(shell.events, 3);
+    expect(got.filter((e): e is Extract<ControlShellEvent, { kind: 'output' }> => e.kind === 'output').map((e) => e.text).join('')).toBe('café');
+  });
+
+  it('sends input as a frame that carries no shell text in the clear', () => {
+    const { stream, shell } = setup();
+    shell.input(1, 'echo hi\r');
+    const sent = JSON.parse(stream.written[0]!.trim()) as { i: number; d: string };
+    expect(sent.i).toBe(1);
+    expect(Buffer.from(sent.d, 'base64').toString()).toBe('echo hi\r');
+    expect(stream.written[0]).not.toContain('echo hi');
+  });
+
+  it('a stuck close is killed inside the guest, not only on the host, and a late input is dropped', async () => {
+    const runner = new FakeSbx({ onStream: () => undefined });
+    runner.addForeign(NAME);
+    const { stream, shell } = shellOver(runner, controlShellArgs(NAME, '/ws', 'ctl_1'));
+    await shell.close();
+    expect(stream.stdinEnded).toBe(true);
+    expect(runner.calls.some((c) => c.join(' ').includes('kill -TERM'))).toBe(true);
+    shell.input(9, 'x');
+    expect(stream.written.join('')).not.toContain('eA==');
+  });
+
+  it('the adapter opens it inside the handle\'s own sandbox', async () => {
+    const sbx = new FakeSbx();
+    sbx.addForeign(NAME);
+    const adapter = new SbxRuntimeAdapter(sbx, { home: '/h', forbidden: [], attemptsRoot: null });
+    await adapter.openControlShell({ sandboxId: NAME, attemptId: 'a', taskId: 't', workspacePath: '/ws' }, 'ctl_9');
+    expect(sbx.calls[0]!.slice(0, 5)).toEqual(['exec', '-i', '-w', '/ws', NAME]);
+  });
+});

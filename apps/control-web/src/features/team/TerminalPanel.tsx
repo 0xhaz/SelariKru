@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Chip, buttonQuiet, formatExact, type Tone } from '@selarikru/ui';
 import { sanitizeTerminalText } from '@selarikru/domain';
-import { TERMINAL_MAX_LINES, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalReason, type TerminalState } from '@selarikru/view-protocol';
+import { TERMINAL_MAX_LINES, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type TerminalReason, type TerminalState } from '@selarikru/view-protocol';
+import { ControlBar } from './ControlBar.tsx';
 
 const CONNECTING: TerminalState = { status: 'connecting', reason: null, lastLineAt: null, dropped: 0 };
 
@@ -29,7 +30,7 @@ function NoAttempt() {
 }
 
 /** Connected only while mounted, which is only while this tab is selected: leaving the tab or closing the drawer closes the channel. */
-export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRequest | null; onOpen: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel> }) {
+export function TerminalPanel({ target, onOpen, onOpenControl, humanIntervenedAt = null }: { target: AuthorizedTerminalRequest | null; onOpen: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>; onOpenControl?: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined; humanIntervenedAt?: string | null }) {
   const [state, setState] = useState<TerminalState>(CONNECTING);
   const [lines, setLines] = useState<readonly string[]>([]);
   const [simulated, setSimulated] = useState(false);
@@ -152,7 +153,8 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
       ) : null}
 
       {heldCount > 0 ? <button type="button" className={buttonQuiet} data-testid="terminal-held" onClick={() => { pinned.current = true; release(); }}>Show {heldCount} new {heldCount === 1 ? 'line' : 'lines'}</button> : null}
-      <p className="text-sm text-muted">Read-only. Nothing here reaches the worker, and output is never saved.</p>
+      {onOpenControl && target !== null ? <ControlBar target={target} onOpen={onOpenControl} canOpen={state.status === 'live'} humanIntervenedAt={humanIntervenedAt} /> : null}
+      <p className="text-sm text-muted">Read-only unless you take control. Output is never saved.</p>
     </div>
   );
 }

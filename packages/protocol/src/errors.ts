@@ -45,6 +45,12 @@ export const ERROR_CODES = [
   'unsupported_model',
   'model_not_allowed',
   'trial_model_pinned',
+  'origin_required',
+  'control_refused_trial',
+  'attempt_not_running',
+  'control_session_active',
+  'control_ticket_used',
+  'control_unavailable',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

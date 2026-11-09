@@ -229,3 +229,16 @@ describe('budget', () => {
     expect(checkReservation(undefined, 5).ok).toBe(false);
   });
 });
+
+describe('terminal control', () => {
+  it('is denied by the shipped policy and by a policy that does not name it', () => {
+    expect(evaluate({ kind: 'terminal_control' }, base).decision).toBe('deny');
+    expect(evaluate({ kind: 'terminal_control' }, { policyVersion: 'x', operations: {} }).decision).toBe('deny');
+    expect(evaluate({ kind: 'terminal_control' }, undefined).decision).toBe('deny');
+  });
+  it('is allowed only where a project grants it', () => {
+    const granted = { ...base, operations: { ...base.operations, terminal_control: 'allow' as const } };
+    expect(evaluate({ kind: 'terminal_control' }, granted).decision).toBe('allow');
+    expect(parsePolicy(granted).operations?.['terminal_control']).toBe('allow');
+  });
+});

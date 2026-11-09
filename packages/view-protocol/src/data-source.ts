@@ -1,4 +1,4 @@
-import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, TerminalChannel } from './commands.ts';
+import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, TerminalChannel, TerminalControlChannel } from './commands.ts';
 import type { ProjectViewEvent } from './events.ts';
 import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
 
@@ -25,6 +25,8 @@ export interface EngineeringDataSource {
   getRunFailures(projectId: string, runId: string): Promise<RunFailuresView>;
   execute(command: AuthorizedViewCommand): Promise<CommandReceipt>;
   openTerminal(session: AuthorizedTerminalRequest): Promise<TerminalChannel>;
+  /** Control mode on one attempt: a single-use ticket and a separate connection. Additive: `execute` cannot carry a ticket, because a receipt is not a secret. Absent: this source offers no control mode. */
+  openTerminalControl?(session: AuthorizedTerminalRequest): TerminalControlChannel;
   disconnect(): void;
 }
 

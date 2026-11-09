@@ -36,6 +36,7 @@ export const OPERATION_KINDS = [
   'assign_replan_tasks',
   'assign_model',
   'destructive_data_migration',
+  'terminal_control',
 ] as const;
 
 /** Kinds needing a human decision: configurable to `require_approval` or `deny`, never `allow`. */

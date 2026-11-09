@@ -3,7 +3,7 @@ import {
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel, type TerminalState,
+  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
 import { approvalUnavailableReason, criterionDescription } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
@@ -535,6 +535,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
           stateHandlers.clear();
         },
       };
+    },
+
+    openTerminalControl(): TerminalControlChannel {
+      const state: TerminalControlState = { phase: 'refused', reason: 'demo', echo: null };
+      return { simulated: true, onState: (h) => { queueMicrotask(() => h(state)); return () => undefined; }, onInput: () => () => undefined, send: () => undefined, interrupt: () => undefined, close: () => undefined };
     },
 
     disconnect() {

@@ -1,5 +1,6 @@
 import type {
   AttemptHandle,
+  ControlShell,
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeSnapshot,
@@ -10,6 +11,7 @@ import type {
   TaskBundle,
 } from '@selarikru/protocol';
 import { redactSecrets } from '@selarikru/protocol';
+import { SbxControlShell, controlShellArgs } from './control-shell.ts';
 import { assertSafeWorkspace, auditMounts } from './guards.ts';
 import { isOurSandbox, sandboxName, taskPrefix } from './names.ts';
 import type { SbxCommandRunner } from './sbx.ts';
@@ -221,6 +223,12 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
     const after = await this.stateNow(id);
     if (after === 'stopped' || after === 'absent') return ack('stopped', true, !endedBySignal, stopDetail ?? detail);
     return ack('stop_failed', false, !endedBySignal, `sandbox still ${after} after sbx stop${stopDetail ? `: ${stopDetail}` : ''}`);
+  }
+
+  /** The human's shell. Runs inside this sandbox only, through the same allow-listed `sbx exec`; there is no code path by which it starts on the host. */
+  async openControlShell(handle: SandboxHandle, sessionId: string): Promise<ControlShell> {
+    const stream = this.sbx.stream(controlShellArgs(handle.sandboxId, handle.workspacePath, sessionId));
+    return new SbxControlShell(stream, this.sbx, handle.sandboxId, sessionId, this.t.signalMs);
   }
 
   async inspect(handle: SandboxHandle): Promise<RuntimeSnapshot> {

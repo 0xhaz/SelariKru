@@ -332,6 +332,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             // The status is unchanged, but clients following snapshot + cursor must learn of the request: bump the aggregate revision and record it.
             const rev = await bumpStatus(tx, key, row.rowRevision, row.status, at);
             await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, attemptIds: open.map((a) => a.attemptId) } });
+            // A cancel means the worker is stopping, so no one should be typing into it.
+            for (const a of open) ctx.control.endForAttempt(a.attemptId, 'attempt_fenced');
             return { operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
           }
           // A verified task is closed work, unless the record behind it no longer stands: then cancelling is one of the ways out.
@@ -568,7 +570,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const statuses = await tx.select().from(schema.taskStatus).where(scope(schema.taskStatus)).orderBy(asc(schema.taskStatus.taskId));
         const revisions = await tx.select().from(schema.taskRevisions).where(scope(schema.taskRevisions));
         const attempts = await tx.select({
-          attemptId: schema.attempts.attemptId, taskId: schema.attempts.taskId, revision: schema.attempts.revision, attemptNumber: schema.attempts.attemptNumber,
+          attemptId: schema.attempts.attemptId, taskId: schema.attempts.taskId, revision: schema.attempts.revision, attemptNumber: schema.attempts.attemptNumber, humanIntervenedAt: schema.attempts.humanIntervenedAt,
           runner: schema.attempts.runner, leaseFence: schema.attempts.leaseFence, lastHeartbeatAt: schema.attempts.lastHeartbeatAt,
           leaseExpiresAt: schema.attempts.leaseExpiresAt, deadlineAt: schema.attempts.deadlineAt, outcome: schema.attempts.outcome,
           exitReason: schema.attempts.exitReason, startedAt: schema.attempts.startedAt, endedAt: schema.attempts.endedAt,
@@ -691,6 +693,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
                 activity: a.lastTool !== null && a.lastToolAt !== null ? { tool: a.lastTool, at: a.lastToolAt.toISOString() } : null,
                 /** The model this attempt was recorded with, and so what its harness received. Null only for attempts from before assignments. */
                 assignment: a.modelProvider !== null && a.modelId !== null ? { provider: a.modelProvider, model: a.modelId, source: a.assignmentSource, route: a.modelRoute ?? 'unknown' } : null,
+                humanIntervenedAt: a.humanIntervenedAt?.toISOString() ?? null,
                 startedAt: a.startedAt?.toISOString() ?? null, endedAt: a.endedAt?.toISOString() ?? null,
                 lastHeartbeatAt: a.lastHeartbeatAt?.toISOString() ?? null, leaseExpiresAt: a.leaseExpiresAt?.toISOString() ?? null, deadlineAt: a.deadlineAt?.toISOString() ?? null,
                 leaseHealth: a.endedAt === null && a.lastHeartbeatAt ? leaseHealth(a.lastHeartbeatAt.toISOString(), at) : null,

@@ -132,8 +132,11 @@ export function redactTerminalText(text: string): string {
 }
 
 const NEWLINE = /\r\n|\n|\r(?!$)/;
+/** What an interactive prompt looks like when it stops without a newline. */
+const PROMPT_END = /[:?>#$\])]\s*$/;
+const MAX_PROMPT_CHARS = 200;
 
-const fit = (line: string): string => (line.length > TERMINAL_MAX_LINE_CHARS ? `${line.slice(0, TERMINAL_MAX_LINE_CHARS)}${LINE_CUT_MARK}` : line);
+export const fitTerminalLine = (line: string): string => (line.length > TERMINAL_MAX_LINE_CHARS ? `${line.slice(0, TERMINAL_MAX_LINE_CHARS)}${LINE_CUT_MARK}` : line);
 
 /**
  * Redacts worker output that arrives in arbitrary chunks. It is line-buffered: text is held until its line is complete, and only then cleaned and redacted, so a secret split
@@ -148,6 +151,8 @@ export class TerminalRedactor {
   private hanging: string | null = null;
   private pemLines: number | null = null;
   private yamlBlock: { readonly indent: number; lines: number } | null = null;
+  /** A released prompt named a credential: the next single-token line is its value, shown or typed. */
+  private promptNamed = false;
   /** Partial lines left by earlier messages, not yet known to be separate. */
   private parts: string[] = [];
 
@@ -191,7 +196,23 @@ export class TerminalRedactor {
     }
     if (this.pemLines !== null) out.push(this.endPem(true));
     this.yamlBlock = null;
+    this.promptNamed = false;
     return out;
+  }
+
+  /**
+   * Releases an interactive prompt that has no newline, such as `Password:` or `Continue? `, so someone at the keyboard can answer it. Only a short held fragment that ends like a prompt is
+   * released, and only if redaction leaves it alone, so a credential's name and value arriving in two pieces is never shown in part. Null when nothing qualifies, and the line stays held.
+   * A released prompt that names a credential leaves the next single-token line hidden, as if the prompt and that line had arrived together.
+   */
+  releasePrompt(): string | null {
+    if (this.discarding || this.pemLines !== null || this.yamlBlock !== null || this.parts.length > 0 || this.hanging !== null || this.promptNamed) return null;
+    const clean = sanitizeTerminalText(this.buffer);
+    if (clean === '' || clean.length > MAX_PROMPT_CHARS || !PROMPT_END.test(clean)) return null;
+    if (redactTerminalText(clean) !== clean) return null;
+    this.buffer = '';
+    if (BEARER_END.test(clean) || endsWithName(clean, false)) this.promptNamed = true;
+    return fitTerminalLine(clean);
   }
 
   /** Decides whether held messages were separate: only if reading them together redacts nothing that reading them apart would miss. */
@@ -225,6 +246,11 @@ export class TerminalRedactor {
       }
       this.yamlBlock = null;
     }
+    if (this.promptNamed) {
+      if (clean.trim() === '') return [];
+      this.promptNamed = false;
+      if (/^\s*\S+\s*$/.test(clean)) return [REDACTED];
+    }
     const requireSeparator = this.mode === 'lines';
     const held = this.hanging;
     this.hanging = null;
@@ -253,6 +279,6 @@ export class TerminalRedactor {
   }
 
   private emit(text: string): string[] {
-    return redactTerminalText(text).split('\n').map(fit);
+    return redactTerminalText(text).split('\n').map(fitTerminalLine);
   }
 }

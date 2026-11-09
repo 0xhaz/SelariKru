@@ -10,6 +10,7 @@ export const EVENT_TYPES = [
   'verification.started', 'verification.passed', 'verification.failed',
   'change.proposed', 'change.merged',
   'candidate.assembled', 'candidate.failed',
+  'attempt.human_intervened', 'terminal.control_ended',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -74,6 +75,10 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   /** The integration controller built (or failed to build) the exact candidate that verification will judge. */
   'candidate.assembled': [I],
   'candidate.failed': [I],
+  /** A person entered control mode on this attempt and typed into its sandbox. Human only: nothing else can claim, or remove, this mark. */
+  'attempt.human_intervened': [H],
+  /** A control session ended. Human only, because the session was theirs even when a fence or timeout closed it. */
+  'terminal.control_ended': [H],
 };
 
 export interface ActorNotPermitted {

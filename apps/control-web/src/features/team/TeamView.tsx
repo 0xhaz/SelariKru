@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AxisBadges, Chip, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, Timestamp, buttonQuiet, formatDayTime } from '@selarikru/ui';
-import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, DataSourceError, TerminalChannel } from '@selarikru/view-protocol';
+import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, DataSourceError, TerminalChannel, TerminalControlChannel } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import { WorkerDrawer } from './WorkerDrawer.tsx';
@@ -189,6 +189,7 @@ export interface TeamViewProps {
   readonly onResync: () => void;
   /** Connects the Terminal tab to one attempt's live output. */
   readonly onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>;
+  readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
   /** A failure while deriving the view. Thrown here so the route's error boundary, not the shell, takes it. */
   readonly failure?: unknown;
 }
@@ -202,7 +203,7 @@ function Heading({ summary }: { summary?: string | null | undefined }) {
   );
 }
 
-export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, onExecute, onRefresh, onResync, onOpenTerminal, failure }: TeamViewProps) {
+export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, onExecute, onRefresh, onResync, onOpenTerminal, onOpenTerminalControl, failure }: TeamViewProps) {
   if (failure !== undefined) throw failure;
   const wide = useIsWide();
   const [sort, setSort] = useState<SortKey>('attention');
@@ -268,7 +269,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
         </Panel>
       )}
       {team.runners.length > 0 ? <div className="mt-4"><RunnersPanel runners={team.runners} summary={team.runnersSummary} simulated={team.simulated} /></div> : null}
-      {selected ? <WorkerDrawer key={selected.workerId} row={selected} mode={mode} simulated={team.simulated} wide={wide} nowMs={nowMs} onClose={close} assign={assignProps} onOpenTerminal={onOpenTerminal} /> : null}
+      {selected ? <WorkerDrawer key={selected.workerId} row={selected} mode={mode} simulated={team.simulated} wide={wide} nowMs={nowMs} onClose={close} assign={assignProps} onOpenTerminal={onOpenTerminal} onOpenTerminalControl={onOpenTerminalControl} /> : null}
     </>
   );
 }

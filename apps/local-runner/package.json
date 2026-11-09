@@ -23,12 +23,14 @@
     "@selarikru/harness-claude": "workspace:*",
     "@selarikru/protocol": "workspace:*",
     "@selarikru/runtime-docker-local": "workspace:*",
+    "ws": "8.21.3",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@selarikru/control-api": "workspace:*",
     "@selarikru/workflow": "workspace:*",
     "@types/node": "24.19.2",
+    "@types/ws": "8.18.1",
     "drizzle-orm": "0.45.4",
     "tsx": "4.23.15",
     "typescript": "5.9.3",

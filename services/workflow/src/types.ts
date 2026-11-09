@@ -74,6 +74,8 @@ export interface Lease {
   readonly assignment?: RecordedAssignment;
   /** Whether this attempt's live output may leave the runner, decided once at claim. Set at claim; absent on a lease rebuilt from a stored attempt, which reads the stored value. */
   readonly streamable?: boolean;
+  /** Whether this attempt can host a control session: streamable and not a benchmark trial. The control API re-checks both, and policy, for every ticket. Absent: it cannot. */
+  readonly controllable?: boolean;
 }
 
 export interface SkippedCandidate {
