@@ -1,11 +1,11 @@
-import { newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
-  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
+  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -81,9 +81,60 @@ function blockedReasonOf(rows: readonly Record<string, unknown>[], taskId: strin
   return typeof reason === 'string' ? reason : null;
 }
 
+/** A task can still get an attempt in any of these. A closed task has none left, so an override on it would be a record of nothing. */
+const ASSIGNABLE_TASK: readonly string[] = ['planned', 'ready', 'running', 'awaiting_approval', 'blocked', 'verifying', 'failed'];
+
 export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
+  const catalog = ctx.catalog ?? NO_HARNESS_CATALOG;
+
+  /** A refused selection as a typed error, so the screen can say which check failed. */
+  const refuseSelection = (selection: { provider: string; model: string }): AppError | null => {
+    const verdict = validateSelection(selection, catalog, ctx.policy);
+    if (verdict.ok) return null;
+    if (verdict.reason === 'model_not_allowed') return new AppError(403, 'model_not_allowed', 'policy does not allow this model', { reason: verdict.decision?.reason, provider: selection.provider, model: selection.model });
+    return new AppError(422, verdict.reason === 'no_provider_detected' ? 'no_provider_detected' : verdict.reason === 'unsupported_provider' ? 'unsupported_provider' : 'unsupported_model', `cannot assign ${selection.provider}/${selection.model}: ${verdict.reason}`, { provider: selection.provider, model: selection.model });
+  };
+
+  // ---- model assignments -------------------------------------------------------------------------------------
+  app.post('/v1/projects/:id/model-assignments', auth, async (req, reply) => {
+    const uid = ownerOf(req);
+    const projectId = idParam(req);
+    const body = parseBody(ModelAssignmentRequestSchema, req.body);
+    await requireProject(db, config.tenantId, projectId);
+    const gate = evaluate({ kind: 'assign_model', selection: body.selection }, ctx.policy);
+    if (gate.decision === 'deny' && gate.reason !== 'model_not_allowed') throw new AppError(403, 'policy_denied', 'policy does not allow assigning models', { reason: gate.reason, decision: gate.decision });
+    if (gate.decision === 'require_approval') throw new AppError(403, 'policy_denied', 'policy does not allow assigning models here', { reason: gate.reason, decision: gate.decision });
+    const at = now();
+    const result = await withTx(db, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.model_assignment:${config.tenantId}:${projectId}:${body.scope}:${body.key}`}, 0))`);
+      return idempotent(tx, { tenantId: config.tenantId, projectId, key: `model.assign:${body.scope}:${body.key}:${body.idempotencyKey}` }, fingerprint(body), async () => {
+        const current = await assignmentRevision(tx, config.tenantId, projectId, body.scope, body.key);
+        if (body.expectedRevision !== current) throw staleRevision(current, 'this assignment');
+        if (body.scope === 'task') {
+          const row = await requireTaskStatus(tx, config.tenantId, body.key);
+          if (row.projectId !== projectId) throw new AppError(404, 'task_not_found', 'no such task in this project');
+          const specRow = await loadSpecRow(tx, { tenantId: config.tenantId, projectId, taskId: body.key, revision: row.currentRevision });
+          const run = specRow ? await requireRun(tx, config.tenantId, specRow.runId) : null;
+          if (!run) throw new AppError(404, 'task_not_found', 'task revision is missing');
+          if (run.trial) throw new AppError(409, 'trial_model_pinned', 'a benchmark trial pins one model and refuses overrides', { pinnedModel: run.pinnedModel });
+          if (!ASSIGNABLE_TASK.includes(row.status)) throw new AppError(403, 'command_not_allowed', `cannot assign a model to a task that is ${row.status}`, { status: row.status });
+        }
+        if (body.selection !== null) {
+          const refused = refuseSelection(body.selection);
+          if (refused) throw refused;
+        }
+        const revision = current + 1;
+        await tx.insert(schema.modelAssignments).values({
+          tenantId: config.tenantId, projectId, scopeKind: body.scope, scopeKey: body.key, revision,
+          provider: body.selection?.provider ?? null, model: body.selection?.model ?? null, updatedBy: uid, updatedAt: at,
+        });
+        return { scope: body.scope, key: body.key, revision, selection: body.selection, appliesTo: 'next_attempt' as const };
+      });
+    });
+    return reply.code(200).send(result);
+  });
 
   // ---- runs -------------------------------------------------------------------------------------------------
   app.post('/v1/projects/:id/runs', auth, async (req, reply) => {
@@ -97,7 +148,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const runId = newId('run');
         const budget: Record<string, unknown> = body.budgetLimitUsd !== undefined ? { limitUsd: body.budgetLimitUsd } : {};
         const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };
-        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement, trial: body.trial === true });
+        const pinnedModel = body.pinnedModel ?? null;
+        if (pinnedModel !== null) {
+          const refused = refuseSelection(pinnedModel);
+          if (refused) throw refused;
+        }
+        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement, trial: body.trial === true, pinnedModel });
         await writeEvent(tx, at, {
           projectId, runId, taskId: runId, aggregateRevision: 1, type: 'run.created',
           actor: { kind: 'human', id: uid },
@@ -106,6 +162,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             ...(body.description !== undefined ? { description: redactSecrets(body.description) } : {}),
             budget: budgetStatus(budget),
             ...(placement ? { placement } : {}),
+            ...(pinnedModel !== null ? { pinnedModel } : {}),
           },
         });
         return { runId, budget: budgetStatus(budget) };
@@ -437,6 +494,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           runner: schema.attempts.runner, leaseFence: schema.attempts.leaseFence, lastHeartbeatAt: schema.attempts.lastHeartbeatAt,
           leaseExpiresAt: schema.attempts.leaseExpiresAt, deadlineAt: schema.attempts.deadlineAt, outcome: schema.attempts.outcome,
           exitReason: schema.attempts.exitReason, startedAt: schema.attempts.startedAt, endedAt: schema.attempts.endedAt,
+          modelRoute: schema.attempts.modelRoute, modelProvider: schema.attempts.modelProvider, modelId: schema.attempts.modelId, assignmentSource: schema.attempts.assignmentSource,
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
         const approvals = await tx.select().from(schema.approvals).where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['pending', 'expired'])));
@@ -466,8 +524,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           projectId,
           cursor,
           generatedAt: at.toISOString(),
+          /** What this machine's harness adapters declare, and what policy says about each model. Identifiers only. */
+          modelCatalog: catalogView(catalog, ctx.policy),
+          /** The current assignment per role and task; each carries the revision a change must send back. */
+          modelAssignments: await loadModelAssignments(tx, config.tenantId, projectId),
           runs: runs.map((r) => ({
-            runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null,
+            runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null, pinnedModel: r.pinnedModel ?? null,
             /** Set once the owner accepted a budget stop. `notDelivered` lists what was stopped and is never counted as verified. */
             reducedScope: reducedScopes.filter((d) => d.context === reducedScopeContext(r.runId)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.affected[0] ?? null,
             /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
@@ -489,6 +551,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               title: (spec?.spec as { title?: string } | undefined)?.title ?? null,
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
                 attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason,
+                /** The model this attempt was recorded with, and so what its harness received. Null only for attempts from before assignments. */
+                assignment: a.modelProvider !== null && a.modelId !== null ? { provider: a.modelProvider, model: a.modelId, source: a.assignmentSource, route: a.modelRoute ?? 'unknown' } : null,
                 startedAt: a.startedAt?.toISOString() ?? null, endedAt: a.endedAt?.toISOString() ?? null,
                 lastHeartbeatAt: a.lastHeartbeatAt?.toISOString() ?? null, leaseExpiresAt: a.leaseExpiresAt?.toISOString() ?? null, deadlineAt: a.deadlineAt?.toISOString() ?? null,
                 leaseHealth: a.endedAt === null && a.lastHeartbeatAt ? leaseHealth(a.lastHeartbeatAt.toISOString(), at) : null,

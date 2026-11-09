@@ -90,6 +90,9 @@ export interface ReservationDetail {
   readonly attemptId: string;
   readonly fence: number;
   readonly amountMicros: number;
+  /** Whether the hold used the model's list rate or stayed conservative. Never an observed price. */
+  readonly rateBasis?: string;
+  readonly rateSource?: string | null;
 }
 
 /** Writes the reservation. Call only after `checkFits` passed on the same locked position. */
@@ -102,7 +105,7 @@ export async function reserve(tx: Tx, position: BudgetPosition, r: ReservationDe
     amountUsd: formatMicros(r.amountMicros),
     amountProvenance: 'estimated',
     state: 'reserved',
-    detail: { attemptId: r.attemptId, fence: r.fence, source: 'spec.limits.maxCostUsd' },
+    detail: { attemptId: r.attemptId, fence: r.fence, source: 'spec.limits.maxCostUsd', ...(r.rateBasis !== undefined ? { rateBasis: r.rateBasis, rateSource: r.rateSource ?? null } : {}) },
   });
 }
 

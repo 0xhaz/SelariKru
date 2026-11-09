@@ -4,6 +4,7 @@ import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { decisionHref } from '../../shell/route.ts';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import type { Fact, TeamRow, WorkerDetail } from './model.ts';
+import { TaskModelOverride } from './ModelAssignments.tsx';
 
 const TABS = [
   { id: 'task', label: 'Task' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
@@ -30,7 +31,9 @@ const Note = ({ children }: { children: ReactNode }) => <p className="text-sm te
 const Empty = ({ children }: { children: ReactNode }) => <p className="py-2 text-muted">{children}</p>;
 const SIMULATED_NOTE = <p className="mb-3 text-sm text-warning">Simulated data. It is not evidence.</p>;
 
-function TaskPanel({ detail }: { detail: WorkerDetail }) {
+type AssignProps = Omit<Parameters<typeof TaskModelOverride>[0], 'target'>;
+
+function TaskPanel({ detail, row, assign }: { detail: WorkerDetail; row: TeamRow; assign: AssignProps }) {
   const t = detail.task;
   return (
     <div className="space-y-4">
@@ -75,6 +78,7 @@ function TaskPanel({ detail }: { detail: WorkerDetail }) {
           {t.current ? <Note>Accepted contract versions, per-task criteria and the branch or pull request are not reported in this snapshot.</Note> : null}
         </>
       ) : <Empty>No task has been assigned to this worker.</Empty>}
+      {row.overrideTarget ? <TaskModelOverride {...assign} target={row.overrideTarget} /> : null}
     </div>
   );
 }
@@ -187,7 +191,7 @@ const MIN_WIDTH = 440;
 const maxWidth = (): number => Math.max(MIN_WIDTH, Math.min(window.innerWidth - 120, 1100));
 const clampWidth = (w: number): number => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
-export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void }) {
+export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -315,7 +319,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
             <div><dt className="mb-1 text-sm font-medium text-muted">Results</dt><dd className="m-0"><ResultSignalView row={row} nowMs={nowMs} /></dd></div>
           </dl>
           <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-line pt-2">
-            <AxisBadges execution={row.execution} modelRoute={row.modelRoute} />
+            <AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} />
             <p className="text-sm text-muted" data-testid="drawer-confirmed">Last confirmed <Exact iso={row.lastConfirmedAt} /></p>
           </div>
         </header>
@@ -341,7 +345,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
         </div>
 
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
-          {tab === 'task' ? <TaskPanel detail={detail} /> : null}
+          {tab === 'task' ? <TaskPanel detail={detail} row={row} assign={assign} /> : null}
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
           {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
@@ -351,7 +355,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose }: { r
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          Read-only. Closing this does not affect the worker.
+          Inspecting is read-only. Closing this does not affect the worker; a model saved here applies only to its next attempt.
         </footer>
       </div>
     </dialog>

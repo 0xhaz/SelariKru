@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startLeaseExpiryDriver } from '../src/index.ts';
 import { bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 import { createScheduler } from '@selarikru/workflow';
-import { POLICY } from '@selarikru/workflow/test-helpers';
+import { TEST_CATALOG, POLICY } from '@selarikru/workflow/test-helpers';
 
 let t: TestDb;
 let h: Harness;
@@ -106,7 +106,7 @@ describe('runner routes', () => {
 describe('cancel request is honoured by the scheduler', () => {
   const cancel = (taskId: string, rev: number, key: string) => post(h.app, `/v1/tasks/${taskId}/commands`, { command: 'cancel', expectedRevision: rev, idempotencyKey: key });
   const taskRow = async () => (await t.db.execute(sql`SELECT status, row_revision FROM task_status WHERE task_id = 't1'`))[0]!;
-  const sched = () => createScheduler({ db: t.db, now: h.clock.now, policy: POLICY });
+  const sched = () => createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
 
   it('a cancel request writes task.cancel_requested as the human owner and bumps the aggregate revision', async () => {
     await seedTask(t.db, specFor('t1'), 'ready');
@@ -230,7 +230,7 @@ describe('lease expiry driver', () => {
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     expect(claim.body.lease).not.toBeNull();
 
-    const scheduler = createScheduler({ db: t.db, now: h.clock.now, policy: POLICY });
+    const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
     const driver = startLeaseExpiryDriver({ scheduler, now: h.clock.now, intervalMs: 10 });
     h.clock.advance(61);
     await waitFor(async () => {

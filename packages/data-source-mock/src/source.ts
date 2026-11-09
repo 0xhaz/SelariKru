@@ -2,12 +2,12 @@ import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
-  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
+  type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel,
 } from '@selarikru/view-protocol';
 import { approvalUnavailableReason } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
-import { FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
+import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 
@@ -31,6 +31,11 @@ interface Project {
   changeRequests: ChangeRequestView[];
   /** Re-verifications spent per task revision, bounded like the real route. */
   readonly reverifyCounts: Map<string, number>;
+  /** The adapter's declared models and the current assignments, as the real tables would hold them. */
+  readonly modelCatalog: ModelCatalogView;
+  modelAssignments: ModelAssignmentView[];
+  /** Every assignment's revision, including removed ones: the real route's optimistic check never forgets. */
+  readonly assignmentRevisions: Map<string, number>;
 }
 
 export interface MockOptions {
@@ -87,6 +92,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
+      modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: [...(fixture.modelAssignments ?? [])], assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
   }
@@ -114,7 +120,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         const seed = seedFor(id, planRevision);
         if (seed) tasks = { ...tasks, [id]: seedTask(seed, event.runId, event.occurredAt, tasks[id]) };
       }
-      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null };
+      const run = snap.runs[event.runId] ?? { runId: event.runId, lifecycle: 'running' as const, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
       snap = {
         ...snap, tasks, runs: { ...snap.runs, [event.runId]: { ...run, lifecycle: 'running', planRevision } },
         meta: { ...snap.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt },
@@ -252,7 +258,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       }),
     );
     const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
-    return { ...s, runs, attempts, workers, meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s) };
+    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s) };
   }
 
   const prng = mulberry32(0x5e1a);
@@ -277,9 +283,36 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   });
   const rejected = (key: string, reason: NonNullable<CommandReceipt['rejection']>): CommandReceipt => receipt(key, { rejection: reason });
 
+  /** The same order of checks as `POST /v1/projects/:id/model-assignments`. Reaches no running attempt: nothing here touches the event stream. */
+  function setAssignment(p: Project, c: Extract<AuthorizedViewCommand, { command: 'assignment.set' }>, op: string): CommandReceipt {
+    const { scope, key, selection } = c.args;
+    const id = `${scope}:${key}`;
+    const current = p.assignmentRevisions.get(id) ?? 0;
+    if (c.expectedRevision !== current) return rejected(c.idempotencyKey, 'stale_revision');
+    if (scope === 'task') {
+      const task = p.state.snapshot.tasks[key];
+      if (!task) return rejected(c.idempotencyKey, 'unknown_target');
+      if (p.state.snapshot.runs[task.runId]?.pinnedModel) return rejected(c.idempotencyKey, 'trial_model_pinned');
+      if (['verified', 'merged', 'cancelled', 'superseded'].includes(task.status)) return rejected(c.idempotencyKey, 'not_allowed');
+    }
+    if (selection !== null) {
+      if (p.modelCatalog.status !== 'detected' || p.modelCatalog.providers.length === 0) return rejected(c.idempotencyKey, 'no_provider_detected');
+      const provider = p.modelCatalog.providers.find((x) => x.provider === selection.provider);
+      if (!provider) return rejected(c.idempotencyKey, 'unsupported_provider');
+      const model = provider.models.find((x) => x.modelId === selection.model);
+      if (!model) return rejected(c.idempotencyKey, 'unsupported_model');
+      if (!model.allowedByPolicy) return rejected(c.idempotencyKey, 'model_not_allowed');
+    }
+    const revision = current + 1;
+    p.assignmentRevisions.set(id, revision);
+    p.modelAssignments = [...p.modelAssignments.filter((a) => !(a.scope === scope && a.key === key)), { scope, key, provider: selection?.provider ?? null, model: selection?.model ?? null, revision, updatedBy: 'demo-operator', updatedAt: isoOf(timeOf(p)) }];
+    return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+  }
+
   function run(p: Project, c: AuthorizedViewCommand): CommandReceipt {
     const snap = p.state.snapshot;
     const op = `op_${seededId(prng, 'sim')}`;
+    if (c.command === 'assignment.set') return setAssignment(p, c, op);
     if (c.command === 'run.accept_reduced_scope' || c.command === 'run.reverify' || c.command === 'run.open_pull_request') {
       const r = snap.runs[c.args.runId];
       if (!r) return rejected(c.idempotencyKey, 'unknown_target');
@@ -401,7 +434,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const c = parsed.data;
       if (closed) throw fail('disconnected', 'the mock data source is disconnected');
       // Ids are namespaced per fixture, so a target matches at most one project.
-      const owner = [...projects.values()].find((p) => ('taskId' in c.args ? Boolean(p.state.snapshot.tasks[c.args.taskId]) : 'runId' in c.args ? Boolean(p.state.snapshot.runs[c.args.runId]) : Boolean(p.state.snapshot.approvals[c.args.approvalId])));
+      const owner = [...projects.values()].find((p) => ('projectId' in c.args ? p.fixture.projectId === c.args.projectId : 'taskId' in c.args ? Boolean(p.state.snapshot.tasks[c.args.taskId]) : 'runId' in c.args ? Boolean(p.state.snapshot.runs[c.args.runId]) : Boolean(p.state.snapshot.approvals[c.args.approvalId])));
       if (!owner) return rejected(c.idempotencyKey, 'unknown_target');
       const seen = owner.receipts.get(c.idempotencyKey);
       if (seen) return { ...seen, replayed: true };

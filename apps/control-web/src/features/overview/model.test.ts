@@ -18,7 +18,7 @@ describe('delivery', () => {
 
   it('heartbeat never increments verified criteria', async () => {
     const running = snapshotOf({ criteria: { verified: 0, total: 1 }, tasks: [task('a', { activeAttemptId: 'att', status: 'running' })], workers: [worker('w', { taskId: 'a', attemptId: 'att' })] });
-    running.attempts['att'] = { attemptId: 'att', taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(60), endedAt: null, lastHeartbeatAt: iso(30) };
+    running.attempts['att'] = { attemptId: 'att', taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(60), endedAt: null, lastHeartbeatAt: iso(30), assignment: null };
     expect(criteria(running)).toBe('0 of 1 criteria verified');
 
     // A heartbeat by event.
@@ -46,7 +46,7 @@ describe('delivery', () => {
 
   it('counts only the run shown, not every run in the project', () => {
     const snapshot = snapshotOf({ tasks: [task('a', { status: 'verified', runId: 'old' }), task('b', { status: 'verified' }), task('c')] });
-    snapshot.runs = { old: { runId: 'old', lifecycle: 'merged', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null }, ...snapshot.runs };
+    snapshot.runs = { old: { runId: 'old', lifecycle: 'merged', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null }, ...snapshot.runs };
     const { delivery } = buildOverview(snapshot, NOW, NOW);
     expect(delivery.criteriaLabel).toBe('1 of 2 tasks verified');
     expect(delivery.tasks.map((t) => t.taskId)).toEqual(['c', 'b']);

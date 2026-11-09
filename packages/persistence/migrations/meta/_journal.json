@@ -85,6 +85,13 @@
       "when": 1794217189356,
       "tag": "0011_approval_resolved_at",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794218621461,
+      "tag": "0012_model_assignments",
+      "breakpoints": true
     }
   ]
 }

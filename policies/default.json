@@ -1,5 +1,5 @@
 {
-  "policyVersion": "2026-11-08.1",
+  "policyVersion": "2026-11-09.1",
   "operations": {
     "read_approved_docs": "allow",
     "run_scoped_tests": "allow",
@@ -7,6 +7,7 @@
     "create_draft_pr": "allow",
     "append_artifacts": "allow",
     "assign_replan_tasks": "allow",
+    "assign_model": "allow",
     "destructive_data_migration": "require_approval",
     "modify_org_permissions": "deny",
     "new_domain": "require_approval",
@@ -28,6 +29,14 @@
     "maxBrowserGenerations": 1,
     "repairAttempts": 2,
     "attemptTimeoutSeconds": 1800
+  },
+  "models": {
+    "allowed": [
+      { "provider": "anthropic", "model": "claude-sonnet-5-5" },
+      { "provider": "anthropic", "model": "claude-opus-5-5" },
+      { "provider": "anthropic", "model": "claude-haiku-5-5" }
+    ],
+    "default": { "provider": "anthropic", "model": "claude-sonnet-5-5" }
   },
   "destinations": [],
   "selectedSources": []

@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import type { VerificationRecord } from '@selarikru/domain';
+import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
+import { detectHarnesses } from '@selarikru/harness-claude';
 import { createGhCliPort, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
@@ -127,6 +128,8 @@ export async function startServer(options: {
   config: ControlApiConfig;
   databaseUrl: string;
   policyFile?: string | undefined;
+  /** What the harness adapters report. Default: detected on this machine at startup. */
+  harnessCatalog?: HarnessCatalog | undefined;
   /** JSON file of per-project plan settings (see loadPlanConfigFile). Without it, proposal review is blocked. */
   planConfigFile?: string | undefined;
   verifier?: TokenVerifier | undefined;
@@ -152,9 +155,11 @@ export async function startServer(options: {
   const now = options.now ?? (() => new Date());
   const { db, close } = createDb(options.databaseUrl);
   const policy = options.policyFile ? loadPolicyFile(options.policyFile) : loadDefaultPolicy();
-  const scheduler = createScheduler({ db, now, policy });
+  // Read once here: a harness installed later needs a restart to be offered, and the screen says what was found.
+  const catalog = options.harnessCatalog ?? await detectHarnesses();
+  const scheduler = createScheduler({ db, now, policy, catalog });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
-  const app = buildApp({ config, db, verifier, now, scheduler, policy, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
+  const app = buildApp({ config, db, verifier, now, scheduler, policy, catalog, planConfig: options.planConfigFile ? loadPlanConfigFile(options.planConfigFile) : undefined,
     github: options.github ? {
       webhookSecret: options.github.webhookSecret,
       pullRequests: options.github.port && options.github.sourceRepoPath && options.github.loadRecord

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AxisBadges, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, buttonQuiet } from '@selarikru/ui';
-import type { DataSourceError } from '@selarikru/view-protocol';
+import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import { WorkerDrawer } from './WorkerDrawer.tsx';
+import { ModelAssignmentsPanel } from './ModelAssignments.tsx';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import { NO_FILTER, SORT_KEYS, filterRows, sortRows, type FleetFilter, type SortKey, type TeamModel, type TeamRow } from './model.ts';
 
@@ -74,7 +75,7 @@ function FleetTable({ rows, sort, nowMs, onOpen }: { rows: readonly TeamRow[]; s
             <td className="px-3 py-3"><ActivitySignalView row={row} /></td>
             <td className="px-3 py-3"><HealthSignalView row={row} nowMs={nowMs} /></td>
             <td className="px-3 py-3"><ResultSignalView row={row} nowMs={nowMs} /></td>
-            <td className="px-3 py-3"><AxisBadges stacked execution={row.execution} modelRoute={row.modelRoute} /></td>
+            <td className="px-3 py-3"><AxisBadges stacked execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} /></td>
           </tr>
         ))}
       </tbody>
@@ -93,7 +94,7 @@ function FleetCards({ rows, nowMs, onOpen }: { rows: readonly TeamRow[]; nowMs: 
             <div><dt className="mb-1 text-sm font-medium text-muted">Health</dt><dd className="m-0"><HealthSignalView row={row} nowMs={nowMs} /></dd></div>
             <div><dt className="mb-1 text-sm font-medium text-muted">Results</dt><dd className="m-0"><ResultSignalView row={row} nowMs={nowMs} /></dd></div>
           </dl>
-          <div className="mt-3 border-t border-line pt-2"><AxisBadges execution={row.execution} modelRoute={row.modelRoute} /></div>
+          <div className="mt-3 border-t border-line pt-2"><AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.assignment?.model} /></div>
         </li>
       ))}
     </ul>
@@ -102,7 +103,7 @@ function FleetCards({ rows, nowMs, onOpen }: { rows: readonly TeamRow[]; nowMs: 
 
 const selectClass = 'rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg';
 
-function Toolbar({ sort, onSort, filter, onFilter, roles, runs, shown, total }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; runs: readonly string[]; shown: number; total: number }) {
+function Toolbar({ sort, onSort, filter, onFilter, roles, runs, providers, shown, total }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; runs: readonly string[]; providers: TeamModel['providers']; shown: number; total: number }) {
   return (
     <div className="mb-3 flex flex-wrap items-end gap-3 border-b border-line pb-3">
       <div>
@@ -118,6 +119,13 @@ function Toolbar({ sort, onSort, filter, onFilter, roles, runs, shown, total }: 
           <option value="local">Local sandbox</option>
           <option value="cloud">Cloud sandbox</option>
           <option value="unknown">Unknown</option>
+        </select>
+      </div>
+      <div>
+        <label htmlFor="team-provider" className="mb-1 block text-sm text-muted">Provider</label>
+        <select id="team-provider" className={selectClass} value={filter.provider} onChange={(e) => onFilter({ ...filter, provider: e.target.value })}>
+          <option value="all">All providers</option>
+          {providers.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
         </select>
       </div>
       <div>
@@ -152,6 +160,9 @@ export interface TeamViewProps {
   readonly mode: 'mock' | 'live';
   readonly onRestart: () => void;
   readonly leaveDemoHref?: string | undefined;
+  readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
+  readonly onRefresh: () => void;
+  readonly onResync: () => void;
   /** A failure while deriving the view. Thrown here so the route's error boundary, not the shell, takes it. */
   readonly failure?: unknown;
 }
@@ -165,7 +176,7 @@ function Heading({ summary }: { summary?: string | null | undefined }) {
   );
 }
 
-export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure }: TeamViewProps) {
+export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, onExecute, onRefresh, onResync, failure }: TeamViewProps) {
   if (failure !== undefined) throw failure;
   const wide = useIsWide();
   const [sort, setSort] = useState<SortKey>('attention');
@@ -207,10 +218,12 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
     );
   }
 
+  const assignProps = { model: team.assignments, disabledReason: connection === 'live' ? null : 'Assignments are off until the connection is live, so nothing is changed on stale state.', onExecute, onRefresh, onResync };
   return (
     <>
       <Heading summary={team.summary} />
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
+      <ModelAssignmentsPanel {...assignProps} />
       {team.empty ? (
         <section aria-label="Workers" className="rounded-card border border-line bg-panel">
           <EmptyState title="No workers have started" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
@@ -219,7 +232,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
         </section>
       ) : (
         <Panel title="Fleet" labelId="team-fleet-title" aside={team.simulated ? 'Simulated, not evidence' : null}>
-          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} runs={team.runs} shown={rows.length} total={team.rows.length} />
+          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} runs={team.runs} providers={team.providers} shown={rows.length} total={team.rows.length} />
           {rows.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-muted">No workers match these filters.</p>
@@ -228,7 +241,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
           ) : wide ? <FleetTable rows={rows} sort={sort} nowMs={nowMs} onOpen={setSelectedId} /> : <FleetCards rows={rows} nowMs={nowMs} onOpen={setSelectedId} />}
         </Panel>
       )}
-      {selected ? <WorkerDrawer key={selected.workerId} row={selected} mode={mode} simulated={team.simulated} wide={wide} nowMs={nowMs} onClose={close} /> : null}
+      {selected ? <WorkerDrawer key={selected.workerId} row={selected} mode={mode} simulated={team.simulated} wide={wide} nowMs={nowMs} onClose={close} assign={assignProps} /> : null}
     </>
   );
 }

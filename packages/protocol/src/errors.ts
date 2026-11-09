@@ -36,6 +36,11 @@ export const ERROR_CODES = [
   'lease_conflict',
   'actor_not_permitted',
   'pull_request_not_allowed',
+  'no_provider_detected',
+  'unsupported_provider',
+  'unsupported_model',
+  'model_not_allowed',
+  'trial_model_pinned',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

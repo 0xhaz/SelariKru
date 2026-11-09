@@ -1,7 +1,7 @@
 import { createScheduler, type Scheduler } from '@selarikru/workflow';
 import { schema } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import { CLOUD_POLICY, POLICY, runner } from '@selarikru/workflow/test-helpers';
+import { TEST_CATALOG, CLOUD_POLICY, POLICY, runner } from '@selarikru/workflow/test-helpers';
 import { reconcileRun } from '@selarikru/integrations-github';
 import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { sql } from 'drizzle-orm';
@@ -17,7 +17,7 @@ let h: Harness;
 let s: Scheduler;
 
 function setup(policy: Policy): void {
-  s = createScheduler({ db: t.db, now: makeHarness(t, {}, policy).clock.now, policy });
+  s = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: makeHarness(t, {}, policy).clock.now, policy });
   h = makeHarness(t, {}, policy, { scheduler: s });
 }
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { RUN_STATUSES, TASK_STATUSES } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, ModelSelectionSchema, RUN_STATUSES, TASK_STATUSES } from '@selarikru/domain';
 import { INFERENCE_MODES } from '@selarikru/policy';
 import { CursorSchema, ProvenanceSchema, VIEW_SCHEMA_VERSION } from './common.ts';
 import { UsageEntrySchema } from './usage.ts';
@@ -18,6 +18,30 @@ export type WorkerHealth = (typeof WORKER_HEALTH)[number];
 export const ExecutionLocationSchema = z.enum(['local', 'cloud', 'unknown']);
 export const ModelRouteSchema = z.enum(['device', 'cloud', 'unknown']);
 export const ObservedSourceSchema = z.enum(['on_device', 'in_cloud', 'unknown']);
+
+/** The model an attempt was launched with, as recorded at claim. It never changes afterwards. Null means no record exists, and the route stays unknown. */
+export const RecordedModelSchema = z.object({ provider: Id, model: Id, source: z.enum(ASSIGNMENT_SOURCES) }).strict();
+export type RecordedModel = z.infer<typeof RecordedModelSchema>;
+
+/** What the installed harness adapters declare, and what policy says about each model. `none` and `unknown` carry no providers. */
+export const ModelCatalogViewSchema = z
+  .object({
+    status: z.enum(CATALOG_STATUSES),
+    detail: z.string().nullable(),
+    providers: z.array(z.object({
+      provider: Id, label: z.string().min(1), harnessVersion: z.string().nullable(),
+      models: z.array(z.object({ modelId: Id, label: z.string().min(1), route: ModelRouteSchema, allowedByPolicy: z.boolean(), policyReason: z.string().nullable() }).strict()),
+    }).strict()),
+  })
+  .strict();
+export type ModelCatalogView = z.infer<typeof ModelCatalogViewSchema>;
+export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, providers: [] };
+
+/** The current assignment for a role or task. `revision` is what a change must send back. Null provider and model: removed, listed only for its revision. */
+export const ModelAssignmentViewSchema = z
+  .object({ scope: z.enum(ASSIGNMENT_SCOPES), key: Id, provider: Id.nullable(), model: Id.nullable(), revision: z.number().int().min(1), updatedBy: z.string().min(1), updatedAt: Iso })
+  .strict();
+export type ModelAssignmentView = z.infer<typeof ModelAssignmentViewSchema>;
 
 export const EvidenceRefSchema = z
   .object({ kind: z.string().min(1), ref: Id, at: Iso })
@@ -79,6 +103,8 @@ export const RunViewSchema = z
     reducedScope: ReducedScopeViewSchema.nullable().default(null),
     /** Null means the source has not reported one (or the run has no budget stop): the not-delivered list is then unknown, and is never read as empty. */
     scopeAssessment: ScopeAssessmentSchema.nullable().default(null),
+    /** A benchmark trial's one model. Set, no assignment can change it. */
+    pinnedModel: ModelSelectionSchema.nullable().default(null),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;
@@ -122,6 +148,8 @@ export const AttemptViewSchema = z
     startedAt: Iso,
     endedAt: Iso.nullable(),
     lastHeartbeatAt: Iso.nullable(),
+    /** The model recorded on this attempt at claim. */
+    assignment: RecordedModelSchema.nullable().default(null),
   })
   .strict();
 export type AttemptView = z.infer<typeof AttemptViewSchema>;
@@ -147,6 +175,8 @@ export const WorkerViewSchema = z
     execution: ExecutionLocationSchema,
     /** Axis two: where the worker's model calls go. A local worker may call a cloud model. Unknown stays unknown. */
     modelRoute: ModelRouteSchema,
+    /** The model recorded on this worker's attempt. Null: none recorded, and the provider stays unknown. */
+    assignment: RecordedModelSchema.nullable().default(null),
     blockedByTaskIds: z.array(Id),
     blockedByApprovalId: Id.nullable(),
   })
@@ -262,6 +292,8 @@ export const ProjectViewSnapshotSchema = z
     changeRequests: z.array(ChangeRequestViewSchema).default([]),
     /** Recent resolved approvals, newest first and bounded by the source. */
     approvalHistory: z.array(ApprovalHistoryEntrySchema).default([]),
+    modelCatalog: ModelCatalogViewSchema.default(UNKNOWN_MODEL_CATALOG),
+    modelAssignments: z.array(ModelAssignmentViewSchema).default([]),
   })
   .strict();
 export type ProjectViewSnapshot = z.infer<typeof ProjectViewSnapshotSchema>;
@@ -270,6 +302,6 @@ export function emptySnapshot(init: { projectId: string; observedAt: string; pro
   return {
     meta: { schemaVersion: VIEW_SCHEMA_VERSION, projectId: init.projectId, cursor: '0', observedAt: init.observedAt, provenance: init.provenance },
     assistant: { mode: null, observedSource: 'unknown' },
-    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [],
+    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [], modelCatalog: UNKNOWN_MODEL_CATALOG, modelAssignments: [],
   };
 }

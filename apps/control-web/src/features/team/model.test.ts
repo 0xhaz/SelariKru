@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { effectiveWorkerHealth, type AttemptView, type TaskView, type UsageEntry } from '@selarikru/view-protocol';
 import { NOW, fixtureSnapshot, iso, snapshotOf, task, worker } from '../overview/testing.ts';
-import { buildTeam, filterRows, sortRows, type TeamRow } from './model.ts';
+import { taskTarget } from './assignments.ts';
+import { NO_FILTER, buildTeam, filterRows, sortRows, type TeamRow } from './model.ts';
 
 const row = (model: ReturnType<typeof buildTeam>, id: string): TeamRow => model.rows.find((r) => r.workerId === id)!;
 const cost = (entryId: string, quantity: string | null, provenance: 'observed' | 'estimated' | 'unavailable'): UsageEntry => ({ entryId, runId: 'run', taskId: 'a', attemptId: 'att', figure: { metric: 'cost_usd', quantity, provenance, source: 'rate_card' } });
@@ -148,9 +149,9 @@ describe('fleet order and filters', () => {
   });
 
   it('filters by runtime, role and blockers', () => {
-    expect(ids(filterRows(model.rows, { runtime: 'cloud', role: 'all', run: 'all', blockedOnly: false }))).toEqual(['decide']);
-    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'backend', run: 'all', blockedOnly: false }))).toEqual(['lost', 'calm']);
-    expect(ids(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'all', blockedOnly: true }))).toEqual(['decide']);
+    expect(ids(filterRows(model.rows, { provider: 'all', runtime: 'cloud', role: 'all', run: 'all', blockedOnly: false }))).toEqual(['decide']);
+    expect(ids(filterRows(model.rows, { provider: 'all', runtime: 'all', role: 'backend', run: 'all', blockedOnly: false }))).toEqual(['lost', 'calm']);
+    expect(ids(filterRows(model.rows, { provider: 'all', runtime: 'all', role: 'all', run: 'all', blockedOnly: true }))).toEqual(['decide']);
   });
 
   it('counts blockers from approvals, dependencies and placement', () => {
@@ -225,7 +226,7 @@ describe('team as a whole', () => {
   });
 });
 
-const attemptOf = (id: string, over: Partial<AttemptView> = {}): AttemptView => ({ attemptId: id, taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(30), endedAt: null, lastHeartbeatAt: iso(5), ...over });
+const attemptOf = (id: string, over: Partial<AttemptView> = {}): AttemptView => ({ attemptId: id, taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'w', startedAt: iso(30), endedAt: null, lastHeartbeatAt: iso(5), assignment: null, ...over });
 const check = (id: string, state: 'running' | 'passed' | 'failed', secondsAgo: number, summary: string) => ({ checkId: id, taskId: 'a', state, summary, updatedAt: iso(secondsAgo), evidenceRef: `ev-${id}` });
 
 describe('fix round 1: blockers have one path', () => {
@@ -236,7 +237,7 @@ describe('fix round 1: blockers have one path', () => {
     expect(row(model, 'w').blockers).toBe(1);
     expect(row(model, 'w').detail.blockers).toHaveLength(1);
     expect(row(model, 'w').detail.blockers[0]).toMatchObject({ kind: 'Blocked by policy' });
-    expect(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'all', blockedOnly: true })).toHaveLength(1);
+    expect(filterRows(model.rows, { provider: 'all', runtime: 'all', role: 'all', run: 'all', blockedOnly: true })).toHaveLength(1);
   });
 
   it('the row count always equals the drawer list', async () => {
@@ -328,7 +329,7 @@ describe('fix round 1: wording and scope', () => {
   it('filters by run and lists the runs seen', () => {
     const model = buildTeam(snapshotOf({ tasks: [task('a'), task('b', { runId: 'run-2' })], workers: [worker('x', { taskId: 'a' }), worker('y', { taskId: 'b' })] }), NOW, NOW);
     expect(model.runs).toEqual(['run', 'run-2']);
-    expect(filterRows(model.rows, { runtime: 'all', role: 'all', run: 'run-2', blockedOnly: false }).map((r) => r.workerId)).toEqual(['y']);
+    expect(filterRows(model.rows, { provider: 'all', runtime: 'all', role: 'all', run: 'run-2', blockedOnly: false }).map((r) => r.workerId)).toEqual(['y']);
   });
 
   it('explains how an attempt ended, with no raw code in the default tab', async () => {
@@ -344,5 +345,58 @@ describe('fix round 1: wording and scope', () => {
   it('mentions the slot limit only when a worker is waiting for capacity', () => {
     const waiting = buildTeam(snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: 'waiting_resource' })] }), NOW, NOW);
     expect(waiting.summary).toBe('1 worker seen: 1 waiting. Slot limit not reported.');
+  });
+});
+
+describe('model assignment', () => {
+  const emptyCatalog = { status: 'none' as const, detail: 'Claude Code was not found on this machine.', providers: [] };
+
+  it('assignment is recorded on the attempt and shown on the inference badge', () => {
+    const w = worker('w', { taskId: 'a', attemptId: 'att', assignment: { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' }, modelRoute: 'cloud', execution: 'local' });
+    const model = buildTeam(snapshotOf({ tasks: [task('a')], workers: [w] }), NOW, NOW);
+    expect(row(model, 'w')).toMatchObject({ execution: 'local', modelRoute: 'cloud', assignment: { model: 'claude-opus-5-5' } });
+  });
+
+  it('a worker with no record is unknown for both route and provider, and never Device', () => {
+    const w = worker('w', { taskId: 'a', attemptId: 'att', modelRoute: 'unknown', assignment: null });
+    const model = buildTeam(snapshotOf({ tasks: [task('a')], workers: [w] }), NOW, NOW);
+    expect(row(model, 'w')).toMatchObject({ modelRoute: 'unknown', assignment: null });
+    expect(model.providers).toEqual([{ value: 'unknown', label: 'Not recorded' }]);
+  });
+
+  it('filters by provider, and keeps the workers with no record behind Not recorded', () => {
+    const a = worker('a1', { taskId: 'a', attemptId: 'x', assignment: { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role' } });
+    const none = worker('b1', { taskId: 'b', attemptId: 'y', assignment: null });
+    const model = buildTeam(snapshotOf({ tasks: [task('a'), task('b')], workers: [a, none] }), NOW, NOW);
+    expect(filterRows(model.rows, { ...NO_FILTER, provider: 'anthropic' }).map((r) => r.workerId)).toEqual(['a1']);
+    expect(filterRows(model.rows, { ...NO_FILTER, provider: 'unknown' }).map((r) => r.workerId)).toEqual(['b1']);
+    expect(filterRows(model.rows, NO_FILTER)).toHaveLength(2);
+  });
+
+  it('says so when no provider can be detected, and offers nothing', () => {
+    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: emptyCatalog };
+    const { assignments } = buildTeam(snap, NOW, NOW);
+    expect(assignments).toMatchObject({ available: false, statusText: emptyCatalog.detail, providers: [] });
+  });
+
+  it('never offers a provider the adapter did not declare, and marks policy refusals', () => {
+    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: { status: 'detected' as const, detail: null, providers: [{ provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316', models: [{ modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud' as const, allowedByPolicy: true, policyReason: null }, { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud' as const, allowedByPolicy: false, policyReason: 'model_not_allowed' }] }] } };
+    const { assignments } = buildTeam(snap, NOW, NOW);
+    expect(assignments.available).toBe(true);
+    expect(assignments.providers.map((p) => p.provider)).toEqual(['anthropic']);
+    expect(assignments.providers[0]!.models[1]).toMatchObject({ allowed: false, refusal: expect.stringMatching(/Policy does not allow/) });
+    expect(assignments.roles).toEqual([expect.objectContaining({ scope: 'role', key: 'backend', current: null, revision: 0 })]);
+  });
+
+  it('a removed assignment keeps its revision for the next change', () => {
+    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelAssignments: [{ scope: 'role' as const, key: 'backend', provider: null, model: null, revision: 3, updatedBy: 'o', updatedAt: iso(9) }] };
+    expect(buildTeam(snap, NOW, NOW).assignments.roles[0]).toMatchObject({ current: null, revision: 3 });
+  });
+
+  it('a task that can take no more attempts offers no override; a trial shows its pin', () => {
+    const base = snapshotOf({ tasks: [task('a', { status: 'merged' }), task('b')] });
+    expect(taskTarget(base.tasks['a']!, base)).toBeNull();
+    const trial = { ...base, runs: { run: { ...base.runs['run']!, pinnedModel: { provider: 'anthropic', model: 'claude-sonnet-5-5' } } } };
+    expect(taskTarget(trial.tasks['b']!, trial)).toMatchObject({ pinned: { provider: 'anthropic' } });
   });
 });

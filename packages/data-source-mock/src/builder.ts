@@ -1,5 +1,5 @@
 import type { Actor, EventType } from '@selarikru/domain';
-import type { AssistantView, ChangeRequestView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
+import type { AssistantView, ChangeRequestView, ModelAssignmentView, ModelCatalogView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
 import { mulberry32, seededId } from './prng.ts';
 
 /** Every fixture starts from this instant (the first day of the interface milestone). Fixed, so fixtures never depend on the wall clock. */
@@ -22,7 +22,9 @@ export type FixtureId =
   /** Not one of the ten named scenarios: a plan with real dependencies across stages, for the Pipeline graph. */
   | 'feature-delivery'
   /** Not named scenarios: one state each, for the Decisions screen. */
-  | 'decision-queue' | 'changed-request' | 'budget-stop' | 'integration-blocked' | 'merge-review' | 'merged-sha-mismatch';
+  | 'decision-queue' | 'changed-request' | 'budget-stop' | 'integration-blocked' | 'merge-review' | 'merged-sha-mismatch'
+  /** Not a named scenario: a benchmark trial, whose one model cannot be changed. */
+  | 'benchmark-trial';
 
 /** What a live snapshot knows about a task that events do not say. The mock plays the server: it seeds these when the plan is accepted. */
 export interface TaskSeed {
@@ -74,7 +76,23 @@ export interface Fixture {
   readonly changeRequests?: readonly ChangeRequestView[];
   /** Tasks with a budget stop in flight, by when it began. A real stop writes a command row and no event until the task is cancelled, so this is snapshot data. */
   readonly budgetStopping?: Readonly<Record<string, number>>;
+  /** What the harness adapters report. Default `DEMO_CATALOG`. Simulated like everything here. */
+  readonly modelCatalog?: ModelCatalogView;
+  readonly modelAssignments?: readonly ModelAssignmentView[];
 }
+
+/** Claude only: no provider is listed that is not installed. Opus is marked not allowed so the demo can show a refused choice. */
+export const DEMO_CATALOG: ModelCatalogView = {
+  status: 'detected', detail: null,
+  providers: [{
+    provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316',
+    models: [
+      { modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud', allowedByPolicy: true, policyReason: null },
+      { modelId: 'claude-haiku-5-5', label: 'Haiku 5.5', route: 'cloud', allowedByPolicy: true, policyReason: null },
+      { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud', allowedByPolicy: false, policyReason: 'model_not_allowed' },
+    ],
+  }],
+};
 
 /** Ids are namespaced per fixture so a command or terminal request can only ever match one project. */
 export const scoped = (fixtureId: FixtureId, local: string): string => `${fixtureId}.${local}`;
@@ -98,6 +116,8 @@ export class FixtureBuilder {
   readonly approvalSeeds: ApprovalSeed[] = [];
   readonly silences: Record<string, Silence> = {};
   readonly budgetStopping: Record<string, number> = {};
+  /** A benchmark trial's single model, when this fixture is one. */
+  pinnedModel: { provider: string; model: string } | null = null;
   private readonly next: () => number;
   private readonly revisions = new Map<string, number>();
 
@@ -151,7 +171,7 @@ export class FixtureBuilder {
 
   /** `run.created`, then `plan.accepted` with the real payload shape (revision, task ids, who accepted it). */
   plan(planRevision: number, tasks: readonly string[], sec = 1): this {
-    if (planRevision === 1) this.emit('run.created', 0, { actor: HUMAN });
+    if (planRevision === 1) this.emit('run.created', 0, { actor: HUMAN, ...(this.pinnedModel ? { payload: { pinnedModel: this.pinnedModel } } : {}) });
     return this.emit('plan.accepted', sec, { actor: SYSTEM, payload: { planRevision, taskIds: tasks.map((t) => this.id(t)), acceptedFor: 'demo-operator' } });
   }
 
@@ -162,7 +182,7 @@ export class FixtureBuilder {
   /** Claim: `attempt.started` then `placement.decided` in one revision. `modelRoute` is the one extra field (see the report). */
   start(task: string, attempt: string, sec: number, runnerId: string, location: 'local' | 'cloud', modelRoute: 'device' | 'cloud' | 'unknown', n = 1): this {
     return this.emit('attempt.started', sec, {
-      task, attempt, payload: { fence: n, attemptNumber: n, runnerId, location, reservationId: `rsv_${attempt}_${n}`, amountUsd: 1, modelRoute },
+      task, attempt, payload: { fence: n, attemptNumber: n, runnerId, location, reservationId: `rsv_${attempt}_${n}`, amountUsd: 1, modelRoute, ...(modelRoute === 'cloud' ? { assignment: this.pinnedModel ? { ...this.pinnedModel, source: 'trial_pin' } : { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role' } } : {}) },
     }).emit('placement.decided', sec, {
       task, attempt, bump: false,
       payload: { target: location, reason: location === 'local' ? 'local_slot_free' : 'execution_cloud', mode: 'local-first', runnerId, ...(location === 'cloud' ? { destination: 'sandbox-cloud' } : {}) },

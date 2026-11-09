@@ -5,6 +5,7 @@ import {
 } from '@selarikru/view-protocol';
 import { explain, requestText, sentence } from '../overview/attention.ts';
 import { activityOf, countFleet, taskRow, workerHealthDisplay, type WorkerHealthDisplay } from '../overview/model.ts';
+import { buildAssignments, taskTarget, type AssignmentsModel, type AssignmentTarget } from './assignments.ts';
 
 export type SortKey = 'attention' | 'role' | 'task' | 'activity' | 'runtime' | 'progress';
 export const SORT_KEYS: readonly { key: SortKey; label: string }[] = [
@@ -13,11 +14,13 @@ export const SORT_KEYS: readonly { key: SortKey; label: string }[] = [
 
 export interface FleetFilter {
   readonly runtime: 'all' | WorkerView['execution'];
+  /** A provider seen on a recorded attempt, or `unknown` for workers with no record. */
+  readonly provider: string;
   readonly role: string;
   readonly run: string;
   readonly blockedOnly: boolean;
 }
-export const NO_FILTER: FleetFilter = { runtime: 'all', role: 'all', run: 'all', blockedOnly: false };
+export const NO_FILTER: FleetFilter = { runtime: 'all', provider: 'all', role: 'all', run: 'all', blockedOnly: false };
 
 export interface ActivitySignal {
   readonly label: string;
@@ -151,6 +154,10 @@ export interface TeamRow {
   readonly results: ResultSignal;
   readonly execution: WorkerView['execution'];
   readonly modelRoute: WorkerView['modelRoute'];
+  /** What the worker's attempt was recorded to run. Null: no record, so provider and model are unknown. */
+  readonly assignment: WorkerView['assignment'];
+  /** The current or last task's own model assignment, when it can still take one. */
+  readonly overrideTarget: AssignmentTarget | null;
   /** True when what is shown is the last confirmed state: the connection is lost, or the session or liveness is stale. */
   readonly stale: boolean;
   /** When this worker's state was last confirmed. */
@@ -174,6 +181,9 @@ export interface TeamModel {
   readonly rows: readonly TeamRow[];
   readonly roles: readonly string[];
   readonly runs: readonly string[];
+  /** Providers on recorded attempts; `unknown` is listed only if some worker has no record. */
+  readonly providers: readonly { readonly value: string; readonly label: string }[];
+  readonly assignments: AssignmentsModel;
 }
 
 const ACTIVITY_RANK: Readonly<Partial<Record<WorkerActivity, number>>> = { blocked_policy: 1, waiting_human: 2 };
@@ -429,7 +439,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   return {
     workerId: w.workerId, role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
-    execution: w.execution, modelRoute: w.modelRoute, stale, lastConfirmedAt,
+    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, overrideTarget: focus ? taskTarget(focus, snapshot) : null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
     blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
     detail: {
@@ -466,7 +476,7 @@ export function sortRows(rows: readonly TeamRow[], key: SortKey): TeamRow[] {
 }
 
 export function filterRows(rows: readonly TeamRow[], f: FleetFilter): TeamRow[] {
-  return rows.filter((r) => (f.runtime === 'all' || r.execution === f.runtime) && (f.role === 'all' || r.role === f.role) && (f.run === 'all' || r.runId === f.run) && (!f.blockedOnly || r.blockers > 0));
+  return rows.filter((r) => (f.runtime === 'all' || r.execution === f.runtime) && (f.provider === 'all' || (r.assignment?.provider ?? 'unknown') === f.provider) && (f.role === 'all' || r.role === f.role) && (f.run === 'all' || r.runId === f.run) && (!f.blockedOnly || r.blockers > 0));
 }
 
 export interface TeamOptions {
@@ -485,5 +495,7 @@ export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, liveness
   const parts = [[counts.working, 'assigned'], [counts.waiting, 'waiting'], [counts.idle, 'idle'], [counts.lost, 'lost']].filter(([n]) => (n as number) > 0).map(([n, label]) => `${n} ${label as string}`);
   const stale = sessionStale || rows.some((r) => r.health.state === 'unknown');
   const summary = rows.length === 0 ? null : `${stale ? 'Last confirmed: ' : ''}${rows.length} worker${rows.length === 1 ? '' : 's'} seen: ${parts.join(', ')}.${workers.some((w) => w.activity === 'waiting_resource') ? ' Slot limit not reported.' : ''}`;
-  return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort(), runs: [...new Set(rows.flatMap((r) => (r.runId ? [r.runId] : [])))].sort() };
+  return { empty: rows.length === 0, simulated: snapshot.meta.provenance === 'simulated', stale, summary, rows, roles: [...new Set(rows.flatMap((r) => (r.role ? [r.role] : [])))].sort(), runs: [...new Set(rows.flatMap((r) => (r.runId ? [r.runId] : [])))].sort(),
+    providers: [...new Set(rows.map((r) => r.assignment?.provider ?? 'unknown'))].sort().map((value) => ({ value, label: value === 'unknown' ? 'Not recorded' : (snapshot.modelCatalog.providers.find((p) => p.provider === value)?.label ?? value) })),
+    assignments: buildAssignments(snapshot) };
 }

@@ -17,6 +17,9 @@ importers:
       '@selarikru/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../../packages/harness-claude
       '@selarikru/integrations-github':
         specifier: workspace:*
         version: link:../../packages/integrations-github

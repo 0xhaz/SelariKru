@@ -24,7 +24,7 @@ import { createAssemblyDriver } from '../../../services/verifier/src/assembly-dr
 import { createVerificationDriver } from '../../../services/verifier/src/driver.ts';
 import { candidateContentHash, loadValidRecord, type RunnerInput, type RunnerOutput } from '../../../services/verifier/src/service.ts';
 import { verifierHashes } from '../../../services/verifier/src/hashing.ts';
-import { API_POLICY, INTRUDER_TOKEN, PROJECT, TENANT, enrolRunner, fakeVerifier, owner, post, resetDb, setupTestDb, specFor, testConfig, type TestDb } from './helpers.ts';
+import { TEST_CATALOG, API_POLICY, INTRUDER_TOKEN, PROJECT, TENANT, enrolRunner, fakeVerifier, owner, post, resetDb, setupTestDb, specFor, testConfig, type TestDb } from './helpers.ts';
 import { buildApp } from '../src/index.ts';
 
 const verifierRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../services/verifier');
@@ -74,7 +74,7 @@ beforeAll(async () => {
   // The verifier reads the store through its own instance: the handoff is the shared location, not a shared object.
   const apiStore = new LocalDiskArtifactStore(artifactDir);
   app = buildApp({
-    config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ db: t.db, now, policy }), policy,
+    config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
     github: { pullRequests: { port: gh, repoPath: repo, loadRecord: (key) => loadValidRecord(t.db, apiStore, key) } },
   });
   await app.listen({ host: '127.0.0.1', port: 0 });

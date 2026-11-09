@@ -24,7 +24,7 @@ function base(tasks: string[] = ['t1'], provenance: 'simulated' | 'observed' = '
   const s = emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance });
   return projectionFromSnapshot({
     ...s,
-    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null } },
+    runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null } },
     tasks: Object.fromEntries(tasks.map((t) => [t, task(t)])),
   });
 }
@@ -795,6 +795,37 @@ describe('history and real-shape snapshots', () => {
     const fresh = { ...s.snapshot, approvalHistory: [entry] };
     const merged = mergeDecisionFacts(s, fresh);
     expect(merged.snapshot.approvalHistory).toEqual([entry]);
+    expect(mergeDecisionFacts(merged, fresh)).toBe(merged);
+  });
+});
+
+describe('model assignments on the projection', () => {
+  const STARTED_WITH: [EventType, number, Partial<ProjectViewEvent>] = ['attempt.started', 3, { attemptId: 'a1', payload: { fence: 1, attemptNumber: 1, runnerId: 'runner_a', location: 'local', modelRoute: 'cloud', assignment: { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' } } }];
+
+  it('assignment is recorded on the attempt and shown on the inference badge', () => {
+    const state = run(base(), [STARTED_WITH]);
+    const worker = state.snapshot.workers['runner_a']!;
+    expect(worker).toMatchObject({ execution: 'local', modelRoute: 'cloud', assignment: { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' } });
+    expect(state.snapshot.attempts['a1']!.assignment).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' });
+  });
+
+  it('an unreadable assignment leaves the provider unknown, and the route stays unknown', () => {
+    const state = run(base(), [['attempt.started', 3, { attemptId: 'a1', payload: { fence: 1, attemptNumber: 1, runnerId: 'runner_a', location: 'local', assignment: { provider: 'anthropic' } } }]]);
+    expect(state.snapshot.workers['runner_a']).toMatchObject({ assignment: null, modelRoute: 'unknown' });
+  });
+
+  it('a run created as a trial carries its pin', () => {
+    const state = run(projectionFromSnapshot(emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance: 'simulated' })), [['run.created', 1, { taskId: 'r1', payload: { pinnedModel: { provider: 'anthropic', model: 'claude-sonnet-5-5' } } }]]);
+    expect(state.snapshot.runs['r1']!.pinnedModel).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5-5' });
+  });
+
+  it('the refresh brings in a changed catalog and assignments', () => {
+    const s = base();
+    const a = { scope: 'role' as const, key: 'backend', provider: 'anthropic', model: 'claude-sonnet-5-5', revision: 1, updatedBy: 'owner', updatedAt: at(4) };
+    const fresh = { ...s.snapshot, modelAssignments: [a], modelCatalog: { status: 'detected' as const, detail: null, providers: [] } };
+    const merged = mergeDecisionFacts(s, fresh);
+    expect(merged.snapshot.modelAssignments).toEqual([a]);
+    expect(merged.snapshot.modelCatalog.status).toBe('detected');
     expect(mergeDecisionFacts(merged, fresh)).toBe(merged);
   });
 });

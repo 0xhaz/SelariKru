@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { schema, sql, type Db } from '../../../packages/persistence/src/index.ts';
-import { CAPS, POLICY, PROJECT, RUN, TENANT, resetDb, runner as workerRunner, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
+import { TEST_CATALOG, CAPS, POLICY, PROJECT, RUN, TENANT, resetDb, runner as workerRunner, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
 import { createScheduler } from '../../workflow/src/index.ts';
 import { verifierHashes } from './hashing.ts';
 import { assembleCandidate } from './integrate.ts';
@@ -294,7 +294,7 @@ describe('verification driver', () => {
     expect(await taskStatus('t1')).toBe('verifying');
     const failedEvent = await q(`SELECT actor_kind, payload FROM events WHERE type = 'candidate.failed'`);
     expect(failedEvent[0]).toMatchObject({ actor_kind: 'integration', payload: { reason: 'candidate_part_not_live', sha } });
-    const dep = createScheduler({ db, now: () => new Date(), policy: POLICY });
+    const dep = createScheduler({ catalog: TEST_CATALOG, db, now: () => new Date(), policy: POLICY });
     expect(await dep.claimNext(workerRunner('r1'), CAPS)).toBeNull();
     expect(await taskStatus('dep')).toBe('planned');
   });

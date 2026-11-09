@@ -83,7 +83,12 @@ export const attempts = pgTable(
     leaseExpiresAt: tstz('lease_expires_at'),
     /** Hard stop fixed at claim. Heartbeats renew the lease, never this. */
     deadlineAt: tstz('deadline_at'),
+    /** The attempt's recorded inference route: `device`, `cloud`, or `unknown`. Null only on attempts from before assignments. */
     modelRoute: text('model_route'),
+    /** What the harness was told to run. Fixed at claim; an assignment changed later never rewrites it. */
+    modelProvider: text('model_provider'),
+    modelId: text('model_id'),
+    assignmentSource: text('assignment_source'),
     baseSha: text('base_sha'),
     headSha: text('head_sha'),
     /** Domain AttemptRecord outcome. Null only for rows written before the scheduler owned attempts. */
@@ -102,6 +107,30 @@ export const attempts = pgTable(
     // Database-level backstops for the scheduler's locking: fences never repeat, one live lease per task.
     uniqueIndex('attempts_task_revision_fence_key').on(t.tenantId, t.projectId, t.taskId, t.revision, t.leaseFence).where(sql`lease_fence IS NOT NULL`),
     uniqueIndex('attempts_one_active_lease').on(t.tenantId, t.projectId, t.taskId).where(sql`lease_token IS NOT NULL AND ended_at IS NULL`),
+  ],
+);
+
+/**
+ * Append-only: the highest revision per scope and key is the current assignment, and a row with a null model removes it. The history is the audit of who changed what.
+ * Never a credential: provider and model identifiers only.
+ */
+export const modelAssignments = pgTable(
+  'model_assignments',
+  {
+    ...scope(),
+    /** `role` or `task`. */
+    scopeKind: text('scope_kind').notNull(),
+    scopeKey: text('scope_key').notNull(),
+    revision: integer('revision').notNull(),
+    provider: text('provider'),
+    model: text('model'),
+    updatedBy: text('updated_by').notNull(),
+    updatedAt: tstz('updated_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.scopeKind, t.scopeKey, t.revision] }),
+    check('model_assignments_scope_kind', sql`scope_kind IN ('role', 'task')`),
+    check('model_assignments_provider_model_paired', sql`(provider IS NULL) = (model IS NULL)`),
   ],
 );
 

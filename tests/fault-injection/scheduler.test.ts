@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { applyVerification, createScheduler, type Lease, type Scheduler } from '@selarikru/workflow';
-import {
+import { TEST_CATALOG,
   CAPS, POLICY, PROJECT, RUN, TENANT, TEST_DATABASE_URL, capsWith, countRows, eventTypes, makeScheduler, reservedTotal, resetDb, runner, seedTask, setupTestDb, specFor,
   statusOf, testClock, type TestClock, type TestDb,
 } from '@selarikru/workflow/test-helpers';
@@ -270,7 +270,7 @@ describe('scheduler fault injection', () => {
     // A fresh instance on a fresh connection pool: nothing of the first instance survives except the database.
     const { db: db2, close: close2 } = createDb(TEST_DATABASE_URL, { max: 5, searchPath: t.schema });
     try {
-      const restarted = createScheduler({ db: db2, now: clock.now, policy: POLICY });
+      const restarted = createScheduler({ catalog: TEST_CATALOG, db: db2, now: clock.now, policy: POLICY });
       expect(await restarted.claimNext(runner('r3'), CAPS)).toBeNull();
       expect(await restarted.expireLeases(clock.now())).toEqual([]);
       expect((await restarted.heartbeat(lease)).ok).toBe(true);

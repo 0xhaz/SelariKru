@@ -2,7 +2,7 @@
  * Harness adapter contracts shared by every runtime (local sandbox, cloud sandbox). Types only; no I/O.
  * Capability statuses come from the T0.5 spike table and must not be upgraded beyond what it shows.
  */
-import type { ApprovalDestination, WorkerApprovalOperation } from '@selarikru/domain';
+import type { ApprovalDestination, ModelSelection, WorkerApprovalOperation } from '@selarikru/domain';
 
 export const CAPABILITY_STATUSES = ['supported', 'partial', 'unsupported', 'not established'] as const;
 export type CapabilityStatus = (typeof CAPABILITY_STATUSES)[number];
@@ -17,6 +17,7 @@ export const HARNESS_CAPABILITY_NAMES = [
   'usageReporting',
   'networkEnforcement',
   'outputSchema',
+  'modelSelection',
 ] as const;
 export type HarnessCapabilityName = (typeof HARNESS_CAPABILITY_NAMES)[number];
 export type HarnessCapabilities = Readonly<Record<HarnessCapabilityName, CapabilityStatus>>;
@@ -26,6 +27,8 @@ export interface HarnessInput {
   readonly prompt: string;
   /** Working directory inside the sandbox. */
   readonly workspacePath: string;
+  /** The model recorded on the attempt. The adapter launches exactly this, or refuses before launching. */
+  readonly model?: ModelSelection;
   readonly maxTurns?: number;
   /** Capabilities the task needs. Anything not `supported` fails before launch unless listed in `acceptPartial`. */
   readonly requires?: readonly HarnessCapabilityName[];
@@ -77,6 +80,8 @@ export type NormalizedHarnessEvent = EventBase &
         readonly connectedMcpServers: readonly string[] | null;
       }
     | { readonly type: 'launch_refused'; readonly reason: 'capability_unavailable'; readonly capability: string; readonly status: CapabilityStatus }
+    /** The recorded model is not one this adapter declares. Nothing was launched. */
+    | { readonly type: 'launch_refused'; readonly reason: 'model_unsupported'; readonly provider: string; readonly model: string }
     | { readonly type: 'system'; readonly subtype: string | null }
     | { readonly type: 'message'; readonly role: 'assistant' | 'user'; readonly blockTypes: readonly string[]; readonly preview?: string }
     | { readonly type: 'tool_call'; readonly toolUseId: string | null; readonly toolName: string | null; readonly status: 'started'; readonly preview?: string }

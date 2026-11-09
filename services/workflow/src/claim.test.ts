@@ -2,8 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { applyVerification, createScheduler, type Scheduler } from './index.ts';
-import {
-  CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
+import { TEST_CATALOG,
+  TEST_MODELS, CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
   testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
@@ -78,7 +78,7 @@ describe('claim preconditions', () => {
 
   it('runner location must fit the task execution setting', async () => {
     await seedTask(t.db, specFor('t1', { execution: 'cloud' }));
-    const hybrid = createScheduler({ db: t.db, now: clock.now, policy: CLOUD_POLICY, placement: { mode: { id: 'one-each', localSlots: 1, cloudSlots: 1 }, cloudDestination: 'cloud-sandbox-eu' } });
+    const hybrid = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: CLOUD_POLICY, placement: { mode: { id: 'one-each', localSlots: 1, cloudSlots: 1 }, cloudDestination: 'cloud-sandbox-eu' } });
     const denied = await hybrid.tryClaim(runner('r1', 'local'), CAPS);
     expect(denied).toMatchObject({ ok: false, reason: 'no_claimable_task', skipped: [{ taskId: 't1', reason: 'location_mismatch' }] });
     expect(await hybrid.claimNext(runner('r2', 'cloud'), CAPS)).not.toBeNull();
@@ -183,7 +183,7 @@ describe('claim preconditions', () => {
   });
 
   it('the repair gate refuses when policy denies, blocking with its reason', async () => {
-    const strict = createScheduler({ db: t.db, now: clock.now, policy: { policyVersion: 'p', limits: { repairAttempts: 1 } } });
+    const strict = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: { policyVersion: 'p', models: TEST_MODELS, limits: { repairAttempts: 1 } } });
     await seedTask(t.db, specFor('t1', { maxAttempts: 3 }));
     const first = (await strict.claimNext(runner('r1'), CAPS))!;
     await strict.publishResult(first, { outcome: 'failed', reason: 'x' });
@@ -197,12 +197,19 @@ describe('claim preconditions', () => {
     expect(await countRows(t.db, 'attempts')).toBe(2);
   });
 
-  it('an absent policy denies repairs but not first attempts', async () => {
-    const noPolicy = createScheduler({ db: t.db, now: clock.now });
+  it('an absent policy denies every attempt: with no policy, no model is permitted', async () => {
+    const noPolicy = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now });
     await seedTask(t.db, specFor('t1', { maxAttempts: 3 }));
-    const first = (await noPolicy.claimNext(runner('r1'), CAPS))!;
-    await noPolicy.publishResult(first, { outcome: 'failed', reason: 'x' });
-    expect(await noPolicy.claimNext(runner('r2'), CAPS)).toBeNull();
+    expect(await noPolicy.tryClaim(runner('r1'), CAPS)).toMatchObject({ ok: false, skipped: [{ reason: 'model_blocked:model_not_assigned:backend' }] });
+    expect(await countRows(t.db, 'attempts')).toBe(0);
+  });
+
+  it('a policy without repair limits denies repairs but not first attempts', async () => {
+    const noLimits = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: { policyVersion: 'p', models: TEST_MODELS } });
+    await seedTask(t.db, specFor('t1', { maxAttempts: 3 }));
+    const first = (await noLimits.claimNext(runner('r1'), CAPS))!;
+    await noLimits.publishResult(first, { outcome: 'failed', reason: 'x' });
+    expect(await noLimits.claimNext(runner('r2'), CAPS)).toBeNull();
     expect((await statusOf(t.db, 't1')).status).toBe('blocked');
   });
 

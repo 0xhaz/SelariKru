@@ -14,7 +14,7 @@ export function task(id: string, over: Partial<TaskView> = {}): TaskView {
 export function worker(id: string, over: Partial<WorkerView> = {}): WorkerView {
   return {
     workerId: id, taskId: null, taskRevision: null, attemptId: null, availability: 'assigned', activity: 'coding', health: 'healthy', leaseHeld: true, stateReason: null, enteredStateAt: iso(60),
-    latestAction: null, latestEvidence: null, lastHeartbeatAt: iso(5), execution: 'local', modelRoute: 'cloud', blockedByTaskIds: [], blockedByApprovalId: null, ...over,
+    latestAction: null, latestEvidence: null, lastHeartbeatAt: iso(5), execution: 'local', modelRoute: 'cloud', assignment: null, blockedByTaskIds: [], blockedByApprovalId: null, ...over,
   };
 }
 
@@ -27,7 +27,7 @@ const byId = <T,>(items: readonly T[], key: (t: T) => string): Record<string, T>
 export function snapshotOf(parts: { tasks?: TaskView[]; workers?: WorkerView[]; approvals?: ApprovalView[]; checks?: ProjectViewSnapshot['checks']; criteria?: { verified: number; total: number } | null }): ProjectViewSnapshot {
   const base = emptySnapshot({ projectId: 'p', observedAt: iso(0), provenance: 'observed' });
   return {
-    ...base, runs: { run: { runId: 'run', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: parts.criteria ?? null, reducedScope: null, scopeAssessment: null } }, tasks: byId(parts.tasks ?? [], (t) => t.taskId), workers: byId(parts.workers ?? [], (w) => w.workerId),
+    ...base, runs: { run: { runId: 'run', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria: parts.criteria ?? null, reducedScope: null, scopeAssessment: null, pinnedModel: null } }, tasks: byId(parts.tasks ?? [], (t) => t.taskId), workers: byId(parts.workers ?? [], (w) => w.workerId),
     approvals: byId(parts.approvals ?? [], (a) => a.approvalId), checks: parts.checks ?? {},
   };
 }

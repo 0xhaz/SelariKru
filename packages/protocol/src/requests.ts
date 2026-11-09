@@ -1,4 +1,4 @@
-import { TaskSpecSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, TaskSpecSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 
@@ -28,8 +28,14 @@ export const CreateRunRequestSchema = z
     placement: RunPlacementSchema.optional(),
     /** A benchmark trial: the run never opens an external pull request. Default false. */
     trial: z.boolean().optional(),
+    /** The trial's one model. Required for a trial, and refused for anything else, so a pin can only mean what it says. */
+    pinnedModel: ModelSelectionSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((r, ctx) => {
+    if (r.trial === true && r.pinnedModel === undefined) ctx.addIssue({ code: 'custom', path: ['pinnedModel'], message: 'a trial pins one model' });
+    if (r.trial !== true && r.pinnedModel !== undefined) ctx.addIssue({ code: 'custom', path: ['pinnedModel'], message: 'only a trial pins a model' });
+  });
 export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;
 
 export const BudgetStatusSchema = z.discriminatedUnion('status', [
@@ -130,6 +136,22 @@ export const ReverifyRunRequestSchema = z
   })
   .strict();
 export type ReverifyRunRequest = z.infer<typeof ReverifyRunRequestSchema>;
+
+/** Sets or removes one assignment. It applies to the next attempt only: nothing here reaches a running worker. */
+export const ModelAssignmentRequestSchema = z
+  .object({
+    scope: z.enum(ASSIGNMENT_SCOPES),
+    /** A role name, or a task id. */
+    key: Key,
+    /** Null removes the assignment. */
+    selection: ModelSelectionSchema.nullable(),
+    /** The assignment's revision as the owner saw it; 0 when none was ever set. A stale value is a 409. */
+    expectedRevision: Revision,
+    idempotencyKey: Key,
+  })
+  .strict()
+  .refine((r) => redactSecrets(r.key) === r.key && (r.selection === null || (redactSecrets(r.selection.provider) === r.selection.provider && redactSecrets(r.selection.model) === r.selection.model)), { message: 'looks like a secret' });
+export type ModelAssignmentRequest = z.infer<typeof ModelAssignmentRequestSchema>;
 
 export const INFERENCE_MODES = ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const;
 export const INFERENCE_SOURCES = ['on_device', 'in_cloud', 'unknown'] as const;

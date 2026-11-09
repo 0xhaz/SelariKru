@@ -26,6 +26,7 @@ const countEvents = async () => Number((await t.db.execute(sql`SELECT count(*)::
 
 const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/runs`],
+  ['POST', `/v1/projects/${PROJECT}/model-assignments`],
   ['POST', `/v1/runs/${RUN}/plan-revisions`],
   ['POST', `/v1/runs/${RUN}/accept-reduced-scope`],
   ['POST', `/v1/runs/${RUN}/reverify`],

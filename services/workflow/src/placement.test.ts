@@ -3,7 +3,7 @@ import type { Policy } from '@selarikru/policy';
 import { createScheduler } from './index.ts';
 import { capacityForMode, place, PLACEMENT_MODES, type Capacity, type PlaceContext } from './placement.ts';
 import { schema } from '@selarikru/persistence';
-import {
+import { TEST_MODELS, TEST_CATALOG,
   CAPS, PROJECT, RUN, TENANT, countRows, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, CLOUD_POLICY, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 import { sql } from 'drizzle-orm';
@@ -160,7 +160,7 @@ describe('placement in claimNext', () => {
   afterAll(async () => { await t.close(); });
   beforeEach(async () => { clock = testClock(); await resetDb(t.db); });
   const sched = (mode: keyof typeof PLACEMENT_MODES, p: Policy | undefined = CLOUD_POLICY as Policy) =>
-    createScheduler({ db: t.db, now: clock.now, policy: p, placement: { mode: PLACEMENT_MODES[mode], cloudDestination: 'cloud-sandbox-eu' } });
+    createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: p, placement: { mode: PLACEMENT_MODES[mode], cloudDestination: 'cloud-sandbox-eu' } });
   const cloud = (id: string) => runner(id, 'cloud');
 
   it('a runner only receives tasks placed for its location', async () => {
@@ -199,9 +199,9 @@ describe('placement in claimNext', () => {
 
   it('a cloud runner without a policy grant gets nothing; a local-only deployment still works', async () => {
     await seedTask(t.db, specFor('x', { execution: 'cloud' }));
-    expect(await createScheduler({ db: t.db, now: clock.now, placement: { mode: PLACEMENT_MODES.C1, cloudDestination: 'cloud-sandbox-eu' } }).tryClaim(cloud('c1'), CAPS)).toMatchObject({ ok: false, skipped: [{ reason: 'placement_blocked:policy_denied:missing_policy' }] });
+    expect(await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: { policyVersion: 'p', models: TEST_MODELS }, placement: { mode: PLACEMENT_MODES.C1, cloudDestination: 'cloud-sandbox-eu' } }).tryClaim(cloud('c1'), CAPS)).toMatchObject({ ok: false, skipped: [{ reason: 'placement_blocked:policy_denied:missing_limit:maxConcurrentTotal' }] });
     await seedTask(t.db, specFor('y', { execution: 'local' }));
-    expect(await createScheduler({ db: t.db, now: clock.now, placement: { mode: PLACEMENT_MODES.L1, cloudDestination: null } }).claimNext(runner('l1'), CAPS)).toMatchObject({ taskId: 'y' });
+    expect(await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: { policyVersion: 'p', models: TEST_MODELS }, placement: { mode: PLACEMENT_MODES.L1, cloudDestination: null } }).claimNext(runner('l1'), CAPS)).toMatchObject({ taskId: 'y' });
   });
 
   it('with no placement configured, local runners work and cloud is denied by the missing limit', async () => {
@@ -323,7 +323,7 @@ describe('placement in claimNext', () => {
   describe('run-level placement', () => {
     const setRun = (runId: string, placement: { mode: string; cloudDestination: string | null } | null) =>
       t.db.update(schema.runs).set({ placement }).where(sql`run_id = ${runId}`);
-    const plain = () => createScheduler({ db: t.db, now: clock.now, policy: CLOUD_POLICY as Policy });
+    const plain = () => createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: CLOUD_POLICY as Policy });
 
     it('the run row carries the mode: H2 sends backend local and frontend cloud with no scheduler-level config', async () => {
       await setRun(RUN, { mode: 'H2', cloudDestination: 'cloud-sandbox-eu' });
@@ -418,7 +418,7 @@ describe('placement in claimNext', () => {
     });
 
     it('repair_within_limits configured require_approval opens a real approval with its reason', async () => {
-      const s = createScheduler({ db: t.db, now: clock.now, policy: { ...(CLOUD_POLICY as Policy), operations: { repair_within_limits: 'require_approval' } } });
+      const s = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: { ...(CLOUD_POLICY as Policy), operations: { repair_within_limits: 'require_approval' } } });
       await seedTask(t.db, specFor('rp'));
       const lease = (await s.claimNext(runner('l1'), CAPS))!;
       await s.publishResult(lease, { outcome: 'failed', reason: 'boom' });

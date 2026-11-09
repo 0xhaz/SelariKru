@@ -1,3 +1,4 @@
+import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID } from './catalog.ts';
 import {
   ApprovalDestinationSchema,
   redactSecrets,
@@ -41,7 +42,10 @@ export interface HarnessLauncher {
   stop(attemptId: string): Promise<{ accepted: boolean; detail: string | null }>;
 }
 
-/** Equals the table in docs/evidence/spike-runtime.md section 8 (Claude Code 2.1.319, sbx v0.51.0, `sbx exec`). */
+/**
+ * Equals the table in docs/evidence/spike-runtime.md section 8 (Claude Code 2.1.319, sbx v0.51.0, `sbx exec`), plus `modelSelection`: the installed CLI documents
+ * `--model <model>` for a model's full name (`claude --help`, 2.1.316). The runner still compares what the stream reports against what was recorded.
+ */
 export const CLAUDE_CAPABILITIES: HarnessCapabilities = Object.freeze({
   structuredEvents: 'supported',
   resume: 'not established',
@@ -52,6 +56,7 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = Object.freeze({
   usageReporting: 'supported',
   networkEnforcement: 'not established',
   outputSchema: 'not established',
+  modelSelection: 'supported',
 });
 
 const DEFAULT_PREVIEW_CHARS = 200;
@@ -168,7 +173,14 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
       return;
     }
 
+    const selected = input.model;
+    if (selected !== undefined && (selected.provider !== CLAUDE_PROVIDER_ID || !CLAUDE_MODELS.some((m) => m.id === selected.model))) {
+      yield finish({ type: 'launch_refused', reason: 'model_unsupported', provider: selected.provider, model: selected.model });
+      return;
+    }
+
     const command = ['claude', '-p', input.prompt, '--output-format', 'stream-json', '--verbose'];
+    if (selected !== undefined) command.push('--model', selected.model);
     if (input.maxTurns !== undefined) command.push('--max-turns', String(input.maxTurns));
     // `=` forms: both flags take variadic values and would otherwise swallow whatever follows.
     if (input.mcp === 'none') command.push('--strict-mcp-config', '--mcp-config={"mcpServers":{}}');

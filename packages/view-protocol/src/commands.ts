@@ -1,3 +1,4 @@
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema } from '@selarikru/domain';
 import { z } from 'zod';
 
 const Id = z.string().min(1);
@@ -17,6 +18,8 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.literal('run.accept_reduced_scope'), ...base, args: z.object({ runId: Id, notDeliveredHash: Id, note: z.string().max(2000).optional() }).strict() }).strict(),
   z.object({ command: z.literal('run.reverify'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
   z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
+  // Sets or removes one assignment; `expectedRevision` is that assignment's revision (0 if never set). It applies to the next attempt only, and has no secret fields.
+  z.object({ command: z.literal('assignment.set'), ...base, args: z.object({ projectId: Id, scope: z.enum(ASSIGNMENT_SCOPES), key: Id, selection: ModelSelectionSchema.nullable() }).strict() }).strict(),
 ]);
 export type AuthorizedViewCommand = z.infer<typeof AuthorizedViewCommandSchema>;
 
@@ -25,6 +28,8 @@ export const REJECTION_REASONS = [
   // Named refusals of the decision routes, so a screen can say why.
   'approval_already_resolved', 'reduced_scope_changed', 'policy_denied', 'cancel_pending', 'not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict',
   'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged',
+  // Named refusals of the assignment route.
+  'no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'trial_model_pinned',
 ] as const;
 export type RejectionReason = (typeof REJECTION_REASONS)[number];
 

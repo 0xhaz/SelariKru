@@ -17,6 +17,8 @@ export interface PolicyDecision {
 
 export type Operation =
   | { kind: 'read_approved_docs' | 'run_scoped_tests' | 'edit_scoped_dev_branch' | 'create_draft_pr' | 'append_artifacts' | 'assign_replan_tasks' }
+  /** Assigning or launching one model. `selection` null removes an assignment, so only the operation's treatment is judged. */
+  | { kind: 'assign_model'; selection: { provider: string; model: string } | null }
   | { kind: 'repair_within_limits'; attempt: number; estimatedCost: number | null; remainingBudget: number | null }
   | {
       kind: 'start_cloud_worker';
@@ -100,6 +102,18 @@ export function evaluate(op: Operation, policy: Policy | undefined): PolicyDecis
     const b = checkReservation(w.estimatedCost, w.remainingBudget);
     if (!b.ok) return decide('deny', `budget:${b.reason}`, v);
     return allowed('eligible_cloud_start_within_limits');
+  }
+
+  // `models.allowed` is the authority for which models are permitted, so a policy that lists models need not also name this operation. Only an explicit deny or an unreadable treatment refuses it outright.
+  if (k === 'assign_model') {
+    if (configured === 'deny') return decide('deny', `configured_deny:${k}`, v);
+    if (configured !== undefined && !isTreatment(configured)) return decide('deny', `invalid_operation_config:${k}`, v);
+    const { selection } = op as Extract<Operation, { kind: 'assign_model' }>;
+    if (selection !== null) {
+      if (!policy.models) return decide('deny', 'missing_models_config', v);
+      if (!policy.models.allowed.some((m) => m.provider === selection.provider && m.model === selection.model)) return decide('deny', 'model_not_allowed', v);
+    }
+    return configured === 'require_approval' ? decide('require_approval', `configured_require_approval:${k}`, v) : decide('allow', 'model_permitted', v);
   }
 
   if (configured === undefined) return decide('deny', `missing_operation_config:${k}`, v);

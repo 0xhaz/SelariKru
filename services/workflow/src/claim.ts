@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { TaskSpecSchema, budgetUsed, readyTasks, transition, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
+import { resolveAssignment, worstCaseHold, type WorstCaseHold } from './assignment.ts';
 import { leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
@@ -23,6 +24,8 @@ interface Candidate {
   runId: string;
   spec: Record<string, unknown>;
   placement: { mode: string; cloudDestination: string | null } | null;
+  trial: boolean;
+  pinnedModel: { provider: string; model: string } | null;
 }
 
 const validRunner = (r: Runner): boolean =>
@@ -97,7 +100,7 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     const candidates: Candidate[] = await tx
       .select({
         projectId: schema.taskStatus.projectId, taskId: schema.taskStatus.taskId, currentRevision: schema.taskStatus.currentRevision,
-        runId: schema.taskRevisions.runId, spec: schema.taskRevisions.spec, placement: schema.runs.placement,
+        runId: schema.taskRevisions.runId, spec: schema.taskRevisions.spec, placement: schema.runs.placement, trial: schema.runs.trial, pinnedModel: schema.runs.pinnedModel,
       })
       .from(schema.taskStatus)
       .innerJoin(schema.taskRevisions, and(
@@ -373,8 +376,16 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (!(await dependenciesReady(tx, key, spec))) return { reason: 'dependencies_unsatisfied' };
   if (await resourceConflict(tx, key, spec)) return { reason: 'resource_conflict' };
 
+  // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
+  const assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel });
+  if (!assigned.ok) {
+    await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
+    return { reason: `model_blocked:${assigned.reason}` };
+  }
+  const hold = worstCaseHold(toMicros(spec.limits.maxCostUsd), assigned.assignment, ctx.catalog ?? NO_HARNESS_CATALOG, ctx.policy);
+  const amountMicros = hold.amountMicros;
+
   // Placement decides the one location this task may run in; a runner elsewhere never receives it.
-  const amountMicros = toMicros(spec.limits.maxCostUsd);
   const budgetScope = { tenantId: runner.tenantId, projectId: c.projectId, runId: c.runId };
   const position = await lockBudget(tx, budgetScope);
   const cfg = runPlacement(ctx, c);
@@ -447,7 +458,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const fits = checkFits(position, amountMicros);
   if (!fits.ok) return { reason: fits.reason };
 
-  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now);
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold);
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
   const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
@@ -455,7 +466,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -472,6 +483,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, revision: spec.revision, attemptNumber,
     runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
     baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location },
+    modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();
   for (const claim of spec.resourceClaims) {
@@ -482,14 +494,14 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
       tenantId: key.tenantId, projectId: key.projectId, claimId: `clm_${randomUUID()}`, taskId: key.taskId, revision: spec.revision, resourceKey, mode, attemptId,
     });
   }
-  await reserve(tx, position, { reservationId, taskId: key.taskId, revision: spec.revision, attemptId, fence, amountMicros });
+  await reserve(tx, position, { reservationId, taskId: key.taskId, revision: spec.revision, attemptId, fence, amountMicros, rateBasis: hold.basis, rateSource: hold.rateSource });
 
   const aggregateRevision = await setStatus(tx, key, rowRevision, state.status, now);
   const scope: EventScope = { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision };
   if (promoted) await emit(tx, scope, now, { type: 'task.ready', attemptId: null, actor: SCHEDULER_ACTOR, payload: { reason: 'dependencies_satisfied' } });
   await emit(tx, scope, now, {
     type: 'attempt.started', attemptId, actor: SCHEDULER_ACTOR,
-    payload: { fence, attemptNumber, runnerId: runner.runnerId, location: runner.location, reservationId, amountUsd: spec.limits.maxCostUsd },
+    payload: { fence, attemptNumber, runnerId: runner.runnerId, location: runner.location, reservationId, amountUsd: amountMicros / 1_000_000, modelRoute: assignment.route, assignment: { provider: assignment.provider, model: assignment.model, source: assignment.source } },
   });
 
   // Why the task is here. A cloud start carries the policy decision (a policy record, never an approval).
@@ -504,7 +516,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
-    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId,
+    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment,
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

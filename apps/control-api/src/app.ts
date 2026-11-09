@@ -1,4 +1,4 @@
-import type { VerificationRecord } from '@selarikru/domain';
+import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
@@ -47,6 +47,8 @@ export interface AppDeps {
   readonly scheduler: Scheduler;
   /** Project policy, already loaded. Absent policy denies every policy-gated command. */
   readonly policy: Policy | undefined;
+  /** What the installed harness adapters declare. Absent reads as nothing detected: no model can be assigned and no claim can start. */
+  readonly catalog?: HarnessCatalog | undefined;
   /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
   readonly planConfig?: PlanConfigSource | undefined;
   /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */

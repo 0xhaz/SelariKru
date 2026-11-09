@@ -13,7 +13,7 @@ import { buildApp } from '@selarikru/control-api';
 import { API_POLICY, enrolRunner, fakeVerifier, testConfig, PROJECT, resetDb, seedTask, setupTestDb, specFor } from '@selarikru/control-api/test-helpers';
 import { NodeSbxRunner, SbxRuntimeAdapter } from '@selarikru/runtime-docker-local';
 import { createScheduler } from '@selarikru/workflow';
-import { POLICY } from '@selarikru/workflow/test-helpers';
+import { TEST_CATALOG, POLICY } from '@selarikru/workflow/test-helpers';
 import { HttpRunnerApi } from '../src/api.ts';
 import { runAttempt } from '../src/attempt.ts';
 
@@ -40,7 +40,7 @@ describe.skipIf(!enabled)('real end-to-end attempt', () => {
     const t = await setupTestDb();
     await resetDb(t.db);
     const config = testConfig();
-    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, scheduler: createScheduler({ db: t.db, now: () => new Date(), policy: POLICY }) });
+    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy: POLICY }) });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;

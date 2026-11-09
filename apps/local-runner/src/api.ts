@@ -1,5 +1,5 @@
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, type LeaseRef, type ResultRequest } from '@selarikru/protocol';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 
 export const ClaimedLeaseSchema = z
@@ -12,6 +12,8 @@ export const ClaimedLeaseSchema = z
     deadlineAt: z.string(),
     /** Human grants delivered with this lease. A row this runner cannot read as a grant is dropped, so it can never be mistaken for one it holds. */
     grants: z.array(z.unknown()).default([]).transform((rows) => rows.flatMap((r) => { const g = LeaseGrantSchema.safeParse(r); return g.success ? [g.data] : []; })),
+    /** The model this attempt was recorded with. The runner launches exactly this, or nothing. Null on a lease with no recorded model, which cannot run. */
+    assignment: RecordedAssignmentSchema.nullable().default(null),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;

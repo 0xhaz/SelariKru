@@ -172,7 +172,7 @@ function unknownCosts(): Fixture {
 
 function noData(): Fixture {
   return {
-    id: 'no-data', name: 'No data', projectId: 'demo-no-data', startSec: 0, events: [], usage: [], assistant: { mode: null, observedSource: 'unknown' }, tasks: [], approvals: [], silences: {},
+    id: 'no-data', name: 'No data', projectId: 'demo-no-data', startSec: 0, modelCatalog: { status: 'none', detail: 'No provider was detected on this machine: the `claude` CLI was not found.', providers: [] }, events: [], usage: [], assistant: { mode: null, observedSource: 'unknown' }, tasks: [], approvals: [], silences: {},
     description: 'A project with no runs, tasks, workers or usage. Empty states render as empty, not as zeros.',
   };
 }
@@ -325,7 +325,16 @@ export const FIXTURE_IDS = [
   'healthy-parallel-work', 'human-wait', 'policy-block', 'runner-loss', 'long-build-stall', 'contract-change', 'failed-ci', 'expired-approval', 'unknown-costs', 'no-data',
 ] as const satisfies readonly FixtureId[];
 
+function benchmarkTrial(): Fixture {
+  const b = new FixtureBuilder('benchmark-trial', 1313);
+  b.pinnedModel = { provider: 'anthropic', model: 'claude-sonnet-5-5' };
+  b.task('api', { title: 'Benchmark API task', role: 'backend', criteria: 1 });
+  b.plan(1, ['api']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud');
+  return done(b, { id: 'benchmark-trial', name: 'Benchmark trial', startSec: 60, assistant: ASSISTANT_DEVICE, description: 'A benchmark trial: every attempt uses its one pinned model, and overrides are refused.', usage: [] });
+}
+
 const BUILDERS: Record<FixtureId, () => Fixture> = {
+  'benchmark-trial': benchmarkTrial,
   'healthy-parallel-work': healthyParallelWork, 'human-wait': humanWait, 'policy-block': policyBlock, 'runner-loss': runnerLoss, 'long-build-stall': longBuildStall,
   'merge-flow': mergeFlow, 'feature-delivery': featureDelivery, 'decision-queue': decisionQueue, 'changed-request': changedRequest, 'budget-stop': budgetStop, 'integration-blocked': integrationBlocked, 'merge-review': mergeReview, 'merged-sha-mismatch': mergedShaMismatch, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
 };
@@ -334,5 +343,5 @@ const BUILDERS: Record<FixtureId, () => Fixture> = {
 export const buildFixture = (id: FixtureId): Fixture => BUILDERS[id]();
 export const buildAllFixtures = (): Fixture[] => FIXTURE_IDS.map(buildFixture);
 /** The ten named fixtures plus the extras. This is what the demo source serves by default. */
-export const EXTRA_FIXTURE_IDS = ['merge-flow', 'feature-delivery', 'decision-queue', 'changed-request', 'budget-stop', 'integration-blocked', 'merge-review', 'merged-sha-mismatch'] as const satisfies readonly FixtureId[];
+export const EXTRA_FIXTURE_IDS = ['benchmark-trial', 'merge-flow', 'feature-delivery', 'decision-queue', 'changed-request', 'budget-stop', 'integration-blocked', 'merge-review', 'merged-sha-mismatch'] as const satisfies readonly FixtureId[];
 export const buildDemoFixtures = (): Fixture[] => [...buildAllFixtures(), ...EXTRA_FIXTURE_IDS.map(buildFixture)];

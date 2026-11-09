@@ -1,6 +1,6 @@
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { ApprovalDestination, LeaseGrant, Result } from '@selarikru/domain';
+import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, Result } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
@@ -41,6 +41,8 @@ export interface SchedulerContext {
    * which denies cloud placement. Missing is never unlimited.
    */
   readonly placement?: PlacementConfig | undefined;
+  /** What the installed harness adapters declare. Absent reads as nothing detected, which blocks every claim. Missing is never unlimited. */
+  readonly catalog?: HarnessCatalog | undefined;
   /** How long an approval request stays grantable. Default `APPROVAL_TTL_SECONDS`. */
   readonly approvalTtlSeconds?: number | undefined;
 }
@@ -66,6 +68,8 @@ export interface Lease {
   readonly deadlineAt: string;
   /** Human grants delivered with this lease: every unused grant for this task revision, consumed by this attempt. Set at claim; absent on a lease rebuilt from a stored attempt. */
   readonly grants?: readonly LeaseGrant[];
+  /** The model this attempt runs, as recorded at claim. Set at claim; absent on a lease rebuilt from a stored attempt. */
+  readonly assignment?: RecordedAssignment;
 }
 
 export interface SkippedCandidate {

@@ -4,7 +4,7 @@ import { createFirebaseVerifier } from '../src/index.ts';
 import { buildApp } from '../src/index.ts';
 import { createScheduler } from '@selarikru/workflow';
 import { startAuthEmulator, type AuthEmulator } from './auth-emulator.ts';
-import { API_POLICY, PROJECT, resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
+import { TEST_CATALOG, API_POLICY, PROJECT, resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
 
 /**
  * Runs the production verifier (firebase-admin, project `selarikru`) against the Firebase Auth Emulator.
@@ -69,7 +69,7 @@ describe.skipIf(!runnable)('Firebase Auth Emulator', () => {
     const clock = testClock();
     const app = buildApp({
       config: testConfig({ ownerUid: alice.uid }), db: t.db, verifier, now: clock.now,
-      scheduler: createScheduler({ db: t.db, now: clock.now }), policy: API_POLICY,
+      scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now }), policy: API_POLICY,
     });
     const url = `/v1/projects/${PROJECT}/snapshot`;
     expect((await app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${alice.idToken}` } })).statusCode).toBe(200);

@@ -2,11 +2,21 @@ import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
-import { ClaudeHarnessAdapter } from '@selarikru/harness-claude';
-import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
+import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
+
+/** A harness this runner can start. It declares the models it runs, so an unsupported one is refused before any sandbox exists. */
+export interface RunnerHarness {
+  readonly provider: string;
+  readonly models: readonly string[];
+  create(launcher: HarnessLauncher): HarnessAdapter;
+}
+
+/** Only what this adapter set can actually launch. Nothing is registered for a provider that is not installed. */
+export const DEFAULT_HARNESSES: readonly RunnerHarness[] = [{ provider: CLAUDE_PROVIDER_ID, models: CLAUDE_MODELS.map((m) => m.id), create: (launcher) => new ClaudeHarnessAdapter(launcher) }];
 
 export interface AttemptDeps {
   readonly api: RunnerApi;
@@ -21,6 +31,8 @@ export interface AttemptDeps {
   /** After this many consecutive failed heartbeats the lease is presumed lost (60 s expiry / 10 s interval = 6). */
   readonly maxMissedHeartbeats: number;
   readonly maxTurns?: number;
+  /** Default: `DEFAULT_HARNESSES`. The seam a further provider's adapter plugs into. */
+  readonly harnesses?: readonly RunnerHarness[];
   readonly cpus: number;
   readonly memoryMiB: number;
   readonly log: (line: string) => void;
@@ -217,6 +229,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       return await finish('blocked', `egress_enforcement_unavailable: this runtime cannot limit a sandbox to ${egressGrants.map((g) => g.destination!.host).join(', ')}`, null, null);
     }
 
+    // The recorded model is what launches, or nothing does. These checks sit before the sandbox: an unsupported model must fail with no sandbox created.
+    const assignment = lease.assignment;
+    if (assignment === null) return await finish('blocked', 'no_model_recorded: this attempt carries no recorded model, so it cannot run', null, null);
+    const harnessEntry = (deps.harnesses ?? DEFAULT_HARNESSES).find((h) => h.provider === assignment.provider);
+    if (harnessEntry === undefined) return await finish('blocked', `unsupported_provider:${assignment.provider}/${assignment.model}`, null, null);
+    if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', `unsupported_model:${assignment.provider}/${assignment.model}`, null, null);
+
     const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
     const taskFile = renderTaskFile(task, { signalPath, grants });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
@@ -255,7 +274,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.cancelled || flags.timedOut) return await finish('failed', flags.timedOut ? 'attempt timeout reached before the agent started' : 'cancelled by owner request before the agent started', null, null);
 
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(budgetMs / 1000)));
-    const harness = new ClaudeHarnessAdapter(launcher);
+    const harness = harnessEntry.create(launcher);
     let resultOk = false;
     let resultNote = 'the agent produced no result';
     let exitFailed = false;
@@ -263,6 +282,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let refused: string | null = null;
     let cost: number | null = null;
     let mcpViolation: string[] | null = null;
+    // A worker silently running a different model from the record is the failure this feature exists to prevent: it stops here and is reported, never tolerated.
+    let modelMismatch: string | null = null;
     // The agent's first approval signal ends the attempt: the runner stops it and the control plane decides whether a person is asked.
     let approvalRequest: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string } | null = null;
     let approvalRefused: ApprovalRefusalReason | null = null;
@@ -271,18 +292,23 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let coveredSignal = false;
     const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
     reportedUsage = { reportedUsage: { setupSeconds } };
-    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath })) {
+    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath })) {
       if (aborted()) requestStop();
       switch (ev.type) {
         case 'session_started':
           log(`session: mode=${ev.permissionMode ?? 'unknown'} connectedMcp=${ev.connectedMcpServers === null ? 'unreported' : JSON.stringify(ev.connectedMcpServers)}`);
+          if (ev.model !== null && ev.model !== assignment.model) {
+            modelMismatch = `model_mismatch: recorded ${assignment.model}, the stream reports ${ev.model}`;
+            log(modelMismatch);
+            requestStop();
+          }
           if (ev.connectedMcpServers !== null && ev.connectedMcpServers.length > 0) {
             mcpViolation = [...ev.connectedMcpServers];
             requestStop();
           }
           break;
         case 'launch_refused':
-          refused = `${ev.capability} is ${ev.status}`;
+          refused = ev.reason === 'capability_unavailable' ? `${ev.capability} is ${ev.status}` : `model_unsupported:${ev.provider}/${ev.model}`;
           break;
         case 'approval_signal':
           // Already granted to this attempt: it may proceed. It does not ask again.
@@ -345,6 +371,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (!confirmed) return await finish('failed', 'agent stop was not confirmed; the workspace is not trusted', cost, null);
     if (mcpViolation !== null) return await finish('failed', `unexpected MCP server connected: ${(mcpViolation as string[]).join(', ')}`, cost, null);
+    if (modelMismatch !== null) return await finish('failed', modelMismatch, cost, null);
     if (flags.cancelled) return await finish('failed', 'cancelled by owner request; agent stopped and confirmed', cost, null);
     if (flags.timedOut) return await finish('failed', 'attempt timeout reached; agent stopped and confirmed', cost, null);
     if (refused !== null) return await finish('blocked', `harness capability unavailable: ${refused}`, cost, null);

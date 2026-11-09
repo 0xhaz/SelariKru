@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { NormalizedHarnessEvent } from '@selarikru/protocol';
-import { ClaudeHarnessAdapter, type HarnessLauncher, type LaunchedProcess } from './adapter.ts';
+import { ClaudeHarnessAdapter, type HarnessLauncher, type LaunchedProcess, type LaunchSpec } from './adapter.ts';
+import { detectClaude, detectHarnesses } from './catalog.ts';
 import { CANARY, fullRun, initEvent } from './fixtures.ts';
 import { decodeUtf8Stream } from './decode.ts';
 
@@ -121,6 +122,8 @@ describe('ClaudeHarnessAdapter', () => {
       usageReporting: 'supported',
       networkEnforcement: 'not established',
       outputSchema: 'not established',
+      // Not a spike row: documented by the installed CLI's own help, and checked at runtime against the init event.
+      modelSelection: 'supported',
     });
   });
 
@@ -335,4 +338,45 @@ describe('approval signal', () => {
     expect(ofType(events, 'approval_signal')).toEqual([]);
   });
 });
+});
+
+describe('the recorded model', () => {
+  it('reaches the CLI as exactly that model, and an unlisted one is refused before anything launches', async () => {
+    const launched: LaunchSpec[] = [];
+    const launcher: HarnessLauncher = {
+      launch: async (spec) => { launched.push(spec); return { lines: (async function* () {})(), stdin: { write() {}, end() {} }, kill() {}, exited: Promise.resolve({ code: 0, signal: null }) }; },
+      stop: async () => ({ accepted: true, detail: null }),
+    };
+    const adapter = new ClaudeHarnessAdapter(launcher);
+    for await (const _ of adapter.run({ attemptId: 'a', prompt: 'p', workspacePath: '/w', model: { provider: 'anthropic', model: 'claude-opus-5-5' } })) void _;
+    expect(launched[0]!.command).toEqual(expect.arrayContaining(['--model', 'claude-opus-5-5']));
+    const refused = [];
+    for await (const e of adapter.run({ attemptId: 'b', prompt: 'p', workspacePath: '/w', model: { provider: 'anthropic', model: 'claude-made-up' } })) refused.push(e);
+    expect(refused).toEqual([expect.objectContaining({ type: 'launch_refused', reason: 'model_unsupported', provider: 'anthropic', model: 'claude-made-up' })]);
+    for await (const _ of adapter.run({ attemptId: 'c', prompt: 'p', workspacePath: '/w', model: { provider: 'codex', model: 'claude-opus-5-5' } })) void _;
+    expect(launched).toHaveLength(1);
+  });
+});
+
+describe('detection', () => {
+  it('offers Claude only when the CLI answers, and says so when it cannot tell', async () => {
+    const found = await detectClaude(async () => '2.1.316 (Claude Code)\n');
+    expect(found.status).toBe('detected');
+    expect(found.providers.map((p) => p.provider)).toEqual(['anthropic']);
+    expect(found.providers[0]).toMatchObject({ harnessVersion: '2.1.316', modelSelection: 'supported' });
+    expect(found.providers[0]!.models.map((m) => m.id)).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5']);
+
+    const gone = await detectClaude(async () => { throw Object.assign(new Error('nope'), { code: 'ENOENT' }); });
+    expect(gone).toMatchObject({ status: 'none', providers: [] });
+    expect(gone.detail).toMatch(/not found/);
+
+    const stuck = await detectClaude(async () => { throw new Error('timed out'); });
+    expect(stuck).toMatchObject({ status: 'unknown', providers: [] });
+
+    const odd = await detectClaude(async () => 'hello');
+    expect(odd).toMatchObject({ status: 'unknown', providers: [] });
+
+    const empty = await detectHarnesses([]);
+    expect(empty).toMatchObject({ status: 'none', providers: [] });
+  });
 });

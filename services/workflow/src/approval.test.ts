@@ -4,7 +4,7 @@ import { schema } from '@selarikru/persistence';
 import { HUMAN_DECISION_KINDS, type Policy } from '@selarikru/policy';
 import { WORKER_APPROVAL_OPERATIONS } from '@selarikru/domain';
 import { createScheduler, type Lease, type PublishResult, type Scheduler } from './index.ts';
-import {
+import { TEST_CATALOG,
   CAPS, CLOUD_POLICY, POLICY, PROJECT, RUN, TENANT, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
@@ -15,7 +15,7 @@ const CLOUD_RUN = { mode: 'C1', cloudDestination: 'cloud-sandbox-eu' };
 let t: TestDb;
 let clock: TestClock;
 let s: Scheduler;
-const sched = (policy: Policy): Scheduler => createScheduler({ db: t.db, now: clock.now, policy });
+const sched = (policy: Policy): Scheduler => createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy });
 const useCloudRun = () => t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify(CLOUD_RUN)}::jsonb`);
 const events = async (type: string) => [...(await t.db.execute(sql`SELECT payload, actor_kind, attempt_id FROM events WHERE type = ${type} ORDER BY sequence`))];
 const approvals = async () => [...(await t.db.execute(sql`SELECT * FROM approvals ORDER BY created_at`))];

@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp, createFirebaseVerifier, loadPlanConfigFile } from '../src/index.ts';
 import { startAuthEmulator, type AuthEmulator } from './auth-emulator.ts';
 import { DEMO, assertEmulatorHost, ensureEmulatorAccount, seedDemo, writeDemoFiles } from '../src/demo.ts';
-import { resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
+import { TEST_CATALOG, resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
 
 describe('demo plan config', () => {
   it('uses plain allowedPaths prefixes, no globs, so the local runner accepts them', () => {
@@ -107,7 +107,7 @@ describe.skipIf(!external && !hasCli)('demo smoke (Auth Emulator)', () => {
     const policy = loadPolicyFile(files.policyFile);
     const app = buildApp({
       config: testConfig({ tenantId: 'tenant_local', ownerUid: DEMO.ownerUid }), db: t.db, verifier: createFirebaseVerifier({ projectId: PROJECT_ID }),
-      now: clock.now, scheduler: createScheduler({ db: t.db, now: clock.now, policy }), policy, planConfig: loadPlanConfigFile(files.planConfigFile),
+      now: clock.now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), policy, planConfig: loadPlanConfigFile(files.planConfigFile),
     });
     const headers = { authorization: `Bearer ${idToken}` };
     const review = await app.inject({

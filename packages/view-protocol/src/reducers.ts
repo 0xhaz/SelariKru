@@ -1,4 +1,4 @@
-import { EVENT_TYPES, RUN_STATUSES, type EventType, type RunStatus, type TaskStatus } from '@selarikru/domain';
+import { ASSIGNMENT_SOURCES, EVENT_TYPES, RUN_STATUSES, type EventType, type RunStatus, type TaskStatus } from '@selarikru/domain';
 import { cursorToSequence, sequenceToCursor } from './common.ts';
 import type { ProjectViewEvent } from './events.ts';
 import {
@@ -53,6 +53,18 @@ const oneOf = <T extends string>(p: Payload, k: string, allowed: readonly T[]): 
   return v !== null && (allowed as readonly string[]).includes(v) ? (v as T) : null;
 };
 
+const selection = (v: unknown): { provider: string; model: string } | null => {
+  const o = v as Payload | null | undefined;
+  return o !== null && typeof o === 'object' && str(o, 'provider') !== null && str(o, 'model') !== null ? { provider: str(o, 'provider')!, model: str(o, 'model')! } : null;
+};
+/** The recorded model from an event. Anything unreadable leaves it null: unknown, never guessed. */
+const recordedModel = (v: unknown): AttemptView['assignment'] => {
+  const s = selection(v);
+  if (s === null) return null;
+  const source = oneOf(v as Payload, 'source', ASSIGNMENT_SOURCES);
+  return source !== null ? { ...s, source } : null;
+};
+
 // ---- helpers --------------------------------------------------------------------------------------------------------------------
 const put = <T>(rec: Readonly<Record<string, T>>, key: string, value: NoInfer<T>): Record<string, T> => ({ ...rec, [key]: value });
 const evidence = (kind: string, ref: string, at: string): EvidenceRef => ({ kind, ref, at });
@@ -81,14 +93,14 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   const p = e.payload;
   const at = e.occurredAt;
   const existingRun = snap0.runs[e.runId];
-  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null };
+  const run = existingRun ?? { runId: e.runId, lifecycle: 'planning' as RunStatus, planRevision: 0, latestEvidence: null, criteria: null, reducedScope: null, scopeAssessment: null, pinnedModel: null };
   const snap: ProjectViewSnapshot = existingRun ? snap0 : { ...snap0, runs: put(snap0.runs, e.runId, run) };
   const setRun = (r: typeof run, s: ProjectViewSnapshot = snap): ProjectViewSnapshot => ({ ...s, runs: put(s.runs, e.runId, r) });
   const lifecycle = oneOf(p, 'lifecycle', RUN_STATUSES);
 
   switch (e.type) {
     case 'run.created':
-      return setRun({ ...run, lifecycle: lifecycle ?? 'planning' });
+      return setRun({ ...run, lifecycle: lifecycle ?? 'planning', pinnedModel: selection(p['pinnedModel']) ?? run.pinnedModel });
     case 'plan.accepted': {
       // A revised plan changes tasks that events cannot describe: a run that already has tasks needs a snapshot.
       if (Object.values(snap.tasks).some((t) => t.runId === e.runId)) return needs('plan_revision');
@@ -203,7 +215,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       const workerId = runnerId ?? `attempt:${attemptId}`;
       const next: AttemptView = {
         attemptId, taskId: task.taskId, number: int(p, 'attemptNumber', 1) ?? task.attemptIds.length + 1, fence, outcome: 'running',
-        exitReason: null, runnerId, startedAt: at, endedAt: null, lastHeartbeatAt: at,
+        exitReason: null, runnerId, startedAt: at, endedAt: null, lastHeartbeatAt: at, assignment: recordedModel(p['assignment']),
       };
       const location = oneOf(p, 'location', ['local', 'cloud'] as const);
       const prior = snap.workers[workerId];
@@ -212,7 +224,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
         // What the worker is doing is unknown until something reports it. Never defaulted.
         activity: null, health: 'healthy', leaseHeld: true,
         stateReason: null, enteredStateAt: at, latestAction: null, latestEvidence: null, lastHeartbeatAt: at,
-        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const) ?? 'unknown',
+        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const) ?? 'unknown', assignment: next.assignment,
         blockedByTaskIds: [], blockedByApprovalId: null,
       };
       const t = withEvidence({ ...moveTask(task, 'running', null, at), placementBlock: null, activeAttemptId: attemptId, attemptIds: [...task.attemptIds, attemptId] }, 'attempt.started');
@@ -463,8 +475,8 @@ export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnap
 }
 
 /**
- * Merges what the Decisions screen reads and events do not carry: the change requests (merge reconciliation has no event), and each run's reduced-scope
- * record and assessment. Same rule as the lifecycle merge: only a snapshot at or past the cursor counts. Returns the state unchanged when nothing differs.
+ * Merges what the screens read and events do not carry: the change requests (merge reconciliation has no event), each run's reduced-scope
+ * record and assessment, and the model catalog and assignments (an assignment change has no event: it is project configuration, audited in its own table). Same rule as the lifecycle merge: only a snapshot at or past the cursor counts. Returns the state unchanged when nothing differs.
  */
 export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSnapshot): ProjectionState {
   const snap = state.snapshot;
@@ -484,8 +496,10 @@ export function mergeDecisionFacts(state: ProjectionState, fresh: ProjectViewSna
   }
   const changeRequests = same(snap.changeRequests, fresh.changeRequests) ? snap.changeRequests : fresh.changeRequests;
   const approvalHistory = same(snap.approvalHistory, fresh.approvalHistory) ? snap.approvalHistory : fresh.approvalHistory;
-  if (!changed && changeRequests === snap.changeRequests && approvalHistory === snap.approvalHistory) return state;
-  return { ...state, snapshot: { ...snap, runs, changeRequests, approvalHistory } };
+  const modelCatalog = same(snap.modelCatalog, fresh.modelCatalog) ? snap.modelCatalog : fresh.modelCatalog;
+  const modelAssignments = same(snap.modelAssignments, fresh.modelAssignments) ? snap.modelAssignments : fresh.modelAssignments;
+  if (!changed && changeRequests === snap.changeRequests && approvalHistory === snap.approvalHistory && modelCatalog === snap.modelCatalog && modelAssignments === snap.modelAssignments) return state;
+  return { ...state, snapshot: { ...snap, runs, changeRequests, approvalHistory, modelCatalog, modelAssignments } };
 }
 
 const RESOLVED: readonly ApprovalView['state'][] = ['granted', 'denied', 'expired', 'superseded'];

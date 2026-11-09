@@ -307,7 +307,7 @@ function reasonFromCode(t: TaskView, code: string): BlockReason {
   else if (klass === 'wait') cause = 'capacity';
   else if (klass === 'policy') cause = 'policy';
   else if (code.startsWith('resource_conflict')) cause = 'claim';
-  else if (code.startsWith('role_not_mapped') || code.startsWith('location_disabled')) cause = 'placement';
+  else if (code.startsWith('role_not_mapped') || code.startsWith('location_disabled') || code.startsWith('no_provider_detected') || code.startsWith('unsupported_') || code.startsWith('model_not_assigned') || code.startsWith('trial_model_not_pinned')) cause = 'placement';
   else cause = 'other';
   return { cause, label: CAUSE_LABEL[cause], text: item.detail, code, taskIds: [], unknown: false, terminal: false, canApprove: code.startsWith('approval_required:') };
 }

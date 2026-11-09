@@ -484,3 +484,44 @@ describe('purity of reducers and fixtures', () => {
     });
   });
 });
+
+describe('model assignment commands', () => {
+  const setup = async (id: Parameters<typeof buildFixture>[0] = 'healthy-parallel-work') => {
+    const fixture = buildFixture(id);
+    const source = createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()), fixtures: [fixture] });
+    const snap = await source.getSnapshot(fixture.projectId);
+    return { source, snap, projectId: fixture.projectId };
+  };
+  const set = (projectId: string, over: Record<string, unknown> = {}, expectedRevision = 0, key = 'k1') => ({ command: 'assignment.set' as const, expectedRevision, idempotencyKey: key, args: { projectId, scope: 'role' as const, key: 'backend', selection: { provider: 'anthropic', model: 'claude-haiku-5-5' }, ...over } });
+
+  it('matches the real route: applied, replayed, stale, refused', async () => {
+    const { source, projectId } = await setup();
+    const ok = await source.execute(set(projectId));
+    expect(ok).toMatchObject({ accepted: true, execution: 'applied', rejection: null, simulated: true });
+    expect((await source.getSnapshot(projectId)).modelAssignments).toMatchObject([{ scope: 'role', key: 'backend', model: 'claude-haiku-5-5', revision: 1 }]);
+    expect(await source.execute(set(projectId))).toMatchObject({ accepted: true, replayed: true });
+    expect(await source.execute(set(projectId, {}, 0, 'k2'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
+    expect(await source.execute(set(projectId, { selection: { provider: 'codex', model: 'gpt-x' } }, 1, 'k3'))).toMatchObject({ rejection: 'unsupported_provider' });
+    expect(await source.execute(set(projectId, { selection: { provider: 'anthropic', model: 'claude-made-up' } }, 1, 'k4'))).toMatchObject({ rejection: 'unsupported_model' });
+    expect(await source.execute(set(projectId, { selection: { provider: 'anthropic', model: 'claude-opus-5-5' } }, 1, 'k5'))).toMatchObject({ rejection: 'model_not_allowed' });
+    expect(await source.execute(set(projectId, { selection: null }, 1, 'k6'))).toMatchObject({ accepted: true });
+    expect((await source.getSnapshot(projectId)).modelAssignments[0]).toMatchObject({ provider: null, model: null, revision: 2 });
+  });
+
+  it('a task override: unknown or closed tasks refuse, and a trial is pinned', async () => {
+    const { source, projectId, snap } = await setup('merge-flow');
+    const closed = Object.values(snap.tasks).find((t) => ['merged', 'verified', 'cancelled', 'superseded'].includes(t.status));
+    expect(await source.execute(set(projectId, { scope: 'task', key: 'nope' }))).toMatchObject({ rejection: 'unknown_target' });
+    if (closed) expect(await source.execute(set(projectId, { scope: 'task', key: closed.taskId }, 0, 'k2'))).toMatchObject({ rejection: 'not_allowed' });
+    const trial = await setup('benchmark-trial');
+    const taskId = Object.keys(trial.snap.tasks)[0]!;
+    expect(trial.snap.runs[Object.keys(trial.snap.runs)[0]!]!.pinnedModel).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5-5' });
+    expect(await trial.source.execute(set(trial.projectId, { scope: 'task', key: taskId, selection: { provider: 'anthropic', model: 'claude-haiku-5-5' } }))).toMatchObject({ rejection: 'trial_model_pinned' });
+  });
+
+  it('lists only Claude, and reports nothing detected when told to', async () => {
+    const { snap } = await setup();
+    expect(snap.modelCatalog.providers.map((p) => p.provider)).toEqual(['anthropic']);
+    expect(JSON.stringify(snap.modelCatalog)).not.toMatch(/codex|gpt/i);
+  });
+});

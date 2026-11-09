@@ -42,6 +42,8 @@ export const runs = pgTable(
     placement: jsonb('placement').$type<{ mode: string; cloudDestination: string | null }>(),
     /** A benchmark trial: it never opens an external pull request. Set when the run is created. */
     trial: boolean('trial').notNull().default(false),
+    /** A trial's one model, fixed at creation. Every attempt in the trial uses it and no assignment can change it. */
+    pinnedModel: jsonb('pinned_model').$type<{ provider: string; model: string }>(),
     createdAt: createdAt(),
   },
   (t) => [

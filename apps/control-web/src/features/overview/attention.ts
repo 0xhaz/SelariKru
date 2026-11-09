@@ -73,6 +73,13 @@ export function explain(code: string): string {
   const [head, ...rest] = bare.split(':');
   const arg = rest.join(':');
   if (head === 'resource_conflict') return arg ? `Another task holds a resource this one needs (${arg}).` : 'Another task holds a resource this one needs.';
+  if (head === 'no_provider_detected') return 'No provider was detected on this machine, so no model can run.';
+  if (head === 'unsupported_provider') return `The provider for ${arg || 'this assignment'} is not installed here, or cannot run a chosen model.`;
+  if (head === 'unsupported_model') return `The model ${arg || 'assigned here'} is not one the installed harness offers.`;
+  if (head === 'model_not_allowed') return `Policy does not allow the model ${arg || 'assigned here'}.`;
+  if (head === 'model_not_assigned') return `No model is assigned to the ${arg || 'task\'s'} role, and this project has no default.`;
+  if (head === 'trial_model_not_pinned') return 'This benchmark trial has no pinned model, so it cannot start.';
+  if (head === 'model_mismatch' || head === 'no_model_recorded') return 'The worker did not run the recorded model, so the attempt was stopped and not trusted.';
   if (head === 'role_not_mapped') return `The ${arg || 'task\'s'} role is not mapped to a worker location.`;
   if (head === 'location_disabled') return `The ${arg || 'chosen'} location is disabled for this run.`;
   if (head === 'budget') {
@@ -83,6 +90,10 @@ export function explain(code: string): string {
   return `${sentence(bare)}.`;
 }
 
+const MODEL_BLOCKS = ['no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'model_not_assigned', 'trial_model_not_pinned'];
+const MODEL_NEXT = 'Choose a supported model in Team, then let it retry.';
+const isModelBlock = (code: string): boolean => MODEL_BLOCKS.some((m) => stripPrefix(code).startsWith(m));
+
 export type BlockClass = 'decision' | 'repair' | 'budget' | 'wait' | 'policy' | 'blocked';
 
 /** `policy` is an allowlist: only a real policy denial or classification denial is called a policy incident. Anything unrecognized is plainly `blocked`. */
@@ -92,7 +103,7 @@ export function classifyBlock(code: string): BlockClass {
   if (bare === 'repair_budget_exhausted' || bare === 'repair_limit_exhausted') return 'repair';
   if (bare === 'concurrency_limit_reached' || bare === 'no_free_slot') return 'wait';
   if (bare.startsWith('budget:') || bare.startsWith('missing_budget') || bare.startsWith('missing_limit:')) return 'budget';
-  if (code.startsWith('policy_denied:') || code === 'classification_not_cloud_eligible') return 'policy';
+  if (code.startsWith('policy_denied:') || code === 'classification_not_cloud_eligible' || bare.startsWith('model_not_allowed')) return 'policy';
   return 'blocked';
 }
 
@@ -167,11 +178,11 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[]):
       return make({
         ...base, kind: 'policy_incident', title: `${name}: blocked by policy`, detail: explain(code),
         consequence: `${whoWaits(hit)} Nothing is moved around the policy, and there is no bypass.`,
-        nextAction: isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : 'Review the effective policy for this task.',
+        nextAction: isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : isModelBlock(code) ? MODEL_NEXT : 'Review the effective policy for this task.',
       });
     case 'blocked': {
       // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
-      const nextAction = code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
+      const nextAction = isModelBlock(code) ? MODEL_NEXT : code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
       return make({
         ...base, kind: 'blocked', title: `${name}: blocked`, detail: explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction,
       });

@@ -1,10 +1,10 @@
 import { createScheduler } from '@selarikru/workflow';
-import { CAPS, POLICY, TENANT, PROJECT, RUN, resetDb, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '@selarikru/workflow/test-helpers';
+import { TEST_CATALOG, CAPS, POLICY, TENANT, PROJECT, RUN, resetDb, seedTask, setupTestDb, specFor, testClock, type TestClock, type TestDb } from '@selarikru/workflow/test-helpers';
 import type { Policy } from '@selarikru/policy';
 import type { FastifyInstance } from 'fastify';
 import { buildApp, type AppDeps, type ControlApiConfig, type TokenVerifier } from '../src/index.ts';
 
-export { PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, testClock };
+export { TEST_CATALOG, PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, testClock };
 export type { TestClock, TestDb };
 
 export const OWNER_UID = 'owner_uid_1';
@@ -50,8 +50,8 @@ export const API_POLICY = { ...POLICY, operations: { assign_replan_tasks: 'allow
 export function makeHarness(t: TestDb, over: Partial<ControlApiConfig> = {}, policy: Policy | null = API_POLICY, extra: Partial<AppDeps> = {}): Harness {
   const clock = testClock();
   const config = testConfig(over);
-  const scheduler = createScheduler({ db: t.db, now: clock.now, policy: POLICY });
-  const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: clock.now, scheduler, policy: policy ?? undefined, ...extra });
+  const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY });
+  const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: clock.now, scheduler, policy: policy ?? undefined, catalog: TEST_CATALOG, ...extra });
   return { app, clock, config };
 }
 

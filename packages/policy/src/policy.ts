@@ -34,6 +34,7 @@ export const OPERATION_KINDS = [
   'modify_org_permissions',
   'append_artifacts',
   'assign_replan_tasks',
+  'assign_model',
   'destructive_data_migration',
 ] as const;
 
@@ -72,6 +73,11 @@ export type DestinationGrant = z.infer<typeof DestinationGrantSchema>;
 
 const TreatmentSchema = z.enum(TREATMENTS);
 
+const ModelSelectionSchema = z.object({ provider: z.string().min(1), model: z.string().min(1) }).strict();
+
+/** Which provider models this project permits. Absent, no model can be assigned or launched. `default` is also the rate reference for budget holds. */
+const ModelsPolicySchema = z.object({ allowed: z.array(ModelSelectionSchema), default: ModelSelectionSchema.optional() }).strict();
+
 export const PolicySchema = z
   .object({
     policyVersion: z.string().min(1),
@@ -88,6 +94,7 @@ export const PolicySchema = z
       .optional(),
     destinations: z.array(DestinationGrantSchema).optional(),
     selectedSources: z.array(z.string()).optional(),
+    models: ModelsPolicySchema.optional(),
     preferredMode: z.enum(['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD']).optional(),
   })
   .strict()

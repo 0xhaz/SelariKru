@@ -376,3 +376,127 @@ test('axe pass: reconnecting team', async ({ page }) => {
   await expect(page.getByTestId('connection-banner')).toBeVisible();
   await expectNoAxeViolations(page);
 });
+
+const SHOTS = process.env['SHOTS_DIR'];
+async function shot(page: Page, name: string): Promise<void> {
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}.png`, fullPage: true });
+}
+const assignmentRow = (page: Page, role: string) => page.locator(`[data-testid="assignment-row"][data-assignment-key="${role}"]`);
+
+test.describe('model assignment', () => {
+  test('assignment is recorded on the attempt and shown on the inference badge', async ({ page }) => {
+    await openTeam(page, fixture('healthy-parallel-work'));
+    const local = rowOf(page, 'runner_local_1');
+    await expect(local).toContainText('Local sandbox');
+    await expect(local).toContainText('Model in cloud');
+    await expect(local.getByTestId('inference-model')).toHaveText('claude-sonnet-5-5');
+    await openWorker(page, 'runner_local_1');
+    await expect(drawer(page).getByTestId('inference-model')).toHaveText('claude-sonnet-5-5');
+  });
+
+  test('a role assignment saves through the command and says it applies to the next attempt', async ({ page }) => {
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work' }; });
+    await page.goto('/tests/harness/index.html#/team');
+    await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
+    const row = assignmentRow(page, 'backend');
+    await expect(row.getByTestId('assignment-current')).toContainText('Using the project default');
+    await page.getByLabel('Model for Backend').selectOption('claude-haiku-5-5');
+    await row.getByRole('button', { name: 'Save for Backend' }).click();
+    await expect(row.getByTestId('assignment-feedback')).toContainText('Applies to the next attempt');
+    await expect(row.getByTestId('assignment-current')).toContainText('claude-haiku-5-5');
+    const commands = await page.evaluate(() => (window as unknown as { __calls: { commands: { command: { command: string; args: unknown } }[] } }).__calls.commands);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.command).toMatchObject({ command: 'assignment.set', expectedRevision: 0, args: { scope: 'role', key: 'backend', selection: { provider: 'anthropic', model: 'claude-haiku-5-5' } } });
+  });
+
+  test('an unsupported choice is explained and cannot be saved', async ({ page }) => {
+    await openTeam(page, fixture('healthy-parallel-work'));
+    const row = assignmentRow(page, 'backend');
+    await page.getByLabel('Model for Backend').selectOption('claude-opus-5-5');
+    await expect(row.getByTestId('assignment-refusal')).toContainText('Policy does not allow');
+    await expect(row.getByRole('button', { name: 'Save for Backend' })).toBeDisabled();
+    await page.getByLabel('Model for Backend').selectOption('claude-sonnet-5-5');
+    await expect(row.getByTestId('assignment-refusal')).toHaveCount(0);
+  });
+
+  test('a server refusal is visible and typed', async ({ page }) => {
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work', rejectWith: 'model_not_allowed' }; });
+    await page.goto('/tests/harness/index.html#/team');
+    await page.getByLabel('Model for Backend').selectOption('claude-haiku-5-5');
+    await assignmentRow(page, 'backend').getByRole('button', { name: 'Save for Backend' }).click();
+    await expect(assignmentRow(page, 'backend').getByTestId('assignment-feedback')).toContainText('Policy does not allow');
+  });
+
+  test('offers no provider that is not installed', async ({ page }) => {
+    await openTeam(page, fixture('healthy-parallel-work'));
+    await expect(page.getByLabel('Provider for Backend').locator('option')).toHaveText(['Claude']);
+    await expect(page.locator('body')).not.toContainText(/codex/i);
+  });
+
+  test('says so when no provider is detected', async ({ page }) => {
+    await openTeam(page, fixture('no-data'));
+    await expect(page.getByTestId('assignment-unavailable')).toContainText('No provider was detected');
+    await expect(page.getByLabel(/Model for/)).toHaveCount(0);
+  });
+
+  test('the drawer offers a per-task override, and a trial shows its pin', async ({ page }) => {
+    await openTeam(page, fixture('healthy-parallel-work'));
+    await openWorker(page, 'runner_local_1');
+    await expect(drawer(page).getByRole('heading', { name: 'Model override for this task' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await openTeam(page, fixture('benchmark-trial'));
+    await rows(page).first().locator('[data-open-worker]').click();
+    await expect(drawer(page).getByTestId('trial-pin')).toContainText('claude-sonnet-5-5');
+    await expect(drawer(page).getByTestId('trial-pin')).toContainText('Overrides are refused');
+  });
+
+  test('the provider filter narrows the fleet and keeps unrecorded workers apart', async ({ page }) => {
+    await openTeam(page, fixture('unknown-costs'));
+    await expect(rows(page)).toHaveCount(3);
+    await page.getByLabel('Provider', { exact: true }).selectOption('unknown');
+    await expect(rows(page)).toHaveCount(1);
+    await expect(rowOf(page, 'runner_cloud_1')).toContainText('Model route unknown');
+    await expect(rowOf(page, 'runner_cloud_1')).not.toContainText(/device/i);
+    await page.getByLabel('Provider', { exact: true }).selectOption('anthropic');
+    await expect(rows(page)).toHaveCount(2);
+    await expect(page.getByTestId('filter-count')).toHaveText('Showing 2 of 3');
+  });
+
+  for (const [width, height] of [[1440, 900], [375, 800]] as const) {
+    test(`axe pass and screenshots at ${width}: control, refusal, filter`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await openTeam(page, fixture('healthy-parallel-work'));
+      await expect(assignmentRow(page, 'backend')).toBeVisible();
+      await shot(page, `assignment-control-${width}`);
+      await expectNoAxeViolations(page);
+      await page.getByLabel('Model for Backend').selectOption('claude-opus-5-5');
+      await expect(assignmentRow(page, 'backend').getByTestId('assignment-refusal')).toBeVisible();
+      await shot(page, `unsupported-choice-${width}`);
+      await expectNoAxeViolations(page);
+      await page.getByLabel('Provider', { exact: true }).selectOption('anthropic');
+      await shot(page, `provider-filter-${width}`);
+      await expectNoAxeViolations(page);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    });
+  }
+
+  test('axe pass and screenshots in light theme at 1440', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openTeam(page, fixture('healthy-parallel-work'));
+    await expect(assignmentRow(page, 'backend')).toBeVisible();
+    await shot(page, 'assignment-control-1440-light');
+    await expectNoAxeViolations(page);
+    await page.getByLabel('Model for Backend').selectOption('claude-opus-5-5');
+    await shot(page, 'unsupported-choice-1440-light');
+    await page.getByLabel('Provider', { exact: true }).selectOption('anthropic');
+    await shot(page, 'provider-filter-1440-light');
+    await expectNoAxeViolations(page);
+  });
+
+  test('axe pass: drawer with the override control', async ({ page }) => {
+    await openTeam(page, fixture('healthy-parallel-work'));
+    await openWorker(page, 'runner_local_1');
+    await expectNoAxeViolations(page);
+  });
+});
