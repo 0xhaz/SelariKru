@@ -77,7 +77,8 @@ export const integrationDeliveries = pgTable(
     ...scope(),
     deliveryId: text('delivery_id').notNull(),
     integration: text('integration').notNull(),
-    sequence: bigint('sequence', { mode: 'number' }).notNull(),
+    /** The event an outbound delivery carries. Null for an inbound delivery (a webhook hint), which has no event. */
+    sequence: bigint('sequence', { mode: 'number' }),
     status: text('status').notNull(),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@selarikru/domain": "workspace:*",
+    "@selarikru/integrations-github": "workspace:*",
     "@selarikru/persistence": "workspace:*",
     "@selarikru/policy": "workspace:*",
     "@selarikru/protocol": "workspace:*",

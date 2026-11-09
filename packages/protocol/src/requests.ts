@@ -26,6 +26,8 @@ export const CreateRunRequestSchema = z
     budgetLimitUsd: z.number().finite().min(0).optional(),
     /** Where this run's tasks may run. Absent: local-only defaults, with cloud disabled. */
     placement: RunPlacementSchema.optional(),
+    /** A benchmark trial: the run never opens an external pull request. Default false. */
+    trial: z.boolean().optional(),
   })
   .strict();
 export type CreateRunRequest = z.infer<typeof CreateRunRequestSchema>;

@@ -1,4 +1,4 @@
-import { jsonb, bigint, pgTable, primaryKey, text, unique, foreignKey, integer } from 'drizzle-orm/pg-core';
+import { boolean, jsonb, bigint, pgTable, primaryKey, text, unique, foreignKey, integer } from 'drizzle-orm/pg-core';
 import { createdAt, scope } from './common.ts';
 
 export const projects = pgTable(
@@ -40,6 +40,8 @@ export const runs = pgTable(
     workflowOwner: text('workflow_owner'),
     /** Run-level placement: `{ mode: 'L1'|'L2'|'C1'|'C2'|'H2', cloudDestination: string|null }`. Null: local-only defaults. Validated at run acceptance. */
     placement: jsonb('placement').$type<{ mode: string; cloudDestination: string | null }>(),
+    /** A benchmark trial: it never opens an external pull request. Set when the run is created. */
+    trial: boolean('trial').notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [

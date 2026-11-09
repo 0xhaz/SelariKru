@@ -78,7 +78,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const runId = newId('run');
         const budget: Record<string, unknown> = body.budgetLimitUsd !== undefined ? { limitUsd: body.budgetLimitUsd } : {};
         const placement = body.placement === undefined ? null : { mode: body.placement.mode, cloudDestination: body.placement.cloudDestination ?? null };
-        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement });
+        await tx.insert(schema.runs).values({ tenantId: config.tenantId, projectId, runId, lifecycle: 'planning', budget, placement, trial: body.trial === true });
         await writeEvent(tx, at, {
           projectId, runId, taskId: runId, aggregateRevision: 1, type: 'run.created',
           actor: { kind: 'human', id: uid },

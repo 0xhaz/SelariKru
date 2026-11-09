@@ -11,6 +11,7 @@ export { expireLeases } from './reconcile.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
 export { applyVerification, markRunReadyForReview, releaseTaskClaims, type VerificationApplication, type VerificationVerdict } from './verification.ts';
+export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
 
 /** Binds the operations to a database and clock. Instances hold no state: any instance sees every lease. */

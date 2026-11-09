@@ -67,3 +67,30 @@ export const planProposals = pgTable(
     foreignKey({ columns: [t.tenantId, t.projectId, t.runId], foreignColumns: [runs.tenantId, runs.projectId, runs.runId] }),
   ],
 );
+
+/**
+ * The reviewable change (pull request) opened for a run's verified candidate. One per run. `status` is what the last authoritative read of the
+ * provider said (`open`, `closed`, `merged`) or `merged_sha_mismatch` when the merged head is not the candidate; it is never set from a webhook body.
+ */
+export const changeRequests = pgTable(
+  'change_requests',
+  {
+    ...scope(),
+    runId: text('run_id').notNull(),
+    repository: text('repository').notNull(),
+    candidateSha: text('candidate_sha').notNull(),
+    branch: text('branch').notNull(),
+    prNumber: integer('pr_number').notNull(),
+    url: text('url').notNull(),
+    status: text('status').notNull(),
+    observedHeadSha: text('observed_head_sha'),
+    mergeCommitSha: text('merge_commit_sha'),
+    observedAt: tstz('observed_at'),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.runId] }),
+    uniqueIndex('change_requests_pr_key').on(t.tenantId, t.projectId, t.prNumber),
+    foreignKey({ columns: [t.tenantId, t.projectId, t.runId], foreignColumns: [runs.tenantId, runs.projectId, runs.runId] }),
+  ],
+);

@@ -7,6 +7,7 @@ import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type Token
 import { type ControlApiConfig } from './config.ts';
 import { AppError, unauthenticated } from './errors.ts';
 import { registerOwnerRoutes } from './routes-owner.ts';
+import { registerGithubWebhook } from './routes-github.ts';
 import { registerProposalRoutes } from './routes-proposals.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
@@ -33,6 +34,8 @@ export interface AppDeps {
   readonly policy: Policy | undefined;
   /** Server-side source of project plan settings. Absent or unknown project blocks proposal review. */
   readonly planConfig?: PlanConfigSource | undefined;
+  /** GitHub webhook settings. Absent: the webhook route is not registered. The secret comes from configuration, never a request. */
+  readonly github?: { readonly webhookSecret: string } | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -148,6 +151,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerProposalRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
   registerEventStream(app, ctx);
+  if (deps.github) registerGithubWebhook(app, ctx, deps.github.webhookSecret);
 
   app.addHook('onClose', async () => {
     for (const close of [...ctx.openStreams]) close();

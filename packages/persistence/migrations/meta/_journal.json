@@ -57,6 +57,13 @@
       "when": 1794167077515,
       "tag": "0007_curly_morbius",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794184707728,
+      "tag": "0008_github_change_requests",
+      "breakpoints": true
     }
   ]
 }

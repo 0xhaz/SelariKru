@@ -1,3 +1,4 @@
+import { createGhCliPort } from '@selarikru/integrations-github';
 import { ConfigError, loadConfigFromEnv } from './config.ts';
 import { startServer } from './server.ts';
 
@@ -10,6 +11,10 @@ try {
     databaseUrl,
     policyFile: process.env['SELARIKRU_POLICY_FILE'] || undefined,
     planConfigFile: process.env['SELARIKRU_PLAN_CONFIG_FILE'] || undefined,
+    github: {
+      webhookSecret: process.env['SELARIKRU_GITHUB_WEBHOOK_SECRET'] || undefined,
+      ...(process.env['SELARIKRU_GITHUB_POLL_INTERVAL_MS'] ? { port: createGhCliPort(), pollIntervalMs: Number(process.env['SELARIKRU_GITHUB_POLL_INTERVAL_MS']) } : {}),
+    },
     onError: (e) => console.error('lease expiry pass failed:', e instanceof Error ? e.message : e),
   });
   console.log(`control API listening on ${server.address}`);
