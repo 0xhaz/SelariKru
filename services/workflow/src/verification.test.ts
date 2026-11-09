@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
-import { withTx } from '@selarikru/persistence';
-import { applyVerification, closeVerificationWithoutVerdict, markRunReadyForReview, reopenBlockedVerification, type Scheduler } from './index.ts';
+import { schema, withTx, type Tx } from '@selarikru/persistence';
+import { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, type Scheduler } from './index.ts';
+import { lockStatusRow, setStatus } from './taskstate.ts';
 import {
   CAPS, PROJECT, RUN, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
@@ -137,5 +138,77 @@ describe('reopenBlockedVerification eligibility', () => {
     const attemptId = String((await t.db.execute(sql`SELECT attempt_id FROM attempts`))[0]!['attempt_id']);
     expect(await withTx(t.db, (tx) => closeVerificationWithoutVerdict({ now: clock.now }, tx, key('t1'), { reason: 'verification_error', expect: { revision: 1, attemptId } }))).toBe(true);
     expect(await reopen()).toEqual({ ok: true, reopened: ['t1'] });
+  });
+});
+
+describe('a claim row whose holder and heir leave at the same moment', () => {
+  // Each round has both transactions hold their task's status row before either touches a claim, the widest the window gets. Against an unlocked release the first round already leaks.
+  const ROUNDS = 20;
+  const claim = { resourceClaims: [{ key: 'k', mode: 'exclusive' as const }] };
+  const ATTEMPT = (taskId: string) => `att_${taskId}`;
+  const part = (taskId: string) => ({ taskId, revision: 1, attemptId: ATTEMPT(taskId) });
+  const live = () => t.db.execute(sql`SELECT task_id FROM resource_claims WHERE released_at IS NULL`);
+
+  async function seedPair(): Promise<void> {
+    await resetDb(t.db);
+    for (const id of ['a', 'b']) {
+      await seedTask(t.db, specFor(id, claim), 'verifying');
+      await t.db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: ATTEMPT(id), taskId: id, revision: 1, attemptNumber: 1, outcome: 'running' });
+    }
+    await t.db.execute(sql`INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode, attempt_id) VALUES (${TENANT}, ${PROJECT}, 'clm_a', 'a', 1, 'k', 'exclusive', ${ATTEMPT('a')})`);
+  }
+
+  /** Resolves for everyone once `n` callers have arrived. */
+  const meeting = (n: number) => {
+    let waiting = n;
+    let open!: () => void;
+    const met = new Promise<void>((r) => { open = r; });
+    return () => { if (--waiting === 0) open(); return met; };
+  };
+
+  /** A real close keeps writing after the release (its event, its command row), so its transaction is still open when the other one reads. */
+  const lingerLikeTheRoute = (tx: Tx) => tx.execute(sql`SELECT pg_sleep(0.03)`);
+
+  /** What the cancel route does for a verifying task, after the same lock. */
+  async function cancel(tx: Tx, taskId: string): Promise<void> {
+    const row = (await lockStatusRow(tx, key(taskId)))!;
+    await setStatus(tx, key(taskId), row.rowRevision, 'cancelled', clock.now());
+    await releaseTaskClaims(tx, key(taskId), row.currentRevision, clock.now());
+  }
+  const leaveAfter = (arrive: () => Promise<void>, taskId: string, close: (tx: Tx) => Promise<unknown>) => withTx(t.db, async (tx) => {
+    await lockStatusRow(tx, key(taskId));
+    await arrive();
+    await close(tx);
+    await lingerLikeTheRoute(tx);
+  });
+
+  it.each([
+    ['a cancel of the holder', (tx: Tx) => cancel(tx, 'a')],
+    ['a passing verdict on the holder', (tx: Tx) => applyVerification({ db: t.db, now: clock.now }, key('a'), { actor: VERIFIER, outcome: 'passed', detail: {} }, tx)],
+    ['a failing verdict on the holder', (tx: Tx) => applyVerification({ db: t.db, now: clock.now }, key('a'), { actor: VERIFIER, outcome: 'failed', detail: {} }, tx)],
+    ['closing the holder without a verdict', (tx: Tx) => closeVerificationWithoutVerdict({ now: clock.now }, tx, key('a'), { reason: 'verification_error', expect: { revision: 1, attemptId: ATTEMPT('a') } })],
+  ] as const)('%s and a cancel of the heir leave the key free', async (_name, holderLeaves) => {
+    for (let round = 0; round < ROUNDS; round++) {
+      await seedPair();
+      const arrive = meeting(2);
+      await Promise.all([leaveAfter(arrive, 'a', holderLeaves), leaveAfter(arrive, 'b', (tx) => cancel(tx, 'b'))]);
+      expect(await live(), `round ${round}`).toEqual([]);
+    }
+  });
+
+  it('closing every part of a candidate while one of them is cancelled leaves the key free and does not deadlock', async () => {
+    for (let round = 0; round < ROUNDS; round++) {
+      await seedPair();
+      const arrive = meeting(2);
+      await Promise.all([
+        withTx(t.db, async (tx) => {
+          await arrive();
+          await closePartsWithoutVerdict({ now: clock.now }, tx, { tenantId: TENANT, projectId: PROJECT }, [part('a'), part('b')], { reason: 'verification_error' });
+          await lingerLikeTheRoute(tx);
+        }),
+        leaveAfter(arrive, 'b', (tx) => cancel(tx, 'b')),
+      ]);
+      expect(await live(), `round ${round}`).toEqual([]);
+    }
   });
 });

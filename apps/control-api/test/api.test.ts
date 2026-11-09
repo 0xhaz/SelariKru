@@ -325,6 +325,18 @@ describe('task commands', () => {
     expect(await t.db.execute(sql`SELECT 1 FROM resource_claims WHERE released_at IS NULL`)).toHaveLength(0);
   });
 
+  it('two parts cancelled at once: the claim row one held and the other would inherit is freed', async () => {
+    // A row passed to a part whose own cancel is in flight blocked the key for the whole project, with nothing left to free it. Twenty rounds catch that every time.
+    for (let round = 0; round < 20; round++) {
+      await resetDb(t.db);
+      for (const id of ['t1', 't2']) await seedTask(t.db, specFor(id, { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }), 'verifying');
+      await t.db.execute(sql`INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode) VALUES ('tenant_a', ${PROJECT}, 'clm_1', 't1', 1, 'k', 'exclusive')`);
+      const results = await Promise.all(['t1', 't2'].map((id) => post(h.app, `/v1/tasks/${id}/commands`, { command: 'cancel', expectedRevision: 0, idempotencyKey: `race-${id}` })));
+      expect(results.map((r) => r.status), `round ${round}`).toEqual([202, 202]);
+      expect(await t.db.execute(sql`SELECT task_id FROM resource_claims WHERE released_at IS NULL`), `round ${round}`).toEqual([]);
+    }
+  });
+
   it('retry refuses a task with an open cancel request, with a clear code', async () => {
     await seedTask(t.db, specFor('t1'), 'failed');
     await t.db.execute(sql`INSERT INTO task_commands (tenant_id, project_id, operation_id, task_id, revision, command, state, requested_by, requested_at)

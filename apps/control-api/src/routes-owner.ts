@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -342,6 +342,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           if (!IMMEDIATE_CANCEL.includes(row.status) && !staleExit) {
             throw new AppError(403, 'command_not_allowed', `cannot cancel a task that is ${row.status}`, { status: row.status });
           }
+          // Retiring a stale candidate touches its other parts: their status rows come before the claim lock the release below takes.
+          if (staleExit) await lockPartsForClaims(tx, { tenantId: config.tenantId, projectId: row.projectId }, stale!.parts.map((p) => p.taskId));
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
           await supersedePendingApprovals(tx, config.tenantId, row.projectId, taskId, at);
           // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.

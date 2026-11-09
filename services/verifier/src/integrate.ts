@@ -26,7 +26,7 @@ import { ArtifactIntegrityError, type ArtifactStore } from '../../../packages/ar
 import { checkEventAuthority, TaskSpecSchema, transition, validatePlanRevision, type EventEnvelope, type TaskSpec, type TaskStatus } from '../../../packages/domain/src/index.ts';
 import { appendEvent, appendUsage, INTEGRATION_ROLE, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { emit, SCHEDULER_ACTOR } from '../../workflow/src/events.ts';
-import { holdClaim } from '../../workflow/src/verification.ts';
+import { holdClaim, lockPartsForClaims } from '../../workflow/src/verification.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus } from '../../workflow/src/taskstate.ts';
 import { checkAllowedPaths, type FileChange } from '../../../packages/runtime-docker-local/src/diff.ts';
 
@@ -835,6 +835,9 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
   const reopened: string[] = [];
   if (rows.length > 0) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`); // same lock as claiming
   const candidateIds = rows.map((r) => String(r['candidate_id'])).sort(cmp);
+  // Every part's status row before the first claim write or event: waiting for the next part while holding claims would deadlock against that part's cancel.
+  const own = [...alsoOwn, ...rows.flatMap((c) => ((c['parts'] as { taskId: string }[]) ?? []).map((p) => p.taskId))];
+  await lockPartsForClaims(tx, run, rows.flatMap((c) => ((c['parts'] as { taskId: string }[]) ?? []).map((p) => p.taskId)));
   for (const r of rows) {
     for (const part of (r['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? []) {
       const key = { tenantId: run.tenantId, projectId: run.projectId, taskId: part.taskId };
@@ -850,7 +853,6 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
       let conflict: string | undefined;
       if (want.size > 0) {
         // The candidate's own parts are coming back together: their claims never conflict with each other, and one row held for a key is enough for all of them.
-        const own = [...alsoOwn, ...rows.flatMap((c) => ((c['parts'] as { taskId: string }[]) ?? []).map((p) => p.taskId))];
         const live = await tx.execute(sql`SELECT resource_key, mode, task_id FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key IN (${inList([...want.keys()])}) AND released_at IS NULL`);
         conflict = [...want].find(([k, m]) => live.some((h) => h['resource_key'] === k && !own.includes(String(h['task_id'])) && (m === 'exclusive' || h['mode'] === 'exclusive')))?.[0];
       }
@@ -862,7 +864,7 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
       }
       if (conflict === undefined) {
         // One row per key for the whole candidate, at the strongest mode any part needs.
-        for (const [resourceKey, mode] of want) await holdClaim(tx, key, { key: resourceKey, mode, taskId: part.taskId, revision: part.revision, attemptId: part.attemptId }, now);
+        for (const [resourceKey, mode] of want) await holdClaim(tx, key, { key: resourceKey, mode, taskId: part.taskId, revision: part.revision, attemptId: part.attemptId, own }, now);
       }
       const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
       // The re-verify lineage: this work was already judged and only main moved, so a failed verdict on the rebuild blocks it. No repair worker is started on its account.

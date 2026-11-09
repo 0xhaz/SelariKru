@@ -443,16 +443,19 @@ describe('a failed rebuild retrying on a new tip', () => {
 
   it('a claim held by this run’s own part waiting for a verdict is not a conflict', async () => {
     const claim = { key: 'lockfile', mode: 'exclusive' as const };
-    const runId = await failedRebuild([{ id: 'o_1', claim }, { id: 'o_2', claim, after: 'o_1' }]);
-    // Seeded, because the real pipeline does not reach it today: one part back to waiting and holding the key, the other still blocked.
-    await w.t.db.execute(sql`UPDATE task_status SET status = 'verifying' WHERE task_id = 'o_2'`);
-    await w.t.db.execute(sql`INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode) VALUES (${TENANT}, ${PROJECT}, 'clm_seed', 'o_2', 1, 'lockfile', 'exclusive')`);
+    const runId = await failedRebuild([{ id: 'o_1', claim }]);
+    // A replan adds a task on the same key; it completes and waits for its verdict, holding the key, while the rebuilt part is still blocked.
+    expect((await w.plan(runId, [w.task(runId, 'o_n', { resourceClaims: [claim] })], 1)).status).toBe(201);
+    await w.claimAndComplete('o_n');
+    expect((await w.status('o_n')).status).toBe('verifying');
+    const held = await w.t.db.execute(sql`SELECT claim_id, task_id, mode FROM resource_claims WHERE resource_key = 'lockfile' AND released_at IS NULL`);
+    expect(held).toMatchObject([{ task_id: 'o_n', mode: 'exclusive' }]);
     landOnMain();
-    const res = await post(w.app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'own' });
+    const res = await post(w.app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 2, idempotencyKey: 'own' });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.reopened).toEqual(['o_1']);
     expect((await w.status('o_1')).status).toBe('verifying');
-    expect(await w.t.db.execute(sql`SELECT claim_id FROM resource_claims WHERE resource_key = 'lockfile' AND released_at IS NULL`)).toEqual([{ claim_id: 'clm_seed' }]);
+    expect(await w.t.db.execute(sql`SELECT claim_id, task_id, mode FROM resource_claims WHERE resource_key = 'lockfile' AND released_at IS NULL`)).toEqual(held);
   });
 
   it('a claim another run holds changes nothing for any part, until it frees; then the whole rebuild proceeds', async () => {
@@ -514,6 +517,58 @@ describe('a key shared across a candidate’s parts', () => {
     expect(await rows()).toEqual([{ task_id: heir, mode: 'exclusive' }]);
     expect((await w.command(heir, (await w.status(heir)).rowRevision, 'c-heir')).status).toBe(202);
     expect(await rows()).toEqual([]);
+  });
+});
+
+describe('a part cancelled while a rebuild takes the key back', () => {
+  it('leaves no claim on the cancelled part, whichever goes first, and the two never deadlock', async () => {
+    const claim = { key: 'schema', mode: 'exclusive' as const };
+    for (let round = 0; round < 4; round++) {
+      await w.reset();
+      const runId = await w.newRun();
+      await w.plan(runId, [w.task(runId, 'r_1', { resourceClaims: [claim] }), w.task(runId, 'r_2', { resourceClaims: [claim], dependencies: [{ taskId: 'r_1', revision: 1, condition: 'artifact_verified' }] })]);
+      await w.claimAndComplete('r_1');
+      await w.assembly().tick();
+      await w.verification(passing).tick();
+      await w.claimAndComplete('r_2');
+      landOnMain();
+      const [cancel, tick] = await Promise.all([w.command('r_2', (await w.status('r_2')).rowRevision, `race-${round}`), w.assembly().tick()]);
+      expect(cancel.status, `round ${round}`).toBe(202);
+      expect(tick.failed.filter((f) => /deadlock/i.test(JSON.stringify(f))), `round ${round}`).toEqual([]);
+      const rows = await w.t.db.execute(sql`SELECT task_id, mode FROM resource_claims WHERE resource_key = 'schema' AND released_at IS NULL`);
+      expect(rows.map((r) => r['task_id']), `round ${round}`).not.toContain('r_2');
+      if ((await w.status('r_1')).status === 'verifying') expect(rows, `round ${round}`).toEqual([{ task_id: 'r_1', mode: 'exclusive' }]);
+    }
+  });
+});
+
+describe('a rebuild beside another run holding the key shared', () => {
+  it('the part takes its own row, so the key stays held for it after the other run leaves', async () => {
+    const shared = { key: 'db', mode: 'shared' as const };
+    const runId = await w.newRun();
+    await w.plan(runId, [w.task(runId, 'h_a', { resourceClaims: [shared] })]);
+    await w.claimAndComplete('h_a');
+    await w.assembly().tick();
+    await w.verification(passing).tick();
+    expect((await w.status('h_a')).status).toBe('verified');
+
+    const other = await w.newRun();
+    await w.plan(other, [w.task(other, 'h_peer', { resourceClaims: [shared] })]);
+    expect((await w.claim()).taskId).toBe('h_peer');
+    landOnMain();
+    expect((await w.assembly().tick()).assembled).toHaveLength(1);
+    expect((await w.status('h_a')).status).toBe('verifying');
+    const holders = async () => (await w.t.db.execute(sql`SELECT task_id, mode FROM resource_claims WHERE resource_key = 'db' AND released_at IS NULL ORDER BY task_id`)).map((r) => [r['task_id'], r['mode']]);
+    expect(await holders()).toEqual([['h_a', 'shared'], ['h_peer', 'shared']]);
+
+    // The peer's lease runs out, which frees its row, and an exclusive task asks for the key while h_a is still being verified.
+    w.advance(61);
+    await w.scheduler.expireLeases(w.now());
+    expect(await holders()).toEqual([['h_a', 'shared']]);
+    const writerRun = await w.newRun();
+    await w.plan(writerRun, [w.task(writerRun, 'h_writer', { resourceClaims: [{ key: 'db', mode: 'exclusive' }] })]);
+    for (let i = 0; i < 2; i++) expect((await w.api().claim()).lease?.taskId).not.toBe('h_writer');
+    expect((await w.status('h_writer')).status).not.toBe('running');
   });
 });
 

@@ -18,7 +18,7 @@
 import { randomUUID } from 'node:crypto';
 import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { emit } from '../../workflow/src/events.ts';
-import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
+import { closePartsWithoutVerdict } from '../../workflow/src/verification.ts';
 import { CandidateNotVerifiable, VERIFICATION_LEASE_SECONDS, verifyCandidate, type VerificationDeps } from './service.ts';
 import { readTip, type RemoteTips } from './tip.ts';
 
@@ -154,9 +154,7 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
     return withTx(db, async (tx: Tx) => {
       const locked = await tx.execute(sql`SELECT 1 FROM candidates WHERE ${candKey(c)} AND status = 'assembled' FOR UPDATE`);
       if (locked.length === 0) return false;
-      for (const p of c.parts) {
-        await closeVerificationWithoutVerdict({ now }, tx, { tenantId, projectId: c.project_id, taskId: p.taskId }, { reason, candidateSha: c.sha, expect: { revision: p.revision, attemptId: p.attemptId } });
-      }
+      await closePartsWithoutVerdict({ now }, tx, { tenantId, projectId: c.project_id }, c.parts, { reason, candidateSha: c.sha });
       await tx.execute(sql`UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now().toISOString()}::timestamptz WHERE ${candKey(c)}`);
       return true;
     });

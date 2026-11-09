@@ -1,6 +1,6 @@
 import { TaskSpecSchema, transition, type Actor, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { schema, withTx, type Db, type Tx } from '@selarikru/persistence';
-import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type TaskKey } from './taskstate.ts';
@@ -16,13 +16,35 @@ export interface VerificationApplication {
   readonly repair?: 'scheduled' | 'refused';
 }
 
+type ClaimScope = { readonly tenantId: string; readonly projectId: string };
+
 /**
- * Makes sure one of this run's parts holds `key` at least at `mode`. The caller has established that any live row on the key is this run's own. Postgres allows one live exclusive
- * row per key, so a candidate's parts share one row: an existing row is kept, raised to exclusive if that is what is wanted, and never lowered.
+ * Serialises every change to a project's live claim rows made on behalf of a run's parts: a release that may hand a row to another part, and taking a row back. Row locks cannot do
+ * this alone, because a part with no row yet has nothing to lock and would miss a row that is being handed to it.
+ *
+ * Lock order, across a whole transaction: candidate row, scheduler lock, task status rows (ascending task id when there are several), this lock, then `resource_claims` rows and the
+ * project's event sequence. Holding this lock, nothing waits for a status row or the scheduler lock, and a transaction that writes for several parts takes it before its first event.
+ * The scheduler lock could not serve here: claiming takes it before status rows, and every caller of `releaseTaskClaims` already holds one.
  */
-export async function holdClaim(tx: Tx, scope: { readonly tenantId: string; readonly projectId: string }, want: { readonly key: string; readonly mode: 'shared' | 'exclusive'; readonly taskId: string; readonly revision: number; readonly attemptId: string }, now: Date): Promise<void> {
+const lockClaimRows = (tx: Tx, scope: ClaimScope) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.claim_rows:${scope.tenantId}:${scope.projectId}`}, 0))`);
+
+/** For a transaction about to change claims for several tasks: their status rows in task order, then the claim lock, so no status row is waited for while claims are held. */
+export async function lockPartsForClaims(tx: Tx, scope: ClaimScope, taskIds: readonly string[]): Promise<void> {
+  const ids = [...new Set(taskIds)];
+  if (ids.length > 0) await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, scope.tenantId), eq(schema.taskStatus.projectId, scope.projectId), inArray(schema.taskStatus.taskId, ids))).orderBy(asc(schema.taskStatus.taskId)).for('update');
+  await lockClaimRows(tx, scope);
+}
+
+/**
+ * Makes sure one of this run's parts holds `key` at least at `mode`. `own` is the set of tasks sharing that candidate; a live row on the key held by anyone else is left alone and does
+ * not stand in for this run's own (the caller has established it does not conflict, so it can only be shared beside a shared want). Postgres allows one live exclusive row per key, so
+ * a candidate's parts share one row: an existing row of theirs is kept, raised to exclusive if that is what is wanted, and never lowered.
+ */
+export async function holdClaim(tx: Tx, scope: ClaimScope, want: { readonly key: string; readonly mode: 'shared' | 'exclusive'; readonly taskId: string; readonly revision: number; readonly attemptId: string; readonly own: readonly string[] }, now: Date): Promise<void> {
+  await lockClaimRows(tx, scope);
   const held = and(eq(schema.resourceClaims.tenantId, scope.tenantId), eq(schema.resourceClaims.projectId, scope.projectId), eq(schema.resourceClaims.resourceKey, want.key), isNull(schema.resourceClaims.releasedAt));
-  const rows = await tx.select({ claimId: schema.resourceClaims.claimId, mode: schema.resourceClaims.mode }).from(schema.resourceClaims).where(held).for('update');
+  const live = await tx.select({ claimId: schema.resourceClaims.claimId, mode: schema.resourceClaims.mode, taskId: schema.resourceClaims.taskId }).from(schema.resourceClaims).where(held).for('update');
+  const rows = live.filter((r) => r.taskId !== null && want.own.includes(r.taskId));
   if (rows.length === 0) {
     await tx.insert(schema.resourceClaims).values({ tenantId: scope.tenantId, projectId: scope.projectId, claimId: `clm_${randomUUID()}`, taskId: want.taskId, revision: want.revision, resourceKey: want.key, mode: want.mode, attemptId: want.attemptId });
     return;
@@ -37,8 +59,11 @@ export async function holdClaim(tx: Tx, scope: { readonly tenantId: string; read
 /**
  * Releases every claim a task revision still holds. Claims are held through verification and released on its outcome. A row this task holds for parts of its run that are still
  * waiting for a verdict passes to one of them, so a part leaving (cancelled, or judged first) cannot free a resource the others still rely on.
+ *
+ * Everything is read after the claim lock: a row handed to this task by another part leaving at the same moment is seen here, and a sibling that left is not an heir.
  */
 export async function releaseTaskClaims(tx: Tx, key: TaskKey, revision: number, now: Date): Promise<void> {
+  await lockClaimRows(tx, key);
   const mine = and(eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), eq(schema.resourceClaims.taskId, key.taskId), eq(schema.resourceClaims.revision, revision), isNull(schema.resourceClaims.releasedAt));
   const held = await tx.select({ claimId: schema.resourceClaims.claimId, resourceKey: schema.resourceClaims.resourceKey }).from(schema.resourceClaims).where(mine);
   if (held.length === 0) return;
@@ -177,6 +202,15 @@ export async function closeVerificationWithoutVerdict(
   return true;
 }
 
+/** Closes every part of a candidate without a verdict in one transaction. Status rows first and in order: closing one part and then waiting for the next would deadlock against that part's cancel. */
+export async function closePartsWithoutVerdict(
+  ctx: { readonly now: () => Date }, tx: Tx, scope: ClaimScope,
+  parts: readonly { readonly taskId: string; readonly revision: number; readonly attemptId: string }[], input: { readonly reason: string; readonly candidateSha?: string },
+): Promise<void> {
+  await lockPartsForClaims(tx, scope, parts.map((p) => p.taskId));
+  for (const p of parts) await closeVerificationWithoutVerdict(ctx, tx, { ...scope, taskId: p.taskId }, { ...input, expect: { revision: p.revision, attemptId: p.attemptId } });
+}
+
 /**
  * Owner-requested re-verifications per task revision and verifier build (see `reverifiesUsed`). Bounded, so a broken verifier cannot be retried for ever by hand either. A new
  * verifier is a new question about the same work, so it starts a new count. Under one build the bound can still be spent, and the exit then is cancel or replan.
@@ -258,8 +292,9 @@ export async function reopenBlockedVerification(
 
   const now = ctx.now();
   const reopened: string[] = [];
+  await lockClaimRows(tx, run);
   for (const p of planned) {
-    for (const [resourceKey, mode] of p.want) await holdClaim(tx, p.key, { key: resourceKey, mode, taskId: p.taskId, revision: p.revision, attemptId: p.attemptId }, now);
+    for (const [resourceKey, mode] of p.want) await holdClaim(tx, p.key, { key: resourceKey, mode, taskId: p.taskId, revision: p.revision, attemptId: p.attemptId, own: [...own] }, now);
     await tx.update(schema.attempts).set({ outcome: 'running', exitReason: null }).where(and(
       eq(schema.attempts.tenantId, p.key.tenantId), eq(schema.attempts.projectId, p.key.projectId), eq(schema.attempts.attemptId, p.attemptId)));
     const aggregateRevision = await setStatus(tx, p.key, p.rowRevision, p.status, now);
@@ -289,7 +324,7 @@ export async function lockStaleCandidate(tx: Tx, run: RunScope, sha: string): Pr
 
 interface Reopen {
   readonly key: TaskKey; readonly part: StaleCandidate['parts'][number]; readonly rowRevision: number; readonly state: TaskState;
-  readonly attempts: Awaited<ReturnType<typeof loadAttempts>>; readonly want: ReadonlyMap<string, 'shared' | 'exclusive'>; readonly conflict: string | undefined;
+  readonly attempts: Awaited<ReturnType<typeof loadAttempts>>; readonly want: ReadonlyMap<string, 'shared' | 'exclusive'>; readonly conflict: string | undefined; readonly partIds: readonly string[];
 }
 
 /** Works out sending one verified part back to `verifying`, writing nothing. Null when its stored task cannot make that move. Another part of the candidate holding a claim is no conflict. */
@@ -310,7 +345,7 @@ async function planReopen(tx: Tx, key: TaskKey, rowRevision: number, part: Stale
   }
   const moved = transition(state, { type: 'verification_invalidated', ...(conflict !== undefined ? { blockedReason: `resource_conflict:${conflict}` } : {}) });
   if (!moved.ok) return null;
-  return { key, part, rowRevision, state: moved.value, attempts, want, conflict };
+  return { key, part, rowRevision, state: moved.value, attempts, want, conflict, partIds };
 }
 
 /** Writes one planned move and its `task.reopened`. A part that hit a claim conflict is `blocked` with that reason, and takes no claims. */
@@ -320,7 +355,7 @@ async function applyReopen(tx: Tx, now: Date, run: RunScope, r: Reopen, payload:
     if (stored && stored.outcome !== rec.outcome) await tx.update(schema.attempts).set({ outcome: rec.outcome }).where(and(eq(schema.attempts.tenantId, r.key.tenantId), eq(schema.attempts.projectId, r.key.projectId), eq(schema.attempts.attemptId, rec.attemptId)));
   }
   if (r.conflict === undefined) {
-    for (const [resourceKey, mode] of r.want) await holdClaim(tx, r.key, { key: resourceKey, mode, taskId: r.part.taskId, revision: r.part.revision, attemptId: r.part.attemptId }, now);
+    for (const [resourceKey, mode] of r.want) await holdClaim(tx, r.key, { key: resourceKey, mode, taskId: r.part.taskId, revision: r.part.revision, attemptId: r.part.attemptId, own: r.partIds }, now);
   }
   const aggregateRevision = await setStatus(tx, r.key, r.rowRevision, r.state.status, now);
   const scope = { projectId: run.projectId, runId: run.runId, taskId: r.part.taskId, aggregateRevision };
@@ -365,6 +400,7 @@ export async function reopenStaleVerification(
     planned.push(plan);
   }
   const now = ctx.now();
+  await lockClaimRows(tx, run);
   for (const plan of planned) {
     await tx.insert(schema.taskCommands).values({ tenantId: plan.key.tenantId, projectId: plan.key.projectId, operationId: `${operationId}_${plan.part.taskId}`, taskId: plan.part.taskId, revision: plan.part.revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now, detail: reverifyDetail(plan.part.attemptId, trusted) });
     await applyReopen(tx, now, run, plan, { reason: 'owner_reverify_stale_record', requestedBy, candidateIds: [candidate.candidateId] });
@@ -386,6 +422,7 @@ export async function retireStaleCandidate(ctx: { readonly now: () => Date }, tx
   const now = ctx.now();
   const partIds = candidate.parts.map((p) => p.taskId);
   const reopened: string[] = [];
+  await lockPartsForClaims(tx, run, partIds.filter((id) => !leaving.includes(id)));
   for (const part of [...candidate.parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
     if (leaving.includes(part.taskId)) continue;
     const key: TaskKey = { tenantId: run.tenantId, projectId: run.projectId, taskId: part.taskId };

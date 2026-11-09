@@ -24,7 +24,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { TaskSpecSchema, type TaskSpec } from '../../../packages/domain/src/index.ts';
 import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
-import { closeVerificationWithoutVerdict, reopenBlockedVerification } from '../../workflow/src/verification.ts';
+import { closePartsWithoutVerdict, reopenBlockedVerification } from '../../workflow/src/verification.ts';
 import { assembleCandidate, type IntegrationDeps } from './integrate.ts';
 import { readTip, type RemoteTips } from './tip.ts';
 
@@ -138,9 +138,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const retry = (rows[0]?.['detail'] as { retry?: { partsKey?: string; count?: number } } | undefined)?.retry;
     const count = retry?.partsKey === partsKey && typeof retry.count === 'number' ? retry.count + 1 : 1;
     if (count > maxRetries) {
-      for (const p of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
-        await closeVerificationWithoutVerdict({ now }, tx, { tenantId, projectId, taskId: p.taskId }, { reason: `assembly_infrastructure:${reason}`, expect: { revision: p.revision, attemptId: p.attemptId } });
-      }
+      await closePartsWithoutVerdict({ now }, tx, { tenantId, projectId }, parts, { reason: `assembly_infrastructure:${reason}` });
       await tx.execute(sql`DELETE FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${id}`);
       return { outcome: 'blocked', count };
     }
