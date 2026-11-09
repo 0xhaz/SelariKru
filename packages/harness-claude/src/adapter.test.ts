@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { NormalizedHarnessEvent } from '@selarikru/protocol';
-import { ClaudeHarnessAdapter, type HarnessLauncher, type LaunchedProcess, type LaunchSpec } from './adapter.ts';
+import { ClaudeHarnessAdapter, TRUNCATED_MARK, type HarnessLauncher, type LaunchedProcess, type LaunchSpec } from './adapter.ts';
 import { cachedHarnessReport, claudeProvider, declaredHarnessCatalog, detectClaude, detectHarnesses } from './catalog.ts';
 import { CANARY, fullRun, initEvent } from './fixtures.ts';
 import { decodeUtf8Stream } from './decode.ts';
@@ -165,6 +165,21 @@ describe('ClaudeHarnessAdapter', () => {
     expect(msg(redacted).preview).not.toContain('sk-ant-api03-AbCdEf0123456789AbCdEf');
   });
 
+  it('long model text and results reach the preview limit, and a cut is marked', async () => {
+    const long = 'word '.repeat(200).trim();
+    const stream = [initEvent,
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: long }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'u', content: [{ type: 'text', text: long }] }] } }),
+    ];
+    const run = (maxChars: number) => collect(new ClaudeHarnessAdapter(fakeLauncher(lines(stream)).launcher).run({ ...base, previews: { enabled: true, maxChars } }));
+    const previews = (evs: Awaited<ReturnType<typeof run>>) => evs.flatMap((e) => ('preview' in e && e.preview !== undefined ? [e.preview] : []));
+    expect(previews(await run(4000))).toEqual([long, long]);
+    for (const p of previews(await run(300))) {
+      expect(p.endsWith(TRUNCATED_MARK)).toBe(true);
+      expect(p.length).toBe(300 + TRUNCATED_MARK.length);
+    }
+  });
+
   it('previews are off by default and bounded when enabled', async () => {
     const long = 'x'.repeat(1000);
     const stream = [
@@ -175,7 +190,7 @@ describe('ClaudeHarnessAdapter', () => {
     expect(JSON.stringify(off)).not.toContain('xxxxx');
     const on = await collect(new ClaudeHarnessAdapter(fakeLauncher(lines(stream)).launcher).run({ ...base, previews: { enabled: true, maxChars: 50 } }));
     const call = on.find((e) => e.type === 'tool_call');
-    expect(call && 'preview' in call ? call.preview?.length : 0).toBeLessThanOrEqual(51);
+    expect(call && 'preview' in call ? call.preview?.length : 0).toBeLessThanOrEqual(50 + TRUNCATED_MARK.length);
   });
 
   it('end of stream without result is ended_without_result; no init still yields a first session event', async () => {

@@ -70,6 +70,14 @@ describe('the live terminal channel', () => {
     expect(states.at(-1)).toMatchObject({ status: 'ended', dropped: 5 });
   });
 
+  it('stops listening at ended, so a later state cannot replace it while the lines are on screen', async () => {
+    const res = sseResponse([frame('state', { status: 'ended', reason: null, lastLineAt: null, dropped: 0 }), frame('state', { status: 'unavailable', reason: 'expired', lastLineAt: null, dropped: 0 })], true);
+    const { states, channel } = await run(res);
+    expect(states.at(-1)?.status).toBe('ended');
+    expect(states.map((s) => s.status)).not.toContain('unavailable');
+    channel.close();
+  });
+
   it('a network failure reads as disconnected, and close stops delivering', async () => {
     const failing = await run(() => Promise.reject(new Error('net')));
     expect(failing.states.at(-1)).toMatchObject({ status: 'disconnected', reason: 'connection_lost' });

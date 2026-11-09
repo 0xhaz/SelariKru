@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { REDACTED, type LeaseRef, type NormalizedHarnessEvent, type TerminalUploadRequest } from '@selarikru/protocol';
-import { LeaseLostError } from '../src/api.ts';
+import { ApiStatusError, ClaimedLeaseSchema, LeaseLostError } from '../src/api.ts';
 import { runAttempt, type AttemptDeps } from '../src/attempt.ts';
 import { DEFAULT_TERMINAL_FEED_LIMITS, TerminalFeed, type TerminalFeedLimits } from '../src/terminal.ts';
 import { makeWorld, type World } from './world.ts';
@@ -65,6 +65,19 @@ describe('the terminal feed', () => {
     expect(sent.at(-1)?.ended).toBe(true);
   });
 
+  it('a refusal stops the feed; a server error or a throttle is retried', async () => {
+    for (const [status, stops] of [[403, true], [400, true], [429, false], [503, false]] as const) {
+      let calls = 0;
+      const feed = new TerminalFeed({ terminal: async () => { calls += 1; throw new ApiStatusError(status, '/v1/runners/terminal'); } }, LEASE, () => {}, limits());
+      feed.onEvent(text('hello\n'));
+      await new Promise((r) => setTimeout(r, 10));
+      expect((feed as unknown as { stopped: boolean }).stopped, String(status)).toBe(stops);
+      expect((feed as unknown as { retry: unknown }).retry === null, String(status)).toBe(stops);
+      feed.abort();
+      expect(calls).toBe(1);
+    }
+  });
+
   it('a lost lease stops the feed without taking the harness with it, and a failed upload is retried with the same seq', async () => {
     const seen: Batch[] = [];
     let calls = 0;
@@ -115,13 +128,12 @@ describe('the attempt path', () => {
     expect(world.logs.join('\n')).not.toContain(SECRET.slice(0, cut));
   });
 
-  it('restricted or secret work streams nothing: no channel opens and previews stay off', async () => {
-    for (const classification of ['restricted', 'secret'] as const) {
-      world = await makeWorld({ task: { classification }, agent: async ({ stream }) => { stream.push(`${JSON.stringify(secretAssistant('not for upload'))}\n`); } });
-      await runAttempt(deps(world), world.lease);
-      expect((world.api as unknown as { terminal: ReturnType<typeof vi.fn> }).terminal).not.toHaveBeenCalled();
-      await world.cleanup();
-    }
+  it('a lease not cleared for streaming sends nothing: no channel opens and previews stay off', async () => {
+    world = await makeWorld({ streamable: false, agent: async ({ stream }) => { stream.push(`${JSON.stringify(secretAssistant('not for upload'))}\n`); } });
+    await runAttempt(deps(world), world.lease);
+    expect((world.api as unknown as { terminal: ReturnType<typeof vi.fn> }).terminal).not.toHaveBeenCalled();
+    const { streamable: _dropped, ...silent } = world.lease;
+    expect(ClaimedLeaseSchema.parse(silent).streamable).toBe(false);
   });
 
   it('an upload that hangs forever does not stop the attempt from finishing', async () => {

@@ -36,6 +36,26 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
   const [generation, setGeneration] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const held = useRef<string[]>([]);
+  const [heldCount, setHeldCount] = useState(0);
+  const [hidden, setHidden] = useState(false);
+
+  const show = (incoming: readonly string[]): void => {
+    setLines((prev) => {
+      const next = [...prev, ...incoming];
+      const over = next.length - TERMINAL_MAX_LINES;
+      if (over <= 0) return next;
+      setHidden(true);
+      return next.slice(over);
+    });
+  };
+  const release = (): void => {
+    if (held.current.length === 0) return;
+    const waiting = held.current;
+    held.current = [];
+    setHeldCount(0);
+    show(waiting);
+  };
 
   useEffect(() => {
     if (target === null) return undefined;
@@ -44,6 +64,9 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
     let unsubscribe: (() => void) | null = null;
     setState(CONNECTING);
     setLines([]);
+    setHidden(false);
+    held.current = [];
+    setHeldCount(0);
     void (async () => {
       try {
         const opened = await onOpen(target);
@@ -53,7 +76,14 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
         }
         channel = opened;
         setSimulated(opened.simulated);
-        const offLine = opened.onLine((line) => setLines((prev) => [...prev, sanitizeTerminalText(line)].slice(-TERMINAL_MAX_LINES)));
+        const offLine = opened.onLine((raw) => {
+          const line = sanitizeTerminalText(raw);
+          // Trimming the top moves everything up, so nothing is trimmed under someone reading back: new lines wait until they return.
+          if (pinned.current) { show([line]); return; }
+          held.current.push(line);
+          if (held.current.length > TERMINAL_MAX_LINES) { held.current.shift(); setHidden(true); }
+          setHeldCount(held.current.length);
+        });
         const offState = opened.onState(setState);
         unsubscribe = () => { offLine(); offState(); };
       } catch {
@@ -75,7 +105,9 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
 
   const onScroll = (): void => {
     const el = scroller.current;
-    if (el) pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (!el) return;
+    pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (pinned.current) release();
   };
 
   const chip = CHIP[state.status];
@@ -108,6 +140,7 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
       {simulated ? <p className="text-sm text-warning">Simulated data. It is not evidence.</p> : null}
       {state.dropped > 0 ? <p className="text-sm text-warning" data-testid="terminal-dropped">{state.dropped} {state.dropped === 1 ? 'line was' : 'lines were'} dropped to keep up. The worker was not slowed.</p> : null}
 
+      {hidden ? <p className="text-sm text-muted" data-testid="terminal-older-hidden">Older lines are hidden. Showing the latest {TERMINAL_MAX_LINES}.</p> : null}
       {lines.length > 0 ? (
         <div ref={scroller} onScroll={onScroll} role="log" aria-label="Worker output" aria-live="off" tabIndex={0} data-testid="terminal-output" className="max-h-[55vh] overflow-y-auto rounded-chip border border-line bg-bg p-3">
           <ol className="m-0 list-none space-y-0.5 p-0 font-mono text-mono">
@@ -116,6 +149,8 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
         </div>
       ) : null}
 
+      {heldCount > 0 ? <button type="button" className={buttonQuiet} data-testid="terminal-held" onClick={() => { pinned.current = true; release(); }}>Show {heldCount} new {heldCount === 1 ? 'line' : 'lines'}</button> : null}
+      <p className="text-sm text-muted" data-testid="terminal-caveat">Known secret formats are hidden. Other sensitive values may still appear.</p>
       <p className="text-sm text-muted">Read-only. Nothing here reaches the worker, and output is never saved.</p>
     </div>
   );

@@ -263,6 +263,34 @@ describe('model assignments', () => {
       expect(out.ok && out.lease.assignment).toEqual({ ...DEVICE, source: 'role', route: 'device' });
     });
 
+    describe('whether live output may leave the runner', () => {
+      const SHA = 'a'.repeat(64);
+      const streamableOf = async () => {
+        const out = await sched.tryClaim(runner('d1'), CAPS);
+        expect(out.ok).toBe(true);
+        const stored = (await t.db.select().from(schema.attempts))[0]!.detail;
+        return { lease: out.ok ? out.lease.streamable : undefined, stored: stored['terminalStreamable'] };
+      };
+
+      it('internal work with labelled sources may', async () => {
+        await seedTask(t.db, specFor('t1', { classification: 'internal', execution: 'local' }));
+        expect(await streamableOf()).toEqual({ lease: true, stored: true });
+      });
+
+      it('a restricted project, an internal task and an unlabelled artifact may not', async () => {
+        await t.db.update(schema.projects).set({ classification: 'restricted' });
+        await seedTask(t.db, specFor('t1', { classification: 'internal', execution: 'local', contractRefs: [{ artifactId: 'ghost', sha256: SHA }] }));
+        await assign('role', 'backend', DEVICE);
+        expect(await streamableOf()).toEqual({ lease: false, stored: false });
+      });
+
+      it('an unlabelled artifact alone is read as secret', async () => {
+        await seedTask(t.db, specFor('t1', { classification: 'internal', execution: 'local', contractRefs: [{ artifactId: 'ghost', sha256: SHA }] }));
+        await assign('role', 'backend', DEVICE);
+        expect(await streamableOf()).toEqual({ lease: false, stored: false });
+      });
+    });
+
     it('a model whose route is unknown is refused for any data', async () => {
       const unknownRoute = { ...TEST_CATALOG, providers: [{ ...TEST_CATALOG.providers[0]!, models: TEST_CATALOG.providers[0]!.models.map((m) => ({ ...m, route: 'unknown' as const })) }] };
       await seedTask(t.db, specFor('t1', { classification: 'public' }));

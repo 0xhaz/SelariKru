@@ -478,6 +478,33 @@ test('terminal: dropped lines are shown, and long output keeps the page at 375',
   await expectNoAxeViolations(page);
 });
 
+test('terminal: says known formats are hidden, and that older lines were dropped from view', async ({ page }) => {
+  await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: Array.from({ length: 230 }, (_, i) => `line ${i}`) });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await expect(panel.getByTestId('terminal-caveat')).toHaveText('Known secret formats are hidden. Other sensitive values may still appear.');
+  await expect(panel.getByTestId('terminal-line')).toHaveCount(200);
+  await expect(panel.getByTestId('terminal-older-hidden')).toContainText('Showing the latest 200');
+  await expectNoAxeViolations(page);
+});
+
+test('terminal: new lines do not move the text under someone reading back', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: Array.from({ length: 200 }, (_, i) => `line ${i}`) });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  const output = panel.getByTestId('terminal-output');
+  await expect(panel.getByTestId('terminal-line')).toHaveCount(200);
+  await output.evaluate((el) => { el.scrollTop = 100; el.dispatchEvent(new Event('scroll')); });
+  await expect.poll(() => output.evaluate((el) => el.scrollTop)).toBe(100);
+  const firstBefore = await panel.getByTestId('terminal-line').first().textContent();
+  await page.evaluate(() => { const w = window as unknown as { __terminalPush: (l: string) => void }; w.__terminalPush('fresh one'); w.__terminalPush('fresh two'); });
+  await expect(panel.getByTestId('terminal-held')).toHaveText('Show 2 new lines');
+  expect(await panel.getByTestId('terminal-line').first().textContent()).toBe(firstBefore);
+  expect(await output.evaluate((el) => el.scrollTop)).toBe(100);
+  await panel.getByTestId('terminal-held').click();
+  await expect(panel.getByTestId('terminal-line').last()).toHaveText('fresh two');
+  await expect(panel.getByTestId('terminal-held')).toHaveCount(0);
+});
+
 test('axe pass: terminal light theme', async ({ page }) => {
   await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: OUTPUT }, 'light');
   await expectNoAxeViolations(page);

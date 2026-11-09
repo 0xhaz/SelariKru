@@ -14,6 +14,8 @@ export const ClaimedLeaseSchema = z
     grants: z.array(z.unknown()).default([]).transform((rows) => rows.flatMap((r) => { const g = LeaseGrantSchema.safeParse(r); return g.success ? [g.data] : []; })),
     /** The model this attempt was recorded with. The runner launches exactly this, or nothing. Null on a lease with no recorded model, which cannot run. */
     assignment: RecordedAssignmentSchema.nullable().default(null),
+    /** Whether this attempt's output may leave the machine, decided at claim from every source's label. Absent: it may not. */
+    streamable: z.boolean().default(false),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
@@ -28,6 +30,17 @@ export class LeaseLostError extends Error {
   constructor(detail = 'the lease is no longer current') {
     super(detail);
     this.name = 'LeaseLostError';
+  }
+}
+
+/** The control API answered with an error. `permanent`: a refusal that a retry cannot change. */
+export class ApiStatusError extends Error {
+  constructor(readonly status: number, path: string) {
+    super(`control API ${path} responded ${status}`);
+    this.name = 'ApiStatusError';
+  }
+  get permanent(): boolean {
+    return this.status >= 400 && this.status < 500 && this.status !== 408 && this.status !== 429;
   }
 }
 
@@ -70,7 +83,7 @@ export class HttpRunnerApi implements RunnerApi {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.status === 409) throw new LeaseLostError();
-    if (!res.ok) throw new Error(`control API ${path} responded ${res.status}`);
+    if (!res.ok) throw new ApiStatusError(res.status, path);
     return res.json();
   }
 

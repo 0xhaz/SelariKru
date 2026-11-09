@@ -13,6 +13,11 @@ describe('sanitizeTerminalText', () => {
     expect(sanitizeTerminalText('a\u0000b\u0008c\tb\nc\u009dd')).toBe('abc\tb\ncd');
   });
 
+  it('removes the combining grapheme joiner, variation selectors and blank fillers', () => {
+    const invisible = [0x34f, 0xfe00, 0xfe0f, 0x3164, 0xffa0, 0xe0100].map((c) => String.fromCodePoint(c));
+    for (const c of invisible) expect(sanitizeTerminalText(`a${c}b`)).toBe('ab');
+  });
+
   it('removes bidi and zero-width characters, including those that would hide a token', () => {
     expect(sanitizeTerminalText('a‮b⁦c​d‍e﻿ f')).toBe('abcdef');
     expect(sanitizeTerminalText('sk-ant-​AAAA‭BBBB')).toBe('sk-ant-AAAABBBB');

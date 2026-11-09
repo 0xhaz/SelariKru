@@ -23,13 +23,13 @@ beforeEach(async () => {
 
 const SECRET = 'sk-ant-api03-AbCdEf0123456789AbCdEf0123456789';
 
-async function runningAttempt(taskId = 't1', classification: 'internal' | 'restricted' | 'secret' = 'internal') {
+async function runningAttempt(taskId = 't1', cleared: boolean | 'absent' = true) {
   await seedTask(t.db, specFor(taskId), 'ready');
   const runner = await enrolRunner(h.app, 'local');
   const claim = await post(h.app, '/v1/runners/claim', {}, bearer(runner.token));
   expect(claim.status).toBe(200);
-  // Placement refuses restricted work a cloud model; the classification is what this test is about, so it is set once the attempt exists.
-  if (classification !== 'internal') await t.db.execute(sql`UPDATE task_revisions SET spec = jsonb_set(spec, '{classification}', to_jsonb(${classification}::text)) WHERE task_id = ${taskId}`);
+  if (cleared === false) await t.db.execute(sql`UPDATE attempts SET detail = jsonb_set(detail, '{terminalStreamable}', 'false') WHERE task_id = ${taskId}`);
+  if (cleared === 'absent') await t.db.execute(sql`UPDATE attempts SET detail = detail - 'terminalStreamable' WHERE task_id = ${taskId}`);
   const lease = { attemptId: claim.body.lease.attemptId as string, fence: claim.body.lease.fence as number, leaseToken: claim.body.lease.leaseToken as string };
   return { runner, lease, as: bearer(runner.token) };
 }
@@ -71,9 +71,12 @@ describe('terminal output', () => {
     const res = await open(PROJECT, lease.attemptId);
     expect(res.status).toBe(200);
     await upload(lease, as, [`key is ${SECRET}`, 'token: \u001b[31msk-ant-api03-ZZZZZZZZZZZZZZZZZZZZZZZZZZ\u001b[0m'], {}, 0);
-    await upload(lease, as, ['-----BEGIN PRIVATE KEY-----'], {}, 1);
-    await upload(lease, as, ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEA'], {}, 2);
-    await upload(lease, as, ['-----END PRIVATE KEY-----', 'after key'], { ended: true }, 3);
+    // The name in one batch and the value in the next; then a private key across three.
+    await upload(lease, as, ['api_key:'], {}, 1);
+    await upload(lease, as, ['SplitAcrossBatchesValue'], {}, 2);
+    await upload(lease, as, ['-----BEGIN PRIVATE KEY-----'], {}, 3);
+    await upload(lease, as, ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEA'], {}, 4);
+    await upload(lease, as, ['-----END PRIVATE KEY-----', 'after key'], { ended: true }, 5);
     const frames = await read(res, (f) => f.some((x) => x.event === 'line' && x.data.text === 'after key'));
     const text = frames.filter((f) => f.event === 'line').map((f) => f.data.text as string).join('\n');
     expect(text).not.toContain(SECRET);
@@ -81,6 +84,8 @@ describe('terminal output', () => {
     expect(text).not.toContain('sk-ant-api03-ZZZ');
     expect(text).not.toContain('\u001b');
     expect(text).not.toContain('MIIEvQIB');
+    expect(text).not.toContain('SplitAcrossBatchesValue');
+    expect(text).toContain('[private key withheld]');
     expect(text).toContain('after key');
     // Terminal output is not domain state: nothing of it reached the events table.
     const events = await t.db.execute(sql`SELECT count(*)::int AS n FROM events WHERE payload::text LIKE ${'%after key%'} OR payload::text LIKE ${'%sk-ant-api03%'}`);
@@ -127,15 +132,27 @@ describe('terminal output', () => {
     expect((await post(h.app, '/v1/runners/terminal', { lease, seq: 9, lines: [], dropped: 0, ended: false })).status).toBe(403);
   });
 
-  for (const classification of ['restricted', 'secret'] as const) {
-    it(`${classification} work is not streamed and not accepted`, async () => {
-      const { lease, as } = await runningAttempt(`t_${classification}`, classification);
+  for (const [name, cleared] of [['refused at claim', false], ['with no decision on record', 'absent']] as const) {
+    it(`an attempt ${name} is not streamed and not accepted`, async () => {
+      const { lease, as } = await runningAttempt(`t_${String(cleared)}`, cleared);
       const res = await open(PROJECT, lease.attemptId);
       expect(res.status).toBe(403);
       expect(((await res.json()) as any).error.code).toBe('terminal_restricted');
       expect((await upload(lease, as, ['should not be stored'])).status).toBe(403);
     });
   }
+
+  it('a restricted project with an internal task and an unlabelled artifact: the claim refuses streaming and nothing goes on the wire', async () => {
+    await t.db.update(schema.projects).set({ classification: 'restricted' });
+    await seedTask(t.db, specFor('t_lbl', { classification: 'internal', execution: 'local', contractRefs: [{ artifactId: 'ghost', sha256: 'a'.repeat(64) }] }), 'ready');
+    await post(h.app, `/v1/projects/${PROJECT}/model-assignments`, { scope: 'role', key: 'backend', selection: { provider: 'test-device', model: 'device-1' }, expectedRevision: 0, idempotencyKey: 'dev' });
+    const runner = await enrolRunner(h.app, 'local');
+    const claim = await post(h.app, '/v1/runners/claim', {}, bearer(runner.token));
+    expect(claim.body.lease).toMatchObject({ taskId: 't_lbl', streamable: false });
+    const { attemptId, fence, leaseToken } = claim.body.lease;
+    expect((await upload({ attemptId, fence, leaseToken }, bearer(runner.token), ['should not be stored'])).status).toBe(403);
+    expect((await open(PROJECT, attemptId)).status).toBe(403);
+  });
 
   it('an attempt with no channel reads as unavailable, never as connected, and goes live once the runner opens one', async () => {
     const { lease, as } = await runningAttempt();
@@ -155,6 +172,8 @@ describe('terminal output', () => {
     const frames = await read(res, (f) => f.some((x) => x.event === 'state' && x.data.status === 'ended'));
     expect(frames.filter((f) => f.event === 'line').map((f) => f.data.text)).toEqual(['one', 'two']);
     expect(frames.find((f) => f.event === 'state' && f.data.status === 'live')?.data.lastLineAt).toBe('2026-11-08T06:00:01.000Z');
+    // The server ends the stream with the channel, so nothing can later tell this client the output aged out.
+    expect(await res.text().catch(() => '')).toBe('');
     await closed(res);
   });
 
@@ -246,13 +265,44 @@ describe('the hub', () => {
     advance(1);
   });
 
+  it('replaying a full buffer to a socket that pushes back is not reported as a loss', () => {
+    const { hub } = mkHub({ ...DEFAULT_TERMINAL_HUB_LIMITS, retentionMs: 60_000, silenceMs: 60_000 });
+    for (let i = 0; i < 900; i += 1) hub.publish('p', 'a', { seq: i, lines: [line('y'.repeat(900))], dropped: 0, ended: false });
+    const stuck = socket();
+    stuck.accept = false;
+    const { client } = hub.attach('p', 'a', stuck, () => {});
+    expect(client.droppedTotal).toBe(0);
+  });
+
+  it('closes clients on end, after what they were still owed', () => {
+    const { hub } = mkHub({ maxLines: 500, retentionMs: 60_000 });
+    hub.publish('p', 'a', { seq: 0, lines: [line('one')], dropped: 0, ended: false });
+    const slow = socket();
+    let closed = 0;
+    hub.attach('p', 'a', slow, () => { closed += 1; });
+    slow.accept = false;
+    hub.publish('p', 'a', { seq: 1, lines: [line('two')], dropped: 0, ended: true });
+    expect(closed).toBe(0);
+    slow.accept = true;
+    slow.drain!();
+    expect(closed).toBe(1);
+    expect(slow.chunks.join('')).toContain('"status":"ended"');
+    // A client arriving after the end gets the lines first, then the end, then is closed.
+    const late = socket();
+    let lateClosed = false;
+    hub.attach('p', 'a', late, () => { lateClosed = true; });
+    expect(late.chunks.findIndex((c) => c.includes('"status":"ended"'))).toBeGreaterThan(late.chunks.findIndex((c) => c.includes('"text":"two"')));
+    expect(lateClosed).toBe(true);
+  });
+
   it('a client that stops reading is eventually disconnected', () => {
     const { hub, advance } = mkHub({ stalledClientMs: 500 });
     hub.publish('p', 'a', { seq: 0, lines: [], dropped: 0, ended: false });
     const stuck = socket();
     stuck.accept = false;
     let closed = false;
-    const attachment = hub.attach('p', 'a', stuck, () => { closed = true; });
+    let destroyed = false;
+    const attachment = hub.attach('p', 'a', stuck, (destroy) => { closed = true; destroyed = destroy; });
     hub.publish('p', 'a', { seq: 1, lines: [line('x')], dropped: 0, ended: false });
     advance(499);
     hub.sweep();
@@ -260,6 +310,7 @@ describe('the hub', () => {
     advance(1);
     hub.sweep();
     expect(closed).toBe(true);
+    expect(destroyed).toBe(true);
     expect(attachment.client.closed).toBe(true);
   });
 

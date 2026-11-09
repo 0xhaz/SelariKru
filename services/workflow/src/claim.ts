@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
@@ -469,7 +469,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const fits = checkFits(position, amountMicros);
   if (!fits.ok) return { reason: fits.reason };
 
-  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold);
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification));
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
   const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
@@ -477,7 +477,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -493,7 +493,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   await tx.insert(schema.attempts).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, revision: spec.revision, attemptNumber,
     runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
-    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location },
+    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable },
     modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();
@@ -527,7 +527,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
-    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment,
+    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable,
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

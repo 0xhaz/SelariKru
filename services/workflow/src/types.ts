@@ -72,6 +72,8 @@ export interface Lease {
   readonly grants?: readonly LeaseGrant[];
   /** The model this attempt runs, as recorded at claim. Set at claim; absent on a lease rebuilt from a stored attempt. */
   readonly assignment?: RecordedAssignment;
+  /** Whether this attempt's live output may leave the runner, decided once at claim. Set at claim; absent on a lease rebuilt from a stored attempt, which reads the stored value. */
+  readonly streamable?: boolean;
 }
 
 export interface SkippedCandidate {

@@ -29,6 +29,7 @@ export function openLiveTerminal(options: LiveTerminalOptions): LiveTerminalChan
   let state: TerminalState = { status: 'connecting', reason: null, lastLineAt: null, dropped: 0 };
   let upstreamDropped = 0;
   let clientDropped = 0;
+  let finished = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
 
   const set = (next: TerminalState): void => {
@@ -66,7 +67,7 @@ export function openLiveTerminal(options: LiveTerminalOptions): LiveTerminalChan
   };
 
   const onFrame = (event: string | undefined, data: string): void => {
-    if (!open || event === undefined) return;
+    if (!open || finished || event === undefined) return;
     let body: Record<string, unknown>;
     try {
       body = JSON.parse(data) as Record<string, unknown>;
@@ -85,6 +86,8 @@ export function openLiveTerminal(options: LiveTerminalOptions): LiveTerminalChan
       if (typeof status !== 'string' || !(SERVER_STATUSES as readonly string[]).includes(status)) return;
       if (typeof body['dropped'] === 'number') upstreamDropped = Math.max(upstreamDropped, body['dropped']);
       set({ status: status as TerminalStatus, reason: readReason(body['reason']), lastLineAt: typeof body['lastLineAt'] === 'string' ? body['lastLineAt'] : state.lastLineAt, dropped: upstreamDropped + clientDropped });
+      // Nothing follows an end. Stopping here means a later server state cannot replace it.
+      if (status === 'ended') { finished = true; closeSoft(); }
     }
   };
 

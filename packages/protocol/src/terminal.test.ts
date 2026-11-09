@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REDACTED, TerminalRedactor, TerminalUploadRequestSchema } from './index.ts';
+import { REDACTED, TerminalRedactor, TerminalUploadRequestSchema, redactSecrets, redactTerminalText } from './index.ts';
 
 const SECRET = 'sk-ant-api03-AbCdEf0123456789AbCdEf0123456789';
 
@@ -35,8 +35,7 @@ describe('TerminalRedactor', () => {
     out.push(...r.write('ZZZsecretpemlinebbbbbbbbbbbbbbbbbbbbbbbb\n-----END RSA PRIVATE KEY-----\nafter the key\n'));
     out.push(...r.flush());
     expect(out.join('\n')).not.toMatch(/MIIEpAIBAAKCAQEA|ZZZsecretpemline/);
-    expect(out[0]).toBe(REDACTED);
-    expect(out.at(-1)).toBe('after the key');
+    expect(out).toEqual(['[private key withheld]', 'after the key']);
   });
 
   it('reads a value on the line after its credential name', () => {
@@ -44,6 +43,38 @@ describe('TerminalRedactor', () => {
     const out = [...r.write(`api_key:\n${SECRET}\nnext\n`), ...r.flush()];
     expect(out.join('\n')).not.toContain(SECRET);
     expect(out.at(-1)).toBe('next');
+  });
+
+  it('the end of a run clears an unclosed private key and says how much went', () => {
+    const r = new TerminalRedactor();
+    r.write('-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n');
+    expect(r.flush()).toEqual(['[private key withheld, 2 lines]']);
+    expect(r.write('next run\n')).toEqual(['next run']);
+  });
+
+  it('a soft break keeps messages apart unless a secret runs across it', () => {
+    const r = new TerminalRedactor();
+    r.write('one');
+    r.softBreak();
+    r.write('two');
+    expect(r.flush()).toEqual(['one', 'two']);
+    r.write(`key ${SECRET.slice(0, 28)}`);
+    r.softBreak();
+    r.write(`${SECRET.slice(28)} end`);
+    expect(r.flush()).toEqual([`key ${REDACTED} end`]);
+  });
+
+  it('lines mode waits only for a name with a separator', () => {
+    const r = new TerminalRedactor('lines');
+    expect(r.write('> Bash grep token\n')).toEqual(['> Bash grep token']);
+    expect(r.write('[ok]\n')).toEqual(['[ok]']);
+    expect(r.write('api_key:\n')).toEqual([]);
+    expect(r.write('value\n').join('')).not.toContain('value');
+  });
+
+  it('does not change what redactSecrets means elsewhere', () => {
+    expect(redactSecrets('DB_PASSWORD=correcthorsebattery')).toBe('DB_PASSWORD=correcthorsebattery');
+    expect(redactTerminalText('DB_PASSWORD=correcthorsebattery')).toBe(`DB_PASSWORD=${REDACTED}`);
   });
 
   it('a line that never ends is withheld, not released in pieces', () => {

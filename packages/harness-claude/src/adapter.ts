@@ -60,6 +60,8 @@ export const CLAUDE_CAPABILITIES: HarnessCapabilities = Object.freeze({
 });
 
 const DEFAULT_PREVIEW_CHARS = 200;
+/** Ends any preview that was cut, so a clipped message never reads as the whole message. */
+export const TRUNCATED_MARK = '… [truncated]';
 /** Longest line parsed; a longer one is discarded to the next newline. */
 export const MAX_LINE_CHARS = 1024 * 1024;
 const MAX_IDENT_CHARS = 256;
@@ -197,8 +199,10 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
     const maxChars = input.previews?.maxChars ?? DEFAULT_PREVIEW_CHARS;
     const preview = (text: string): string => {
       const safe = rawPreviews ? text : redactSecrets(text);
-      return safe.length > maxChars ? `${safe.slice(0, maxChars)}…` : safe;
+      return safe.length > maxChars ? `${safe.slice(0, maxChars)}${TRUNCATED_MARK}` : safe;
     };
+    // One character past the limit survives, so `preview` can tell the text was longer and say so.
+    const text = (v: unknown): string | null => (typeof v === 'string' ? v.slice(0, maxChars + 1) : null);
     const toolNames = new Map<string, string>();
 
     let initSeen = false;
@@ -230,7 +234,7 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
           const blocks = content.filter(isObj);
           const out: Draft[] = [];
           const textPreview = previewsOn
-            ? blocks.map((b) => str(b['text'])).filter((t): t is string => t !== null).join('\n')
+            ? blocks.map((b) => text(b['text'])).filter((t): t is string => t !== null).join('\n')
             : '';
           const base = { type: 'message' as const, role: type, blockTypes: blocks.map((b) => str(b['type']) ?? 'unknown') };
           out.push(textPreview ? { ...base, preview: preview(textPreview) } : base);
@@ -254,11 +258,11 @@ export class ClaudeHarnessAdapter implements HarnessAdapter {
                 toolName: id ? (toolNames.get(id) ?? null) : null,
                 status: b['is_error'] === true ? ('error' as const) : ('ok' as const),
               };
-              let text = '';
-              if (typeof b['content'] === 'string') text = b['content'];
+              let result = '';
+              if (typeof b['content'] === 'string') result = b['content'];
               else if (Array.isArray(b['content']))
-                text = b['content'].filter(isObj).map((c) => str(c['text']) ?? '').join('\n');
-              out.push(previewsOn && text ? { ...d, preview: preview(text) } : d);
+                result = b['content'].filter(isObj).map((c) => text(c['text']) ?? '').join('\n');
+              out.push(previewsOn && result ? { ...d, preview: preview(result) } : d);
             }
           }
           return out;

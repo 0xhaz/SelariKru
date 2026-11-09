@@ -1,16 +1,16 @@
-import { TerminalRedactor, isTerminalStreamable, type TerminalUploadRequest } from '@selarikru/protocol';
+import { TerminalRedactor, type TerminalUploadRequest } from '@selarikru/protocol';
 import { schema } from '@selarikru/persistence';
 import { and, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
-import { loadSpecRow, requireProject } from './store.ts';
+import { requireProject } from './store.ts';
 
 /**
  * Live worker output. Deliberately not domain state: it is held only in this process, per attempt, in a bounded buffer with short retention, and never reaches the events table,
  * an artifact, evidence or a log.
  *
- * Retention: the last `maxLines` lines (at most `maxBytes`) of each attempt, kept until `retentionMs` after its last upload, and for at most `maxAttempts` attempts at once (oldest
+ * Retention: the last `maxLines` lines (at most `maxBytes`, counted as sent on the wire) of each attempt, kept until `retentionMs` after its last upload, and for at most `maxAttempts` attempts at once (oldest
  * first out). A restart empties it.
  */
 export interface TerminalHubLimits {
@@ -18,7 +18,7 @@ export interface TerminalHubLimits {
   readonly maxBytes: number;
   readonly retentionMs: number;
   readonly maxAttempts: number;
-  /** Frames queued per client before the oldest line is dropped for that client. */
+  /** Frames queued per client before the oldest line is dropped for that client. Set above `maxLines` and `maxBytes`, so replaying the whole buffer can never count as a loss. */
   readonly clientQueueLines: number;
   readonly clientQueueBytes: number;
   /** A channel the runner has not touched for this long is no longer live. */
@@ -33,13 +33,13 @@ export interface TerminalHubLimits {
 
 export const DEFAULT_TERMINAL_HUB_LIMITS: TerminalHubLimits = {
   maxLines: 500, maxBytes: 256 * 1024, retentionMs: 5 * 60_000, maxAttempts: 32,
-  clientQueueLines: 500, clientQueueBytes: 256 * 1024, silenceMs: 30_000, stalledClientMs: 60_000, maxSessionMs: 30 * 60_000, maxSessionsPerAttempt: 8, sweepMs: 5_000,
+  clientQueueLines: 600, clientQueueBytes: 320 * 1024, silenceMs: 30_000, stalledClientMs: 60_000, maxSessionMs: 30 * 60_000, maxSessionsPerAttempt: 8, sweepMs: 5_000,
 };
 
 export type TerminalStatus = 'live' | 'ended' | 'disconnected' | 'unavailable';
 export type TerminalStateReason = 'no_channel' | 'expired' | 'runner_silent' | 'session_expired' | null;
 
-interface StoredLine { readonly n: number; readonly at: string; readonly text: string }
+interface StoredLine { readonly n: number; readonly at: string; readonly text: string; readonly size: number }
 interface Frame { readonly chunk: string; readonly droppable: boolean; readonly size: number }
 
 /** The output sink of an SSE client. Only `write` and `once('drain')` are used, so a test can stand in for the socket. */
@@ -48,7 +48,7 @@ export interface TerminalSocket {
   once(event: 'drain', listener: () => void): unknown;
 }
 
-const lineFrame = (l: StoredLine): Frame => {
+const lineFrame = (l: Omit<StoredLine, 'size'>): Frame => {
   const chunk = `id: ${l.n}\nevent: line\ndata: ${JSON.stringify({ n: l.n, at: l.at, text: l.text })}\n\n`;
   return { chunk, droppable: true, size: chunk.length };
 };
@@ -67,6 +67,7 @@ export class TerminalClient {
   private droppedSinceNotice = 0;
   /** Set while the socket has refused more. */
   private waitingSinceMs: number | null = null;
+  private onFlushed: (() => void) | null = null;
   closed = false;
 
   constructor(
@@ -95,6 +96,20 @@ export class TerminalClient {
     this.pump();
   }
 
+  /** Runs `done` once everything queued has been written, so a client that is behind still gets the end of the output. */
+  closeWhenFlushed(done: () => void): void {
+    if (this.closed) return;
+    this.onFlushed = done;
+    this.notifyFlushed();
+  }
+
+  private notifyFlushed(): void {
+    if (this.onFlushed === null || this.waitingSinceMs !== null || this.droppedSinceNotice > 0 || this.queue.length > 0) return;
+    const done = this.onFlushed;
+    this.onFlushed = null;
+    done();
+  }
+
   private pump(): void {
     while (this.waitingSinceMs === null && !this.closed && (this.droppedSinceNotice > 0 || this.queue.length > 0)) {
       let chunk: string;
@@ -112,7 +127,9 @@ export class TerminalClient {
         this.waitingSinceMs = null;
         this.pump();
       });
+      return;
     }
+    this.notifyFlushed();
   }
 
   /** The sender's half of the keepalive: skipped while the socket is full, because silence is then already explained. */
@@ -143,8 +160,8 @@ interface AttemptChannel {
 
 export interface TerminalAttachment {
   readonly client: TerminalClient;
-  /** Closes the client and detaches it. Idempotent. */
-  close(): void;
+  /** Closes the client and detaches it. Idempotent. `destroy`: the socket stopped accepting data, so there is nothing to flush and an orderly end would never finish. */
+  close(destroy?: boolean): void;
 }
 
 export class TerminalHub {
@@ -207,6 +224,7 @@ export class TerminalHub {
       channel.ended = true;
     }
     if (created || wasSilent || batch.dropped > 0 || channel.ended !== wasEnded) this.broadcastState(channel);
+    if (channel.ended && !wasEnded) this.closeClients(channel);
   }
 
   private createChannel(projectId: string, attemptId: string, now: number): AttemptChannel {
@@ -215,7 +233,7 @@ export class TerminalHub {
       if (!oldest) break;
       this.dropChannel(oldest[0], 'expired');
     }
-    const channel: AttemptChannel = { projectId, redactor: new TerminalRedactor(), lines: [], bytes: 0, next: 1, lastSeq: -1, lastUploadMs: now, lastLineAt: null, dropped: 0, ended: false, silent: false, clients: new Set() };
+    const channel: AttemptChannel = { projectId, redactor: new TerminalRedactor('lines'), lines: [], bytes: 0, next: 1, lastSeq: -1, lastUploadMs: now, lastLineAt: null, dropped: 0, ended: false, silent: false, clients: new Set() };
     this.channels.set(attemptId, channel);
     const waiters = this.waiting.get(attemptId);
     if (waiters && waiters.projectId === projectId) {
@@ -226,19 +244,24 @@ export class TerminalHub {
   }
 
   private addLine(channel: AttemptChannel, at: string, text: string): void {
-    const line = { n: channel.next, at, text };
+    const frame = lineFrame({ n: channel.next, at, text });
+    const line = { n: channel.next, at, text, size: frame.size };
     channel.next += 1;
     channel.lastLineAt = at;
     channel.lines.push(line);
-    channel.bytes += text.length;
-    while (channel.lines.length > this.limits.maxLines || channel.bytes > this.limits.maxBytes) channel.bytes -= channel.lines.shift()!.text.length;
-    const frame = lineFrame(line);
+    channel.bytes += line.size;
+    while (channel.lines.length > this.limits.maxLines || channel.bytes > this.limits.maxBytes) channel.bytes -= channel.lines.shift()!.size;
     for (const a of channel.clients) a.client.enqueue(frame);
   }
 
   private broadcastState(channel: AttemptChannel): void {
     const state = this.statusOf(channel);
     for (const a of channel.clients) a.client.stateFrame(state);
+  }
+
+  /** An ended channel has nothing more to say. Closing here means the card stays "ended" and cannot later be told its output aged out while the lines are still on screen. */
+  private closeClients(channel: AttemptChannel): void {
+    for (const a of [...channel.clients]) a.client.closeWhenFlushed(() => a.close());
   }
 
   /** The attempt's result was accepted: whatever the runner last sent, the channel has ended. */
@@ -249,6 +272,7 @@ export class TerminalHub {
     channel.ended = true;
     channel.silent = false;
     this.broadcastState(channel);
+    this.closeClients(channel);
   }
 
   /** Called before the response is committed, so a refusal can still be an HTTP error. */
@@ -260,13 +284,13 @@ export class TerminalHub {
   }
 
   /** Registers a client, replays what is retained, and tells it the channel's state. A client on an attempt with no channel waits for one and is told so. */
-  attach(projectId: string, attemptId: string, socket: TerminalSocket, onClose: () => void): TerminalAttachment {
+  attach(projectId: string, attemptId: string, socket: TerminalSocket, onClose: (destroy: boolean) => void): TerminalAttachment {
     const channel = this.channels.get(attemptId);
     const client = new TerminalClient(socket, this.limits, this.nowMs);
     let closed = false;
     const attachment: TerminalAttachment = {
       client,
-      close: () => {
+      close: (destroy = false) => {
         if (closed) return;
         closed = true;
         client.closed = true;
@@ -274,13 +298,15 @@ export class TerminalHub {
         this.channels.get(attemptId)?.clients.delete(attachment);
         const w = this.waiting.get(attemptId);
         if (w) { w.clients.delete(attachment); if (w.clients.size === 0) this.waiting.delete(attemptId); }
-        onClose();
+        onClose(destroy);
       },
     };
+    // Lines first: a client treats `ended` as the last thing it will hear.
+    if (channel) for (const line of channel.lines) client.enqueue(lineFrame(line));
     client.stateFrame(this.statusOf(channel));
     if (channel) {
       channel.clients.add(attachment);
-      for (const line of channel.lines) client.enqueue(lineFrame(line));
+      if (channel.ended) client.closeWhenFlushed(() => attachment.close());
     } else {
       const entry = this.waiting.get(attemptId) ?? { projectId, clients: new Set<TerminalAttachment>() };
       entry.clients.add(attachment);
@@ -295,7 +321,7 @@ export class TerminalHub {
     for (const [attemptId, channel] of [...this.channels]) {
       for (const a of [...channel.clients]) {
         const stalled = a.client.stalledForMs;
-        if (stalled !== null && stalled >= this.limits.stalledClientMs) a.close();
+        if (stalled !== null && stalled >= this.limits.stalledClientMs) a.close(true);
       }
       if (now - channel.lastUploadMs >= this.limits.retentionMs) { this.dropChannel(attemptId, 'expired'); continue; }
       if (!channel.ended && !channel.silent && now - channel.lastUploadMs >= this.limits.silenceMs) {
@@ -324,12 +350,8 @@ export class TerminalHub {
 
 const refused = (): AppError => new AppError(403, 'terminal_restricted', 'live output is not available for restricted or secret work');
 
-/** Whether a project's and a task's classification both allow output to leave the runner. Anything unreadable fails closed. */
-export async function streamableAttempt(ctx: Pick<AppContext, 'db' | 'config'>, key: { projectId: string; taskId: string; revision: number; projectClassification: unknown }): Promise<boolean> {
-  if (!isTerminalStreamable(key.projectClassification)) return false;
-  const spec = (await loadSpecRow(ctx.db, { tenantId: ctx.config.tenantId, projectId: key.projectId, taskId: key.taskId, revision: key.revision }))?.spec as { classification?: unknown } | undefined;
-  return isTerminalStreamable(spec?.classification);
-}
+/** Decided once at claim from every source's label and stored on the attempt. An attempt with no decision on record is refused. */
+export const attemptStreamable = (attempt: { readonly detail: Record<string, unknown> }): boolean => attempt.detail['terminalStreamable'] === true;
 
 /** The owner's read of one attempt's live output: an SSE stream authenticated by the Authorization header, scoped to the project the attempt belongs to. */
 export function registerTerminalRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -338,10 +360,10 @@ export function registerTerminalRoutes(app: FastifyInstance, ctx: AppContext): v
 
   app.get('/v1/projects/:id/attempts/:attemptId/terminal', { onRequest: [ctx.owner] }, async (req, reply) => {
     const { id: projectId, attemptId } = req.params as { id: string; attemptId: string };
-    const project = await requireProject(db, config.tenantId, projectId);
+    await requireProject(db, config.tenantId, projectId);
     const [attempt] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, config.tenantId), eq(schema.attempts.projectId, projectId), eq(schema.attempts.attemptId, attemptId)));
     if (!attempt) throw new AppError(404, 'attempt_not_found', 'no such attempt in this project');
-    if (!(await streamableAttempt(ctx, { projectId, taskId: attempt.taskId, revision: attempt.revision, projectClassification: project.classification }))) throw refused();
+    if (!attemptStreamable(attempt)) throw refused();
     if (ctx.lifecycle.closing) throw new AppError(503, 'shutting_down', 'the server is shutting down');
 
     hub.admit(projectId, attemptId);
@@ -349,9 +371,10 @@ export function registerTerminalRoutes(app: FastifyInstance, ctx: AppContext): v
     reply.hijack();
     raw.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no', ...ctx.corsHeaders(req.corsOrigin) });
     raw.write(': terminal open\n\n');
-    const attachment = hub.attach(projectId, attemptId, raw, () => {
+    const attachment = hub.attach(projectId, attemptId, raw, (destroy) => {
       ctx.openStreams.delete(closeStream);
-      raw.end();
+      if (destroy) raw.destroy();
+      else raw.end();
     });
 
     const keepalive = setInterval(() => attachment.client.keepalive(), config.sse.keepAliveMs);
@@ -368,6 +391,6 @@ export function registerTerminalRoutes(app: FastifyInstance, ctx: AppContext): v
     }
     ctx.openStreams.add(closeStream);
     req.raw.on('close', closeStream);
-    if (ctx.lifecycle.closing) closeStream();
+    if (ctx.lifecycle.closing || attachment.client.closed) closeStream();
   });
 }

@@ -212,7 +212,7 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
         let open = true;
         return {
           channelId: 'scripted', simulated: script.simulated ?? false,
-          onLine(handler: (line: string) => void) { queueMicrotask(() => { if (open) for (const line of script.lines ?? []) handler(line); }); return () => {}; },
+          onLine(handler: (line: string) => void) { (window as unknown as { __terminalPush: (l: string) => void }).__terminalPush = handler; queueMicrotask(() => { if (open) for (const line of script.lines ?? []) handler(line); }); return () => {}; },
           onState(handler: (state: TerminalState) => void) { queueMicrotask(() => { if (open) handler({ status: script.status, reason: script.reason ?? null, lastLineAt: script.lastLineAt ?? null, dropped: script.dropped ?? 0 }); }); return () => {}; },
           close() { open = false; window.__calls.commands.push({ method: 'terminalClose' }); },
         };
