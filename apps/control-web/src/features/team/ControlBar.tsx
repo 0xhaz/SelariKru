@@ -60,7 +60,8 @@ export function ControlBar({ target, onOpen, canOpen, humanIntervenedAt }: { tar
 
   const state = mode.at === 'open' ? mode.state : null;
   const on = state?.phase === 'on';
-  const hidden = on && state.echo === false;
+  // Unknown is a program in raw mode, which may be reading a secret: the field is hidden then too.
+  const hidden = on && state.echo !== true;
 
   useEffect(() => { if (on) input.current?.focus(); }, [on]);
 
@@ -121,7 +122,7 @@ export function ControlBar({ target, onOpen, canOpen, humanIntervenedAt }: { tar
           <p className="text-sm text-muted" data-testid="control-honest">Any shell use marks this attempt as human-intervened, and the recorded model cannot vouch for what a person ran here.</p>
           <form onSubmit={send} className="flex flex-wrap items-end gap-2" autoComplete="off">
             <div className="min-w-0 flex-1 basis-56">
-              <label htmlFor="control-input" className="block text-sm font-medium text-fg">{hidden ? <>Hidden input: the shell is not echoing. <span className="text-warning">Visible inside the sandbox. Do not type a real secret.</span></> : 'Line to send'}</label>
+              <label htmlFor="control-input" className="block text-sm font-medium text-fg">{hidden ? <>{state?.echo === false ? 'Hidden input: the shell is not echoing.' : 'Hidden input: the program may be reading a secret.'} <span className="text-warning">Visible inside the sandbox. Do not type a real secret.</span></> : 'Line to send'}</label>
               <input id="control-input" ref={input} data-testid="control-input" type={hidden ? 'password' : 'text'} value={line} onChange={(e) => setLine(e.target.value)} maxLength={4096} autoComplete={hidden ? 'new-password' : 'off'} autoCapitalize="off" autoCorrect="off" spellCheck={false} className="mt-1 w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 font-mono text-mono text-fg" />
             </div>
             <button type="submit" className={buttonPrimary}>Send</button>

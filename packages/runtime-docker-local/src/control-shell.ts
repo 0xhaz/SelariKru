@@ -11,10 +11,11 @@ const PID_PREFIX = '/tmp/selarikru-control-';
  * The guest half of control mode. Python is stdlib-only and present in the sandbox image (docs/evidence/spike-runtime.md); no native binding is added to the runner for it.
  *
  * It owns a PTY running a plain, non-readline bash in the workspace, and speaks JSON lines on stdin and stdout. The important frame is the ack: for each input it reads the
- * terminal's ECHO flag at the moment that input is written, on the master side, so `sudo` or `read -s` are seen for what they did. Nothing typed is ever kept here.
+ * terminal's ECHO flag at the moment that input is written, on the master side, so `sudo` or `read -s` are seen for what they did. Nothing typed is ever kept here. Echo off is reported
+ * only when ECHO is clear and ICANON is set. With ICANON clear the program is in raw mode and may print what it reads itself (Node's readline does), so that is reported as unknown.
  *
  * Frames in:  {"i":seq,"d":"<base64 bytes>"}  and  {"x":1} to end.
- * Frames out: {"e":0|1} state, {"o":"<base64 bytes>"} output, {"a":seq,"e":0|1|null} ack (null: the write was not accepted), {"q":code} shell gone.
+ * Frames out: {"e":0|1|null} state, {"o":"<base64 bytes>"} output, {"a":seq,"e":0|1|null} ack (null: the write was not accepted), {"q":code} shell gone.
  */
 export const CONTROL_HELPER = String.raw`
 import base64, fcntl, json, os, pty, select, signal, struct, sys, termios, time
@@ -40,9 +41,12 @@ def send(o):
         data = data[n:]
 def echo():
     try:
-        return 1 if termios.tcgetattr(fd)[3] & termios.ECHO else 0
+        lflag = termios.tcgetattr(fd)[3]
     except Exception:
         return None
+    if lflag & termios.ECHO:
+        return 1
+    return 0 if lflag & termios.ICANON else None
 def stop(*_):
     try:
         os.killpg(pid, signal.SIGHUP)
@@ -182,10 +186,7 @@ export class SbxControlShell implements ControlShell {
     if (typeof f['o'] === 'string') return { kind: 'output', text: this.decoder.decode(Buffer.from(f['o'], 'base64'), { stream: true }) };
     if (typeof f['a'] === 'number') return { kind: 'ack', seq: f['a'], echo: echo(f['e']) };
     if ('q' in f) return closed;
-    if ('e' in f) {
-      const on = echo(f['e']);
-      return on === null ? null : { kind: 'echo', on };
-    }
+    if ('e' in f) return { kind: 'echo', on: echo(f['e']) };
     return null;
   }
 

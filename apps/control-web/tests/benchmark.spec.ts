@@ -123,7 +123,10 @@ test('a measured, complete, matched cohort shows the winner badge and says what 
   await expect(l1c1.getByTestId('winner-badge')).toContainText('Winner on this cohort: C1');
   await expect(l1c1).toContainText('On this fixture and configuration, 5 of 5 attempts passed');
   await expect(l1c1).toContainText('not a general claim');
-  await expect(page.locator('[data-testid="comparison"][data-id="H2-L1"]').getByTestId('winner-badge')).toContainText('two workers against one');
+  const h2 = page.locator('[data-testid="comparison"][data-id="H2-L1"]');
+  await expect(h2.getByTestId('winner-badge')).toHaveCount(0);
+  await expect(h2.getByTestId('descriptive-verdict')).toContainText('no winner');
+  await expect(h2.getByTestId('comparison-sides')).toContainText('with twice the coding capacity');
   await axe(page);
 });
 
@@ -132,6 +135,7 @@ test('simulated data never enters totals', async ({ page }) => {
   await expect(page.getByTestId('benchmark-status')).toHaveAttribute('data-state', 'not-measured');
   const simulated = page.getByTestId('simulated-section');
   await expect(simulated).toBeVisible();
+  await expect(page.getByTestId('benchmark-status')).toContainText('Only simulated records exist');
   await expect(simulated.getByRole('heading', { level: 2 })).toContainText('Simulated');
   await expect(simulated.getByTestId('cohort-kind').first()).toContainText('Simulated');
   await expect(page.getByTestId('winner-badge')).toHaveCount(0);
@@ -143,8 +147,19 @@ test('simulated data never enters totals', async ({ page }) => {
 
 test('a mixed file shows only measured attempts in the totals', async ({ page }) => {
   await open(page, benchmarkFile({ records: [...completeWorkers('measured').slice(0, 5), ...completeWorkers('simulated', {}, 'cohort-sim')], cohorts: [workerCohort(), workerCohort({ cohortId: 'cohort-sim' }), assistantCohort()] }));
-  await expect(page.getByTestId('benchmark-totals')).toContainText('Measured attempts5');
+  await expect(page.getByTestId('worker-totals')).toContainText('Worker attempts: 5');
+  await expect(page.getByTestId('assistant-totals')).toContainText('Assistant requests: Not measured');
   await expect(page.getByTestId('simulated-section')).toBeVisible();
+});
+
+test('a confounded comparison has no badge and says so', async ({ page }) => {
+  const records = completeWorkers('measured');
+  records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, confounders: ['ARM laptop against x86 VM'] });
+  await open(page, benchmarkFile({ records }));
+  const c = page.locator('[data-testid="comparison"][data-id="L1-C1"]');
+  await expect(c.getByTestId('winner-badge')).toHaveCount(0);
+  await expect(c).toContainText('End-to-end configuration comparison');
+  await expect(c.getByTestId('no-winner-reasons')).toContainText('ARM laptop against x86 VM');
 });
 
 test('human-intervened attempts are listed and excluded', async ({ page }) => {

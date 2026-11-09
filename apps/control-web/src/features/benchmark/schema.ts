@@ -13,6 +13,10 @@ const nullableQty = z.number().finite().nonnegative().nullable();
 const nullableUsd = z.number().finite().nonnegative().nullable();
 const nullableCount = z.number().int().nonnegative().nullable();
 const isoDate = z.iso.datetime({ offset: true });
+const provenanceField = z.enum(['observed', 'estimated', 'unavailable']);
+
+/** The eight required Feedback Board criteria. A worker record carries exactly these, and Passed is derived from them. */
+export const FEEDBACK_CRITERIA = ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-05', 'FB-06', 'FB-07', 'FB-08'] as const;
 
 const UsageRoleSchema = z.strictObject({
   role: z.string().min(1),
@@ -101,6 +105,9 @@ const RecordSchema = z.strictObject({
     localWorkerHours: nullableQty,
     cloudWorkerHours: nullableQty,
     integrationAndVerificationHours: nullableQty,
+    /** Added to the template: who says how long the worker ran. A non-null figure with no provenance or source is refused. */
+    workerHoursProvenance: provenanceField,
+    workerHoursSource: nullableText,
     requestedVcpus: nullableQty,
     requestedMemoryGib: nullableQty,
     peakRssMiB: nullableQty,
@@ -116,6 +123,9 @@ const RecordSchema = z.strictObject({
     customerDirectActual: nullableUsd,
     allocatedFixedCost: nullableUsd,
     localHardwareEnergyCost: nullableUsd,
+    /** Added to the template: a local cost is measured or assumed, and the file must say which. */
+    localCostProvenance: provenanceField,
+    localCostSource: nullableText,
     rateCardVersion: nullableText,
     settlementStatus: z.enum(['settled', 'pending', 'unavailable']),
     exclusions: z.array(z.string()),
@@ -126,6 +136,9 @@ const RecordSchema = z.strictObject({
     intervention: nullableQty,
     correction: nullableQty,
     review: nullableQty,
+    /** Added to the template: where the minutes came from. */
+    provenance: provenanceField,
+    source: nullableText,
   }),
   quality: z.strictObject({
     allRequiredChecksPassed: z.boolean().nullable(),
@@ -143,10 +156,25 @@ const RecordSchema = z.strictObject({
   failures: z.array(z.strictObject({ category: z.string().min(1), detail: nullableText })),
   confounders: z.array(z.string()),
   artifactReferences: z.array(z.string()),
+  /** Added to the template (plan section 5, "hash/tag every result"): sha-256 of the raw record. */
+  resultSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   measuredResultsPresent: z.boolean(),
 });
 
 export type BenchmarkRecord = z.infer<typeof RecordSchema>;
+
+/** All eight required criteria passed. This, not the record's own flag, is what decides Passed. */
+export function allCriteriaPassed(record: BenchmarkRecord): boolean {
+  const criteria = record.quality.criteria;
+  return criteria.length === FEEDBACK_CRITERIA.length && FEEDBACK_CRITERIA.every((id) => criteria.some((c) => c.id === id && c.status === 'passed'));
+}
+
+function containsNumber(value: unknown): boolean {
+  if (typeof value === 'number') return true;
+  if (Array.isArray(value)) return value.some(containsNumber);
+  if (value !== null && typeof value === 'object') return Object.values(value).some(containsNumber);
+  return false;
+}
 
 const CohortSchema = z.strictObject({
   cohortId: z.string().min(1),
@@ -194,7 +222,32 @@ export const BenchmarkFileSchema = z.strictObject({
     // A number with `measuredResultsPresent: false`, or a simulated record that says it was measured, is a contradiction: it is refused rather than guessed at.
     const measured = record.dataKind === 'measured' && record.status !== 'not_run';
     if (record.measuredResultsPresent !== measured) refuse(`measuredResultsPresent ${record.measuredResultsPresent} contradicts dataKind ${record.dataKind} and status ${record.status}`);
-    if (record.status === 'not_run' && record.timings.endToEndVerifiedMs !== null) refuse('an attempt that did not run has a timing');
+    const { timings, resources, cost, humanMinutes, operations, assistant } = record;
+    if (record.status === 'not_run' && containsNumber({ timings, resources, cost, humanMinutes, operations, assistant })) refuse('an attempt that did not run carries a number');
+
+    if (record.track === 'workers') {
+      const ids = record.quality.criteria.map((c) => c.id);
+      if (ids.length !== FEEDBACK_CRITERIA.length || !FEEDBACK_CRITERIA.every((id) => ids.includes(id))) refuse('a worker record must carry exactly FB-01 to FB-08');
+      else if ((record.quality.allRequiredChecksPassed === true) !== allCriteriaPassed(record)) refuse('allRequiredChecksPassed disagrees with the criteria');
+    } else if (record.quality.criteria.length > 0) refuse('an assistant record has no delivery criteria');
+
+    const unsourced = (present: boolean, provenance: string, source: string | null, what: string): void => {
+      if (present && (provenance === 'unavailable' || source === null)) refuse(`${what} has a value with no provenance or source`);
+      if (!present && provenance !== 'unavailable') refuse(`${what} claims ${provenance} with no value`);
+    };
+    unsourced(resources.localWorkerHours !== null || resources.cloudWorkerHours !== null, resources.workerHoursProvenance, resources.workerHoursSource, 'worker-hours');
+    unsourced(humanMinutes.initialSetup !== null || humanMinutes.scoping !== null || humanMinutes.intervention !== null || humanMinutes.correction !== null || humanMinutes.review !== null, humanMinutes.provenance, humanMinutes.source, 'human minutes');
+    unsourced(cost.localHardwareEnergyCost !== null, cost.localCostProvenance, cost.localCostSource, 'local cost');
+
+    // `measured` is a claim. A record that ran must carry what would let someone check it.
+    if (measured) {
+      if (record.track === 'workers' && record.configuration.candidateSha === null) refuse('a measured attempt needs its candidate SHA');
+      if (record.configuration.manifestSha256 === null) refuse('a measured attempt needs its manifest hash');
+      if (timings.clockDomain === null) refuse('a measured attempt needs its clock domain');
+      if (record.artifactReferences.length === 0) refuse('a measured attempt needs an artifact reference');
+      if (record.resultSha256 === null) refuse('a measured attempt needs its result hash');
+      if (record.quality.criteria.some((c) => c.status === 'passed' && c.evidenceReferences.length === 0)) refuse('a passing criterion needs evidence');
+    }
   });
 });
 
@@ -208,21 +261,27 @@ export type BenchmarkLoad =
 
 export const RESULTS_FILE = 'benchmark-results.json';
 
-/** Reads the published results file. No file, or a host answering with its HTML fallback page, means nothing has been measured: not an error, and nothing is invented in its place. */
+/** Far larger than a real cohort's export. A bigger answer is refused rather than parsed. */
+export const MAX_RESULTS_CHARS = 8 * 1024 * 1024;
+
+/** Reads the published results file. No file, or a host answering with its HTML page, means nothing has been measured. Anything else either parses or is refused, and nothing is invented in its place. */
 export async function loadBenchmark(url: string = `${import.meta.env.BASE_URL}${RESULTS_FILE}`, fetchFn: typeof fetch = fetch): Promise<BenchmarkLoad> {
   let response: Response;
+  let body: string;
   try {
     response = await fetchFn(url, { cache: 'no-store' });
+    if (response.status === 404) return { kind: 'absent' };
+    if (!response.ok) return { kind: 'unreachable', detail: `The server answered ${response.status}.` };
+    if (Number(response.headers.get('content-length') ?? 0) > MAX_RESULTS_CHARS) return { kind: 'invalid', issues: ['The results file is too large to read.'] };
+    body = await response.text();
   } catch {
     return { kind: 'unreachable', detail: 'The results file could not be requested.' };
   }
-  if (response.status === 404) return { kind: 'absent' };
-  if (!response.ok) return { kind: 'unreachable', detail: `The server answered ${response.status}.` };
-  const contentType = response.headers.get('content-type') ?? '';
-  if (!contentType.includes('json')) return { kind: 'absent' };
+  if (body.length > MAX_RESULTS_CHARS) return { kind: 'invalid', issues: ['The results file is too large to read.'] };
+  if (/^\s*<(?:!doctype\s+html|html)[\s>]/i.test(body)) return { kind: 'absent' };
   let raw: unknown;
   try {
-    raw = await response.json();
+    raw = JSON.parse(body);
   } catch {
     return { kind: 'invalid', issues: ['The results file is not valid JSON.'] };
   }

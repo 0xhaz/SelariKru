@@ -89,7 +89,7 @@ export interface RuntimeSnapshot {
 export type ControlShellEvent =
   | { readonly kind: 'output'; readonly text: string }
   | { readonly kind: 'ack'; readonly seq: number; readonly echo: boolean | null }
-  | { readonly kind: 'echo'; readonly on: boolean }
+  | { readonly kind: 'echo'; readonly on: boolean | null }
   | { readonly kind: 'exited' };
 
 /** A PTY shell inside one attempt's own sandbox, for a person in control mode. `ack.echo` is whether the shell was echoing when that input reached the PTY; null when it could not be read. */

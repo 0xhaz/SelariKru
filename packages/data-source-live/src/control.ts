@@ -74,10 +74,10 @@ export function openLiveControl(options: LiveControlOptions): TerminalControlCha
     ws.onerror = () => undefined;
     ws.onclose = () => { if (state.phase === 'connecting') finish('refused', 'connection_failed'); else finish('ended', 'connection_lost'); };
     ws.onmessage = (e) => {
-      let f: { type?: string; echo?: boolean | null; on?: boolean; code?: string; reason?: string; seq?: number | null; disposition?: string };
+      let f: { type?: string; echo?: boolean | null; on?: boolean | null; code?: string; reason?: string; seq?: number | null; disposition?: string };
       try { f = JSON.parse(e.data as string) as typeof f; } catch { return; }
       if (f.type === 'ready' && state.phase === 'connecting') set({ phase: 'on', reason: null, echo: f.echo ?? null });
-      else if (f.type === 'echo' && state.phase === 'on') set({ ...state, echo: f.on === true });
+      else if (f.type === 'echo' && state.phase === 'on') set({ ...state, echo: f.on ?? null });
       else if (f.type === 'ack' && f.disposition !== 'pending') for (const h of inputHandlers) h(f.disposition as TerminalControlInputOutcome);
       else if (f.type === 'refused') {
         if (f.seq === null || f.seq === undefined) finish('refused', (SESSION_REFUSALS as readonly string[]).includes(f.code ?? '') ? (f.code as TerminalControlReason) : 'connection_failed');

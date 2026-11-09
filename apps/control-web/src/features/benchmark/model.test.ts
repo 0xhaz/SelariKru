@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildBenchmark, MIN_ATTEMPTS_PER_MODE, type Comparison, type Figure, type WorkerCohortView } from './model.ts';
-import { BenchmarkFileSchema, loadBenchmark, type BenchmarkFile, type BenchmarkLoad } from './schema.ts';
+import { BenchmarkFileSchema, MAX_RESULTS_CHARS, loadBenchmark, type BenchmarkFile, type BenchmarkLoad } from './schema.ts';
 import { assistantCohort, assistantRecord, benchmarkFile, completeAssistant, completeWorkers, workerCohort, workerRecord } from './testing.ts';
 
 const ok = (file: BenchmarkFile): BenchmarkLoad => ({ kind: 'ok', file: BenchmarkFileSchema.parse(file) });
@@ -42,6 +42,44 @@ describe('the results file', () => {
     expect(BenchmarkFileSchema.safeParse({ ...benchmarkFile({ records: [] }), cohorts: [{ ...workerCohort(), plannedPerMode: 0 }] }).success).toBe(false);
   });
 
+  it('refuses a flag that disagrees with the criteria, and anything but exactly FB-01 to FB-08', () => {
+    const passing = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const refused = (record: typeof passing): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...passing, quality: { ...passing.quality, allRequiredChecksPassed: false } })).toBe(true);
+    expect(refused({ ...passing, quality: { ...passing.quality, allRequiredChecksPassed: null } })).toBe(true);
+    const failing = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', failedCriteria: ['FB-03'] });
+    expect(refused({ ...failing, quality: { ...failing.quality, allRequiredChecksPassed: true } })).toBe(true);
+    expect(refused({ ...passing, quality: { ...passing.quality, criteria: passing.quality.criteria.slice(1) } })).toBe(true);
+    expect(refused({ ...passing, quality: { ...passing.quality, criteria: [...passing.quality.criteria, { id: 'FB-09', status: 'passed', evidenceReferences: ['x'] }] } })).toBe(true);
+  });
+
+  it('refuses any number on an attempt that did not run', () => {
+    const notRun = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', status: 'not_run' });
+    const refused = (record: typeof notRun): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...notRun, timings: { ...notRun.timings, queueMs: 0 } })).toBe(true);
+    expect(refused({ ...notRun, cost: { ...notRun.cost, platformPaidEstimated: 0 } })).toBe(true);
+    expect(refused({ ...notRun, resources: { ...notRun.resources, requestedVcpus: 2 } })).toBe(true);
+  });
+
+  it('refuses a value with no provenance or source', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...r, resources: { ...r.resources, workerHoursProvenance: 'unavailable', workerHoursSource: null } })).toBe(true);
+    expect(refused({ ...r, humanMinutes: { ...r.humanMinutes, source: null } })).toBe(true);
+    expect(refused({ ...r, cost: { ...r.cost, localHardwareEnergyCost: 0 } })).toBe(true);
+  });
+
+  it('a measured record that ran must carry what would let someone check it', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...r, configuration: { ...r.configuration, candidateSha: null } })).toBe(true);
+    expect(refused({ ...r, configuration: { ...r.configuration, manifestSha256: null } })).toBe(true);
+    expect(refused({ ...r, timings: { ...r.timings, clockDomain: null } })).toBe(true);
+    expect(refused({ ...r, artifactReferences: [] })).toBe(true);
+    expect(refused({ ...r, resultSha256: null })).toBe(true);
+    expect(refused({ ...r, quality: { ...r.quality, criteria: r.quality.criteria.map((c) => ({ ...c, evidenceReferences: [] })) } })).toBe(true);
+  });
+
   it('a template record with no measurements is accepted only as not run', () => {
     const file = benchmarkFile({ records: [workerRecord({ mode: 'L1', index: 0, status: 'not_run', dataKind: 'measured' })] });
     expect(BenchmarkFileSchema.safeParse(file).success).toBe(true);
@@ -55,6 +93,14 @@ describe('loading the file', () => {
   });
   it("a host's HTML fallback page reads as absent, not as an error", async () => {
     await expect(loadBenchmark('x', respond(200, 'text/html', '<!doctype html>'))).resolves.toEqual({ kind: 'absent' });
+    await expect(loadBenchmark('x', respond(200, 'application/json', '<!DOCTYPE html><html></html>'))).resolves.toEqual({ kind: 'absent' });
+  });
+  it('anything that is not HTML parses or is refused, whatever its content type', async () => {
+    await expect(loadBenchmark('x', respond(200, 'text/plain', 'garbage'))).resolves.toMatchObject({ kind: 'invalid' });
+    await expect(loadBenchmark('x', respond(200, 'text/plain', JSON.stringify(benchmarkFile({}))))).resolves.toMatchObject({ kind: 'ok' });
+  });
+  it('a body over the size limit is refused unread', async () => {
+    await expect(loadBenchmark('x', respond(200, 'application/json', ' '.repeat(MAX_RESULTS_CHARS + 1)))).resolves.toMatchObject({ kind: 'invalid' });
   });
   it('a broken file is invalid and says why', async () => {
     const out = await loadBenchmark('x', respond(200, 'application/json', '{"protocolVersion":"9"}'));
@@ -193,7 +239,74 @@ describe('worker rows', () => {
     records[1] = workerRecord({ mode: 'L1', index: 1, dataKind: 'measured', usage: [{ role: 'coding', inputTokens: 500, outputTokens: 500, cacheTokens: null, provenance: 'estimated', source: 'rate card' }] });
     const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
     expect(row.usage.provenance).toBe('observed');
-    expect(row.usage.detail).toBe('Median of 3 of 5 attempts with observed usage. 1 estimated, 1 unavailable.');
+    expect(row.usage.detail).toBe('Median of 3 of 5 attempts with observed usage. 1 estimated, 1 unavailable. Coverage: complete.');
+    expect(row.usage.basis).toContain('harness');
+    expect(row.usage.basis).not.toContain('Provider-reported');
+  });
+
+  it('a role missing its output makes that attempt unavailable, and cache tokens are not added in', () => {
+    const records = completeWorkers('measured');
+    records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', usage: [{ role: 'coding', inputTokens: 100, outputTokens: null, cacheTokens: null, provenance: 'observed', source: 'harness' }] });
+    const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
+    expect(row.usage.detail).toContain('1 unavailable');
+    expect(row.usage.text).toBe('128,000 tokens median');
+  });
+
+  it('human minutes with a null part are unavailable for that attempt, never summed as zero', () => {
+    const records = completeWorkers('measured');
+    records[0] = { ...records[0]!, humanMinutes: { ...records[0]!.humanMinutes, review: null } };
+    const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
+    expect(row.human.text).toBe('8 min');
+    expect(row.human.detail).toContain('Human minutes: 4 of 5 attempts. 1 unavailable.');
+  });
+
+  it('worker-hours and human minutes take their provenance and source from the record', () => {
+    const records = completeWorkers('measured').map((r) => ({ ...r, resources: { ...r.resources, workerHoursProvenance: 'estimated' as const, workerHoursSource: 'billing export' } }));
+    const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
+    expect(row.hours[0]!.provenance).toBe('estimated');
+    expect(row.hours[0]!.basis).toContain('billing export');
+    expect(row.human.basis).toContain('reviewer log');
+  });
+
+  it('delivery time is withheld unless it was on a server monotonic clock', () => {
+    const records = completeWorkers('measured').map((r) => ({ ...r, timings: { ...r.timings, clockDomain: 'host-wall' } }));
+    const cohort = workersOf(benchmarkFile({ records }));
+    expect(cohort.rows.find((r) => r.mode === 'L1')!.time.text).toBe('Withheld');
+    expect(reasonsOf(comparison(cohort, 'L1-C1'))).toContain('server monotonic clock');
+  });
+
+  it('no 0 of 0: runs and planned attempts are shown instead', () => {
+    const records = [0, 1, 2].map((index) => workerRecord({ mode: 'L1', index, dataKind: 'measured', humanIntervened: true, ms: 60_000 }));
+    const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
+    expect(row.completion.text).toBe('No comparable attempts');
+    expect(row.completion.detail).toContain('3 run of 5 planned.');
+  });
+
+  it('an over-limit attempt with all checks passing does not pass and says why', () => {
+    const records = completeWorkers('measured');
+    records[0] = { ...records[0]!, quality: { ...records[0]!.quality, withinDeclaredLimits: false } };
+    const cohort = workersOf(benchmarkFile({ records }));
+    expect(cohort.attempts.find((a) => a.attemptId === 'l1-0-measured')!.statusLabel).toBe('Over limit');
+    expect(cohort.rows.find((r) => r.mode === 'L1')!.completion.text).toBe('4 of 5 passed');
+  });
+
+  it('a not-run row reads not applicable for human intervention', () => {
+    const records = [workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', status: 'not_run' })];
+    expect(workersOf(benchmarkFile({ records })).attempts[0]!.humanLabel).toBe('Not applicable');
+  });
+
+  it('a local cost carries the provenance the record gave it', () => {
+    const records = completeWorkers('measured').map((r) => ({ ...r, cost: { ...r.cost, localHardwareEnergyCost: 0, localCostProvenance: 'estimated' as const, localCostSource: 'assumed tariff' } }));
+    const local = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!.cost[2]!;
+    expect(local.provenance).toBe('estimated');
+    expect(local.basis).toContain('assumed tariff');
+  });
+
+  it('customer-direct charges are shown apart', () => {
+    const records = completeWorkers('measured').map((r) => ({ ...r, cost: { ...r.cost, customerDirectActual: 0.5 } }));
+    const direct = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!.cost[3]!;
+    expect(direct.text).toBe('$2.50');
+    expect(direct.basis).toContain('Customer-direct');
   });
 });
 
@@ -205,7 +318,52 @@ describe('the winner badge', () => {
     const c = comparison(cohort, 'L1-C1');
     expect(c.verdict).toMatchObject({ kind: 'winner', mode: 'C1', basis: 'speed' });
     expect(c.verdict.kind === 'winner' ? c.verdict.statement : '').toMatch(/^On this fixture and configuration, 5 of 5 attempts passed/);
-    expect(comparison(cohort, 'H2-L1').verdict).toMatchObject({ kind: 'winner', mode: 'H2' });
+  });
+
+  it('H2 against a one-worker mode is described side by side, with no winner', () => {
+    const c = comparison(workersOf(complete()), 'H2-L1');
+    expect(c.verdict.kind).toBe('descriptive');
+    expect(c.sides[0]).toBe('H2: 5 of 5 passed, median 12m 40s, range 12m 0s to 13m 20s, with twice the coding capacity.');
+    expect(c.sides[1]).toContain('L1: 5 of 5 passed');
+  });
+
+  it('every verdict shows both sides with n of N, and below the target of five says Exploratory', () => {
+    const records = (['L1', 'C1'] as const).flatMap((m) => [0, 1, 2].map((index) => workerRecord({ mode: m, index, dataKind: 'measured', ms: (m === 'L1' ? 1_200_000 : 600_000) + index * 1000 })));
+    const c = comparison(workersOf(benchmarkFile({ cohorts: [workerCohort({ plannedPerMode: 3, requiredModes: ['L1', 'C1'] }), assistantCohort()], records })), 'L1-C1');
+    expect(c.verdict).toMatchObject({ kind: 'winner', mode: 'C1', exploratory: true });
+    expect(c.sides.join(' ')).toContain('L1: 3 of 3 passed');
+    expect(c.sides[0]).toContain('Exploratory');
+  });
+
+  it('a one-attempt margin names no winner', () => {
+    const records = completeWorkers('measured');
+    records[5] = workerRecord({ mode: 'C1', index: 0, dataKind: 'measured', status: 'failed' });
+    const c = comparison(workersOf(benchmarkFile({ records })), 'L1-C1');
+    expect(c.verdict.kind).toBe('none');
+    expect(reasonsOf(c)).toMatch(/one attempt/i);
+  });
+
+  it('a recorded confounder removes the badge and changes the scope', () => {
+    const records = completeWorkers('measured');
+    records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, confounders: ['ARM laptop against x86 VM'] });
+    const c = comparison(workersOf(benchmarkFile({ records })), 'L1-C1');
+    expect(c.verdict.kind).toBe('none');
+    expect(reasonsOf(c)).toContain('ARM laptop against x86 VM');
+    expect(c.scope).toContain('End-to-end configuration comparison');
+  });
+
+  it('a different manifest blocks a winner', () => {
+    const records = completeWorkers('measured');
+    records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, config: { manifestSha256: 'other' } });
+    expect(reasonsOf(comparison(workersOf(benchmarkFile({ records })), 'L1-C1'))).toContain('Not the same manifest');
+  });
+
+  it('names each excluded pair', () => {
+    const records = completeWorkers('measured');
+    records[5] = workerRecord({ mode: 'C1', index: 0, dataKind: 'measured', status: 'failed' });
+    const { pairs } = comparison(workersOf(benchmarkFile({ records })), 'L1-C1');
+    expect(pairs.valid).toBe(4);
+    expect(pairs.excluded).toEqual(['block-0: C1 did not pass']);
   });
 
   it('no winner badge on incomplete or mismatched cohorts', () => {
@@ -321,6 +479,18 @@ describe('assistant rows', () => {
     expect(row.requested).toBe('Device only');
   });
 
+  it('warm-ups go in their own ledger, out of request cost and totals of requests', () => {
+    const records = [
+      assistantRecord({ route: 'ONLY_IN_CLOUD', index: 0, dataKind: 'measured', costUsd: 1 }),
+      assistantRecord({ route: 'ONLY_IN_CLOUD', index: 1, dataKind: 'measured', warmup: true, costUsd: 5 }),
+    ];
+    const model = buildBenchmark(ok(benchmarkFile({ records })));
+    const row = model.assistant.measured[0]!.rows.find((r) => r.mode === 'ONLY_IN_CLOUD')!;
+    expect(row.cost.text).toBe('$1.00');
+    expect(row.warmups.text).toBe('$5.00');
+    expect(row.warmups.detail).toContain('1 warm-up');
+  });
+
   it('device usage that was not reported stays unavailable', () => {
     const cohort = buildBenchmark(ok(benchmarkFile({ records: completeAssistant('measured') }))).assistant.measured[0]!;
     const device = cohort.rows.find((r) => r.mode === 'ONLY_ON_DEVICE')!;
@@ -350,6 +520,7 @@ describe('simulated data', () => {
     const model = buildBenchmark(ok(file));
     expect(model.workers.totals.attempts).toBe(5);
     expect(model.workers.totals.passed).toBe(5);
+    expect(model.workers.totals.notRecorded).toBe(0);
     expect(model.assistant.totals.attempts).toBe(0);
     expect(model.assistant.measured).toEqual([]);
     const cohort = model.workers.measured[0]!;

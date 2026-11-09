@@ -163,7 +163,7 @@ export class ControlBridge {
             open(ev.on);
             this.send({ type: 'echo', sessionId, on: ev.on });
             // A program may print its prompt first and turn echo off after.
-            if (!ev.on) this.armPrompt(sessionId);
+            if (ev.on !== true) this.armPrompt(sessionId);
             break;
           case 'output':
             open(null);

@@ -39,7 +39,7 @@ export type ControlRefusal = (typeof CONTROL_REFUSALS)[number];
 
 export const ControlServerFrameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ready'), sessionId: z.string().min(1), echo: z.boolean().nullable() }).strict(),
-  z.object({ type: z.literal('echo'), on: z.boolean() }).strict(),
+  z.object({ type: z.literal('echo'), on: z.boolean().nullable() }).strict(),
   z.object({ type: z.literal('ack'), seq: Seq, disposition: z.enum(CONTROL_INPUT_DISPOSITIONS) }).strict(),
   z.object({ type: z.literal('refused'), seq: Seq.nullable(), code: z.enum(CONTROL_REFUSALS) }).strict(),
   z.object({ type: z.literal('ended'), reason: z.enum(CONTROL_END_REASONS) }).strict(),
@@ -63,7 +63,7 @@ export const ControlUpFrameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('hello'), lease: LeaseRefSchema }).strict(),
   z.object({ type: z.literal('opened'), sessionId: SessionId, echo: z.boolean().nullable() }).strict(),
   z.object({ type: z.literal('ack'), sessionId: SessionId, seq: Seq, echo: z.boolean().nullable() }).strict(),
-  z.object({ type: z.literal('echo'), sessionId: SessionId, on: z.boolean() }).strict(),
+  z.object({ type: z.literal('echo'), sessionId: SessionId, on: z.boolean().nullable() }).strict(),
   z.object({ type: z.literal('output'), sessionId: SessionId, lines: z.array(TerminalLineSchema).max(CONTROL_MAX_LINK_BATCH_LINES), dropped: z.number().int().min(0) }).strict(),
   z.object({ type: z.literal('shell_ended'), sessionId: SessionId, unavailable: z.boolean() }).strict(),
 ]);

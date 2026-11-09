@@ -742,6 +742,17 @@ test('control mode: a prompt with echo off hides the field and says the line wil
   await expect(panel.getByTestId('control-input')).toHaveAttribute('autocomplete', 'new-password');
 });
 
+test('control mode: an unknown echo state, as a raw-mode program gives, hides the field', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'text');
+  await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'on', reason: null, echo: null }));
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'password');
+  await expect(panel.locator('label[for="control-input"]')).toContainText('may be reading a secret');
+});
+
 test('control mode: the hidden input label itself says the line is visible in the sandbox', async ({ page }) => {
   await controlPage(page, { phase: 'on' });
   const panel = drawer(page).getByTestId('terminal-panel');

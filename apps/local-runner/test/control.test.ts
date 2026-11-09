@@ -24,6 +24,9 @@ class FakeShell implements ControlShell {
     const w = this.waiter;
     if (w !== null) { this.waiter = null; w(e); } else this.queue.push(e);
   }
+  /** The bridge is reading events. */
+  get listening(): boolean { return this.waiter !== null; }
+  get backlog(): number { return this.queue.length; }
   input(seq: number, data: string): void { this.inputs.push({ seq, data }); }
   async close(): Promise<void> { this.closed = true; this.emit(null); }
 }
@@ -39,93 +42,93 @@ function bridge(shell: FakeShell | null, over: { openFails?: boolean } = {}) {
   return { b, sent, down, log, handlers: () => handlers };
 }
 
-const tick = (ms = 15) => new Promise((r) => setTimeout(r, ms));
+const until = (assertion: () => void): Promise<void> => vi.waitFor(assertion, { timeout: 5_000, interval: 2 });
+/** Everything emitted has been consumed by the bridge, and its 5 ms prompt timer has had the chance to fire. For asserting that something did not happen. */
+const settled = async (shell: FakeShell): Promise<void> => {
+  await until(() => expect(shell.backlog).toBe(0));
+  await new Promise((r) => setTimeout(r, 30));
+};
 
 describe('the control bridge', () => {
+  const opened = async (shell: FakeShell | null, over: { openFails?: boolean } = {}) => {
+    const b = bridge(shell, over);
+    await until(() => expect(b.handlers()).toBeDefined());
+    b.down({ type: 'open', sessionId: 's1' });
+    if (shell !== null) await until(() => expect(shell.listening).toBe(true));
+    return b;
+  };
+  const outputs = (sent: readonly ControlUpFrame[]): string[] => sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
+
   it('opens a shell only in its attempt\'s own sandbox, and forwards acks and output', async () => {
     const shell = new FakeShell();
-    const { sent, down } = bridge(shell);
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
+    const { sent, down } = await opened(shell);
     shell.emit({ kind: 'echo', on: true });
-    await tick();
-    expect(sent).toContainEqual({ type: 'opened', sessionId: 's1', echo: true });
+    await until(() => expect(sent).toContainEqual({ type: 'opened', sessionId: 's1', echo: true }));
     down({ type: 'input', sessionId: 's1', seq: 1, data: 'ls\r' });
     expect(shell.inputs).toEqual([{ seq: 1, data: 'ls\r' }]);
     shell.emit({ kind: 'ack', seq: 1, echo: true });
     shell.emit({ kind: 'output', text: 'ls\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' });
-    await tick();
-    const lines = sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
-    expect(lines.join('\n')).toContain(`GITHUB_TOKEN=${REDACTED}`);
-    expect(lines.join('\n')).not.toContain('ghp_abc');
-    expect(sent).toContainEqual({ type: 'ack', sessionId: 's1', seq: 1, echo: true });
+    await until(() => expect(outputs(sent).join('\n')).toContain(`GITHUB_TOKEN=${REDACTED}`));
+    expect(outputs(sent).join('\n')).not.toContain('ghp_abc');
+    await until(() => expect(sent).toContainEqual({ type: 'ack', sessionId: 's1', seq: 1, echo: true }));
     expect(JSON.stringify(sent)).not.toContain('ghp_abc');
   });
 
   it('never releases a partial line that is not a prompt, and releases one that is', async () => {
     const shell = new FakeShell();
-    const { sent, down } = bridge(shell);
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
+    const { sent } = await opened(shell);
     shell.emit({ kind: 'echo', on: true });
     shell.emit({ kind: 'output', text: 'TOKEN=abc' });
-    await tick(25);
+    await settled(shell);
     expect(sent.filter((f) => f.type === 'output')).toEqual([]);
     shell.emit({ kind: 'output', text: 'def\nPassword: ' });
-    await tick(25);
     // Echo on: the prompt goes out and the next line, where the terminal prints the value, is hidden.
-    const outputs = (): string[] => sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
-    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ']);
+    await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ']));
     shell.emit({ kind: 'output', text: 'typed-value\n' });
-    await tick(25);
-    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED]);
-    // Echo off: the value is not printed, so what follows the prompt is real output and is shown.
+    await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED]));
+    // Echo off with a password prompt: nothing is printed, so what follows is real output and is shown.
     shell.emit({ kind: 'echo', on: false });
     shell.emit({ kind: 'output', text: 'Passphrase: ' });
-    await tick(25);
+    await until(() => expect(outputs(sent)).toContain('Passphrase: '));
     shell.emit({ kind: 'output', text: 'done\n' });
-    await tick(25);
-    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED, 'Passphrase: ', 'done']);
+    await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED, 'Passphrase: ', 'done']));
+  });
+
+  it('a raw-mode program, reported as unknown echo, has what it prints after a credential prompt hidden', async () => {
+    const shell = new FakeShell();
+    const { sent } = await opened(shell);
+    shell.emit({ kind: 'echo', on: true });
+    shell.emit({ kind: 'echo', on: null });
+    await until(() => expect(sent).toContainEqual({ type: 'echo', sessionId: 's1', on: null }));
+    shell.emit({ kind: 'output', text: 'API key: ' });
+    await until(() => expect(outputs(sent)).toEqual(['API key: ']));
+    shell.emit({ kind: 'output', text: 'sk-typed-value-123\n' });
+    await until(() => expect(outputs(sent)).toEqual(['API key: ', REDACTED]));
+    expect(JSON.stringify(sent)).not.toContain('sk-typed-value-123');
   });
 
   it('tells the API when the runtime has no shell to give', async () => {
-    const { sent, down } = bridge(null, { openFails: true });
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
-    expect(sent).toContainEqual({ type: 'shell_ended', sessionId: 's1', unavailable: true });
+    const { sent } = await opened(null, { openFails: true });
+    await until(() => expect(sent).toContainEqual({ type: 'shell_ended', sessionId: 's1', unavailable: true }));
   });
 
   it('a close frame ends the shell inside the sandbox', async () => {
     const shell = new FakeShell();
-    const { down } = bridge(shell);
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
+    const { down } = await opened(shell);
     down({ type: 'close', sessionId: 's1', reason: 'left' });
-    await tick();
-    expect(shell.closed).toBe(true);
+    await until(() => expect(shell.closed).toBe(true));
   });
 
   it('a lost connection ends the session and reconnects for the next one', async () => {
     const shell = new FakeShell();
-    const { down, handlers } = bridge(shell);
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
+    const { handlers } = await opened(shell);
     handlers().onClose();
-    await tick();
-    expect(shell.closed).toBe(true);
+    await until(() => expect(shell.closed).toBe(true));
   });
 
   it('shutdown ends the shell and stops reconnecting, and no input is forwarded after it', async () => {
     const shell = new FakeShell();
-    const { b, down } = bridge(shell);
-    await tick();
-    down({ type: 'open', sessionId: 's1' });
-    await tick();
+    const { b, down } = await opened(shell);
     await b.shutdown();
     down({ type: 'input', sessionId: 's1', seq: 2, data: 'rm -rf .\r' });
     expect(shell.closed).toBe(true);
@@ -136,19 +139,19 @@ describe('the control bridge', () => {
     const shell = new FakeShell();
     const sent: ControlUpFrame[] = [];
     let sendable = false;
-    let handlers!: ControlHandlers;
+    let handlers: ControlHandlers | undefined;
     const b = new ControlBridge({ connect: async (h) => { handlers = h; return { send: (f) => sent.push(f), get sendable() { return sendable; }, close: () => undefined }; }, runtime: { openControlShell: async () => shell } as unknown as RuntimeAdapter, handle: HANDLE, log: () => undefined, limits: { flushMs: 1, promptMs: 500, maxLines: 10, maxBytes: 100_000, reconnectMs: 1 } });
     b.start();
-    await tick();
-    handlers.onFrame({ type: 'open', sessionId: 's1' });
-    await tick();
+    await until(() => expect(handlers).toBeDefined());
+    handlers!.onFrame({ type: 'open', sessionId: 's1' });
+    await until(() => expect(shell.listening).toBe(true));
     shell.emit({ kind: 'echo', on: true });
     shell.emit({ kind: 'output', text: `${Array.from({ length: 50 }, (_, i) => `l${i}`).join('\n')}\n` });
-    await tick();
+    await settled(shell);
     expect(sent.filter((f) => f.type === 'output')).toEqual([]);
     sendable = true;
     shell.emit({ kind: 'output', text: 'z\n' });
-    await tick();
+    await until(() => expect(sent.filter((f) => f.type === 'output').length).toBeGreaterThan(0));
     const out = sent.filter((f) => f.type === 'output') as Extract<ControlUpFrame, { type: 'output' }>[];
     expect(out.flatMap((o) => o.lines).length).toBeLessThanOrEqual(10);
     expect(out.reduce((n, o) => n + o.dropped, 0)).toBeGreaterThan(30);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Chip, buttonQuiet, formatDayTime, type Tone } from '@selarikru/ui';
-import { buildBenchmark, type AssistantCohortView, type AssistantRow, type AttemptRow, type BenchmarkModel, type Comparison, type Counts, type EvidenceRow, type Fact, type Figure, type Verdict, type WorkerCohortView, type WorkerRow } from './model.ts';
+import { buildBenchmark, type AssistantCohortView, type AssistantRow, type AttemptRow, type BenchmarkModel, type Comparison, type Counts, type EvidenceRow, type Fact, type Figure, type Totals, type Verdict, type WorkerCohortView, type WorkerRow } from './model.ts';
 import { loadBenchmark, type BenchmarkLoad } from './schema.ts';
 
 type Tab = 'assistant' | 'workers';
@@ -20,16 +20,20 @@ const PROVENANCE: Readonly<Record<Figure['provenance'], { label: string; classNa
   simulated: { label: 'Simulated', className: 'font-semibold text-warning' },
 };
 
+/** The value itself already says there is nothing, so the provenance word is not repeated under it. */
+const ABSENT: ReadonlySet<string> = new Set(['Not measured', 'Unavailable', 'None recorded', 'Withheld', 'No comparable attempts']);
+
 function FigureView({ figure, compact = false }: { figure: Figure; compact?: boolean }) {
   const p = PROVENANCE[figure.provenance];
+  const absent = ABSENT.has(figure.text);
   return (
     <div data-testid="figure" data-provenance={figure.provenance} className="min-w-0">
-      <p className={`text-sm font-semibold ${figure.text === 'Not measured' || figure.text === 'Unavailable' ? 'text-muted' : 'text-fg'}`}>{figure.text}</p>
+      <p className={`text-sm font-semibold ${absent ? 'text-muted' : 'text-fg'}`}>{figure.text}</p>
       {figure.detail ? <p className="text-xs text-muted">{figure.detail}</p> : null}
       <p className="text-xs text-muted">
         {/* The value already says Not measured or Unavailable; the word is not repeated beneath it. */}
-        {figure.text === 'Not measured' || figure.text === 'Unavailable' ? null : <span className={p.className}>{p.label}</span>}
-        {compact ? null : <>{figure.text === 'Not measured' || figure.text === 'Unavailable' ? '' : ' · '}{figure.basis}</>}
+        {absent ? null : <span className={p.className}>{p.label}</span>}
+        {compact ? null : <>{absent ? '' : ' · '}{figure.basis}</>}
       </p>
     </div>
   );
@@ -131,7 +135,7 @@ function AssistantTable({ rows, caption }: { rows: readonly AssistantRow[]; capt
             <Cell label="Routing, schema, review"><Stack><FigureView figure={r.routing} /><FigureView figure={r.schema} /><FigureView figure={r.review} /></Stack></Cell>
             <Cell label="First output"><FigureView figure={r.firstOutput} /></Cell>
             <Cell label="Complete"><FigureView figure={r.complete} /></Cell>
-            <Cell label="Usage and cost"><Stack><FigureView figure={r.usage} /><FigureView figure={r.cost} /></Stack></Cell>
+            <Cell label="Usage and cost"><Stack><FigureView figure={r.usage} /><FigureView figure={r.cost} /><FigureView figure={r.warmups} /></Stack></Cell>
           </div>
         ))}
       </div>
@@ -161,7 +165,7 @@ function AttemptRowView({ a }: { a: AttemptRow }) {
       <Cell label="Criteria"><p className="text-sm text-fg">{a.criteria}</p></Cell>
       <Cell label="Time"><FigureView figure={a.time} compact /></Cell>
       <Cell label="Cost"><FigureView figure={a.cost} compact /></Cell>
-      <Cell label="Human"><p className={`text-sm ${a.humanLabel === 'No' ? 'text-muted' : 'font-medium text-warning'}`}>{a.humanLabel}</p></Cell>
+      <Cell label="Human"><p className={`text-sm ${a.humanLabel === 'No' || a.humanLabel === 'Not applicable' ? 'text-muted' : 'font-medium text-warning'}`}>{a.humanLabel}</p></Cell>
       <Cell label="Evidence"><p className="text-sm"><EvidenceLinks refs={a.evidence} /></p></Cell>
     </div>
   );
@@ -196,11 +200,19 @@ function AttemptTable({ attempts, collapsePassing, caption }: { attempts: readon
   );
 }
 
-function VerdictView({ verdict, capacityNote }: { verdict: Verdict; capacityNote: string | null }) {
+function VerdictView({ verdict }: { verdict: Verdict }) {
+  if (verdict.kind === 'descriptive') {
+    return (
+      <div>
+        <Chip tone="neutral" testId="descriptive-verdict">Side by side, no winner</Chip>
+        <p className="mt-2 text-sm text-muted">Different capacity, so no winner is named. A winner is only for pairs with equal capacity.</p>
+      </div>
+    );
+  }
   if (verdict.kind === 'winner') {
     return (
       <div>
-        <Chip tone="success" testId="winner-badge">{`Winner on this cohort: ${verdict.mode}${capacityNote ? ', two workers against one' : ''}`}</Chip>
+        <Chip tone="success" testId="winner-badge">{`Winner on this cohort: ${verdict.mode}${verdict.exploratory ? ' (exploratory)' : ''}`}</Chip>
         <p className="mt-2 text-sm text-fg">{verdict.statement}</p>
         <p className="mt-1 text-sm text-muted">{verdict.basis === 'completion' ? 'Decided by more attempts passing, so speed was not compared.' : 'Decided by non-overlapping delivery-time ranges with equal pass rates.'} One fixture, one configuration: not a general claim.</p>
       </div>
@@ -223,7 +235,11 @@ function ComparisonCard({ c }: { c: Comparison }) {
       <p className="font-mono text-mono font-semibold text-fg">{c.title}</p>
       <p className="mt-0.5 text-sm text-muted">{c.scope}</p>
       {c.capacityNote ? <p className="mt-2 text-sm font-medium text-warning" data-testid="capacity-note">{c.capacityNote}</p> : null}
-      <div className="mt-3"><VerdictView verdict={c.verdict} capacityNote={c.capacityNote} /></div>
+      <ul className="mt-2 space-y-0.5 text-sm text-fg" data-testid="comparison-sides">{c.sides.map((s) => <li key={s}>{s}</li>)}</ul>
+      {c.pairs.valid > 0 || c.pairs.excluded.length > 0 ? (
+        <p className="mt-2 text-sm text-muted" data-testid="pair-summary">{c.pairs.valid} valid {c.pairs.valid === 1 ? 'pair' : 'pairs'}{c.pairs.excluded.length > 0 ? `. Excluded: ${c.pairs.excluded.join('; ')}` : ''}.</p>
+      ) : null}
+      <div className="mt-3"><VerdictView verdict={c.verdict} /></div>
     </li>
   );
 }
@@ -281,7 +297,8 @@ function WorkerCohort({ cohort }: { cohort: WorkerCohortView }) {
 function AssistantCohort({ cohort }: { cohort: AssistantCohortView }) {
   return (
     <CohortFrame cohort={cohort} title="Assistant cohort" testId="assistant-cohort">
-      <VerdictView verdict={cohort.comparison.verdict} capacityNote={null} />
+      <ul className="space-y-0.5 text-sm text-fg" data-testid="comparison-sides">{cohort.comparison.sides.map((s) => <li key={s}>{s}</li>)}</ul>
+      <VerdictView verdict={cohort.comparison.verdict} />
       <AssistantTable rows={cohort.rows} caption={`${cohort.cohortId}: results by route`} />
       <AttemptTable attempts={cohort.attempts} collapsePassing caption={`${cohort.cohortId}: requests`} />
     </CohortFrame>
@@ -304,7 +321,9 @@ function RuleList() {
     <section aria-labelledby="benchmark-rules" className="rounded-card border border-line bg-panel p-4">
       <h2 id="benchmark-rules" className="text-sm font-semibold text-fg">How a winner is decided</h2>
       <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
-        <li>Only complete cohorts, matched on starter, verifier, harness and model, meeting the plan’s minimum of three attempts per mode.</li>
+        <li>Only complete cohorts, matched on manifest, starter, verifier, harness and model, with at least three attempts per mode and no recorded confounder. Fewer than five attempts is Exploratory.</li>
+        <li>Completion comes first: more attempts passing decides it, by more than one attempt. Speed is only compared at equal pass rates, and only when the two delivery-time ranges do not overlap.</li>
+        <li>A winner is for pairs with equal capacity. H2 against a one-worker mode is described side by side.</li>
         <li>Failed, timed-out, cancelled and abandoned attempts stay listed and count against a mode.</li>
         <li>Spread and sample size are always shown with a median. Below three valid pairs there is no headline speed result.</li>
         <li>Device and cloud assistants run different models, so they are compared as routes, never as a contest.</li>
@@ -377,7 +396,7 @@ function WorkersTab({ track }: { track: BenchmarkModel['workers'] }) {
   const hasMeasured = track.measured.length > 0;
   return (
     <div className="space-y-5">
-      <TrackIntro>The same Feedback Board starter, contract and verifier for every attempt. Execution host is where the worker ran. Inference destination is where its model ran. They are different questions.</TrackIntro>
+      <TrackIntro>Each cohort is planned on one Feedback Board starter, contract and verifier, and shows what its attempts recorded. Execution host is where the worker ran. Inference destination is where its model ran. They are different questions.</TrackIntro>
       {hasMeasured ? track.measured.map((c) => <WorkerCohort key={c.cohortId} cohort={c} />) : (
         <section aria-label="Worker modes" className="rounded-card border border-line bg-panel p-4"><WorkerTable rows={track.placeholder} caption="Worker modes" /></section>
       )}
@@ -406,22 +425,38 @@ function StatusBanner({ model, onRetry }: { model: BenchmarkModel; onRetry: () =
       </section>
     );
   }
+  const hasSimulated = model.assistant.simulated.length > 0 || model.workers.simulated.length > 0;
   if (total === 0) {
     return (
       <section role="status" data-testid="benchmark-status" data-state="not-measured" className="rounded-card border border-line bg-panel p-4 sm:p-5">
         <p className="text-2xl font-semibold tracking-tight text-fg">Not measured</p>
-        <p className="mt-1 max-w-prose text-muted">No benchmark has been run. These tables show what will be recorded, and every value reads Not measured until a real run produces it. Nothing here is estimated, modelled or interpolated.</p>
+        <p className="mt-1 max-w-prose text-muted">{hasSimulated ? 'No measured results. Only simulated records exist, shown separately below: they are not evidence and count toward nothing.' : 'No benchmark has been run. These tables show what will be recorded, and every value reads Not measured until a real run produces it. Nothing here is estimated, modelled or interpolated.'}</p>
       </section>
     );
   }
-  const t = { attempts: total, passed: model.assistant.totals.passed + model.workers.totals.passed, failed: model.assistant.totals.failed + model.workers.totals.failed, abandoned: model.assistant.totals.abandoned + model.workers.totals.abandoned, human: model.assistant.totals.humanIntervened + model.workers.totals.humanIntervened };
   return (
     <section role="status" data-testid="benchmark-status" data-state="results" aria-label="Measured totals" className="rounded-card border border-line bg-panel p-4">
-      <dl className="flex flex-wrap gap-x-8 gap-y-2" data-testid="benchmark-totals">
-        {[['Measured attempts', t.attempts], ['Passed', t.passed], ['Failed', t.failed], ['Abandoned', t.abandoned], ['Human-intervened', t.human]].map(([k, v]) => <div key={String(k)}><dt className="text-sm text-muted">{k}</dt><dd className="m-0 text-xl font-semibold text-fg">{v}</dd></div>)}
-      </dl>
-      {model.generatedAt ? <p className="mt-2 text-sm text-muted">Results file generated {formatDayTime(model.generatedAt)}. Totals count measured attempts only.</p> : null}
+      <div className="grid gap-4 md:grid-cols-2">
+        <TrackTotals label="Assistant requests" testId="assistant-totals" totals={model.assistant.totals} />
+        <TrackTotals label="Worker attempts" testId="worker-totals" totals={model.workers.totals} />
+      </div>
+      {model.generatedAt ? <p className="mt-3 text-sm text-muted">Results file generated {formatDayTime(model.generatedAt)}. Totals count measured records only, and each track is counted on its own.</p> : null}
     </section>
+  );
+}
+
+function TrackTotals({ label, testId, totals }: { label: string; testId: string; totals: Totals }) {
+  const parts: readonly [string, number][] = [['Passed', totals.passed], ['Failed', totals.failed], ['Timed out', totals.timedOut], ['Cancelled', totals.cancelled], ['Denied', totals.deniedStart], ['Abandoned', totals.abandoned], ['Human-intervened', totals.humanIntervened], ['Not recorded', totals.notRecorded], ['Warm-ups', totals.warmups]];
+  return (
+    <div data-testid={testId}>
+      <p className="text-sm font-medium text-fg">{label}: {totals.attempts === 0 ? 'Not measured' : totals.attempts}</p>
+      {totals.attempts > 0 ? (
+        <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          {parts.map(([k, v]) => <div key={k} className="flex gap-1"><dt className="text-muted">{k}</dt><dd className="m-0 font-semibold text-fg">{v}</dd></div>)}
+        </dl>
+      ) : null}
+      {totals.notRun > 0 ? <p className="mt-1 text-sm text-muted">{totals.notRun} planned but not run, not counted above.</p> : null}
+    </div>
   );
 }
 

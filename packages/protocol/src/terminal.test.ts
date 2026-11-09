@@ -176,6 +176,40 @@ describe('prompts without a newline', () => {
     expect(r.write('Connected\n')).toEqual(['Connected']);
   });
 
+  // A raw-mode program (Node readline) has ECHO and ICANON off and prints the typed value itself, so the helper reports it as unknown, never as echo off.
+  it('a raw-mode program, reported as unknown, has its printed value hidden', () => {
+    const r = new TerminalRedactor();
+    r.write('API key: ');
+    expect(r.releasePrompt()).toBe('API key: ');
+    expect(r.write('sk-typed-value-123\n')).toEqual(['[REDACTED]']);
+  });
+
+  it('a named fragment with no trailing space stays held in raw mode', () => {
+    const r = new TerminalRedactor();
+    r.write('API_KEY:');
+    expect(r.releasePrompt()).toBeNull();
+    expect(r.write('abc123def456\n').join('\n')).not.toContain('abc123def456');
+  });
+
+  it.each([
+    ['API_KEY:', 'abc123def456\n', 'abc123def456'],
+    ['{"password":', '"hunter2"}\n', 'hunter2'],
+    ['Authorization:', ' Basic dXNlcjpwYXNz\n', 'dXNlcjpwYXNz'],
+    ['api_key: ', 'abc123def456\n', 'abc123def456'],
+  ])('with echo off, %s followed by a value never shows the value', (prompt, value, secret) => {
+    const r = new TerminalRedactor();
+    r.write(prompt);
+    r.releasePrompt(true);
+    expect(r.write(value).join('\n')).not.toContain(secret);
+  });
+
+  it.each(['Password (for admin): ', 'Enter password to continue: ', 'Enter your API key here: ', 'Access token (optional): '])('recognises the credential in %s, wherever it sits', (prompt) => {
+    const r = new TerminalRedactor();
+    r.write(prompt);
+    expect(r.releasePrompt()).toBe(prompt);
+    expect(r.write('typed-value\n')).toEqual(['[REDACTED]']);
+  });
+
   it('an unknown echo state is treated as echo on', () => {
     const r = new TerminalRedactor();
     r.write('Password: ');

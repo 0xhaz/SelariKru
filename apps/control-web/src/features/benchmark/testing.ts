@@ -10,12 +10,14 @@ const blankQuality: BenchmarkRecord['quality'] = {
   withinDeclaredLimits: null,
 };
 
+const evidence = (id: string): string[] => [`#/evidence?check=${id}`];
+
 function passedQuality(): BenchmarkRecord['quality'] {
-  return { allRequiredChecksPassed: true, withinDeclaredLimits: true, criteria: blankQuality.criteria.map((c) => ({ ...c, status: 'passed' as const })) };
+  return { allRequiredChecksPassed: true, withinDeclaredLimits: true, criteria: blankQuality.criteria.map((c) => ({ ...c, status: 'passed' as const, evidenceReferences: evidence(c.id) })) };
 }
 
 function failedQuality(failed: readonly string[]): BenchmarkRecord['quality'] {
-  return { allRequiredChecksPassed: false, withinDeclaredLimits: true, criteria: blankQuality.criteria.map((c) => ({ ...c, status: failed.includes(c.id) ? 'failed' as const : 'passed' as const })) };
+  return { allRequiredChecksPassed: false, withinDeclaredLimits: true, criteria: blankQuality.criteria.map((c) => ({ ...c, status: failed.includes(c.id) ? 'failed' as const : 'passed' as const, evidenceReferences: evidence(c.id) })) };
 }
 
 const baseConfig: BenchmarkRecord['configuration'] = {
@@ -36,6 +38,7 @@ export interface WorkerOver {
   readonly actualUsd?: number | null;
   readonly estimatedUsd?: number | null;
   readonly config?: Partial<BenchmarkRecord['configuration']>;
+  readonly confounders?: readonly string[];
   readonly usage?: BenchmarkRecord['resources']['providerUsageByRole'];
 }
 
@@ -51,17 +54,18 @@ export function workerRecord(o: WorkerOver): BenchmarkRecord {
     assistant: null,
     timings: { clockDomain: 'server-monotonic', startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: ran ? (o.ms === undefined ? 900_000 : o.ms) : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
     resources: {
-      localWorkerHours: ran && o.mode !== 'C1' ? 0.25 : null, cloudWorkerHours: ran && o.mode !== 'L1' ? 0.25 : null, integrationAndVerificationHours: null, requestedVcpus: 2, requestedMemoryGib: 4, peakRssMiB: null, energyKwh: null,
+      localWorkerHours: ran && o.mode !== 'C1' ? 0.25 : null, cloudWorkerHours: ran && o.mode !== 'L1' ? 0.25 : null, integrationAndVerificationHours: null, workerHoursProvenance: ran ? 'observed' : 'unavailable', workerHoursSource: ran ? 'runner' : null, requestedVcpus: ran ? 2 : null, requestedMemoryGib: ran ? 4 : null, peakRssMiB: null, energyKwh: null,
       providerUsageByRole: o.usage ?? (ran ? [{ role: 'coding', inputTokens: 120_000, outputTokens: 8_000, cacheTokens: 40_000, provenance: 'observed', source: 'harness' }] : []),
       usageCoverage: ran ? 'complete' : 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true,
     },
-    cost: { currency: 'USD', platformPaidActual: ran ? (o.actualUsd === undefined ? 1.2 : o.actualUsd) : null, platformPaidEstimated: ran ? (o.estimatedUsd === undefined ? 1.3 : o.estimatedUsd) : null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, rateCardVersion: 'rc-2026-11', settlementStatus: ran ? 'settled' : 'unavailable', exclusions: ['fixed subscriptions'] },
-    humanMinutes: { initialSetup: null, scoping: null, intervention: 0, correction: 0, review: 2 },
+    cost: { currency: 'USD', platformPaidActual: ran ? (o.actualUsd === undefined ? 1.2 : o.actualUsd) : null, platformPaidEstimated: ran ? (o.estimatedUsd === undefined ? 1.3 : o.estimatedUsd) : null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, localCostProvenance: 'unavailable', localCostSource: null, rateCardVersion: 'rc-2026-11', settlementStatus: ran ? 'settled' : 'unavailable', exclusions: ['fixed subscriptions'] },
+    humanMinutes: ran ? { initialSetup: null, scoping: null, intervention: 0, correction: 0, review: 2, provenance: 'observed', source: 'reviewer log' } : { initialSetup: null, scoping: null, intervention: null, correction: null, review: null, provenance: 'unavailable', source: null },
     quality,
-    operations: { repairCount: 0, deniedActionCount: 0, cleanupConfirmed: true, externalPrUrl: null, humanIntervened: o.humanIntervened === undefined ? false : o.humanIntervened },
+    operations: { repairCount: ran ? 0 : null, deniedActionCount: ran ? 0 : null, cleanupConfirmed: ran ? true : null, externalPrUrl: null, humanIntervened: o.humanIntervened === undefined ? false : o.humanIntervened },
     failures: status === 'failed' ? [{ category: 'verifier_failed', detail: 'FB-03 did not pass' }] : [],
-    confounders: [],
+    confounders: [...(o.confounders ?? [])],
     artifactReferences: ran ? [`#/evidence?run=${o.mode}-${o.index}`] : [],
+    resultSha256: ran ? 'a'.repeat(64) : null,
     measuredResultsPresent: measured,
   };
 }
@@ -76,6 +80,7 @@ export interface AssistantOver {
   readonly schemaValid?: boolean | null;
   readonly warmup?: boolean;
   readonly cohortId?: string;
+  readonly costUsd?: number;
 }
 
 export function assistantRecord(o: AssistantOver): BenchmarkRecord {
@@ -89,18 +94,19 @@ export function assistantRecord(o: AssistantOver): BenchmarkRecord {
     attemptId: `${device ? 'dev' : 'cloud'}-${o.index}-${dataKind}${o.warmup ? '-w' : ''}`, configuration: { ...baseConfig, cacheCondition: 'warm', codingModel: device ? 'gemini-nano' : 'gemini-2.5-flash', inferenceDestination: device ? 'device' : 'cloud', candidateSha: null },
     assistant: {
       fixtureId: `brief-${o.index % 10}`, requestedMode: o.route, observedInferenceSource: ran ? observed : null, sdkVersion: '13.1.0', schemaValid: ran ? (o.schemaValid === undefined ? true : o.schemaValid) : null, warmup: o.warmup ?? false,
-      semanticReview: { reviewer: null, routeLabelHidden: true, retainedFacts: 6, missingFacts: 0, inventedRequirements: 0 },
-      providerInputTokens: device ? null : 1200, providerOutputTokens: device ? null : 300, inputBytes: 2048, outputBytes: 512,
+      semanticReview: { reviewer: null, routeLabelHidden: ran ? true : null, retainedFacts: ran ? 6 : null, missingFacts: ran ? 0 : null, inventedRequirements: ran ? 0 : null },
+      providerInputTokens: device || !ran ? null : 1200, providerOutputTokens: device || !ran ? null : 300, inputBytes: ran ? 2048 : null, outputBytes: ran ? 512 : null,
     },
-    timings: { clockDomain: 'browser-monotonic', startedAtUtc: null, endedAtUtc: null, firstOutputMs: ran && o.ms !== null ? (o.ms ?? 1200) / 3 : null, generationCompleteMs: ran ? (o.ms === undefined ? 1200 : o.ms) : null, schemaValidationMs: 4, endToEndVerifiedMs: null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
-    resources: { localWorkerHours: null, cloudWorkerHours: null, integrationAndVerificationHours: null, requestedVcpus: null, requestedMemoryGib: null, peakRssMiB: null, energyKwh: null, providerUsageByRole: [], usageCoverage: ran ? (device ? 'none' : 'complete') : 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true },
-    cost: { currency: 'USD', platformPaidActual: device || !ran ? null : 0.001, platformPaidEstimated: null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, rateCardVersion: 'rc-2026-11', settlementStatus: 'unavailable', exclusions: [] },
-    humanMinutes: { initialSetup: null, scoping: null, intervention: null, correction: null, review: null },
+    timings: { clockDomain: 'browser-monotonic', startedAtUtc: null, endedAtUtc: null, firstOutputMs: ran && o.ms !== null ? (o.ms ?? 1200) / 3 : null, generationCompleteMs: ran ? (o.ms === undefined ? 1200 : o.ms) : null, schemaValidationMs: ran ? 4 : null, endToEndVerifiedMs: null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
+    resources: { localWorkerHours: null, cloudWorkerHours: null, integrationAndVerificationHours: null, workerHoursProvenance: 'unavailable', workerHoursSource: null, requestedVcpus: null, requestedMemoryGib: null, peakRssMiB: null, energyKwh: null, providerUsageByRole: [], usageCoverage: ran ? (device ? 'none' : 'complete') : 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true },
+    cost: { currency: 'USD', platformPaidActual: o.costUsd ?? (device || !ran ? null : 0.001), platformPaidEstimated: null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, localCostProvenance: 'unavailable', localCostSource: null, rateCardVersion: 'rc-2026-11', settlementStatus: 'unavailable', exclusions: [] },
+    humanMinutes: { initialSetup: null, scoping: null, intervention: null, correction: null, review: null, provenance: 'unavailable', source: null },
     quality: { allRequiredChecksPassed: null, criteria: [], withinDeclaredLimits: null },
     operations: { repairCount: null, deniedActionCount: null, cleanupConfirmed: null, externalPrUrl: null, humanIntervened: false },
     failures: status === 'failed' ? [{ category: 'adapter_error', detail: 'schema unsupported' }] : [],
     confounders: [],
-    artifactReferences: [],
+    artifactReferences: ran ? [`#/evidence?run=assistant-${o.index}`] : [],
+    resultSha256: ran ? 'b'.repeat(64) : null,
     measuredResultsPresent: dataKind === 'measured' && ran,
   };
 }

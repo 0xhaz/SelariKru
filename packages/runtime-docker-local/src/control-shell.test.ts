@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { spawn, spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { describe, expect, it, vi } from 'vitest';
 import type { ControlShellEvent } from '@selarikru/protocol';
 import { CONTROL_HELPER, SbxControlShell, controlKillArgs, controlShellArgs } from './control-shell.ts';
 import { FakeSbx } from './fake-sbx.ts';
@@ -62,6 +64,14 @@ describe('the shell frames', () => {
     expect(got).toEqual([{ kind: 'echo', on: true }, { kind: 'output', text: 'hi\n' }, { kind: 'ack', seq: 3, echo: false }, { kind: 'exited' }]);
   });
 
+  it('an unreadable echo state, or a raw-mode program, arrives as unknown rather than being dropped', async () => {
+    const { stream, shell } = setup();
+    stream.push('{"e":null}\n');
+    stream.end(0);
+    const got = await collect(shell.events, 2);
+    expect(got).toEqual([{ kind: 'echo', on: null }, { kind: 'exited' }]);
+  });
+
   it('a multi-byte character split across frames is rejoined', async () => {
     const { stream, shell } = setup();
     const bytes = Buffer.from('café', 'utf8');
@@ -99,4 +109,45 @@ describe('the shell frames', () => {
     await adapter.openControlShell({ sandboxId: NAME, attemptId: 'a', taskId: 't', workspacePath: '/ws' }, 'ctl_9');
     expect(sbx.calls[0]!.slice(0, 5)).toEqual(['exec', '-i', '-w', '/ws', NAME]);
   });
+});
+
+// Runs the real guest helper on a real PTY, because the termios flags are the whole point. Needs only python3 and bash, so nothing is mocked and no sandbox is involved.
+const hasPython = spawnSync('python3', ['-c', 'import pty, termios']).status === 0 && process.platform !== 'win32';
+
+describe.skipIf(!hasPython)('the guest helper on a real pty', () => {
+  const run = async (command: string): Promise<(number | null)[]> => {
+    const child = spawn('python3', ['-I', '-c', CONTROL_HELPER, `t${process.pid}${Date.now()}`], { stdio: ['pipe', 'pipe', 'ignore'], cwd: tmpdir() });
+    const states: (number | null)[] = [];
+    let held = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      held += chunk;
+      for (let i = held.indexOf('\n'); i >= 0; i = held.indexOf('\n')) {
+        const frame = JSON.parse(held.slice(0, i)) as { e?: number | null; a?: number };
+        held = held.slice(i + 1);
+        if ('e' in frame && frame.a === undefined) states.push(frame.e ?? null);
+      }
+    });
+    await vi.waitFor(() => expect(states.length).toBeGreaterThan(0), { timeout: 5_000 });
+    child.stdin.write(`${JSON.stringify({ i: 1, d: Buffer.from(`${command}\n`).toString('base64') })}\n`);
+    try {
+      await vi.waitFor(() => expect(states.slice(1).length).toBeGreaterThan(0), { timeout: 8_000 });
+      await new Promise((r) => setTimeout(r, 300));
+    } finally {
+      child.stdin.write('{"x":1}\n');
+      child.kill();
+    }
+    return states;
+  };
+
+  it('a raw-mode program reports unknown, not echo off', async () => {
+    const states = await run(`python3 -I -c 'import tty,time; tty.setraw(0); time.sleep(0.6)'`);
+    expect(states).toContain(null);
+    expect(states.slice(1)).not.toContain(0);
+  }, 20_000);
+
+  it('echo off with canonical input reports echo off', async () => {
+    const states = await run('stty -echo; sleep 0.6; stty echo');
+    expect(states.slice(1)).toContain(0);
+    expect(states).not.toContain(null);
+  }, 20_000);
 });
