@@ -95,6 +95,13 @@ describe('results that are withheld whole', () => {
     ['Read AWS credentials', 'Read', { file_path: '/home/me/.aws/credentials' }],
     ['a service account', 'Bash', { command: 'cat service-account.json | jq .' }],
     ['a pem by Grep', 'Grep', { pattern: 'BEGIN', path: 'certs/tls.pem' }],
+    ['a named env file', 'Read', { file_path: '/w/config/prod.env' }],
+    ['a Grep over an .env glob', 'Grep', { pattern: 'KEY', glob: '.env*' }],
+    ['env behind leading space', 'Bash', { command: '   env' }],
+    ['bash -c "env"', 'Bash', { command: 'bash -c "env"' }],
+    ['sh -c env', 'Bash', { command: 'sh -c env' }],
+    ['bash -lc printenv', 'Bash', { command: "bash -lc 'printenv'" }],
+    ['bash -c cat .env', 'Bash', { command: 'bash -c "cat .env"' }],
   ];
   for (const [name, tool, input] of cases) {
     it(name, async () => {

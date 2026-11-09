@@ -96,6 +96,52 @@ describe('TerminalRedactor', () => {
   });
 });
 
+describe('names and values: both sides', () => {
+  const VALUE = 'Zq9xPlanted7Val';
+  const run = (text: string): string[] => { const r = new TerminalRedactor(); const out = r.write(text); out.push(...r.flush()); return out; };
+  const attacks: readonly (readonly [string, string])[] = [
+    ['DB_PASS', `DB_PASS=${VALUE}\n`], ['SMTP_PASS with a colon', `SMTP_PASS: ${VALUE}\n`], ['PASSPHRASE', `PASSPHRASE=${VALUE}\n`], ['Cookie', `> Cookie: session=${VALUE}\n`],
+    ['Set-Cookie', `< Set-Cookie: sid=${VALUE}; Path=/\n`], ['SESSION_ID', `SESSION_ID=${VALUE}\n`], ['sessionId', `sessionId: ${VALUE}\n`], ['JSESSIONID', `JSESSIONID=${VALUE}\n`],
+    ['a short bearer with a digit', `used Bearer ${VALUE} here\n`], ['a long bearer with no digit', 'Bearer abcdefghijklmnopqrstuvw\n'],
+    ['AWS secret', `AWS_SECRET_ACCESS_KEY=wJ${VALUE}\n`], ['DB_PASSWORD', `DB_PASSWORD=x${VALUE}\n`], ['API_KEY', `API_KEY=a${VALUE}\n`], ['MY_SERVICE_KEY', `MY_SERVICE_KEY=9f${VALUE}\n`],
+    ['apikey', `apikey: ${VALUE}\n`], ['signingKey hump', `signingKey: ${VALUE}\n`], ['x-api-key', `x-api-key: ${VALUE}\n`], ['x-auth segment', `x-auth: ${VALUE}\n`], ['Authorization', `Authorization: Basic ${VALUE}\n`],
+    ['Proxy-Authorization', `Proxy-Authorization: x${VALUE}\n`], ['a query token', `https://x/y?access_token=${VALUE}&z=1\n`],
+    ['a grep prefix on a password', `src/auth.ts:12: const password = "${VALUE}"\n`], ['a grep prefix on an env line', `config/prod.env:3:API_KEY=${VALUE}\n`],
+    ['a numeric password', 'PASSWORD=123456\n'], ['a password in JSON', `{"password":"${VALUE}","x":1}\n`], ['nested under an object', `auth: { pass: "${VALUE}" }\n`],
+    ['a name and its value after a blank line', `token:\n\n${VALUE}\n`], ['a bare name, then the value', `password\n${VALUE}\n`],
+    ['a presigned S3 URL', `https://x.s3.amazonaws.com/a?X-Amz-Signature=${VALUE}\n`], ['a SAS URL', `https://a.blob/x?sig=${VALUE}&se=1\n`], ['Dockerfile ENV', `ENV DB_PASSWORD ${VALUE}\n`], ['Dockerfile ENV, weak name', `ENV SERVICE_KEY ${VALUE}\n`],
+    ['--password', `deploy --password ${VALUE}\n`], ['--api-key', `deploy --api-key ${VALUE}\n`], ['a quoted weak value in code', `const key = "${VALUE}"\n`],
+  ];
+  for (const [name, text] of attacks) it(`redacts: ${name}`, () => { expect(run(text).join('\n')).not.toMatch(new RegExp(`${VALUE}|abcdefghijklmnop|123456`)); });
+
+  const harmless: readonly (readonly [string, readonly string[]])[] = [
+    ['src/auth.ts:12: const x = 1\n', ['src/auth.ts:12: const x = 1']],
+    ['  at handler (/w/src/auth.ts:12:3)\n', ['  at handler (/w/src/auth.ts:12:3)']],
+    ['<li key={item.id} className="row">{item.title}</li>\n', ['<li key={item.id} className="row">{item.title}</li>']],
+    ['"author": "Jane Doe",\n', ['"author": "Jane Doe",']],
+    ['author: Jane\n', ['author: Jane']],
+    ['"keywords": ["a"],\n', ['"keywords": ["a"],']],
+    ['keyboard: us\n', ['keyboard: us']],
+    ['Authentication: uses cookies\n', ['Authentication: uses cookies']],
+    ['tokens: 5\n', ['tokens: 5']],
+    ['"max_tokens": 4096,\n', ['"max_tokens": 4096,']],
+    ['primaryKey: true,\n', ['primaryKey: true,']],
+    ['function f(token: string): void {\n', ['function f(token: string): void {']],
+    ['const key = x\n', ['const key = x']],
+    ['Key points: small diff\n', ['Key points: small diff']],
+    ['Press the hotkey: ctrl-s\n', ['Press the hotkey: ctrl-s']],
+    ['FAIL src/auth/login.test.ts > auth: rejects bad login\n', ['FAIL src/auth/login.test.ts > auth: rejects bad login']],
+    ['foo(key, value)\n', ['foo(key, value)']],
+    ['Tests: 3 passed\n', ['Tests: 3 passed']],
+    ['The test failed on the monkey\nNext sentence stays visible\n', ['The test failed on the monkey', 'Next sentence stays visible']],
+    ['I found the API key\nNext sentence stays visible\n', ['I found the API key', 'Next sentence stays visible']],
+    ['password:\nthese are several words\n', ['password:', REDACTED]],
+    ['bypass: yes\n', ['bypass: yes']],
+    ['Bearer of bad news\n', ['Bearer of bad news']],
+  ];
+  for (const [text, expected] of harmless) it(`leaves alone: ${text.split('\n')[0]}`, () => { expect(run(text)).toEqual(expected); });
+});
+
 describe('the terminal upload schema', () => {
   const lease = { attemptId: 'a', fence: 1, leaseToken: 't' };
   it('accepts a bounded batch and refuses more', () => {

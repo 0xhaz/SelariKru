@@ -19,15 +19,94 @@ const PEM_WHOLE = /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----
 export const TERMINAL_WITHHELD_NOTICE = '[output withheld: may contain secrets]';
 const PEM_NOTICE = '[private key withheld]';
 
-/** Any identifier with one of these in it names a credential. Bounded on both sides, so a very long line cannot cost quadratic time on the worker's own event loop. */
-const NAME = '[A-Za-z0-9_.-]{0,64}(?:secret|passw(?:or)?d|pwd|token|key|credential|auth)[A-Za-z0-9_.-]{0,64}';
-const NAME_END = new RegExp(`${NAME}["']?\\s*[:=]?\\s*["']?$`, 'i');
-const NAME_SEPARATOR_END = new RegExp(`${NAME}["']?\\s*[:=]\\s*["']?$`, 'i');
+/** A word that means a credential wherever it appears in a name. A value under one of these is always hidden. */
+const STRONG_NAME = /secret|passw(?:or)?d|passphrase|(?<!by|com|sur|tres)pass(?![a-z])|pwd|credential|cookie|authorization|api[_.-]?key|access[_.-]?key|private[_.-]?key/i;
+/** Names that often mean a credential and often do not, so the value is looked at too. */
+const WEAK_NAME = /token|sess(?:ion)?[_.-]?id|(?:^|[._-])sid$/i;
+/** `key` and `auth` count only as a whole segment or camelCase hump: `primaryKey` yes, `monkey`, `author` and `keyboard` no. */
+const WEAK_SEGMENTS: ReadonlySet<string> = new Set(['key', 'keys', 'auth']);
+
+type NameKind = 'strong' | 'weak' | null;
+
+function kindOf(name: string): NameKind {
+  if (STRONG_NAME.test(name)) return 'strong';
+  if (WEAK_NAME.test(name)) return 'weak';
+  return name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').split(/[_.-]+/).some((part) => WEAK_SEGMENTS.has(part.toLowerCase())) ? 'weak' : null;
+}
+
+/** `auth.ts`, `token.json`: a file, not a name, unless the "extension" is itself a credential word as in `db.pass`. */
+const fileLike = (name: string): boolean => {
+  const ext = /\.([a-z]{1,5})$/i.exec(name)?.[1];
+  return ext !== undefined && kindOf(ext) === null;
+};
+
+const VALUE_END = String.raw`\s*(?:[,;)}\]]|$)`;
+const HARMLESS_LITERAL = new RegExp(String.raw`^(?:-?\d{1,7}(?:\.\d+)?|true|false|null|undefined|none|nil)${VALUE_END}`, 'i');
+const TS_PRIMITIVE = /^(?:string|number|boolean|bigint|symbol|object|any|unknown|void|never|null|undefined)(?:\[\])?(?![\w-])/;
+const TS_TYPE_NAME = new RegExp(String.raw`^[A-Z][a-zA-Z]{1,40}(?:<[^>\n]*>)?(?:\[\])?\s*(?:[,;)}\]|&=]|$)`);
+const PROSE = /^[A-Za-z][A-Za-z']*(?:\s+[A-Za-z][A-Za-z']*){2,}[.!?]?\s*$/;
+const DECLARED = /\b(?:const|let|var|val)\s+$/;
+
+/** Whether what follows a weak name plainly is not a credential: a count, a flag, a type, an object, a sentence, or a reference in code. Anything that could be a value is hidden. */
+function harmlessValue(value: string, annotation: boolean, before: string): boolean {
+  if (value.startsWith('{') || HARMLESS_LITERAL.test(value) || PROSE.test(value)) return true;
+  if (annotation && (TS_PRIMITIVE.test(value) || TS_TYPE_NAME.test(value))) return true;
+  return DECLARED.test(before) && !/^["'`]/.test(value);
+}
+
+const shouldHide = (name: string, value: string, annotation: boolean, before: string): boolean => {
+  const kind = kindOf(name);
+  return kind === 'strong' || (kind === 'weak' && !harmlessValue(value, annotation, before));
+};
+
+const NAME_AND_SEPARATOR = /([A-Za-z0-9_.-]{1,128})(["'\]]{0,2}\s*(?::=|:(?!:)|={1,3}(?![=>])))(\s*)/g;
+
+/** Where a value starting at `start` ends: its closing quote, or the end of the line, since an env value or YAML scalar has no reliable end of its own. */
+function valueEnd(text: string, start: number): number {
+  const newline = text.indexOf('\n', start);
+  const eol = newline < 0 ? text.length : newline;
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return eol;
+  const close = text.indexOf(quote, start + 1);
+  return close >= 0 && close < eol ? close + 1 : eol;
+}
+
+/** Walks every `name: value` in the text. A value that is left alone is still read, so `src/a.ts:3: password = x` and `auth: { pass: x }` lose only what they should. Linear in the line. */
+function redactAssignments(text: string): string {
+  let out = '';
+  let copied = 0;
+  NAME_AND_SEPARATOR.lastIndex = 0;
+  for (let m = NAME_AND_SEPARATOR.exec(text); m; m = NAME_AND_SEPARATOR.exec(text)) {
+    const name = m[1]!;
+    const separator = m[2]!;
+    const start = m.index + m[0].length;
+    if (start >= text.length || text[start] === '\n') continue;
+    // `name.ext:12` is a position in a file, and a stack frame or grep prefix is not a credential.
+    if (m[3] === '' && separator === ':' && /\d/.test(text[start]!) && fileLike(name)) continue;
+    const end = valueEnd(text, start);
+    if (!shouldHide(name, text.slice(start, end), separator.endsWith(':'), text.slice(Math.max(0, m.index - 8), m.index))) continue;
+    out += `${text.slice(copied, start)}${REDACTED}`;
+    copied = end;
+    NAME_AND_SEPARATOR.lastIndex = end;
+  }
+  return out + text.slice(copied);
+}
+
+const TRAILING_NAME = /([A-Za-z0-9_.-]{1,128})["']?\s*(:=|:|={1,3})?\s*["']?$/;
+
+/** A line whose value may be on the next line: it ends in a name and a separator, or (in stream mode) is nothing but a name. A sentence that happens to end in such a word is not one. */
+function endsWithName(line: string, requireSeparator: boolean): boolean {
+  const m = TRAILING_NAME.exec(line);
+  if (!m || kindOf(m[1]!) === null || fileLike(m[1]!)) return false;
+  return m[2] !== undefined || (!requireSeparator && line.trim().replace(/^["']|["']$/g, '') === m[1]);
+}
+
+const BARE_BEARER = /\b(bearer)\s+(?:(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{12,}|[A-Za-z0-9._~+/=-]{20,})/gi;
 const BEARER_END = /\b(?:bearer|basic)\s*$/i;
-const YAML_BLOCK = new RegExp(`^(\\s*)(?:-\\s+)?${NAME}["']?\\s*:\\s*[|>][-+0-9]*\\s*$`, 'i');
-/** Unquoted values run to the end of the line: an env value or YAML scalar has no reliable end, and hiding too much is the accepted cost. */
-const ASSIGNMENT = new RegExp(`(${NAME}["'\\]]?\\s*[:=]\\s*)("[^"\\n]*"?|'[^'\\n]*'?|\\S[^\\n]*)`, 'gi');
-const FLAG_VALUE = /(--?[a-z0-9-]{0,64}(?:secret|passw(?:or)?d|pwd|token|key|credential|auth)[a-z0-9-]{0,64})(\s+)("[^"\n]*"|'[^'\n]*'|[^\s-]\S*)/gi;
+const YAML_BLOCK = /^(\s*)(?:-\s+)?([A-Za-z0-9_.-]{1,128})["']?\s*:\s*[|>][-+0-9]*\s*$/;
+const FLAG_VALUE = /(?<![\w-])(--?)([a-z0-9][a-z0-9-]{0,127})(\s+)("[^"\n]*"|'[^'\n]*'|[^\s-]\S*)/gi;
+const DOCKER_ENV = /^(\s*ENV\s+)([A-Za-z0-9_.-]{1,128})(\s+)(\S[^\n]*)$/gm;
+const PRESIGNED = /([?&](?:X-Amz-Signature|X-Amz-Credential|X-Goog-Signature|Signature|sig)=)[^&\s'"]+/gi;
 const WEBHOOK_URL = /https?:\/\/(?:hooks\.slack\.com\/[^\s'"]+|[^\s'"]*webhook[^\s'"]*)/gi;
 const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/?#'"]*@/gi;
 const USER_PASS = /(^|\s)((?:-u|--user)(?:[=\s]\s*)?)("[^"\n]*:[^"\n]*"|'[^'\n]*:[^'\n]*'|[^\s"':]+:\S+)/g;
@@ -39,13 +118,17 @@ const COMMAND_PASSWORDS: readonly RegExp[] = [
 ];
 
 /**
- * The terminal's own redaction, stricter than `redactSecrets` and kept apart from it so other uses do not change meaning. Output is shown to a person, so anything named like a
- * credential goes, with no requirement that the value look like one. It over-redacts on purpose. It still only knows formats: a sensitive value with neither a telling name nor shape passes.
+ * The terminal's own redaction, stricter than `redactSecrets` and kept apart from it so other uses do not change meaning. A value under a credential's name goes, with no requirement
+ * that it look like one; only weak names get their value looked at. It still only knows formats: a sensitive value with neither a telling name nor shape passes.
  */
 export function redactTerminalText(text: string): string {
-  let out = redactSecrets(text).replace(PEM_WHOLE, PEM_NOTICE).replace(WEBHOOK_URL, REDACTED).replace(URL_USERINFO, `$1${REDACTED}@`).replace(USER_PASS, `$1$2${REDACTED}`);
+  let out = redactSecrets(text).replace(PEM_WHOLE, PEM_NOTICE).replace(WEBHOOK_URL, REDACTED).replace(URL_USERINFO, `$1${REDACTED}@`).replace(USER_PASS, `$1$2${REDACTED}`).replace(PRESIGNED, `$1${REDACTED}`);
   for (const re of COMMAND_PASSWORDS) out = out.replace(re, `$1${REDACTED}`);
-  return out.replace(FLAG_VALUE, `$1$2${REDACTED}`).replace(ASSIGNMENT, `$1${REDACTED}`);
+  out = out
+    .replace(BARE_BEARER, `$1 ${REDACTED}`)
+    .replace(FLAG_VALUE, (whole: string, dash: string, name: string, gap: string, value: string) => (shouldHide(name, value, false, '') ? `${dash}${name}${gap}${REDACTED}` : whole))
+    .replace(DOCKER_ENV, (whole: string, head: string, name: string, gap: string, value: string) => (shouldHide(name, value, false, '') ? `${head}${name}${gap}${REDACTED}` : whole));
+  return redactAssignments(out);
 }
 
 const NEWLINE = /\r\n|\n|\r(?!$)/;
@@ -55,7 +138,7 @@ const fit = (line: string): string => (line.length > TERMINAL_MAX_LINE_CHARS ? `
 /**
  * Redacts worker output that arrives in arbitrary chunks. It is line-buffered: text is held until its line is complete, and only then cleaned and redacted, so a secret split
  * across two chunks is rejoined before any pattern looks at it. Nothing of a partial line is ever released; a line that never ends is dropped whole. Multi-line secrets are
- * handled by state: a line ending in a credential's name is read with the next, a YAML block under one is withheld, and everything after an unclosed private-key header is withheld
+ * handled by state: a line ending in a credential's name and a separator, or that is only a name, is read with the next, a YAML block under one is withheld, and everything after an unclosed private-key header is withheld
  * until its END or the end of the run. `lines` mode is for text that has already been through a stream redactor: only a name with an explicit separator waits for the next line,
  * because a rendered line that merely ends in such a word says nothing about what follows.
  */
@@ -142,22 +225,27 @@ export class TerminalRedactor {
       }
       this.yamlBlock = null;
     }
-    const nameEnd = this.mode === 'stream' ? NAME_END : NAME_SEPARATOR_END;
+    const requireSeparator = this.mode === 'lines';
     const held = this.hanging;
     this.hanging = null;
-    // Judged after redaction: a value that happens to end in such a word is gone by then, and is not a name left waiting.
-    if (held !== null && nameEnd.test(redactTerminalText(held)) && clean.trim() !== '') return [...this.emit(held), REDACTED];
+    // Blank lines between a name and its value change nothing, so it keeps waiting.
+    if (held !== null && clean.trim() === '') {
+      this.hanging = held;
+      return [];
+    }
+    // Judged after redaction: a value that happens to end in such a word is gone by then, and is not a name left waiting. Only a single token is taken for its value.
+    if (held !== null && endsWithName(redactTerminalText(held), requireSeparator) && /^\s*\S+\s*$/.test(clean)) return [...this.emit(held), REDACTED];
     const joined = held !== null ? `${held}\n${clean}` : clean;
     if (PEM_BEGIN.test(joined) && !PEM_END.test(joined)) {
       this.pemLines = 0;
       return [];
     }
     const yaml = YAML_BLOCK.exec(clean);
-    if (yaml) {
+    if (yaml && kindOf(yaml[2]!) !== null) {
       this.yamlBlock = { indent: (yaml[1] ?? '').length, lines: 0 };
       return this.emit(joined);
     }
-    if (held === null && (BEARER_END.test(clean) || nameEnd.test(redactTerminalText(clean)))) {
+    if (held === null && (BEARER_END.test(clean) || endsWithName(redactTerminalText(clean), requireSeparator))) {
       this.hanging = clean;
       return [];
     }

@@ -65,6 +65,7 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
     setState(CONNECTING);
     setLines([]);
     setHidden(false);
+    pinned.current = true;
     held.current = [];
     setHeldCount(0);
     void (async () => {
@@ -134,6 +135,7 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
         ) : null}
       </div>
 
+      <p className="text-sm text-muted" data-testid="terminal-caveat">Known secret formats are hidden. Other sensitive values may still appear.</p>
       {state.status === 'disconnected' ? (
         <p className="text-sm text-fg" data-testid="terminal-last-line">{state.lastLineAt ? <>Last line at <time dateTime={state.lastLineAt}>{formatExact(state.lastLineAt)}</time>.</> : 'No line had arrived before the connection was lost.'}</p>
       ) : null}
@@ -150,7 +152,6 @@ export function TerminalPanel({ target, onOpen }: { target: AuthorizedTerminalRe
       ) : null}
 
       {heldCount > 0 ? <button type="button" className={buttonQuiet} data-testid="terminal-held" onClick={() => { pinned.current = true; release(); }}>Show {heldCount} new {heldCount === 1 ? 'line' : 'lines'}</button> : null}
-      <p className="text-sm text-muted" data-testid="terminal-caveat">Known secret formats are hidden. Other sensitive values may still appear.</p>
       <p className="text-sm text-muted">Read-only. Nothing here reaches the worker, and output is never saved.</p>
     </div>
   );

@@ -505,6 +505,21 @@ test('terminal: new lines do not move the text under someone reading back', asyn
   await expect(panel.getByTestId('terminal-held')).toHaveCount(0);
 });
 
+test('terminal: the caveat sits above the output, and Reconnect follows the output again', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await terminalPage(page, { status: 'disconnected', reason: 'connection_lost', lastLineAt: LAST_LINE, lines: Array.from({ length: 120 }, (_, i) => `line ${i}`) });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  const output = panel.getByTestId('terminal-output');
+  await expect(panel.getByTestId('terminal-line')).toHaveCount(120);
+  const above = await panel.getByTestId('terminal-caveat').evaluate((c) => (c.compareDocumentPosition(document.querySelector('[data-testid="terminal-output"]')!) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
+  expect(above).toBe(true);
+  await output.evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+  await expect.poll(() => output.evaluate((el) => el.scrollTop)).toBe(0);
+  await panel.getByRole('button', { name: 'Reconnect' }).click();
+  await expect(panel.getByTestId('terminal-line')).toHaveCount(120);
+  await expect.poll(() => panel.getByTestId('terminal-output').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(24);
+});
+
 test('axe pass: terminal light theme', async ({ page }) => {
   await terminalPage(page, { status: 'live', lastLineAt: LAST_LINE, lines: OUTPUT }, 'light');
   await expectNoAxeViolations(page);

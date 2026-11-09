@@ -38,10 +38,11 @@ interface ToolArguments {
   readonly shown: string;
   readonly command: string | null;
   readonly paths: readonly string[];
+  readonly glob: string | null;
 }
 
 function readArguments(preview: string | undefined): ToolArguments {
-  if (preview === undefined) return { shown: '', command: null, paths: [] };
+  if (preview === undefined) return { shown: '', command: null, paths: [], glob: null };
   let input: Record<string, unknown> | null = null;
   try {
     input = JSON.parse(preview) as Record<string, unknown>;
@@ -55,21 +56,36 @@ function readArguments(preview: string | undefined): ToolArguments {
   const command = value('command');
   const paths = FILE_FIELDS.flatMap((f) => { const v = value(f); return v === null ? [] : [v]; });
   const main = command ?? paths[0] ?? value('pattern');
-  if (main !== null) return { shown: ` ${main}`, command, paths };
-  return { shown: input !== null && preview.length <= MAX_BARE_ARGUMENTS ? ` ${preview}` : ' [arguments not shown]', command, paths };
+  const glob = value('glob');
+  if (main !== null) return { shown: ` ${main}`, command, paths, glob };
+  return { shown: input !== null && preview.length <= MAX_BARE_ARGUMENTS ? ` ${preview}` : ' [arguments not shown]', command, paths, glob };
 }
 
 /** Files that hold credentials by convention. Over-matching costs one tool result on screen; it never touches the worker. */
-const SENSITIVE_FILE = /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]*\.(?:pem|key|p12|pfx|jks|keystore|asc|gpg)|id_(?:rsa|dsa|ecdsa|ed25519)|\.netrc|\.npmrc|\.pypirc|\.pgpass|\.htpasswd|\.git-credentials|[^/]*credentials?[^/]*|\.?secrets?\.(?:json|ya?ml|toml|env|txt)|service[-_]?account[^/]*\.json|kubeconfig)$/i;
+const SENSITIVE_FILE = /(?:^|\/)(?:[^/]*\.env(?:\.[^/]*)?|[^/]*\.(?:pem|key|p12|pfx|jks|keystore|asc|gpg)|id_(?:rsa|dsa|ecdsa|ed25519)|\.netrc|\.npmrc|\.pypirc|\.pgpass|\.htpasswd|\.git-credentials|[^/]*credentials?[^/]*|\.?secrets?\.(?:json|ya?ml|toml|env|txt)|service[-_]?account[^/]*\.json|kubeconfig)$/i;
 /** `env` or `printenv` that prints the environment. `env FOO=1 cmd` runs a command instead, so a following assignment does not count. */
-const ENV_DUMP = /(?:^|[;&|(]\s*|\bsudo\s+)(?:env|printenv)(?:\s*$|\s*[;&|)]|\s+(?![^\s=]+=)[^\s;&|)]*)/;
+const ENV_DUMP = /(?:^|[;&|(\n]\s*|\bsudo\s+)(?:env|printenv)(?:\s*$|\s*[;&|)\n]|\s+(?![^\s=]+=)[^\s;&|)]*)/;
+/** `bash -c "env"` and friends: what the shell will run is what matters. */
+const SHELL_WRAPPER = /^(?:(?:ba|da|z|k)?sh)\s+(?:-[a-z]+\s+)*-[a-z]*c\s+([\s\S]*)$/;
+
+function unwrapShell(command: string): string {
+  let current = command.trim();
+  for (let i = 0; i < 3; i += 1) {
+    const inner = SHELL_WRAPPER.exec(current)?.[1];
+    if (inner === undefined) break;
+    current = inner.trim().replace(/^(["'])([\s\S]*)\1$/, '$2').trim();
+  }
+  return current;
+}
 const ENV_SOURCES = /\/proc\/(?:\d+|self)\/environ\b|^\s*(?:export\s+-p|declare\s+-x|set)\s*$/;
 
 function mayExposeSecrets(args: ToolArguments): boolean {
   if (args.paths.some((p) => SENSITIVE_FILE.test(p))) return true;
+  if (args.glob !== null && (SENSITIVE_FILE.test(args.glob) || /(?:^|\/)[^/]*\.env/i.test(args.glob))) return true;
   if (args.command === null) return false;
-  if (ENV_DUMP.test(args.command) || ENV_SOURCES.test(args.command)) return true;
-  return args.command.split(/[\s;&|<>()"'=,`]+/).some((t) => t !== '' && SENSITIVE_FILE.test(t));
+  const command = unwrapShell(args.command);
+  if (ENV_DUMP.test(command) || ENV_SOURCES.test(command)) return true;
+  return command.split(/[\s;&|<>()"'=,`]+/).some((t) => t !== '' && SENSITIVE_FILE.test(t));
 }
 
 /**
