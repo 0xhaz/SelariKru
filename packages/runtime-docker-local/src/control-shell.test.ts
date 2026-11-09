@@ -17,6 +17,11 @@ describe('the control shell command', () => {
     }
   });
 
+  it('python ignores the workspace on its import path, so a planted json.py cannot replace the standard library', () => {
+    const args = controlShellArgs(NAME, '/ws', 'ctl_1');
+    expect(args.slice(args.indexOf('python3'), args.indexOf('python3') + 3)).toEqual(['python3', '-I', '-c']);
+  });
+
   it('a session id can never become part of a shell command', () => {
     expect(() => controlShellArgs(NAME, '/ws', 'x; rm -rf /')).toThrow();
     expect(() => controlKillArgs(NAME, '$(reboot)')).toThrow();

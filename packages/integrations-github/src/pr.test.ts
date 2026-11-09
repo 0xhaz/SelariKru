@@ -108,6 +108,23 @@ describe('openReviewablePr', () => {
     expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   });
 
+  it('names every attempt of this run a person opened a shell in, from the database, older revisions included, and no other run\'s', async () => {
+    const at = new Date('2026-11-09T02:00:00.000Z');
+    const attempt = (attemptId: string, taskId: string, revision: number, humanIntervenedAt: Date | null) => ({ tenantId: TENANT, projectId: PROJECT, attemptId, taskId, revision, attemptNumber: 1, humanIntervenedAt });
+    await tdb.db.insert(schema.taskRevisions).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, taskId: 'task_a', revision: 2, boardId: 'b1', spec: specFor('task_a', { revision: 2 }) });
+    await tdb.db.insert(schema.runs).values({ tenantId: TENANT, projectId: PROJECT, runId: 'run_other', lifecycle: 'running', budget: { limitUsd: 1 } });
+    await seedTask(tdb.db, specFor('task_other', { runId: 'run_other' }), 'ready');
+    await tdb.db.insert(schema.attempts).values([attempt('att_marked', 'task_a', 1, at), attempt('att_newer', 'task_a', 2, new Date(at.getTime() + 60_000)), attempt('att_clean', 'task_b', 1, null), attempt('att_other_run', 'task_other', 1, at)]);
+    await openReviewablePr(run, deps());
+    const body = gh.prs[0]!.body;
+    expect(body).toContain('## Human intervention');
+    expect(body).toContain('Attempt `att_marked` (task `task_a`) at 2026-11-09T02:00:00.000Z');
+    expect(body).toContain('Attempt `att_newer` (task `task_a`) at 2026-11-09T02:01:00.000Z');
+    expect(body).toContain('A person opened a shell');
+    expect(body).not.toContain('att_clean');
+    expect(body).not.toContain('att_other_run');
+  });
+
   it('prints no approvals section when none were granted', async () => {
     await openReviewablePr(run, deps());
     expect(gh.prs[0]!.body).not.toContain('Approvals granted');

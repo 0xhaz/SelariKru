@@ -136,5 +136,8 @@ describe('human intervention', () => {
     const snapshot: ProjectViewSnapshot = { ...empty, runs: { r1: run('r1'), r2: run('r2') }, tasks: { t1: task('t1', 'r1'), t2: task('t2', 'r2') }, attempts: { a1: attempt('a1', 't1', '2026-11-09T01:05:00.000Z'), a2: attempt('a2', 't2', '2026-11-09T01:06:00.000Z'), a3: attempt('a3', 't1', null) } };
     const model = buildEvidence(snapshot, 'r1')!;
     expect(model.humanIntervened).toEqual([{ attemptId: 'a1', taskId: 't1', at: '2026-11-09T01:05:00.000Z' }]);
+    // An attempt of an older revision is only on the server's list, and the same attempt is not counted twice.
+    const withOlder: ProjectViewSnapshot = { ...snapshot, runs: { ...snapshot.runs, r1: { ...run('r1'), humanInterventions: [{ attemptId: 'old', taskId: 't1', at: '2026-11-09T00:50:00.000Z' }, { attemptId: 'a1', taskId: 't1', at: '2026-11-09T01:05:00.000Z' }] } } };
+    expect(buildEvidence(withOlder, 'r1')!.humanIntervened.map((h) => h.attemptId)).toEqual(['old', 'a1']);
   });
 });

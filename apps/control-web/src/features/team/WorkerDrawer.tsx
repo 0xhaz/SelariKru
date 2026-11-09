@@ -346,7 +346,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
           ))}
         </div>
 
-        {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person typed into this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
+        {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person opened a shell in this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
           {tab === 'task' ? <TaskPanel detail={detail} row={row} assign={assign} /> : null}
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}

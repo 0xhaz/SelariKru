@@ -59,7 +59,7 @@ export interface EvidenceModel {
   readonly candidate: CandidateModel | null;
   readonly notDelivered: readonly string[];
   readonly reducedScopeAccepted: boolean;
-  /** Attempts of this run a person typed into, as they happened. A verifier pass does not clear this: the recorded model cannot vouch for what a person ran. */
+  /** Attempts of this run a person opened a shell in, as they happened. A verifier pass does not clear this: the recorded model cannot vouch for what a person ran. */
   readonly humanIntervened: readonly { readonly attemptId: string; readonly taskId: string; readonly at: string }[];
 }
 
@@ -161,6 +161,13 @@ function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectV
 }
 
 /** The acceptance-to-evidence report for one run. Null when the project has no run. Pure. */
+/** The server's list covers every revision of the run; attempts in the projection add what an event marked since that snapshot. */
+function interventionsOf(snapshot: ProjectViewSnapshot, run: RunView): EvidenceModel['humanIntervened'] {
+  const live = Object.values(snapshot.attempts).filter((a) => a.humanIntervenedAt && snapshot.tasks[a.taskId]?.runId === run.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt! }));
+  const all = new Map([...(run.humanInterventions ?? []), ...live].map((h) => [h.attemptId, h]));
+  return [...all.values()].sort((x, y) => x.at.localeCompare(y.at));
+}
+
 export function buildEvidence(snapshot: ProjectViewSnapshot, wantedRunId: string | null): EvidenceModel | null {
   const run = chosenRun(snapshot, wantedRunId);
   if (!run) return null;
@@ -176,7 +183,7 @@ export function buildEvidence(snapshot: ProjectViewSnapshot, wantedRunId: string
     states: [verifiedState(run, evidence), mergedState(run, snapshot, simulated), DEPLOYED],
     coverage: run.criteria ? `${run.criteria.verified} of ${run.criteria.total} approved criteria verified` : 'Per-criterion evidence is not connected',
     reducedScopeAccepted: run.reducedScope !== null,
-    humanIntervened: Object.values(snapshot.attempts).filter((a) => a.humanIntervenedAt && snapshot.tasks[a.taskId]?.runId === run.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt! })).sort((x, y) => x.at.localeCompare(y.at)),
+    humanIntervened: interventionsOf(snapshot, run),
     counts, criteria, candidate: evidence ? candidateOf(evidence, run, snapshot, simulated) : null, notDelivered,
   };
 }

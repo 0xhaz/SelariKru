@@ -701,6 +701,8 @@ test('control mode: the read-only view has no way to send anything until a perso
   await expect(dialog).toContainText('human-intervened');
   await expect(dialog).toContainText('recorded model cannot vouch');
   await expect(dialog).toContainText('cannot answer a decision, grant access or pass a check');
+  await expect(dialog).toContainText('The worker runs as the same user and can read what you type here, including hidden input. Do not type real secrets. Typed lines are stored after pattern redaction.');
+  await expect(dialog).toContainText('one line at a time');
   await expect(panel.getByTestId('control-input')).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Stay read-only' }).click();
   await expect(dialog).toHaveCount(0);
@@ -709,6 +711,8 @@ test('control mode: the read-only view has no way to send anything until a perso
   await page.getByRole('button', { name: 'Take control' }).click();
   await expect(panel.getByTestId('control-banner')).toContainText('Control mode on');
   await expect(panel.getByTestId('control-honest')).toContainText('recorded model cannot vouch');
+  await expect(panel.getByTestId('control-same-user')).toHaveText('The worker runs as the same user and can read what you type here, including hidden input. Do not type real secrets. Typed lines are stored after pattern redaction.');
+  await expect(panel.getByTestId('control-line-mode')).toContainText('vim and top');
   expect(await controlCalls(page, 'openTerminalControl')).toBe(1);
   await expectNoAxeViolations(page);
 });
@@ -734,7 +738,25 @@ test('control mode: a prompt with echo off hides the field and says the line wil
   await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'text');
   await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'on', reason: null, echo: false }));
   await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'password');
-  await expect(panel.getByTestId('control-hidden-note')).toContainText('not recorded');
+  await expect(panel.getByTestId('control-hidden-note')).toHaveText('This line is hidden here. It is not recorded by SelariKru, but it is visible inside the sandbox.');
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('autocomplete', 'new-password');
+});
+
+test('control mode: Leave is on screen as soon as control mode is on at 375', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 900 });
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByRole('button', { name: 'Leave control mode' })).toBeInViewport();
+});
+
+test('control mode: the mark shows on Evidence even with no per-criterion evidence', async ({ page }) => {
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait', attemptPatch: { '*': { humanIntervenedAt: '2026-11-08T06:00:30.000Z' } }, runPatch: { criteria: null, evidence: null } }; });
+  await page.goto('/tests/harness/index.html#/evidence');
+  await expect(page.getByText('Per-criterion evidence is not available for this run')).toBeVisible();
+  await expect(page.getByTestId('evidence-human').locator('li').first()).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Human intervention' })).toContainText('opened a shell');
 });
 
 test('control mode: leaving it, and closing the drawer, end it', async ({ page }) => {

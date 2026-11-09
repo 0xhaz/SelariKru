@@ -3,6 +3,10 @@ import { Chip, buttonDangerSolid, buttonPrimary, buttonQuiet } from '@selarikru/
 import type { AuthorizedTerminalRequest, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlReason, TerminalControlState } from '@selarikru/view-protocol';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 
+/** Said in the confirm and beside the input: echo off and a password field are not protection from the worker. */
+const SAME_USER = 'The worker runs as the same user and can read what you type here, including hidden input. Do not type real secrets. Typed lines are stored after pattern redaction.';
+const LINE_MODE = 'Control mode sends one line at a time, so full-screen programs like vim and top will not render.';
+
 const REASON: Readonly<Record<TerminalControlReason, string>> = {
   demo: 'Demo data has no shell to type into.',
   ticket_invalid: 'The connection could not be set up. Try again.',
@@ -32,8 +36,8 @@ const REASON: Readonly<Record<TerminalControlReason, string>> = {
 const OUTCOME: Readonly<Record<TerminalControlInputOutcome, string>> = {
   recorded: '',
   interrupt: '',
-  withheld_echo_off: 'Sent. Its text was not recorded, because the shell was not echoing.',
-  withheld_unconfirmed: 'Sent. Its text was not recorded, because the shell did not confirm what it did with it.',
+  withheld_echo_off: 'Sent. Its text was not recorded by SelariKru, because the shell was not echoing. It was still visible inside the sandbox.',
+  withheld_unconfirmed: 'Sent. Its text was not recorded by SelariKru, because the shell did not confirm what it did with it.',
   rate_limited: 'Too fast: that line was not sent.',
   too_long: 'That line was too long and was not sent.',
 };
@@ -81,7 +85,7 @@ export function ControlBar({ target, onOpen, canOpen, humanIntervenedAt }: { tar
   const closedReason = state && state.reason !== null ? REASON[state.reason] : null;
   return (
     <div data-testid="control-bar" data-phase={state?.phase ?? 'off'} className="space-y-2 rounded-chip border border-line bg-panel p-3">
-      {humanIntervenedAt !== null && !on ? <p className="text-sm text-fg" data-testid="control-marked"><Chip tone="warning">Human-intervened</Chip> <span className="ml-1 text-muted">A person has typed into this attempt’s sandbox.</span></p> : null}
+      {humanIntervenedAt !== null && !on ? <p className="text-sm text-fg" data-testid="control-marked"><Chip tone="warning">Human-intervened</Chip> <span className="ml-1 text-muted">A person has opened a shell in this attempt’s sandbox.</span></p> : null}
 
       {mode.at === 'idle' ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -94,7 +98,7 @@ export function ControlBar({ target, onOpen, canOpen, humanIntervenedAt }: { tar
         <ConfirmDialog
           copy={{
             title: 'Type into this worker’s sandbox?',
-            consequence: 'You will control a real shell inside this attempt’s own sandbox. Doing so marks the attempt as human-intervened, for good, on the attempt, in Evidence and on the pull request. The recorded model cannot vouch for anything you run, and every line is audited. Pressing Enter sends a line to the shell only: it cannot answer a decision, grant access or pass a check, and any change you make still goes through the diff gate and the verifier.',
+            consequence: `You will control a real shell inside this attempt’s own sandbox. Doing so marks the attempt as human-intervened, for good, on the attempt, in Evidence and on the pull request. The recorded model cannot vouch for anything you run, and every line is audited. Pressing Enter sends a line to the shell only: it cannot answer a decision, grant access or pass a check, and any change you make still goes through the diff gate and the verifier. ${SAME_USER} ${LINE_MODE}`,
             keepLabel: 'Stay read-only',
           }}
           confirmLabel="Take control"
@@ -107,21 +111,25 @@ export function ControlBar({ target, onOpen, canOpen, humanIntervenedAt }: { tar
 
       {on ? (
         <div className="space-y-2" data-testid="control-on">
-          <p role="status" data-testid="control-banner" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg">
-            <Chip tone="warning">Control mode on</Chip>
-            <span>You are typing into {target.attemptId}’s sandbox. Every line is audited.</span>
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <p role="status" data-testid="control-banner" className="flex min-w-0 flex-1 basis-48 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg">
+              <Chip tone="warning">Control mode on</Chip>
+              <span className="wrap-anywhere">You are typing into {target.attemptId}’s sandbox. Every line is audited.</span>
+            </p>
+            <button type="button" className={buttonDangerSolid} onClick={() => { channel.current?.close(); channel.current = null; setMode({ at: 'open', state: { phase: 'ended', reason: 'left', echo: null } }); }}>Leave control mode</button>
+          </div>
           <p className="text-sm text-muted" data-testid="control-honest">Any shell use marks this attempt as human-intervened, and the recorded model cannot vouch for what a person ran here.</p>
           <form onSubmit={send} className="flex flex-wrap items-end gap-2" autoComplete="off">
             <div className="min-w-0 flex-1 basis-56">
               <label htmlFor="control-input" className="block text-sm font-medium text-fg">{hidden ? 'Hidden input: the shell is not echoing' : 'Line to send'}</label>
-              <input id="control-input" ref={input} data-testid="control-input" type={hidden ? 'password' : 'text'} value={line} onChange={(e) => setLine(e.target.value)} maxLength={4096} autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} className="mt-1 w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 font-mono text-mono text-fg" />
+              <input id="control-input" ref={input} data-testid="control-input" type={hidden ? 'password' : 'text'} value={line} onChange={(e) => setLine(e.target.value)} maxLength={4096} autoComplete={hidden ? 'new-password' : 'off'} autoCapitalize="off" autoCorrect="off" spellCheck={false} className="mt-1 w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 font-mono text-mono text-fg" />
             </div>
             <button type="submit" className={buttonPrimary}>Send</button>
             <button type="button" className={buttonQuiet} onClick={() => channel.current?.interrupt()}>Interrupt (Ctrl-C)</button>
-            <button type="button" className={buttonDangerSolid} onClick={() => { channel.current?.close(); channel.current = null; setMode({ at: 'open', state: { phase: 'ended', reason: 'left', echo: null } }); }}>Leave control mode</button>
           </form>
-          {hidden ? <p className="text-sm text-muted" data-testid="control-hidden-note">This line is not shown and its text is not recorded.</p> : null}
+          <p className="text-sm text-fg" data-testid="control-same-user">{SAME_USER}</p>
+          <p className="text-sm text-muted" data-testid="control-line-mode">{LINE_MODE}</p>
+          {hidden ? <p className="text-sm text-muted" data-testid="control-hidden-note">This line is hidden here. It is not recorded by SelariKru, but it is visible inside the sandbox.</p> : null}
           {notice !== '' ? <p className="text-sm text-warning" role="status" data-testid="control-notice">{notice}</p> : null}
         </div>
       ) : null}

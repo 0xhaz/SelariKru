@@ -159,6 +159,8 @@ export const RunViewSchema = z
     scopeAssessment: ScopeAssessmentSchema.nullable().default(null),
     /** A benchmark trial's one model. Set, no assignment can change it. */
     pinnedModel: ModelSelectionSchema.nullable().default(null),
+    /** Every attempt of this run a person opened a shell in, older task revisions included. Absent: the source does not report it. */
+    humanInterventions: z.array(z.object({ attemptId: Id, taskId: Id, at: Iso }).strict()).optional(),
   })
   .strict();
 export type RunView = z.infer<typeof RunViewSchema>;

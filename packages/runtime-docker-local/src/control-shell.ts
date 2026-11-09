@@ -126,7 +126,8 @@ stop()
 
 export const controlShellArgs = (sandboxId: string, workspace: string, sessionId: string): string[] => {
   if (!SAFE_SESSION.test(sessionId)) throw new Error('invalid control session id');
-  return ['exec', '-i', '-w', workspace, sandboxId, 'python3', '-c', CONTROL_HELPER, sessionId];
+  // `-I`: with `-c` the working directory, which is the worker's workspace, is otherwise first on the import path, so a planted `json.py` would replace the standard library.
+  return ['exec', '-i', '-w', workspace, sandboxId, 'python3', '-I', '-c', CONTROL_HELPER, sessionId];
 };
 
 /** The stop for when the host client cannot reach it: killing `sbx exec` does not end the process in the sandbox (spike section 5). */

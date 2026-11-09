@@ -44,7 +44,7 @@ async function runningAttempt(taskId = 't1', trial = false) {
   const claim = await post(h.app, '/v1/runners/claim', {}, bearer(runner.token));
   expect(claim.status).toBe(200);
   const lease = { attemptId: claim.body.lease.attemptId as string, fence: claim.body.lease.fence as number, leaseToken: claim.body.lease.leaseToken as string };
-  return { runner, lease };
+  return { runner, lease, controllable: claim.body.lease.controllable as boolean };
 }
 
 class FakeLink {
@@ -238,12 +238,14 @@ describe('gates', () => {
   });
 
   it('trial runs refuse control mode', async () => {
-    const { runner, lease } = await runningAttempt('t1', true);
+    const { runner, lease, controllable } = await runningAttempt('t1', true);
+    // The claim does not offer it, and even a runner that opened a link anyway is refused for every ticket.
+    expect(controllable).toBe(false);
     const link = await FakeLink.open(runner.token, lease);
     const r = await mint(lease.attemptId);
     expect(r.status).toBe(403);
     expect(r.body.error.code).toBe('control_refused_trial');
-    expect(claimDoesNotOffer(lease)).toBe(true);
+    expect((await t.db.select().from(schema.controlSessions))).toEqual([]);
     link.close();
   });
 
@@ -266,6 +268,33 @@ describe('gates', () => {
     expect(r.body.error.code).toBe('control_unavailable');
   });
 
+  it('an open cancel refuses a new ticket, and a cancel request closes the session after it commits', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    const [status] = await t.db.select().from(schema.taskStatus);
+    const cancel = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: status!.rowRevision, idempotencyKey: 'c1' });
+    expect(cancel.status).toBe(202);
+    await c.waitFor((f) => f.type === 'ended' && f.reason === 'attempt_fenced');
+    await new Promise((r) => setTimeout(r, 40));
+    const next = await mint(lease.attemptId, owner({ origin: ORIGIN }), 'after-cancel');
+    expect(next.status).toBe(409);
+    expect(next.body.error.code).toBe('attempt_not_running');
+    link.close();
+  });
+
+  it('a stale cancel that is refused closes nobody\'s session', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    const cancel = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: 9999, idempotencyKey: 'c2' });
+    expect(cancel.status).toBe(409);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(c.frames.some((f) => f.type === 'ended')).toBe(false);
+    c.ws.close();
+    link.close();
+  });
+
   it('a runner link carries the runner token, never an Origin, and the lease must be its own', async () => {
     const { runner, lease } = await runningAttempt();
     await expect(new Promise((res, rej) => { const ws = new WebSocket(`${wsBase}/v1/runners/control-link`); ws.once('open', res); ws.once('error', rej); })).rejects.toThrow(/401/);
@@ -273,8 +302,6 @@ describe('gates', () => {
     await expect(FakeLink.open(runner.token, { ...lease, fence: lease.fence + 7 })).rejects.toThrow();
   });
 });
-
-function claimDoesNotOffer(_lease: unknown): boolean { return true; }
 
 describe('a session', () => {
   it('control mode marks the attempt human-intervened', async () => {
@@ -290,6 +317,7 @@ describe('a session', () => {
     const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
     const seen = snap.body.tasks[0].attempts[0];
     expect(seen.humanIntervenedAt).toBe(attempt!.humanIntervenedAt!.toISOString());
+    expect(snap.body.runs[0].humanInterventions).toEqual([{ attemptId: lease.attemptId, taskId: 't1', at: attempt!.humanIntervenedAt!.toISOString() }]);
     const events = await eventsOf();
     expect(events.find((e) => e.type === 'attempt.human_intervened')).toMatchObject({ actor: 'human', id: 'owner_uid_1', attempt: lease.attemptId });
     link.close();

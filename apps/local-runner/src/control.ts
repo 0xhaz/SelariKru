@@ -90,6 +90,8 @@ export class ControlBridge {
   private flush: ReturnType<typeof setTimeout> | null = null;
   private prompt: ReturnType<typeof setTimeout> | null = null;
   private closing: Promise<void> | null = null;
+  /** The shell's echo flag as last reported. */
+  private echo: boolean | null = null;
 
   constructor(
     private readonly deps: { readonly connect: ControlConnector; readonly runtime: RuntimeAdapter; readonly handle: SandboxHandle; readonly log: (line: string) => void; readonly limits?: Partial<ControlLimits> },
@@ -139,6 +141,7 @@ export class ControlBridge {
     if (this.stopped || this.active !== null) { await shell.close().catch(() => undefined); return; }
     this.active = { sessionId, shell };
     this.redactor = new TerminalRedactor();
+    this.echo = null;
     this.deps.log('control session opened');
     void this.pump(this.active);
   }
@@ -156,8 +159,11 @@ export class ControlBridge {
         if (this.active !== active) break;
         switch (ev.kind) {
           case 'echo':
+            this.echo = ev.on;
             open(ev.on);
             this.send({ type: 'echo', sessionId, on: ev.on });
+            // A program may print its prompt first and turn echo off after.
+            if (!ev.on) this.armPrompt(sessionId);
             break;
           case 'output':
             open(null);
@@ -187,10 +193,14 @@ export class ControlBridge {
   private onOutput(sessionId: string, text: string): void {
     this.append(this.redactor.write(text));
     this.schedule(sessionId);
+    this.armPrompt(sessionId);
+  }
+
+  private armPrompt(sessionId: string): void {
     if (this.prompt !== null) clearTimeout(this.prompt);
     this.prompt = setTimeout(() => {
       this.prompt = null;
-      const released = this.redactor.releasePrompt();
+      const released = this.redactor.releasePrompt(this.echo === false);
       if (released !== null) { this.append([released]); this.schedule(sessionId); }
     }, this.limits.promptMs);
     this.prompt.unref?.();

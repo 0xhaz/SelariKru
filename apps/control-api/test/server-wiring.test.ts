@@ -94,6 +94,21 @@ describe('real-run seed', () => {
     expect(settings.baseSha).toBe(baseSha);
     expect(settings.allowedPaths).toEqual(['src', 'public']);
   });
+
+  it('leaves control mode off unless asked, and a grant changes the policy version that tasks are pinned to', () => {
+    const read = (dir: string, cfg: ReturnType<typeof readRealRunConfig>) => {
+      const { planConfigFile, policyFile } = writeRealRunFiles(join(root, dir), cfg);
+      const policy = JSON.parse(readFileSync(policyFile, 'utf8')) as { policyVersion: string; operations: Record<string, string> };
+      return { policy, plan: (JSON.parse(readFileSync(planConfigFile, 'utf8')) as { projects: Record<string, { policyVersion: string }> }).projects[cfg.projectId]! };
+    };
+    const off = read('off', readRealRunConfig(env()));
+    const on = read('on', readRealRunConfig(env({ SELARIKRU_REAL_TERMINAL_CONTROL: '1' })));
+    expect(off.policy.operations['terminal_control']).toBe('deny');
+    expect(on.policy.operations['terminal_control']).toBe('allow');
+    expect(on.policy.policyVersion).not.toBe(off.policy.policyVersion);
+    expect(on.plan.policyVersion).toBe(on.policy.policyVersion);
+    expect(off.plan.policyVersion).toBe(off.policy.policyVersion);
+  });
 });
 
 describe('the API host', () => {

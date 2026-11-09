@@ -302,6 +302,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const at = now();
     // Only a cancel of a verified task needs its record judged, and the record is read outside the transaction.
     const seen = body.command === 'cancel' ? await requireTaskStatus(db, config.tenantId, taskId) : null;
+    // Filled in the transaction and acted on only once it has committed: a rollback must not have closed anyone's session.
+    let cancelledAttempts: readonly string[] = [];
     const seenRun = seen?.status === 'verified' ? (await loadSpecRow(db, { tenantId: config.tenantId, projectId: seen.projectId, taskId, revision: seen.currentRevision }))?.runId : undefined;
     const staleSha = seen && seenRun ? await staleCandidateOf(seen.projectId, seenRun) : null;
     const result = await withTx(db, async (tx) => {
@@ -332,8 +334,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             // The status is unchanged, but clients following snapshot + cursor must learn of the request: bump the aggregate revision and record it.
             const rev = await bumpStatus(tx, key, row.rowRevision, row.status, at);
             await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, attemptIds: open.map((a) => a.attemptId) } });
-            // A cancel means the worker is stopping, so no one should be typing into it.
-            for (const a of open) ctx.control.endForAttempt(a.attemptId, 'attempt_fenced');
+            cancelledAttempts = open.map((a) => a.attemptId);
             return { operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
           }
           // A verified task is closed work, unless the record behind it no longer stands: then cancelling is one of the ways out.
@@ -372,6 +373,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         return { operationId, command: 'retry' as const, state: 'applied' as const, taskStatus: retried.value.taskStatus };
       });
     });
+    // A cancel means the worker is stopping, so no one should be typing into it.
+    for (const attemptId of cancelledAttempts) ctx.control.endForAttempt(attemptId, 'attempt_fenced');
     return reply.code(202).send(result);
   });
 
@@ -664,6 +667,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             reducedScope: reducedScopes.filter((d) => d.context === reducedScopeContext(r.runId)).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.affected[0] ?? null,
             /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
             scopeAssessment: assessments.get(r.runId) ?? null,
+            /** Every attempt of this run a person opened a shell in. All revisions: replanning a task does not erase that a person was in its sandbox. */
+            humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);

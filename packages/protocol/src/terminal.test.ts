@@ -151,23 +151,47 @@ describe('the terminal upload schema', () => {
 });
 
 describe('prompts without a newline', () => {
-  it('releases a short prompt, and hides a credential that follows a named one', () => {
+  it('releases an ordinary prompt', () => {
     const r = new TerminalRedactor();
     r.write('Continue? ');
     expect(r.releasePrompt()).toBe('Continue? ');
-    r.write('y\nDatabase password: ');
-    expect(r.releasePrompt()).toBe('Database password: ');
-    expect(r.write('hunter2\n')).toEqual(['[REDACTED]']);
+    expect(r.write('y\nnext\n')).toEqual(['y', 'next']);
   });
 
-  it('holds anything that is not a prompt or that redaction changes: a name and value split by a pause is never shown in part', () => {
+  it('a prompt naming a credential goes out only with echo off, and the whole next line is hidden', () => {
+    const r = new TerminalRedactor();
+    r.write('Database password: ');
+    expect(r.releasePrompt()).toBeNull();
+    expect(r.releasePrompt(true)).toBe('Database password: ');
+    expect(r.write('two tokens\nvisible\n')).toEqual(['[REDACTED]', 'visible']);
+  });
+
+  it('never shows part of a credential across a pause', () => {
+    const url = new TerminalRedactor();
+    url.write('https://admin:');
+    expect(url.releasePrompt(true)).toBeNull();
+    const out = url.write('s3cretpw@db.example.com/x\n').join('\n');
+    expect(out).not.toContain('s3cretpw');
+    const spaced = new TerminalRedactor();
+    spaced.write('see https://admin: ');
+    expect(spaced.releasePrompt(true)).toBeNull();
+    const key = new TerminalRedactor();
+    key.write('api_key: ');
+    expect(key.releasePrompt()).toBeNull();
+    expect(key.write('two tokens\n').join('\n')).not.toContain('two tokens');
+    const pair = new TerminalRedactor();
+    pair.write('API_KEY=abc123');
+    expect(pair.releasePrompt()).toBeNull();
+    expect(pair.write('def456\n')).toEqual(['API_KEY=[REDACTED]']);
+  });
+
+  it('holds what does not look like a prompt, or is too long to be one', () => {
     const r = new TerminalRedactor();
     r.write('downloading 40');
     expect(r.releasePrompt()).toBeNull();
-    const t = new TerminalRedactor();
-    t.write('API_KEY=abc123');
-    expect(t.releasePrompt()).toBeNull();
-    expect(t.write('def456\n')).toEqual(['API_KEY=[REDACTED]']);
+    const noSpace = new TerminalRedactor();
+    noSpace.write('name:');
+    expect(noSpace.releasePrompt()).toBeNull();
     const long = new TerminalRedactor();
     long.write(`${'x'.repeat(400)}: `);
     expect(long.releasePrompt()).toBeNull();

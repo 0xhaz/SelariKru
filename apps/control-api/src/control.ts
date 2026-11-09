@@ -265,7 +265,14 @@ export class ControlHub {
     const [status] = await tx.select({ status: schema.taskStatus.status, currentRevision: schema.taskStatus.currentRevision, rowRevision: schema.taskStatus.rowRevision }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, config.tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.taskId, attempt.taskId)));
     const live = status?.status === 'running' && status.currentRevision === attempt.revision && attempt.endedAt === null && attempt.leaseExpiresAt !== null && attempt.leaseExpiresAt.getTime() > at.getTime() && attempt.leaseFence !== null && attempt.runner !== null;
     if (!live) return { refused: 'attempt_not_running' as const };
+    if (await this.cancelOpen(tx, projectId, attempt.taskId, attempt.revision)) return { refused: 'attempt_not_running' as const };
     return { attempt, runId: run.runId, rowRevision: status.rowRevision };
+  }
+
+  /** A cancel requested and not yet resolved: the worker is stopping, so nobody may start typing into it. */
+  private async cancelOpen(tx: Executor, projectId: string, taskId: string, revision: number): Promise<boolean> {
+    const rows = await tx.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(eq(schema.taskCommands.tenantId, this.ctx.config.tenantId), eq(schema.taskCommands.projectId, projectId), eq(schema.taskCommands.taskId, taskId), eq(schema.taskCommands.revision, revision), eq(schema.taskCommands.command, 'cancel'), eq(schema.taskCommands.state, 'cancel_requested')));
+    return rows.length > 0;
   }
 
   private refuseInput(session: Session, seq: number | null, code: ControlRefusal): void {
@@ -335,7 +342,9 @@ export class ControlHub {
       .from(schema.attempts)
       .innerJoin(schema.taskStatus, and(eq(schema.taskStatus.tenantId, schema.attempts.tenantId), eq(schema.taskStatus.projectId, schema.attempts.projectId), eq(schema.taskStatus.taskId, schema.attempts.taskId)))
       .where(and(eq(schema.attempts.tenantId, s.tenantId), eq(schema.attempts.projectId, s.projectId), eq(schema.attempts.attemptId, s.attemptId)));
-    return !!row && row.runner === s.runner && row.fence === s.fence && row.endedAt === null && row.expires !== null && row.expires.getTime() > this.nowMs && row.status === 'running' && row.revision === row.current;
+    if (!row || row.runner !== s.runner || row.fence !== s.fence || row.endedAt !== null || row.expires === null || row.expires.getTime() <= this.nowMs || row.status !== 'running' || row.revision !== row.current) return false;
+    // Also here, for a ticket spent in the moment before a cancel committed.
+    return !(await this.cancelOpen(tx, s.projectId, s.taskId, row.revision));
   };
 
   /** What the shell did with the line. `echo` null means no answer: its text stays out. */

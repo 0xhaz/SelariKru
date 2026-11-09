@@ -104,12 +104,13 @@ export function writeRealRunFiles(dir: string, cfg: RealRunConfig): { planConfig
   if (timeoutSeconds === undefined) throw new Error('policies/default.json has no attemptTimeoutSeconds');
   if (evaluate({ kind: 'create_draft_pr' }, base).decision !== 'allow') throw new Error('policies/default.json does not allow create_draft_pr');
   // Control mode stays off unless the operator opts in: it opens a shell, so a real-run rehearsal does not grant it by default.
-  const policy = { ...base, policyVersion: POLICY_VERSION, operations: { ...base.operations, terminal_control: cfg.terminalControl ? 'allow' : 'deny' } };
+  const policyVersion = cfg.terminalControl ? `${POLICY_VERSION}+terminal-control` : POLICY_VERSION;
+  const policy = { ...base, policyVersion, operations: { ...base.operations, terminal_control: cfg.terminalControl ? 'allow' : 'deny' } };
   const planConfig = {
     projects: {
       [cfg.projectId]: {
         boardId: 'feedback-board', role: 'backend', baseSha: cfg.baseSha, allowedPaths: [...cfg.allowedPaths],
-        classification: 'internal', policyVersion: POLICY_VERSION, execution: 'local', inferencePolicyId: 'real-run-local',
+        classification: 'internal', policyVersion, execution: 'local', inferencePolicyId: 'real-run-local',
         limits: { maxAttempts: 3, timeoutSeconds, maxCostUsd: 1 },
         allowedRequirementIds: [...DEMO.requirementIds],
         forbiddenMandatoryScope: ['login', 'voting', 'payments', 'email'],

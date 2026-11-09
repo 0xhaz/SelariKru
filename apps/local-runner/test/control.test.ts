@@ -75,6 +75,11 @@ describe('the control bridge', () => {
     expect(sent.filter((f) => f.type === 'output')).toEqual([]);
     shell.emit({ kind: 'output', text: 'def\nPassword: ' });
     await tick(25);
+    // Echo on: a name and a pause could be the front of a credential, so it stays held.
+    const held = sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
+    expect(held).toEqual([`TOKEN=${REDACTED}`]);
+    shell.emit({ kind: 'echo', on: false });
+    await tick(25);
     const lines = sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
     expect(lines).toEqual([`TOKEN=${REDACTED}`, 'Password: ']);
   });

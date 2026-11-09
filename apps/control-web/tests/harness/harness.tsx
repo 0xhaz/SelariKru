@@ -38,6 +38,8 @@ interface Scenario {
   control?: { phase: TerminalControlState['phase']; reason?: TerminalControlState['reason']; echo?: boolean | null };
   /** Field overrides by attempt id in that fixture's snapshots. */
   attemptPatch?: Record<string, Record<string, unknown>>;
+  /** Field overrides applied to every run in that fixture's snapshots. */
+  runPatch?: Record<string, unknown>;
   /** Mount the shell on the mock source with its command methods wrapped in spies, recording to `window.__calls.commands`. */
   spiedFixture?: string;
   /** Overrides `dependsOn` by task id in that fixture's snapshots, to show unknown dependencies and cycles. */
@@ -195,9 +197,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     getSnapshot: async (projectId) => {
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
-      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch) return base;
+      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch) return base;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
-      return { ...base, tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
+      return { ...base, runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
