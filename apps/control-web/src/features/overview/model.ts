@@ -3,7 +3,7 @@ import {
   INFERENCE_LABELS, OBSERVED_SOURCE_LABELS, effectiveWorkerHealth, isEmptyProject, usageFor, verifiedCounts,
   type ProjectViewSnapshot, type RunView, type TaskView, type UsageTotal, type WorkerHealthReading, type WorkerView,
 } from '@selarikru/view-protocol';
-import { buildAttention, type AttentionItem } from './attention.ts';
+import { buildAttention, classifyBlock, isClosedTask, type AttentionItem } from './attention.ts';
 
 export type CriterionCell = 'verified' | 'failed' | 'held' | 'active' | 'pending';
 
@@ -110,9 +110,12 @@ const CELL: Readonly<Partial<Record<TaskView['status'], CriterionCell>>> = {
 const ORDER: readonly TaskView['status'][] = ['failed', 'blocked', 'awaiting_approval', 'running', 'verifying', 'ready', 'planned', 'verified', 'merged', 'cancelled', 'superseded'];
 
 export function taskRow(t: TaskView): TaskRow {
-  const placed = t.placementBlock !== null;
+  // A closed task's stored block is history. A wait for a slot is healthy and clears by itself.
+  const blocked = t.placementBlock !== null && !isClosedTask(t);
+  const slotWait = blocked && classifyBlock(t.placementBlock!) === 'wait';
+  const placed = blocked && !slotWait;
   const s = STATUS[t.status];
-  const label = placed ? 'Cannot be placed' : t.status === 'superseded' && t.supersededByRevision !== null ? `Superseded by revision ${t.supersededByRevision}` : s.label;
+  const label = slotWait ? 'Waiting for a slot' : placed ? 'Cannot be placed' : t.status === 'superseded' && t.supersededByRevision !== null ? `Superseded by revision ${t.supersededByRevision}` : s.label;
   const tone: Tone = placed ? (t.placementBlock!.startsWith('approval_required:') ? 'warning' : 'danger') : s.tone;
   // Work stopped for budget still counts towards delivery, as unmet.
   const cell = placed || (t.status === 'cancelled' && t.cancelReason === 'budget_exhausted') ? 'held' : (CELL[t.status] ?? null);

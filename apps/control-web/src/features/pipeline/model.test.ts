@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task, worker } from '../overview/testing.ts';
-import { PIPELINE_COLUMNS, STAGES, buildPipeline, filterRows, type PipelineModel, type PipelineRow } from './model.ts';
+import { layoutGraph } from './layout.ts';
+import { PIPELINE_COLUMNS, STAGES, buildPipeline, filterRows, graphInput, type PipelineModel, type PipelineRow } from './model.ts';
 
 const build = (snapshot: Parameters<typeof buildPipeline>[0]): PipelineModel => buildPipeline(snapshot, NOW, NOW);
 const row = (m: PipelineModel, id: string): PipelineRow => m.rows.find((r) => r.taskId === id)!;
@@ -22,7 +23,7 @@ describe('pipeline table', () => {
     expect(r.owner).toEqual({ role: 'backend', workerId: null });
     expect(r.state.label).toBe('Planned');
     expect(r.predecessors).toEqual([{ taskId: 'dep', title: 'Dep', status: 'Verified; awaiting merge', edge: 'met', note: null }]);
-    expect(r.accepted).toBeNull();
+    expect(r.accepted).toBe('None at rev 1');
     expect(r.branch).toBeNull();
     expect(r.checks).toMatchObject({ label: 'Failed', tone: 'danger', detail: '3 of 41 failed' });
     expect(r.age).toBe('1m 30s');
@@ -56,7 +57,13 @@ describe('pipeline table', () => {
   it('marks a superseded task as replaced, and accepts nothing unverified', () => {
     const m = build(snapshotOf({ tasks: [task('old', { status: 'superseded', supersededByRevision: 3 }), task('run', { status: 'running', revision: 2 })] }));
     expect(row(m, 'old').accepted).toBe('Replaced by rev 3');
-    expect(row(m, 'run').accepted).toBeNull();
+    expect(row(m, 'run').accepted).toBe('None at rev 2');
+  });
+
+  it('keeps the check chip short on closed work, leaving the task state to the state column', () => {
+    const m = build(snapshotOf({ tasks: [task('t', { status: 'superseded', supersededByRevision: 2 })], checks: { c: { checkId: 'c', taskId: 't', state: 'passed', summary: 'ok', updatedAt: iso(2), evidenceRef: 'e' } } }));
+    expect(row(m, 't').checks).toMatchObject({ label: 'Passed earlier', detail: 'ok' });
+    expect(row(m, 't').checkLines[0]!.label).toContain('superseded');
   });
 
   it('reuses the attention wording for the next action, and stays quiet for running work', () => {
@@ -80,8 +87,40 @@ describe('pipeline table', () => {
       ],
       approvals: [approval('apr', { taskId: 'a', taskRevision: 1 })],
     }));
-    expect(m.summary).toBe('4 tasks: 1 running, 3 held (1 policy, 1 approval, 1 dependency).');
+    expect(m.summary).toBe('4 tasks: 1 running, 2 held (1 policy, 1 approval), 1 waiting.');
     expect(m.summary).not.toContain('%');
+  });
+});
+
+describe('summary', () => {
+  it('puts every task in one part, closed work included, so the parts add up', () => {
+    const m = build(snapshotOf({
+      tasks: [
+        task('run', { status: 'running' }), task('verify', { status: 'verifying' }), task('wait', { status: 'planned', dependsOn: ['run'] }), task('plan', { status: 'planned', dependsOn: [] }),
+        task('done', { status: 'merged' }), task('stop', { status: 'cancelled' }), task('old', { status: 'superseded' }), task('stuck', { status: 'blocked', statusReason: 'budget:exceeds_limit' }),
+      ],
+    }));
+    expect(m.summary).toBe('8 tasks: 1 running, 1 verifying, 1 held (1 budget), 1 waiting, 1 planned or queued, 1 done, 1 cancelled, 1 superseded.');
+  });
+});
+
+describe('closed tasks', () => {
+  it.each(['cancelled', 'superseded', 'verified', 'merged'] as const)('a %s task with a leftover placement block is not held and offers nothing to approve', (status) => {
+    const m = build(snapshotOf({ tasks: [task('t', { status, placementBlock: 'approval_required:cloud_start' })] }));
+    expect(row(m, 't').why).toEqual({ held: false, reasons: [] });
+    expect(row(m, 't').ifApproved).toBeNull();
+    expect(row(m, 't').state.label).not.toBe('Cannot be placed');
+    expect(m.summary).not.toContain('held');
+  });
+
+  it('shares the failed-gate rule: only the latest check counts on a queued task', () => {
+    const checks = (later: 'passed' | 'failed') => ({
+      a: { checkId: 'a', taskId: 't', state: 'failed' as const, summary: 'old', updatedAt: iso(50), evidenceRef: 'e' },
+      b: { checkId: 'b', taskId: 't', state: later, summary: 'new', updatedAt: iso(5), evidenceRef: 'e' },
+    });
+    expect(causes(build(snapshotOf({ tasks: [task('t', { status: 'ready' })], checks: checks('passed') })), 't')).toEqual([]);
+    expect(causes(build(snapshotOf({ tasks: [task('t', { status: 'ready' })], checks: checks('failed') })), 't')).toEqual(['gate']);
+    expect(causes(build(snapshotOf({ tasks: [task('t', { status: 'failed', statusReason: 'verification_failed' })] })), 't')).toEqual(['gate']);
   });
 });
 
@@ -150,6 +189,44 @@ describe('why blocked', () => {
     expect(m.edges).toEqual([{ from: 'old', to: 't', state: 'stale', label: 'Stale: superseded by rev 2' }]);
   });
 
+  it('says a person must act when a dependency can never finish', () => {
+    const m = build(snapshotOf({ tasks: [task('dep', { status: 'cancelled', title: 'Dep' }), task('t', { status: 'planned', dependsOn: ['dep'] })] }));
+    expect(why(m, 't').reasons[0]).toMatchObject({ cause: 'dependency', terminal: true });
+    expect(why(m, 't').reasons[0]!.text).toContain('cannot finish');
+    expect(row(m, 't').nextAction).toBe('A person must replan or cancel this task.');
+    expect(row(m, 't').quietWait).toBe(false);
+  });
+
+  it('gives a cycle member a cycle reason, not a wait on the other member', () => {
+    const m = build(snapshotOf({ tasks: [task('a', { status: 'planned', title: 'A', dependsOn: ['b'] }), task('b', { status: 'planned', title: 'B', dependsOn: ['a'] })] }));
+    expect(causes(m, 'a')).toEqual(['cycle']);
+    expect(row(m, 'a').predecessors![0]!.edge).toBe('cycle');
+    expect(why(m, 'a').reasons[0]!.text).toBe('It is part of a dependency cycle (A → B → A), so it can never start.');
+    expect(row(m, 'a').nextAction).toBe('A person must replan or cancel this task.');
+  });
+
+  it('a task waiting on a cycle member is an ordinary dependency wait', () => {
+    const m = build(snapshotOf({ tasks: [task('a', { status: 'planned', dependsOn: ['b'] }), task('b', { status: 'planned', dependsOn: ['a'] }), task('c', { status: 'planned', dependsOn: ['a'] })] }));
+    expect(causes(m, 'c')).toEqual(['dependency']);
+  });
+
+  it('a slot wait is quiet, not a red failure', () => {
+    const m = build(snapshotOf({ tasks: [task('s', { status: 'ready', placementBlock: 'no_free_slot' })] }));
+    expect(row(m, 's').state).toEqual({ label: 'Waiting for a slot', tone: 'neutral' });
+    expect(row(m, 's').rail).toBeNull();
+    expect(row(m, 's').quietWait).toBe(true);
+  });
+
+  it('only a live approval offers what changes on approval; expired and denied give the real next step', () => {
+    const expired = build(snapshotOf({ tasks: [task('a', { status: 'awaiting_approval' }), task('f', { status: 'planned', dependsOn: ['a'] })], approvals: [approval('apr', { taskId: 'a', taskRevision: 1, reason: 'allow_x', expiresAt: iso(5) })] }));
+    expect(row(expired, 'a').ifApproved).toBeNull();
+    expect(row(expired, 'a').nextAction).toBe('Request approval again if the task still needs it.');
+    const denied = build(snapshotOf({ tasks: [task('a', { status: 'blocked', statusReason: 'approval_denied' })] }));
+    expect(causes(denied, 'a')).toEqual(['approval']);
+    expect(row(denied, 'a').ifApproved).toBeNull();
+    expect(row(denied, 'a').nextAction).toBe('Change the plan or cancel the task.');
+  });
+
   it('reads a pending approval past its expiry as expired, never as granted', () => {
     const m = build(snapshotOf({ tasks: [task('a', { status: 'awaiting_approval' })], approvals: [approval('apr', { taskId: 'a', taskRevision: 1, reason: 'allow_x', expiresAt: iso(5) })] }));
     expect(causes(m, 'a')).toEqual(['approval']);
@@ -211,6 +288,7 @@ describe('stages', () => {
     expect(['brief', 'gate', 'api', 'web', 'int', 'e2e', 'rev'].map((id) => stageOf(m, id))).toEqual(['discovery', 'contract', 'build', 'build', 'integrate', 'verify', 'review']);
     expect(STAGES.map((s) => s.id)).toEqual(['discovery', 'contract', 'build', 'integrate', 'verify', 'review', 'merged']);
     expect(m.stageNote).toContain('inferred');
+    expect(m.stageNote).toContain('stays with its work');
   });
 
   it('moves a finished task right only when nothing depends on it', () => {
@@ -236,6 +314,10 @@ describe('stages', () => {
   it('an unknown dependency does not turn a final review into a contract gate', () => {
     const m = build(snapshotOf({ tasks: [task('rev', { role: 'reviewer', status: 'planned', dependsOn: [] }), task('mystery', { status: 'planned', dependsOn: null })] }));
     expect(stageOf(m, 'rev')).toBe('review');
+  });
+
+  it('a role named like an object key is not a stage', () => {
+    expect(stageOf(build(snapshotOf({ tasks: [task('t', { role: 'constructor' })] })), 't')).toBe('build');
   });
 
   it('groups rows by stage in pipeline order and drops empty stages', () => {
@@ -321,6 +403,13 @@ describe('plan integrity', () => {
     expect(m.edges.filter((e) => e.state === 'cycle')).toHaveLength(2);
   });
 
+  it('reports a cycle in the direction the graph draws it', () => {
+    const m = build(snapshotOf({ tasks: [task('a', { status: 'planned', title: 'A', dependsOn: ['b'] }), task('b', { status: 'planned', title: 'B', dependsOn: ['c'] }), task('c', { status: 'planned', title: 'C', dependsOn: ['a'] })] }));
+    // A depends on B, so the graph draws B -> A.
+    expect(m.cycle!.text).toBe('A → C → B → A');
+    expect(m.edges.filter((e) => e.state === 'cycle').map((e) => `${e.from}>${e.to}`).sort()).toEqual(['a>c', 'b>a', 'c>b']);
+  });
+
   it('a contract change summarises the replanned tasks and what is not reported', () => {
     const base = snapshotOf({
       tasks: [task('web', { status: 'planned', revision: 2, title: 'Web v2' }), task('api', { status: 'running', revision: 1 }), task('old', { status: 'superseded', supersededByRevision: 2, title: 'Old' })],
@@ -333,6 +422,19 @@ describe('plan integrity', () => {
 
   it('has no replan summary at plan revision 1', () => {
     expect(build(snapshotOf({ tasks: [task('a')] })).replan).toBeNull();
+  });
+});
+
+describe('graph stability', () => {
+  it('same topology with a different status order gives identical positions', () => {
+    const tasks = (s1: 'running' | 'failed', s2: 'running' | 'failed') => [
+      task('z', { status: s1 }), task('a', { status: s2 }), task('m', { status: 'planned', dependsOn: ['z', 'a'] }), task('b', { status: 'planned', dependsOn: ['a'] }),
+    ];
+    const positions = (m: PipelineModel) => layoutGraph(graphInput(m.rows, m.edges)).nodes;
+    const first = build(snapshotOf({ tasks: tasks('running', 'failed') }));
+    const second = build(snapshotOf({ tasks: tasks('failed', 'running') }));
+    expect(first.rows.map((r) => r.taskId)).not.toEqual(second.rows.map((r) => r.taskId));
+    expect(positions(first)).toEqual(positions(second));
   });
 });
 

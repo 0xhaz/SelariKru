@@ -35,6 +35,8 @@ interface Scenario {
   spiedFixture?: string;
   /** Overrides `dependsOn` by task id in that fixture's snapshots, to show unknown dependencies and cycles. */
   dependsOn?: Record<string, string[] | null>;
+  /** Field overrides by task id in that fixture's snapshots, for states fixtures do not reach, such as a superseded dependency. */
+  taskPatch?: Record<string, Record<string, unknown>>;
 }
 
 declare global {
@@ -169,9 +171,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     ...session.source,
     getSnapshot: async (projectId) => {
       const base = await session.source.getSnapshot(projectId);
-      if (!sc.dependsOn) return base;
-      const tasks = Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, id in sc.dependsOn! ? { ...t, dependsOn: sc.dependsOn![id]! } : t]));
-      return { ...base, tasks };
+      if (!sc.dependsOn && !sc.taskPatch) return base;
+      const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
+      return { ...base, tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });

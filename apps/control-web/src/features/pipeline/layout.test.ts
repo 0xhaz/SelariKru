@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NODE_H, NODE_W, layoutGraph, nextNode, type LayoutInput } from './layout.ts';
+import { NODE_H, NODE_W, edgeLabelPoint, layoutGraph, nextNode, type LayoutInput, type LayoutResult } from './layout.ts';
 
 const node = (id: string, column: number): LayoutInput['nodes'][number] => ({ id, column });
 const graph = (): LayoutInput => ({
@@ -64,6 +64,54 @@ describe('graph layout', () => {
   });
 });
 
+describe('edge labels and ids', () => {
+  it('puts a label in the gap between layers, on a two-point edge too', () => {
+    const out = layoutGraph({ nodes: [node('a', 0), node('b', 1)], edges: [{ from: 'a', to: 'b' }] });
+    const at = edgeLabelPoint(out.edges[0]!.points)!;
+    const a = out.nodes.find((n) => n.id === 'a')!;
+    const b = out.nodes.find((n) => n.id === 'b')!;
+    expect(at.x).toBeGreaterThan(a.x + NODE_W);
+    expect(at.x).toBeLessThan(b.x);
+  });
+
+  it('labels a long edge in its first gap, and a back edge in the gap it crosses', () => {
+    const out = layoutGraph({ nodes: [node('a', 0), node('b', 1)], edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }] });
+    const back = out.edges.find((e) => e.back)!;
+    const at = edgeLabelPoint(back.points)!;
+    const a = out.nodes.find((n) => n.id === 'a')!;
+    const b = out.nodes.find((n) => n.id === 'b')!;
+    expect(at.x).toBeGreaterThan(a.x + NODE_W);
+    expect(at.x).toBeLessThan(b.x);
+  });
+
+  it('an arrow or a hyphen in a task id cannot collide with an edge key', () => {
+    const out = layoutGraph({ nodes: [node('a->b', 0), node('a', 0), node('b', 1), node('c-d', 1)], edges: [{ from: 'a->b', to: 'b' }, { from: 'a', to: 'c-d' }] });
+    expect(out.edges.every((e) => e.points.length === 2 && !e.back)).toBe(true);
+  });
+
+  it('lays an edgeless stage side by side so parallel work reads as parallel', () => {
+    const out = layoutGraph({ nodes: [node('a', 2), node('b', 2), node('c', 2)], edges: [] });
+    expect(new Set(out.nodes.map((n) => n.y)).size).toBe(1);
+    expect(new Set(out.nodes.map((n) => n.x)).size).toBe(3);
+    expect(out.columns).toHaveLength(1);
+  });
+});
+
+const reachable = (out: LayoutResult, start: string): Set<string> => {
+  const seen = new Set([start]);
+  const queue = [start];
+  for (let i = 0; i < queue.length; i += 1) {
+    for (const key of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) {
+      const to = nextNode(out, queue[i]!, key);
+      if (to && !seen.has(to)) {
+        seen.add(to);
+        queue.push(to);
+      }
+    }
+  }
+  return seen;
+};
+
 describe('keyboard path', () => {
   const out = layoutGraph(graph());
   it('Right follows a dependent, Left a dependency', () => {
@@ -78,6 +126,18 @@ describe('keyboard path', () => {
     expect(nextNode(out, column[1]!, 'ArrowUp')).toBe(column[0]);
     expect(nextNode(out, column[0]!, 'ArrowUp')).toBeNull();
   });
+  it('reaches every node in an edgeless multi-stage graph, and picks the nearest across a gap', () => {
+    const many = layoutGraph({ nodes: ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, i) => node(id, i % 3)), edges: [] });
+    expect(reachable(many, 'a').size).toBe(7);
+  });
+
+  it('reaches a node under a long edge', () => {
+    const out2 = layoutGraph({ nodes: [node('a', 0), node('under', 1), node('c', 2)], edges: [{ from: 'a', to: 'c' }] });
+    expect(nextNode(out2, 'a', 'ArrowRight')).toBe('under');
+    expect(nextNode(out2, 'under', 'ArrowRight')).toBe('c');
+    expect(reachable(out2, 'a').size).toBe(3);
+  });
+
   it('Home and End reach the first and last task in reading order', () => {
     expect(nextNode(out, 'web', 'Home')).toBe('brief');
     expect(nextNode(out, 'web', 'End')).toBe('rev');

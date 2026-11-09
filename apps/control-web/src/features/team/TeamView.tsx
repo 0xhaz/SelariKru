@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { AxisBadges, EmptyState, Panel, buttonQuiet, type Tone } from '@selarikru/ui';
+import { AxisBadges, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, buttonQuiet } from '@selarikru/ui';
 import type { DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
@@ -21,13 +21,6 @@ export function useIsWide(): boolean {
   }, []);
   return wide;
 }
-
-const RAIL_SHADOW: Readonly<Record<Tone, string>> = {
-  neutral: '', active: '', success: '',
-  warning: 'shadow-[inset_3px_0_0_var(--color-warning)]',
-  danger: 'shadow-[inset_3px_0_0_var(--color-danger)]',
-};
-const RAIL_BORDER: Readonly<Record<Tone, string>> = { neutral: 'border-l-line', active: 'border-l-line', success: 'border-l-line', warning: 'border-l-warning', danger: 'border-l-danger' };
 
 function Identity({ row, onOpen }: { row: TeamRow; onOpen: (id: string) => void }) {
   return (

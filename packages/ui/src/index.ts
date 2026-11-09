@@ -1,4 +1,4 @@
-export { Chip, toneGlyph, type Tone } from './Chip.tsx';
+export { Chip, RAIL_BORDER, RAIL_SHADOW, TONE_TEXT, toneGlyph, type Tone } from './Chip.tsx';
 export { EmptyState, Panel } from './Panel.tsx';
 export { AxisBadges } from './AxisBadges.tsx';
 export { Timestamp } from './Timestamp.tsx';

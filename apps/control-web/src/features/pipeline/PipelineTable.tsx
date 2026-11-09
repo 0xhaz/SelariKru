@@ -1,16 +1,11 @@
 import type { ReactNode } from 'react';
-import { Chip, Timestamp, type Tone } from '@selarikru/ui';
+import { Chip, RAIL_BORDER, RAIL_SHADOW, Timestamp } from '@selarikru/ui';
 import { roleName } from '../team/TeamSignals.tsx';
+import { Muted } from './ui.tsx';
 import { PIPELINE_COLUMNS, stageLabel, type Predecessor, type PipelineRow, type StageGroup } from './model.ts';
 
-const RAIL_SHADOW: Readonly<Record<Tone, string>> = {
-  neutral: '', active: '', success: '', warning: 'shadow-[inset_3px_0_0_var(--color-warning)]', danger: 'shadow-[inset_3px_0_0_var(--color-danger)]',
-};
-const RAIL_BORDER: Readonly<Record<Tone, string>> = { neutral: 'border-l-line', active: 'border-l-line', success: 'border-l-line', warning: 'border-l-warning', danger: 'border-l-danger' };
 const EDGE_TEXT: Readonly<Record<Predecessor['edge'], string>> = { met: 'text-muted', waiting: 'text-fg', stale: 'text-warning', unknown: 'text-warning', cycle: 'text-danger' };
 const EDGE_WORD: Readonly<Record<Predecessor['edge'], string>> = { met: '', waiting: 'waiting', stale: 'stale', unknown: 'unknown', cycle: 'cycle' };
-
-export const Muted = ({ children }: { children: ReactNode }) => <span className="text-muted">{children}</span>;
 
 /** Dragging across a row to copy text ends in a click on the row. That is not a request to inspect the task. */
 const hasTextSelection = (): boolean => {
@@ -64,12 +59,12 @@ function TaskIdentity({ row, showStage, onOpen }: { row: PipelineRow; showStage:
 function Row({ row, selected, showStage, onOpen }: { row: PipelineRow; selected: boolean; showStage: boolean; onOpen: (id: string) => void }) {
   const selectedRail = selected ? 'shadow-[inset_3px_0_0_var(--color-active)]' : row.rail ? RAIL_SHADOW[row.rail] : '';
   return (
-    <tr data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} onClick={() => { if (!hasTextSelection()) onOpen(row.taskId); }} className={`cursor-pointer wrap-anywhere border-b border-line align-top hover:bg-panel-2 ${selected ? 'bg-panel-2' : ''}`}>
+    <tr data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} data-rail={row.rail ?? 'none'} onClick={() => { if (!hasTextSelection()) onOpen(row.taskId); }} className={`cursor-pointer wrap-anywhere border-b border-line align-top hover:bg-panel-2 ${selected ? 'bg-panel-2' : ''}`}>
       <td className={`px-3 py-3 ${selectedRail}`}><TaskIdentity row={row} showStage={showStage} onOpen={onOpen} /></td>
       <td className="px-3 py-3"><span className="block text-fg">{roleName(row.owner.role)}</span>{row.owner.workerId ? <span className="block break-all font-mono text-mono text-muted">{row.owner.workerId}</span> : <span className="block text-sm text-muted">No worker</span>}</td>
       <td className="px-3 py-3"><StateCell row={row} onOpen={onOpen} /></td>
       <td className="px-3 py-3"><PredecessorList row={row} /></td>
-      <td className="px-3 py-3">{row.accepted ?? <Muted>Not yet</Muted>}</td>
+      <td className="px-3 py-3">{row.accepted.startsWith('None') ? <Muted>{row.accepted}</Muted> : row.accepted}</td>
       <td className="px-3 py-3">{row.branch ?? <Muted>Not reported</Muted>}</td>
       <td className="px-3 py-3">{checksCell(row)}</td>
       <td className="whitespace-nowrap px-3 py-3 text-sm text-muted"><Timestamp iso={row.since} tabStop={false}>{row.age}</Timestamp></td>
@@ -78,7 +73,7 @@ function Row({ row, selected, showStage, onOpen }: { row: PipelineRow; selected:
   );
 }
 
-const WIDTHS = ['w-[16%]', 'w-[11%]', 'w-[18%]', 'w-[13%]', 'w-[7%]', 'w-[8%]', 'w-[10%]', 'w-[6%]', 'w-[11%]'];
+const WIDTHS = ['w-[15%]', 'w-[11%]', 'w-[18%]', 'w-[13%]', 'w-[8%]', 'w-[8%]', 'w-[10%]', 'w-[6%]', 'w-[11%]'];
 
 export function PipelineTable({ groups, flat, selectedId, onOpen }: { groups: readonly StageGroup[]; flat: boolean; selectedId: string | null; onOpen: (id: string) => void }) {
   return (
@@ -110,16 +105,16 @@ function Field({ label, children, className = '' }: { label: string; children: R
 function Card({ row, selected, showStage, onOpen }: { row: PipelineRow; selected: boolean; showStage: boolean; onOpen: (id: string) => void }) {
   const rail = selected ? 'border-l-active' : row.rail ? RAIL_BORDER[row.rail] : '';
   return (
-    <li data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} className={`wrap-anywhere rounded-chip border border-line border-l-4 p-3 ${selected ? 'bg-panel-2' : ''} ${rail}`}>
+    <li data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} data-rail={row.rail ?? 'none'} className={`wrap-anywhere rounded-chip border border-line border-l-4 p-3 ${selected ? 'bg-panel-2' : ''} ${rail}`}>
       <TaskIdentity row={row} showStage={showStage} onOpen={onOpen} />
       <div className="mt-2"><StateCell row={row} onOpen={onOpen} /></div>
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-4">
         <Field label="Owner"><span className="block text-fg">{roleName(row.owner.role)}</span>{row.owner.workerId ? <span className="block break-all font-mono text-mono text-muted">{row.owner.workerId}</span> : <span className="block text-sm text-muted">No worker</span>}</Field>
         <Field label="Age"><span className="text-sm text-muted"><Timestamp iso={row.since} tabStop={false}>{row.age}</Timestamp></span></Field>
-        <Field label="Accepted revision">{row.accepted ?? <Muted>Not yet</Muted>}</Field>
-        <Field label="Branch or candidate">{row.branch ?? <Muted>Not reported</Muted>}</Field>
-        <Field label="Predecessors" className="col-span-2 lg:col-span-1"><PredecessorList row={row} /></Field>
-        <Field label="Checks" className="col-span-2 lg:col-span-1"><div>{checksCell(row)}</div></Field>
+        {!row.accepted.startsWith('None') ? <Field label="Accepted revision">{row.accepted}</Field> : null}
+        {row.branch ? <Field label="Branch or candidate">{row.branch}</Field> : null}
+        {row.predecessors === null || row.predecessors.length > 0 ? <Field label="Predecessors" className="col-span-2 lg:col-span-1"><PredecessorList row={row} /></Field> : null}
+        {row.checks ? <Field label="Checks" className="col-span-2 lg:col-span-1"><div>{checksCell(row)}</div></Field> : null}
         <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span></Field>
       </dl>
     </li>
@@ -135,6 +130,7 @@ export function PipelineCards({ groups, flat, selectedId, onOpen }: { groups: re
           <ul className="space-y-3">{g.rows.map((r) => <Card key={r.taskId} row={r} selected={selectedId === r.taskId} showStage={flat} onOpen={onOpen} />)}</ul>
         </section>
       ))}
+      <p className="text-sm text-muted">Empty fields are left out of a card: no accepted revision, branch, predecessors or checks reported.</p>
     </div>
   );
 }

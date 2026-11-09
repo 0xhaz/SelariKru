@@ -2,13 +2,13 @@ import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { Chip, buttonQuiet, formatExact } from '@selarikru/ui';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { roleName } from '../team/TeamSignals.tsx';
+import { Note } from './ui.tsx';
 import { stageLabel, type BlockCause, type PipelineRow, type TaskLink } from './model.ts';
 
 const Exact = ({ iso }: { iso: string }) => <time dateTime={iso}>{formatExact(iso)}</time>;
-const Muted = ({ children }: { children: ReactNode }) => <p className="text-sm text-muted">{children}</p>;
 
 const CAUSE_TEXT: Readonly<Record<BlockCause, string>> = {
-  policy: 'text-danger', budget: 'text-danger', approval: 'text-warning', claim: 'text-warning', placement: 'text-danger', gate: 'text-danger', worker: 'text-danger', dependency: 'text-fg', capacity: 'text-fg', other: 'text-warning', unstated: 'text-warning',
+  policy: 'text-danger', budget: 'text-danger', approval: 'text-warning', claim: 'text-warning', placement: 'text-danger', gate: 'text-danger', worker: 'text-danger', cycle: 'text-danger', dependency: 'text-fg', capacity: 'text-fg', other: 'text-warning', unstated: 'text-warning',
 };
 
 function Section({ title, children, testId }: { title: string; children: ReactNode; testId?: string }) {
@@ -94,7 +94,7 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
         </header>
 
         <div className="flex-1 space-y-5 p-4 sm:px-6">
-          {simulated ? <Muted>Simulated data. It is not evidence.</Muted> : null}
+          {simulated ? <Note>Simulated data. It is not evidence.</Note> : null}
 
           {why.held ? (
             <section aria-label="Why blocked?" data-testid="why-blocked" className="rounded-chip border border-line-strong bg-panel-2 p-3">
@@ -119,13 +119,13 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
               <p className="text-fg">{row.ifApproved.text}</p>
               {row.ifApproved.eligible.length > 0 ? (
                 <div className="mt-2">
-                  <Muted>Becomes eligible once this task is verified:</Muted>
+                  <Note>Becomes eligible once this task is verified:</Note>
                   <TaskLinks items={row.ifApproved.eligible} onOpen={onOpen} />
                 </div>
-              ) : <Muted>No other task becomes eligible from this alone.</Muted>}
+              ) : <Note>No other task becomes eligible from this alone.</Note>}
               {row.ifApproved.stillWaiting.length > 0 ? (
                 <div className="mt-2">
-                  <Muted>Still waits on other work:</Muted>
+                  <Note>Still waits on other work:</Note>
                   <TaskLinks items={row.ifApproved.stillWaiting} onOpen={onOpen} />
                 </div>
               ) : null}
@@ -134,7 +134,7 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
           ) : null}
 
           <Section title="Inputs">
-            {row.predecessors === null ? <Muted>Not known yet. A dependency may exist that this snapshot does not list.</Muted> : row.predecessors.length === 0 ? <Muted>None.</Muted> : (
+            {row.predecessors === null ? <Note>Not known yet. A dependency may exist that this snapshot does not list.</Note> : row.predecessors.length === 0 ? <Note>None.</Note> : (
               <ul className="space-y-1">
                 {row.predecessors.map((p) => (
                   <li key={p.taskId} className="flex flex-wrap justify-between gap-2 wrap-anywhere">
@@ -146,11 +146,11 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
             )}
           </Section>
 
-          <Section title="Outputs">{row.dependents.length === 0 ? <Muted>No task depends on this one.</Muted> : <TaskLinks items={row.dependents} onOpen={onOpen} />}</Section>
+          <Section title="Outputs">{row.dependents.length === 0 ? <Note>No task depends on this one.</Note> : <TaskLinks items={row.dependents} onOpen={onOpen} />}</Section>
 
           <Section title="Lease and attempts">
             <p className="mb-1 text-sm text-muted">{row.owner.workerId ? <>Held by <span className="font-mono text-mono text-fg">{row.owner.workerId}</span></> : 'No worker holds this task now.'}</p>
-            {row.attempts.length === 0 ? <Muted>No attempts yet.</Muted> : (
+            {row.attempts.length === 0 ? <Note>No attempts yet.</Note> : (
               <ul className="space-y-1">
                 {row.attempts.map((a, i) => <li key={i} className="flex flex-wrap justify-between gap-2 text-sm"><span className="text-fg">{a.label}</span><span className="text-muted"><Exact iso={a.at} /></span></li>)}
               </ul>
@@ -158,7 +158,7 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
           </Section>
 
           <Section title="Checks">
-            {row.checkLines.length === 0 ? <Muted>No checks have reported for this task yet.</Muted> : (
+            {row.checkLines.length === 0 ? <Note>No checks have reported for this task yet.</Note> : (
               <ul className="space-y-2">
                 {row.checkLines.map((c) => (
                   <li key={c.checkId}>
@@ -175,7 +175,9 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
             <p className="text-sm text-muted">In this state since <span className="text-fg"><Exact iso={row.since} /></span> ({row.age}).</p>
           </Section>
 
-          <p className="text-sm text-muted">Scope, per-task criteria and the accepted artifact or branch are not reported in this snapshot.</p>
+          <Section title="Accepted revision"><p className="text-fg">{row.accepted}</p></Section>
+
+          <Note>Scope, per-task criteria, artifact contents and the branch are not reported in this snapshot.</Note>
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">Read-only. Closing this does not affect the task.</footer>

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { toneGlyph, type Tone } from '@selarikru/ui';
+import { TONE_TEXT, toneGlyph, type Tone } from '@selarikru/ui';
 import { roleName } from '../team/TeamSignals.tsx';
-import { NODE_H, NODE_W, edgePath, layoutGraph, nextNode } from './layout.ts';
-import { STAGES, stageIndex, stageLabel, type EdgeState, type PipelineEdge, type PipelineRow } from './model.ts';
+import { NODE_H, NODE_W, edgeLabelPoint, edgePath, layoutGraph, nextNode, type LayoutInput } from './layout.ts';
+import { STAGES, graphInput, stageLabel, type EdgeState, type PipelineEdge, type PipelineRow } from './model.ts';
 
 const HEADER_H = 32;
-const TONE_TEXT: Readonly<Record<Tone, string>> = { neutral: 'text-muted', active: 'text-active', success: 'text-success', warning: 'text-warning', danger: 'text-danger' };
+const STUB_LENGTH = 40;
 const TONE_RAIL: Readonly<Record<Tone, string>> = { neutral: 'border-l-line-strong', active: 'border-l-active', success: 'border-l-success', warning: 'border-l-warning', danger: 'border-l-danger' };
 const EDGE_STYLE: Readonly<Record<EdgeState, { color: string; dash: string | undefined; marker: string }>> = {
   met: { color: 'var(--color-line-strong)', dash: undefined, marker: 'pl-arrow-met' },
@@ -18,6 +18,9 @@ const MARKERS: readonly { id: string; color: string }[] = [
   { id: 'pl-arrow-met', color: 'var(--color-line-strong)' }, { id: 'pl-arrow-waiting', color: 'var(--color-muted)' }, { id: 'pl-arrow-stale', color: 'var(--color-warning)' },
   { id: 'pl-arrow-cycle', color: 'var(--color-danger)' }, { id: 'pl-arrow-critical', color: 'var(--color-active)' },
 ];
+
+/** Short enough for the gap between layers. The full wording is in the node's text, the table and the inspector. */
+const EDGE_WORD: Readonly<Partial<Record<EdgeState, string>>> = { stale: 'Stale', cycle: 'Cycle' };
 
 const hasUnknownDeps = (row: PipelineRow): boolean => row.predecessors === null || row.predecessors.some((p) => p.edge === 'unknown');
 
@@ -34,7 +37,8 @@ function GraphNode({ row, layoutNode, selected, connected, tabbable, highlight, 
 }) {
   const border = selected ? 'border-active ring-2 ring-active' : row.inCycle ? 'border-danger' : highlight ? 'border-warning outline-2 outline-dashed outline-offset-2 outline-warning' : connected ? 'border-line-strong' : 'border-line';
   const checks = row.checkCount > 0 ? `${row.checkCount} ${row.checkCount === 1 ? 'check' : 'checks'}` : null;
-  const footer = [checks, row.why.held ? `Held ${row.age}` : null].filter(Boolean).join(' · ') || 'No checks yet';
+  // "Held" is kept for real blockers; a task healthily waiting on another should not compete with them.
+  const footer = [checks, row.why.held && !row.quietWait ? `Held ${row.age}` : null].filter(Boolean).join(' · ') || 'No checks yet';
   const unknownDeps = hasUnknownDeps(row);
   return (
     <li className="absolute" style={{ left: layoutNode.x, top: layoutNode.y + HEADER_H, width: NODE_W, height: NODE_H }}>
@@ -56,9 +60,10 @@ function GraphNode({ row, layoutNode, selected, connected, tabbable, highlight, 
         <span className="min-w-0">
           <span className="line-clamp-2 text-sm font-semibold leading-snug text-fg" title={row.title}>{row.title}</span>
           <span className="mt-0.5 block truncate text-sm text-muted">{roleName(row.role)} · rev {row.revision}</span>
+          {row.critical ? <span className="block truncate text-sm text-active" data-testid="node-on-chain">Longest chain</span> : null}
         </span>
         <span className="min-w-0">
-          <span className={`flex items-start gap-1.5 text-sm font-medium leading-snug ${TONE_TEXT[row.state.tone]}`}><span aria-hidden="true" className="mt-1 text-glyph">{toneGlyph(row.state.tone)}</span><span className="min-w-0 flex-1">{row.state.label}</span>{row.critical ? <span className="shrink-0 font-normal text-active">Chain</span> : null}</span>
+          <span className={`flex items-start gap-1.5 text-sm font-medium leading-snug ${TONE_TEXT[row.state.tone]}`}><span aria-hidden="true" className="mt-1 text-glyph">{toneGlyph(row.state.tone)}</span><span className="min-w-0 flex-1">{row.state.label}</span></span>
           <span className={`block text-sm leading-snug text-muted ${unknownDeps ? '' : 'truncate'}`}>{highlight ? <span className="text-warning">Eligible once verified</span> : unknownDeps ? <span className="text-warning" data-testid="node-unknown-deps">Dependencies unknown</span> : footer}</span>
         </span>
         <span className="sr-only">{nodeDescription(row, highlight)}</span>
@@ -79,7 +84,9 @@ export interface GraphProps {
 export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, onOpen }: GraphProps) {
   const shown = useMemo(() => new Set(rows.map((r) => r.taskId)), [rows]);
   const visibleEdges = useMemo(() => edges.filter((e) => shown.has(e.from) && shown.has(e.to)), [edges, shown]);
-  const layout = useMemo(() => layoutGraph({ nodes: rows.map((r) => ({ id: r.taskId, column: stageIndex(r.stage) })), edges: visibleEdges }), [rows, visibleEdges]);
+  // Keyed on structure, so the per-second rebuild of the rows neither re-lays out the graph nor moves a node.
+  const structure = JSON.stringify(graphInput(rows, edges));
+  const layout = useMemo(() => layoutGraph(JSON.parse(structure) as LayoutInput), [structure]);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const byId = useMemo(() => new Map(rows.map((r) => [r.taskId, r])), [rows]);
   const connected = useMemo(() => (selectedId === null ? new Set<string>() : new Set(visibleEdges.flatMap((e) => (e.from === selectedId ? [e.to] : e.to === selectedId ? [e.from] : [])))), [visibleEdges, selectedId]);
@@ -108,26 +115,28 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
   }, [layout.width]);
 
   const totalHeight = layout.height + HEADER_H;
+  // A stub on the first layer needs room to its left, or an unknown would read as no dependencies there.
+  const leftPad = layout.nodes.some((n) => n.x === 0 && hasUnknownDeps(byId.get(n.id)!)) ? STUB_LENGTH + 4 : 0;
   const stageX = (index: number): { x: number; width: number } => layout.columns.find((c) => c.index === index) ?? { x: 0, width: 0 };
 
   return (
     <div data-testid="pipeline-graph">
     <div ref={scroller} className="overflow-x-auto pb-2">
-      <div className="relative" style={{ width: layout.width, height: totalHeight }}>
+      <div className="relative" style={{ width: layout.width, height: totalHeight, marginLeft: leftPad }}>
         {layout.columns.map((c) => (
           <div key={c.index} className="absolute top-0 border-b border-line-strong pb-1 text-sm font-semibold text-fg" style={{ left: c.x, width: c.width }}>{STAGES[c.index]!.label}</div>
         ))}
-        <svg aria-hidden="true" className="absolute left-0" style={{ top: HEADER_H }} width={layout.width} height={layout.height} fill="none">
+        <svg aria-hidden="true" className="absolute left-0" style={{ top: HEADER_H, overflow: 'visible' }} width={layout.width} height={layout.height} fill="none">
           <defs>
             {MARKERS.map((m) => (
               <marker key={m.id} id={m.id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L8 4 L0 8 z" fill={m.color} /></marker>
             ))}
           </defs>
           {/* A null is not "no dependencies": a dotted stub marks that something may arrive here. */}
-          {layout.nodes.filter((n) => n.x > 0 && hasUnknownDeps(byId.get(n.id)!)).map((n) => (
+          {layout.nodes.filter((n) => hasUnknownDeps(byId.get(n.id)!)).map((n) => (
             <g key={`stub-${n.id}`} data-testid="graph-unknown-stub">
-              <path d={`M ${n.x - 40} ${n.y + NODE_H / 2} L ${n.x} ${n.y + NODE_H / 2}`} stroke="var(--color-warning)" strokeWidth="1.5" strokeDasharray="2 4" markerEnd="url(#pl-arrow-stale)" />
-              <text x={n.x - 24} y={n.y + NODE_H / 2 - 7} fontSize="14" fill="var(--color-warning)" stroke="var(--color-panel)" strokeWidth="4" paintOrder="stroke">?</text>
+              <path d={`M ${n.x - STUB_LENGTH} ${n.y + NODE_H / 2} L ${n.x} ${n.y + NODE_H / 2}`} stroke="var(--color-warning)" strokeWidth="1.5" strokeDasharray="2 4" markerEnd="url(#pl-arrow-stale)" />
+              <text x={n.x - STUB_LENGTH + 16} y={n.y + NODE_H / 2 - 7} fontSize="14" fill="var(--color-warning)" stroke="var(--color-panel)" strokeWidth="4" paintOrder="stroke">?</text>
             </g>
           ))}
           {layout.edges.map((e, i) => {
@@ -137,11 +146,14 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
             const critical = meta.critical === true && meta.state !== 'cycle';
             const color = critical ? 'var(--color-active)' : style.color;
             const marker = critical ? 'pl-arrow-critical' : style.marker;
-            const mid = e.points[Math.floor(e.points.length / 2)]!;
+            // Two tasks that depend on each other share one gap: the forward edge carries the word for both.
+            const paired = e.back && layout.edges.some((o) => !o.back && o.from === e.to && o.to === e.from);
+            const word = paired ? undefined : EDGE_WORD[meta.state];
+            const at = word ? edgeLabelPoint(e.points) : null;
             return (
-              <g key={`${e.from}-${e.to}`} data-testid="graph-edge" data-state={meta.state} data-critical={meta.critical === true}>
+              <g key={i} data-back={e.back} data-testid="graph-edge" data-state={meta.state} data-critical={meta.critical === true}>
                 <path d={edgePath(e.points)} stroke={color} strokeWidth={critical || emphasized ? 2.5 : 1.5} strokeDasharray={style.dash} markerEnd={`url(#${marker})`} />
-                {meta.label ? <text x={mid.x + 4} y={mid.y - 6} fontSize="13" fill={style.color} stroke="var(--color-panel)" strokeWidth="4" paintOrder="stroke">{meta.label}</text> : null}
+                {word && at ? <text x={at.x} y={at.y + (e.back ? 18 : -6)} textAnchor="middle" fontSize="13" fill={style.color} stroke="var(--color-panel)" strokeWidth="4" paintOrder="stroke" data-testid="graph-edge-label">{word}{meta.label ? <title>{meta.label}</title> : null}</text> : null}
               </g>
             );
           })}
@@ -172,7 +184,13 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
   );
 }
 
-export function GraphLegend() {
+/** Only what is actually drawn. With no edges at all there is nothing to decode, so it says that instead. */
+export function GraphLegend({ rows, edges }: { rows: readonly PipelineRow[]; edges: readonly PipelineEdge[] }) {
+  const shown = new Set(rows.map((r) => r.taskId));
+  const drawn = edges.filter((e) => shown.has(e.from) && shown.has(e.to));
+  const has = (...states: readonly EdgeState[]): boolean => drawn.some((e) => states.includes(e.state));
+  const unknownStub = rows.some(hasUnknownDeps);
+  if (drawn.length === 0 && !unknownStub) return <p className="text-sm text-muted" data-testid="graph-no-edges">No task here depends on another.</p>;
   const item = (dash: string | undefined, color: string, label: string, width = 1.5) => (
     <li className="flex items-center gap-1.5">
       <svg aria-hidden="true" width="28" height="8"><line x1="0" y1="4" x2="28" y2="4" stroke={color} strokeWidth={width} strokeDasharray={dash} /></svg>
@@ -181,10 +199,11 @@ export function GraphLegend() {
   );
   return (
     <ul aria-label="Edge meanings" className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted" data-testid="graph-legend">
-      {item(undefined, 'var(--color-line-strong)', 'Dependency met')}
-      {item('6 5', 'var(--color-muted)', 'Waiting')}
-      {item('2 4', 'var(--color-warning)', 'Stale or unknown')}
-      {item(undefined, 'var(--color-active)', 'Longest chain (heavier line)', 2.5)}
+      {has('met') ? item(undefined, 'var(--color-line-strong)', 'Dependency met') : null}
+      {has('waiting') ? item('6 5', 'var(--color-muted)', 'Waiting') : null}
+      {has('stale') || unknownStub ? item('2 4', 'var(--color-warning)', 'Stale or unknown') : null}
+      {has('cycle') ? item(undefined, 'var(--color-danger)', 'Cycle') : null}
+      {drawn.some((e) => e.critical) ? item(undefined, 'var(--color-active)', 'Longest chain (heavier line)', 2.5) : null}
     </ul>
   );
 }

@@ -13,6 +13,15 @@ const GLYPH: Record<Tone, string> = { neutral: '○', active: '◆', success: '�
 
 export const toneGlyph = (tone: Tone): string => GLYPH[tone];
 
+export const TONE_TEXT: Readonly<Record<Tone, string>> = { neutral: 'text-muted', active: 'text-active', success: 'text-success', warning: 'text-warning', danger: 'text-danger' };
+/** Attention rails. Only a warning or failure earns one; ordinary work stays quiet. */
+export const RAIL_SHADOW: Readonly<Record<Tone, string>> = {
+  neutral: '', active: '', success: '',
+  warning: 'shadow-[inset_3px_0_0_var(--color-warning)]',
+  danger: 'shadow-[inset_3px_0_0_var(--color-danger)]',
+};
+export const RAIL_BORDER: Readonly<Record<Tone, string>> = { neutral: 'border-l-line', active: 'border-l-line', success: 'border-l-line', warning: 'border-l-warning', danger: 'border-l-danger' };
+
 /** Status chip: color is always paired with a glyph and text. */
 export function Chip({ tone, children, testId }: { tone: Tone; children: ReactNode; testId?: string }) {
   return (

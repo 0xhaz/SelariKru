@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useStore } from 'zustand';
-import { buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
+import { TONE_TEXT, buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
@@ -49,7 +49,6 @@ const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }
   unavailable: { label: 'Unavailable', tone: 'neutral' },
   dead: { label: 'Stream stopped', tone: 'danger' },
 };
-const TONE_TEXT: Readonly<Record<Tone, string>> = { neutral: 'text-muted', active: 'text-active', success: 'text-success', warning: 'text-warning', danger: 'text-danger' };
 
 function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionState; confirmedAt: string | null; nowMs: number }) {
   const c = CONNECTION[connection];

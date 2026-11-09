@@ -6,10 +6,10 @@ async function openPipeline(page: Page, fixture: string, view = ''): Promise<voi
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
 }
 
-async function openHarness(page: Page, dependsOn: Record<string, string[] | null>, view = 'graph'): Promise<void> {
-  await page.addInitScript((value) => {
-    window.__scenario = { spiedFixture: 'feature-delivery', dependsOn: value };
-  }, dependsOn);
+async function openHarness(page: Page, dependsOn: Record<string, string[] | null>, view = 'graph', taskPatch: Record<string, Record<string, unknown>> = {}): Promise<void> {
+  await page.addInitScript(([deps, patch]) => {
+    window.__scenario = { spiedFixture: 'feature-delivery', dependsOn: deps, taskPatch: patch };
+  }, [dependsOn, taskPatch] as const);
   await page.goto(`/tests/harness/index.html#/pipeline?view=${view}`);
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
 }
@@ -60,9 +60,14 @@ test('"Why blocked?" names dependency, claim, approval, policy or budget', async
 
 test('a dependency wait reads as a quiet state, a failed gate does not', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
+  await openPipeline(page, 'contract-change');
+  const waiting = row(page, 'contract-change.web');
+  await expect(waiting).toContainText('Waiting on Approve contract v1');
+  await expect(waiting).toHaveAttribute('data-rail', 'none');
   await openPipeline(page, 'failed-ci');
   await expect(row(page, 'failed-ci.api')).toContainText('Failed check; repair queued');
   await expect(row(page, 'failed-ci.api')).toContainText('3 of 41 tests failed');
+  await expect(row(page, 'failed-ci.api')).toHaveAttribute('data-rail', 'danger');
 });
 
 test('critical-path filter', async ({ page }) => {
@@ -113,6 +118,58 @@ test('the graph is one tab stop with keyboard travel, and Enter opens and return
   await expect(brief).toBeFocused();
 });
 
+test('"Why blocked?" returns focus to its own trigger', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPipeline(page, 'feature-delivery');
+  const why = page.locator('[data-why-task="feature-delivery.search"]');
+  await why.focus();
+  await page.keyboard.press('Enter');
+  await expect(inspector(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(inspector(page)).toHaveCount(0);
+  await expect(why).toBeFocused();
+});
+
+test('a stale edge is labelled in the gap and tells a person to act', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openHarness(page, {}, 'graph', { 'feature-delivery.api': { status: 'superseded', supersededByRevision: 2 } });
+  const label = page.locator('[data-testid="graph-edge"][data-state="stale"] [data-testid="graph-edge-label"]');
+  await expect(label).toContainText('Stale');
+  const box = (await label.boundingBox())!;
+  for (const n of await page.getByTestId('graph-node').all()) {
+    const b = (await n.boundingBox())!;
+    expect(box.x + box.width <= b.x || b.x + b.width <= box.x || box.y + box.height <= b.y || b.y + b.height <= box.y).toBe(true);
+  }
+  await node(page, 'feature-delivery.integrate').click();
+  await expect(inspector(page).getByTestId('why-blocked')).toContainText('which was superseded by revision 2 and cannot finish');
+  await expect(inspector(page).getByTestId('why-blocked')).toContainText('A person must replan or cancel this task.');
+});
+
+test('the legend shows only what is drawn, and an edgeless graph says why', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPipeline(page, 'healthy-parallel-work', 'graph');
+  await expect(page.getByTestId('graph-legend')).toHaveCount(0);
+  await expect(page.getByTestId('graph-no-edges')).toHaveText('No task here depends on another.');
+  const [a, b] = await page.getByTestId('graph-node').all();
+  expect((await a!.boundingBox())!.y).toBe((await b!.boundingBox())!.y);
+  await openPipeline(page, 'feature-delivery', 'graph');
+  await expect(page.getByTestId('graph-legend')).toContainText('Longest chain');
+  await expect(page.getByTestId('graph-legend')).not.toContainText('Stale');
+});
+
+test('healthy waiting is not labelled held, and a first-layer unknown still draws its stub', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPipeline(page, 'feature-delivery', 'graph');
+  await expect(node(page, 'feature-delivery.review')).not.toContainText('Held');
+  await expect(node(page, 'feature-delivery.search')).toContainText('Held');
+  await expect(node(page, 'feature-delivery.search')).toContainText('Longest chain');
+  await expect(page.getByTestId('pipeline-summary')).toContainText('held (1 approval)');
+  await page.goto('about:blank');
+  await openHarness(page, { 'feature-delivery.brief': null });
+  await expect(page.getByTestId('graph-unknown-stub')).toHaveCount(1);
+  await expect(node(page, 'feature-delivery.brief')).toContainText('Dependencies unknown');
+});
+
 test('a node names its dependencies in text for a screen reader', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openPipeline(page, 'feature-delivery', 'graph');
@@ -141,6 +198,9 @@ test('a plan cycle is reported as a plan error with its path', async ({ page }) 
   await openHarness(page, { 'feature-delivery.e2e': ['feature-delivery.review'] });
   await expect(page.getByTestId('cycle-notice')).toContainText('End-to-end checks → Merge review → End-to-end checks');
   await expect(page.locator('[data-testid="graph-edge"][data-state="cycle"]')).toHaveCount(2);
+  // A two-task cycle shares one gap, so the forward edge carries the label and it is not printed twice.
+  await expect(page.locator('[data-testid="graph-edge"][data-back="false"][data-state="cycle"] [data-testid="graph-edge-label"]')).toHaveCount(1);
+  await expect(page.locator('[data-testid="graph-edge"][data-back="true"] [data-testid="graph-edge-label"]')).toHaveCount(0);
   await expect(page.getByTestId('critical-label')).toContainText('the plan has a cycle');
   await expectNoAxeViolations(page);
 });

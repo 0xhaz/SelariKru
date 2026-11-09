@@ -1,4 +1,4 @@
-import { approvalStateAt, effectiveWorkerHealth, type ProjectViewSnapshot, type TaskView } from '@selarikru/view-protocol';
+import { approvalStateAt, effectiveWorkerHealth, type CheckView, type ProjectViewSnapshot, type TaskView } from '@selarikru/view-protocol';
 import { formatAge } from '@selarikru/ui';
 
 /**
@@ -33,6 +33,11 @@ export interface AttentionItem {
 }
 
 const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merged', 'verified'];
+/** Work that has stopped. A placement block or a stored reason on it says nothing about what is holding anything now. */
+export const isClosedTask = (t: Pick<TaskView, 'status'>): boolean => CLOSED.includes(t.status);
+export const latestCheckOf = (snapshot: ProjectViewSnapshot, taskId: string): CheckView | undefined => Object.values(snapshot.checks).filter((c) => c.taskId === taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+/** A failed verdict is released back to `ready` for a repair, so a queued task whose latest check failed is still a failed gate. */
+export const atFailedGate = (t: Pick<TaskView, 'status'>, latest: CheckView | undefined): boolean => t.status === 'failed' || (t.status === 'ready' && latest?.state === 'failed');
 const titleOf = (t: TaskView): string => t.title ?? t.taskId;
 export const sentence = (code: string): string => {
   const words = code.replace(/[_:]+/g, ' ').trim();
@@ -159,15 +164,14 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[]):
  */
 export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null = null): AttentionItem[] {
   const items: AttentionItem[] = [];
-  const live = Object.values(snapshot.tasks).filter((t) => !CLOSED.includes(t.status));
+  const live = Object.values(snapshot.tasks).filter((t) => !isClosedTask(t));
   const affected = (t: TaskView): readonly string[] => dependentsOf(snapshot, t.taskId);
 
   for (const task of live) {
     const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
     if (blockCode !== null) items.push(blockItem(task, blockCode, affected(task)));
-    const latestCheck = Object.values(snapshot.checks).filter((c) => c.taskId === task.taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-    // A failed verdict is released back to `ready` for a repair, so a queued task whose latest check failed is still a failed gate.
-    if (task.status === 'failed' || (task.status === 'ready' && latestCheck?.state === 'failed')) {
+    const latestCheck = latestCheckOf(snapshot, task.taskId);
+    if (atFailedGate(task, latestCheck)) {
       const check = latestCheck?.state === 'failed' ? latestCheck : undefined;
       const hit = affected(task);
       items.push(make({
@@ -194,8 +198,8 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const state = approvalStateAt(approval, nowMs);
     if (state !== 'pending' && state !== 'expired') continue;
     const task = approval.taskId !== null ? snapshot.tasks[approval.taskId] : undefined;
-    if (task && CLOSED.includes(task.status)) continue;
-    const hit = task ? affected(task) : Object.values(snapshot.tasks).filter((t) => t.runId === approval.runId && !CLOSED.includes(t.status)).map((t) => t.taskId);
+    if (task && isClosedTask(task)) continue;
+    const hit = task ? affected(task) : Object.values(snapshot.tasks).filter((t) => t.runId === approval.runId && !isClosedTask(t)).map((t) => t.taskId);
     const name = task ? titleOf(task) : 'This run';
     const asked = approval.reason ? sentence(approval.reason) : 'Unspecified request';
     const expiresIn = state === 'pending' && approval.expiresAt !== null ? ` Expires in ${formatAge(Date.parse(approval.expiresAt) - nowMs)}.` : '';
@@ -239,7 +243,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
         consequence: 'Usually a long build. The task stays running and nothing has failed.', nextAction: 'No action yet. Inspect it if it stays silent.',
       }));
     }
-    if ((reading.health === 'disconnected' || reading.health === 'failed') && task && !CLOSED.includes(task.status)) {
+    if ((reading.health === 'disconnected' || reading.health === 'failed') && task && !isClosedTask(task)) {
       const replaced = task.activeAttemptId !== null && task.activeAttemptId !== worker.attemptId;
       const lastSeen = worker.lastHeartbeatAt ?? worker.enteredStateAt;
       if (replaced) {
@@ -265,7 +269,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     }
   }
 
-  const replanned = Object.values(snapshot.tasks).filter((t) => t.revision > 1 && !CLOSED.includes(t.status));
+  const replanned = Object.values(snapshot.tasks).filter((t) => t.revision > 1 && !isClosedTask(t));
   for (const run of Object.values(snapshot.runs)) {
     if (run.planRevision < 2) continue;
     const mine = replanned.filter((t) => t.runId === run.runId);

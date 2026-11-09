@@ -154,7 +154,12 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
   }, [view, selectedTaskId]);
 
   const selected = pipeline?.rows.find((r) => r.taskId === selectedTaskId) ?? null;
-  const open = (id: string): void => pipelinePresentation.getState().open(id);
+  // The element to return to on close. An opener inside the inspector does not count: it is about to be replaced.
+  const opener = useRef<Element | null>(null);
+  const open = (id: string): void => {
+    if (!pipelinePresentation.getState().inspecting) opener.current = document.activeElement;
+    pipelinePresentation.getState().open(id);
+  };
   const select = (id: string): void => pipelinePresentation.getState().select(id);
 
   // Focus returns to whatever opened the inspector, found by task id so a re-sort or a view change cannot strand it.
@@ -162,8 +167,9 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
   useEffect(() => {
     if (wasInspecting.current && !inspecting) {
       const id = pipelinePresentation.getState().selectedTaskId;
-      const opener = id ? document.querySelector<HTMLElement>(`[data-open-task="${CSS.escape(id)}"]`) : null;
-      (opener ?? document.getElementById('main'))?.focus();
+      const trigger = opener.current instanceof HTMLElement && opener.current.isConnected && opener.current.closest<HTMLElement>('[data-task-id]')?.dataset['taskId'] === id ? opener.current : null;
+      const fallback = id ? document.querySelector<HTMLElement>(`[data-open-task="${CSS.escape(id)}"]`) : null;
+      (trigger ?? fallback ?? document.getElementById('main'))?.focus();
     }
     wasInspecting.current = inspecting;
   }, [inspecting]);
@@ -232,7 +238,7 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
               <>
                 <PipelineGraph rows={shownRows} edges={pipeline.edges} selectedId={selectedTaskId} highlight={highlight} onSelect={select} onOpen={open} />
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-line pt-2">
-                  <GraphLegend />
+                  <GraphLegend rows={shownRows} edges={pipeline.edges} />
                   <p className="text-sm text-muted">Arrow keys follow dependencies. Enter inspects.</p>
                 </div>
               </>

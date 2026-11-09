@@ -1,8 +1,9 @@
 import { formatAge, type Tone } from '@selarikru/ui';
 import { approvalStateAt, isEmptyProject, type AttemptView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
-import { blockItem, buildAttention, classifyBlock, explain, sentence, type AttentionItem } from '../overview/attention.ts';
+import { atFailedGate, blockItem, buildAttention, classifyBlock, explain, isClosedTask, latestCheckOf, sentence, type AttentionItem } from '../overview/attention.ts';
 import { activeRun, taskRow } from '../overview/model.ts';
 import { checksOf, readCheck } from '../team/model.ts';
+import type { LayoutInput } from './layout.ts';
 
 export const STAGES = [
   { id: 'discovery', label: 'Discovery' }, { id: 'contract', label: 'Contract' }, { id: 'build', label: 'Build' }, { id: 'integrate', label: 'Integrate' },
@@ -18,10 +19,10 @@ export const PIPELINE_COLUMNS = [
   { key: 'accepted', label: 'Accepted revision' }, { key: 'branch', label: 'Branch or candidate' }, { key: 'checks', label: 'Checks' }, { key: 'age', label: 'Age' }, { key: 'next', label: 'Next action' },
 ] as const;
 
-export type BlockCause = 'policy' | 'budget' | 'approval' | 'claim' | 'placement' | 'gate' | 'worker' | 'dependency' | 'capacity' | 'other' | 'unstated';
-const CAUSE_ORDER: readonly BlockCause[] = ['policy', 'budget', 'approval', 'claim', 'placement', 'gate', 'worker', 'dependency', 'capacity', 'other', 'unstated'];
+export type BlockCause = 'policy' | 'budget' | 'approval' | 'claim' | 'placement' | 'gate' | 'worker' | 'cycle' | 'dependency' | 'capacity' | 'other' | 'unstated';
+const CAUSE_ORDER: readonly BlockCause[] = ['policy', 'budget', 'approval', 'claim', 'placement', 'gate', 'worker', 'cycle', 'dependency', 'capacity', 'other', 'unstated'];
 export const CAUSE_LABEL: Readonly<Record<BlockCause, string>> = {
-  policy: 'Policy', budget: 'Budget', approval: 'Approval', claim: 'Resource claim', placement: 'Placement', gate: 'Failed check', worker: 'Worker', dependency: 'Dependency', capacity: 'Capacity', other: 'Reported reason', unstated: 'Not stated',
+  policy: 'Policy', budget: 'Budget', approval: 'Approval', claim: 'Resource claim', placement: 'Placement', gate: 'Failed check', worker: 'Worker', cycle: 'Plan cycle', dependency: 'Dependency', capacity: 'Capacity', other: 'Reported reason', unstated: 'Not stated',
 };
 
 export interface BlockReason {
@@ -34,6 +35,10 @@ export interface BlockReason {
   readonly taskIds: readonly string[];
   /** True when the reason is that something is not known, so the view does not read it as a finding. */
   readonly unknown: boolean;
+  /** True when nothing can clear this without a person changing the plan: a dependency that can never finish, or a cycle. */
+  readonly terminal: boolean;
+  /** True for an approval a person can still give. An expired or denied one has a different next step. */
+  readonly canApprove: boolean;
 }
 
 export interface WhyBlocked {
@@ -99,6 +104,7 @@ export interface PipelineRow {
   readonly title: string;
   readonly role: string | null;
   readonly revision: number;
+  readonly status: TaskView['status'];
   readonly stage: StageId;
   readonly owner: { readonly role: string | null; readonly workerId: string | null };
   readonly state: { readonly label: string; readonly tone: Tone };
@@ -107,7 +113,8 @@ export interface PipelineRow {
   /** Null means the dependencies are unknown; empty means none. */
   readonly predecessors: readonly Predecessor[] | null;
   readonly dependents: readonly TaskLink[];
-  readonly accepted: string | null;
+  /** What was accepted at the task's current revision, so never blank: "Rev 2", "None at rev 2" or "Replaced by rev 3". */
+  readonly accepted: string;
   readonly branch: string | null;
   readonly checks: CheckSummary | null;
   readonly checkCount: number;
@@ -117,6 +124,8 @@ export interface PipelineRow {
   readonly since: string;
   readonly nextAction: string;
   readonly why: WhyBlocked;
+  /** Held only by healthy waiting: a dependency still in progress or a free slot. Should not compete with a real blocker. */
+  readonly quietWait: boolean;
   readonly critical: boolean;
   readonly inCycle: boolean;
   /** Only when an approval is what holds this task. */
@@ -162,13 +171,13 @@ export interface PipelineModel {
   readonly stageNote: string;
 }
 
-const STAGE_NOTE = 'Stage is inferred from each task\'s role, state and dependencies. The plan does not record one.';
+const STAGE_NOTE = 'Stage is inferred from each task\'s role, state and dependencies. A finished task stays with its work while others depend on it. The plan does not record a stage.';
 const REPLAN_UNREPORTED = 'The earlier plan, invalidated outputs and checks, and cost impact are not in this snapshot.';
 
-const ROLE_STAGE: Readonly<Record<string, StageId>> = {
-  research: 'discovery', planner: 'discovery', product: 'discovery', discovery: 'discovery', architect: 'contract', contract: 'contract',
-  integration: 'integrate', integrator: 'integrate', verification: 'verify', verifier: 'verify', qa: 'verify', reviewer: 'review',
-};
+const ROLE_STAGE: ReadonlyMap<string, StageId> = new Map([
+  ['research', 'discovery'], ['planner', 'discovery'], ['product', 'discovery'], ['discovery', 'discovery'], ['architect', 'contract'], ['contract', 'contract'],
+  ['integration', 'integrate'], ['integrator', 'integrate'], ['verification', 'verify'], ['verifier', 'verify'], ['qa', 'verify'], ['reviewer', 'review'],
+]);
 
 /**
  * A task's column. The role says what kind of work it is; a finished task with nothing depending on it moves on to its own gate. A dependency is
@@ -179,7 +188,7 @@ function assignStages(tasks: readonly TaskView[], dependentsOf: ReadonlyMap<stri
   const anyUnknown = tasks.some((t) => t.dependsOn === null);
   const natural = (t: TaskView): number => {
     const hasDependents = (dependentsOf.get(t.taskId)?.length ?? 0) > 0;
-    let base: StageId = (t.role ? ROLE_STAGE[t.role] : undefined) ?? 'build';
+    let base: StageId = (t.role ? ROLE_STAGE.get(t.role) : undefined) ?? 'build';
     if (t.role === 'reviewer' && hasDependents) base = 'contract';
     if (!hasDependents && !anyUnknown) {
       const advance: StageId | null = t.status === 'merged' ? 'merged' : t.status === 'verified' ? 'review' : t.status === 'verifying' ? 'verify' : null;
@@ -298,17 +307,18 @@ function reasonFromCode(t: TaskView, code: string): BlockReason {
   else if (code.startsWith('resource_conflict')) cause = 'claim';
   else if (code.startsWith('role_not_mapped') || code.startsWith('location_disabled')) cause = 'placement';
   else cause = 'other';
-  return { cause, label: CAUSE_LABEL[cause], text: item.detail, code, taskIds: [], unknown: false };
+  return { cause, label: CAUSE_LABEL[cause], text: item.detail, code, taskIds: [], unknown: false, terminal: false, canApprove: code.startsWith('approval_required:') };
 }
 
-function reason(cause: BlockCause, text: string, extra: Partial<Pick<BlockReason, 'code' | 'taskIds' | 'unknown'>> = {}): BlockReason {
-  return { cause, label: CAUSE_LABEL[cause], text, code: extra.code ?? null, taskIds: extra.taskIds ?? [], unknown: extra.unknown ?? false };
+function reason(cause: BlockCause, text: string, extra: Partial<Pick<BlockReason, 'code' | 'taskIds' | 'unknown' | 'terminal' | 'canApprove'>> = {}): BlockReason {
+  return { cause, label: CAUSE_LABEL[cause], text, code: extra.code ?? null, taskIds: extra.taskIds ?? [], unknown: extra.unknown ?? false, terminal: extra.terminal ?? false, canApprove: extra.canApprove ?? false };
 }
 
 const WAITING_STATUSES: readonly TaskView['status'][] = ['planned', 'blocked'];
 const HOLDABLE_BY_APPROVAL: readonly TaskView['status'][] = ['awaiting_approval', 'planned', 'ready', 'blocked'];
 
 function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): WhyBlocked {
+  if (isClosedTask(t)) return { held: false, reasons: [] };
   const reasons: BlockReason[] = [];
   const code = t.placementBlock ?? (t.status === 'blocked' ? t.statusReason : null);
   if (code) reasons.push(reasonFromCode(t, code));
@@ -318,15 +328,15 @@ function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): W
     if (open.length > 0) {
       const latest = open.sort((x, y) => y.a.requestedAt.localeCompare(x.a.requestedAt))[0]!;
       const asked = latest.a.reason ? sentence(latest.a.reason) : 'Unspecified request';
-      reasons.push(reason('approval', latest.state === 'expired' ? `A request expired and was not granted: ${asked}.` : `Waiting for your decision: ${asked}.`, { code: latest.a.reason }));
+      reasons.push(reason('approval', latest.state === 'expired' ? `A request expired and was not granted: ${asked}.` : `Waiting for your decision: ${asked}.`, { code: latest.a.reason, canApprove: latest.state === 'pending' }));
     } else if (t.status === 'awaiting_approval') {
       reasons.push(reason('approval', 'It is waiting for approval, and the request is not in this snapshot.'));
     }
   }
 
-  const check = checksOf(ctx.snapshot, t.taskId)[0];
+  const check = latestCheckOf(ctx.snapshot, t.taskId);
   const failedLatest = check?.state === 'failed' ? check : undefined;
-  if (t.status === 'failed' || (t.status === 'ready' && failedLatest)) {
+  if (atFailedGate(t, check)) {
     if (failedLatest) {
       const summary = failedLatest.summary ?? failedLatest.checkId;
       reasons.push(reason('gate', `Check failed: ${summary}.${t.status === 'ready' ? ' A repair attempt is scheduled.' : ''}`, { code: failedLatest.checkId }));
@@ -340,6 +350,8 @@ function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): W
   if (ctx.workerByTask.get(t.taskId)?.activity === 'waiting_resource') reasons.push(reason('capacity', 'It is waiting for a free slot.', { code: 'waiting_resource' }));
 
   const waitsOnDeps = WAITING_STATUSES.includes(t.status);
+  const inCycle = ctx.cycleIds.has(t.taskId);
+  if (waitsOnDeps && inCycle) reasons.push(reason('cycle', `It is part of a dependency cycle (${ctx.cycleText}), so it can never start.`, { taskIds: [...ctx.cycleIds], terminal: true }));
   if (waitsOnDeps) {
     if (t.dependsOn === null) {
       reasons.push(reason('dependency', 'Its dependencies are not known yet, so one may be holding it.', { unknown: true }));
@@ -347,10 +359,10 @@ function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): W
       for (const id of t.dependsOn) {
         const dep = ctx.byId.get(id);
         const edge = edgeOf(dep);
-        if (edge.state === 'met') continue;
+        if (edge.state === 'met' || (inCycle && ctx.cycleIds.has(id))) continue;
         const name = dep?.title ?? id;
         if (edge.state === 'unknown') reasons.push(reason('dependency', `Depends on ${name}, which is not in this snapshot, so its state is unknown.`, { taskIds: [id], unknown: true }));
-        else if (edge.state === 'stale') reasons.push(reason('dependency', `Depends on ${name}, which was ${edge.note!.toLowerCase()} and cannot finish.`, { taskIds: [id] }));
+        else if (edge.state === 'stale') reasons.push(reason('dependency', `Depends on ${name}, which was ${edge.note!.toLowerCase()} and cannot finish.`, { taskIds: [id], terminal: true }));
         else reasons.push(reason('dependency', `Waiting on ${name} (${taskRow(dep!).statusLabel.toLowerCase()}).`, { taskIds: [id] }));
       }
     }
@@ -362,6 +374,7 @@ function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): W
 }
 
 function defaultNext(t: TaskView, why: WhyBlocked, run: RunView | undefined): string {
+  if (why.reasons.some((r) => r.terminal)) return 'A person must replan or cancel this task.';
   switch (t.status) {
     case 'planned':
       if (t.dependsOn === null) return 'None yet. Its dependencies are not known.';
@@ -380,6 +393,8 @@ interface Context {
   readonly snapshot: ProjectViewSnapshot;
   readonly nowMs: number;
   readonly byId: ReadonlyMap<string, TaskView>;
+  readonly cycleIds: ReadonlySet<string>;
+  readonly cycleText: string;
   readonly workerByTask: ReadonlyMap<string, ProjectViewSnapshot['workers'][string]>;
 }
 
@@ -390,6 +405,9 @@ const RUN_EVIDENCE_BRANCH: Readonly<Record<string, string>> = {
 function attemptLines(attempts: readonly AttemptView[]): AttemptLine[] {
   return [...attempts].sort((a, b) => a.number - b.number).map((a) => ({ label: `Attempt ${a.number}, ${a.outcome}${a.exitReason ? `. ${explain(a.exitReason)}` : ''}`, at: a.startedAt, runner: a.runnerId }));
 }
+
+const BUCKET: Readonly<Partial<Record<TaskView['status'], string>>> = { running: 'running', verifying: 'verifying', ready: 'planned or queued', planned: 'planned or queued', verified: 'done', merged: 'done', cancelled: 'cancelled', superseded: 'superseded' };
+const SUMMARY_ORDER: readonly string[] = ['running', 'verifying', 'held', 'waiting', 'planned or queued', 'done', 'cancelled', 'superseded'];
 
 const STATUS_ORDER: readonly TaskView['status'][] = ['failed', 'blocked', 'awaiting_approval', 'running', 'verifying', 'ready', 'planned', 'verified', 'merged', 'cancelled', 'superseded'];
 
@@ -409,7 +427,6 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
   const tasks = Object.values(snapshot.tasks).filter((t) => runId === null || t.runId === runId);
   const byId = new Map(tasks.map((t) => [t.taskId, t]));
   const workers = Object.values(snapshot.workers);
-  const ctx: Context = { snapshot, nowMs, byId, workerByTask: new Map(workers.filter((w) => w.taskId !== null).map((w) => [w.taskId!, w])) };
 
   const dependentsOf = new Map<string, string[]>();
   for (const t of tasks) {
@@ -420,6 +437,12 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
   const stages = assignStages(tasks, dependentsOf);
   const cyclePath = findCycle(byId);
   const inCycle = new Set(cyclePath ?? []);
+  // The search walks "depends on"; the graph's arrows run the other way, so the path is reported in the direction it is drawn.
+  const drawnCycle = cyclePath ? [...cyclePath].reverse() : null;
+  const cycleTitle = (id: string): string => byId.get(id)?.title ?? id;
+  const cycleText = drawnCycle ? drawnCycle.map(cycleTitle).join(' → ') : '';
+  const isCycleEdge = (taskId: string, dep: string): boolean => cyclePath?.some((id, i) => id === taskId && cyclePath[i + 1] === dep) ?? false;
+  const ctx: Context = { snapshot, nowMs, byId, cycleIds: inCycle, cycleText, workerByTask: new Map(workers.filter((w) => w.taskId !== null).map((w) => [w.taskId!, w])) };
   const { chain, depth } = longestChain(tasks, byId, cyclePath);
   const criticalIds = new Set(chain.taskIds);
   const attention = buildAttention(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
@@ -453,10 +476,10 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
       const predecessors = t.dependsOn === null ? null : t.dependsOn.map((id): Predecessor => {
         const dep = byId.get(id);
         const edge = edgeOf(dep);
-        return { taskId: id, title: dep?.title ?? id, status: dep ? taskRow(dep).statusLabel : 'Unknown', edge: edge.state, note: edge.note };
+        return { taskId: id, title: dep?.title ?? id, status: dep ? taskRow(dep).statusLabel : 'Unknown', edge: isCycleEdge(t.taskId, id) ? 'cycle' : edge.state, note: edge.note };
       });
       let ifApproved: ApprovalEffect | null = null;
-      if (why.reasons.some((r) => r.cause === 'approval')) {
+      if (why.reasons.some((r) => r.canApprove)) {
         const followers = (dependentsOf.get(t.taskId) ?? []).map((id) => byId.get(id)!).filter(isUnfinished);
         const onlyThis = (f: TaskView): boolean => (f.dependsOn ?? []).every((d) => d === t.taskId || edgeOf(byId.get(d)).state === 'met');
         ifApproved = {
@@ -465,17 +488,18 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
           stillWaiting: followers.filter((f) => !onlyThis(f)).map((f) => link(f.taskId)),
         };
       }
-      const accepted = t.status === 'verified' || t.status === 'merged' ? `Rev ${t.revision}` : t.status === 'superseded' ? (t.supersededByRevision !== null ? `Replaced by rev ${t.supersededByRevision}` : 'Replaced') : null;
+      const accepted = t.status === 'verified' || t.status === 'merged' ? `Rev ${t.revision}` : t.status === 'superseded' ? (t.supersededByRevision !== null ? `Replaced by rev ${t.supersededByRevision}` : 'Replaced') : `None at rev ${t.revision}`;
       const branch = (t.status === 'verified' || t.status === 'merged') && run?.latestEvidence ? (RUN_EVIDENCE_BRANCH[run.latestEvidence.kind] ?? null) : null;
       return {
-        taskId: t.taskId, title: base.title, role: t.role, revision: t.revision, stage: stages.get(t.taskId)!,
+        taskId: t.taskId, title: base.title, role: t.role, revision: t.revision, status: t.status, stage: stages.get(t.taskId)!,
         owner: { role: t.role, workerId: ctx.workerByTask.get(t.taskId)?.workerId ?? null },
         state,
         reason: why.reasons[0]?.text ?? own[0]?.detail ?? null,
         predecessors,
         dependents: (dependentsOf.get(t.taskId) ?? []).map(link),
         accepted, branch,
-        checks: pick ? { label: pick.label, tone: pick.tone, detail: pick.check.summary } : null,
+        // The table chip keeps the verdict; the task's own state is already in the row, and the inspector has the full reading.
+        checks: pick ? { label: pick.label.split(';')[0]!, tone: pick.tone, detail: pick.check.summary } : null,
         checkCount: checks.length,
         checkLines: checks.map((c) => ({ checkId: c.check.checkId, label: c.label, tone: c.tone, summary: c.check.summary, at: c.check.updatedAt })),
         attempts: attemptLines(taskAttempts),
@@ -483,6 +507,7 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
         since: t.enteredStatusAt,
         nextAction: own[0]?.nextAction ?? defaultNext(t, why, run ?? undefined),
         why,
+        quietWait: why.held && why.reasons.every((r) => !r.unknown && !r.terminal && (r.cause === 'dependency' || r.cause === 'capacity')),
         critical: criticalIds.has(t.taskId),
         inCycle: inCycle.has(t.taskId),
         ifApproved,
@@ -495,8 +520,7 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
     const task = byId.get(t.taskId)!;
     for (const dep of task.dependsOn ?? []) {
       if (!byId.has(dep)) continue;
-      const pos = cyclePath ? cyclePath.findIndex((id, i) => id === t.taskId && cyclePath[i + 1] === dep) : -1;
-      const base = pos >= 0 ? { state: 'cycle' as const, label: 'Cycle' } : edgeOf(byId.get(dep));
+      const base = isCycleEdge(t.taskId, dep) ? { state: 'cycle' as const, label: 'Cycle' } : edgeOf(byId.get(dep));
       const onChain = criticalIds.has(dep) && criticalIds.has(t.taskId) && depth.get(t.taskId) === (depth.get(dep) ?? -2) + 1;
       edges.push({ from: dep, to: t.taskId, state: base.state, label: base.label, ...(onChain ? { critical: true as const } : {}) });
     }
@@ -506,16 +530,11 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
   const groups: StageGroup[] = STAGES.map((s) => ({ id: s.id, label: s.label, rows: rows.filter((r) => r.stage === s.id) })).filter((g) => g.rows.length > 0);
   const summary = (() => {
     if (rows.length === 0) return null;
-    const count = (p: (r: PipelineRow) => boolean): number => rows.filter(p).length;
-    const held = CAUSE_ORDER.map((c) => [c, count((r) => r.why.reasons[0]?.cause === c)] as const).filter(([, n]) => n > 0).map(([c, n]) => `${n} ${CAUSE_LABEL[c].toLowerCase()}`).join(', ');
-    const parts = [
-      [count((r) => !r.why.held && r.state.label === 'Running'), 'running'],
-      [count((r) => r.state.label === 'Verifying'), 'verifying'],
-      [count((r) => r.why.held), held ? `held (${held})` : 'held'],
-      [count((r) => !r.why.held && (r.state.label === 'Queued' || r.state.label === 'Planned')), 'planned or queued'],
-      [count((r) => r.state.label.startsWith('Verified') || r.state.label === 'Merged'), 'done'],
-    ] as const;
-    const body = parts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`).join(', ');
+    // Each row lands in exactly one bucket, so the parts always add up to the total.
+    const bucketOf = (r: PipelineRow): string => (r.why.held ? (r.quietWait ? 'waiting' : 'held') : (BUCKET[r.status] ?? r.status));
+    const count = (bucket: string): number => rows.filter((r) => bucketOf(r) === bucket).length;
+    const held = CAUSE_ORDER.map((c) => [c, rows.filter((r) => bucketOf(r) === 'held' && r.why.reasons[0]?.cause === c).length] as const).filter(([, n]) => n > 0).map(([c, n]) => `${n} ${CAUSE_LABEL[c].toLowerCase()}`).join(', ');
+    const body = SUMMARY_ORDER.map((bucket): [number, string] => [count(bucket), bucket === 'held' && held ? `held (${held})` : bucket]).filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`).join(', ');
     return `${options.stale ? 'Last confirmed: ' : ''}${plural(rows.length, 'task')}: ${body}.`;
   })();
 
@@ -532,15 +551,23 @@ export function buildPipeline(snapshot: ProjectViewSnapshot, nowMs: number, live
     };
   }
 
-  const cycleTitle = (id: string): string => byId.get(id)?.title ?? id;
   return {
     empty: isEmptyProject(snapshot) || rows.length === 0,
     simulated: snapshot.meta.provenance === 'simulated',
     stale: options.stale === true,
     summary, runs, runId, planRevision: run?.planRevision ?? null,
     rows, edges, stages: groups, critical: chain,
-    cycle: cyclePath ? { ids: cyclePath, text: cyclePath.map(cycleTitle).join(' → ') } : null,
+    cycle: drawnCycle ? { ids: drawnCycle, text: cycleText } : null,
     replan, stageNote: STAGE_NOTE,
+  };
+}
+
+/** The graph's input, in task id order whatever the rows' status order, so a status change alone never moves a node. */
+export function graphInput(rows: readonly PipelineRow[], edges: readonly PipelineEdge[]): LayoutInput {
+  const shown = new Set(rows.map((r) => r.taskId));
+  return {
+    nodes: [...rows].sort((a, b) => a.taskId.localeCompare(b.taskId)).map((r) => ({ id: r.taskId, column: stageIndex(r.stage) })),
+    edges: edges.filter((e) => shown.has(e.from) && shown.has(e.to)).map((e) => ({ from: e.from, to: e.to })),
   };
 }
 
