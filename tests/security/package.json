@@ -1,0 +1,29 @@
+{
+  "name": "@selarikru/security-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end negative cases through the real API, scheduler, runner and database. The only fakes are the sandbox binary, the agent's output and GitHub.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@selarikru/artifacts": "workspace:*",
+    "@selarikru/control-api": "workspace:*",
+    "@selarikru/domain": "workspace:*",
+    "@selarikru/harness-claude": "workspace:*",
+    "@selarikru/integrations-github": "workspace:*",
+    "@selarikru/persistence": "workspace:*",
+    "@selarikru/policy": "workspace:*",
+    "@selarikru/protocol": "workspace:*",
+    "@selarikru/runtime-docker-local": "workspace:*",
+    "@selarikru/workflow": "workspace:*",
+    "drizzle-orm": "0.45.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

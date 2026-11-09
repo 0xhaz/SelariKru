@@ -544,19 +544,89 @@ importers:
 
   tests/fault-injection:
     dependencies:
+      '@selarikru/artifacts':
+        specifier: workspace:*
+        version: link:../../packages/artifacts
+      '@selarikru/control-api':
+        specifier: workspace:*
+        version: link:../../apps/control-api
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../../packages/harness-claude
+      '@selarikru/integrations-github':
+        specifier: workspace:*
+        version: link:../../packages/integrations-github
       '@selarikru/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
+      '@selarikru/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@selarikru/runtime-docker-local':
+        specifier: workspace:*
+        version: link:../../packages/runtime-docker-local
       '@selarikru/workflow':
         specifier: workspace:*
         version: link:../../services/workflow
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
     devDependencies:
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.10.0)(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  tests/security:
+    dependencies:
+      '@selarikru/artifacts':
+        specifier: workspace:*
+        version: link:../../packages/artifacts
+      '@selarikru/control-api':
+        specifier: workspace:*
+        version: link:../../apps/control-api
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../../packages/harness-claude
+      '@selarikru/integrations-github':
+        specifier: workspace:*
+        version: link:../../packages/integrations-github
+      '@selarikru/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@selarikru/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@selarikru/runtime-docker-local':
+        specifier: workspace:*
+        version: link:../../packages/runtime-docker-local
+      '@selarikru/workflow':
+        specifier: workspace:*
+        version: link:../../services/workflow
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
       typescript:
         specifier: 5.9.3
         version: 5.9.3
