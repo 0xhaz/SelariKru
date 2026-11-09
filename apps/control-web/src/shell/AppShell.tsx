@@ -13,6 +13,7 @@ import { DecisionsView } from '../features/decisions/DecisionsView.tsx';
 import { buildDecisions, type DecisionsModel } from '../features/decisions/model.ts';
 import { EvidenceView } from '../features/evidence/EvidenceView.tsx';
 import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts';
+import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hrefFor, useHashQuery, useRoute, type Route } from './route.ts';
@@ -42,10 +43,11 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Pipeline', route: 'pipeline' },
   { label: 'Decisions', route: 'decisions' },
   { label: 'Evidence', route: 'evidence' },
+  { label: 'Benchmark', route: 'benchmark' },
   { label: 'Assistant', route: 'assistant' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', assistant: 'Assistant' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', benchmark: 'Benchmark', assistant: 'Assistant' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -274,6 +276,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
               connection={connection} error={state.error} model={builtEvidence.evidence} failure={builtEvidence.failure} hasSnapshot={snapshot !== null} confirmedAt={confirmedAt} mode={mode} leaveDemoHref={leaveDemoHref}
               checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onLoadFailures={state.loadFailures} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
             />
+          </RouteBoundary>
+        ) : null}
+        {route === 'benchmark' ? (
+          <RouteBoundary resetKey="benchmark">
+            <BenchmarkView mode={mode} />
           </RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}
