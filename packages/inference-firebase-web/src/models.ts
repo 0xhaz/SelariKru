@@ -48,11 +48,12 @@ const SCHEMAS: Record<Operation, Schema> = {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['title', 'description', 'requirementIds'],
+          required: ['title', 'description', 'requirementIds', 'role'],
           properties: {
             title: { type: 'string', minLength: 1, maxLength: 120 },
             description: { type: 'string', minLength: 1, maxLength: 600 },
             requirementIds: { type: 'array', minItems: 1, items: { type: 'string' } },
+            role: { type: 'string', enum: ['backend', 'frontend'] },
           },
         },
       },
@@ -66,7 +67,7 @@ const SYSTEM_INSTRUCTIONS: Record<Operation, string> = {
   suggestCriteria:
     'Suggest 1–8 testable acceptance criteria using only the supplied scope. Return JSON matching the schema. Use the supplied requirement IDs. Do not add mandatory integrations, accounts or new features.',
   draftTaskPlan:
-    'Draft a short ordered task plan using only the supplied scope. Return JSON matching the schema. Each task cites the supplied requirement IDs it serves. Do not add mandatory integrations, accounts or new features.',
+    'Draft a short ordered task plan using only the supplied scope. Return JSON matching the schema. Each task cites the supplied requirement IDs it serves and names its role: backend for the API and storage, frontend for the screen. Do not add mandatory integrations, accounts or new features.',
 };
 
 export function systemInstructionFor(op: Operation): string {

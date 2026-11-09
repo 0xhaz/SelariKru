@@ -6,6 +6,7 @@ import { evaluate } from '@selarikru/policy';
 import { loadDefaultPolicy } from '@selarikru/policy/load';
 import { and, eq } from 'drizzle-orm';
 import { ConfigError } from './config.ts';
+import { PILOT_CRITERIA } from '@selarikru/domain';
 import { DEMO } from './demo.ts';
 import { writeEvent } from './store.ts';
 
@@ -113,6 +114,7 @@ export function writeRealRunFiles(dir: string, cfg: RealRunConfig): { planConfig
         classification: 'internal', policyVersion, execution: 'local', inferencePolicyId: 'real-run-local',
         limits: { maxAttempts: 3, timeoutSeconds, maxCostUsd: 1 },
         allowedRequirementIds: [...DEMO.requirementIds],
+        requirementText: Object.fromEntries(PILOT_CRITERIA.map((c) => [c.id, c.text])),
         forbiddenMandatoryScope: ['login', 'voting', 'payments', 'email'],
       },
     },

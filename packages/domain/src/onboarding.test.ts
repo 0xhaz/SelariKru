@@ -89,7 +89,8 @@ describe('blueprint', () => {
       const manifest = JSON.parse(readFileSync(new URL('../../../services/verifier/suites/feedback-board/manifest.json', import.meta.url), 'utf8')) as { criteria: { id: string }[] };
       const c = blueprintFromAnswers(answers());
       expect(c.acceptanceCriteria.map((a) => a.id)).toEqual(manifest.criteria.map((a) => a.id));
-      expect(c.acceptanceCriteria.map((a) => a.text)).toEqual(manifest.criteria.map((a) => CRITERION_DESCRIPTIONS[a.id]));
+      c.acceptanceCriteria.forEach((a) => expect(a.text).toContain(CRITERION_DESCRIPTIONS[a.id]!));
+      expect(c.acceptanceCriteria.find((a) => a.id === 'FB-02')!.text).toBe('Reject empty/too-short/too-long titles, oversized descriptions, wrong field types and invalid statuses. Required evidence: API returns 400 without creating/updating a row; UI provides a readable validation error.');
       expect(BlueprintContentSchema.safeParse(c).success).toBe(true);
       expect(pilotCriteriaProblem(c)).toBeNull();
     });
@@ -106,6 +107,22 @@ describe('blueprint', () => {
       expect(c.acceptanceCriteria).toEqual([{ id: 'AC-1', text: 'A patient can see their position' }]);
       expect(c.allowedPaths).toEqual(['src', 'tests']);
       expect(pilotCriteriaProblem(c)).toBeNull();
+    });
+
+    it('gives each role its own paths: writable, and with no overlap', () => {
+      const { rolePaths, allowedPaths } = blueprintFromAnswers(answers());
+      expect(rolePaths).toEqual({ backend: ['server', 'migrations', 'tests/backend'], frontend: ['src', 'tests/frontend'] });
+      const all = [...rolePaths!.backend, ...rolePaths!.frontend];
+      expect(new Set(all).size).toBe(all.length);
+      for (const p of all) expect(allowedPaths.some((a) => p === a || p.startsWith(`${a}/`))).toBe(true);
+      expect(pilotCriteriaProblem({ ...blueprintFromAnswers(answers()), rolePaths: { backend: ['src'], frontend: ['src'] } })).toMatch(/fixed/);
+      expect(pilotCriteriaProblem({ ...blueprintFromAnswers(answers()), rolePaths: undefined })).toMatch(/fixed/);
+    });
+
+    it('states each criterion in the starter contract in the same words, and the contract points at nothing private', () => {
+      const contract = ['runtime.md', 'api.ts', 'openapi.yaml'].map((f) => readFileSync(new URL(f, new URL('contract/', starter)), 'utf8'));
+      for (const a of blueprintFromAnswers(answers()).acceptanceCriteria) expect(contract[0]).toContain(`- ${a.id}: ${a.text}`);
+      for (const text of contract) expect(text).not.toMatch(/docs\//);
     });
 
     it('tells a new project to start from the starter shell, not an empty repository', () => {

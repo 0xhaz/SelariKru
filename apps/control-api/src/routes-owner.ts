@@ -222,7 +222,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (errors.length > 0) throw new AppError(422, 'plan_invalid', 'the proposed plan is not valid', errors);
 
     // Titles are free text; everything else in a spec is an identifier, hash or limit.
-    const tasks: TaskSpec[] = body.tasks.map((t) => TaskSpecSchema.parse({ ...t, title: redactSecrets(t.title) }));
+    const tasks: TaskSpec[] = body.tasks.map((t) => TaskSpecSchema.parse({ ...t, title: redactSecrets(t.title), ...(t.description !== undefined ? { description: redactSecrets(t.description) } : {}), ...(t.criteria !== undefined ? { criteria: t.criteria.map((c) => ({ ...c, text: redactSecrets(c.text) })) } : {}) }));
     const at = now();
 
     // Only a verified task needs its record judged, and the record is read outside the transaction.
@@ -237,14 +237,18 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       if (body.expectedRevision !== current) throw staleRevision(current, 'the plan');
 
       // A criterion the plan leaves out would simply leave the denominator: the run could read "4 of 4" while the suite judged eight.
-      const required = (ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds))?.requiredRequirementIds;
-      if (required !== undefined) {
+      const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
+      if (settings?.requiredRequirementIds !== undefined || settings?.rolePaths !== undefined) {
         const replaced = new Set(tasks.map((t) => t.taskId));
         const kept = await tx.select({ taskId: schema.taskStatus.taskId, spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
           .where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
-        const carried = new Set([...tasks.flatMap((t) => t.requirementIds), ...kept.filter((k) => !replaced.has(k.taskId)).flatMap((k) => (k.spec as TaskSpec).requirementIds)]);
-        const missing = required.filter((id) => !carried.has(id));
+        const plan = [...tasks, ...kept.filter((k) => !replaced.has(k.taskId)).map((k) => k.spec as TaskSpec)];
+        const carried = new Set(plan.flatMap((t) => t.requirementIds));
+        const missing = (settings.requiredRequirementIds ?? []).filter((id) => !carried.has(id));
         if (missing.length > 0) throw new AppError(422, 'criteria_not_covered', `This plan leaves out ${missing.join(', ')}. A run on this project is judged on every criterion.`, { missing });
+        const roles = new Set(plan.map((t) => t.role));
+        const absent = Object.keys(settings.rolePaths ?? {}).filter((r) => !roles.has(r));
+        if (absent.length > 0) throw new AppError(422, 'roles_not_covered', `This plan has no ${absent.join(' or ')} task. This project is built by one worker per role, so each role needs its own task.`, { missing: absent });
       }
 
       const existing = new Map<string, { currentRevision: number; status: string; rowRevision: number; projectId: string }>();

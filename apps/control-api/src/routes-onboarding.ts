@@ -127,9 +127,11 @@ export async function onboardingPlanSettings(db: Executor, tenantId: string, pro
   return {
     boardId: 'first-milestone', role: 'backend', baseSha: pass.baseSha, allowedPaths: blueprint.allowedPaths,
     classification: goal.success ? goal.data.classification : 'internal', policyVersion: policy.policyVersion, execution: execution === 'hybrid' ? 'eligible_any' : execution, inferencePolicyId: 'onboarding',
-    limits: { maxAttempts: (policy.limits?.repairAttempts ?? 0) + 1, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: budget },
+    // A claim reserves its task's whole cap from the run's budget. With one worker per role, a cap equal to the budget would refuse the second worker.
+    limits: { maxAttempts: (policy.limits?.repairAttempts ?? 0) + 1, timeoutSeconds: attemptTimeoutSeconds, maxCostUsd: blueprint.rolePaths ? budget / Object.keys(blueprint.rolePaths).length : budget },
     allowedRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), forbiddenMandatoryScope: blueprint.nonGoals,
-    ...(templateSupport(blueprint.tracks).executable ? { requiredRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id) } : {}),
+    requirementText: Object.fromEntries(blueprint.acceptanceCriteria.map((c) => [c.id, c.text])),
+    ...(templateSupport(blueprint.tracks).executable ? { requiredRequirementIds: blueprint.acceptanceCriteria.map((c) => c.id), ...(blueprint.rolePaths ? { rolePaths: blueprint.rolePaths } : {}) } : {}),
   };
 }
 

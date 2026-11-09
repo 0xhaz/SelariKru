@@ -53,7 +53,7 @@ const SAFE_PATH = /^[A-Za-z0-9._:@+*\/-]{1,300}$/;
 /**
  * A plan task as the API accepts it. The domain schema only requires non-empty strings, so everything that ends up in
  * events, snapshots and stored specs is held to an identifier alphabet here, and any secret-shaped value is refused.
- * `title` is the one free-text field; the API redacts it before storing.
+ * `title`, `description` and each criterion's `text` are the free-text fields; the API redacts them before storing.
  */
 export const PlanTaskSchema = TaskSpecSchema.superRefine((spec, ctx) => {
   const bad = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
@@ -63,7 +63,7 @@ export const PlanTaskSchema = TaskSpecSchema.superRefine((spec, ctx) => {
   };
   const walk = (value: unknown, path: (string | number)[]): void => {
     if (typeof value === 'string') {
-      if (path[0] === 'title') return;
+      if (path[0] === 'title' || path[0] === 'description' || (path[0] === 'criteria' && path[2] === 'text')) return;
       check(value, path, path[0] === 'allowedPaths' ? SAFE_PATH : SAFE_ID);
     } else if (Array.isArray(value)) value.forEach((v, i) => walk(v, [...path, i]));
     else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) walk(v, [...path, k]);

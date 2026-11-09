@@ -301,13 +301,19 @@ describe('prompt, hash, validation, usage, timing', () => {
   it('draftTaskPlan validates its own schema and model metadata is pinned', async () => {
     const { adapter, sdk } = make();
     sdk.result = {
-      text: JSON.stringify({ tasks: [{ title: 'Do', description: 'It', requirementIds: ['FB-02'] }] }),
+      text: JSON.stringify({ tasks: [{ title: 'Do', description: 'It', requirementIds: ['FB-02'], role: 'frontend' }] }),
       inferenceSource: 'on_device',
     };
     const p = await adapter.draftTaskPlan(req());
     expect(p.status).toBe('ok');
     expect(p.model).toEqual({ cloudModel: 'gemini-3.5-flash-lite', sdkVersion: '13.1.0' });
     expect(p.trust).toBe('untrusted_proposal');
+  });
+
+  it.each([[undefined], ['admin']])('a drafted task whose role is %s fails the schema', async (role) => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: JSON.stringify({ tasks: [{ title: 'Do', description: 'It', requirementIds: ['FB-02'], ...(role ? { role } : {}) }] }), inferenceSource: 'on_device' };
+    expect((await adapter.draftTaskPlan(req())).status).toBe('invalid');
   });
 
   it('serialises generation (one device generation at a time)', async () => {

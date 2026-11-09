@@ -215,7 +215,7 @@ export function BlueprintStep(p: StepProps) {
     const criteriaLines = lines(criteria);
     const content: BlueprintContent = {
       ...c,
-      nonGoals: lines(nonGoals), assumptions: lines(assumptions), allowedPaths: lines(paths),
+      nonGoals: lines(nonGoals), assumptions: lines(assumptions), allowedPaths: c.rolePaths ? c.allowedPaths : lines(paths),
       // The pilot stack's criteria belong to the verifier's suite; renumbering them here would leave a run judged on nothing.
       acceptanceCriteria: templateSupport(c.tracks).executable ? c.acceptanceCriteria : criteriaLines.map((text, i) => ({ id: `AC-${i + 1}`, text })),
     };
@@ -258,7 +258,7 @@ export function BlueprintStep(p: StepProps) {
       {editing ? (
         <div className="space-y-4 rounded-card border border-active bg-panel p-4">
           {templateSupport(c.tracks).executable ? <Notice tone="neutral" title="Acceptance criteria">These are fixed by the verification suite, FB-01 to FB-08, so they cannot be edited here.</Notice> : <Field id="edit-criteria" label="Acceptance criteria" hint="One per line. Each becomes something a run must pass."><textarea id="edit-criteria" className={inputClass} rows={4} value={criteria} onChange={(e) => setCriteria(e.target.value)} /></Field>}
-          <Field id="edit-paths" label="Paths workers may change" hint="One per line, relative to the repository."><textarea id="edit-paths" className={`${inputClass} font-mono text-mono`} rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} /></Field>
+          {c.rolePaths ? null : <Field id="edit-paths" label="Paths workers may change" hint="One per line, relative to the repository."><textarea id="edit-paths" className={`${inputClass} font-mono text-mono`} rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} /></Field>}
           <Field id="edit-nongoals" label="Non-goals" hint="One per line. Agents treat these as out of scope."><textarea id="edit-nongoals" className={inputClass} rows={3} value={nonGoals} onChange={(e) => setNonGoals(e.target.value)} /></Field>
           <Field id="edit-assumptions" label="Assumptions" hint="One per line."><textarea id="edit-assumptions" className={inputClass} rows={3} value={assumptions} onChange={(e) => setAssumptions(e.target.value)} /></Field>
         </div>
@@ -270,7 +270,7 @@ export function BlueprintStep(p: StepProps) {
           </Section>
           <Section title="Acceptance criteria"><ul className="space-y-1">{c.acceptanceCriteria.map((a) => <li key={a.id} className="flex gap-2"><span className="shrink-0 whitespace-nowrap font-mono text-mono text-muted">{a.id}</span><span className="min-w-0 wrap-anywhere">{a.text}</span></li>)}</ul></Section>
           <Section title="Who works on it"><ul className="space-y-1">{c.roles.map((r) => <li key={r.role}><span className="font-medium">{r.role}.</span> <span className="text-muted">{r.reason}</span></li>)}</ul></Section>
-          <Section title="Paths workers may change"><ul className="space-y-1 font-mono text-mono">{c.allowedPaths.map((x) => <li key={x}>{x}</li>)}</ul></Section>
+          <Section title="Paths workers may change"><ul className="space-y-1 font-mono text-mono">{c.rolePaths ? (Object.entries(c.rolePaths) as [string, string[]][]).map(([role, paths]) => <li key={role}>{role}: {paths.join(", ")}</li>) : c.allowedPaths.map((x) => <li key={x}>{x}</li>)}</ul></Section>
           <Section title="Non-goals"><Bullets items={c.nonGoals} empty="None listed. Add any you want agents to leave alone." /></Section>
           <Section title="Assumptions"><Bullets items={c.assumptions} empty="None listed." /></Section>
           <Section title="Connections needed"><Bullets items={c.requiredConnections} empty="None." /></Section>

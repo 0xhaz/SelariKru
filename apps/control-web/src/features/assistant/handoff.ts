@@ -29,6 +29,7 @@ export function apiErrorText(code: string, details: unknown): string {
       const missing = (details as { missing?: unknown } | null)?.missing;
       return `This plan leaves out ${Array.isArray(missing) ? missing.join(', ') : 'required criteria'}. A run on this project is judged on every criterion, so the plan must cover them all.`;
     }
+    case 'roles_not_covered': return `This plan has no ${((details as { missing?: unknown } | null)?.missing as string[] | undefined)?.join(' or ') ?? 'task for a required role'} task. Each role needs its own task, so draft the plan again.`;
     case 'plan_invalid': return 'The candidate tasks are not a valid plan. Nothing was created.';
     case 'missing_server_config': return 'This project has no plan settings on the server, so review is blocked.';
     case 'policy_denied': return 'Policy does not allow planning here.';

@@ -23,7 +23,7 @@ function Data({ data }: { data: ProposalData }) {
             <li key={i} className="rounded-chip border border-line bg-bg p-3">
               <p className="font-medium">{t.title}</p>
               <p className="text-sm text-muted">{t.description}</p>
-              <p className={`${mono} mt-1 text-active`}>{t.requirementIds.join(', ')}</p>
+              <p className={`${mono} mt-1 text-active`}>{t.role ? `${t.role}: ` : ''}{t.requirementIds.join(', ')}</p>
             </li>
           ))}
         </ol>

@@ -131,3 +131,11 @@ describe('validateProposal', () => {
     expect(canonicalJson({ b: 1, a: { d: [2, { y: 1, x: 2 }], c: 3 } })).toBe(canonicalJson({ a: { c: 3, d: [2, { x: 2, y: 1 }] }, b: 1 }));
   });
 });
+
+describe('a task plan names a role from the closed set', () => {
+  const plan: FixtureCtx = { operation: 'draftTaskPlan', allowedRequirementIds: ['FB-01'] };
+  const task = (role: unknown) => ({ tasks: [{ title: 'T', description: 'D', requirementIds: ['FB-01'], role }] });
+  it.each(['backend', 'frontend'])('accepts %s', (role) => expect(validateProposal(task(role), plan).status).toBe('valid'));
+  it.each(['admin', 'Backend', 'qa', 3])('rejects %s', (role) => expect(validateProposal(task(role), plan).status).toBe('rejected'));
+});
+

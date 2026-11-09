@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     return;
   }
   if (cmd === 'run') {
-    const { values } = parseArgs({ args: rest, options: { repo: { type: 'string', multiple: true }, poll: { type: 'string' } } });
+    const { values } = parseArgs({ args: rest, options: { repo: { type: 'string', multiple: true }, poll: { type: 'string' }, slots: { type: 'string' } } });
     const creds = await loadCredentials(stateDir);
     if (!creds) throw new Error('not paired: run `pair` first');
     const repos = await loadRepos(values.repo ?? []);
@@ -73,6 +73,8 @@ async function main(): Promise<void> {
       pollMs: Number(values.poll ?? 5000),
       // Probed on this machine's host. The CLI inside the sandbox image can differ; the init-event check is what proves the model that actually ran.
       harnessReport: cachedHarnessReport(),
+      // Two by default, the pilot's coding limit. The server still decides: a one-slot placement mode simply gives the second slot nothing.
+      slots: Number(values.slots ?? 2),
       // A path that is not a git repository is not a checkout: say so here, and the server's readiness check will not count it.
       projects: await gitBackedProjects(repos, log),
       log,

@@ -72,6 +72,9 @@ const RESERVED_DIR = '.selarikru';
 
 const grantedLabel = (g: LeaseGrant): string => (g.destination ? `${g.operation} (destination ${g.destination.host})` : g.operation);
 
+/** Proposal and blueprint text is one paragraph here, so it cannot start a section of its own in TASK.md. */
+const oneLine = (s: string): string => s.replace(/\s*\n\s*/g, ' ').trim();
+
 export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[] } = {}): string {
   const grants = opts.grants ?? [];
   return [
@@ -81,6 +84,8 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     `- requirements: ${task.requirementIds.join(', ') || 'none listed'}`,
     `- acceptance checks: ${task.acceptanceCheckIds.join(', ') || 'none listed'}`,
     '',
+    ...(task.description !== undefined ? ['## What to build', oneLine(task.description), ''] : []),
+    ...(task.criteria !== undefined && task.criteria.length > 0 ? ['## Acceptance criteria', 'The result is judged against these.', ...task.criteria.map((c) => `- ${c.id}: ${oneLine(c.text)}`), ''] : []),
     '## Allowed paths',
     'Change files only under these paths. Any change outside them is rejected after the run.',
     ...(task.allowedPaths.length > 0 ? task.allowedPaths.map((p) => `- ${p}`) : ['- (none: make no changes)']),

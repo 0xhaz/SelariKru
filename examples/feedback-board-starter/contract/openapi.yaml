@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Feedback Board API
   version: "0.1"
-  description: Frozen contract from docs/demo-project.md section 3. Not implemented in the starter baseline.
+  description: Frozen contract for the Feedback Board (see runtime.md). Not implemented in the starter baseline.
 paths:
   /api/feedback:
     get:

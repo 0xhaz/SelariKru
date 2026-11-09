@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { VerificationRecordSchema } from '@selarikru/domain';
 import { schema } from '@selarikru/persistence';
 import { OnboardingViewSchema } from '@selarikru/protocol';
@@ -11,6 +12,9 @@ import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { loadValidRecord } from '../../../services/verifier/src/service.ts';
 import { createGitProbes, ghRepoAccess, readinessProbesFromEnv, seedDemo, type ReadinessProbes } from '../src/index.ts';
+import { PLAN_TASK_ROLES, type TaskSpec } from '@selarikru/domain';
+import { renderTaskFile } from '../../local-runner/src/attempt.ts';
+import { PLACEMENT_MODES } from '../../../services/workflow/src/placement.ts';
 import { hashTree } from '../../../services/verifier/src/hashing.ts';
 import { API_POLICY, ORIGIN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, setupTestDb, type Harness, type TestDb } from './helpers.ts';
 
@@ -784,11 +788,11 @@ describe('controller', () => {
     v = (await check(h, v)).body;
     v = (await activate(h, v)).body;
     const review = await post(h.app, `/v1/runs/${v.firstRunId}/proposals/review`, {
-      envelope: { operation: 'draftTaskPlan', status: 'ok', data: { tasks: [{ title: 'Queue screen', description: 'Show position', requirementIds: ['FB-01'] }] } },
+      envelope: { operation: 'draftTaskPlan', status: 'ok', data: { tasks: [{ title: 'Queue screen', description: 'Show position', requirementIds: ['FB-01'], role: 'backend' }] } },
     });
     expect(review.status, JSON.stringify(review.body)).toBe(200);
     expect(review.body.tasks[0].baseSha).toBe(SHA);
-    expect(review.body.tasks[0].allowedPaths).toEqual(['src', 'server', 'migrations', 'tests']);
+    expect(review.body.tasks[0].allowedPaths).toEqual(['server', 'migrations', 'tests/backend']);
     expect(review.body.tasks[0].requirementIds).toEqual(['FB-01']);
     expect(review.body.tasks[0].acceptanceCheckIds).toEqual(['FB-01']);
   });
@@ -797,7 +801,8 @@ describe('controller', () => {
     const CRITERIA = ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-05', 'FB-06', 'FB-07', 'FB-08'];
     const TRUSTED = { checkManifestSha256: 'e'.repeat(64), verifierSha256: '1'.repeat(64) };
     const CANDIDATE = 'c'.repeat(40);
-    const planOf = (tasks: readonly { title: string; requirementIds: readonly string[] }[]) => ({ operation: 'draftTaskPlan', status: 'ok', data: { tasks: tasks.map((x) => ({ ...x, description: 'Build it' })) } });
+    const planOf = (tasks: readonly { title: string; requirementIds: readonly string[]; role: string; description?: string }[]) => ({ operation: 'draftTaskPlan', status: 'ok', data: { tasks: tasks.map((x) => ({ description: 'Build it', ...x })) } });
+    const TWO_ROLES = [{ title: 'API and storage', requirementIds: ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-06'], role: 'backend' }, { title: 'Form, list and filters', requirementIds: ['FB-05', 'FB-07', 'FB-08'], role: 'frontend' }];
 
     /** What the verifier writes once it has passed a candidate: a stored record with all eight results and one check run per criterion per task. */
     async function recordVerified(artifacts: LocalDiskArtifactStore, projectId: string, runId: string, taskIds: readonly string[]) {
@@ -833,17 +838,24 @@ describe('controller', () => {
         const runId = v.firstRunId as string;
 
         // The plan the assistant drafts from a brief naming these ids is the one the server accepts.
-        const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'API and storage', requirementIds: ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-06'] }, { title: 'Form, list and filters', requirementIds: ['FB-05', 'FB-07', 'FB-08'] }]) });
+        const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf(TWO_ROLES) });
         expect(review.status, JSON.stringify(review.body)).toBe(200);
         expect(review.body.tasks.map((x: { acceptanceCheckIds: string[] }) => x.acceptanceCheckIds)).toEqual([['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-06'], ['FB-05', 'FB-07', 'FB-08']]);
 
         // A plan that left a criterion out would shrink the denominator, so it is refused and says which.
-        const partialReview = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'Only the form', requirementIds: ['FB-01'] }]) });
+        const partialReview = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'Only the form', requirementIds: ['FB-01'], role: 'frontend' }]) });
         expect(partialReview.status).toBe(200);
         const partial = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('partial'), tasks: partialReview.body.tasks });
         expect(partial.status).toBe(422);
         expect(partial.body.error.code).toBe('criteria_not_covered');
         expect(partial.body.error.details.missing).toEqual(CRITERIA.slice(1));
+
+        // Every criterion on one role would leave the other half of the app unbuilt.
+        const oneRole = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ title: 'Everything', requirementIds: CRITERIA, role: 'backend' }]) });
+        expect(oneRole.status).toBe(200);
+        const refused = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('one-role'), tasks: oneRole.body.tasks });
+        expect(refused.status).toBe(422);
+        expect(refused.body.error).toMatchObject({ code: 'roles_not_covered', details: { missing: ['frontend'] } });
 
         const accepted = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('plan'), tasks: review.body.tasks });
         expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
@@ -863,6 +875,62 @@ describe('controller', () => {
         await h.app.close();
         rmSync(dir, { recursive: true, force: true });
       }
+    });
+
+    it('a two-role plan runs as two workers at once, each with its role, its own paths and what it needs to know', async () => {
+      const h = harness();
+      const runner = await enrolRunner(h.app);
+      let v = await configured(h);
+      await reportProjects(h, runner.token, [v.projectId]);
+      v = (await check(h, v)).body;
+      v = (await activate(h, v)).body;
+      const runId = v.firstRunId as string;
+      const assigned = await post(h.app, `/v1/projects/${v.projectId}/model-assignments`, { scope: 'role', key: 'frontend', selection: { provider: 'anthropic', model: 'claude-sonnet-5-5' }, expectedRevision: 0, idempotencyKey: k('assign') });
+      expect(assigned.status, JSON.stringify(assigned.body)).toBe(200);
+
+      const SECRET = 'sk_live_CANARY0123456789abcdefXYZ';
+      const WHAT = `Build the Express routes and SQLite persistence; the token ${SECRET} is not for you.`;
+      const review = await post(h.app, `/v1/runs/${runId}/proposals/review`, { envelope: planOf([{ ...TWO_ROLES[0]!, description: WHAT }, { ...TWO_ROLES[1]!, description: 'Build the one-screen form, list and status filters.' }]) });
+      expect(review.status, JSON.stringify(review.body)).toBe(200);
+      const accepted = await post(h.app, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, idempotencyKey: k('plan'), tasks: review.body.tasks });
+      expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
+
+      const claim = async () => (await post(h.app, '/v1/runners/claim', { projects: [v.projectId] }, bearer(runner.token))).body;
+      const [first, second, third] = [await claim(), await claim(), await claim()];
+      expect(first.lease, JSON.stringify(first)).not.toBeNull();
+      expect(second.lease, JSON.stringify(second)).not.toBeNull();
+      expect(first.lease.attemptId).not.toBe(second.lease.attemptId);
+      expect(third.lease).toBeNull(); // both tasks are running: the limit of two is reached
+
+      const leases = [first.lease, second.lease];
+      // Through the route the runner itself reads its task from.
+      const specOf = async (lease: { attemptId: string; fence: number; leaseToken: string }) => (await post(h.app, '/v1/runners/task', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken } }, bearer(runner.token))).body.task as TaskSpec;
+      const specs = await Promise.all(leases.map(specOf));
+      const backend = specs.find((s) => s.role === 'backend')!;
+      const frontend = specs.find((s) => s.role === 'frontend')!;
+      expect(backend.allowedPaths).toEqual(['server', 'migrations', 'tests/backend']);
+      expect(frontend.allowedPaths).toEqual(['src', 'tests/frontend']);
+      expect([backend.limits.maxCostUsd, frontend.limits.maxCostUsd]).toEqual([12.5, 12.5]); // both fit under the $25 run budget at once
+      expect(leases.find((l) => l.taskId === frontend.taskId).assignment).toMatchObject({ model: 'claude-sonnet-5-5', source: 'role' });
+      expect(leases.find((l) => l.taskId === backend.taskId).assignment).toMatchObject({ source: 'default' });
+
+      // What the worker reads: its own brief and the full text of only the criteria it carries.
+      const backendFile = renderTaskFile(backend);
+      const frontendFile = renderTaskFile(frontend);
+      expect(backendFile).toContain('Build the Express routes and SQLite persistence');
+      expect(backendFile).toContain('- FB-01: Create feedback with a trimmed title of 3–120 characters');
+      expect(backendFile).toContain('Valid POST returns 201 and a persisted item');
+      expect(backendFile).not.toContain('FB-05:');
+      expect(backendFile).not.toContain(SECRET);
+      expect(frontendFile).toContain('Build the one-screen form');
+      expect(frontendFile).toContain('- FB-05: Filter by All/Open/Planned/Done');
+      expect(frontendFile).not.toContain('FB-01:');
+
+      // It goes to the worker and nowhere else: the owner's snapshot and the event log carry neither.
+      const snapshot = JSON.stringify((await get(h.app, `/v1/projects/${v.projectId}/snapshot`, owner())).body);
+      expect(snapshot).not.toContain('Build the Express routes');
+      const events = JSON.stringify(await t.db.execute(sql`SELECT payload FROM events WHERE project_id = ${v.projectId}`));
+      expect(events).not.toContain('Build the Express routes');
     });
 
     it('refuses an owner edit that would replace the criteria, and an older blueprint that already did', async () => {
@@ -908,5 +976,19 @@ describe('runner_has_project', () => {
     await reportProjects(h, other.token, [v.projectId]);
     const fixed = await check(h, result.body);
     expect(statusOf(fixed.body, 'runner_has_project')).toBe('passed');
+  });
+});
+
+describe('the certified contract', () => {
+  it('is the starter shell\'s own, so stack_certified passes for a copy of it', () => {
+    const root = new URL('../../../', import.meta.url);
+    const hashes = JSON.parse(readFileSync(new URL('services/verifier/suites/feedback-board/HASHES.json', root), 'utf8')) as { contractSha256: string };
+    expect(hashTree(fileURLToPath(new URL('examples/feedback-board-starter/contract', root)))).toBe(hashes.contractSha256);
+  });
+});
+
+describe('plan task roles', () => {
+  it('are exactly the roles the role-pinned placement mode maps', () => {
+    expect(Object.keys(PLACEMENT_MODES.H2.rolePlacement).sort()).toEqual([...PLAN_TASK_ROLES].sort());
   });
 });

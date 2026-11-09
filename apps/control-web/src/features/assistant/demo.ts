@@ -4,7 +4,7 @@ import type { ProposalOperation } from '@selarikru/domain';
 /** Canned output for the Demo data mode. No model runs; the result is never evidence. */
 export function demoData(op: ProposalOperation, ids: readonly string[]): unknown {
   if (op === 'draftTaskPlan') {
-    return { tasks: ids.map((id) => ({ title: `Demo task for ${id}`, description: `Demo description for ${id}.`, requirementIds: [id] })) };
+    return { tasks: ids.map((id) => ({ title: `Demo task for ${id}`, description: `Demo description for ${id}.`, requirementIds: [id], role: 'backend' })) };
   }
   const criteria = ids.map((id) => ({ requirementId: id, text: `Demo criterion for ${id}.` }));
   return op === 'draftBrief' ? { summary: 'Demo summary. Not produced by a model.', acceptanceCriteria: criteria } : { acceptanceCriteria: criteria };

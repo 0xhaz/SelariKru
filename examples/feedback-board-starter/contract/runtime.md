@@ -1,8 +1,21 @@
 # Feedback Board runtime contract
 
-Frozen with the API contract (`api.ts`, `openapi.yaml`). The independent verifier relies on the behavior stated in this file, in `api.ts` and `openapi.yaml`, and in `docs/demo-project.md` section 3. Every rule the tests depend on is stated here or there. Changing it requires a new cohort.
+Frozen with the API contract (`api.ts`, `openapi.yaml`). The independent verifier relies on the behavior stated in this file and in `api.ts` and `openapi.yaml`. Every rule the tests depend on is stated here or there. Changing it requires a new cohort.
 
 This file is a contract only. The starter implements none of it.
+
+## Acceptance criteria
+
+The verifier judges a candidate on these eight criteria.
+
+- FB-01: Create feedback with a trimmed title of 3–120 characters and an optional trimmed description of at most 1,000 characters. Required evidence: Valid POST returns 201 and a persisted item; browser displays the saved item.
+- FB-02: Reject empty/too-short/too-long titles, oversized descriptions, wrong field types and invalid statuses. Required evidence: API returns 400 without creating/updating a row; UI provides a readable validation error.
+- FB-03: List feedback newest first, breaking equal timestamps by descending item ID. Required evidence: Seeded API/browser assertions use controlled timestamps and IDs.
+- FB-04: New feedback starts Open; updates permit Open, Planned or Done. Required evidence: PATCH persists the selected status; missing item returns 404.
+- FB-05: Filter by All/Open/Planned/Done; status counts describe the full dataset. Required evidence: Three-item seed has one item in each status; filters and counts update after creation/status changes.
+- FB-06: Saved feedback and status survive browser reload and API restart. Required evidence: Restart test reuses the same per-run database and checks API plus browser results.
+- FB-07: Loading, empty and failed-request states are usable; unsuccessful writes do not appear saved. Required evidence: Controlled delay/failure and empty-database browser cases.
+- FB-08: Form controls have accessible names, support keyboard use and render submitted text as text. Required evidence: Browser checks including a synthetic HTML/script-like title that never executes.
 
 ## Launch
 

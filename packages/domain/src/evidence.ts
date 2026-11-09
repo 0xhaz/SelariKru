@@ -158,14 +158,25 @@ export type CriterionState = CheckStatus | 'not_run' | 'not_delivered';
 
 /** What each Feedback Board acceptance criterion asks for, as approved in the brief. A criterion outside this list simply has no description. */
 export const CRITERION_DESCRIPTIONS: Readonly<Record<string, string>> = {
-  'FB-01': 'Create feedback with a trimmed title of 3 to 120 characters and an optional trimmed description of at most 1,000 characters',
-  'FB-02': 'Reject invalid titles, oversized descriptions, wrong types and invalid statuses',
+  'FB-01': 'Create feedback with a trimmed title of 3–120 characters and an optional trimmed description of at most 1,000 characters',
+  'FB-02': 'Reject empty/too-short/too-long titles, oversized descriptions, wrong field types and invalid statuses',
   'FB-03': 'List feedback newest first, breaking equal timestamps by descending item ID',
   'FB-04': 'New feedback starts Open; updates permit Open, Planned or Done',
-  'FB-05': 'Filter by status; status counts describe the full dataset',
-  'FB-06': 'Saved feedback and status survive a browser reload and an API restart',
-  'FB-07': 'Loading, empty and failed states are usable; failed writes do not appear saved',
-  'FB-08': 'Controls have accessible names, work from the keyboard and render text as text',
+  'FB-05': 'Filter by All/Open/Planned/Done; status counts describe the full dataset',
+  'FB-06': 'Saved feedback and status survive browser reload and API restart',
+  'FB-07': 'Loading, empty and failed-request states are usable; unsuccessful writes do not appear saved',
+  'FB-08': 'Form controls have accessible names, support keyboard use and render submitted text as text',
+};
+/** What the frozen contract asks each criterion to show. Worded as the contract states it; the workers read both. */
+export const CRITERION_REQUIRED_EVIDENCE: Readonly<Record<string, string>> = {
+  'FB-01': 'Valid POST returns 201 and a persisted item; browser displays the saved item',
+  'FB-02': 'API returns 400 without creating/updating a row; UI provides a readable validation error',
+  'FB-03': 'Seeded API/browser assertions use controlled timestamps and IDs',
+  'FB-04': 'PATCH persists the selected status; missing item returns 404',
+  'FB-05': 'Three-item seed has one item in each status; filters and counts update after creation/status changes',
+  'FB-06': 'Restart test reuses the same per-run database and checks API plus browser results',
+  'FB-07': 'Controlled delay/failure and empty-database browser cases',
+  'FB-08': 'Browser checks including a synthetic HTML/script-like title that never executes',
 };
 export const criterionDescription = (id: string): string | null => CRITERION_DESCRIPTIONS[id] ?? null;
 

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CRITERION_DESCRIPTIONS } from './evidence.ts';
+import { CRITERION_DESCRIPTIONS, CRITERION_REQUIRED_EVIDENCE } from './evidence.ts';
 import { err, ok, type Result } from './result.ts';
 
 /**
@@ -163,6 +163,8 @@ export const BlueprintContentSchema = z.strictObject({
   stack: z.array(z.strictObject({ name: Text(80), reason: Text(240) })).max(12),
   /** Repository paths workers may change. Each is relative and stays inside the repository. */
   allowedPaths: z.array(z.string().regex(SAFE_PATH, 'must be a relative path inside the repository')).min(1).max(20),
+  /** The paths each role's worker may change, when a template splits the work. Absent means every task gets `allowedPaths`. */
+  rolePaths: z.strictObject({ backend: z.array(z.string().regex(SAFE_PATH)).min(1).max(20), frontend: z.array(z.string().regex(SAFE_PATH)).min(1).max(20) }).optional(),
   acceptanceCriteria: z.array(z.strictObject({ id: criterionId, text: Text(400) })).min(1).max(8),
   roles: z.array(z.strictObject({ role: Text(60), reason: Text(200) })).min(1).max(8),
   requiredConnections: z.array(Text(60)).max(8),
@@ -185,14 +187,19 @@ export type BlueprintContent = z.infer<typeof BlueprintContentSchema>;
 /** The repository paths of the Feedback Board starter shell a worker may change. Its contract and frozen test fixtures stay out. */
 export const PILOT_ALLOWED_PATHS = ['src', 'server', 'migrations', 'tests'] as const;
 /** The pilot stack's criteria are the ones the verifier's suite judges: an id or text of any other kind would never be checked. */
-export const PILOT_CRITERIA: readonly { readonly id: string; readonly text: string }[] = Object.entries(CRITERION_DESCRIPTIONS).sort(([a], [b]) => a.localeCompare(b)).map(([id, text]) => ({ id, text }));
+export const PILOT_CRITERIA: readonly { readonly id: string; readonly text: string }[] = Object.entries(CRITERION_DESCRIPTIONS).sort(([a], [b]) => a.localeCompare(b)).map(([id, behaviour]) => ({ id, text: `${behaviour}. Required evidence: ${CRITERION_REQUIRED_EVIDENCE[id]!}.` }));
+/**
+ * What each role's worker may change. They do not overlap, so two workers cannot conflict. Tests are per role, each in its own directory; everything else in the shell, the contract included, is readable by both.
+ */
+export const PILOT_ROLE_PATHS = { backend: ['server', 'migrations', 'tests/backend'], frontend: ['src', 'tests/frontend'] } as const;
 const PILOT_CRITERIA_REFUSAL = `The pilot stack is judged on the verification suite's fixed criteria, ${PILOT_CRITERIA[0]!.id} to ${PILOT_CRITERIA.at(-1)!.id}, so they cannot be changed.`;
 
 /** Why this blueprint's criteria would leave a run judged on something else, or null when they are right. Only an executable template has a suite to agree with. */
-export function pilotCriteriaProblem(content: Pick<BlueprintContent, 'tracks' | 'acceptanceCriteria'>): string | null {
+export function pilotCriteriaProblem(content: Pick<BlueprintContent, 'tracks' | 'acceptanceCriteria' | 'rolePaths'>): string | null {
   if (!templateSupport(content.tracks).executable) return null;
   const same = content.acceptanceCriteria.length === PILOT_CRITERIA.length && PILOT_CRITERIA.every((c, i) => content.acceptanceCriteria[i]?.id === c.id && content.acceptanceCriteria[i]?.text === c.text);
-  return same ? null : PILOT_CRITERIA_REFUSAL;
+  if (!same) return PILOT_CRITERIA_REFUSAL;
+  return JSON.stringify(content.rolePaths) === JSON.stringify(PILOT_ROLE_PATHS) ? null : 'The pilot stack has one worker per role with fixed paths, so these cannot be changed.';
 }
 
 /** The controller's own first draft. Deterministic: the same answers give the same blueprint, and no model is involved. */
@@ -206,6 +213,7 @@ export function blueprintFromAnswers(answers: OnboardingAnswers): BlueprintConte
     tracks: a.focus.tracks,
     stack: [],
     allowedPaths: executable.executable ? [...PILOT_ALLOWED_PATHS] : ['src', 'tests'],
+    ...(executable.executable ? { rolePaths: { backend: [...PILOT_ROLE_PATHS.backend], frontend: [...PILOT_ROLE_PATHS.frontend] } } : {}),
     acceptanceCriteria: executable.executable ? PILOT_CRITERIA.map((c) => ({ ...c })) : [{ id: 'AC-1', text: a.goal.firstOutcome }],
     roles: [...new Map(a.focus.tracks.flatMap((t) => TEMPLATE_CATALOG[t].roles).map((r) => [r.role, r])).values()],
     requiredConnections: ['GitHub repository'],

@@ -13,6 +13,8 @@ export interface LoopDeps {
   readonly pollMs: number;
   /** What this machine can launch, sent with every claim so the scheduler never hands it a model it cannot run. */
   readonly harnessReport?: () => Promise<readonly RunnerHarnessReport[]>;
+  /** How many attempts this runner may hold at once. Defaults to one. */
+  readonly slots?: number;
   /** Project ids to report to the server as having a checkout. Defaults to every configured repo. */
   readonly projects?: readonly string[];
   readonly sleep?: (ms: number) => Promise<void>;
@@ -31,7 +33,7 @@ const sleepUnlessAborted = (ms: number, signal: AbortSignal): Promise<void> =>
     signal.addEventListener('abort', done, { once: true });
   });
 
-/** Claims one task at a time over outbound HTTPS, runs it, and repeats. Opens no port. */
+/** Claims one task per slot over outbound HTTPS, runs it, and repeats. Opens no port. */
 export class RunnerLoop {
   constructor(private readonly d: LoopDeps) {}
 
@@ -44,6 +46,11 @@ export class RunnerLoop {
     } catch (err) {
       this.d.log(`orphan sweep failed: ${err instanceof Error ? err.message : 'error'}`);
     }
+    await Promise.all(Array.from({ length: Math.max(1, this.d.slots ?? 1) }, () => this.worker(signal, sleep)));
+  }
+
+  /** One slot: claim, run, repeat. The server's limits decide how many slots actually hold work. */
+  private async worker(signal: AbortSignal, sleep: (ms: number) => Promise<void>): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
       try {

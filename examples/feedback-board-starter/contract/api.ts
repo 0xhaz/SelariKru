@@ -1,4 +1,4 @@
-// Frozen API contract for the Feedback Board benchmark (docs/demo-project.md section 3).
+// Frozen API contract for the Feedback Board benchmark (see runtime.md).
 // Changing it requires a new cohort. Do not edit mid-run.
 
 export const FEEDBACK_STATUSES = ['open', 'planned', 'done'] as const;

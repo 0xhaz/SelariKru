@@ -33,3 +33,22 @@ describe('reporting project checkouts', () => {
     expect((claim.mock.calls[0] as unknown[])[1]).toEqual(['real']);
   });
 });
+
+describe('slots', () => {
+  it('claims for each slot at once, so one runner can hold two workers under the server\'s limit', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const ctl = new AbortController();
+    const claim = vi.fn(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight -= 1;
+      return { lease: null, reason: 'nothing' };
+    });
+    const loop = new RunnerLoop({ api: { claim } as never, runtime: { sweepOrphans: async () => [] } as never, pollMs: 1, log: () => undefined, slots: 2, attempt: { repos: {} } as never, sleep: async () => ctl.abort() } as never);
+    await loop.run(ctl.signal);
+    expect(peak).toBe(2);
+  });
+});
+

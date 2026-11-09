@@ -35,6 +35,10 @@ export const ProjectPlanSettingsSchema = z
     forbiddenMandatoryScope: z.array(z.string().min(1)),
     /** Criteria a run's plan as a whole must carry: the denominator it is judged against. Absent means this configuration fixes none. */
     requiredRequirementIds: z.array(z.string().min(1)).min(1).optional(),
+    /** When set, every task must name a role and gets that role's paths. Absent means the fixed `role` and `allowedPaths` above apply and a proposed role is not read. */
+    rolePaths: z.object({ backend: z.array(z.string().min(1)).min(1), frontend: z.array(z.string().min(1)).min(1) }).strict().optional(),
+    /** Full criterion text by requirement id, copied onto the tasks that carry each one so the worker can read it. */
+    requirementText: z.record(z.string(), z.string().min(1).max(400)).optional(),
   })
   .strict();
 export type ProjectPlanSettings = z.input<typeof ProjectPlanSettingsSchema>;
@@ -90,7 +94,7 @@ export interface PlanReview {
   /** True when a heuristic scope finding needs the engineer's explicit acknowledgement before acceptance. */
   readonly needsReview: boolean;
   readonly issues: readonly ProposalIssue[];
-  /** Proposal fields with no TaskSpec counterpart. They are not carried. */
+  /** Proposal fields this configuration does not read. They are not carried. */
   readonly droppedFields: readonly string[];
 }
 
@@ -148,10 +152,15 @@ export function reviewPlanProposal(
   const bad: { path: string; message: string }[] = [];
   v.data.tasks.forEach((t, i) => {
     // Resource claims in a proposal are never carried; claims are server-owned.
+    if (c.rolePaths && t.role === undefined) {
+      bad.push({ path: `tasks.${i}.role`, message: 'this project needs a role on every task: backend or frontend' });
+      return;
+    }
+    const criteria = t.requirementIds.flatMap((id) => (c.requirementText?.[id] !== undefined ? [{ id, text: c.requirementText[id] }] : []));
     const parsed = PlanTaskSchema.safeParse({
       schemaVersion: 1, tenantId: c.tenantId, projectId: c.projectId, runId: c.runId, taskId: `${opts.taskIdPrefix}-${i + 1}`,
-      boardId: c.boardId, revision: 1, role: c.role, title: t.title, baseSha: c.baseSha, requirementIds: [...t.requirementIds],
-      dependencies: [], contractRefs: [], allowedPaths: c.allowedPaths, resourceClaims: [], acceptanceCheckIds: t.requirementIds.filter((id) => Object.hasOwn(CRITERION_DESCRIPTIONS, id)),
+      boardId: c.boardId, revision: 1, role: c.rolePaths ? t.role : c.role, title: t.title, description: t.description, ...(criteria.length > 0 ? { criteria } : {}), baseSha: c.baseSha, requirementIds: [...t.requirementIds],
+      dependencies: [], contractRefs: [], allowedPaths: c.rolePaths ? c.rolePaths[t.role!] : c.allowedPaths, resourceClaims: [], acceptanceCheckIds: t.requirementIds.filter((id) => Object.hasOwn(CRITERION_DESCRIPTIONS, id)),
       classification, policyVersion: c.policyVersion, execution: c.execution, inferencePolicyId: c.inferencePolicyId,
       limits: c.limits,
     });
@@ -166,5 +175,5 @@ export function reviewPlanProposal(
     const missing = v.issues.map((i) => `${i.kind}:${i.path}`).filter((k) => !acked.has(k));
     if (missing.length > 0) return err({ code: 'acknowledgement_required', paths: [...new Set(missing)] });
   }
-  return ok({ tasks, needsReview, issues: v.issues, droppedFields: ['description'] });
+  return ok({ tasks, needsReview, issues: v.issues, droppedFields: !c.rolePaths && v.data.tasks.some((t) => t.role !== undefined) ? ['role'] : [] });
 }

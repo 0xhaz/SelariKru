@@ -27,13 +27,14 @@ describe('reviewPlanProposal (server re-validation)', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.needsReview).toBe(false);
-    expect(r.value.droppedFields).toContain('description');
+    expect(r.value.droppedFields).toEqual([]);
     expect(r.value.tasks).toHaveLength(2);
     expect(r.value.tasks[0]).toMatchObject({
       taskId: 'prop-1', title: 'Feedback form', requirementIds: ['FB-01'], baseSha: 'abc123', allowedPaths: ['src'],
       classification: 'internal', policyVersion: 'v1', limits: { maxAttempts: 3, timeoutSeconds: 1800, maxCostUsd: 1 }, dependencies: [], resourceClaims: [],
     });
-    expect(r.value.tasks[0]).not.toHaveProperty('description');
+    expect(r.value.tasks[0]).toMatchObject({ description: 'Build the form with validation.' });
+    expect(r.value.tasks[0]).not.toHaveProperty('criteria');
   });
 
   it('rejects proposal-supplied server-owned fields and shell/tool authority', () => {

@@ -148,7 +148,7 @@ export function HandoffPanel({
           {rv.tasks.map((t) => (
             <li key={t.taskId} className="rounded-chip border border-line bg-bg p-3">
               <p className="font-medium">{t.title}</p>
-              <p className={`${mono} text-active`}>{t.requirementIds.join(', ')}</p>
+              <p className={`${mono} text-active`}>{typeof t['role'] === 'string' ? `${t['role']}: ` : ''}{t.requirementIds.join(', ')}</p>
             </li>
           ))}
         </ol>

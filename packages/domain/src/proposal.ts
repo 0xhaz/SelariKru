@@ -6,6 +6,10 @@ import { z } from 'zod';
  * tool grants, budget, permissions or policy.
  */
 
+/** The roles a task plan may name: the ones the role-pinned placement mode maps to a location. */
+export const PLAN_TASK_ROLES = ['backend', 'frontend'] as const;
+export type PlanTaskRole = (typeof PLAN_TASK_ROLES)[number];
+
 export const PROPOSAL_OPERATIONS = ['draftBrief', 'suggestCriteria', 'draftTaskPlan'] as const;
 export type ProposalOperation = (typeof PROPOSAL_OPERATIONS)[number];
 
@@ -41,6 +45,8 @@ export interface TaskProposal {
   readonly title: string;
   readonly description: string;
   readonly requirementIds: readonly string[];
+  /** Which worker does it. A closed set: it selects server-defined paths and a model assignment, and grants nothing itself. */
+  readonly role?: PlanTaskRole;
   /** Never read as authority. Mapping ignores it. */
   readonly resourceClaims?: readonly { readonly key: string; readonly mode: 'shared' | 'exclusive' }[];
 }
@@ -66,6 +72,7 @@ const task = z.strictObject({
   title: z.string().min(1).max(120),
   description: z.string().min(1).max(600),
   requirementIds: z.array(z.string()).min(1),
+  role: z.enum(PLAN_TASK_ROLES).optional(),
 });
 const SCHEMAS: Record<ProposalOperation, z.ZodType> = {
   draftBrief: z.strictObject({ summary: z.string().min(1).max(400), acceptanceCriteria: criteria }),
@@ -98,7 +105,7 @@ export const MAX_PROPOSAL_BYTES = 64 * 1024;
 const MAX_SCAN_CHARS = 600;
 /** Object keys that may appear in a reported path. Any other key is reported as `*`, so model-chosen names never reach logs. */
 const KNOWN_PATH_KEYS = new Set([
-  'summary', 'acceptanceCriteria', 'tasks', 'text', 'title', 'description', 'requirementId', 'requirementIds',
+  'summary', 'acceptanceCriteria', 'tasks', 'text', 'title', 'description', 'requirementId', 'requirementIds', 'role',
   'resourceClaims', 'key', 'mode',
 ]);
 type Seg = string | number;

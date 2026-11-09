@@ -25,6 +25,10 @@ export const TaskSpecSchema = z
     revision: z.number().int().min(1),
     role: Id,
     title: Id,
+    /** What to build, from the reviewed proposal. Free text for the worker only: redacted before storing, and never put in a snapshot or an event. */
+    description: z.string().min(1).max(600).optional(),
+    /** The full text of the criteria this task carries, for the worker's TASK.md. */
+    criteria: z.array(z.object({ id: Id, text: z.string().min(1).max(400) }).strict()).optional(),
     baseSha: Id,
     requirementIds: z.array(Id),
     dependencies: z.array(
