@@ -16,11 +16,50 @@ export interface VerificationApplication {
   readonly repair?: 'scheduled' | 'refused';
 }
 
-/** Releases every claim a task revision still holds. Claims are held through verification and released on its outcome. */
+/**
+ * Makes sure one of this run's parts holds `key` at least at `mode`. The caller has established that any live row on the key is this run's own. Postgres allows one live exclusive
+ * row per key, so a candidate's parts share one row: an existing row is kept, raised to exclusive if that is what is wanted, and never lowered.
+ */
+export async function holdClaim(tx: Tx, scope: { readonly tenantId: string; readonly projectId: string }, want: { readonly key: string; readonly mode: 'shared' | 'exclusive'; readonly taskId: string; readonly revision: number; readonly attemptId: string }, now: Date): Promise<void> {
+  const held = and(eq(schema.resourceClaims.tenantId, scope.tenantId), eq(schema.resourceClaims.projectId, scope.projectId), eq(schema.resourceClaims.resourceKey, want.key), isNull(schema.resourceClaims.releasedAt));
+  const rows = await tx.select({ claimId: schema.resourceClaims.claimId, mode: schema.resourceClaims.mode }).from(schema.resourceClaims).where(held).for('update');
+  if (rows.length === 0) {
+    await tx.insert(schema.resourceClaims).values({ tenantId: scope.tenantId, projectId: scope.projectId, claimId: `clm_${randomUUID()}`, taskId: want.taskId, revision: want.revision, resourceKey: want.key, mode: want.mode, attemptId: want.attemptId });
+    return;
+  }
+  if (want.mode !== 'exclusive' || rows.some((r) => r.mode === 'exclusive')) return;
+  const [keep, ...rest] = rows;
+  // Shared rows of this run's other parts go first: the index would refuse an exclusive beside them only once, but a claim is one row from here on.
+  if (rest.length > 0) await tx.update(schema.resourceClaims).set({ releasedAt: now }).where(and(held, inArray(schema.resourceClaims.claimId, rest.map((r) => r.claimId))));
+  await tx.update(schema.resourceClaims).set({ mode: 'exclusive' }).where(and(held, eq(schema.resourceClaims.claimId, keep!.claimId)));
+}
+
+/**
+ * Releases every claim a task revision still holds. Claims are held through verification and released on its outcome. A row this task holds for parts of its run that are still
+ * waiting for a verdict passes to one of them, so a part leaving (cancelled, or judged first) cannot free a resource the others still rely on.
+ */
 export async function releaseTaskClaims(tx: Tx, key: TaskKey, revision: number, now: Date): Promise<void> {
-  await tx.update(schema.resourceClaims).set({ releasedAt: now }).where(and(
-    eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), eq(schema.resourceClaims.taskId, key.taskId),
-    eq(schema.resourceClaims.revision, revision), isNull(schema.resourceClaims.releasedAt)));
+  const mine = and(eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), eq(schema.resourceClaims.taskId, key.taskId), eq(schema.resourceClaims.revision, revision), isNull(schema.resourceClaims.releasedAt));
+  const held = await tx.select({ claimId: schema.resourceClaims.claimId, resourceKey: schema.resourceClaims.resourceKey }).from(schema.resourceClaims).where(mine);
+  if (held.length === 0) return;
+  const siblings = await tx.execute(sql`
+    SELECT s.task_id, s.current_revision, r.spec, (SELECT a.attempt_id FROM attempts a WHERE a.tenant_id = s.tenant_id AND a.project_id = s.project_id AND a.task_id = s.task_id AND a.revision = s.current_revision ORDER BY a.attempt_number DESC LIMIT 1) AS attempt_id
+    FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision
+    WHERE s.tenant_id = ${key.tenantId} AND s.project_id = ${key.projectId} AND s.status = 'verifying' AND s.task_id <> ${key.taskId}
+      AND r.run_id = (SELECT run_id FROM task_revisions x WHERE x.tenant_id = ${key.tenantId} AND x.project_id = ${key.projectId} AND x.task_id = ${key.taskId} AND x.revision = ${revision})
+    ORDER BY s.task_id`);
+  for (const row of held) {
+    const claimsOf = (b: Record<string, unknown>) => TaskSpecSchema.parse(b['spec']).resourceClaims.filter((c) => c.key === row.resourceKey);
+    const wanting = siblings.filter((b) => claimsOf(b).length > 0);
+    const others = wanting.length === 0 ? [] : await tx.select({ id: schema.resourceClaims.claimId }).from(schema.resourceClaims).where(and(eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), eq(schema.resourceClaims.resourceKey, row.resourceKey), isNull(schema.resourceClaims.releasedAt), inArray(schema.resourceClaims.taskId, wanting.map((b) => String(b['task_id'])))));
+    if (wanting.length === 0 || others.length > 0) {
+      await tx.update(schema.resourceClaims).set({ releasedAt: now }).where(and(mine, eq(schema.resourceClaims.claimId, row.claimId)));
+      continue;
+    }
+    const heir = wanting[0]!;
+    const mode = wanting.some((b) => claimsOf(b).some((c) => c.mode === 'exclusive')) ? 'exclusive' : 'shared';
+    await tx.update(schema.resourceClaims).set({ taskId: String(heir['task_id']), revision: Number(heir['current_revision']), mode, attemptId: heir['attempt_id'] === null ? null : String(heir['attempt_id']) }).where(and(mine, eq(schema.resourceClaims.claimId, row.claimId)));
+  }
 }
 
 /**
@@ -183,8 +222,9 @@ export async function reopenBlockedVerification(
   // under its own actor, with the lease `fence` in the payload), so a worker that reports `verification_error` must not earn a re-verification.
   const eligible = blocked.filter((b) => b['by_scheduler'] === true && (isReverifiableBlock(b['reason'] as string | null) || (opts.baseMoved === true && b['reason'] === 'reverification_failed')));
   if (eligible.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
-  const now = ctx.now();
-  const reopened: string[] = [];
+  // Every part is planned before anything is written: a refusal for one part must leave all of them as they were, or a partial tree gets judged.
+  interface Planned { readonly taskId: string; readonly revision: number; readonly key: TaskKey; readonly rowRevision: number; readonly attemptId: string; readonly status: TaskStatus; readonly want: ReadonlyMap<string, 'shared' | 'exclusive'> }
+  const planned: Planned[] = [];
   for (const b of eligible) {
     const taskId = String(b['task_id']);
     const revision = Number(b['revision']);
@@ -199,25 +239,34 @@ export async function reopenBlockedVerification(
     if (!state) throw new Error(`task ${taskId}: stored spec no longer valid`);
     const moved = transition(state, { type: 'reverify_requested', afterFailedVerdict: b['reason'] === 'reverification_failed' });
     if (!moved.ok) return { ok: false, reason: 'nothing_to_reverify', taskId };
-    const attemptId = moved.value.attempts.at(-1)!.attemptId;
-
     const want = new Map<string, 'shared' | 'exclusive'>();
     for (const c of spec.resourceClaims) if (want.get(c.key) !== 'exclusive') want.set(c.key, c.mode);
-    if (want.size > 0) {
-      const live = await tx.select({ key: schema.resourceClaims.resourceKey, mode: schema.resourceClaims.mode }).from(schema.resourceClaims).where(and(
-        eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), inArray(schema.resourceClaims.resourceKey, [...want.keys()]), isNull(schema.resourceClaims.releasedAt)));
-      if ([...want].some(([k, m]) => live.some((h) => h.key === k && (m === 'exclusive' || h.mode === 'exclusive')))) return { ok: false, reason: 'resource_conflict', taskId };
-      for (const [resourceKey, mode] of want) {
-        await tx.insert(schema.resourceClaims).values({ tenantId: key.tenantId, projectId: key.projectId, claimId: `clm_${randomUUID()}`, taskId, revision, resourceKey, mode, attemptId });
-      }
-    }
+    planned.push({ taskId, revision, key, rowRevision: row.rowRevision, attemptId: moved.value.attempts.at(-1)!.attemptId, status: moved.value.status, want });
+  }
+  if (planned.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
+
+  // The parts coming back and this run's others waiting for a verdict go into one candidate, so their claims are not a conflict; anyone else's is, for all of them.
+  const waiting = await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).innerJoin(schema.taskRevisions, and(eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId), eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
+    .where(and(eq(schema.taskStatus.tenantId, run.tenantId), eq(schema.taskStatus.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), eq(schema.taskStatus.status, 'verifying')));
+  const own = new Set([...planned.map((p) => p.taskId), ...waiting.map((w) => w.taskId)]);
+  for (const p of planned) {
+    if (p.want.size === 0) continue;
+    const live = await tx.select({ key: schema.resourceClaims.resourceKey, mode: schema.resourceClaims.mode, taskId: schema.resourceClaims.taskId }).from(schema.resourceClaims).where(and(
+      eq(schema.resourceClaims.tenantId, run.tenantId), eq(schema.resourceClaims.projectId, run.projectId), inArray(schema.resourceClaims.resourceKey, [...p.want.keys()]), isNull(schema.resourceClaims.releasedAt)));
+    if ([...p.want].some(([k, m]) => live.some((h) => h.key === k && !own.has(h.taskId) && (m === 'exclusive' || h.mode === 'exclusive')))) return { ok: false, reason: 'resource_conflict', taskId: p.taskId };
+  }
+
+  const now = ctx.now();
+  const reopened: string[] = [];
+  for (const p of planned) {
+    for (const [resourceKey, mode] of p.want) await holdClaim(tx, p.key, { key: resourceKey, mode, taskId: p.taskId, revision: p.revision, attemptId: p.attemptId }, now);
     await tx.update(schema.attempts).set({ outcome: 'running', exitReason: null }).where(and(
-      eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
-    const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
-    await tx.insert(schema.taskCommands).values({ tenantId: key.tenantId, projectId: key.projectId, operationId: `${operationId}_${taskId}`, taskId, revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now, detail: reverifyDetail(attemptId, trusted) });
+      eq(schema.attempts.tenantId, p.key.tenantId), eq(schema.attempts.projectId, p.key.projectId), eq(schema.attempts.attemptId, p.attemptId)));
+    const aggregateRevision = await setStatus(tx, p.key, p.rowRevision, p.status, now);
+    await tx.insert(schema.taskCommands).values({ tenantId: p.key.tenantId, projectId: p.key.projectId, operationId: `${operationId}_${p.taskId}`, taskId: p.taskId, revision: p.revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now, detail: reverifyDetail(p.attemptId, trusted) });
     // The control plane acting for the owner, as with `plan.accepted`: `task.reopened` is not a human event, and the owner is named in the payload.
-    await emit(tx, { projectId: run.projectId, runId: run.runId, taskId, aggregateRevision }, now, { type: 'task.reopened', attemptId, actor: { kind: 'integration', id: 'reverify' }, payload: { reason: 'owner_reverify', status: 'verifying', requestedBy } });
-    reopened.push(taskId);
+    await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: p.taskId, aggregateRevision }, now, { type: 'task.reopened', attemptId: p.attemptId, actor: { kind: 'integration', id: 'reverify' }, payload: { reason: 'owner_reverify', status: 'verifying', requestedBy } });
+    reopened.push(p.taskId);
   }
   return reopened.length > 0 ? { ok: true, reopened } : { ok: false, reason: 'nothing_to_reverify' };
 }
@@ -271,7 +320,7 @@ async function applyReopen(tx: Tx, now: Date, run: RunScope, r: Reopen, payload:
     if (stored && stored.outcome !== rec.outcome) await tx.update(schema.attempts).set({ outcome: rec.outcome }).where(and(eq(schema.attempts.tenantId, r.key.tenantId), eq(schema.attempts.projectId, r.key.projectId), eq(schema.attempts.attemptId, rec.attemptId)));
   }
   if (r.conflict === undefined) {
-    for (const [resourceKey, mode] of r.want) await tx.insert(schema.resourceClaims).values({ tenantId: r.key.tenantId, projectId: r.key.projectId, claimId: `clm_${randomUUID()}`, taskId: r.part.taskId, revision: r.part.revision, resourceKey, mode, attemptId: r.part.attemptId });
+    for (const [resourceKey, mode] of r.want) await holdClaim(tx, r.key, { key: resourceKey, mode, taskId: r.part.taskId, revision: r.part.revision, attemptId: r.part.attemptId }, now);
   }
   const aggregateRevision = await setStatus(tx, r.key, r.rowRevision, r.state.status, now);
   const scope = { projectId: run.projectId, runId: run.runId, taskId: r.part.taskId, aggregateRevision };

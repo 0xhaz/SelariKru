@@ -254,7 +254,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     if (isClosedTask(task)) continue;
     const code = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
     if (code === null) continue;
-    if (isReverifiableReason(code)) {
+    if (isReverifiableReason(code) || (code === 'reverification_failed' && snapshot.runs[task.runId]?.failedRebuildMainMoved === true)) {
       reverify.set(task.runId, [...(reverify.get(task.runId) ?? []), task]);
       continue;
     }
@@ -284,9 +284,10 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     ];
     const codes = tasks.map((t) => t.statusReason ?? 'unknown').join(', ');
     const allAssembly = tasks.every((t) => t.statusReason?.startsWith('assembly_infrastructure:'));
+    const failedRebuild = tasks.every((t) => t.statusReason === 'reverification_failed');
     out.push({
-      id: `reverify:${runId}`, kind: 'reverify', chip: allAssembly ? 'Assembly failed' : 'Verification failed', tone: 'warning', state: 'open',
-      title: `${names}: verification could not finish`, summary: allAssembly ? 'The assembly step could not build a candidate, so nothing was verified.' : 'The verifier could not reach a verdict. This is an infrastructure failure, not a failed check.',
+      id: `reverify:${runId}`, kind: 'reverify', chip: failedRebuild ? 'Rebuild failed' : allAssembly ? 'Assembly failed' : 'Verification failed', tone: 'warning', state: 'open',
+      title: failedRebuild ? `${names}: the rebuild failed, and main has moved again` : `${names}: verification could not finish`, summary: failedRebuild ? 'The rebuilt code failed its checks on an earlier main. Main has moved since, and the automatic retry could not start. Re-verifying builds it on the current main.' : allAssembly ? 'The assembly step could not build a candidate, so nothing was verified.' : 'The verifier could not reach a verdict. This is an infrastructure failure, not a failed check.',
       consequence: 'It stays blocked. Finished work is not lost, and no worker needs to redo it.', reason: null, advisory: null, note: 'Re-verifying sends the finished work back without running a worker. It is limited per task revision.',
       facts: [{ label: 'Tasks', value: names }, { label: 'Plan revision', value: String(expected) }], details: [{ label: 'Reason codes', value: codes }, { label: 'Run ID', value: runId }], notDelivered: null, changed: null, actions,
       since: tasks.map((t) => t.enteredStatusAt).sort()[0]!, fingerprint: ['reverify', expected, codes, tasks.map((t) => `${t.taskId}:${t.aggregateRevision}`).join(',')].join('|'),
@@ -383,9 +384,9 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   }
   if (run.rebuildDeferred && !(cr?.status === 'open' && cr.outOfDate)) {
     return [{
-      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Rebuild waiting', tone: 'warning', title: 'Main moved, and the rebuild is waiting on a resource',
+      ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Rebuild waiting', tone: 'warning', title: 'Main moved, and the rebuild is waiting',
       summary: `${run.rebuildDeferred.message}. Nothing was changed: the verified commit stands, built on the old main.`,
-      consequence: 'It rebuilds on its own when the resource is free. Until then this code has not been verified against the current main.', note: null,
+      consequence: 'It tries again on its own. Until then this code has not been verified against the current main.', note: null,
       facts: [{ label: 'Status', value: 'Rebuild deferred' }], details: [{ label: 'Why', value: run.rebuildDeferred.message }], actions: cr ? [prLink(cr, options.mode, simulated)] : [], since: run.rebuildDeferred.at, fingerprint: ['rebuild-deferred', run.rebuildDeferred.message].join('|'),
     }];
   }

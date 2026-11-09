@@ -181,6 +181,19 @@ describe('blocked work', () => {
     expect(action(cards[0]!, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', expectedRevision: 1, args: { runId: 'run' } } });
   });
 
+  it('a failed rebuild offers re-verify only once main has moved and the automatic retry could not start', () => {
+    const blocked = (moved: boolean) => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'reverification_failed', aggregateRevision: 3 })] });
+      s.runs['run'] = { ...s.runs['run']!, failedRebuildMainMoved: moved };
+      return s;
+    };
+    const card = build(blocked(true)).cards.find((c) => c.id === 'reverify:run')!;
+    expect(card).toMatchObject({ chip: 'Rebuild failed' });
+    expect(action(card, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', args: { runId: 'run' } } });
+    expect(card.summary).not.toContain('infrastructure failure');
+    expect(build(blocked(false)).cards.find((c) => c.id === 'reverify:run')).toBeUndefined();
+  });
+
   describe('an open pull request main has left behind', () => {
     const left = (lifecycle: 'running' | 'ready_for_review', rebuiltSha: string | null, rebuild: 'building' | 'verifying' | 'verified' | 'failed' | 'conflicted' = rebuiltSha === null ? 'building' : lifecycle === 'ready_for_review' ? 'verified' : 'verifying') => {
       const s = snapshotOf({ tasks: [task('t', { status: lifecycle === 'running' ? 'verifying' : 'verified', aggregateRevision: 4 })] });

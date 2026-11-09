@@ -404,6 +404,138 @@ describe('a candidate whose own parts share a claim', () => {
   });
 });
 
+describe('a failed rebuild retrying on a new tip', () => {
+  const dep = (taskId: string) => ({ taskId, revision: 1, condition: 'artifact_verified' as const });
+  const liveParts = async (runId: string) => {
+    const [row] = await w.t.db.execute(sql`SELECT parts FROM candidates WHERE run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
+    return (row!['parts'] as { taskId: string }[]).map((p) => p.taskId).sort();
+  };
+  async function failedRebuild(tasks: { id: string; claim?: { key: string; mode: 'shared' | 'exclusive' }; after?: string }[]): Promise<string> {
+    const runId = await w.newRun();
+    await w.plan(runId, tasks.map((t) => w.task(runId, t.id, { ...(t.claim ? { resourceClaims: [t.claim] } : {}), ...(t.after ? { dependencies: [dep(t.after)] } : {}) })));
+    for (const t of tasks) {
+      await w.claimAndComplete(t.id);
+      await w.assembly().tick();
+      await w.verification(passing).tick();
+    }
+    expect(await w.lifecycle(runId)).toBe('ready_for_review');
+    landOnMain();
+    await w.assembly().tick();
+    await w.verification(failingOn(['FB-01'])).tick();
+    for (const t of tasks) expect((await w.status(t.id)).status).toBe('blocked');
+    return runId;
+  }
+
+  it('two parts sharing an exclusive key both come back, and the candidate holds both', async () => {
+    const claim = { key: 'lockfile', mode: 'exclusive' as const };
+    const runId = await failedRebuild([{ id: 't_1', claim }, { id: 't_2', claim, after: 't_1' }]);
+    landOnMain();
+    const tick = await w.assembly().tick();
+    expect(tick.failed).toEqual([]);
+    expect(tick.assembled).toHaveLength(1);
+    expect((await w.status('t_1')).status).toBe('verifying');
+    expect((await w.status('t_2')).status).toBe('verifying');
+    expect(await liveParts(runId)).toEqual(['t_1', 't_2']);
+    expect(await w.t.db.execute(sql`SELECT mode FROM resource_claims WHERE resource_key = 'lockfile' AND released_at IS NULL`)).toEqual([{ mode: 'exclusive' }]);
+    expect((await w.verification(passing).tick()).verified).toBe(tick.assembled[0]);
+    expect(await w.lifecycle(runId)).toBe('ready_for_review');
+  });
+
+  it('a claim held by this run’s own part waiting for a verdict is not a conflict', async () => {
+    const claim = { key: 'lockfile', mode: 'exclusive' as const };
+    const runId = await failedRebuild([{ id: 'o_1', claim }, { id: 'o_2', claim, after: 'o_1' }]);
+    // Seeded, because the real pipeline does not reach it today: one part back to waiting and holding the key, the other still blocked.
+    await w.t.db.execute(sql`UPDATE task_status SET status = 'verifying' WHERE task_id = 'o_2'`);
+    await w.t.db.execute(sql`INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode) VALUES (${TENANT}, ${PROJECT}, 'clm_seed', 'o_2', 1, 'lockfile', 'exclusive')`);
+    landOnMain();
+    const res = await post(w.app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'own' });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.reopened).toEqual(['o_1']);
+    expect((await w.status('o_1')).status).toBe('verifying');
+    expect(await w.t.db.execute(sql`SELECT claim_id FROM resource_claims WHERE resource_key = 'lockfile' AND released_at IS NULL`)).toEqual([{ claim_id: 'clm_seed' }]);
+  });
+
+  it('a claim another run holds changes nothing for any part, until it frees; then the whole rebuild proceeds', async () => {
+    const runId = await failedRebuild([{ id: 't_a' }, { id: 't_z', claim: { key: 'db', mode: 'exclusive' } }]);
+    const other = await w.newRun();
+    await w.plan(other, [w.task(other, 't_other', { resourceClaims: [{ key: 'db', mode: 'exclusive' }] })]);
+    await w.claimAndComplete('t_other', 'src/other_only.ts');
+    landOnMain();
+
+    const commands = await w.count('task_commands', `command = 'reverify'`);
+    for (let i = 0; i < 2; i++) await w.assembly().tick();
+    expect((await w.status('t_a')).status).toBe('blocked');
+    expect((await w.status('t_z')).status).toBe('blocked');
+    expect(await w.count('task_commands', `command = 'reverify'`)).toBe(commands);
+    expect(await w.count('candidates', `run_id = '${runId}' AND status = 'assembled'`)).toBe(0);
+    expect(await w.count('resource_claims', `task_id IN ('t_a', 't_z') AND released_at IS NULL`)).toBe(0);
+
+    // The owner is shown it, and asking changes nothing either while the claim is held.
+    const card = buildDecisions(toViewSnapshot(await w.snapshot()), Date.now(), { mode: 'live', connection: 'live' }).cards.find((c) => c.id === `reverify:${runId}`)!;
+    expect(card).toMatchObject({ chip: 'Rebuild failed' });
+    const asked = await post(w.app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'held' });
+    expect(asked.status).toBe(409);
+    expect(asked.body.error.details.reason).toBe('resource_conflict');
+    expect((await w.status('t_a')).status).toBe('blocked');
+
+    const { rowRevision } = await w.status('t_other');
+    expect((await w.command('t_other', rowRevision, 'free2')).status).toBe(202);
+    const tick = await w.assembly().tick();
+    expect(tick.assembled).toHaveLength(1);
+    expect((await w.status('t_a')).status).toBe('verifying');
+    expect((await w.status('t_z')).status).toBe('verifying');
+    expect(await liveParts(runId)).toEqual(['t_a', 't_z']);
+  });
+});
+
+describe('a key shared across a candidate’s parts', () => {
+  const dep = (taskId: string) => ({ taskId, revision: 1, condition: 'artifact_verified' as const });
+  async function rebuilt(first: 'shared' | 'exclusive', second: 'shared' | 'exclusive'): Promise<string> {
+    const runId = await w.newRun();
+    await w.plan(runId, [w.task(runId, 'k_1', { resourceClaims: [{ key: 'k', mode: first }] }), w.task(runId, 'k_2', { resourceClaims: [{ key: 'k', mode: second }], dependencies: [dep('k_1')] })]);
+    for (const id of ['k_1', 'k_2']) { await w.claimAndComplete(id); await w.assembly().tick(); await w.verification(passing).tick(); }
+    landOnMain();
+    expect((await w.assembly().tick()).assembled).toHaveLength(1);
+    return runId;
+  }
+  const rows = () => w.t.db.execute(sql`SELECT task_id, mode FROM resource_claims WHERE resource_key = 'k' AND released_at IS NULL`);
+
+  it.each([['shared', 'exclusive'], ['exclusive', 'shared']] as const)('%s then %s is held exclusively, on one row', async (first, second) => {
+    await rebuilt(first, second);
+    expect(await rows()).toMatchObject([{ mode: 'exclusive' }]);
+  });
+
+  it('cancelling the part holding the row passes it on; it frees only when the last part leaves', async () => {
+    await rebuilt('exclusive', 'exclusive');
+    const [held] = await rows();
+    const holder = String(held!['task_id']);
+    const heir = holder === 'k_1' ? 'k_2' : 'k_1';
+    expect((await w.command(holder, (await w.status(holder)).rowRevision, 'c-holder')).status).toBe(202);
+    expect(await rows()).toEqual([{ task_id: heir, mode: 'exclusive' }]);
+    expect((await w.command(heir, (await w.status(heir)).rowRevision, 'c-heir')).status).toBe(202);
+    expect(await rows()).toEqual([]);
+  });
+});
+
+describe('a failed fetch on a rebuild', () => {
+  it('is said on the screens, once, and changes nothing else', async () => {
+    const { runId, sha } = await w.verifiedRun(['t_nf']);
+    const tip = landOnMain();
+    const remote = { branchHead: async () => tip, fetchBranch: async () => { throw new Error('fetch refused'); } };
+    const events = await w.count('events');
+    await w.assembly({ remote }).tick();
+    const first = await w.t.db.execute(sql`SELECT detail FROM candidates WHERE sha = ${sha}`);
+    w.advance(30);
+    await w.assembly({ remote }).tick();
+    expect(await w.t.db.execute(sql`SELECT detail FROM candidates WHERE sha = ${sha}`)).toEqual(first);
+    expect(await w.count('events')).toBe(events);
+    expect(await candidateStatus(sha)).toBe('assembled');
+    const run = (await w.snapshot()).runs.find((r: { runId: string }) => r.runId === runId);
+    expect(run.rebuildDeferred.message).toContain('could not be fetched');
+    expect((await views(runId)).card).toMatchObject({ chip: 'Rebuild waiting' });
+  });
+});
+
 describe('a rebuild that goes wrong with a pull request open is named for what happened', () => {
   it('a failed verdict', async () => {
     const { runId } = await w.verifiedRun(['t_f2']);

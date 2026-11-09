@@ -442,10 +442,10 @@ export function dockerRunner(opts: { script?: string; timeoutMs?: number; docker
     const add = (b: Buffer) => { log = (log + b.toString()).slice(-256 * 1024); };
     p.stdout.on('data', add);
     p.stderr.on('data', add);
-    // Killing the script alone would leave the container running: stop it by name, then the script (its trap removes the container).
+    // Force-removed by name: killing the script alone would leave the container running, and SIGKILL skips the script's own cleanup trap, so `docker kill` would leave it behind, stopped.
     const stop = (why: string): void => {
       log += `\n[verifier] ${why}`;
-      spawn(docker, ['kill', name], { stdio: 'ignore' }).on('error', () => undefined);
+      spawn(docker, ['rm', '-f', name], { stdio: 'ignore' }).on('error', () => undefined);
       p.kill('SIGKILL');
     };
     const timer = setTimeout(() => stop(`docker run timed out after ${timeoutMs / 1000}s`), timeoutMs);

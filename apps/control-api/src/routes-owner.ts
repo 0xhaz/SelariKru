@@ -594,7 +594,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
         // A rebuild for a moved main retires the pull request's candidate first, so this is true from the moment the rebuild starts. Read from candidates, not the evidence report: a run with no requirement ids has none.
         const retiredForMain = await tx.execute(sql`SELECT run_id, sha, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'invalidated' AND reason = 'base_changed' AND sha IS NOT NULL`);
-        const candidateRows = await tx.execute(sql`SELECT run_id, sha, status, updated_at, detail -> 'rebuildDeferred' AS deferred FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status IN ('assembled', 'rejected', 'failed', 'conflicted')`);
+        const candidateRows = await tx.execute(sql`SELECT run_id, sha, status, updated_at, detail -> 'rebuildDeferred' AS deferred, detail -> 'retryRefused' AS retry_refused FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status IN ('assembled', 'rejected', 'failed', 'conflicted')`);
         const whenOf = (v: unknown): number => new Date(v as string | Date).getTime();
         /** How the rebuild that left this pull request behind is going. A failed or conflicted one is said as such; only a run actually building says it is. */
         const rebuildState = (runId: string, retiredAt: unknown, liveSha: string | null): 'building' | 'verifying' | 'verified' | 'failed' | 'conflicted' => {
@@ -682,6 +682,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             /** Where the run stands after a budget stop, before anyone has accepted it. Null when nothing was stopped, or it cannot be read. */
             scopeAssessment: assessments.get(r.runId) ?? null,
             /** Every attempt of this run a person opened a shell in. All revisions: replanning a task does not erase that a person was in its sandbox. */
+            /** A failed rebuild could not retry by itself after main moved again, so the owner may send it back. */
+            failedRebuildMainMoved: candidateRows.filter((c) => c['run_id'] === r.runId && c['status'] === 'rejected').sort((x, y) => whenOf(y['updated_at']) - whenOf(x['updated_at']))[0]?.['retry_refused'] != null,
             /** Main moved, but rebuilding now would have to take a claim another task holds: nothing was touched, and the rebuild runs when it is free. */
             rebuildDeferred: (() => {
               const d = candidateRows.find((c) => c['run_id'] === r.runId && c['status'] === 'assembled')?.['deferred'] as { message?: unknown; at?: unknown } | null | undefined;

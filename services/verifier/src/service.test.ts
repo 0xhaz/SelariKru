@@ -511,8 +511,30 @@ describe('dockerRunner', () => {
     const name = readFileSync(join(dir, 'name.txt'), 'utf8').trim();
     expect(name).toMatch(/^selarikru-verify-/);
     for (let i = 0; i < 50 && !existsSync(calls); i += 1) await new Promise((r) => setTimeout(r, 50)); // the kill is issued asynchronously
-    expect(readFileSync(calls, 'utf8')).toContain(`kill ${name}`);
+    expect(readFileSync(calls, 'utf8')).toContain(`rm -f ${name}`);
     expect(out.log).toMatch(/timed out/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an aborted run force-removes the container, leaving none stopped', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'docker-stub-'));
+    const calls = join(dir, 'calls.txt');
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${calls}\n`);
+    chmod(stub, 0o755);
+    const script = join(dir, 'verify.sh');
+    writeFileSync(script, `#!/bin/sh\necho "$VERIFY_CONTAINER_NAME" > ${join(dir, 'name.txt')}\nexec sleep 30\n`);
+    chmod(script, 0o755);
+    const abort = new AbortController();
+    const running = dockerRunner({ script, timeoutMs: 60_000, dockerCommand: stub })({ candidateDir: dir, resultsPath: join(dir, 'r.json'), signal: abort.signal });
+    for (let i = 0; i < 100 && !existsSync(join(dir, 'name.txt')); i += 1) await new Promise((r) => setTimeout(r, 20));
+    abort.abort();
+    const out = await running;
+    const name = readFileSync(join(dir, 'name.txt'), 'utf8').trim();
+    for (let i = 0; i < 50 && !existsSync(calls); i += 1) await new Promise((r) => setTimeout(r, 50));
+    expect(readFileSync(calls, 'utf8')).toContain(`rm -f ${name}`);
+    expect(readFileSync(calls, 'utf8')).not.toContain('kill');
+    expect(out.log).toMatch(/superseded/);
     rmSync(dir, { recursive: true, force: true });
   });
 });

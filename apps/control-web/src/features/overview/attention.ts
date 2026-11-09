@@ -228,7 +228,11 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
     // The expiry sweep blocks the task with this reason, and the expired approval below already says so.
     const expiredRequestShown = blockCode === 'approval_expired' && Object.values(snapshot.approvals).some((a) => a.taskId === task.taskId && approvalStateAt(a, nowMs) === 'expired');
-    if (blockCode !== null && !expiredRequestShown) items.push(blockItem(task, blockCode, affected(task)));
+    if (blockCode !== null && !expiredRequestShown) {
+      const item = blockItem(task, blockCode, affected(task));
+      // Only then does the Decisions card for this block exist.
+      items.push(blockCode === 'reverification_failed' && snapshot.runs[task.runId]?.failedRebuildMainMoved === true ? { ...item, decisionId: `reverify:${task.runId}` } : item);
+    }
     const latestCheck = latestCheckOf(snapshot, task.taskId);
     if (atFailedGate(task, latestCheck)) {
       const check = latestCheck?.state === 'failed' ? latestCheck : undefined;
@@ -295,7 +299,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
       continue;
     }
     if (run.rebuildDeferred) {
-      items.push(make({ id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'rebuild_deferred', since: run.rebuildDeferred.at, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId).map((t) => t.taskId), owner: 'You', title: 'Main moved, and the rebuild is waiting on a resource', detail: run.rebuildDeferred.message, consequence: 'This code has not been verified against the current main.', nextAction: 'It rebuilds on its own when the resource is free.' }));
+      items.push(make({ id: `review:${run.runId}`, decisionId: `review:${run.runId}`, kind: 'decision', status: 'review', code: 'rebuild_deferred', since: run.rebuildDeferred.at, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId).map((t) => t.taskId), owner: 'You', title: 'Main moved, and the rebuild is waiting', detail: run.rebuildDeferred.message, consequence: 'This code has not been verified against the current main.', nextAction: 'It tries again on its own.' }));
       continue;
     }
     // A run the server would refuse a pull request for is not ready, whatever its lifecycle says.

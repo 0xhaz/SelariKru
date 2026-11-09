@@ -26,6 +26,7 @@ import { ArtifactIntegrityError, type ArtifactStore } from '../../../packages/ar
 import { checkEventAuthority, TaskSpecSchema, transition, validatePlanRevision, type EventEnvelope, type TaskSpec, type TaskStatus } from '../../../packages/domain/src/index.ts';
 import { appendEvent, appendUsage, INTEGRATION_ROLE, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
 import { emit, SCHEDULER_ACTOR } from '../../workflow/src/events.ts';
+import { holdClaim } from '../../workflow/src/verification.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus } from '../../workflow/src/taskstate.ts';
 import { checkAllowedPaths, type FileChange } from '../../../packages/runtime-docker-local/src/diff.ts';
 
@@ -852,7 +853,6 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
         const own = [...alsoOwn, ...rows.flatMap((c) => ((c['parts'] as { taskId: string }[]) ?? []).map((p) => p.taskId))];
         const live = await tx.execute(sql`SELECT resource_key, mode, task_id FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key IN (${inList([...want.keys()])}) AND released_at IS NULL`);
         conflict = [...want].find(([k, m]) => live.some((h) => h['resource_key'] === k && !own.includes(String(h['task_id'])) && (m === 'exclusive' || h['mode'] === 'exclusive')))?.[0];
-        for (const k of live) if (own.includes(String(k['task_id']))) want.delete(String(k['resource_key']));
       }
       const moved = transition(state, { type: 'verification_invalidated', ...(conflict !== undefined ? { blockedReason: `resource_conflict:${conflict}` } : {}) });
       if (!moved.ok) throw new Error(`illegal reopen transition: ${JSON.stringify(moved.error)}`);
@@ -861,11 +861,8 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
         if (stored && stored.outcome !== rec.outcome) await tx.execute(sql`UPDATE attempts SET outcome = ${rec.outcome} WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND attempt_id = ${rec.attemptId}`);
       }
       if (conflict === undefined) {
-        for (const [resourceKey, mode] of want) {
-          await tx.execute(sql`
-            INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode, attempt_id)
-            VALUES (${run.tenantId}, ${run.projectId}, ${`clm_${randomUUID()}`}, ${part.taskId}, ${part.revision}, ${resourceKey}, ${mode}, ${part.attemptId})`);
-        }
+        // One row per key for the whole candidate, at the strongest mode any part needs.
+        for (const [resourceKey, mode] of want) await holdClaim(tx, key, { key: resourceKey, mode, taskId: part.taskId, revision: part.revision, attemptId: part.attemptId }, now);
       }
       const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
       // The re-verify lineage: this work was already judged and only main moved, so a failed verdict on the rebuild blocks it. No repair worker is started on its account.

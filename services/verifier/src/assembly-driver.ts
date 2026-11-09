@@ -79,7 +79,10 @@ interface TaskRow { readonly spec: TaskSpec; readonly status: string; readonly a
 type Part = { readonly taskId: string; readonly revision: number; readonly attemptId: string };
 interface Due { readonly repository: string; readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string; readonly partsKey: string; readonly parts: readonly Part[]; readonly baseMoved: boolean }
 type TipReader = (repository: string, target: string) => Promise<string>;
-interface LiveCandidate { readonly baseSha: string; readonly target: string; readonly parts: readonly Part[] }
+/** A refusal inside the retry's transaction: thrown, so that nothing of it is committed. */
+class RetryRefused extends Error {}
+
+interface LiveCandidate { readonly deferred: boolean; readonly baseSha: string; readonly target: string; readonly parts: readonly Part[] }
 /** Nothing to do, due, or a failure before assembly could start (the tip could not be read). */
 type Assessment = { readonly kind: 'idle' } | { readonly kind: 'due'; readonly due: Due } | { readonly kind: 'reopen' } | { readonly kind: 'infrastructure'; readonly partsKey: string; readonly parts: readonly Part[]; readonly pinnedBaseSha: string; readonly target: string; readonly reason: string; readonly message: string };
 const RETRY_STATUS = 'retrying';
@@ -167,7 +170,11 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     } catch {
       return { kind: 'idle' };
     }
-    if (tipSha === '' || tipSha === live.baseSha) return { kind: 'idle' };
+    if (tipSha === '') return { kind: 'idle' };
+    if (tipSha === live.baseSha) {
+      if (live.deferred) await db.execute(sql`UPDATE candidates SET detail = detail - 'rebuildDeferred' WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled'`);
+      return { kind: 'idle' };
+    }
     const readPr = async () => (await db.execute(sql`SELECT status FROM change_requests WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId}`))[0];
     let pr = await readPr();
     // The move of main may be this very pull request being merged. Ask GitHub first: if it cannot say, nothing is retired on a guess.
@@ -214,14 +221,14 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     const tasks = await loadRunTasks(db, tenantId, projectId, runId);
     // A verifying part with no published change set cannot enter a candidate; it counts as unfinished below.
     const waiting = tasks.filter((t) => t.status === 'verifying' && t.attemptId !== null && t.manifest !== null);
-    const liveRows = await db.execute(sql`SELECT base_sha, target, parts FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
+    const liveRows = await db.execute(sql`SELECT base_sha, target, parts, detail ? 'rebuildDeferred' AS deferred FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
     const live = new Set(liveRows.flatMap((r) => (r['parts'] as Part[]).map(partKey)));
     if (waiting.every((t) => live.has(partKey({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! })))) {
       // Nothing is waiting to be built, so the only work left here is a candidate the target has moved past. More than one live candidate is not a state to act on.
       if (liveRows.length === 0) return assessFailedRebuild(projectId, runId, tasks, tip);
       if (liveRows.length !== 1) return { kind: 'idle' };
       const row = liveRows[0]!;
-      return assessMoved(projectId, runId, tasks, { baseSha: String(row['base_sha']), target: String(row['target']), parts: row['parts'] as Part[] }, tip);
+      return assessMoved(projectId, runId, tasks, { deferred: row['deferred'] === true, baseSha: String(row['base_sha']), target: String(row['target']), parts: row['parts'] as Part[] }, tip);
     }
 
     const waitingIds = new Set(waiting.map((t) => t.spec.taskId));
@@ -255,12 +262,25 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     return { kind: 'due', due: { repository, target, pinnedBaseSha, currentBaseSha, inputsKey, partsKey, parts, baseMoved: false } };
   }
 
+  /** Written once per reason: the candidate stands untouched, the next pass tries again, and the screens say why nothing moved. */
+  const noteDeferred = (projectId: string, runId: string, message: string) => db.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{rebuildDeferred}', jsonb_build_object('message', ${message}::text, 'at', ${now().toISOString()}::text)) WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND detail -> 'rebuildDeferred' ->> 'message' IS DISTINCT FROM ${message}::text`);
+
   async function assembleRun(projectId: string, runId: string, tip: TipReader): Promise<{ sha?: string; failure?: string; retrying?: string }> {
     const assessed = await assess(projectId, runId, tip);
     if (assessed.kind === 'idle') return {};
     if (assessed.kind === 'reopen') {
-      const reopened = await withTx(db, (tx) => reopenBlockedVerification({ now }, tx, { tenantId, projectId, runId }, 'integration', `op_rebuild_retry_${randomUUID()}`, null, { baseMoved: true, unbounded: true }));
-      return reopened.ok ? assembleRun(projectId, runId, tip) : {};
+      try {
+        await withTx(db, async (tx) => {
+          const reopened = await reopenBlockedVerification({ now }, tx, { tenantId, projectId, runId }, 'integration', `op_rebuild_retry_${randomUUID()}`, null, { baseMoved: true, unbounded: true });
+          if (!reopened.ok) throw new RetryRefused(reopened.reason);
+        });
+      } catch (e) {
+        if (!(e instanceof RetryRefused)) throw e;
+        // It could not start (a claim another run holds, most likely). Said once, so the owner can see main moved and try; the next pass tries again by itself.
+        await db.execute(sql`UPDATE candidates c SET detail = jsonb_set(c.detail, '{retryRefused}', jsonb_build_object('reason', ${e.message}::text, 'at', ${now().toISOString()}::text)) WHERE c.tenant_id = ${tenantId} AND c.project_id = ${projectId} AND c.run_id = ${runId} AND c.status = 'rejected' AND c.sha IS NOT NULL AND c.detail -> 'retryRefused' ->> 'reason' IS DISTINCT FROM ${e.message}::text`);
+        return {};
+      }
+      return assembleRun(projectId, runId, tip);
     }
     if (assessed.kind === 'infrastructure') {
       const a = assessed;
@@ -273,8 +293,11 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
       try {
         await options.remote.fetchBranch({ repository: due.repository, repoPath, branch: due.target, sha: due.currentBaseSha });
       } catch (e) {
-        // A rebuild has retired nothing yet, so a failed fetch leaves everything as it was. Work with no candidate at all waits like any other infrastructure failure.
-        if (due.baseMoved) return {};
+        // A rebuild has retired nothing yet, so a failed fetch leaves everything as it was, and says so once. Work with no candidate at all waits like any other infrastructure failure.
+        if (due.baseMoved) {
+          await noteDeferred(projectId, runId, `main moved, but ${due.target} could not be fetched from GitHub`);
+          return {};
+        }
         const message = `the tip of ${due.target} could not be fetched: ${redactSecrets(e instanceof Error ? e.message : 'error').slice(0, 200)}`;
         const done = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, due.target, due.partsKey, due.parts, due.pinnedBaseSha, 'base_unavailable', message));
         if (done.outcome === 'retrying') options.onRetry?.({ runId, reason: 'base_unavailable', count: done.count, maxRetries });
@@ -297,8 +320,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     );
     if (r.ok) { await clearRetry(projectId, runId, due.target); return { sha: r.sha }; }
     if (r.reason === 'rebuild_deferred') {
-      // Written once per reason. The candidate stands untouched; the next pass tries again.
-      await db.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{rebuildDeferred}', jsonb_build_object('message', ${r.message}::text, 'at', ${now().toISOString()}::text)) WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND detail -> 'rebuildDeferred' ->> 'message' IS DISTINCT FROM ${r.message}::text`);
+      await noteDeferred(projectId, runId, r.message);
       return {};
     }
     if (deferred) return deferred.outcome === 'blocked' ? { failure: `assembly_infrastructure:${deferred.reason}` } : { retrying: deferred.reason };

@@ -144,6 +144,8 @@ export const RunViewSchema = z
     runId: Id,
     /** Main moved, but rebuilding now would take a claim another task holds. Nothing was touched. */
     rebuildDeferred: z.object({ message: z.string(), at: Iso }).strict().nullable().optional(),
+    /** A rebuild failed its verdict, main has moved since, and the automatic retry could not start. `run.reverify` can send it back. */
+    failedRebuildMainMoved: z.boolean().optional(),
     lifecycle: z.enum(RUN_STATUSES),
     planRevision: z.number().int().min(0),
     /** Latest run-level evidence (candidate assembled, change proposed or merged). Run-level events never create tasks. */
