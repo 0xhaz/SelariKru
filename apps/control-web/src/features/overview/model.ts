@@ -242,7 +242,9 @@ const RUN_EVIDENCE: Readonly<Record<string, { stateLabel: string; tone: Tone; su
 function evidence(snapshot: ProjectViewSnapshot): EvidenceRow[] {
   const rows: EvidenceRow[] = Object.values(snapshot.checks).map((c) => {
     const task = c.taskId !== null ? snapshot.tasks[c.taskId] : undefined;
-    return { id: c.checkId, ...CHECK_STATE[c.state], summary: c.summary ?? c.checkId, subject: task ? (task.title ?? task.taskId) : null, at: c.updatedAt };
+    // A real verdict says nothing in words, and its check id is an internal key: it is named by what it records.
+    const named = c.summary ?? (c.checkId.endsWith(':verification') ? `Verification ${c.state === 'running' ? 'running' : c.state}` : c.checkId);
+    return { id: c.checkId, ...CHECK_STATE[c.state], summary: named, subject: task ? (task.title ?? task.taskId) : null, at: c.updatedAt };
   });
   for (const run of Object.values(snapshot.runs)) {
     const shape = run.latestEvidence ? RUN_EVIDENCE[run.latestEvidence.kind] : undefined;

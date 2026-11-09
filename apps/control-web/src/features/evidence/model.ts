@@ -139,7 +139,7 @@ function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectV
   return {
     sha: c.sha, short: shortSha(c.sha), statusLabel: c.live ? 'Live' : (c.status === 'rejected' ? 'Rejected' : c.status), live: c.live, anchor: CANDIDATE_ANCHOR, commitHref, flaky: c.flaky,
     facts: [
-      { label: 'Full commit', value: c.sha }, { label: 'Base commit', value: c.baseSha }, { label: 'Tree', value: c.treeSha ?? 'Not recorded' }, { label: 'Target branch', value: c.target },
+      { label: 'Base commit', value: c.baseSha }, { label: 'Tree', value: c.treeSha ?? 'Not recorded' }, { label: 'Target branch', value: c.target },
       { label: 'Verification record', value: c.recordId ?? 'Not recorded' }, { label: 'Verified on', value: c.verifierHost ?? 'Not recorded' }, { label: 'Check manifest', value: c.checkManifestSha256 ? `sha256:${c.checkManifestSha256.slice(0, 16)}` : 'Not recorded' }, { label: 'Verifier', value: c.verifierSha256 ? `sha256:${c.verifierSha256.slice(0, 16)}` : 'Not recorded' },
     ],
   };

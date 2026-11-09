@@ -67,11 +67,11 @@ function CriteriaTable({ rows }: { rows: readonly CriterionRow[] }) {
           {rows.map((r) => (
             <tr key={r.criterionId} data-testid="criterion" data-criterion={r.criterionId} data-state={r.state} className="border-b border-line align-top last:border-0">
               <th scope="row" className="py-2.5 pr-3 font-mono text-mono font-semibold text-fg">{r.criterionId}</th>
-              <td className="py-2.5 pr-3"><Chip tone={r.tone}>{r.stateLabel}</Chip></td>
+              <td className="py-2.5 pr-3 whitespace-nowrap"><Chip tone={r.tone}>{r.stateLabel}</Chip></td>
               <td className="py-2.5 pr-3 text-muted">{r.tasks.join(', ')}</td>
               <td className="py-2.5 pr-3"><CheckLink row={r} /></td>
               <td className="py-2.5 pr-3"><ShaLink row={r} /></td>
-              <td className="py-2.5 text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatClock(r.evidence.at)}</Timestamp> : 'Not yet'}</td>
+              <td className="py-2.5 whitespace-nowrap text-muted">{r.evidence ? <Timestamp iso={r.evidence.at}>{formatClock(r.evidence.at)}</Timestamp> : 'Not yet'}</td>
             </tr>
           ))}
         </tbody>
@@ -210,7 +210,7 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
       <div className="grid gap-4">
         <DeliveryStrip states={model.states} />
         {model.connected ? (
-          <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
             <div className="grid gap-4">
               <Panel title="Acceptance criteria" labelId="evidence-criteria-title" aside={model.counts.map((c) => `${c.n} ${c.label}`).join(', ')}>
                 <CriteriaTable rows={model.criteria} />

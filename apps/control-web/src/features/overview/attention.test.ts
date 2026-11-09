@@ -1,9 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { ATTENTION_ORDER, buildAttention } from './attention.ts';
+import type { TaskView } from '@selarikru/view-protocol';
+import { ATTENTION_ORDER, blockItem, buildAttention } from './attention.ts';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task, worker } from './testing.ts';
 
 const placed = (code: string) => snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: code })] });
 const blockedBy = (code: string) => snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: code })] });
+
+const attentionTask = (): TaskView => ({ taskId: 't', runId: 'r', revision: 1, aggregateRevision: 1, title: 'T', role: 'backend', dependsOn: [], status: 'ready', statusReason: null, placementBlock: null, cancelRequested: null, cancelReason: null, supersededByRevision: null, attemptIds: [], activeAttemptId: null, enteredStatusAt: '2026-11-09T01:00:00.000Z', latestEvidence: null });
+
+describe('a runner\'s model refusal on a blocked task', () => {
+  it.each(['unsupported_provider:acme/x', 'unsupported_model:anthropic/x'])('%s is not told to let it retry', (code) => {
+    const blocked = blockItem({ ...attentionTask(), status: 'blocked', statusReason: code }, code, ['t']);
+    expect(blocked.nextAction).not.toMatch(/retry/i);
+    expect(blocked.nextAction).toBe('Replan or cancel this task.');
+    const claimTime = blockItem({ ...attentionTask(), status: 'ready', placementBlock: code }, code, ['t']);
+    expect(claimTime.nextAction).toMatch(/let it retry/);
+  });
+});
 
 describe('attention queue', () => {
   it('attention sorted per design §4 order', () => {
