@@ -6,7 +6,7 @@ import {
 } from '@selarikru/view-protocol';
 import type { VirtualClock } from './clock.ts';
 import { FIXTURE_T0_MS, HUMAN, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
-import { buildAllFixtures } from './fixtures.ts';
+import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 
 interface Subscriber {
@@ -67,7 +67,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   const projects = new Map<string, Project>();
   let closed = false;
 
-  for (const fixture of options.fixtures ?? buildAllFixtures()) {
+  for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
@@ -114,6 +114,19 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const result = applyEvent(p.state, applied);
     if (result.outcome === 'resync' || result.outcome === 'duplicate') throw new Error(`mock fixture ${p.fixture.id} is inconsistent at ${event.type}: ${result.outcome}`);
     p.state = result.state;
+    advanceLifecycle(p, event.runId);
+  }
+
+  /** The server writes run lifecycle with no event: ready_for_review with the last verdict, merged once every task is merged. */
+  function advanceLifecycle(p: Project, runId: string): void {
+    const snap = p.state.snapshot;
+    const run = snap.runs[runId];
+    if (!run) return;
+    const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId && t.status !== 'cancelled' && t.status !== 'superseded');
+    let lifecycle = run.lifecycle;
+    if ((lifecycle === 'running' || lifecycle === 'blocked') && tasks.length > 0 && tasks.every((t) => t.status === 'verified' || t.status === 'merged')) lifecycle = 'ready_for_review';
+    if (lifecycle === 'ready_for_review' && tasks.length > 0 && tasks.every((t) => t.status === 'merged')) lifecycle = 'merged';
+    if (lifecycle !== run.lifecycle) p.state = { ...p.state, snapshot: { ...snap, runs: { ...snap.runs, [runId]: { ...run, lifecycle } } } };
   }
 
   function accept(p: Project, event: ProjectViewEvent): void {

@@ -1,4 +1,4 @@
-import { FixtureBuilder, HUMAN, REAPER, figure, type Fixture, type FixtureId } from './builder.ts';
+import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, type Fixture, type FixtureId } from './builder.ts';
 
 /**
  * Ten named scenarios. Each is a stream of real domain events (the payload fields the services emit today), a fixed start time, usage
@@ -176,15 +176,39 @@ function noData(): Fixture {
   };
 }
 
+function mergeFlow(): Fixture {
+  const b = new FixtureBuilder('merge-flow', 1111);
+  b.task('api', { title: 'Feedback API', role: 'backend' }).task('web', { title: 'Feedback list UI', role: 'frontend' });
+  b.plan(1, ['api', 'web']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud').ready('web', 5).start('web', 'att_web_1', 7, CLOUD, 'cloud', 'cloud');
+  b.complete('api', 'att_api_1', 40, LOCAL).verdict('api', 'att_api_1', 50, 'passed', { checkId: 'ci:api', summary: 'all checks passed' });
+  b.complete('web', 'att_web_1', 45, CLOUD).verdict('web', 'att_web_1', 55, 'passed', { checkId: 'ci:web', summary: 'all checks passed' });
+  // The last verdict makes the run ready for review in the same transaction, with no event: the snapshot says so.
+  b.emit('candidate.assembled', 60, { actor: INTEGRATION, payload: { candidateId: 'cand_1' } });
+  b.emit('change.proposed', 65, { actor: INTEGRATION, payload: { prNumber: 12, url: 'https://example.invalid/pr/12' } });
+  // A merge seen on GitHub: a run-level event, then one per verified task. The run's `merged` follows with no event of its own.
+  const merged = { prNumber: 12, url: 'https://example.invalid/pr/12', candidateSha: 'c'.repeat(40), mergeCommitSha: 'd'.repeat(40) };
+  b.emit('change.merged', 100, { actor: INTEGRATION, payload: merged });
+  b.emit('change.merged', 100, { task: 'api', actor: INTEGRATION, payload: merged });
+  b.emit('change.merged', 100, { task: 'web', actor: INTEGRATION, payload: merged });
+  return done(b, {
+    id: 'merge-flow', name: 'Merge flow', startSec: 70, assistant: ASSISTANT_DEVICE,
+    description: 'Every task is verified, so the run is ready for review. A human merges on GitHub; the merge is observed and the run becomes merged.',
+    usage: [b.use('api', 'att_api_1', figure('cost_usd', '0.20', 'estimated', 'rate_card')), b.use('web', 'att_web_1', figure('cost_usd', '0.18', 'estimated', 'rate_card'))],
+  });
+}
+
 export const FIXTURE_IDS = [
   'healthy-parallel-work', 'human-wait', 'policy-block', 'runner-loss', 'long-build-stall', 'contract-change', 'failed-ci', 'expired-approval', 'unknown-costs', 'no-data',
 ] as const satisfies readonly FixtureId[];
 
 const BUILDERS: Record<FixtureId, () => Fixture> = {
   'healthy-parallel-work': healthyParallelWork, 'human-wait': humanWait, 'policy-block': policyBlock, 'runner-loss': runnerLoss, 'long-build-stall': longBuildStall,
-  'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
+  'merge-flow': mergeFlow, 'contract-change': contractChange, 'failed-ci': failedCi, 'expired-approval': expiredApproval, 'unknown-costs': unknownCosts, 'no-data': noData,
 };
 
 /** A fresh copy each call. Fixtures are pure data, so two calls are deeply equal. */
 export const buildFixture = (id: FixtureId): Fixture => BUILDERS[id]();
 export const buildAllFixtures = (): Fixture[] => FIXTURE_IDS.map(buildFixture);
+/** The ten named fixtures plus `merge-flow`. This is what the demo source serves by default. */
+export const EXTRA_FIXTURE_IDS = ['merge-flow'] as const satisfies readonly FixtureId[];
+export const buildDemoFixtures = (): Fixture[] => [...buildAllFixtures(), ...EXTRA_FIXTURE_IDS.map(buildFixture)];

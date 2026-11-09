@@ -6,7 +6,7 @@ import {
   ProjectViewEventSchema, ProjectViewSnapshotSchema, approvalStateAt, effectiveWorkerHealth, isEmptyProject, startProjection, usageFor,
   type ProjectViewSnapshot,
 } from '@selarikru/view-protocol';
-import { FIXTURE_IDS, buildAllFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
+import { EXTRA_FIXTURE_IDS, FIXTURE_IDS, buildAllFixtures, buildDemoFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
 
 const make = (fixtures?: Fixture[]) => createMockDataSource({ clock: createSeededClock(fixtureTime(0)), ...(fixtures ? { fixtures } : {}) });
 const snap = async (id: FixtureId, advanceSec = 0): Promise<{ s: ProjectViewSnapshot; nowMs: number }> => {
@@ -20,6 +20,8 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 const sc = scoped;
 const noTimers = (): (() => void) => () => {};
 
+const ALL_IDS = [...FIXTURE_IDS, ...EXTRA_FIXTURE_IDS] as const;
+
 describe('fixtures', () => {
   it('has all ten named fixtures', () => {
     expect([...FIXTURE_IDS]).toEqual([
@@ -30,12 +32,12 @@ describe('fixtures', () => {
 
   it('are deterministic: two builds, and two sources on separate clocks, are deeply equal', async () => {
     expect(buildAllFixtures()).toEqual(buildAllFixtures());
-    for (const id of FIXTURE_IDS) expect((await snap(id)).s).toEqual((await snap(id)).s);
+    for (const id of ALL_IDS) expect((await snap(id)).s).toEqual((await snap(id)).s);
   });
 
   it('ids are namespaced per fixture: no task, attempt or approval id appears in two projects', () => {
     const seen = new Map<string, string>();
-    for (const f of buildAllFixtures()) {
+    for (const f of buildDemoFixtures()) {
       const ids = new Set<string>();
       for (const e of f.events) {
         ids.add(e.taskId);
@@ -49,7 +51,7 @@ describe('fixtures', () => {
     }
   });
 
-  it.each(FIXTURE_IDS)('%s: events are valid domain events from permitted actors, and the snapshot is valid', async (id) => {
+  it.each(ALL_IDS)('%s: events are valid domain events from permitted actors, and the snapshot is valid', async (id) => {
     const f = buildFixture(id);
     f.events.forEach((e, i) => {
       expect(ProjectViewEventSchema.safeParse(e).success, `${id} #${i}`).toBe(true);
@@ -64,7 +66,7 @@ describe('fixtures', () => {
     expect((await snap(id)).s.meta.provenance).toBe('simulated');
   });
 
-  it.each(FIXTURE_IDS)('%s: every task follows the domain state machine, within 2 concurrent attempts, and the projection agrees', async (id) => {
+  it.each(ALL_IDS)('%s: every task follows the domain state machine, within 2 concurrent attempts, and the projection agrees', async (id) => {
     const f = buildFixture(id);
     const machines = new Map<string, TaskState>();
     const running = new Set<string>();
@@ -113,6 +115,7 @@ describe('fixtures', () => {
         case 'verification.passed': move(e.taskId, { type: 'verification_passed' }, at); break;
         case 'verification.failed': move(e.taskId, { type: 'verification_failed', reason: 'verification_failed' }, at); break;
         case 'task.cancelled': move(e.taskId, { type: 'cancel' }, at); running.delete(e.taskId); break;
+        case 'change.merged': if (e.taskId !== e.runId) move(e.taskId, { type: 'change_merged' }, at); break; // the run-level event has no task
         default: break;
       }
     }
@@ -131,7 +134,7 @@ describe('fixtures', () => {
     expect(worker(s, 'runner_local_1')).toMatchObject({ execution: 'local', modelRoute: 'cloud', availability: 'assigned', activity: null });
     expect(worker(s, 'runner_cloud_1')).toMatchObject({ execution: 'cloud', modelRoute: 'cloud', activity: null });
     expect(s.assistant).toEqual({ mode: 'PREFER_ON_DEVICE', observedSource: 'on_device' });
-    for (const w of Object.values(s.workers)) expect(effectiveWorkerHealth(w, nowMs).health).toBe('healthy');
+    for (const w of Object.values(s.workers)) expect(effectiveWorkerHealth(w, nowMs, nowMs).health).toBe('healthy');
     expect(Object.values(s.tasks).filter((t) => t.status === 'running')).toHaveLength(2);
     expect(s.tasks[sc('healthy-parallel-work', 'api')]!.dependsOn).toEqual([]); // the snapshot knows; events never said
   });
@@ -142,7 +145,7 @@ describe('fixtures', () => {
     expect(worker(s, 'runner_local_1')).toMatchObject({ activity: 'waiting_human', blockedByApprovalId: apr });
     expect(s.tasks[sc('human-wait', 'migrate')]!.status).toBe('awaiting_approval');
     expect(approvalStateAt(s.approvals[apr]!, nowMs)).toBe('pending');
-    expect(effectiveWorkerHealth(worker(s, 'runner_cloud_1'), nowMs).health).toBe('healthy');
+    expect(effectiveWorkerHealth(worker(s, 'runner_cloud_1'), nowMs, nowMs).health).toBe('healthy');
   });
 
   it('policy block: tasks carry a placement reason and no worker', async () => {
@@ -156,7 +159,7 @@ describe('fixtures', () => {
     const { s, nowMs } = await snap('runner-loss');
     const w = worker(s, 'runner_local_1');
     expect(w).toMatchObject({ activity: null, availability: 'assigned', leaseHeld: true });
-    expect(effectiveWorkerHealth(w, nowMs).health).toBe('disconnected');
+    expect(effectiveWorkerHealth(w, nowMs, nowMs).health).toBe('disconnected');
     expect(s.tasks[sc('runner-loss', 'api')]!.status).toBe('running');
     const after = await snap('runner-loss', 20);
     expect(after.s.attempts[sc('runner-loss', 'att_api_1')]).toMatchObject({ outcome: 'interrupted', exitReason: 'lease_expired' });
@@ -167,10 +170,10 @@ describe('fixtures', () => {
   it('long-build stall: a suspected stall is neither a lost connection nor a failure, and it recovers', async () => {
     const { s, nowMs } = await snap('long-build-stall');
     const w = worker(s, 'runner_local_1');
-    expect(effectiveWorkerHealth(w, nowMs)).toMatchObject({ health: 'suspected_stall', derived: true });
+    expect(effectiveWorkerHealth(w, nowMs, nowMs)).toMatchObject({ health: 'suspected_stall', derived: true });
     expect(s.tasks[sc('long-build-stall', 'web')]!.status).toBe('running');
     const later = await snap('long-build-stall', 10);
-    expect(effectiveWorkerHealth(worker(later.s, 'runner_local_1'), later.nowMs).health).toBe('healthy');
+    expect(effectiveWorkerHealth(worker(later.s, 'runner_local_1'), later.nowMs, later.nowMs).health).toBe('healthy');
   });
 
   it('contract change: the plan is revised by one event, the replanned task is revision 2, and the approval waits', async () => {
@@ -242,7 +245,7 @@ describe('liveness through the session', () => {
         ds.clock.advance(5_000);
         await session.refresh();
         const st = session.state()!.snapshot;
-        out.push(Object.values(st.workers).map((w) => `${w.workerId}:${effectiveWorkerHealth(w, ds.clockFor(f.projectId).nowMs()).health}`).join(','));
+        out.push(Object.values(st.workers).map((w) => `${w.workerId}:${effectiveWorkerHealth(w, ds.clockFor(f.projectId).nowMs(), session.livenessAsOfMs()).health}`).join(','));
       }
       return { session, out, cursor0 };
     };
@@ -269,6 +272,41 @@ describe('liveness through the session', () => {
     expect(after.meta.cursor).toBe(before.meta.cursor);
     expect(after.tasks).toEqual(before.tasks);
     session.stop();
+  });
+});
+
+describe('run lifecycle', () => {
+  it('reaches ready_for_review and then merged through the real event sequence, once a refresh carries it', async () => {
+    const f = { ...buildFixture('merge-flow'), startSec: 50 };
+    const ds = make([f]);
+    const run = sc('merge-flow', 'run');
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
+    await settle();
+    const life = () => session.state()!.snapshot.runs[run]!.lifecycle;
+    expect(life()).toBe('running');
+
+    ds.clock.advance(6_000); // both verdicts are in (55 s)
+    await settle();
+    const tasks = () => Object.values(session.state()!.snapshot.tasks).map((t) => t.status);
+    expect(tasks()).toEqual(['verified', 'verified']);
+    expect(life()).toBe('running'); // no event says otherwise
+    await session.refresh();
+    expect(life()).toBe('ready_for_review');
+
+    ds.clock.advance(50_000); // the merge is seen at 100 s
+    await settle();
+    expect(tasks()).toEqual(['merged', 'merged']);
+    expect(life()).toBe('ready_for_review');
+    await session.refresh();
+    expect(life()).toBe('merged');
+    expect(session.state()!.snapshot.runs[run]!.latestEvidence).toMatchObject({ kind: 'change.merged' });
+    expect(Object.keys(session.state()!.snapshot.tasks)).toHaveLength(2); // run-level events made no tasks
+    session.stop();
+  });
+
+  it('the first snapshot of a ready run already says ready_for_review', async () => {
+    const { s } = await snap('merge-flow');
+    expect(s.runs[sc('merge-flow', 'run')]!.lifecycle).toBe('ready_for_review');
   });
 });
 

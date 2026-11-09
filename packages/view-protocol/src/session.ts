@@ -1,7 +1,7 @@
 import type { Clock } from './common.ts';
 import { cursorToSequence } from './common.ts';
 import type { DataSourceError, EngineeringDataSource } from './data-source.ts';
-import { applyEvent, mergeLiveness, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
+import { applyEvent, mergeLiveness, mergeRunLifecycle, projectionFromSnapshot, type ProjectionState } from './reducers.ts';
 
 /** `live`: subscribed. `reconnecting`: a snapshot load failed and a retry is scheduled. `dead`: the stream cannot recover; data is frozen. */
 export type SessionStatus = 'live' | 'reconnecting' | 'dead';
@@ -13,7 +13,7 @@ export interface ProjectionSession {
   livenessAsOfMs(): number | null;
   /** How many times a gap, a provenance mismatch or an event needing snapshot data made the session fetch a new snapshot. */
   resyncCount(): number;
-  /** Fetches a snapshot and merges liveness only. The scheduled refresh calls this. A dead session does nothing. */
+  /** Fetches a snapshot and merges heartbeats and run lifecycle only (the two things events do not carry). The scheduled refresh calls this. A dead session does nothing. */
   refresh(): Promise<void>;
   stop(): void;
 }
@@ -37,8 +37,10 @@ export interface SessionOptions {
 
 /** Resyncs in a row whose snapshot did not advance the cursor. A snapshot that advances it resets the count. */
 export const MAX_STUCK_RESYNCS = 5;
-/** Failed snapshot loads in a row before the session gives up. Delays: base, 2x, 4x, 8x, 16x. */
-export const MAX_LOAD_RETRIES = 5;
+/** Backoff after a failed load or a stream error doubles from the base up to this cap, then repeats at the cap with no attempt limit. */
+export const MAX_RETRY_DELAY_MS = 30_000;
+/** Errors that no retry can fix: the session is dead. Anything else retryable, and `invalid_cursor`, goes back through a snapshot. */
+const TERMINAL_CODES: readonly DataSourceError['code'][] = ['unauthorized', 'unknown_project', 'disconnected'];
 const DEFAULT_REFRESH_MS = 10_000;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 
@@ -47,10 +49,12 @@ const DEFAULT_RETRY_BASE_MS = 1_000;
  * stops the stream and fetches a fresh snapshot (resync); the projection is only replaced by a whole snapshot, never patched across a gap.
  * A snapshot older than the projection is rejected. A redelivered event is a no-op and never refetches.
  *
- * Failures: a failed snapshot load is retried with bounded exponential backoff on the injected scheduler and resubscribes from the new
- * cursor on success. The resync budget counts only resyncs that made no progress, so a long run of successful, spaced resyncs stays live.
- * When the budget or the retries run out the session is dead: it reports `stream_dead`, stops merging liveness (so workers cannot look
- * healthy over frozen task state) and keeps the last state, visibly stale through `status()` and `livenessAsOfMs()`.
+ * Failures: a failed snapshot load, or a retryable error on the stream, is retried with exponential backoff (capped at 30 s, repeated with no
+ * attempt limit) on the injected scheduler and resubscribes from the new cursor on success. `invalid_cursor` (the server's `cursor_ahead`) goes
+ * back through a snapshot at once. The resync budget counts only resyncs that made no progress, so spaced, successful resyncs stay live.
+ * The session is dead only for a terminal error (`unauthorized` and the like) or a snapshot stuck behind the triggering event: it reports
+ * `stream_dead`, stops merging liveness (so workers cannot look healthy over frozen task state) and keeps the last state, visibly stale
+ * through `status()` and `livenessAsOfMs()`.
  */
 export function startProjection(source: EngineeringDataSource, projectId: string, hooks: SessionHooks, options: SessionOptions): ProjectionSession {
   let current: ProjectionState | null = null;
@@ -88,7 +92,7 @@ export function startProjection(source: EngineeringDataSource, projectId: string
   }
 
   function listen(mine: number, cursor: string): void {
-    unsubscribe = source.subscribe(
+    const un = source.subscribe(
       projectId,
       cursor,
       (event) => {
@@ -104,22 +108,43 @@ export function startProjection(source: EngineeringDataSource, projectId: string
           void load();
           return;
         }
+        retries = 0; // the stream is delivering: the next outage starts its backoff from the base
         if (result.outcome === 'duplicate') return;
         current = result.state;
         hooks.onState(current);
       },
       (error) => {
-        if (!stopped && mine === generation) fail(error);
+        if (stopped || mine !== generation) return;
+        fail(error);
+        if (TERMINAL_CODES.includes(error.code) || (!error.retryable && error.code !== 'invalid_cursor')) {
+          die(`event stream failed and cannot be retried (${error.code})`);
+          return;
+        }
+        // The stream is gone whatever the status said. Go back through a snapshot: at once for a cursor the server does not know,
+        // after a backoff for anything else, so a down server is not hammered.
+        generation += 1;
+        unsubscribe?.();
+        unsubscribe = null;
+        if (error.code === 'invalid_cursor') {
+          stuck += 1;
+          if (stuck > MAX_STUCK_RESYNCS) {
+            die('the server keeps rejecting the cursor');
+            return;
+          }
+          void load();
+        } else scheduleRetry();
       },
     );
+    // A source may call back, or the caller may stop, before `subscribe` returns: never keep a subscription nobody owns.
+    if (stopped || mine !== generation) {
+      un();
+      return;
+    }
+    unsubscribe = un;
   }
 
   function scheduleRetry(): void {
-    if (retries >= MAX_LOAD_RETRIES) {
-      die('snapshot could not be loaded after repeated retries');
-      return;
-    }
-    const delay = (options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS) * 2 ** retries;
+    const delay = Math.min((options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS) * 2 ** Math.min(retries, 20), MAX_RETRY_DELAY_MS);
     retries += 1;
     setStatus('reconnecting');
     // A one-shot timer on the injected scheduler: cancel on first fire.
@@ -150,7 +175,6 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     }
     loading = false;
     if (stopped || mine !== generation) return;
-    retries = 0;
     const nextSeq = cursorToSequence(snapshot.meta.cursor);
     if (current !== null && nextSeq < cursorToSequence(current.snapshot.meta.cursor)) {
       // An older snapshot would move the projection backwards. Keep what we have and stay subscribed from where we are.
@@ -179,7 +203,7 @@ export function startProjection(source: EngineeringDataSource, projectId: string
     }
     if (stopped || !isLive() || current === null) return;
     asOf = options.clock.nowMs();
-    const merged = mergeLiveness(current, fresh);
+    const merged = mergeRunLifecycle(mergeLiveness(current, fresh), fresh);
     if (merged !== current) {
       current = merged;
       hooks.onState(current);

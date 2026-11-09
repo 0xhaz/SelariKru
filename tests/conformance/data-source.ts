@@ -17,10 +17,11 @@ export interface DataSourceUnderTest {
   clockFor(projectId: string): { nowMs(): number };
   /** Makes the next batch of events available (the mock moves its virtual clock; a live fixture server writes events). */
   advance(): Promise<void>;
+  /** Resolves once everything the source has already been asked to deliver has been delivered (the mock flushes microtasks; a live source waits for its stream to go quiet). */
+  settle(): Promise<void>;
   cleanup(): Promise<void>;
 }
 
-const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 /**
  * What both a real snapshot and a fold of events can state. Checked against `GET /v1/projects/:id/snapshot` in apps/control-api/src/routes-owner.ts:
  * it returns, per task, status, revision (currentRevision), aggregateRevision (rowRevision), the attempts of the current revision with their
@@ -28,8 +29,10 @@ const tick = () => new Promise<void>((r) => setTimeout(r, 0));
  * run evidence, checks, resolved approvals (only pending ones), workers, an explicit activeAttemptId (derivable as the attempt that has not ended)
  * or a cancel reason. So only these fields are compared, and `activeAttemptId` is taken as the attempt that is running and has not ended.
  */
-const comparable = (s: ProjectViewSnapshot) => ({
-  runs: Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { lifecycle: r.lifecycle }])),
+const comparable = (s: ProjectViewSnapshot, withLifecycle = false) => ({
+  // Run lifecycle has no event of its own (ready_for_review is written with the last verdict, merged follows change.merged): it is only
+  // expected to agree after a session refresh, so it is compared only when asked.
+  runs: Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, withLifecycle ? { lifecycle: r.lifecycle } : {}])),
   tasks: Object.fromEntries(
     Object.entries(s.tasks).map(([id, t]) => [id, {
       status: t.status, revision: t.revision, aggregateRevision: t.aggregateRevision, activeAttemptId: t.activeAttemptId, cancelRequested: t.cancelRequested !== null,
@@ -83,7 +86,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       expect(err).toBeInstanceOf(DataSourceException);
       expect((err as DataSourceException).detail.code).toBe('unknown_project');
       const c = collect(ds, ds.unknownProjectId, '0');
-      await tick();
+      await ds.settle();
       expect(c.errors.map((e) => e.code)).toEqual(['unknown_project']);
       c.stop();
     });
@@ -92,7 +95,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const c = collect(ds, ds.busyProjectId, '0');
-      await tick();
+      await ds.settle();
       expect(c.errors).toEqual([]);
       expect(c.events.length).toBe(Number(snap.meta.cursor));
       c.events.forEach((e, i) => {
@@ -107,13 +110,15 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
     it('a session that follows the stream (resyncing when asked) converges on a fresh snapshot, on event-derived fields', async () => {
       const ds = await setup();
       const session = startProjection(ds.source, ds.busyProjectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0, every: () => () => {}, clock: ds.clockFor(ds.busyProjectId) });
-      await tick();
+      await ds.settle();
       await ds.advance();
-      for (let i = 0; i < 5; i += 1) await tick();
+      for (let i = 0; i < 5; i += 1) await ds.settle();
       const fresh = await ds.source.getSnapshot(ds.busyProjectId);
       const mine = session.state()!.snapshot;
       expect(mine.meta.cursor).toBe(fresh.meta.cursor);
       expect(comparable(mine)).toEqual(comparable(fresh));
+      await session.refresh();
+      expect(comparable(session.state()!.snapshot, true)).toEqual(comparable(fresh, true));
       session.stop();
     });
 
@@ -121,10 +126,10 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const c = collect(ds, ds.busyProjectId, snap.meta.cursor);
-      await tick();
+      await ds.settle();
       expect(c.events).toEqual([]); // nothing is replayed that the snapshot already holds
       await ds.advance();
-      await tick();
+      await ds.settle();
       expect(c.events.length).toBeGreaterThan(0);
       const first = Number(snap.meta.cursor) + 1;
       c.events.forEach((e, i) => expect(e.sequence).toBe(first + i));
@@ -135,10 +140,10 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const c = collect(ds, ds.busyProjectId, snap.meta.cursor);
-      await tick();
+      await ds.settle();
       c.stop();
       await ds.advance();
-      await tick();
+      await ds.settle();
       expect(c.events).toEqual([]);
     });
 
@@ -146,7 +151,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ds = await setup();
       for (const bad of ['not-a-cursor', '999999999']) {
         const c = collect(ds, ds.busyProjectId, bad);
-        await tick();
+        await ds.settle();
         expect(c.errors.map((e) => e.code), bad).toEqual(['invalid_cursor']);
         expect(c.events).toEqual([]);
         c.stop();
@@ -181,7 +186,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const c = collect(ds, ds.busyProjectId, snap.meta.cursor);
       await ds.source.execute({ command: 'task.cancel', expectedRevision: t.aggregateRevision, idempotencyKey: 'k-evt', args: { taskId: t.taskId } });
       await ds.advance();
-      await tick();
+      await ds.settle();
       const types = c.events.filter((e) => e.taskId === t.taskId).map((e) => e.type);
       expect(types.indexOf('task.cancel_requested')).toBeGreaterThanOrEqual(0);
       expect(types.indexOf('task.cancelled')).toBeGreaterThan(types.indexOf('task.cancel_requested'));
@@ -195,7 +200,7 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ch = await ds.source.openTerminal({ taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: 0 });
       const lines: string[] = [];
       ch.onLine((l) => lines.push(l));
-      await tick();
+      await ds.settle();
       expect(lines.length).toBeLessThanOrEqual(TERMINAL_MAX_LINES);
       ch.close();
       await expect(ds.source.openTerminal({ taskId: attempt.taskId, attemptId: 'no-such-attempt', expectedRevision: 0 })).rejects.toBeInstanceOf(DataSourceException);
@@ -206,13 +211,15 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       if (!ds.prePlanProjectId) return;
       const pid = ds.prePlanProjectId;
       const session = startProjection(ds.source, pid, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0, every: () => () => {}, clock: ds.clockFor(pid) });
-      await tick();
+      await ds.settle();
       expect(Object.keys(session.state()!.snapshot.tasks)).toEqual([]);
       await ds.advance();
-      for (let i = 0; i < 5; i += 1) await tick();
+      for (let i = 0; i < 5; i += 1) await ds.settle();
       const fresh = await ds.source.getSnapshot(pid);
       expect(Object.keys(fresh.tasks).length).toBeGreaterThan(0);
       expect(comparable(session.state()!.snapshot)).toEqual(comparable(fresh));
+      await session.refresh();
+      expect(comparable(session.state()!.snapshot, true)).toEqual(comparable(fresh, true));
       session.stop();
     });
 
@@ -230,10 +237,10 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       const ds = await setup();
       const snap = await ds.source.getSnapshot(ds.busyProjectId);
       const c = collect(ds, ds.busyProjectId, snap.meta.cursor);
-      await tick();
+      await ds.settle();
       ds.source.disconnect();
       await ds.advance();
-      await tick();
+      await ds.settle();
       expect(c.events).toEqual([]);
       const err = await ds.source.getSnapshot(ds.busyProjectId).then(() => null, (e: unknown) => e);
       expect(err).toBeInstanceOf(DataSourceException);

@@ -16,13 +16,13 @@ export interface WorkerHealthReading {
  * Health from the last confirmed value and heartbeat age. 30 s of silence is a suspected stall, 60 s is a lost connection. Silence only
  * ever worsens a healthy reading; it never turns a failed worker healthy, and it never invents idle or success.
  */
-export function effectiveWorkerHealth(worker: WorkerView, nowMs: number, livenessAsOfMs?: number | null): WorkerHealthReading {
+export function effectiveWorkerHealth(worker: WorkerView, nowMs: number, livenessAsOfMs: number | null): WorkerHealthReading {
   if (!worker.leaseHeld || worker.lastHeartbeatAt === null || worker.health !== 'healthy') {
     return { health: worker.health, heartbeatAgeMs: null, derived: false };
   }
   // Heartbeats reach the projection only through refreshes. If the last successful one is old (or there never was one), a stale
   // heartbeat time could be our outage rather than the worker, so the honest reading is unknown.
-  if (livenessAsOfMs !== undefined && (livenessAsOfMs === null || nowMs - livenessAsOfMs >= LIVENESS_STALE_MS)) {
+  if (livenessAsOfMs === null || nowMs - livenessAsOfMs >= LIVENESS_STALE_MS) {
     return { health: 'unknown', heartbeatAgeMs: null, derived: true };
   }
   const age = Math.max(0, nowMs - Date.parse(worker.lastHeartbeatAt));

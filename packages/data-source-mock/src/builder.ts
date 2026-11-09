@@ -10,12 +10,15 @@ export const SCHEDULER: Actor = { kind: 'scheduler', id: 'scheduler' };
 export const SYSTEM: Actor = { kind: 'system', id: 'control-plane' };
 export const HUMAN: Actor = { kind: 'human', id: 'demo-operator' };
 export const VERIFIER: Actor = { kind: 'verifier', id: 'verifier' };
+export const INTEGRATION: Actor = { kind: 'integration', id: 'integration' };
 export const REAPER: Actor = { kind: 'system', id: 'lease_reaper' };
 export const runnerActor = (runnerId: string): Actor => ({ kind: 'worker', id: runnerId });
 
 export type FixtureId =
   | 'healthy-parallel-work' | 'human-wait' | 'policy-block' | 'runner-loss' | 'long-build-stall'
-  | 'contract-change' | 'failed-ci' | 'expired-approval' | 'unknown-costs' | 'no-data';
+  | 'contract-change' | 'failed-ci' | 'expired-approval' | 'unknown-costs' | 'no-data'
+  /** Not one of the ten named scenarios: the verified-to-merged path, for run lifecycle. */
+  | 'merge-flow';
 
 /** What a live snapshot knows about a task that events do not say. The mock plays the server: it seeds these when the plan is accepted. */
 export interface TaskSeed {

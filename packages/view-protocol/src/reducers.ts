@@ -423,3 +423,23 @@ export function mergeLiveness(state: ProjectionState, fresh: ProjectViewSnapshot
   }
   return changed ? { ...state, snapshot: { ...snap, attempts, workers } } : state;
 }
+
+/**
+ * Merges the run lifecycle from a snapshot, and nothing else. Two lifecycle changes have no event (`ready_for_review` is written with the
+ * last verdict, and `merged` follows `change.merged` without saying so), so the periodic refresh carries them. Only a snapshot at or past
+ * the projection's cursor counts: an older one cannot move a run backwards. Event-derived state and the cursor are untouched.
+ */
+export function mergeRunLifecycle(state: ProjectionState, fresh: ProjectViewSnapshot): ProjectionState {
+  const snap = state.snapshot;
+  if (fresh.meta.projectId !== snap.meta.projectId || fresh.meta.provenance !== snap.meta.provenance) return state;
+  if (cursorToSequence(fresh.meta.cursor) < cursorToSequence(snap.meta.cursor)) return state;
+  let runs = snap.runs;
+  let changed = false;
+  for (const r of Object.values(fresh.runs)) {
+    const mine = snap.runs[r.runId];
+    if (!mine || mine.lifecycle === r.lifecycle) continue;
+    runs = put(runs, r.runId, { ...mine, lifecycle: r.lifecycle });
+    changed = true;
+  }
+  return changed ? { ...state, snapshot: { ...snap, runs } } : state;
+}
