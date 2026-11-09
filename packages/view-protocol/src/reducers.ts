@@ -91,6 +91,9 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'plan.accepted': {
       // A revised plan changes tasks that events cannot describe: a run that already has tasks needs a snapshot.
       if (Object.values(snap.tasks).some((t) => t.runId === e.runId)) return needs('plan_revision');
+      // The first plan lists tasks that only a snapshot can describe: fetch it now so the board is not empty until the first task event.
+      const listed = Array.isArray(p['taskIds']) ? (p['taskIds'] as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+      if (listed.some((id) => !snap.tasks[id])) return needs('unknown_task');
       return setRun({ ...run, lifecycle: lifecycle ?? 'running', planRevision: int(p, 'planRevision', 1) ?? run.planRevision });
     }
     case 'run.reverted':
@@ -136,7 +139,20 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   if (hinted !== null && hinted > existing.revision) return needs('unknown_revision');
   if (hinted !== null && hinted < existing.revision) return null;
   if (e.aggregateRevision < existing.aggregateRevision) return null;
-  if (TERMINAL.includes(existing.status)) return null;
+  if (TERMINAL.includes(existing.status)) {
+    // The task takes no more events, but an approval decision is still a fact about the approval (and frees the worker waiting on it).
+    if (e.type === 'approval.granted' || e.type === 'approval.denied') {
+      const wanted = str(p, 'approvalId');
+      const found = wanted !== null ? snap.approvals[wanted] : Object.values(snap.approvals).filter((a) => a.taskId === existing.taskId && a.state === 'pending').at(-1);
+      if (!found) return null;
+      const w = Object.values(snap.workers).find((x) => x.blockedByApprovalId === found.approvalId);
+      return {
+        ...snap, approvals: put(snap.approvals, found.approvalId, { ...found, state: e.type === 'approval.granted' ? ('granted' as const) : ('denied' as const), resolvedAt: at }),
+        workers: w ? put(snap.workers, w.workerId, idleWorker(w, at)) : snap.workers,
+      };
+    }
+    return null;
+  }
   let task: TaskView = { ...existing, aggregateRevision: e.aggregateRevision, title: str(p, 'title') ?? existing.title };
 
   const commit = (t: TaskView, s: ProjectViewSnapshot = snap): ProjectViewSnapshot => ({ ...s, tasks: put(s.tasks, t.taskId, t) });
@@ -184,7 +200,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
         // What the worker is doing is unknown until something reports it. Never defaulted.
         activity: null, health: 'healthy', leaseHeld: true,
         stateReason: null, enteredStateAt: at, latestAction: null, latestEvidence: null, lastHeartbeatAt: at,
-        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const) ?? prior?.modelRoute ?? 'unknown',
+        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const) ?? 'unknown',
         blockedByTaskIds: [], blockedByApprovalId: null,
       };
       const t = withEvidence({ ...moveTask(task, 'running', null, at), placementBlock: null, activeAttemptId: attemptId, attemptIds: [...task.attemptIds, attemptId] }, 'attempt.started');

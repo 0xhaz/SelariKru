@@ -18,6 +18,7 @@ const snap = async (id: FixtureId, advanceSec = 0): Promise<{ s: ProjectViewSnap
 const worker = (s: ProjectViewSnapshot, id: string) => s.workers[id]!;
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const sc = scoped;
+const noTimers = (): (() => void) => () => {};
 
 describe('fixtures', () => {
   it('has all ten named fixtures', () => {
@@ -233,7 +234,7 @@ describe('liveness through the session', () => {
     const alive = buildFixture('healthy-parallel-work');
     const dead = buildFixture('runner-loss');
     const run = async (f: Fixture, until: number) => {
-      const session = startProjection(ds, f.projectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 10_000, every: (fn) => { manual.push(fn); return () => {}; } });
+      const session = startProjection(ds, f.projectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 10_000, clock: ds.clockFor(f.projectId), every: (fn) => { manual.push(fn); return () => {}; } });
       await settle();
       const out: string[] = [];
       const cursor0 = session.state()!.snapshot.meta.cursor;
@@ -259,7 +260,7 @@ describe('liveness through the session', () => {
   it('a snapshot refresh moves heartbeats only: the cursor and event-derived state are untouched', async () => {
     const ds = make();
     const f = buildFixture('long-build-stall');
-    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => {} }, { refreshMs: 0 });
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => {} }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
     await settle();
     const before = session.state()!.snapshot;
     ds.clock.advance(1_000);
@@ -275,7 +276,7 @@ describe('streaming and resync', () => {
   it('streams the rest of a scenario as the virtual clock advances, with no resync when the snapshot already knows everything', async () => {
     const ds = make();
     const f = buildFixture('human-wait');
-    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0 });
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
     await settle();
     ds.clock.advance(70_000); // grant at 150 s, claimed again at 155 s
     expect(session.state()!.snapshot.tasks[sc('human-wait', 'migrate')]!.status).toBe('running');
@@ -284,10 +285,25 @@ describe('streaming and resync', () => {
     session.stop();
   });
 
+  it('a session that starts before the first plan.accepted gets the board when it arrives', async () => {
+    const f = { ...buildFixture('healthy-parallel-work'), startSec: 0 };
+    const ds = make([f]);
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
+    await settle();
+    expect(Object.keys(session.state()!.snapshot.tasks)).toEqual([]);
+    ds.clock.advance(8_000); // plan at 1 s, claims at 6 s and 7 s
+    await settle();
+    expect(session.resyncCount()).toBeGreaterThanOrEqual(1);
+    const st = session.state()!.snapshot;
+    expect(Object.values(st.tasks).map((t) => t.title).sort()).toEqual(['Feedback API', 'Feedback list UI']);
+    expect(Object.values(st.tasks).every((t) => t.status === 'running')).toBe(true);
+    session.stop();
+  });
+
   it('an approval.requested without an approval id makes the session resync, and then it knows the approval', async () => {
     const f = { ...buildFixture('human-wait'), startSec: 30 };
     const ds = make([f]);
-    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0 });
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
     await settle();
     expect(Object.keys(session.state()!.snapshot.approvals)).toEqual([]);
     ds.clock.advance(15_000); // the request is at 40 s
@@ -301,7 +317,7 @@ describe('streaming and resync', () => {
   it('a revised plan makes the session resync to the new task revision', async () => {
     const f = { ...buildFixture('contract-change'), startSec: 50 };
     const ds = make([f]);
-    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0 });
+    const session = startProjection(ds, f.projectId, { onState: () => {}, onError: () => { throw new Error('unexpected'); } }, { refreshMs: 0, every: noTimers, clock: ds.clockFor(f.projectId) });
     await settle();
     expect(session.state()!.snapshot.tasks[sc('contract-change', 'web')]!.revision).toBe(1);
     ds.clock.advance(15_000); // plan.accepted revision 2 at 60 s

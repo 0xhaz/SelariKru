@@ -195,7 +195,7 @@ describe('approvals', () => {
       subscribe: (_p, _c, onEvent) => { push = onEvent; return () => { push = null; }; },
       execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
     };
-    const session = startProjection(source, 'p1', { onState: () => {}, onError: () => {} }, { refreshMs: 0 });
+    const session = startProjection(source, 'p1', { onState: () => {}, onError: () => {} }, NO_REFRESH());
     await settle();
     push!(request); // the real event, without an approval id
     await settle();
@@ -227,7 +227,7 @@ describe('plan revisions and run-level events', () => {
     const withTasks = base();
     expect(applyEvent(withTasks, nx(withTasks, 'plan.accepted', 1, { taskId: 'r1', payload: { planRevision: 2, taskIds: ['t1'] } }))).toMatchObject({ outcome: 'resync', reason: 'plan_revision' });
     const empty = projectionFromSnapshot(emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance: 'simulated' }));
-    const r = applyEvent(empty, nx(empty, 'plan.accepted', 1, { taskId: 'r1', payload: { planRevision: 1, taskIds: ['t1'] } }));
+    const r = applyEvent(empty, nx(empty, 'plan.accepted', 1, { taskId: 'r1', payload: { planRevision: 1 } }));
     expect(r.outcome).toBe('applied');
     expect(r.state.snapshot.runs['r1']).toMatchObject({ planRevision: 1, lifecycle: 'running' });
     expect(r.state.snapshot.tasks).toEqual({}); // task identity, revision and title come from a snapshot
@@ -288,6 +288,17 @@ describe('usage', () => {
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
+/** A scheduler the test drives by hand. */
+function sched() {
+  const timers: Array<{ fn: () => void; ms: number; on: boolean }> = [];
+  return {
+    every: (fn: () => void, ms: number) => { const t = { fn, ms, on: true }; timers.push(t); return () => { t.on = false; }; },
+    fire: (pred: (ms: number) => boolean = () => true) => { for (const t of [...timers]) if (t.on && pred(t.ms)) t.fn(); },
+    active: () => timers.filter((t) => t.on).map((t) => t.ms),
+  };
+}
+const NO_REFRESH = () => ({ every: sched().every, clock: { nowMs: () => T0 }, refreshMs: 0 });
+
 /** A fake server that holds a state, serves snapshots with live heartbeat times, and delivers real events. */
 function fakeServer(initial: ProjectViewSnapshot, hooks: { heartbeatAt(attemptId: string): string | null }) {
   let snapshot = initial;
@@ -295,17 +306,19 @@ function fakeServer(initial: ProjectViewSnapshot, hooks: { heartbeatAt(attemptId
   const errors: DataSourceError[] = [];
   let fetched = 0;
   const subscribes: string[] = [];
+  const control = { failures: 0 };
   const source: EngineeringDataSource = {
     mode: 'mock',
     getSnapshot: async () => {
       fetched += 1;
+      if (control.failures > 0) { control.failures -= 1; throw new Error('outage'); }
       const attempts = Object.fromEntries(Object.entries(snapshot.attempts).map(([id, a]) => [id, a.outcome === 'running' && a.endedAt === null ? { ...a, lastHeartbeatAt: hooks.heartbeatAt(id) } : a]));
       return { ...snapshot, attempts };
     },
     subscribe: (_p, after, onEvent) => { subscribes.push(after); push = onEvent; return () => { if (push === onEvent) push = null; }; },
     execute: async () => { throw new Error('unused'); }, openTerminal: async () => { throw new Error('unused'); }, disconnect: () => {},
   };
-  return { source, errors, subscribes, setSnapshot: (s: ProjectViewSnapshot) => { snapshot = s; }, emit: (e: ProjectViewEvent) => push?.(e), fetched: () => fetched };
+  return { source, errors, subscribes, control, setSnapshot: (s: ProjectViewSnapshot) => { snapshot = s; }, emit: (e: ProjectViewEvent) => push?.(e), fetched: () => fetched };
 }
 
 describe('session', () => {
@@ -313,7 +326,7 @@ describe('session', () => {
     const s0 = base();
     const later = run(s0, [['task.ready', 2], STARTED]);
     const f = fakeServer(s0.snapshot, { heartbeatAt: () => null });
-    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 0 });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, NO_REFRESH());
     await settle();
     const ready = nx(s0, 'task.ready', 2);
     f.setSnapshot(later.snapshot);
@@ -329,7 +342,7 @@ describe('session', () => {
     const s0 = base();
     const later = run(s0, [['task.ready', 2], STARTED]);
     const f = fakeServer(later.snapshot, { heartbeatAt: () => null });
-    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 0 });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, NO_REFRESH());
     await settle();
     const fetchedBefore = f.fetched();
     f.emit({ ...nx(s0, 'task.ready', 2), sequence: 1, eventId: 'evt_old' });
@@ -347,12 +360,12 @@ describe('session', () => {
     const s0 = base();
     const later = run(s0, [['task.ready', 2], STARTED]);
     const f = fakeServer(later.snapshot, { heartbeatAt: () => null });
-    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 0 });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, NO_REFRESH());
     await settle();
     f.setSnapshot(s0.snapshot); // the server hands back an older view
     f.emit({ ...nx(later, 'task.ready', 3), sequence: Number(later.snapshot.meta.cursor) + 5 }); // gap forces a refetch
     await settle();
-    expect(f.errors.at(-1)).toMatchObject({ code: 'unavailable' });
+    expect(f.errors.map((e) => e.code)).toContain('snapshot_rejected');
     expect(session.state()!.snapshot.meta.cursor).toBe(later.snapshot.meta.cursor); // not moved backwards
     f.emit(nx(later, 'task.blocked', 9, { payload: { reason: 'x' } }));
     expect(session.state()!.snapshot.meta.cursor).toBe(String(Number(later.snapshot.meta.cursor) + 1));
@@ -362,13 +375,13 @@ describe('session', () => {
   it('a source that keeps producing gaps is reported unavailable instead of looping', async () => {
     const s0 = base();
     const f = fakeServer(s0.snapshot, { heartbeatAt: () => null });
-    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 0 });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, NO_REFRESH());
     for (let i = 0; i < 10; i += 1) {
       await settle();
       f.emit({ ...nx(s0, 'task.ready', 1), sequence: 50 + i, eventId: `g${i}` });
     }
     await settle();
-    expect(f.errors.at(-1)).toMatchObject({ code: 'unavailable' });
+    expect(f.errors.at(-1)).toMatchObject({ code: 'stream_dead' });
     expect(f.fetched()).toBeLessThan(10);
     session.stop();
   });
@@ -383,7 +396,7 @@ describe('session', () => {
     let nowSec = 2;
     const f = fakeServer(s.snapshot, { heartbeatAt: (id) => (id === 'alive' ? at(Math.floor(nowSec / 10) * 10) : at(2)) });
     let tickFn: (() => void) | null = null;
-    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 10_000, every: (fn) => { tickFn = fn; return () => {}; } });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { refreshMs: 10_000, clock: { nowMs: () => T0 + nowSec * 1000 }, every: (fn) => { tickFn = fn; return () => {}; } });
     await settle();
     const cursor = session.state()!.snapshot.meta.cursor;
     const health = (id: string) => effectiveWorkerHealth(session.state()!.snapshot.workers[id]!, T0 + nowSec * 1000).health;
@@ -412,5 +425,165 @@ describe('session', () => {
     expect(merged.snapshot.tasks).toBe(s.snapshot.tasks);
     expect(merged.snapshot.workers['runner_a']!.lastHeartbeatAt).toBe(at(50));
     expect(mergeLiveness(merged, { ...fresh, attempts: { a1: { ...fresh.attempts['a1']!, lastHeartbeatAt: at(10) } } })).toBe(merged); // older never wins
+  });
+});
+
+describe('session survival', () => {
+  const at0 = (cursor: number): ProjectViewSnapshot => ({ ...base().snapshot, meta: { ...base().snapshot.meta, cursor: String(cursor) } });
+  const gap = (cursor: number): ProjectViewEvent => ({ ...nx(base(), 'task.ready', 1), sequence: cursor + 2, eventId: `gap_${cursor}` });
+
+  it('many spaced resyncs, each moving the cursor forward, stay live', async () => {
+    const f = fakeServer(at0(0), { heartbeatAt: () => null });
+    const timers = sched();
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every: timers.every, clock: { nowMs: () => T0 }, refreshMs: 0 });
+    await settle();
+    for (let cursor = 0; cursor < 30; cursor += 3) {
+      f.setSnapshot(at0(cursor + 2)); // the snapshot is at the gap event's sequence: progress
+      f.emit(gap(cursor));
+      await settle();
+      f.setSnapshot(at0(cursor + 3));
+    }
+    expect(session.resyncCount()).toBe(10);
+    expect(session.status()).toBe('live');
+    expect(f.errors.filter((e) => e.code === 'stream_dead')).toEqual([]);
+    session.stop();
+  });
+
+  it('one failed snapshot during a resync is retried with backoff and the stream resumes from the new cursor', async () => {
+    const f = fakeServer(at0(0), { heartbeatAt: () => null });
+    const timers = sched();
+    const statuses: string[] = [];
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e), onStatus: (s) => statuses.push(s) }, { every: timers.every, clock: { nowMs: () => T0 }, refreshMs: 0, retryBaseMs: 1000 });
+    await settle();
+    f.control.failures = 1;
+    f.emit(gap(0));
+    await settle();
+    expect(session.status()).toBe('reconnecting');
+    expect(timers.active()).toEqual([1000]);
+    f.setSnapshot(at0(7));
+    timers.fire((ms) => ms === 1000);
+    await settle();
+    expect(session.status()).toBe('live');
+    expect(session.state()!.snapshot.meta.cursor).toBe('7');
+    expect(f.subscribes.at(-1)).toBe('7');
+    expect(statuses).toEqual(['reconnecting', 'live']);
+    expect(timers.active()).toEqual([]); // the retry timer is gone
+    session.stop();
+  });
+
+  it('backoff doubles and is bounded: repeated failures end in a dead stream', async () => {
+    const f = fakeServer(at0(0), { heartbeatAt: () => null });
+    const timers = sched();
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every: timers.every, clock: { nowMs: () => T0 }, refreshMs: 0, retryBaseMs: 1000 });
+    await settle();
+    f.control.failures = 100;
+    f.emit(gap(0));
+    const delays: number[] = [];
+    for (let i = 0; i < 10 && session.status() !== 'dead'; i += 1) {
+      await settle();
+      delays.push(...timers.active());
+      timers.fire();
+    }
+    await settle();
+    expect(delays).toEqual([1000, 2000, 4000, 8000, 16000]);
+    expect(session.status()).toBe('dead');
+    expect(f.errors.at(-1)).toMatchObject({ code: 'stream_dead' });
+    session.stop();
+  });
+
+  it('a snapshot stuck behind the event still terminates at the bound', async () => {
+    const f = fakeServer(at0(5), { heartbeatAt: () => null });
+    const timers = sched();
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every: timers.every, clock: { nowMs: () => T0 }, refreshMs: 0 });
+    await settle();
+    for (let i = 0; i < 12 && session.status() !== 'dead'; i += 1) {
+      f.emit(gap(5)); // the server never gets past 5
+      await settle();
+    }
+    expect(session.status()).toBe('dead');
+    expect(f.errors.at(-1)).toMatchObject({ code: 'stream_dead' });
+    expect(f.fetched()).toBeLessThan(10);
+    session.stop();
+  });
+
+  it('after death, refresh no longer changes heartbeats; before the first refresh and during an outage workers read unknown, not disconnected', async () => {
+    let s = base(['t1']);
+    s = run(s, [['task.ready', 1], ['attempt.started', 2, { attemptId: 'a1', payload: { fence: 1, runnerId: 'runner_a', location: 'local' } }]]);
+    let beat = at(2);
+    const f = fakeServer(s.snapshot, { heartbeatAt: () => beat });
+    const timers = sched();
+    let nowSec = 2;
+    const clock = { nowMs: () => T0 + nowSec * 1000 };
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, { every: timers.every, clock, refreshMs: 10_000 });
+    await settle();
+    const w = () => session.state()!.snapshot.workers['runner_a']!;
+    expect(effectiveWorkerHealth(w(), clock.nowMs(), session.livenessAsOfMs()).health).toBe('healthy');
+
+    // An outage: refreshes fail. 70 s later the heartbeat is old only because we could not look.
+    f.control.failures = 100;
+    nowSec = 72;
+    await session.refresh();
+    expect(f.errors.at(-1)).toMatchObject({ code: 'refresh_failed' });
+    expect(effectiveWorkerHealth(w(), clock.nowMs(), session.livenessAsOfMs())).toMatchObject({ health: 'unknown' });
+    expect(effectiveWorkerHealth(w(), clock.nowMs()).health).toBe('disconnected'); // the naive reading the outage would have produced
+
+    // The stream dies; refresh stops mutating anything.
+    f.control.failures = 0;
+    for (let i = 0; i < 8 && session.status() !== 'dead'; i += 1) { f.emit(gap(Number(session.state()!.snapshot.meta.cursor))); await settle(); }
+    expect(session.status()).toBe('dead');
+    const frozen = session.state();
+    beat = at(51);
+    nowSec = 60;
+    await session.refresh();
+    expect(session.state()).toBe(frozen);
+    expect(w().lastHeartbeatAt).toBe(at(2));
+    session.stop();
+  });
+
+  it('rejects an older snapshot with its own error code', async () => {
+    const f = fakeServer(at0(9), { heartbeatAt: () => null });
+    const session = startProjection(f.source, 'p1', { onState: () => {}, onError: (e) => f.errors.push(e) }, NO_REFRESH());
+    await settle();
+    f.setSnapshot(at0(3));
+    f.emit(gap(9));
+    await settle();
+    expect(f.errors.map((e) => e.code)).toContain('snapshot_rejected');
+    expect(session.status()).toBe('live');
+    session.stop();
+  });
+});
+
+describe('first plan and terminal tasks', () => {
+  it('the first plan.accepted that lists unknown tasks needs a snapshot, so the board is not empty until the first task event', () => {
+    const empty = projectionFromSnapshot({ ...emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance: 'simulated' }) });
+    const r = applyEvent(empty, nx(empty, 'plan.accepted', 1, { taskId: 'r1', payload: { planRevision: 1, taskIds: ['t1', 't2'] } }));
+    expect(r).toMatchObject({ outcome: 'resync', reason: 'unknown_task' });
+    // With nothing listed there is nothing to wait for.
+    expect(applyEvent(empty, nx(empty, 'plan.accepted', 1, { taskId: 'r1', payload: { planRevision: 1 } })).outcome).toBe('applied');
+  });
+
+  it('approval.granted on a cancelled task resolves the approval and frees the worker; the task stays cancelled', () => {
+    let s = running();
+    s = run(s, [
+      ['approval.requested', 10, { attemptId: 'a1', payload: { fence: 1, approvalId: 'ap1', reason: 'x' } }],
+      ['task.cancelled', 11, { actor: HUMAN, payload: { operationId: 'op' } }],
+    ]);
+    expect(s.snapshot.tasks['t1']!.status).toBe('cancelled');
+    expect(s.snapshot.approvals['ap1']!.state).toBe('pending');
+    s = run(s, [['approval.granted', 12, { actor: HUMAN, payload: { approvalId: 'ap1' } }]]);
+    expect(s.snapshot.approvals['ap1']).toMatchObject({ state: 'granted', resolvedAt: at(12) });
+    expect(s.snapshot.tasks['t1']!.status).toBe('cancelled');
+    expect(s.snapshot.workers['runner_a']).toMatchObject({ blockedByApprovalId: null, availability: 'idle' });
+  });
+
+  it('a later attempt does not inherit an earlier attempt\'s model route', () => {
+    let s = running();
+    expect(s.snapshot.workers['runner_a']!.modelRoute).toBe('cloud');
+    s = run(s, [
+      ['attempt.failed', 20, { attemptId: 'a1', payload: { fence: 1, reason: 'attempt_timeout', outcome: 'failed' } }],
+      ['task.ready', 21, {}],
+      ['attempt.started', 22, { attemptId: 'a2', payload: { fence: 2, attemptNumber: 2, runnerId: 'runner_a', location: 'local' } }],
+    ]);
+    expect(s.snapshot.workers['runner_a']!.modelRoute).toBe('unknown');
   });
 });

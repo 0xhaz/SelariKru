@@ -12,6 +12,9 @@ export const HEARTBEAT_INTERVAL_MS = 10_000;
 export const SUSPECT_AFTER_MS = 30_000;
 export const LEASE_EXPIRY_MS = 60_000;
 
+/** Liveness older than this (no successful refresh) is stale: workers read as unknown rather than disconnected. */
+export const LIVENESS_STALE_MS = 30_000;
+
 /** Time is always passed in. Reducers never read a clock; selectors take `nowMs`; sources take a `Clock`. */
 export interface Clock {
   nowMs(): number;

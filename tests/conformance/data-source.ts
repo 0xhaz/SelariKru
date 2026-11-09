@@ -11,6 +11,10 @@ export interface DataSourceUnderTest {
   /** A project with nothing in it; optional. */
   readonly emptyProjectId?: string;
   readonly unknownProjectId: string;
+  /** A project whose first `plan.accepted` is still to come after `advance()`; optional. */
+  readonly prePlanProjectId?: string;
+  /** The project's own clock, for a session's liveness stamps. A live source passes `{ nowMs: () => Date.now() }`. */
+  clockFor(projectId: string): { nowMs(): number };
   /** Makes the next batch of events available (the mock moves its virtual clock; a live fixture server writes events). */
   advance(): Promise<void>;
   cleanup(): Promise<void>;
@@ -18,16 +22,20 @@ export interface DataSourceUnderTest {
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 /**
- * The event-derived part of a snapshot. Titles, dependencies and heartbeat times come from the snapshot, not the events, so they are
- * excluded: a source that serves them differently must still pass. (Task titles and `dependsOn` are null or filled depending on the source.)
+ * What both a real snapshot and a fold of events can state. Checked against `GET /v1/projects/:id/snapshot` in apps/control-api/src/routes-owner.ts:
+ * it returns, per task, status, revision (currentRevision), aggregateRevision (rowRevision), the attempts of the current revision with their
+ * outcome, and `cancel` (a cancel request); per run, lifecycle. It does not return statusReason, latestEvidence, enteredStatusAt, enteredStateAt,
+ * run evidence, checks, resolved approvals (only pending ones), workers, an explicit activeAttemptId (derivable as the attempt that has not ended)
+ * or a cancel reason. So only these fields are compared, and `activeAttemptId` is taken as the attempt that is running and has not ended.
  */
-const eventDerived = (s: ProjectViewSnapshot) => ({
-  runs: s.runs,
-  tasks: Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, title: null, dependsOn: null, role: null }])),
-  attempts: Object.fromEntries(Object.entries(s.attempts).map(([id, a]) => [id, { ...a, lastHeartbeatAt: null }])),
-  workers: Object.fromEntries(Object.entries(s.workers).map(([id, w]) => [id, { ...w, lastHeartbeatAt: null }])),
-  approvals: s.approvals,
-  checks: s.checks,
+const comparable = (s: ProjectViewSnapshot) => ({
+  runs: Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { lifecycle: r.lifecycle }])),
+  tasks: Object.fromEntries(
+    Object.entries(s.tasks).map(([id, t]) => [id, {
+      status: t.status, revision: t.revision, aggregateRevision: t.aggregateRevision, activeAttemptId: t.activeAttemptId, cancelRequested: t.cancelRequested !== null,
+    }]),
+  ),
+  attempts: Object.fromEntries(Object.entries(s.attempts).map(([id, a]) => [id, { outcome: a.outcome }])),
 });
 
 /**
@@ -98,14 +106,14 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
 
     it('a session that follows the stream (resyncing when asked) converges on a fresh snapshot, on event-derived fields', async () => {
       const ds = await setup();
-      const session = startProjection(ds.source, ds.busyProjectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0 });
+      const session = startProjection(ds.source, ds.busyProjectId, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0, every: () => () => {}, clock: ds.clockFor(ds.busyProjectId) });
       await tick();
       await ds.advance();
       for (let i = 0; i < 5; i += 1) await tick();
       const fresh = await ds.source.getSnapshot(ds.busyProjectId);
       const mine = session.state()!.snapshot;
       expect(mine.meta.cursor).toBe(fresh.meta.cursor);
-      expect(eventDerived(mine)).toEqual(eventDerived(fresh));
+      expect(comparable(mine)).toEqual(comparable(fresh));
       session.stop();
     });
 
@@ -191,6 +199,21 @@ export function dataSourceConformance(name: string, make: () => Promise<DataSour
       expect(lines.length).toBeLessThanOrEqual(TERMINAL_MAX_LINES);
       ch.close();
       await expect(ds.source.openTerminal({ taskId: attempt.taskId, attemptId: 'no-such-attempt', expectedRevision: 0 })).rejects.toBeInstanceOf(DataSourceException);
+    });
+
+    it('a session that starts before the first plan fills the board after it, and agrees with a fresh snapshot', async () => {
+      const ds = await setup();
+      if (!ds.prePlanProjectId) return;
+      const pid = ds.prePlanProjectId;
+      const session = startProjection(ds.source, pid, { onState: () => {}, onError: (e) => { throw new Error(e.message); } }, { refreshMs: 0, every: () => () => {}, clock: ds.clockFor(pid) });
+      await tick();
+      expect(Object.keys(session.state()!.snapshot.tasks)).toEqual([]);
+      await ds.advance();
+      for (let i = 0; i < 5; i += 1) await tick();
+      const fresh = await ds.source.getSnapshot(pid);
+      expect(Object.keys(fresh.tasks).length).toBeGreaterThan(0);
+      expect(comparable(session.state()!.snapshot)).toEqual(comparable(fresh));
+      session.stop();
     });
 
     it('an empty project reads as empty', async () => {

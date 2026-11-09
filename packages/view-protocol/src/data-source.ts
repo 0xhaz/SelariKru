@@ -2,7 +2,9 @@ import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, 
 import type { ProjectViewEvent } from './events.ts';
 import type { ProjectViewSnapshot } from './snapshot.ts';
 
-export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected';
+export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
+  /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
+  | 'stream_dead' | 'refresh_failed' | 'snapshot_rejected';
 export interface DataSourceError {
   readonly code: DataSourceErrorCode;
   readonly message: string;

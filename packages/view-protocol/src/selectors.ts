@@ -1,10 +1,11 @@
-import { LEASE_EXPIRY_MS, SUSPECT_AFTER_MS } from './common.ts';
+import { LEASE_EXPIRY_MS, LIVENESS_STALE_MS, SUSPECT_AFTER_MS } from './common.ts';
 import type { ApprovalView, ProjectViewSnapshot, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
 
 /** Derived reads. Time is a parameter (`nowMs`); nothing here reads a clock. */
 
 export interface WorkerHealthReading {
-  readonly health: WorkerHealth;
+  /** `unknown` when liveness data is stale (a refresh outage): silence then says nothing about the worker. */
+  readonly health: WorkerHealth | 'unknown';
   /** Milliseconds since the last heartbeat; null when none was recorded or no lease is held. */
   readonly heartbeatAgeMs: number | null;
   /** True when the reading is derived from silence rather than reported. */
@@ -15,9 +16,14 @@ export interface WorkerHealthReading {
  * Health from the last confirmed value and heartbeat age. 30 s of silence is a suspected stall, 60 s is a lost connection. Silence only
  * ever worsens a healthy reading; it never turns a failed worker healthy, and it never invents idle or success.
  */
-export function effectiveWorkerHealth(worker: WorkerView, nowMs: number): WorkerHealthReading {
+export function effectiveWorkerHealth(worker: WorkerView, nowMs: number, livenessAsOfMs?: number | null): WorkerHealthReading {
   if (!worker.leaseHeld || worker.lastHeartbeatAt === null || worker.health !== 'healthy') {
     return { health: worker.health, heartbeatAgeMs: null, derived: false };
+  }
+  // Heartbeats reach the projection only through refreshes. If the last successful one is old (or there never was one), a stale
+  // heartbeat time could be our outage rather than the worker, so the honest reading is unknown.
+  if (livenessAsOfMs !== undefined && (livenessAsOfMs === null || nowMs - livenessAsOfMs >= LIVENESS_STALE_MS)) {
+    return { health: 'unknown', heartbeatAgeMs: null, derived: true };
   }
   const age = Math.max(0, nowMs - Date.parse(worker.lastHeartbeatAt));
   if (age >= LEASE_EXPIRY_MS) return { health: 'disconnected', heartbeatAgeMs: age, derived: true };
