@@ -23,8 +23,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { ArtifactIntegrityError, type ArtifactStore } from '../../../packages/artifacts/src/index.ts';
-import { checkEventAuthority, TaskSpecSchema, validatePlanRevision, type EventEnvelope, type TaskSpec } from '../../../packages/domain/src/index.ts';
+import { checkEventAuthority, TaskSpecSchema, transition, validatePlanRevision, type EventEnvelope, type TaskSpec, type TaskStatus } from '../../../packages/domain/src/index.ts';
 import { appendEvent, schema, sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { emit, SCHEDULER_ACTOR } from '../../workflow/src/events.ts';
+import { buildTaskState, loadAttempts, lockStatusRow, setStatus } from '../../workflow/src/taskstate.ts';
 import { checkAllowedPaths, type FileChange } from '../../../packages/runtime-docker-local/src/diff.ts';
 
 const execFileP = promisify(execFile);
@@ -777,19 +779,54 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
     UPDATE approvals SET outcome = 'invalidated'
     WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND outcome IN ('pending', 'granted') AND expected_revisions ->> 'candidateSha' IN (${inList(shas)})
     RETURNING approval_id`);
-  // Evidence is gone, so readiness is too: the run leaves review and every part this evidence had verified goes back to `verifying`.
+  // Evidence is gone, so readiness is too. Every part this evidence had verified goes back through the domain transition to `verifying`
+  // (claims re-acquired; `blocked` when they cannot be), the run leaves review, and each change is recorded in this same transaction.
   const reopened: string[] = [];
+  if (rows.length > 0) await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`); // same lock as claiming
+  const candidateIds = rows.map((r) => String(r['candidate_id'])).sort(cmp);
   for (const r of rows) {
     for (const part of (r['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? []) {
-      const moved = await tx.execute(sql`
-        UPDATE task_status SET status = 'verifying', row_revision = row_revision + 1, updated_at = ${now.toISOString()}::timestamptz
-        WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND task_id = ${part.taskId} AND current_revision = ${part.revision} AND status = 'verified'
-        RETURNING task_id`);
-      if (moved.length > 0) reopened.push(part.taskId);
+      const key = { tenantId: run.tenantId, projectId: run.projectId, taskId: part.taskId };
+      const row = await lockStatusRow(tx, key);
+      if (!row || row.currentRevision !== part.revision || row.status !== 'verified') continue;
+      const rev = await tx.execute(sql`SELECT spec FROM task_revisions WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND task_id = ${part.taskId} AND revision = ${part.revision}`);
+      const spec = TaskSpecSchema.parse(rev[0]!['spec']);
+      const attempts = await loadAttempts(tx, key, part.revision);
+      const state = buildTaskState(spec, row.status as TaskStatus, attempts);
+      if (!state) throw new Error(`task ${part.taskId}: stored spec no longer valid`);
+      const want = new Map<string, 'shared' | 'exclusive'>();
+      for (const c of spec.resourceClaims) if (want.get(c.key) !== 'exclusive') want.set(c.key, c.mode);
+      let conflict: string | undefined;
+      if (want.size > 0) {
+        const live = await tx.execute(sql`SELECT resource_key, mode FROM resource_claims WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND resource_key IN (${inList([...want.keys()])}) AND released_at IS NULL`);
+        conflict = [...want].find(([k, m]) => live.some((h) => h['resource_key'] === k && (m === 'exclusive' || h['mode'] === 'exclusive')))?.[0];
+      }
+      const moved = transition(state, { type: 'verification_invalidated', ...(conflict !== undefined ? { blockedReason: `resource_conflict:${conflict}` } : {}) });
+      if (!moved.ok) throw new Error(`illegal reopen transition: ${JSON.stringify(moved.error)}`);
+      for (const rec of moved.value.attempts) {
+        const stored = attempts.find((a) => a.attemptId === rec.attemptId);
+        if (stored && stored.outcome !== rec.outcome) await tx.execute(sql`UPDATE attempts SET outcome = ${rec.outcome} WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND attempt_id = ${rec.attemptId}`);
+      }
+      if (conflict === undefined) {
+        for (const [resourceKey, mode] of want) {
+          await tx.execute(sql`
+            INSERT INTO resource_claims (tenant_id, project_id, claim_id, task_id, revision, resource_key, mode, attempt_id)
+            VALUES (${run.tenantId}, ${run.projectId}, ${`clm_${randomUUID()}`}, ${part.taskId}, ${part.revision}, ${resourceKey}, ${mode}, ${part.attemptId})`);
+        }
+      }
+      const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
+      const scope = { projectId: run.projectId, runId: spec.runId, taskId: part.taskId, aggregateRevision };
+      await emit(tx, scope, now, {
+        type: 'task.reopened', attemptId: part.attemptId, actor: INTEGRATION_ACTOR,
+        payload: { reason, candidateIds, status: moved.value.status, ...(conflict !== undefined ? { blocked: `resource_conflict:${conflict}` } : {}) },
+      });
+      if (conflict !== undefined) await emit(tx, scope, now, { type: 'task.blocked', attemptId: part.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: `resource_conflict:${conflict}` } });
+      reopened.push(part.taskId);
     }
   }
-  await tx.execute(sql`
-    UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review'`);
+  const reverted = await tx.execute(sql`
+    UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review' RETURNING run_id`);
+  if (reverted.length > 0) await emitCandidate(tx, run, now, 'run.reverted', { reason, candidateIds, reopenedTasks: [...new Set(reopened)].sort(cmp) });
   return {
     reason,
     candidates: rows.map((r) => String(r['candidate_id'])).sort(cmp),
@@ -799,7 +836,7 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
   };
 }
 
-async function emitCandidate(tx: Tx, run: IntegrationRun, now: Date, type: 'candidate.assembled' | 'candidate.failed', payload: Record<string, unknown>): Promise<void> {
+async function emitCandidate(tx: Tx, run: IntegrationRun, now: Date, type: 'candidate.assembled' | 'candidate.failed' | 'run.reverted', payload: Record<string, unknown>): Promise<void> {
   const at = now.toISOString();
   const envelope: EventEnvelope = {
     schemaVersion: 1, eventId: `evt_${randomUUID()}`, projectId: run.projectId, runId: run.runId, taskId: run.runId, attemptId: null, type,
@@ -918,10 +955,20 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
       const superseded = await withTx(deps.db, async (tx) => {
         await fence(tx, run, holder);
         const at = now();
-        await tx.execute(sql`
+        // The same commit can come back with new attempt bindings (an identical repair). Whatever was concluded about the earlier binding
+      // is kept as history in `detail.history` but stops being evidence: its check runs are invalidated.
+      const prior = await tx.execute(sql`SELECT status, parts IS DISTINCT FROM ${JSON.stringify(parts)}::jsonb AS changed FROM candidates WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${candidateId} FOR UPDATE`);
+      if (prior[0] && (prior[0]['status'] !== 'assembled' || prior[0]['changed'] === true)) {
+        await tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_sha = ${sha} AND result <> 'invalidated'`);
+      }
+      await tx.execute(sql`
           INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
           VALUES (${run.tenantId}, ${run.projectId}, ${candidateId}, ${run.runId}, ${run.target}, ${sha}, ${run.currentBaseSha}, ${treeSha}, ${JSON.stringify(parts)}::jsonb, 'assembled', NULL, '{}'::jsonb, ${at.toISOString()}::timestamptz)
-          ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET status = 'assembled', reason = NULL, updated_at = EXCLUDED.updated_at`);
+          ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET
+            detail = CASE WHEN candidates.status = 'assembled' AND candidates.parts IS NOT DISTINCT FROM EXCLUDED.parts THEN candidates.detail
+              ELSE jsonb_set(candidates.detail, '{history}', COALESCE(candidates.detail -> 'history', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+                'status', candidates.status, 'reason', candidates.reason, 'parts', candidates.parts, 'treeSha', candidates.tree_sha, 'rebuiltAt', EXCLUDED.updated_at))) END,
+            status = 'assembled', reason = NULL, parts = EXCLUDED.parts, tree_sha = EXCLUDED.tree_sha, base_sha = EXCLUDED.base_sha, updated_at = EXCLUDED.updated_at`);
         const sup = await invalidate(tx, run, 'superseded_by_new_candidate', { shaNot: sha }, at);
         await emitCandidate(tx, run, at, 'candidate.assembled', {
           candidateId, sha, baseSha: run.currentBaseSha, treeSha, target: run.target, parts: parts.map((p) => ({ taskId: p.taskId, revision: p.revision, manifestSha256: p.manifestSha256 })),

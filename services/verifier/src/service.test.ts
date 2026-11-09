@@ -455,3 +455,106 @@ describe('dockerRunner', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('reopening on invalidation is a recorded, legal transition', () => {
+  const verifyAndReopen = async (claims: { key: string; mode: 'shared' | 'exclusive' }[] = []) => {
+    await addDone('t1', { 'src/a.txt': 'a\n' }, { resourceClaims: claims, maxAttempts: 2 });
+    const a = await assemble();
+    await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    expect(await status('t1')).toBe('verified');
+    await addDone('t2', { 'src/b.txt': 'b\n' });
+    return { a, b: await assemble() };
+  };
+
+  it('writes task-scoped and run-scoped events by the integration actor, and reopens the attempt', async () => {
+    await verifyAndReopen();
+    expect(await status('t1')).toBe('verifying');
+    expect(await q(`SELECT task_id, actor_kind, payload FROM events WHERE type = 'task.reopened'`)).toMatchObject([{ task_id: 't1', actor_kind: 'integration' }]);
+    expect(await q(`SELECT task_id, actor_kind FROM events WHERE type = 'run.reverted'`)).toEqual([{ task_id: RUN, actor_kind: 'integration' }]);
+    expect((await q(`SELECT lifecycle FROM runs`))[0]).toMatchObject({ lifecycle: 'running' });
+    expect((await q(`SELECT outcome FROM attempts WHERE attempt_id = 'att_t1'`))[0]).toMatchObject({ outcome: 'running' });
+  });
+
+  it('re-acquires the exclusive claims the passing verdict released', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' }, { resourceClaims: [{ key: 'k', mode: 'exclusive' }] });
+    const a = await assemble();
+    await db.insert(schema.resourceClaims).values({ tenantId: TENANT, projectId: PROJECT, claimId: 'clm_1', taskId: 't1', revision: 1, resourceKey: 'k', mode: 'exclusive', attemptId: 'att_t1' });
+    await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    expect(await q(`SELECT 1 FROM resource_claims WHERE released_at IS NULL`)).toHaveLength(0);
+    await addDone('t2', { 'src/b.txt': 'b\n' });
+    await assemble();
+    expect(await status('t1')).toBe('verifying');
+    expect(await q(`SELECT task_id, resource_key, mode FROM resource_claims WHERE released_at IS NULL`)).toEqual([{ task_id: 't1', resource_key: 'k', mode: 'exclusive' }]);
+  });
+
+  it('blocks the task with a clear reason when a conflicting live claim exists', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' }, { resourceClaims: [{ key: 'k', mode: 'exclusive' }] });
+    const a = await assemble();
+    await db.insert(schema.resourceClaims).values({ tenantId: TENANT, projectId: PROJECT, claimId: 'clm_1', taskId: 't1', revision: 1, resourceKey: 'k', mode: 'exclusive', attemptId: 'att_t1' });
+    await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    // Another task took the resource while t1 was verified.
+    await seedTask(db, specFor('t3', { resourceClaims: [{ key: 'k', mode: 'exclusive' }] }), 'running');
+    await db.insert(schema.resourceClaims).values({ tenantId: TENANT, projectId: PROJECT, claimId: 'clm_3', taskId: 't3', revision: 1, resourceKey: 'k', mode: 'exclusive' });
+    await addDone('t2', { 'src/b.txt': 'b\n' });
+    await assemble();
+    expect(await status('t1')).toBe('blocked');
+    expect(await q(`SELECT payload FROM events WHERE type = 'task.reopened' AND task_id = 't1'`)).toMatchObject([{ payload: { blocked: 'resource_conflict:k' } }]);
+    expect(await q(`SELECT 1 FROM events WHERE type = 'task.blocked' AND task_id = 't1'`)).toHaveLength(1);
+    expect(await q(`SELECT 1 FROM resource_claims WHERE task_id = 't1' AND released_at IS NULL`)).toHaveLength(0);
+    expect((await q(`SELECT outcome FROM attempts WHERE attempt_id = 'att_t1'`))[0]).toMatchObject({ outcome: 'interrupted' });
+  });
+
+  it('a failed re-verification fails the reopened attempt record', async () => {
+    const { b } = await verifyAndReopen();
+    const rec = await verifyCandidate(ref(b), deps(async (i) => ok(i, { 'FB-03': 'failed' })));
+    expect(rec.taskOutcomes.find((o) => o.taskId === 't1')).toMatchObject({ applied: true, taskStatus: 'ready' });
+    expect((await q(`SELECT outcome FROM attempts WHERE attempt_id = 'att_t1'`))[0]).toMatchObject({ outcome: 'failed' });
+  });
+
+  it('is recorded even when the rebuilt assembly then fails', async () => {
+    await addDone('t1', { 'src/a.txt': 'a\n' });
+    const a = await assemble();
+    await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    // main moves and changes the very path t1 added: the rebuild conflicts, but the old evidence is already gone.
+    writeFileSync(join(repo, 'src/a.txt'), 'main changed it\n');
+    git(repo, 'add', '-A');
+    git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'move main');
+    const moved = git(repo, 'rev-parse', 'HEAD');
+    try {
+      const r = await assembleCandidate({ tenantId: TENANT, projectId: PROJECT, runId: RUN, target: 'main', pinnedBaseSha: baseSha, currentBaseSha: moved, repoPath: repo }, { db, artifacts, workRoot: join(root, 'work') });
+      expect(r.ok).toBe(false);
+      expect(await status('t1')).toBe('verifying');
+      expect(await q(`SELECT 1 FROM events WHERE type = 'task.reopened' AND task_id = 't1'`)).toHaveLength(1);
+      expect(await q(`SELECT 1 FROM events WHERE type = 'run.reverted'`)).toHaveLength(1);
+    } finally {
+      git(repo, 'reset', '-q', '--hard', baseSha);
+    }
+  });
+});
+
+describe('an identical repair rebinds the candidate', () => {
+  it('fail, repair with identical bytes, reassemble, verify: the verdict applies', async () => {
+    await addDone('t1', { 'src/a.txt': 'same\n' }, { maxAttempts: 2, resourceClaims: [{ key: 'k', mode: 'exclusive' }] });
+    const a = await assemble();
+    await db.insert(schema.resourceClaims).values({ tenantId: TENANT, projectId: PROJECT, claimId: 'clm_1', taskId: 't1', revision: 1, resourceKey: 'k', mode: 'exclusive', attemptId: 'att_t1' });
+    await verifyCandidate(ref(a), deps(async (i) => ok(i, { 'FB-02': 'failed' })));
+    expect(await status('t1')).toBe('ready');
+    // Attempt 2 publishes byte-identical changes.
+    const manifest = String(((await q(`SELECT detail FROM attempts WHERE attempt_id = 'att_t1'`))[0]!['detail'] as Record<string, unknown>)['changeManifestSha256']);
+    await db.execute(sql`UPDATE task_status SET status = 'verifying', row_revision = row_revision + 1 WHERE task_id = 't1'`);
+    await db.insert(schema.resourceClaims).values({ tenantId: TENANT, projectId: PROJECT, claimId: 'clm_2', taskId: 't1', revision: 1, resourceKey: 'k', mode: 'exclusive', attemptId: 'att_t1' });
+    await db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_t1_2', taskId: 't1', revision: 1, attemptNumber: 2, outcome: 'running', startedAt: new Date(), endedAt: new Date(), detail: { changeManifestSha256: manifest } });
+    const again = await assemble();
+    expect(again.sha).toBe(a.sha);
+    const row = (await q(`SELECT status, parts, detail FROM candidates WHERE sha = '${a.sha}'`))[0]!;
+    expect(row['status']).toBe('assembled');
+    expect((row['parts'] as { attemptId: string }[])[0]!.attemptId).toBe('att_t1_2');
+    // The earlier verdict stays as history and is no longer evidence for the rebuilt candidate.
+    expect((row['detail'] as { history: { status: string; parts: { attemptId: string }[] }[] }).history).toMatchObject([{ status: 'rejected', parts: [{ attemptId: 'att_t1' }] }]);
+    expect(await loadValidRecord(db, artifacts, loadKey(a))).toBeNull();
+    const rec = await verifyCandidate(ref(a), deps(async (i) => ok(i)));
+    expect(rec.taskOutcomes[0]).toMatchObject({ applied: true, taskStatus: 'verified' });
+    expect(await q(`SELECT 1 FROM resource_claims WHERE released_at IS NULL`)).toHaveLength(0);
+    expect(await loadValidRecord(db, artifacts, loadKey(a))).toEqual(rec);
+  });
+});

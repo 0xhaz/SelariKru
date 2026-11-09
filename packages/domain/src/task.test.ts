@@ -119,6 +119,28 @@ describe('task state machine', () => {
     expect(r.ok).toBe(false);
   });
 
+  it('invalidated evidence reopens a verified task: verified to verifying, the attempt waits for a verdict again', () => {
+    const verified = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 2 }), [
+      { type: 'dependencies_satisfied' }, start(1), { type: 'attempt_completed' }, { type: 'verification_passed' },
+    ]);
+    expect(verified.attempts[0]!.outcome).toBe('succeeded');
+    const reopened = transition(verified, { type: 'verification_invalidated' });
+    expect(reopened.ok && reopened.value.status).toBe('verifying');
+    expect(reopened.ok && reopened.value.attempts[0]!.outcome).toBe('running');
+    // A failed re-verification then fails that attempt, whatever it was.
+    const failed = reopened.ok ? transition(reopened.value, { type: 'verification_failed', reason: 'x' }) : reopened;
+    expect(failed.ok && failed.value.attempts[0]!.outcome).toBe('failed');
+    // If the claims cannot be re-acquired the task blocks, and the attempt is interrupted (budget-neutral).
+    const blocked = transition(verified, { type: 'verification_invalidated', blockedReason: 'resource_conflict' });
+    expect(blocked.ok && blocked.value.status).toBe('blocked');
+    expect(blocked.ok && blocked.value.attempts[0]!.outcome).toBe('interrupted');
+    // Only a verified task can be reopened.
+    const running = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }, start(1)]);
+    expect(transition(running, { type: 'verification_invalidated' }).ok).toBe(false);
+    const merged = run(verified, [{ type: 'change_merged' }]);
+    expect(transition(merged, { type: 'verification_invalidated' }).ok).toBe(false);
+  });
+
   it('merged cannot be superseded', () => {
     const s = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [
       { type: 'dependencies_satisfied' }, start(1), { type: 'attempt_completed' }, { type: 'verification_passed' }, { type: 'change_merged' },

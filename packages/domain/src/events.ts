@@ -4,7 +4,7 @@ import { err, ok, type Result } from './result.ts';
 
 export const EVENT_TYPES = [
   'run.created', 'plan.accepted',
-  'task.ready', 'placement.decided', 'placement.blocked', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.blocked',
+  'task.ready', 'placement.decided', 'placement.blocked', 'task.cancel_requested', 'task.cancelled', 'task.superseded', 'task.reopened', 'run.reverted', 'task.blocked',
   'attempt.started', 'attempt.heartbeat', 'attempt.completed', 'attempt.failed',
   'approval.requested', 'approval.granted', 'approval.denied',
   'verification.started', 'verification.passed', 'verification.failed',
@@ -52,6 +52,10 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'task.cancel_requested': [H],
   'task.cancelled': [H, S, Y],
   'task.superseded': [S, Y],
+  /** A verified task went back to `verifying` (or `blocked`) because the evidence for it was invalidated. */
+  'task.reopened': [I],
+  /** A run left `ready_for_review` because its evidence was invalidated. */
+  'run.reverted': [I, S],
   'task.blocked': [S, Y],
   'attempt.started': [W, S],
   'attempt.heartbeat': [W],
