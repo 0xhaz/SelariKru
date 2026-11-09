@@ -194,7 +194,8 @@ describe('blocked work', () => {
       const c = card(left('running', null));
       expect(c).toMatchObject({ kind: 'reconciliation', chip: 'Pull request out of date', tone: 'warning' });
       expect(c.title).toBe('Pull request #7 no longer holds the verified code');
-      expect(c.summary).toContain('Main moved, so the code was rebuilt');
+      expect(c.summary).toContain('Main moved, so the code is being rebuilt');
+      expect(c.summary).toContain('The rebuilt commit does not exist yet.');
       expect(c.note).toContain('Close pull request #7 on GitHub, and open the new one once verification passes');
       expect(`${c.title} ${c.summary}`).not.toMatch(/ready for your review/i);
       expect(c.actions.filter((a) => a.kind === 'command')).toEqual([]);
@@ -202,6 +203,7 @@ describe('blocked work', () => {
     it('still does once the rebuilt code has passed, and says which stage it is', () => {
       const c = card(left('ready_for_review', 'c'.repeat(40)));
       expect(c.kind).toBe('reconciliation');
+      expect(c.summary).toContain('Main moved, so the code was rebuilt');
       expect(c.summary).toContain('The rebuilt code has passed verification.');
       expect(c.actions.filter((a) => a.kind === 'command')).toEqual([]);
     });

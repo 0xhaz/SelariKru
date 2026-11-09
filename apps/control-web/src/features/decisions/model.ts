@@ -387,7 +387,7 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
     const stage = rebuiltSha === null ? 'The rebuilt commit does not exist yet.' : passed ? 'The rebuilt code has passed verification.' : 'The rebuilt code has not passed verification yet.';
     return [{
       ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: 'Pull request out of date', tone: 'warning', title: `Pull request #${cr.prNumber} no longer holds the verified code`,
-      summary: `Main moved, so the code was rebuilt on the new main. This pull request still holds the old commit. ${stage}`,
+      summary: `Main moved, so the code ${rebuiltSha === null ? 'is being rebuilt' : 'was rebuilt'} on the new main. This pull request still holds the old commit. ${stage}`,
       consequence: 'A merge of this pull request would not be recorded for this run, and no task would count as merged.',
       note: `Close pull request #${cr.prNumber} on GitHub, and open the new one once verification passes. Agents never close pull requests.`,
       facts: [{ label: 'Status', value: 'Out of date: main moved' }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Verification of the rebuild', value: passed ? 'Passed' : 'Not passed yet' }],
