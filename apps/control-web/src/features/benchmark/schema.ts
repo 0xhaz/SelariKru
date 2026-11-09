@@ -212,6 +212,7 @@ export const BenchmarkFileSchema = z.strictObject({
   const attemptIds = new Set<string>();
   const resultHashes = new Set<string>();
   const candidateTrials = new Map<string, string>();
+  const passedCandidates = new Set<string>();
   file.records.forEach((record, i) => {
     const path = ['records', i];
     const refuse = (message: string): void => { ctx.addIssue({ code: 'custom', path, message }); };
@@ -245,6 +246,8 @@ export const BenchmarkFileSchema = z.strictObject({
     unsourced(humanMinutes.initialSetup !== null || humanMinutes.scoping !== null || humanMinutes.intervention !== null || humanMinutes.correction !== null || humanMinutes.review !== null, humanMinutes.provenance, humanMinutes.source, 'human minutes');
     unsourced(cost.localHardwareEnergyCost !== null, cost.localCostProvenance, cost.localCostSource, 'local cost');
 
+    const passing = record.status === 'completed' && (record.track === 'workers' ? allCriteriaPassed(record) && record.quality.withinDeclaredLimits === true : assistant?.schemaValid === true);
+
     // `measured` is a claim. A record that ran must carry what would let someone check it.
     if (measured) {
       // A denied, abandoned or failed attempt may never have produced a candidate, and the plan keeps those records. What a reader must be able to check starts at verification.
@@ -254,11 +257,16 @@ export const BenchmarkFileSchema = z.strictObject({
         if (candidate === null) {
           if (verified) refuse('an attempt that reached verification needs its candidate commit');
         } else if (!COMMIT_SHA.test(candidate)) refuse('a candidate must be a commit SHA');
-        else if (candidate !== record.configuration.starterSha) {
-          // Every trial starts clean (plan section 3), so two trials cannot share a commit. A no-change attempt legitimately ends on the starter.
+        else if (candidate === record.configuration.starterSha) {
+          // A no-change attempt legitimately ends on the starter, but it delivered nothing and cannot be a pass.
+          if (passing) refuse('a passing attempt cannot be on the starter commit');
+        } else {
+          // Every trial starts clean (plan section 3), so two trials cannot share a commit. Inside one trial a commit may be recorded again, but it is one delivered change and counts as one pass.
           const seenIn = candidateTrials.get(candidate);
           if (seenIn !== undefined && seenIn !== record.trialId) refuse(`candidate ${candidate} is reused by another trial`);
+          else if (passing && passedCandidates.has(candidate)) refuse(`candidate ${candidate} already passed in trial ${record.trialId}`);
           candidateTrials.set(candidate, seenIn ?? record.trialId);
+          if (passing) passedCandidates.add(candidate);
         }
       }
       if (record.configuration.manifestSha256 === null) refuse('a measured attempt needs its manifest hash');
@@ -276,7 +284,6 @@ export const BenchmarkFileSchema = z.strictObject({
     const minutes = (humanMinutes.intervention ?? 0) + (humanMinutes.correction ?? 0);
     if (record.operations.humanIntervened === false && minutes > 0) refuse('humanIntervened is false but intervention or correction minutes are recorded');
 
-    const passing = record.status === 'completed' && (record.track === 'workers' ? allCriteriaPassed(record) && record.quality.withinDeclaredLimits === true : assistant?.schemaValid === true);
     if (passing && record.track === 'workers' && timings.endToEndVerifiedMs === null) refuse('a passing attempt needs its delivery time');
     if (passing && [timings.endToEndVerifiedMs, timings.firstOutputMs, timings.generationCompleteMs].includes(0)) refuse('a passing attempt cannot have taken no time');
     if (timings.firstOutputMs !== null && timings.generationCompleteMs !== null && timings.firstOutputMs > timings.generationCompleteMs) refuse('first output came after the complete response');

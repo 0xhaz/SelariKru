@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildBenchmark, MIN_ATTEMPTS_PER_MODE, type Comparison, type Figure, type WorkerCohortView } from './model.ts';
-import { BenchmarkFileSchema, MAX_RESULTS_CHARS, loadBenchmark, type BenchmarkFile, type BenchmarkLoad } from './schema.ts';
+import { BenchmarkFileSchema, MAX_RESULTS_CHARS, loadBenchmark, type BenchmarkFile, type BenchmarkLoad, type BenchmarkRecord } from './schema.ts';
 import { assistantCohort, assistantRecord, benchmarkFile, completeAssistant, completeWorkers, workerCohort, workerRecord } from './testing.ts';
 
 const ok = (file: BenchmarkFile): BenchmarkLoad => ({ kind: 'ok', file: BenchmarkFileSchema.parse(file) });
@@ -119,17 +119,52 @@ describe('the results file', () => {
     expect(parse({ ...denied, artifactReferences: ['notes.txt'] })).toBe(false);
   });
 
-  it('one candidate may repeat inside a trial, not across trials, and a no-change attempt on the starter is exempt', () => {
-    const a = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
-    const b = workerRecord({ mode: 'L1', index: 1, dataKind: 'measured' });
-    const candidate = a.configuration.candidateSha!;
-    const shared = { ...b, configuration: { ...b.configuration, candidateSha: candidate } };
-    const parse = (...records: (typeof a)[]): boolean => BenchmarkFileSchema.safeParse(benchmarkFile({ records })).success;
-    expect(parse(a, { ...shared, trialId: a.trialId })).toBe(true);
-    expect(parse(a, shared)).toBe(false);
+  describe('one commit is one pass', () => {
+    const passing = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const nonPassing = workerRecord({ mode: 'L1', index: 1, dataKind: 'measured', failedCriteria: ['FB-01'] });
+    const parse = (...records: (typeof passing)[]): boolean => BenchmarkFileSchema.safeParse(benchmarkFile({ records })).success;
     const starter = 'd'.repeat(40);
-    const onStarter = (r: typeof a): typeof a => ({ ...r, configuration: { ...r.configuration, starterSha: starter, candidateSha: starter } });
-    expect(parse(onStarter(a), onStarter(b))).toBe(true);
+    const onStarter = (r: typeof passing): typeof passing => ({ ...r, configuration: { ...r.configuration, starterSha: starter, candidateSha: starter } });
+    const asRepeatOf = (r: typeof passing, of: typeof passing): typeof passing => ({ ...r, trialId: of.trialId, configuration: { ...r.configuration, candidateSha: of.configuration.candidateSha } });
+    const secondPass = workerRecord({ mode: 'L1', index: 2, dataKind: 'measured' });
+
+    it('a passing record on the starter commit delivered nothing, and is refused', () => {
+      expect(parse(onStarter(passing))).toBe(false);
+    });
+
+    it('a no-change attempt that did not pass may end on the starter, in any number of trials', () => {
+      expect(parse(onStarter(nonPassing))).toBe(true);
+      const another = workerRecord({ mode: 'L1', index: 3, dataKind: 'measured', status: 'failed', ms: null });
+      expect(parse(onStarter(nonPassing), onStarter(another))).toBe(true);
+      const overLimit = { ...passing, quality: { ...passing.quality, withinDeclaredLimits: false } };
+      expect(parse(onStarter(overLimit))).toBe(true);
+    });
+
+    it('a second passing record for the same trial and candidate is refused, in either position', () => {
+      expect(parse(passing, asRepeatOf(secondPass, passing))).toBe(false);
+      expect(parse(nonPassing, passing, asRepeatOf(secondPass, passing))).toBe(false);
+    });
+
+    it('a same-trial repeat that is not a second pass stays allowed', () => {
+      expect(parse(passing, asRepeatOf(nonPassing, passing))).toBe(true);
+      expect(parse(asRepeatOf(nonPassing, passing), passing)).toBe(true);
+      const alsoFailing = workerRecord({ mode: 'L1', index: 4, dataKind: 'measured', failedCriteria: ['FB-02'] });
+      expect(parse(nonPassing, asRepeatOf(alsoFailing, nonPassing))).toBe(true);
+    });
+
+    it('a repeat across trials is still refused, passing or not', () => {
+      const elsewhere = (r: typeof passing): typeof passing => ({ ...r, configuration: { ...r.configuration, candidateSha: passing.configuration.candidateSha } });
+      expect(parse(passing, elsewhere(secondPass))).toBe(false);
+      expect(parse(passing, elsewhere(nonPassing))).toBe(false);
+    });
+
+    it.each(['failed', 'timed_out', 'cancelled', 'denied_start', 'abandoned'] as const)('two %s records in one trial with no candidate are both kept', (status) => {
+      const honest = (index: number): typeof passing => {
+        const r = workerRecord({ mode: 'L1', index, dataKind: 'measured', status, ms: null });
+        return { ...r, trialId: 'shared-trial', artifactReferences: [], configuration: { ...r.configuration, candidateSha: null } };
+      };
+      expect(parse(honest(0), honest(1))).toBe(true);
+    });
   });
 
   it('refuses a record saying no person intervened while logging intervention or correction minutes', () => {
@@ -345,6 +380,15 @@ describe('worker rows', () => {
     expect(reasonsOf(comparison(cohort, 'L1-C1'))).toContain('server monotonic clock');
   });
 
+  it('an attempt timed on another clock says so in its basis, and a server-clock attempt keeps its own', () => {
+    const server = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 60_000 });
+    const wall = workerRecord({ mode: 'L1', index: 1, dataKind: 'measured', ms: 61_000 });
+    const attempts = workersOf(benchmarkFile({ records: [server, { ...wall, timings: { ...wall.timings, clockDomain: 'host-wall' } }] })).attempts;
+    expect(attempts[0]!.time.basis).toBe('End-to-end verified, server clock');
+    expect(attempts[1]!.time.detail).toBe('Recorded on host wall.');
+    expect(attempts[1]!.time.basis).toBe('End-to-end verified, host wall');
+  });
+
   it('no 0 of 0: runs and planned attempts are shown instead', () => {
     const records = [0, 1, 2].map((index) => workerRecord({ mode: 'L1', index, dataKind: 'measured', humanIntervened: true, ms: 60_000 }));
     const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
@@ -403,6 +447,30 @@ describe('the winner badge', () => {
     expect(c.verdict).toMatchObject({ kind: 'winner', mode: 'C1', exploratory: true });
     expect(c.sides.join(' ')).toContain('L1: 3 of 3 passed');
     expect(c.sides[0]).toContain('Exploratory');
+  });
+
+  describe('the server-clock check covers delivery times only', () => {
+    const cohortWith = (denied: (r: BenchmarkRecord) => BenchmarkRecord, extra: readonly BenchmarkRecord[] = []): WorkerCohortView => {
+      const l1 = [0, 1, 2, 3, 4].map((index) => workerRecord({ mode: 'L1', index, dataKind: 'measured', ms: 1_200_000 + index * 1000 }));
+      const passed = [0, 1, 2].map((index) => workerRecord({ mode: 'C1', index, dataKind: 'measured', ms: 900_000 + index * 1000 }));
+      const starts = [3, 4].map((index) => denied({ ...workerRecord({ mode: 'C1', index, dataKind: 'measured', status: 'denied_start', ms: null }), artifactReferences: [] }));
+      return workersOf(benchmarkFile({ records: [...l1, ...passed, ...starts, ...extra] }));
+    };
+    const noClock = (r: BenchmarkRecord): BenchmarkRecord => ({ ...r, configuration: { ...r.configuration, candidateSha: null }, timings: { ...r.timings, clockDomain: null } });
+
+    it('C1 at 3 of 5 with two null-clock denied starts against L1 at 5 of 5 gets the same verdict as with a clock on them', () => {
+      const withoutClock = comparison(cohortWith(noClock), 'L1-C1').verdict;
+      const withClock = comparison(cohortWith((r) => ({ ...r, configuration: { ...r.configuration, candidateSha: null } })), 'L1-C1').verdict;
+      expect(withClock).toMatchObject({ kind: 'winner', mode: 'L1', basis: 'completion' });
+      expect(withoutClock).toEqual(withClock);
+    });
+
+    it('a delivery time on another clock still blocks, even on an attempt that did not pass', () => {
+      const failed = workerRecord({ mode: 'C1', index: 4, dataKind: 'measured', status: 'failed', ms: 800_000 });
+      const onWall = { ...failed, timings: { ...failed.timings, clockDomain: 'host-wall' } };
+      const records = completeWorkers('measured').map((r) => (r.attemptId === onWall.attemptId ? onWall : r));
+      expect(reasonsOf(comparison(workersOf(benchmarkFile({ records })), 'L1-C1'))).toContain('server monotonic clock');
+    });
   });
 
   it('a one-attempt margin names no winner', () => {

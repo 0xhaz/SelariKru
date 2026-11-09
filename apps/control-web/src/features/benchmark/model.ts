@@ -435,12 +435,12 @@ function attemptRow(record: BenchmarkRecord, kind: DataKind): AttemptRow {
   const passed = record.track === 'workers' ? workerPassed(record) : assistantPassed(record);
   const status = statusOf(record, passed);
   const ms = record.track === 'workers' ? record.timings.endToEndVerifiedMs : record.timings.generationCompleteMs;
-  const timeBasis = record.track === 'workers' ? BASIS.time : BASIS.complete;
   const costValue = record.cost.platformPaidActual ?? record.cost.platformPaidEstimated;
   const costProvenance: FigureProvenance = record.cost.platformPaidActual !== null ? 'observed' : record.cost.platformPaidEstimated !== null ? 'estimated' : 'unavailable';
   const failure = record.failures.length > 0 ? record.failures.map((f) => (f.detail !== null ? `${f.category}: ${f.detail}` : f.category)).join('; ') : null;
   const prefix = ran(record) ? 'Unavailable' : NOT_MEASURED;
   const wrongClock = record.track === 'workers' && ms !== null && record.timings.clockDomain !== SERVER_CLOCK;
+  const timeBasis = record.track !== 'workers' ? BASIS.complete : wrongClock ? `End-to-end verified, ${clockLabel([record])}` : BASIS.time;
   return {
     attemptId: record.attemptId, mode: POLICY[record.mode] ?? record.mode, statusLabel: status.label, tone: status.tone, passed, criteria: criteriaText(record),
     time: stamp(ms !== null ? { text: formatMs(ms), detail: wrongClock ? `Recorded on ${clockLabel([record])}.` : record.track === 'workers' && !passed ? 'Not a passing run, so not in the median.' : null, provenance: 'observed', basis: timeBasis } : { text: prefix, detail: null, provenance: 'unavailable', basis: timeBasis }, kind),
@@ -546,7 +546,7 @@ function verdictFor(a: Side, b: Side, planned: number, kind: DataKind, aCounts: 
   if (aCounts.total > 0 && bCounts.total > 0) {
     const usable = [...a.records, ...b.records].filter(comparable);
     reasons.push(...dimensionReasons(usable));
-    if (usable.some((r) => r.timings.clockDomain !== SERVER_CLOCK)) reasons.push('Delivery times are not all on a server monotonic clock.');
+    if (usable.some((r) => r.timings.endToEndVerifiedMs !== null && r.timings.clockDomain !== SERVER_CLOCK)) reasons.push('Delivery times are not all on a server monotonic clock.');
   }
   const confounders = [...new Set([...a.records, ...b.records].filter(ran).flatMap((r) => r.confounders))];
   if (confounders.length > 0) reasons.push(`Confounders recorded: ${confounders.join('; ')}.`);

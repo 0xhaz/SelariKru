@@ -449,6 +449,37 @@ describe('a session', () => {
     expect(c.frames.find((f) => f.type === 'ended').reason).toBe('attempt_finished');
   });
 
+  it('with two publishes at once, the guard holds until the last one is done', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    let releaseSecond!: () => void;
+    const second = hub.whileFinishing(lease.attemptId, () => new Promise<void>((resolve) => { releaseSecond = resolve; }));
+    await hub.whileFinishing(lease.attemptId, async () => {
+      await t.db.update(schema.attempts).set({ endedAt: new Date(h.clock.now().getTime()) }).where(eq(schema.attempts.attemptId, lease.attemptId));
+    });
+    await new Promise((r) => setTimeout(r, 90)); // several 20 ms sweeps, with only the second publish still running
+    expect(c.frames.filter((f) => f.type === 'ended')).toEqual([]);
+    releaseSecond();
+    await second;
+    // With no publish left the guard is gone, so a sweep treats the ended attempt as it would any other.
+    await c.waitFor((f) => f.type === 'ended');
+    expect(c.frames.find((f) => f.type === 'ended').reason).toBe('attempt_fenced');
+  });
+
+  it('a runner not holding the attempt cannot mark it finishing', async () => {
+    const { lease } = await runningAttempt();
+    const stranger = await enrolRunner(h.app, 'local');
+    const guard = vi.spyOn(ControlHub.prototype, 'whileFinishing');
+    try {
+      const res = await post(h.app, '/v1/runners/result', { lease, result: { outcome: 'failed', reason: 'not mine' } }, bearer(stranger.token));
+      expect(res.status).toBe(409);
+      expect(guard).not.toHaveBeenCalled();
+    } finally {
+      guard.mockRestore();
+    }
+  });
+
   it('a sweep does not remove a newer link registered while it was reading', async () => {
     const { runner, lease } = await runningAttempt();
     const link = await FakeLink.open(runner.token, lease);

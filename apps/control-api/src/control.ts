@@ -132,8 +132,8 @@ export class ControlHub {
   private readonly clientServer = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_FRAME_BYTES, perMessageDeflate: false });
   private readonly linkServer = new WebSocketServer({ noServer: true, maxPayload: CONTROL_MAX_LINK_FRAME_BYTES, perMessageDeflate: false });
   private timers: ReturnType<typeof setInterval>[] = [];
-  /** Attempts whose result is being published right now. */
-  private readonly finishing = new Set<string>();
+  /** Attempts whose result is being published right now, with how many publishes are in flight for each. */
+  private readonly finishing = new Map<string, number>();
   private closing = false;
 
   constructor(
@@ -452,11 +452,13 @@ export class ControlHub {
   /** Immediately, and only ever after the attempt's own result or cancellation is durable. */
   /** Runs a result's publish. Its commit ends the attempt before `endForAttempt` can run, and a sweep landing in that gap must not call a normal finish a fence. */
   async whileFinishing<T>(attemptId: string, publish: () => Promise<T>): Promise<T> {
-    this.finishing.add(attemptId);
+    this.finishing.set(attemptId, (this.finishing.get(attemptId) ?? 0) + 1);
     try {
       return await publish();
     } finally {
-      this.finishing.delete(attemptId);
+      const left = (this.finishing.get(attemptId) ?? 1) - 1;
+      if (left > 0) this.finishing.set(attemptId, left);
+      else this.finishing.delete(attemptId);
     }
   }
 

@@ -132,7 +132,9 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       r.outcome === 'completed'
         ? { outcome: 'completed', ...(r.headSha !== undefined ? { headSha: r.headSha } : {}), ...(r.changeManifestSha256 !== undefined ? { changeManifestSha256: r.changeManifestSha256 } : {}), ...reported }
         : { outcome: r.outcome, reason: redactSecrets(r.reason), ...(r.outcome === 'approval_requested' && r.operation !== undefined ? { operation: r.operation } : {}), ...(r.outcome === 'approval_requested' && r.destination !== undefined ? { destination: r.destination } : {}), ...reported };
-    const published = await ctx.control.whileFinishing(body.lease.attemptId, async () => scheduler.publishResult(await leaseFor(runner, body.lease), result));
+    // Resolved first: only the runner holding the attempt may mark it finishing.
+    const lease = await leaseFor(runner, body.lease);
+    const published = await ctx.control.whileFinishing(lease.attemptId, () => scheduler.publishResult(lease, result));
     if (!published.ok) throw conflict(published.error);
     ctx.terminal.markEnded(body.lease.attemptId);
     ctx.control.endForAttempt(body.lease.attemptId, 'attempt_finished');
