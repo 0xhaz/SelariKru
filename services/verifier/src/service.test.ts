@@ -6,13 +6,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
+import { ArtifactIntegrityError, LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { checkEventAuthority, type EventEnvelope } from '../../../packages/domain/src/index.ts';
 import { schema, sql, type Db } from '../../../packages/persistence/src/index.ts';
 import { PROJECT, RUN, TENANT, resetDb, seedTask, setupTestDb, specFor, type TestDb } from '../../workflow/test/helpers.ts';
 import { verifierHashes } from './hashing.ts';
 import { assembleCandidate } from './integrate.ts';
 import { loadRunEvidence } from '../../workflow/src/evidence.ts';
+import { RecordStoreUnavailableError } from '../../workflow/src/verification-record.ts';
 import { CandidateNotVerifiable, candidateContentHash, currentTrusted, dockerRunner, loadValidRecord, verifyCandidate, type RunnerInput, type RunnerOutput, type VerificationDeps } from './service.ts';
 
 const pkgRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -337,7 +338,7 @@ describe('per-criterion evidence over a real verification', () => {
     expect((await loadRunEvidence(db, scope, tasks, bar()))!.evidence.candidate).toMatchObject({ recordValid: true });
     for (const store of [
       { put: artifacts.put.bind(artifacts), has: async () => false, get: async () => null },
-      { put: artifacts.put.bind(artifacts), has: async () => true, get: async (): Promise<Uint8Array | null> => { throw new Error('stored bytes do not match'); } },
+      { put: artifacts.put.bind(artifacts), has: async () => true, get: async (): Promise<Uint8Array | null> => { throw new ArtifactIntegrityError('a'.repeat(64)); } },
       { put: artifacts.put.bind(artifacts), has: async () => true, get: async () => Buffer.from('not a record') },
     ]) {
       expect(await loadValidRecord(db, store, loadKey(cand))).toBeNull();
@@ -345,6 +346,10 @@ describe('per-criterion evidence over a real verification', () => {
       expect(report.evidence.candidate).toMatchObject({ recordValid: false });
       expect(report.criteria.verified).toBe(0);
     }
+    // A read that fails is not a verdict: the record is not called invalid, and acting on it is refused. The report still counts no pass, and survives.
+    const sick = { put: artifacts.put.bind(artifacts), has: async () => true, get: async (): Promise<Uint8Array | null> => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); } };
+    await expect(loadValidRecord(db, sick, loadKey(cand))).rejects.toBeInstanceOf(RecordStoreUnavailableError);
+    expect((await loadRunEvidence(db, scope, tasks, { trusted: currentTrusted(), artifacts: sick }))!.criteria.verified).toBe(0);
     // No store at all is the same answer, not a pass.
     expect((await loadRunEvidence(db, scope, tasks, null))!.criteria.verified).toBe(0);
   });

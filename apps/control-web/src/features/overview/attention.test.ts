@@ -39,7 +39,8 @@ describe('attention queue', () => {
     });
     const items = buildAttention(snapshot, NOW, NOW);
     expect(items.map((i) => i.kind)).toEqual(['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'blocked', 'information']);
-    expect(items.map((i) => i.kind)).toEqual([...ATTENTION_ORDER]);
+    // `stale_record` needs a stale run, covered below.
+    expect(items.map((i) => i.kind)).toEqual(ATTENTION_ORDER.filter((k) => k !== 'stale_record'));
   });
 
   it('puts the longest-waiting item first within a rank and is stable for the same input', () => {
@@ -207,7 +208,8 @@ describe('attention queue', () => {
     it('does not call the run ready for review, and sends the owner to re-verify', () => {
       const items = buildAttention(shaped(false), NOW, NOW);
       expect(items.find((i) => i.id === 'review:run')).toBeUndefined();
-      expect(items.find((i) => i.code === 'record_no_longer_valid')).toMatchObject({ kind: 'failed_gate', decisionId: 'reverify:run', needsOperator: true, affectedTaskIds: ['t'] });
+      expect(items.find((i) => i.code === 'record_no_longer_valid')).toMatchObject({ kind: 'stale_record', decisionId: 'reverify:run', needsOperator: true, affectedTaskIds: ['t'] });
+      expect(ATTENTION_ORDER.indexOf('stale_record')).toBe(ATTENTION_ORDER.indexOf('failed_gate') + 1);
     });
 
     it('a valid record is ready, and a merged run raises nothing', () => {

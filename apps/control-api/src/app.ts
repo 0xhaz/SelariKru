@@ -2,7 +2,7 @@ import type { HarnessCatalog, VerificationRecord } from '@selarikru/domain';
 import type { GitHubPort } from '@selarikru/integrations-github';
 import { schema, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { RecordBytes, Scheduler, TrustedVerifier } from '@selarikru/workflow';
+import { RecordStoreUnavailableError, type RecordBytes, type Scheduler, type TrustedVerifier } from '@selarikru/workflow';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { bearerToken, RUNNER_TOKEN_PREFIX, sha256Hex, type Principal, type TokenVerifier } from './auth.ts';
@@ -129,6 +129,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (error instanceof AppError) {
       return reply.code(error.status).send({ error: { code: error.code, message: error.message, ...(error.details !== undefined ? { details: error.details } : {}) } });
     }
+    // A failed read says nothing about the record: nothing may be decided from it, and the caller can try again.
+    if (error instanceof RecordStoreUnavailableError) return reply.code(503).send({ error: { code: 'record_store_unavailable', message: 'the verification record store could not be read; try again' } });
     const status = (error as { statusCode?: number }).statusCode;
     if (typeof status === 'number' && status >= 400 && status < 500) {
       return reply.code(400).send({ error: { code: 'invalid_request', message: 'malformed request' } });

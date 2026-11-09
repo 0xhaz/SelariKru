@@ -9,6 +9,7 @@ import type { CriterionCell, DeliveryModel, EvidenceRow, FleetModel, OverviewMod
 const KIND: Readonly<Record<AttentionKind, { label: string; tone: Tone }>> = {
   policy_incident: { label: 'Policy block', tone: 'danger' },
   failed_gate: { label: 'Failed check', tone: 'danger' },
+  stale_record: { label: 'Record no longer valid', tone: 'warning' },
   decision: { label: 'Decision', tone: 'warning' },
   worker_lost: { label: 'Connection lost', tone: 'danger' },
   budget_resource: { label: 'Budget or limit', tone: 'warning' },

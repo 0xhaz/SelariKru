@@ -567,6 +567,28 @@ describe('run orchestration chain', () => {
         expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).status).toBe(409);
       });
 
+      it('a store read that fails is not a stale record: the exit stays shut and the candidate lives', async () => {
+        const { runId, sha, store } = await verifiedRun('t_exit_io');
+        const sick = new Proxy(store, { get: (o, k) => (k === 'get' ? async () => { throw Object.assign(new Error('EIO: read failed'), { code: 'EIO' }); } : Reflect.get(o, k)) });
+        const now = () => new Date();
+        const sickApp = buildApp({
+          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
+          evidence: { trusted: () => trustedNow, artifacts: sick, loadRecord: (key) => loadValidRecord(t.db, sick, key, { trusted: trustedNow }) },
+        });
+        await sickApp.ready();
+        try {
+          const [row] = await t.db.execute(sql`SELECT row_revision FROM task_status WHERE task_id = 't_exit_io'`);
+          const res = await post(sickApp, '/v1/tasks/t_exit_io/commands', { command: 'cancel', expectedRevision: Number(row!['row_revision']), idempotencyKey: 'io1' });
+          expect(res.status).toBe(503);
+          expect(res.body.error.code).toBe('record_store_unavailable');
+          expect(await taskStatus('t_exit_io')).toBe('verified');
+          expect(await t.db.execute(sql`SELECT status FROM candidates WHERE sha = ${sha}`)).toMatchObject([{ status: 'assembled' }]);
+          expect(await lifecycle(runId)).toBe('ready_for_review');
+        } finally {
+          await sickApp.close();
+        }
+      });
+
       it('at the limit the owner can still replan, and the task starts again on a new revision', async () => {
         const { runId, sha } = await verifiedRun('t_exit_r');
         trustedNow = STALE;

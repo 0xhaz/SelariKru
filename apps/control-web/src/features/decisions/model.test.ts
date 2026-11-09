@@ -222,7 +222,14 @@ describe('blocked work', () => {
     });
 
     it('warns before re-verifying with a pull request open', () => {
-      expect(action(stale(withRecord(false, { pr: 'open' }))!, 'Re-verify the run')).toMatchObject({ confirm: { title: 'Re-verify while pull request #7 is open?', consequence: expect.stringMatching(/recorded as stale/) } });
+      expect(action(stale(withRecord(false, { pr: 'open' }))!, 'Re-verify the run')).toMatchObject({ confirm: { title: 'Re-verify while pull request #7 is open?', consequence: expect.stringMatching(/held as stale until the verdict\. A passing verdict then records the merge/) } });
+    });
+
+    it('the cancel confirmation on the stale card says the candidate is retired, other parts are re-judged and a repair may start', () => {
+      const text = (stale(withRecord(false))!.actions.find((a) => a.id === 'cancel:t') as { confirm: { consequence: string } }).confirm.consequence;
+      expect(text).toMatch(/retires this candidate/);
+      expect(text).toMatch(/other verified parts go back for a new verdict/);
+      expect(text).toMatch(/may start a repair worker/);
     });
 
     it('a stale pull request that already merged does not say merging it would ship', () => {

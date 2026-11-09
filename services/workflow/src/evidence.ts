@@ -1,7 +1,7 @@
 import { deriveRunEvidence, type CheckStatus, type CriterionObservation, type EvidenceTask } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
 import type { Executor } from '@selarikru/persistence';
-import { loadLatestAppliedRecord, validRecordOf, type RecordBar } from './verification-record.ts';
+import { loadLatestAppliedRecord, RecordStoreUnavailableError, validRecordOf, type RecordBar } from './verification-record.ts';
 
 const STATUSES: readonly string[] = ['passed', 'failed', 'skipped', 'error'];
 const iso = (v: unknown): string => new Date(v as string | Date).toISOString();
@@ -57,7 +57,8 @@ export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: 
         SELECT payload FROM events WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND type IN ('verification.passed', 'verification.failed') AND payload ->> 'recordId' = ${recordId}
         ORDER BY sequence DESC LIMIT 1`);
       verdict = (events[0]?.['payload'] as Record<string, unknown> | undefined) ?? {};
-      if (bar !== null) recordValid = (await validRecordOf(latest, sha, { artifacts: bar.artifacts, trusted: () => bar.trusted })) !== null;
+      // A store that cannot be read counts no pass here and does not take down the whole snapshot. Anything that acts on this (cancel, replan, re-verify) reads the record itself and refuses on the same failure.
+      if (bar !== null) recordValid = await validRecordOf(latest, sha, { artifacts: bar.artifacts, trusted: () => bar.trusted }).then((r) => r !== null, (e: unknown) => { if (e instanceof RecordStoreUnavailableError) return false; throw e; });
     }
   }
   const derived = deriveRunEvidence({ tasks, observations, candidateSha: sha, candidateLive: row?.['status'] === 'assembled', recordValid });

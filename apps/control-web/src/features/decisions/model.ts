@@ -121,6 +121,7 @@ const ADVISORY_TEXT = 'This approval is a recorded human pause. A grant records 
 const WORKER_REASON = 'Reason given by the worker (worker-supplied, not verified)';
 const REPLAN_OFF = 'Replanning runs through the Assistant, which is off under demo data.';
 const CANCEL_CONSEQUENCE = 'It stops for good. Work so far stays on record, but it only runs again through a new plan revision.';
+const STALE_CANCEL_CONSEQUENCE = 'Cancelling retires this candidate and its check runs, so it can never reach a pull request. Its other verified parts go back for a new verdict on a candidate without this work, and that verdict may start a repair worker. This task only runs again through a new plan revision.';
 
 function replanAction(mode: DecisionOptions['mode'], paused: string | null, target: { readonly runId: string; readonly taskId?: string }): DecisionAction {
   const disabledReason = mode === 'mock' ? REPLAN_OFF : paused;
@@ -128,11 +129,11 @@ function replanAction(mode: DecisionOptions['mode'], paused: string | null, targ
   return { kind: 'link', id: 'replan', label: 'Replan in the Assistant', style: 'quiet', href: `${hrefFor('assistant')}?${query.toString()}`, external: false, disabledReason };
 }
 
-function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task'): DecisionAction {
+function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task', consequence = CANCEL_CONSEQUENCE): DecisionAction {
   return {
     kind: 'command', id: `cancel:${t.taskId}`, label, style: 'danger', disabledReason: paused,
     intent: { command: 'task.cancel', expectedRevision: t.aggregateRevision, args: { taskId: t.taskId } },
-    confirm: { title: `Cancel "${titleOf(t)}"?`, consequence: CANCEL_CONSEQUENCE, keepLabel: 'Keep the task' },
+    confirm: { title: `Cancel "${titleOf(t)}"?`, consequence, keepLabel: 'Keep the task' },
   };
 }
 
@@ -241,7 +242,7 @@ function reverifyAction(snapshot: ProjectViewSnapshot, runId: string, expected: 
   const open = snapshot.changeRequests.find((c) => c.runId === runId && c.status === 'open');
   return {
     kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId } },
-    confirm: open ? { title: `Re-verify while pull request #${open.prNumber} is open?`, consequence: `The run leaves review until there is a new verdict. If someone merges #${open.prNumber} on GitHub before then, the merge is recorded as stale and no task counts as merged.`, keepLabel: 'Keep it in review' } : null,
+    confirm: open ? { title: `Re-verify while pull request #${open.prNumber} is open?`, consequence: `The run leaves review until there is a new verdict. If someone merges #${open.prNumber} on GitHub before then, the merge is held as stale until the verdict. A passing verdict then records the merge and its tasks count as merged; otherwise no task counts as merged.`, keepLabel: 'Keep it in review' } : null,
   };
 }
 
@@ -303,7 +304,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
       actions: [
         reverifyAction(snapshot, run.runId, expected, paused),
         replanAction(options.mode, paused, { runId: run.runId }),
-        ...Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`)),
+        ...Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`, STALE_CANCEL_CONSEQUENCE)),
       ],
       since: c.recordedAt, fingerprint: ['reverify-stale', expected, c.sha, c.recordId ?? 'none'].join('|'),
     });

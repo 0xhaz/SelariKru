@@ -6,7 +6,7 @@ import { formatAge } from '@selarikru/ui';
  * Design section 4, highest first, with `blocked` added just above information for block reasons outside the design's list. The view never
  * reorders this; reordering changes the meaning of the queue.
  */
-export const ATTENTION_ORDER = ['policy_incident', 'failed_gate', 'decision', 'worker_lost', 'budget_resource', 'blocked', 'information'] as const;
+export const ATTENTION_ORDER = ['policy_incident', 'failed_gate', 'stale_record', 'decision', 'worker_lost', 'budget_resource', 'blocked', 'information'] as const;
 export type AttentionKind = (typeof ATTENTION_ORDER)[number];
 
 export interface AttentionItem {
@@ -281,7 +281,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
   for (const run of Object.values(snapshot.runs)) {
     if (hasStaleRecord(run)) {
       items.push(make({
-        id: `stale-record:${run.runId}`, decisionId: `reverify:${run.runId}`, kind: 'failed_gate', code: 'record_no_longer_valid', since: run.evidence!.candidate!.recordedAt, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => t.taskId), owner: 'You',
+        id: `stale-record:${run.runId}`, decisionId: `reverify:${run.runId}`, kind: 'stale_record', code: 'record_no_longer_valid', since: run.evidence!.candidate!.recordedAt, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => t.taskId), owner: 'You',
         title: 'Verification record no longer valid', detail: 'The verifier, its suite or the stored record changed after this candidate was judged, so its passes do not count.',
         consequence: 'No pull request can open on this candidate.', nextAction: 'Re-verify the run, or replan or cancel its tasks.',
       }));
