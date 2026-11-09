@@ -82,6 +82,24 @@ describe('POST /v1/projects/:id/model-assignments', () => {
     expect((await post(empty.app, url, body({ selection: SONNET, idempotencyKey: 'k9' }))).body.error.code).toBe('unsupported_model');
   });
 
+  it('writes a runner\'s harness report only when it changed', async () => {
+    const { token, runnerId } = await enrolRunner(h.app);
+    const version = async () => String((await t.db.execute(sql`SELECT xmin::text AS v FROM runners WHERE runner_id = ${runnerId}`))[0]!['v']);
+    const claim = (harnesses: unknown) => post(h.app, '/v1/runners/claim', { harnesses }, bearer(token));
+    const start = await version();
+    // Same content in another order: jsonb and the wire disagree about key order, and that is not a change.
+    expect((await claim(TEST_RUNNER_REPORT.map((r) => ({ models: [...r.models].reverse(), harnessVersion: r.harnessVersion, provider: r.provider })))).status).toBe(200);
+    await claim(TEST_RUNNER_REPORT);
+    expect(await version()).toBe(start);
+    await claim([{ provider: 'anthropic', harnessVersion: '9.9.9', models: ['claude-opus-5-5'] }]);
+    const changed = await version();
+    expect(changed).not.toBe(start);
+    await claim([{ provider: 'anthropic', harnessVersion: '9.9.9', models: ['claude-opus-5-5'] }]);
+    expect(await version()).toBe(changed);
+    const stored = (await t.db.execute(sql`SELECT harness_report FROM runners WHERE runner_id = ${runnerId}`))[0]!['harness_report'];
+    expect(stored).toEqual([{ provider: 'anthropic', harnessVersion: '9.9.9', models: ['claude-opus-5-5'] }]);
+  });
+
   it('a task override is looked up in this project only', async () => {
     await seedTask(t.db, specFor('t1'));
     const other = await post(h.app, url.replace(PROJECT, 'proj_b'), body({ scope: 'task', key: 't1' }));

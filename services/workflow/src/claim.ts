@@ -185,6 +185,8 @@ interface ResolvedSources {
   readonly sources: Source[];
   /** The strongest label across the project, the task, its predecessors and every referenced artifact. */
   readonly classification: Classification;
+  /** The same, but a contract reference that cannot be labelled counts as `secret`: whether a model may read it cannot wait for a label nobody can give. */
+  readonly routeClassification: Classification;
 }
 
 const MAX_PREDECESSORS = 500;
@@ -247,11 +249,13 @@ async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<Res
   const labelOf = (r: { artifactId: string; sha256: string }): string | undefined => stored.find((a) => a.id === r.artifactId && a.sha === r.sha256)?.label;
 
   let classification = repo;
+  let unlabelled = false;
   const sources: Source[] = [];
   for (const r of spec.contractRefs) {
     const label = labelOf(r);
     sources.push({ id: `artifact:${r.artifactId}`, classification: label as Classification | undefined });
     if (label !== undefined) classification = strongest(classification, label as Classification);
+    else unlabelled = true;
   }
   for (const r of preds.flat()) {
     const label = labelOf(r);
@@ -259,7 +263,7 @@ async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<Res
     repo = strongest(repo, (label ?? 'secret') as Classification);
   }
   classification = strongest(classification, repo);
-  return { sources: [{ id: `repo:${spec.projectId}`, classification: repo }, ...sources], classification };
+  return { sources: [{ id: `repo:${spec.projectId}`, classification: repo }, ...sources], classification, routeClassification: unlabelled ? 'secret' : classification };
 }
 
 async function latestRevision(tx: Tx, key: TaskKey): Promise<number | null> {
@@ -379,7 +383,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
   const assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);
   if (!assigned.ok) {
-    await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
+    // Only a fact about the task is recorded. "This runner lacks it" while another has it is about the poller, and recording it would grow the log at poll rate.
+    if (!assigned.runnerOnly) await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
     return { reason: `model_blocked:${assigned.reason}` };
   }
   const hold = worstCaseHold(toMicros(spec.limits.maxCostUsd), assigned.assignment, ctx.catalog ?? NO_HARNESS_CATALOG, ctx.policy);
@@ -391,7 +396,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const cfg = runPlacement(ctx, c);
   const resolved = await resolveSources(tx, key, spec);
   // Placement decides where the worker runs; this decides where its model calls may go. The two are judged separately, and a local sandbox does not make a cloud model local.
-  const refusedRoute = routeRefusal(assigned.assignment, resolved.classification);
+  const refusedRoute = routeRefusal(assigned.assignment, resolved.routeClassification);
   if (refusedRoute !== null) {
     await recordBlock(tx, key, c, statusRow, refusedRoute, null, now);
     return { reason: `model_blocked:${refusedRoute}` };

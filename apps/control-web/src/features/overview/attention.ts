@@ -95,11 +95,19 @@ export function explain(code: string): string {
   return `${sentence(bare)}.`;
 }
 
-const MODEL_BLOCKS = ['no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'model_not_assigned', 'trial_model_not_pinned', 'model_not_on_runner', 'model_route_unknown', 'model_mismatch', 'model_unverified'];
+const MODEL_BLOCKS = ['no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'model_not_assigned', 'trial_model_not_pinned', 'model_not_on_runner', 'model_route_unknown'];
 const RESTRICTED_MODEL = 'restricted_requires_device_model';
 const RESTRICTED_NEXT = 'No device model is available yet, so this cannot run. Replan it without the restricted data, or cancel it.';
 const MODEL_NEXT = 'Choose a supported model in Team, then let it retry.';
-const isModelBlock = (code: string): boolean => MODEL_BLOCKS.some((m) => stripPrefix(code).startsWith(m));
+/** Choosing another model cannot fix these. The first two are what a runner found while the attempt ran; the last needs a runner, not a choice. */
+const NO_PROVIDER_NEXT = 'Connect a runner on a machine with a supported harness installed.';
+const RUN_FAULT_NEXT = 'Replan or cancel this task.';
+const modelNextAction = (code: string): string | null => {
+  const bare = stripPrefix(code);
+  if (bare.startsWith('no_provider_detected')) return NO_PROVIDER_NEXT;
+  if (bare.startsWith('model_mismatch') || bare.startsWith('model_unverified')) return RUN_FAULT_NEXT;
+  return MODEL_BLOCKS.some((m) => bare.startsWith(m)) ? MODEL_NEXT : null;
+};
 
 export type BlockClass = 'decision' | 'repair' | 'budget' | 'wait' | 'policy' | 'blocked';
 
@@ -185,11 +193,11 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[]):
       return make({
         ...base, kind: 'policy_incident', title: `${name}: blocked by policy`, detail: explain(code),
         consequence: `${whoWaits(hit)} Nothing is moved around the policy, and there is no bypass.`,
-        nextAction: code.includes(RESTRICTED_MODEL) ? RESTRICTED_NEXT : isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : isModelBlock(code) ? MODEL_NEXT : 'Review the effective policy for this task.',
+        nextAction: code.includes(RESTRICTED_MODEL) ? RESTRICTED_NEXT : isRestrictedDenial(code) ? 'Run it in a local sandbox with a device model only.' : modelNextAction(code) ?? 'Review the effective policy for this task.',
       });
     case 'blocked': {
       // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
-      const nextAction = isModelBlock(code) ? MODEL_NEXT : code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.';
+      const nextAction = modelNextAction(code) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.');
       return make({
         ...base, kind: 'blocked', title: `${name}: blocked`, detail: explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction,
       });

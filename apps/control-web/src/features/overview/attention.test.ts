@@ -286,3 +286,27 @@ describe('attention queue', () => {
     });
   });
 });
+
+describe('next action for model blocks', () => {
+  const next = (code: string) => buildAttention(placed(code), NOW, NOW).find((i) => i.code === code)?.nextAction;
+  const nextBlocked = (code: string) => buildAttention(blockedBy(code), NOW, NOW).find((i) => i.code === code)?.nextAction;
+
+  it('sends only choices a person can make in Team to Team', () => {
+    expect(next('unsupported_model:anthropic/x')).toMatch(/Choose a supported model in Team/);
+    expect(next('model_not_on_runner:anthropic/x')).toMatch(/Choose a supported model in Team/);
+  });
+
+  it('needs a runner, not a choice, when no provider is detected', () => {
+    const action = next('no_provider_detected:anthropic/x');
+    expect(action).toBe('Connect a runner on a machine with a supported harness installed.');
+    expect(action).not.toMatch(/Team/);
+  });
+
+  it('a block a runner published is replanned or cancelled', () => {
+    for (const code of ['model_mismatch: recorded a, the stream reports b', 'model_unverified: recorded a, the stream never reported a model']) expect(nextBlocked(code), code).toBe('Replan or cancel this task.');
+  });
+
+  it('a restricted task is told no device model exists', () => {
+    expect(next('restricted_requires_device_model:anthropic/x')).toMatch(/No device model is available yet/);
+  });
+});

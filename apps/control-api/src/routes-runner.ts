@@ -16,6 +16,10 @@ const runnerOf = (req: FastifyRequest): Runner => {
   return { runnerId: p.runnerId, tenantId: p.tenantId, location: p.location };
 };
 
+/** Independent of order, and of the key order jsonb stores. */
+const reportKey = (reports: readonly { provider: string; harnessVersion: string | null; models: readonly string[] }[]): string =>
+  JSON.stringify(reports.map((r) => [r.provider, r.harnessVersion, [...r.models].sort()]).sort());
+
 const conflict = (c: LeaseConflict): AppError =>
   new AppError(409, 'lease_conflict', 'the lease is not current', { reason: c.reason, taskId: c.taskId, attemptId: c.attemptId, fence: c.fence });
 
@@ -67,8 +71,10 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const runner = runnerOf(req);
     const body = parseBody(ClaimRequestSchema, req.body);
     const where = and(eq(schema.runners.tenantId, runner.tenantId), eq(schema.runners.runnerId, runner.runnerId));
-    if (body.harnesses !== undefined) await db.update(schema.runners).set({ harnessReport: body.harnesses }).where(where);
-    const harnesses = body.harnesses ?? (await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(where))[0]?.report ?? [];
+    const stored = (await db.select({ report: schema.runners.harnessReport }).from(schema.runners).where(where))[0]?.report ?? null;
+    // Claims arrive at poll rate; an unchanged report writes nothing.
+    if (body.harnesses !== undefined && (stored === null || reportKey(stored) !== reportKey(body.harnesses))) await db.update(schema.runners).set({ harnessReport: body.harnesses }).where(where);
+    const harnesses = body.harnesses ?? stored ?? [];
     const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
     if (outcome.ok) return reply.code(200).send({ lease: outcome.lease, reason: null, skipped: outcome.skipped });
     return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped });

@@ -228,6 +228,34 @@ describe('model assignments', () => {
       expect((await sched.tryClaim(runner('r1', 'local'), CAPS)).skipped[0]!.reason).toMatch(/^model_blocked:restricted_requires_device_model/);
     });
 
+    describe('a contract reference that cannot be labelled counts as secret for the route', () => {
+      const SHA = 'a'.repeat(64);
+      const refused = async () => {
+        const out = await sched.tryClaim(runner('r1', 'local'), CAPS);
+        expect(out.ok).toBe(false);
+        expect(out.skipped[0]!.reason).toBe('model_blocked:restricted_requires_device_model:anthropic/claude-sonnet-5-5');
+        expect(await countRows(t.db, 'attempts')).toBe(0);
+        expect(await countRows(t.db, 'budget_reservations')).toBe(0);
+      };
+
+      it('an artifact that does not exist', async () => {
+        await seedTask(t.db, specFor('t1', { classification: 'internal', contractRefs: [{ artifactId: 'ghost', sha256: SHA }] }));
+        await refused();
+      });
+
+      it('an artifact whose stored digest does not match, even one labelled public', async () => {
+        await t.db.insert(schema.artifacts).values({ tenantId: TENANT, projectId: PROJECT, artifactId: 'a1', type: 'contract', sha256: 'b'.repeat(64), classification: 'public' });
+        await seedTask(t.db, specFor('t1', { classification: 'internal', contractRefs: [{ artifactId: 'a1', sha256: SHA }] }));
+        await refused();
+      });
+
+      it('a labelled reference still claims on a cloud model', async () => {
+        await t.db.insert(schema.artifacts).values({ tenantId: TENANT, projectId: PROJECT, artifactId: 'a2', type: 'contract', sha256: SHA, classification: 'internal' });
+        await seedTask(t.db, specFor('t1', { classification: 'internal', contractRefs: [{ artifactId: 'a2', sha256: SHA }] }));
+        expect((await sched.tryClaim(runner('r1', 'local'), CAPS)).ok).toBe(true);
+      });
+    });
+
     it('restricted work on a device model can run', async () => {
       await seedTask(t.db, specFor('t1', { classification: 'restricted', execution: 'local' }));
       await assign('role', 'backend', DEVICE);
@@ -253,6 +281,49 @@ describe('model assignments', () => {
     const able = await sched.tryClaim(runner('r3'), CAPS);
     expect(able.ok).toBe(true);
     expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBeNull();
+  });
+
+  describe('polling runners do not grow the log', () => {
+    const enrol = async (runnerId: string, models: string[], location: 'local' | 'cloud' = 'local') => {
+      const harnesses = [{ provider: 'anthropic', harnessVersion: '2.1.316', models }];
+      await t.db.insert(schema.runners).values({ tenantId: TENANT, runnerId, location, tokenHash: `hash-${runnerId}`, harnessReport: harnesses });
+      return { ...runner(runnerId, location), harnesses };
+    };
+    const rowRevision = async () => (await t.db.select().from(schema.taskStatus))[0]!.rowRevision;
+    beforeEach(async () => { await t.db.delete(schema.runners); });
+
+    it('mixed runners: one lacks the model, another has it but cannot take the task, and nothing is written', async () => {
+      await seedTask(t.db, specFor('t1', { execution: 'local' }));
+      const lacks = await enrol('a', ['claude-opus-5-5']);
+      const has = await enrol('b', ['claude-sonnet-5-5'], 'cloud');
+      const before = await rowRevision();
+      for (let i = 0; i < 4; i += 1) {
+        expect((await sched.tryClaim(lacks, CAPS)).skipped[0]!.reason).toBe('model_blocked:model_not_on_runner:anthropic/claude-sonnet-5-5');
+        expect((await sched.tryClaim(has, CAPS)).ok).toBe(false);
+      }
+      expect(await rowRevision()).toBe(before);
+      expect(await eventTypes(t.db)).toEqual([]);
+      expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBeNull();
+    });
+
+    it('when no runner has the model it is recorded once, however many poll', async () => {
+      await seedTask(t.db, specFor('t1'));
+      const a = await enrol('a', ['claude-opus-5-5']);
+      const b = await enrol('b', ['claude-haiku-5-5']);
+      for (let i = 0; i < 4; i += 1) { await sched.tryClaim(a, CAPS); await sched.tryClaim(b, CAPS); }
+      expect(await eventTypes(t.db)).toEqual(['placement.blocked']);
+      expect(await rowRevision()).toBe(1);
+      expect((await t.db.select().from(schema.taskStatus))[0]!.placementBlock).toBe('model_not_on_runner:anthropic/claude-sonnet-5-5');
+    });
+
+    it('a revoked runner does not count as having the model', async () => {
+      await seedTask(t.db, specFor('t1'));
+      const lacks = await enrol('a', ['claude-opus-5-5']);
+      await enrol('gone', ['claude-sonnet-5-5']);
+      await t.db.update(schema.runners).set({ revokedAt: clock.now() }).where(eq(schema.runners.runnerId, 'gone'));
+      await sched.tryClaim(lacks, CAPS);
+      expect(await eventTypes(t.db)).toEqual(['placement.blocked']);
+    });
   });
 
   it('validateSelection is the single check, and policy has the last word', () => {

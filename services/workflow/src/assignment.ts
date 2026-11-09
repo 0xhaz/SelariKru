@@ -27,7 +27,8 @@ const blockCode = (reason: ModelRefusalReason, selection: ModelSelection): strin
 
 export type ResolvedAssignment =
   | { readonly ok: true; readonly assignment: RecordedAssignment }
-  | { readonly ok: false; readonly reason: string };
+  /** `runnerOnly`: another unrevoked runner can launch this model, so the refusal says nothing about the task itself. */
+  | { readonly ok: false; readonly reason: string; readonly runnerOnly?: boolean };
 
 /** The current row per scope and key: the highest revision. A removed assignment reads as null. */
 async function currentRows(db: Executor, tenantId: string, projectId: string, wanted: readonly { readonly scope: 'role' | 'task'; readonly key: string }[]): Promise<Map<string, ModelSelection>> {
@@ -69,7 +70,10 @@ export async function resolveAssignment(ctx: SchedulerContext, db: Executor, key
   const verdict = validateSelection(selection, declared, ctx.policy);
   if (!verdict.ok) return { ok: false, reason: blockCode(verdict.reason, selection) };
   // Declared and allowed is not enough: this runner has to be able to launch it.
-  if (findCatalogModel(availableCatalog(declared, runnerReport), selection).model === null) return { ok: false, reason: blockCode('model_not_on_runner', selection) };
+  if (findCatalogModel(availableCatalog(declared, runnerReport), selection).model === null) {
+    const elsewhere = findCatalogModel(availableCatalog(declared, await loadRunnerReports(db, key.tenantId)), selection).model !== null;
+    return { ok: false, reason: blockCode('model_not_on_runner', selection), runnerOnly: elsewhere };
+  }
   return { ok: true, assignment: { ...selection, source, route: verdict.model.route } };
 }
 

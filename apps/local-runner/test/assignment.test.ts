@@ -82,6 +82,8 @@ describe('assigned model reaches the harness', () => {
   it('a runner sends its report with each claim, and one without the model is refused', async () => {
     const world = (w = await makeWorld({}));
     await seedTask(t.db, specFor('t1', { baseSha: world.sha, allowedPaths: ['src'] }), 'ready');
+    // Runners enrolled by earlier tests still report the model; this one must be the only runner.
+    await t.db.execute(sql`DELETE FROM runners`);
     const { app, api, runnerId } = await apiFor();
     try {
       const without = await api.claim([{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-haiku-5-5'] }]);
