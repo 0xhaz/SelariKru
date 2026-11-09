@@ -4,6 +4,8 @@ import { buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@sela
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
+import { TeamView } from '../features/team/TeamView.tsx';
+import { buildTeam, type TeamModel } from '../features/team/model.ts';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hrefFor, useRoute, type Route } from './route.ts';
@@ -29,11 +31,13 @@ export interface AppShellProps {
 
 const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Overview', route: 'overview' },
-  { label: 'Team', route: null },
+  { label: 'Team', route: 'team' },
   { label: 'Pipeline', route: null },
   { label: 'Decisions', route: null },
   { label: 'Assistant', route: 'assistant' },
 ];
+
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', assistant: 'Assistant' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -111,6 +115,15 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
     }
   }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   const overview = built.overview;
+  // Same containment as the overview: a snapshot that cannot be read fails this route, not the shell.
+  const builtTeam = useMemo((): { team: TeamModel | null; failure?: unknown } => {
+    if (route !== 'team' || !snapshot) return { team: null };
+    try {
+      return { team: buildTeam(snapshot, state.nowMs, liveness, { lastConfirmedMs: state.livenessAsOfMs, stale }) };
+    } catch (failure) {
+      return { team: null, failure };
+    }
+  }, [route, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
@@ -124,7 +137,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
     document.getElementById('main')?.focus();
   }, [route]);
   useEffect(() => {
-    document.title = route === 'assistant' ? 'Assistant · SelariKru' : 'Mission Control · SelariKru';
+    document.title = `${TITLES[route]} · SelariKru`;
   }, [route]);
 
   const showCount = overview !== null && !overview.empty;
@@ -189,6 +202,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, devPan
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
             <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+          </RouteBoundary>
+        ) : null}
+        {route === 'team' ? (
+          <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`}>
+            <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
           </RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}

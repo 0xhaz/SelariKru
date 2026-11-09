@@ -34,7 +34,7 @@ export interface AttentionItem {
 
 const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merged', 'verified'];
 const titleOf = (t: TaskView): string => t.title ?? t.taskId;
-const sentence = (code: string): string => {
+export const sentence = (code: string): string => {
   const words = code.replace(/[_:]+/g, ' ').trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
@@ -58,7 +58,7 @@ const EXPLAIN: Readonly<Record<string, string>> = {
   execution_conflicts_with_role_pin: 'The task\'s execution setting conflicts with where its role is pinned.',
 };
 
-function explain(code: string): string {
+export function explain(code: string): string {
   const bare = stripPrefix(code);
   const known = EXPLAIN[bare];
   if (known) return known;

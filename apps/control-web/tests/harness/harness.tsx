@@ -5,7 +5,9 @@ import { createRoot } from 'react-dom/client';
 import { RestrictedDraftHold, type AssistRequest, type AssistantProposal, type Readiness } from '@selarikru/inference-firebase-web';
 import { AssistantPanel, createApiClient, useAssistantStore, type ApiResult, type AssistantApi, type AssistantPort } from '../../src/features/assistant/index.ts';
 import { AppShell } from '../../src/shell/AppShell.tsx';
-import { createProjectionStore } from '../../src/shell/projection-store.ts';
+import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
+import { loadDemoSession } from '../../src/data-source/demo.ts';
+import type { EngineeringDataSource } from '@selarikru/view-protocol';
 import '../../src/index.css';
 
 type Op = 'draftBrief' | 'suggestCriteria' | 'draftTaskPlan';
@@ -29,12 +31,15 @@ interface Scenario {
   shell?: boolean;
   /** Makes the assistant route fail, to exercise the route's error boundary. */
   assistantFails?: 'render' | 'chunk';
+  /** Mount the shell on the mock source with its command methods wrapped in spies, recording to `window.__calls.commands`. */
+  spiedFixture?: string;
 }
 
 declare global {
   interface Window {
     __scenario?: Scenario;
-    __calls: { adapter: unknown[]; api: unknown[] };
+    __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[] };
+    __spiedSource?: EngineeringDataSource;
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
     __store: typeof useAssistantStore;
@@ -43,7 +48,7 @@ declare global {
 }
 
 const sc: Scenario = window.__scenario ?? {};
-window.__calls = { adapter: [], api: [] };
+window.__calls = { adapter: [], api: [], commands: [] };
 let device: Readiness['device'] = sc.device ?? 'available';
 
 const gate = (): { p: Promise<void>; release: () => void } => {
@@ -154,8 +159,40 @@ const ChunkFail = lazy(() => Promise.reject(new Error('Failed to fetch dynamical
 const panel = sc.assistantFails === 'render' ? <Boom /> : sc.assistantFails === 'chunk' ? <ChunkFail /> : <AssistantPanel adapter={adapter} api={sc.noApi ? null : api} hold={hold} defaults={{ projectId: 'proj-1', runId: 'run-1' }} />;
 const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: { nowMs: () => Date.now() }, every: () => () => {} });
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    {sc.shell ? <AppShell store={store} mode="live" projectLabel="proj-1" account={{ label: 'owner@example.test', onSignOut: () => {} }} assistant={panel} /> : panel}
-  </StrictMode>,
-);
+/** The demo source with `execute` and `openTerminal` spied. Everything else passes through. */
+async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; label: string }> {
+  const session = (await loadDemoSession(null))!;
+  const project = session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!;
+  const source: EngineeringDataSource = {
+    ...session.source,
+    execute: (command) => {
+      window.__calls.commands.push({ method: 'execute', command });
+      return session.source.execute(command);
+    },
+    openTerminal: (request) => {
+      window.__calls.commands.push({ method: 'openTerminal', request });
+      return session.source.openTerminal(request);
+    },
+  };
+  window.__spiedSource = source;
+  const spied = createProjectionStore({ source, projectId: project.projectId, clock: session.clockFor(project.projectId), every: session.every });
+  spied.getState().start();
+  return { store: spied, label: project.name };
+}
+
+const root = createRoot(document.getElementById('root')!);
+if (sc.spiedFixture) {
+  void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
+    root.render(
+      <StrictMode>
+        <AppShell store={spied} mode="mock" projectLabel={label} assistant={null} />
+      </StrictMode>,
+    );
+  });
+} else {
+  root.render(
+    <StrictMode>
+      {sc.shell ? <AppShell store={store} mode="live" projectLabel="proj-1" account={{ label: 'owner@example.test', onSignOut: () => {} }} assistant={panel} /> : panel}
+    </StrictMode>,
+  );
+}

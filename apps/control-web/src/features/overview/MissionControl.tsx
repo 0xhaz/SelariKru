@@ -1,7 +1,6 @@
-import { useId } from 'react';
-import { AxisBadges, Chip, EmptyState, Panel, Timestamp, buttonPrimary, buttonQuiet, formatAge, formatClock, formatCount, formatDuration, formatExact, formatUsd, toneGlyph, type Tone } from '@selarikru/ui';
+import { AxisBadges, Chip, EmptyState, Panel, Timestamp, formatAge, formatClock, formatCount, formatDuration, formatExact, formatUsd, toneGlyph, type Tone } from '@selarikru/ui';
 import type { DataSourceError, ProjectViewSnapshot, UsageTotal } from '@selarikru/view-protocol';
-import { hrefFor } from '../../shell/route.ts';
+import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import type { AttentionItem, AttentionKind } from './attention.ts';
 import type { CriterionCell, DeliveryModel, EvidenceRow, FleetModel, OverviewModel, UsageModel } from './model.ts';
@@ -247,13 +246,6 @@ function ResourcesPanel({ model }: { model: UsageModel }) {
   );
 }
 
-/** The way forward from an empty or unavailable screen. Under demo data the assistant is off, so that link would be a dead end. */
-function NextStep({ mode, leaveDemoHref, primary }: { mode: 'mock' | 'live'; leaveDemoHref?: string | undefined; primary?: boolean }) {
-  const cls = primary ? buttonPrimary : buttonQuiet;
-  if (mode === 'mock') return leaveDemoHref ? <a className={cls} href={leaveDemoHref}>Leave demo mode</a> : null;
-  return <a className={cls} href={hrefFor('assistant')}>Open the Assistant</a>;
-}
-
 function EmptyProject({ mode, leaveDemoHref }: { mode: 'mock' | 'live'; leaveDemoHref?: string | undefined }) {
   return (
     <section aria-label="Project setup" className="rounded-card border border-line bg-panel">
@@ -262,26 +254,6 @@ function EmptyProject({ mode, leaveDemoHref }: { mode: 'mock' | 'live'; leaveDem
           ? <p>This demo project has no run. Choose another fixture in the demo controls below, or leave demo mode to start real work in the Assistant.</p>
           : <p>Start by drafting acceptance criteria and a task plan. Mission Control fills in once a plan is accepted and work begins.</p>}
       </EmptyState>
-    </section>
-  );
-}
-
-const STATE_COPY = {
-  unavailable: { live: 'Live project data is not connected to this build yet. No demo or placeholder data is shown in its place.', mock: 'The demo source did not return a snapshot.' },
-};
-
-function ConnectionBanner({ connection, error, onRestart, observedAt }: { connection: ConnectionState; error: DataSourceError | null; onRestart: () => void; observedAt: string | null }) {
-  const headingId = useId();
-  if (connection !== 'reconnecting' && connection !== 'dead') return null;
-  const dead = connection === 'dead';
-  return (
-    <section aria-labelledby={headingId} className={`mb-4 rounded-chip border border-l-4 p-3 ${dead ? 'border-danger bg-danger-tint' : 'border-warning bg-warning-tint'}`} data-testid="connection-banner">
-      <h2 id={headingId} className={`font-medium ${dead ? 'text-danger' : 'text-warning'}`}>{dead ? 'The event stream stopped' : 'Reconnecting to the event stream'}</h2>
-      <p className="mt-0.5 text-fg">
-        {dead ? 'What you see is frozen at the last confirmed state' : 'Showing the last confirmed state'}{observedAt ? ` from ${formatClock(observedAt)}` : ''}. Worker health reads as unknown, and no action is taken on stale data.
-      </p>
-      {error ? <p className="mt-1 text-sm text-muted">Error category <span className="font-mono text-mono">{error.code}</span>{error.retryable ? ', retrying' : ', not retryable'}</p> : null}
-      {dead ? <button type="button" className={`${buttonQuiet} mt-2`} onClick={onRestart}>Restart session</button> : null}
     </section>
   );
 }

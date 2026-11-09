@@ -37,7 +37,7 @@ export interface FleetRow {
   readonly taskTitle: string | null;
   /** `reported` is false when nothing has said what the worker is doing, so the view can keep that quiet. */
   readonly activity: { readonly label: string; readonly tone: Tone; readonly reported: boolean };
-  readonly health: { readonly state: WorkerHealthReading['health']; readonly label: string; readonly tone: Tone };
+  readonly health: WorkerHealthDisplay;
   readonly heartbeatAgeMs: number | null;
   /** The last time this worker's state was confirmed, for "state last confirmed at". */
   readonly lastConfirmedAt: string;
@@ -47,7 +47,7 @@ export interface FleetRow {
 
 export interface FleetModel {
   readonly rows: readonly FleetRow[];
-  readonly summary: { readonly working: number; readonly waiting: number; readonly idle: number; readonly lost: number };
+  readonly summary: FleetSummary;
 }
 
 export interface EvidenceRow {
@@ -109,7 +109,7 @@ const CELL: Readonly<Partial<Record<TaskView['status'], CriterionCell>>> = {
 };
 const ORDER: readonly TaskView['status'][] = ['failed', 'blocked', 'awaiting_approval', 'running', 'verifying', 'ready', 'planned', 'verified', 'merged', 'cancelled', 'superseded'];
 
-function taskRow(t: TaskView): TaskRow {
+export function taskRow(t: TaskView): TaskRow {
   const placed = t.placementBlock !== null;
   const s = STATUS[t.status];
   const label = placed ? 'Cannot be placed' : t.status === 'superseded' && t.supersededByRevision !== null ? `Superseded by revision ${t.supersededByRevision}` : s.label;
@@ -153,9 +153,9 @@ const ACTIVITY: Readonly<Record<NonNullable<WorkerView['activity']>, { label: st
   waiting_resource: { label: 'Waiting for capacity', tone: 'neutral' },
   blocked_policy: { label: 'Blocked by policy', tone: 'danger' },
 };
-const WAITING: readonly NonNullable<WorkerView['activity']>[] = ['waiting_dependency', 'waiting_human', 'waiting_resource', 'blocked_policy'];
+export const WAITING: readonly NonNullable<WorkerView['activity']>[] = ['waiting_dependency', 'waiting_human', 'waiting_resource', 'blocked_policy'];
 
-function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetRow['activity'] {
+export function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetRow['activity'] {
   if (w.availability === 'offline') return { label: 'Offline', tone: 'neutral', reported: true };
   if (w.activity === null) return w.availability === 'idle' ? { label: 'Idle', tone: 'neutral', reported: true } : { label: 'Activity not reported', tone: 'neutral', reported: false };
   if (w.activity === 'waiting_dependency' && w.blockedByTaskIds.length > 0) {
@@ -165,32 +165,62 @@ function activityOf(w: WorkerView, snapshot: ProjectViewSnapshot): FleetRow['act
   return { ...ACTIVITY[w.activity], reported: true };
 }
 
-const HEALTH: Readonly<Record<WorkerHealthReading['health'], { label: string; tone: Tone }>> = {
+/** `no_lease`: a worker that holds no attempt lease sends no heartbeat, so there is nothing to call healthy. */
+export type WorkerHealthState = WorkerHealthReading['health'] | 'no_lease';
+export interface WorkerHealthDisplay {
+  readonly state: WorkerHealthState;
+  readonly label: string;
+  readonly tone: Tone;
+}
+
+const HEALTH: Readonly<Record<WorkerHealthState, { label: string; tone: Tone }>> = {
   healthy: { label: 'Healthy', tone: 'success' },
   suspected_stall: { label: 'Connected; progress may be stalled', tone: 'warning' },
   disconnected: { label: 'Connection lost', tone: 'danger' },
   failed: { label: 'Failed', tone: 'danger' },
   unknown: { label: 'Health unknown', tone: 'warning' },
+  no_lease: { label: 'No lease held', tone: 'neutral' },
 };
 
-function fleet(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null): FleetModel {
+/** What a view may say about a worker's connection. `stale` means the session is not live, so nothing here can be called healthy. */
+export function workerHealthDisplay(w: WorkerView, reading: WorkerHealthReading, stale: boolean): WorkerHealthDisplay {
+  const state: WorkerHealthState = reading.health !== 'healthy' ? reading.health : stale ? 'unknown' : w.leaseHeld ? 'healthy' : 'no_lease';
+  return { state, ...HEALTH[state] };
+}
+
+export interface FleetSummary {
+  readonly working: number;
+  readonly waiting: number;
+  readonly idle: number;
+  readonly lost: number;
+}
+
+/** Counts the fleet. A loss already seen at the last confirmed time stays counted while the current reading is unknown. */
+export function countFleet(workers: readonly WorkerView[], nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null): FleetSummary {
   const summary = { working: 0, waiting: 0, idle: 0, lost: 0 };
-  const rows = Object.values(snapshot.workers).map((w): FleetRow => {
+  for (const w of workers) {
     const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
-    const task = w.taskId !== null ? snapshot.tasks[w.taskId] : undefined;
-    // The row stays honest about now (unknown); the summary keeps a loss already seen at the last confirmed time.
     const counted = reading.health === 'unknown' && lastConfirmedMs !== null ? effectiveWorkerHealth(w, lastConfirmedMs, lastConfirmedMs).health : reading.health;
     if (counted === 'disconnected' || counted === 'failed') summary.lost += 1;
     else if (w.activity !== null && WAITING.includes(w.activity)) summary.waiting += 1;
     else if (w.availability === 'idle') summary.idle += 1;
     else if (w.availability === 'assigned') summary.working += 1;
+  }
+  return summary;
+}
+
+function fleet(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, lastConfirmedMs: number | null, stale: boolean): FleetModel {
+  const workers = Object.values(snapshot.workers);
+  const rows = workers.map((w): FleetRow => {
+    const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
+    const task = w.taskId !== null ? snapshot.tasks[w.taskId] : undefined;
     return {
       workerId: w.workerId, role: task?.role ?? null, taskTitle: task ? (task.title ?? task.taskId) : null, activity: activityOf(w, snapshot),
-      health: { state: reading.health, ...HEALTH[reading.health] }, heartbeatAgeMs: reading.heartbeatAgeMs, lastConfirmedAt: w.lastHeartbeatAt ?? w.enteredStateAt,
+      health: workerHealthDisplay(w, reading, stale), heartbeatAgeMs: reading.heartbeatAgeMs, lastConfirmedAt: w.lastHeartbeatAt ?? w.enteredStateAt,
       execution: w.execution, modelRoute: w.modelRoute,
     };
   });
-  return { rows, summary };
+  return { rows, summary: countFleet(workers, nowMs, livenessAsOfMs, lastConfirmedMs) };
 }
 
 const CHECK_STATE = { passed: { stateLabel: 'Passed', tone: 'success' }, failed: { stateLabel: 'Failed', tone: 'danger' }, running: { stateLabel: 'Running', tone: 'active' } } as const;
@@ -241,7 +271,7 @@ export interface OverviewOptions {
 export function buildOverview(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: OverviewOptions = {}): OverviewModel {
   const attention = buildAttention(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const needsYou = attention.filter((i) => i.needsOperator).length;
-  const fleetModel = fleet(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
+  const fleetModel = fleet(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null, options.stale === true);
   const workersUnknown = fleetModel.rows.some((r) => r.health.state === 'unknown');
   const stale = options.stale === true || workersUnknown;
 

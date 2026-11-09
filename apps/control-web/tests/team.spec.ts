@@ -1,0 +1,307 @@
+import AxeBuilder from '@axe-core/playwright';
+import { expect, test, type Page } from '@playwright/test';
+
+async function openTeam(page: Page, query = ''): Promise<void> {
+  await page.goto(`/?demo${query}#/team`);
+  await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
+}
+const fixture = (id: string): string => `&fixture=${id}`;
+const rows = (page: Page) => page.getByTestId('fleet-row');
+const rowOf = (page: Page, id: string) => page.locator(`[data-testid="fleet-row"][data-worker-id="${id}"]`);
+const drawer = (page: Page) => page.getByTestId('worker-drawer');
+
+async function openWorker(page: Page, id: string): Promise<void> {
+  await rowOf(page, id).locator(`[data-open-worker="${id}"]`).click();
+  await expect(drawer(page)).toBeVisible();
+}
+
+async function expectNoAxeViolations(page: Page): Promise<void> {
+  const { violations } = await new AxeBuilder({ page }).analyze();
+  expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+}
+
+test('the Team nav item is a real link and the page is titled', async ({ page }) => {
+  await page.goto('/?demo');
+  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Team' }).click();
+  await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
+  await expect(page).toHaveTitle('Team · SelariKru');
+  await expect(page.locator('#main')).toBeFocused();
+});
+
+test('activity, health and results render separately', async ({ page }) => {
+  await openTeam(page, fixture('failed-ci'));
+  const row = rows(page).first();
+  await expect(row.getByTestId('signal-activity')).toContainText('Idle');
+  await expect(row.getByTestId('signal-health')).toContainText('No lease held');
+  await expect(row.getByTestId('signal-results')).toContainText('Failed');
+  await expect(row.getByTestId('signal-results')).toContainText('3 of 41 tests failed');
+  // A failed check does not turn into a health problem, and idle is not a result.
+  await expect(row.getByTestId('signal-health')).not.toContainText('Failed');
+  await expect(row.getByTestId('signal-results')).not.toContainText('Idle');
+});
+
+test('null activity renders exactly once, muted, and is never guessed', async ({ page }) => {
+  await openTeam(page, fixture('healthy-parallel-work'));
+  const activity = rowOf(page, 'runner_local_1').getByTestId('signal-activity');
+  await expect(activity).toHaveText('Activity not reported');
+  await expect(activity.locator('.text-muted')).toHaveCount(1);
+  await expect(rows(page).first().getByText('Activity not reported')).toHaveCount(1);
+});
+
+test('runtime and inference badges independent, including local worker with cloud model', async ({ page }) => {
+  await openTeam(page, fixture('healthy-parallel-work'));
+  const local = rowOf(page, 'runner_local_1');
+  await expect(local).toContainText('Local sandbox');
+  await expect(local).toContainText('Model in cloud');
+  const cloud = rowOf(page, 'runner_cloud_1');
+  await expect(cloud).toContainText('Cloud sandbox');
+  await expect(cloud).toContainText('Model in cloud');
+  await openWorker(page, 'runner_local_1');
+  await expect(drawer(page)).toContainText('Local sandbox');
+  await expect(drawer(page)).toContainText('Model in cloud');
+});
+
+test('disconnected keeps last-confirmed state with stale label', async ({ page }) => {
+  await openTeam(page, fixture('runner-loss'));
+  const row = rowOf(page, 'runner_local_1');
+  await expect(row).toContainText('Connection lost');
+  await expect(row.getByTestId('stale-label')).toContainText('Stale');
+  await expect(row).toContainText('State last confirmed');
+  await expect(row).toContainText('Feedback API');
+  await expect(row).toContainText('Local sandbox');
+  // Nothing invented: no activity, no result, and not shown healthy.
+  await expect(row.getByTestId('signal-activity')).toHaveText('Activity not reported');
+  await expect(row).not.toContainText('Healthy');
+  await openWorker(page, 'runner_local_1');
+  await expect(drawer(page).getByTestId('drawer-summary')).toContainText('Connection lost');
+  await expect(drawer(page).getByTestId('drawer-confirmed')).toContainText('2026');
+});
+
+test('a stale session labels every worker and claims no health', async ({ page }) => {
+  await openTeam(page, `${fixture('human-wait')}&fault=reconnecting`);
+  await expect(page.getByTestId('connection-banner')).toContainText('Reconnecting');
+  await expect(page.getByTestId('team-summary')).toContainText('Last confirmed');
+  const count = await rows(page).count();
+  expect(count).toBeGreaterThan(0);
+  await expect(page.getByTestId('stale-label')).toHaveCount(count);
+  for (let i = 0; i < count; i += 1) await expect(rows(page).nth(i).getByTestId('signal-health')).toContainText('Health unknown');
+  await expect(page.getByRole('main')).not.toContainText('Healthy');
+});
+
+test('a dead session offers a restart and keeps workers labelled', async ({ page }) => {
+  await openTeam(page, '&fault=dead');
+  await expect(page.getByTestId('connection-banner')).toContainText('The event stream stopped');
+  await expect(rows(page).first()).toContainText('Health unknown');
+  await page.getByRole('button', { name: 'Restart session' }).click();
+  await expect(page.getByTestId('connection-banner')).toHaveCount(0);
+  await expect(page.getByTestId('stale-label')).toHaveCount(0);
+});
+
+test('unknown inference never shows Device', async ({ page }) => {
+  await openTeam(page, fixture('unknown-costs'));
+  const row = rowOf(page, 'runner_cloud_1');
+  await expect(row).toContainText('Model route unknown');
+  await expect(row).not.toContainText(/device/i);
+  await openWorker(page, 'runner_cloud_1');
+  await expect(drawer(page)).toContainText('Model route unknown');
+  await expect(drawer(page)).not.toContainText(/device/i);
+});
+
+test('drawer opens to Task, focus returns on close', async ({ page }) => {
+  await openTeam(page, fixture('human-wait'));
+  const opener = rowOf(page, 'runner_local_1').locator('[data-open-worker="runner_local_1"]');
+  await opener.focus();
+  await page.keyboard.press('Enter');
+  const taskTab = drawer(page).getByRole('tab', { name: 'Task' });
+  await expect(taskTab).toHaveAttribute('aria-selected', 'true');
+  await expect(taskTab).toBeFocused();
+  await expect(drawer(page).getByRole('tab', { name: 'Terminal' })).toHaveCount(0);
+  await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Add feedback table');
+
+  // Focus stays within the drawer: nothing behind it can be reached.
+  for (let i = 0; i < 25; i += 1) {
+    await page.keyboard.press('Tab');
+    const outside = await page.evaluate(() => {
+      const active = document.activeElement;
+      const dialog = document.querySelector('dialog');
+      return active !== null && active !== document.body && dialog !== null && !dialog.contains(active);
+    });
+    expect(outside).toBe(false);
+  }
+
+  await page.keyboard.press('Escape');
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(opener).toBeFocused();
+
+  // And by the Close button.
+  await opener.click();
+  await drawer(page).getByRole('button', { name: 'Close' }).click();
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(opener).toBeFocused();
+});
+
+test('tabs follow the arrow keys and show exact times', async ({ page }) => {
+  await openTeam(page, fixture('failed-ci'));
+  await openWorker(page, 'runner_local_1');
+  await page.keyboard.press('ArrowRight');
+  const timeline = drawer(page).getByRole('tab', { name: 'Timeline' });
+  await expect(timeline).toBeFocused();
+  await expect(timeline).toHaveAttribute('aria-selected', 'true');
+  await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Check failed');
+  await expect(drawer(page).getByTestId('drawer-panel').locator('time').first()).toContainText('2026');
+  await page.keyboard.press('End');
+  await expect(drawer(page).getByRole('tab', { name: 'Usage' })).toBeFocused();
+  await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Estimated');
+});
+
+test('opening a worker is read-only', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' };
+  });
+  await page.goto('/tests/harness/index.html#/team');
+  await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
+  const commands = (): Promise<unknown[]> => page.evaluate(() => (window as unknown as { __calls: { commands: unknown[] } }).__calls.commands);
+
+  const count = await rows(page).count();
+  expect(count).toBeGreaterThan(0);
+  for (let i = 0; i < count; i += 1) {
+    await rows(page).nth(i).locator('[data-open-worker]').click();
+    for (const tab of ['Task', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) await drawer(page).getByRole('tab', { name: tab }).click();
+    await page.keyboard.press('Escape');
+    await expect(drawer(page)).toHaveCount(0);
+  }
+  expect(await commands()).toEqual([]);
+
+  // The spy works: a real command through the same source is recorded.
+  await page.evaluate(async () => {
+    const w = window as unknown as { __spiedSource: { execute(c: unknown): Promise<unknown> } };
+    await w.__spiedSource.execute({ command: 'task.cancel', expectedRevision: 0, idempotencyKey: 'control', args: { taskId: 'missing' } }).catch(() => undefined);
+  });
+  expect(await commands()).toHaveLength(1);
+});
+
+test('timestamps in rows are not tab stops; the exact time is in the drawer', async ({ page }) => {
+  await openTeam(page, fixture('runner-loss'));
+  await expect(rows(page).first().locator('time').first()).toBeVisible();
+  await expect(rows(page).first().locator('[tabindex]')).toHaveCount(0);
+  await openWorker(page, 'runner_local_1');
+  await expect(drawer(page).getByTestId('drawer-confirmed').locator('time')).toContainText('2026');
+});
+
+test('unknown costs read as unknown and never zero', async ({ page }) => {
+  await openTeam(page, fixture('unknown-costs'));
+  await expect(rowOf(page, 'runner_cloud_1').getByTestId('row-spend')).toContainText('Unavailable');
+  await expect(rowOf(page, 'runner_cloud_1')).not.toContainText('$0');
+  await expect(rowOf(page, 'runner_local_1').getByTestId('row-spend')).toContainText('estimated');
+  await openWorker(page, 'runner_cloud_1');
+  await drawer(page).getByRole('tab', { name: 'Usage' }).click();
+  await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Unavailable');
+  await expect(drawer(page).getByTestId('drawer-panel')).not.toContainText('$0');
+});
+
+test('sorting and filtering reorder and narrow the fleet, and say what is hidden', async ({ page }) => {
+  await openTeam(page, fixture('unknown-costs'));
+  await expect(rows(page)).toHaveCount(3);
+  await page.getByLabel('Runtime').selectOption('cloud');
+  await expect(rows(page)).toHaveCount(1);
+  await expect(page.getByTestId('filter-count')).toHaveText('Showing 1 of 3');
+  await page.getByLabel('Role').selectOption('backend');
+  await expect(page.getByText('No workers match these filters.')).toBeVisible();
+  await page.getByRole('button', { name: 'Clear filters' }).click();
+  await expect(rows(page)).toHaveCount(3);
+  await page.getByLabel('Sort by').selectOption('role');
+  await expect(page.locator('th[aria-sort="ascending"]')).toHaveText('Worker and task');
+});
+
+test('an empty project shows no invented workers', async ({ page }) => {
+  await openTeam(page, fixture('no-data'));
+  await expect(page.getByText('No workers have started')).toBeVisible();
+  await expect(rows(page)).toHaveCount(0);
+  await expect(page.getByTestId('team-summary')).toHaveCount(0);
+});
+
+test('with no live source the Team view is honest and shows no roster', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as unknown as { __scenario: unknown }).__scenario = { shell: true };
+  });
+  await page.goto('/tests/harness/index.html#/team');
+  await expect(page.getByText('Project data is unavailable')).toBeVisible();
+  await expect(page.getByTestId('demo-badge')).toHaveCount(0);
+  await expect(rows(page)).toHaveCount(0);
+  await expectNoAxeViolations(page);
+});
+
+test('a view that fails to render is contained and recovers', async ({ page }) => {
+  await page.goto('/?demo&fault=corrupt#/team');
+  await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
+  await expect(page.getByTestId('demo-badge')).toBeVisible();
+  await page.getByRole('button', { name: 'Restart projection' }).click();
+  await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
+  await expect(rows(page).first()).toBeVisible();
+});
+
+test('the drawer carries the Demo data label even when it covers the page', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await openTeam(page, fixture('human-wait'));
+  await openWorker(page, 'runner_local_1');
+  await expect(drawer(page).getByTestId('drawer-demo-badge')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('the drawer can be maximized and resized by keyboard at desktop width', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openTeam(page, fixture('human-wait'));
+  await openWorker(page, 'runner_local_1');
+  const before = (await drawer(page).boundingBox())!.width;
+  await drawer(page).getByRole('separator', { name: 'Drawer width' }).focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect.poll(async () => (await drawer(page).boundingBox())!.width).toBeGreaterThan(before);
+  await drawer(page).getByRole('button', { name: 'Maximize' }).click();
+  await expect.poll(async () => (await drawer(page).boundingBox())!.width).toBe(1440);
+  await expect(drawer(page).getByRole('separator')).toHaveCount(0);
+});
+
+test('a long worker id and task title wrap at 375', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await openTeam(page, fixture('failed-ci'));
+  await page.evaluate(() => {
+    const long = 'x'.repeat(240);
+    document.querySelectorAll('[data-testid="fleet-row"] span, [data-testid="fleet-row"] p').forEach((el) => {
+      if (el.children.length === 0) el.textContent = long;
+    });
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+for (const id of ['healthy-parallel-work', 'human-wait', 'policy-block', 'runner-loss', 'long-build-stall', 'contract-change', 'failed-ci', 'expired-approval', 'unknown-costs', 'no-data', 'merge-flow']) {
+  test(`axe pass: team ${id}`, async ({ page }) => {
+    await openTeam(page, fixture(id));
+    await expectNoAxeViolations(page);
+  });
+}
+
+for (const id of ['human-wait', 'runner-loss', 'unknown-costs']) {
+  test(`axe pass: open drawer ${id}`, async ({ page }) => {
+    await openTeam(page, fixture(id));
+    await rows(page).first().locator('[data-open-worker]').click();
+    await expect(drawer(page)).toBeVisible();
+    await expectNoAxeViolations(page);
+  });
+}
+
+test('axe pass: drawer light theme and every tab', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
+  await openTeam(page, fixture('failed-ci'));
+  await rows(page).first().locator('[data-open-worker]').click();
+  for (const tab of ['Task', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) {
+    await drawer(page).getByRole('tab', { name: tab }).click();
+    await expectNoAxeViolations(page);
+  }
+});
+
+test('axe pass: reconnecting team', async ({ page }) => {
+  await openTeam(page, '&fault=reconnecting');
+  await expect(page.getByTestId('connection-banner')).toBeVisible();
+  await expectNoAxeViolations(page);
+});

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['overview', 'assistant'] as const;
+export const ROUTES = ['overview', 'team', 'assistant'] as const;
 export type Route = (typeof ROUTES)[number];
 
 const parse = (hash: string): Route => ((ROUTES as readonly string[]).includes(hash.replace(/^#\/?/, '')) ? (hash.replace(/^#\/?/, '') as Route) : 'overview');

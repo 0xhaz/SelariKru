@@ -7,7 +7,7 @@ const TOOLTIP_WIDTH_PX = 256;
  * A relative or clock label that shows the exact local time in a tooltip on hover and on keyboard focus, positioned so the line does not move.
  * A screen reader gets the exact time from the label.
  */
-export function Timestamp({ iso, children }: { iso: string; children: string }) {
+export function Timestamp({ iso, children, tabStop = true }: { iso: string; children: string; /** False in row-heavy views, where the exact time is reachable elsewhere. Hover still shows it. */ tabStop?: boolean }) {
   const exact = formatExact(iso);
   const ref = useRef<HTMLSpanElement>(null);
   const [alignRight, setAlignRight] = useState(false);
@@ -18,7 +18,7 @@ export function Timestamp({ iso, children }: { iso: string; children: string }) 
   };
   return (
     <span ref={ref} className="group relative inline-block" onMouseEnter={place} onFocus={place}>
-      <time dateTime={iso} tabIndex={0} aria-label={`${children} (${exact})`} className="rounded-chip">{children}</time>
+      {tabStop ? <time dateTime={iso} tabIndex={0} aria-label={`${children} (${exact})`} className="rounded-chip">{children}</time> : <time dateTime={iso}>{children}</time>}
       <span
         aria-hidden="true"
         className={`pointer-events-none absolute bottom-full z-30 mb-1 hidden w-max max-w-64 rounded-chip border border-line-strong bg-panel-2 px-2 py-1 text-sm text-fg group-hover:block group-focus-within:block ${alignRight ? 'right-0' : 'left-0'}`}
