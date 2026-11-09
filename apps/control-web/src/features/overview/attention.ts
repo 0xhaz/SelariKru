@@ -40,6 +40,11 @@ const CLOSED: readonly TaskView['status'][] = ['superseded', 'cancelled', 'merge
 export const isClosedTask = (t: Pick<TaskView, 'status'>): boolean => CLOSED.includes(t.status);
 export const latestCheckOf = (snapshot: ProjectViewSnapshot, taskId: string): CheckView | undefined => Object.values(snapshot.checks).filter((c) => c.taskId === taskId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
 /** A failed verdict is released back to `ready` for a repair, so a queued task whose latest check failed is still a failed gate. */
+export const isClosedRun = (run: Pick<RunView, 'lifecycle'>): boolean => run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled';
+/** The run's latest record is known not to stand. No evidence at all is not this: then the record is simply not reported, and the server decides. */
+export const recordNoLongerValid = (run: Pick<RunView, 'evidence'>): boolean => run.evidence?.candidate?.recordValid === false;
+/** Finished work on an open run whose record no longer stands: what a re-verify is for. Once a re-verify starts its check runs are gone and no row reads passed, so this clears itself. */
+export const hasStaleRecord = (run: RunView): boolean => !isClosedRun(run) && run.evidence?.candidate?.live === true && recordNoLongerValid(run) && run.evidence.criteria.some((c) => c.state === 'passed');
 export const atFailedGate = (t: Pick<TaskView, 'status'>, latest: CheckView | undefined): boolean => t.status === 'failed' || (t.status === 'ready' && latest?.state === 'failed');
 const titleOf = (t: TaskView): string => t.title ?? t.taskId;
 export const sentence = (code: string): string => {
@@ -274,7 +279,15 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
   }
 
   for (const run of Object.values(snapshot.runs)) {
-    if (run.lifecycle !== 'ready_for_review') continue;
+    if (hasStaleRecord(run)) {
+      items.push(make({
+        id: `stale-record:${run.runId}`, decisionId: `reverify:${run.runId}`, kind: 'failed_gate', code: 'record_no_longer_valid', since: run.evidence!.candidate!.recordedAt, affectedTaskIds: Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => t.taskId), owner: 'You',
+        title: 'Verification record no longer valid', detail: 'The verifier, its suite or the stored record changed after this candidate was judged, so its passes do not count.',
+        consequence: 'No pull request can open on this candidate.', nextAction: 'Re-verify the run, or replan or cancel its tasks.',
+      }));
+    }
+    // A run the server would refuse a pull request for is not ready, whatever its lifecycle says.
+    if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) continue;
     const tasks = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status !== 'superseded' && t.status !== 'cancelled');
     // A cancelled task is undelivered whatever cancelled it; only a budget stop also needs the reduced scope accepted.
     const cancelled = Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'cancelled');

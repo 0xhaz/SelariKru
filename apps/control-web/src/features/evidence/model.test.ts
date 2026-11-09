@@ -100,6 +100,18 @@ describe('buildEvidence', () => {
     expect(states(m)['verified']!.value).not.toBe('Record no longer valid');
   });
 
+  it('offers no re-verify on a closed run, and still says the record does not stand', () => {
+    for (const lifecycle of ['merged', 'failed', 'cancelled'] as const) {
+      const m = buildEvidence(snap({ lifecycle, criteria: { verified: 0, total: 1 }, evidence: evidence([criterion('FB-01', { verified: false })], true, false) }), null)!;
+      expect(states(m)['verified']).toMatchObject({ value: 'Record no longer valid', link: null });
+      expect(states(m)['verified']!.detail).not.toMatch(/re-verifying/i);
+    }
+  });
+
+  it('a lone carriage return ends a line rather than joining two words', () => {
+    expect(cleanFailureText('one\rtwo\r\nthree')).toBe('one\ntwo\nthree');
+  });
+
   it('strips control and direction characters from failure text, and keeps line structure', () => {
     expect(cleanFailureText('safe\u202Egnp.exe\u2066\u0007\nline2\ttab\u009b')).toBe('safegnp.exe\nline2\ttab');
   });

@@ -12,9 +12,9 @@ import { fileURLToPath } from 'node:url';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
 import { initEvent } from '../../../packages/harness-claude/src/fixtures.ts';
 import { FakeGitHub } from '@selarikru/integrations-github/testing';
-import { createScheduler } from '@selarikru/workflow';
+import { createScheduler, reopenStaleVerification } from '@selarikru/workflow';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { schema } from '@selarikru/persistence';
+import { schema, withTx } from '@selarikru/persistence';
 import { eq, sql } from 'drizzle-orm';
 import { FakeSbx, type FakeStream } from '../../../packages/runtime-docker-local/src/fake-sbx.ts';
 import { SbxRuntimeAdapter } from '../../../packages/runtime-docker-local/src/adapter.ts';
@@ -513,21 +513,151 @@ describe('run orchestration chain', () => {
         expect(await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: real })).toBeNull();
       });
 
-      it('leaves a valid record alone, and a spent bound leaves the task verified', async () => {
-        const { runId } = await verifiedRun('t_stale_b');
+      const spend = (taskId: string, trusted: { checkManifestSha256: string; verifierSha256: string }, attemptId = 'spent') => t.db.insert(schema.taskCommands).values([1, 2, 3].map((n) => ({ tenantId: TENANT, projectId: PROJECT, operationId: `op_${taskId}_${trusted.verifierSha256.slice(0, 4)}_${n}`, taskId, revision: 1, command: 'reverify', state: 'applied', requestedBy: 'owner', requestedAt: new Date(), detail: { attemptId, ...trusted } })));
+      const command = async (taskId: string, key: string) => {
+        const [row] = await t.db.execute(sql`SELECT row_revision FROM task_status WHERE task_id = ${taskId}`);
+        return post(evApp, `/v1/tasks/${taskId}/commands`, { command: 'cancel', expectedRevision: Number(row!['row_revision']), idempotencyKey: key });
+      };
+      const replanOf = async (runId: string, taskId: string) => post(evApp, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 1, tasks: [{ ...task(runId, taskId), revision: 2 }] });
+
+      it('leaves a valid record alone: no re-verify, no cancel, no replan', async () => {
+        const { runId, sha } = await verifiedRun('t_valid');
         const valid = await reverify(runId, 'b1');
         expect(valid.status).toBe(403);
         expect(valid.body.error.details).toMatchObject({ reason: 'nothing_to_reverify' });
-        expect(await taskStatus('t_stale_b')).toBe('verified');
-
-        trustedNow = STALE;
-        await t.db.insert(schema.taskCommands).values([1, 2, 3].map((n) => ({ tenantId: TENANT, projectId: PROJECT, operationId: `op_b_${n}`, taskId: 't_stale_b', revision: 1, command: 'reverify', state: 'applied', requestedBy: 'owner', requestedAt: new Date() })));
-        const over = await reverify(runId, 'b2');
-        expect(over.status).toBe(403);
-        expect(over.body.error.details).toMatchObject({ reason: 'reverify_limit_reached', taskId: 't_stale_b' });
-        expect(await taskStatus('t_stale_b')).toBe('verified');
+        expect((await command('t_valid', 'c1')).status).toBe(403);
+        expect((await replanOf(runId, 't_valid')).body.error.code).toBe('task_not_replannable');
+        expect(await taskStatus('t_valid')).toBe('verified');
         expect(await lifecycle(runId)).toBe('ready_for_review');
-        expect(await t.db.execute(sql`SELECT 1 FROM check_runs WHERE result = 'invalidated'`)).toHaveLength(0);
+        expect(await t.db.execute(sql`SELECT 1 FROM check_runs WHERE candidate_sha = ${sha} AND result = 'invalidated'`)).toHaveLength(0);
+      });
+
+      it('the bound belongs to one verifier: a new one resets it, the same one refuses', async () => {
+        const { runId } = await verifiedRun('t_hash');
+        trustedNow = STALE;
+        await spend('t_hash', STALE);
+        const over = await reverify(runId, 'h1');
+        expect(over.status).toBe(403);
+        expect(over.body.error.details).toMatchObject({ reason: 'reverify_limit_reached', taskId: 't_hash' });
+        expect(await taskStatus('t_hash')).toBe('verified');
+        expect(await lifecycle(runId)).toBe('ready_for_review');
+
+        // A dependency bump changes the verifier hash. The three spent under the old one do not count.
+        trustedNow = { ...STALE, verifierSha256: 'a'.repeat(64) };
+        const reset = await reverify(runId, 'h2');
+        expect(reset.status).toBe(200);
+        expect(await taskStatus('t_hash')).toBe('verifying');
+        expect(await t.db.execute(sql`SELECT detail ->> 'verifierSha256' AS v FROM task_commands WHERE command = 'reverify' AND detail ->> 'verifierSha256' = ${'a'.repeat(64)}`)).toHaveLength(1);
+      });
+
+      it('at the limit the owner can still cancel: the evidence is retired and the run leaves review', async () => {
+        const { runId, sha, store } = await verifiedRun('t_exit_c');
+        trustedNow = STALE;
+        await spend('t_exit_c', STALE);
+        expect((await reverify(runId, 'x1')).body.error.details).toMatchObject({ reason: 'reverify_limit_reached' });
+        const res = await command('t_exit_c', 'x2');
+        expect(res.status).toBe(202);
+        expect(res.body).toMatchObject({ command: 'cancel', state: 'applied', taskStatus: 'cancelled' });
+        expect(await taskStatus('t_exit_c')).toBe('cancelled');
+        expect(await lifecycle(runId)).toBe('running');
+        expect(await t.db.execute(sql`SELECT status, reason FROM candidates WHERE sha = ${sha}`)).toMatchObject([{ status: 'invalidated', reason: 'owner_cancelled_stale_record' }]);
+        // Even with the old verifier back, nothing here can read as valid or reach a pull request.
+        trustedNow = real;
+        expect(await loadValidRecord(t.db, store, { tenantId: TENANT, projectId: PROJECT, sha }, { trusted: real })).toBeNull();
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).status).toBe(409);
+      });
+
+      it('at the limit the owner can still replan, and the task starts again on a new revision', async () => {
+        const { runId, sha } = await verifiedRun('t_exit_r');
+        trustedNow = STALE;
+        await spend('t_exit_r', STALE);
+        const res = await replanOf(runId, 't_exit_r');
+        expect(res.status).toBe(201);
+        expect(await taskStatus('t_exit_r')).toBe('planned');
+        expect(await lifecycle(runId)).toBe('running');
+        expect(await t.db.execute(sql`SELECT status FROM candidates WHERE sha = ${sha}`)).toMatchObject([{ status: 'invalidated' }]);
+      });
+
+      it('cancelling one stale part sends the other back for a verdict on a candidate without it', async () => {
+        const runId = await newRun();
+        await planOf(runId, [task(runId, 't_pair_a'), task(runId, 't_pair_b')]);
+        for (const id of ['t_pair_a', 't_pair_b']) await runWorker(await claim(), ({ write }) => { write(`src/${id}.ts`, 'export const v = 1;\n'); });
+        const store = new LocalDiskArtifactStore(artifactDir);
+        const assembly = () => createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick();
+        const first = (await assembly()).assembled[0]!;
+        await verification(store, verifierRunner).tick();
+        expect(await taskStatus('t_pair_a')).toBe('verified');
+        trustedNow = STALE;
+        expect((await command('t_pair_a', 'p1')).status).toBe(202);
+        expect(await taskStatus('t_pair_b')).toBe('verifying');
+        trustedNow = real;
+        const second = (await assembly()).assembled[0]!;
+        expect(second).not.toBe(first);
+        expect((await verification(store, verifierRunner).tick()).verified).toBe(second);
+        expect(await taskStatus('t_pair_b')).toBe('verified');
+        expect(await taskStatus('t_pair_a')).toBe('cancelled');
+      });
+
+      it('writes nothing when a later part cannot be re-verified', async () => {
+        const runId = await newRun();
+        await planOf(runId, [task(runId, 't_part_a'), task(runId, 't_part_b')]);
+        for (const id of ['t_part_a', 't_part_b']) await runWorker(await claim(), ({ write }) => { write(`src/${id}.ts`, 'export const v = 1;\n'); });
+        const store = new LocalDiskArtifactStore(artifactDir);
+        const sha = (await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick()).assembled[0]!;
+        await verification(store, verifierRunner).tick();
+        await t.db.execute(sql`UPDATE task_status SET status = 'merged' WHERE task_id = 't_part_b'`);
+        trustedNow = STALE;
+        const refused = await reverify(runId, 'pw1');
+        expect(refused.status).toBe(403);
+        expect(refused.body.error.details).toMatchObject({ reason: 'nothing_to_reverify' });
+        // Called directly, committing whatever it wrote: a refusal must have written nothing, not rely on the route to roll back.
+        const direct = await withTx(t.db, (tx) => reopenStaleVerification({ now: () => new Date() }, tx, { tenantId: TENANT, projectId: PROJECT, runId }, 'owner', 'op_direct', sha, STALE));
+        expect(direct).toMatchObject({ ok: false, reason: 'nothing_to_reverify' });
+        expect(await taskStatus('t_part_a')).toBe('verified');
+        expect(await t.db.execute(sql`SELECT 1 FROM task_commands WHERE command = 'reverify'`)).toHaveLength(0);
+        expect(await t.db.execute(sql`SELECT 1 FROM check_runs WHERE candidate_sha = ${sha} AND result = 'invalidated'`)).toHaveLength(0);
+      });
+
+      it('an error, then a re-verify, then a failed verdict starts no worker', async () => {
+        const { runId, store } = await verifiedRun('t_lineage');
+        const attemptsBefore = await t.db.execute(sql`SELECT attempt_id, attempt_number FROM attempts WHERE task_id = 't_lineage'`);
+        trustedNow = STALE;
+        expect((await reverify(runId, 'l1')).status).toBe(200);
+        trustedNow = real;
+        await verification(store, async () => ({ exitCode: null, result: null, log: 'docker daemon restarting' })).tick();
+        expect(await taskStatus('t_lineage')).toBe('blocked');
+        expect((await reverify(runId, 'l2')).status).toBe(200);
+        expect(await taskStatus('t_lineage')).toBe('verifying');
+        expect((await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick()).assembled).toHaveLength(1);
+        await verification(store, failing).tick();
+        expect(await taskStatus('t_lineage')).toBe('blocked');
+        expect(await t.db.execute(sql`SELECT payload ->> 'reason' AS reason FROM events WHERE type = 'task.blocked' AND task_id = 't_lineage' ORDER BY sequence DESC LIMIT 1`)).toMatchObject([{ reason: 'reverification_failed' }]);
+        expect(await t.db.execute(sql`SELECT attempt_id, attempt_number FROM attempts WHERE task_id = 't_lineage'`)).toEqual(attemptsBefore);
+      });
+
+      it('a re-assembly during a stale re-verify keeps the no-repair rule', async () => {
+        const { runId, sha, store } = await verifiedRun('t_rebuilt');
+        const attemptsBefore = await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_rebuilt'`);
+        trustedNow = STALE;
+        expect((await reverify(runId, 'r1')).status).toBe(200);
+        trustedNow = real;
+        // The candidate row is rebuilt from scratch: nothing kept on it can survive this.
+        await t.db.execute(sql`UPDATE candidates SET status = 'invalidated', reason = 'test_rebuild' WHERE sha = ${sha}`);
+        expect((await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick()).assembled).toEqual([sha]);
+        expect((await t.db.execute(sql`SELECT detail FROM candidates WHERE sha = ${sha}`))[0]!['detail']).not.toHaveProperty('reverification');
+        await verification(store, failing).tick();
+        expect(await taskStatus('t_rebuilt')).toBe('blocked');
+        expect(await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_rebuilt'`)).toEqual(attemptsBefore);
+      });
+
+      it('a later attempt the owner asked for is repaired as usual: the rule follows the re-verified attempt', async () => {
+        const { store } = await verifiedRun('t_later');
+        await t.db.insert(schema.taskCommands).values({ tenantId: TENANT, projectId: PROJECT, operationId: 'op_other', taskId: 't_later', revision: 1, command: 'reverify', state: 'applied', requestedBy: 'owner', requestedAt: new Date(), detail: { attemptId: 'an_earlier_attempt' } });
+        await t.db.execute(sql`UPDATE task_status SET status = 'verifying' WHERE task_id = 't_later'`);
+        await t.db.execute(sql`UPDATE attempts SET outcome = 'running' WHERE task_id = 't_later'`);
+        await t.db.execute(sql`UPDATE check_runs SET result = 'invalidated'`);
+        await verification(store, failing).tick();
+        expect(await taskStatus('t_later')).toBe('ready');
       });
 
       it('a stale record is refused to anyone but the owner and under a policy that withholds it', async () => {

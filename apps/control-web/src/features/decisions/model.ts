@@ -1,7 +1,7 @@
 import { ADVISORY_APPROVAL_OPERATIONS, WORKER_APPROVAL_OPERATIONS, approvalUnavailableReason } from '@selarikru/domain';
 import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, verifiedCounts, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge, type Tone } from '@selarikru/ui';
-import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, isClosedTask, reducedScopeCovers, sentence } from '../overview/attention.ts';
+import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, hasStaleRecord, isClosedRun, isClosedTask, recordNoLongerValid, reducedScopeCovers, sentence } from '../overview/attention.ts';
 import { hrefFor } from '../../shell/route.ts';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 
@@ -236,7 +236,14 @@ function approvalCard(a: ApprovalView, snapshot: ProjectViewSnapshot, nowMs: num
   };
 }
 
-const isClosedRun = (run: RunView): boolean => run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled';
+/** Re-verifying takes the run out of review, so with a pull request open the owner is told what that means first. */
+function reverifyAction(snapshot: ProjectViewSnapshot, runId: string, expected: number, paused: string | null): DecisionAction {
+  const open = snapshot.changeRequests.find((c) => c.runId === runId && c.status === 'open');
+  return {
+    kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId } },
+    confirm: open ? { title: `Re-verify while pull request #${open.prNumber} is open?`, consequence: `The run leaves review until there is a new verdict. If someone merges #${open.prNumber} on GitHub before then, the merge is recorded as stale and no task counts as merged.`, keepLabel: 'Keep it in review' } : null,
+  };
+}
 
 function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: DecisionOptions, paused: string | null): DecisionCardModel[] {
   const out: DecisionCardModel[] = [];
@@ -269,7 +276,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     const expected = run?.planRevision ?? 0;
     const names = tasks.map(titleOf).join(', ');
     const actions: DecisionAction[] = [
-      { kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId } }, confirm: null },
+      reverifyAction(snapshot, runId, expected, paused),
       replanAction(options.mode, paused, { runId }),
       ...tasks.flatMap((t) => (tasks.length > 1 ? [cancelAction(t, paused, `Cancel "${titleOf(t)}"`)] : [cancelAction(t, paused)])),
     ];
@@ -283,17 +290,21 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
       since: tasks.map((t) => t.enteredStatusAt).sort()[0]!, fingerprint: ['reverify', expected, codes, tasks.map((t) => `${t.taskId}:${t.aggregateRevision}`).join(',')].join('|'),
     });
   }
-  // Finished work whose record no longer stands has no block to clear, so it gets its own card: the same command, reached from the Evidence report.
+  // Finished work whose record no longer stands has no block to clear, so it gets its own card: the same command, reached from the Evidence report. At the limit, cancel and replan are the way out.
   for (const run of Object.values(snapshot.runs)) {
-    const c = run.evidence?.candidate;
-    if (!c || !c.live || c.recordValid || reverify.has(run.runId) || isClosedRun(run) || !run.evidence!.criteria.some((x) => x.state === 'passed')) continue;
+    if (!hasStaleRecord(run) || reverify.has(run.runId)) continue;
+    const c = run.evidence!.candidate!;
     const expected = run.planRevision;
     out.push({
       id: `reverify:${run.runId}`, kind: 'reverify', chip: 'Record no longer valid', tone: 'warning', state: 'open',
       title: `Candidate ${c.sha.slice(0, 12)}: verification record no longer valid`, summary: 'The verifier, its suite or the stored record changed after this candidate was judged. Its passes do not count, and no pull request can open on it.',
-      consequence: 'Its tasks stay out of review until a new verdict. Re-verifying judges the same commit again.', reason: null, advisory: null, note: 'Re-verifying runs no worker. A failed verdict leaves the task blocked for you to decide. It is limited per task revision.',
+      consequence: 'Its tasks stay out of review until a new verdict. Re-verifying judges the same commit again.', reason: null, advisory: null, note: 'Re-verifying runs no worker. A failed verdict leaves the task blocked for you to decide. It is limited per task revision and verifier build; past that, replan or cancel.',
       facts: [{ label: 'Candidate', value: c.sha }, { label: 'Plan revision', value: String(expected) }], details: [{ label: 'Reason code', value: 'record_no_longer_valid' }, { label: 'Run ID', value: run.runId }], notDelivered: null, changed: null,
-      actions: [{ kind: 'command', id: 'reverify', label: 'Re-verify the run', style: 'primary', disabledReason: paused, intent: { command: 'run.reverify', expectedRevision: expected, args: { runId: run.runId } }, confirm: null }],
+      actions: [
+        reverifyAction(snapshot, run.runId, expected, paused),
+        replanAction(options.mode, paused, { runId: run.runId }),
+        ...Object.values(snapshot.tasks).filter((t) => t.runId === run.runId && t.status === 'verified').map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`)),
+      ],
       since: c.recordedAt, fingerprint: ['reverify-stale', expected, c.sha, c.recordId ?? 'none'].join('|'),
     });
   }
@@ -360,15 +371,16 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
       ...base, id: `review:${run.runId}`, kind: 'reconciliation', chip: mismatch ? 'Merge not recorded' : 'Stale pull request', tone: mismatch ? 'danger' : 'warning',
       title: mismatch ? `Pull request #${cr.prNumber} does not match what was verified` : `Pull request #${cr.prNumber} no longer matches the run's candidate`,
       summary: mismatch ? 'GitHub reports a merge, but its head or base is not the commit SelariKru verified. No merge is recorded, and no task counts as merged.' : 'The candidate this pull request carries is no longer the run\'s current one. Whatever happens to it is not recorded for this run.',
-      consequence: mismatch ? 'The run stays unmerged here until someone reconciles it on GitHub.' : 'Merging it would ship a commit nothing verified against the current run.',
+      consequence: mismatch ? 'The run stays unmerged here until someone reconciles it on GitHub.' : cr.mergeCommitSha ? 'It was merged on GitHub, but not as this run\'s verified candidate, so no merge is recorded and no task counts as merged.' : 'Merging it would ship a commit nothing verified against the current run.',
       note: mismatch ? 'Check what was merged on GitHub. SelariKru cannot change a merge.' : null,
       facts: [{ label: 'Status', value: mismatch ? 'Merged commit is not the verified commit' : 'Candidate is stale' }, { label: 'Verified candidate', value: short(cr.candidateSha), mono: true }, { label: 'GitHub head', value: cr.observedHeadSha ? short(cr.observedHeadSha) : 'Not reported', mono: true }, { label: 'Merge commit', value: cr.mergeCommitSha ? short(cr.mergeCommitSha) : 'Not reported', mono: true }],
       details: [{ label: 'Verified candidate', value: cr.candidateSha }, { label: 'GitHub head', value: cr.observedHeadSha ?? 'None' }, { label: 'Merge commit', value: cr.mergeCommitSha ?? 'None' }, { label: 'Provider status', value: cr.status }, { label: 'Base ref', value: cr.baseRef }],
-      actions: [prLink(cr, options.mode, simulated), ...(!mismatch ? [openPrAction(run, paused, uncovered)] : [])], since: cr.observedAt ?? snapshot.meta.observedAt,
+      actions: [prLink(cr, options.mode, simulated), ...(!mismatch && run.lifecycle === 'ready_for_review' && !recordNoLongerValid(run) ? [openPrAction(run, paused, uncovered)] : [])], since: cr.observedAt ?? snapshot.meta.observedAt,
       fingerprint: ['recon', cr.status, cr.observedHeadSha, cr.mergeCommitSha, cr.candidateSha].join('|'),
     }];
   }
-  if (run.lifecycle !== 'ready_for_review') return [];
+  // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.
+  if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) return [];
   if (cr && cr.status === 'open') {
     return [{
       ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Merge readiness', tone: 'success', title: `Pull request #${cr.prNumber} is ready for your review`,

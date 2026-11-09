@@ -35,7 +35,7 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   not_budget_stopped: { text: 'This run has no budget-stopped work to accept.', changed: false },
   already_accepted: { text: 'This reduced scope was already accepted.', changed: false },
   nothing_to_reverify: { text: 'Nothing here can be re-verified any more. The block may already be cleared.', changed: false },
-  reverify_limit_reached: { text: 'This task has used its re-verifications. If it is blocked, replan or cancel it. If it is verified, it stays verified but its record does not count.', changed: false },
+  reverify_limit_reached: { text: 'This task has used its re-verifications under this verifier. Replan or cancel it instead.', changed: false },
   resource_conflict: { text: 'Re-verifying is waiting on a resource another task holds. Try again when it is free.', changed: false },
   run_not_ready: { text: 'This run is not ready for a pull request.', changed: false },
   reduced_scope_not_accepted: { text: 'Accept the reduced scope first: a pull request cannot open while budget-stopped work is undecided.', changed: false },

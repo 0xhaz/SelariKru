@@ -121,7 +121,7 @@ describe('markRunReadyForReview', () => {
 
 describe('reopenBlockedVerification eligibility', () => {
   const run = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
-  const reopen = () => withTx(t.db, (tx) => reopenBlockedVerification({ now: clock.now }, tx, run, 'owner', 'op_1'));
+  const reopen = () => withTx(t.db, (tx) => reopenBlockedVerification({ now: clock.now }, tx, run, 'owner', 'op_1', null));
 
   it('a reason the worker reported is not eligible, even when it reads like a verifier error', async () => {
     await seedTask(t.db, specFor('t1'));

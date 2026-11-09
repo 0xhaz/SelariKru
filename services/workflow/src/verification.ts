@@ -4,6 +4,7 @@ import { and, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type TaskKey } from './taskstate.ts';
+import type { TrustedVerifier } from './verification-record.ts';
 
 export type VerificationVerdict = 'passed' | 'failed' | 'error' | 'skipped';
 
@@ -31,7 +32,9 @@ export async function releaseTaskClaims(tx: Tx, key: TaskKey, revision: number, 
  *
  * passed -> `verified`, claims released. (Readiness of the run is decided by `markRunReadyForReview`, which needs live evidence.)
  * failed -> `failed`, claims released, then a bounded repair through the retry transition (`ready`), or `blocked` when the
- *           attempt budget is spent. The trusted suite is never touched.
+ *           attempt budget is spent. An attempt an owner sent back for re-verification goes straight to `blocked` (`reverification_failed`): finished work
+ *           re-judged never starts a worker. That rule is read from the `reverify` command naming this attempt, so it survives the candidate being rebuilt.
+ *           The trusted suite is never touched.
  */
 export async function applyVerification(
   ctx: { readonly db: Db; readonly now: () => Date }, key: TaskKey,
@@ -39,8 +42,6 @@ export async function applyVerification(
     readonly actor: Actor; readonly outcome: VerificationVerdict; readonly detail: Record<string, unknown>;
     /** The revision and attempt the verified candidate part carried. A verdict on anything else is stale and changes nothing. */
     readonly expect?: { readonly revision: number; readonly attemptId: string };
-    /** False on an owner's re-verification of finished work: a failed verdict goes to `blocked` for the owner to decide, and no repair worker starts. */
-    readonly repairable?: boolean;
   }, tx?: Tx,
 ): Promise<VerificationApplication> {
   if (input.actor.kind !== 'verifier') throw new Error('only the verifier identity may apply a verification outcome');
@@ -75,10 +76,13 @@ export async function applyVerification(
       state = move(initial, { type: 'verification_passed' });
     } else {
       const failed = move(initial, { type: 'verification_failed', reason: 'verification_failed' });
-      const retry = input.repairable === false ? null : transition(failed, { type: 'retry_requested' });
+      const reverified = attemptId !== null && (await t.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(
+        eq(schema.taskCommands.tenantId, key.tenantId), eq(schema.taskCommands.projectId, key.projectId), eq(schema.taskCommands.taskId, key.taskId), eq(schema.taskCommands.revision, row.currentRevision),
+        eq(schema.taskCommands.command, 'reverify'), sql`${schema.taskCommands.detail} ->> 'attemptId' = ${attemptId}`)).limit(1)).length > 0;
+      const retry = reverified ? null : transition(failed, { type: 'retry_requested' });
       if (retry?.ok) { state = retry.value; repair = 'scheduled'; follow = { type: 'task.ready', reason: 'repair_scheduled' }; }
       else {
-        const reason = input.repairable === false ? 'reverification_failed' : 'repair_budget_exhausted';
+        const reason = reverified ? 'reverification_failed' : 'repair_budget_exhausted';
         state = move(failed, { type: 'repair_refused', reason }); repair = 'refused'; follow = { type: 'task.blocked', reason };
       }
     }
@@ -134,8 +138,23 @@ export async function closeVerificationWithoutVerdict(
   return true;
 }
 
-/** Owner-requested re-verifications per task revision. Bounded, so a broken verifier cannot be retried for ever by hand either. */
+/**
+ * Owner-requested re-verifications per task revision and verifier build (see `reverifiesUsed`). Bounded, so a broken verifier cannot be retried for ever by hand either. A new
+ * verifier is a new question about the same work, so it starts a new count. Under one build the bound can still be spent, and the exit then is cancel or replan.
+ */
 export const REVERIFY_LIMIT = 3;
+
+/** What each `reverify` command records: the attempt sent back, which is what carries the no-repair rule, and the verifier build it was asked of, which keys the bound. */
+const reverifyDetail = (attemptId: string, trusted: TrustedVerifier | null): Record<string, unknown> => ({ attemptId, ...(trusted ?? {}) });
+
+/** Re-verifications of this task revision under this verifier build. No build known (no evidence wiring) counts the commands that named none. */
+async function reverifiesUsed(tx: Tx, key: TaskKey, revision: number, trusted: TrustedVerifier | null): Promise<number> {
+  const used = await tx.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(
+    eq(schema.taskCommands.tenantId, key.tenantId), eq(schema.taskCommands.projectId, key.projectId), eq(schema.taskCommands.taskId, key.taskId), eq(schema.taskCommands.command, 'reverify'), eq(schema.taskCommands.revision, revision),
+    sql`${schema.taskCommands.detail} ->> 'checkManifestSha256' IS NOT DISTINCT FROM ${trusted?.checkManifestSha256 ?? null}::text`,
+    sql`${schema.taskCommands.detail} ->> 'verifierSha256' IS NOT DISTINCT FROM ${trusted?.verifierSha256 ?? null}::text`));
+  return used.length;
+}
 
 /** Why an owner may send a run's finished work back for another verdict: the verifier or the assembly failed, and nothing was concluded about the work. */
 export const isReverifiableBlock = (reason: string | null): boolean => reason === 'verification_error' || (reason !== null && reason.startsWith('assembly_infrastructure:'));
@@ -149,7 +168,7 @@ export type ReverifyOutcome = { readonly ok: true; readonly reopened: readonly s
  * back under the scheduler's lock. The caller holds the transaction and has recorded the owner's idempotency key.
  */
 export async function reopenBlockedVerification(
-  ctx: { readonly now: () => Date }, tx: Tx, run: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, requestedBy: string, operationId: string,
+  ctx: { readonly now: () => Date }, tx: Tx, run: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, requestedBy: string, operationId: string, trusted: TrustedVerifier | null,
 ): Promise<ReverifyOutcome> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
   const blocked = await tx.execute(sql`
@@ -170,9 +189,7 @@ export async function reopenBlockedVerification(
     const key: TaskKey = { tenantId: run.tenantId, projectId: run.projectId, taskId };
     const row = await lockStatusRow(tx, key);
     if (!row || row.status !== 'blocked' || row.currentRevision !== revision) continue;
-    const used = await tx.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(
-      eq(schema.taskCommands.tenantId, key.tenantId), eq(schema.taskCommands.projectId, key.projectId), eq(schema.taskCommands.taskId, taskId), eq(schema.taskCommands.command, 'reverify'), eq(schema.taskCommands.revision, revision)));
-    if (used.length >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId };
+    if ((await reverifiesUsed(tx, key, revision, trusted)) >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId };
 
     const spec = TaskSpecSchema.parse(b['spec']);
     const attempts = await loadAttempts(tx, key, revision);
@@ -195,7 +212,7 @@ export async function reopenBlockedVerification(
     await tx.update(schema.attempts).set({ outcome: 'running', exitReason: null }).where(and(
       eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
     const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
-    await tx.insert(schema.taskCommands).values({ tenantId: key.tenantId, projectId: key.projectId, operationId: `${operationId}_${taskId}`, taskId, revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now });
+    await tx.insert(schema.taskCommands).values({ tenantId: key.tenantId, projectId: key.projectId, operationId: `${operationId}_${taskId}`, taskId, revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now, detail: reverifyDetail(attemptId, trusted) });
     // The control plane acting for the owner, as with `plan.accepted`: `task.reopened` is not a human event, and the owner is named in the payload.
     await emit(tx, { projectId: run.projectId, runId: run.runId, taskId, aggregateRevision }, now, { type: 'task.reopened', attemptId, actor: { kind: 'integration', id: 'reverify' }, payload: { reason: 'owner_reverify', status: 'verifying', requestedBy } });
     reopened.push(taskId);
@@ -203,73 +220,135 @@ export async function reopenBlockedVerification(
   return reopened.length > 0 ? { ok: true, reopened } : { ok: false, reason: 'nothing_to_reverify' };
 }
 
+export interface StaleCandidate { readonly candidateId: string; readonly sha: string; readonly parts: readonly { readonly taskId: string; readonly revision: number; readonly attemptId: string }[] }
+interface RunScope { readonly tenantId: string; readonly projectId: string; readonly runId: string }
+
 /**
- * Re-runs verification for a run's current candidate whose record no longer stands (verifier, suite, lockfile or stored bytes changed). `sha` is the candidate the caller found stale,
- * read before this transaction because loading a record takes its own connection. Status during a re-verify: every part goes `verified` -> `verifying` with its attempt waiting for a
- * verdict again and its claims back, the candidate's check runs are invalidated so the old record cannot read as valid, and the run leaves review. A new valid record promotes it again; a failed verdict blocks it
- * (`reverification_failed`) with no repair worker; a verifier that keeps erroring is closed by the reaper as any other. A refusal leaves everything as it was: the tasks stay `verified`,
- * reported as no longer valid. No attempt starts. The bound is `REVERIFY_LIMIT` per task revision, shared with `reopenBlockedVerification`.
- * The candidate lock comes first, then the scheduler lock, the order assembly uses.
+ * Locks the run's current candidate if it is still the assembled one the caller found stale (`sha`, read before the transaction because loading a record takes its own connection),
+ * then takes the scheduler lock: the order assembly uses. Null when the candidate moved on. Take it before any task lock, so this cannot deadlock against a verdict being written.
  */
-export async function reopenStaleVerification(
-  ctx: { readonly now: () => Date }, tx: Tx, run: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, requestedBy: string, operationId: string, sha: string,
-): Promise<ReverifyOutcome> {
+export async function lockStaleCandidate(tx: Tx, run: RunScope, sha: string): Promise<StaleCandidate | null> {
   const [candidate] = await tx.execute(sql`
     SELECT candidate_id, sha, status, parts FROM candidates WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
     ORDER BY created_at DESC, candidate_id DESC LIMIT 1 FOR UPDATE`);
-  const parts = (candidate?.['parts'] as { taskId: string; revision: number; attemptId: string }[] | undefined) ?? [];
-  if (!candidate || candidate['status'] !== 'assembled' || candidate['sha'] !== sha || parts.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
+  if (!candidate || candidate['status'] !== 'assembled' || candidate['sha'] !== sha) return null;
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
+  return { candidateId: String(candidate['candidate_id']), sha, parts: (candidate['parts'] as StaleCandidate['parts'] | null) ?? [] };
+}
+
+interface Reopen {
+  readonly key: TaskKey; readonly part: StaleCandidate['parts'][number]; readonly rowRevision: number; readonly state: TaskState;
+  readonly attempts: Awaited<ReturnType<typeof loadAttempts>>; readonly want: ReadonlyMap<string, 'shared' | 'exclusive'>; readonly conflict: string | undefined;
+}
+
+/** Works out sending one verified part back to `verifying`, writing nothing. Null when its stored task cannot make that move. Another part of the candidate holding a claim is no conflict. */
+async function planReopen(tx: Tx, key: TaskKey, rowRevision: number, part: StaleCandidate['parts'][number], partIds: readonly string[]): Promise<Reopen | null> {
+  const [rev] = await tx.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, part.taskId), eq(schema.taskRevisions.revision, part.revision)));
+  if (!rev) return null;
+  const spec = TaskSpecSchema.parse(rev.spec);
+  const attempts = await loadAttempts(tx, key, part.revision);
+  const state = buildTaskState(spec, 'verified', attempts);
+  if (!state) throw new Error(`task ${part.taskId}: stored spec no longer valid`);
+  const want = new Map<string, 'shared' | 'exclusive'>();
+  for (const c of spec.resourceClaims) if (want.get(c.key) !== 'exclusive') want.set(c.key, c.mode);
+  let conflict: string | undefined;
+  if (want.size > 0) {
+    const live = await tx.select({ key: schema.resourceClaims.resourceKey, mode: schema.resourceClaims.mode, taskId: schema.resourceClaims.taskId }).from(schema.resourceClaims).where(and(
+      eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), inArray(schema.resourceClaims.resourceKey, [...want.keys()]), isNull(schema.resourceClaims.releasedAt)));
+    conflict = [...want].find(([k, m]) => live.some((h) => !partIds.includes(h.taskId ?? '') && h.key === k && (m === 'exclusive' || h.mode === 'exclusive')))?.[0];
+  }
+  const moved = transition(state, { type: 'verification_invalidated', ...(conflict !== undefined ? { blockedReason: `resource_conflict:${conflict}` } : {}) });
+  if (!moved.ok) return null;
+  return { key, part, rowRevision, state: moved.value, attempts, want, conflict };
+}
+
+/** Writes one planned move and its `task.reopened`. A part that hit a claim conflict is `blocked` with that reason, and takes no claims. */
+async function applyReopen(tx: Tx, now: Date, run: RunScope, r: Reopen, payload: Record<string, unknown>): Promise<void> {
+  for (const rec of r.state.attempts) {
+    const stored = r.attempts.find((a) => a.attemptId === rec.attemptId);
+    if (stored && stored.outcome !== rec.outcome) await tx.update(schema.attempts).set({ outcome: rec.outcome }).where(and(eq(schema.attempts.tenantId, r.key.tenantId), eq(schema.attempts.projectId, r.key.projectId), eq(schema.attempts.attemptId, rec.attemptId)));
+  }
+  if (r.conflict === undefined) {
+    for (const [resourceKey, mode] of r.want) await tx.insert(schema.resourceClaims).values({ tenantId: r.key.tenantId, projectId: r.key.projectId, claimId: `clm_${randomUUID()}`, taskId: r.part.taskId, revision: r.part.revision, resourceKey, mode, attemptId: r.part.attemptId });
+  }
+  const aggregateRevision = await setStatus(tx, r.key, r.rowRevision, r.state.status, now);
+  const scope = { projectId: run.projectId, runId: run.runId, taskId: r.part.taskId, aggregateRevision };
+  await emit(tx, scope, now, { type: 'task.reopened', attemptId: r.part.attemptId, actor: REVERIFY_ACTOR, payload: { ...payload, status: r.state.status, ...(r.conflict !== undefined ? { blocked: `resource_conflict:${r.conflict}` } : {}) } });
+  if (r.conflict !== undefined) await emit(tx, scope, now, { type: 'task.blocked', attemptId: r.part.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: `resource_conflict:${r.conflict}` } });
+}
+
+const REVERIFY_ACTOR = { kind: 'integration', id: 'reverify' } as const;
+
+/** The stale record's check runs go, so it can never read as valid again, even if the verifier hashes come back. */
+const invalidateCheckRuns = (tx: Tx, run: RunScope, sha: string) => tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_sha = ${sha} AND result <> 'invalidated'`);
+
+async function leaveReview(tx: Tx, now: Date, run: RunScope, reason: string, candidateId: string, reopened: readonly string[]): Promise<void> {
+  const reverted = await tx.execute(sql`UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review' RETURNING run_id`);
+  if (reverted.length > 0) await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: run.runId, aggregateRevision: 0 }, now, { type: 'run.reverted', attemptId: null, actor: REVERIFY_ACTOR, payload: { reason, candidateIds: [candidateId], reopenedTasks: reopened } });
+}
+
+/**
+ * Re-runs verification for a run's current candidate whose record no longer stands (verifier, suite, lockfile or stored bytes changed). Status during a re-verify: every part goes
+ * `verified` -> `verifying` with its attempt waiting for a verdict again and its claims back, the candidate's check runs are invalidated so the old record cannot read as valid, and the
+ * run leaves review. A new valid record promotes it again; a failed verdict blocks it (`reverification_failed`) with no repair worker; a verifier that keeps erroring is closed by the
+ * reaper as any other. No attempt starts. Every check runs before the first write, so a refusal has changed nothing: the tasks stay `verified`, reported as no longer valid.
+ * The bound is `REVERIFY_LIMIT` per task revision and verifier build, shared with `reopenBlockedVerification`.
+ */
+export async function reopenStaleVerification(
+  ctx: { readonly now: () => Date }, tx: Tx, run: RunScope, requestedBy: string, operationId: string, sha: string, trusted: TrustedVerifier,
+): Promise<ReverifyOutcome> {
+  const candidate = await lockStaleCandidate(tx, run, sha);
+  if (!candidate || candidate.parts.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
   const [lifecycle] = await tx.select({ lifecycle: schema.runs.lifecycle }).from(schema.runs).where(and(eq(schema.runs.tenantId, run.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, run.runId)));
   if (!lifecycle || !['running', 'blocked', 'ready_for_review'].includes(lifecycle.lifecycle)) return { ok: false, reason: 'nothing_to_reverify' };
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
-  const now = ctx.now();
-  const partIds = parts.map((p) => p.taskId);
-  const reopened: string[] = [];
-  for (const part of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
+  const partIds = candidate.parts.map((p) => p.taskId);
+  const planned: Reopen[] = [];
+  for (const part of [...candidate.parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
     const key: TaskKey = { tenantId: run.tenantId, projectId: run.projectId, taskId: part.taskId };
     const row = await lockStatusRow(tx, key);
     if (!row || row.status !== 'verified' || row.currentRevision !== part.revision) return { ok: false, reason: 'nothing_to_reverify' };
-    const used = await tx.select({ id: schema.taskCommands.operationId }).from(schema.taskCommands).where(and(
-      eq(schema.taskCommands.tenantId, key.tenantId), eq(schema.taskCommands.projectId, key.projectId), eq(schema.taskCommands.taskId, part.taskId), eq(schema.taskCommands.command, 'reverify'), eq(schema.taskCommands.revision, part.revision)));
-    if (used.length >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId: part.taskId };
+    if ((await reverifiesUsed(tx, key, part.revision, trusted)) >= REVERIFY_LIMIT) return { ok: false, reason: 'reverify_limit_reached', taskId: part.taskId };
+    const plan = await planReopen(tx, key, row.rowRevision, part, partIds);
+    if (!plan) return { ok: false, reason: 'nothing_to_reverify' };
+    if (plan.conflict !== undefined) return { ok: false, reason: 'resource_conflict', taskId: part.taskId };
+    planned.push(plan);
+  }
+  const now = ctx.now();
+  for (const plan of planned) {
+    await tx.insert(schema.taskCommands).values({ tenantId: plan.key.tenantId, projectId: plan.key.projectId, operationId: `${operationId}_${plan.part.taskId}`, taskId: plan.part.taskId, revision: plan.part.revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now, detail: reverifyDetail(plan.part.attemptId, trusted) });
+    await applyReopen(tx, now, run, plan, { reason: 'owner_reverify_stale_record', requestedBy, candidateIds: [candidate.candidateId] });
+  }
+  await invalidateCheckRuns(tx, run, sha);
+  // Infrastructure retries are counted per verdict attempt, so this request starts with a full set.
+  await tx.execute(sql`UPDATE candidates SET detail = detail - 'verificationRetry', updated_at = ${now.toISOString()}::timestamptz WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${candidate.candidateId}`);
+  const reopened = planned.map((p) => p.part.taskId);
+  await leaveReview(tx, now, run, 'owner_reverify_stale_record', candidate.candidateId, reopened);
+  return { ok: true, reopened };
+}
 
-    const [rev] = await tx.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, part.taskId), eq(schema.taskRevisions.revision, part.revision)));
-    if (!rev) return { ok: false, reason: 'nothing_to_reverify' };
-    const spec = TaskSpecSchema.parse(rev.spec);
-    const attempts = await loadAttempts(tx, key, part.revision);
-    const state = buildTaskState(spec, 'verified', attempts);
-    if (!state) throw new Error(`task ${part.taskId}: stored spec no longer valid`);
-    const moved = transition(state, { type: 'verification_invalidated' });
-    if (!moved.ok) return { ok: false, reason: 'nothing_to_reverify' };
-
-    const want = new Map<string, 'shared' | 'exclusive'>();
-    for (const c of spec.resourceClaims) if (want.get(c.key) !== 'exclusive') want.set(c.key, c.mode);
-    if (want.size > 0) {
-      const live = await tx.select({ key: schema.resourceClaims.resourceKey, mode: schema.resourceClaims.mode, taskId: schema.resourceClaims.taskId }).from(schema.resourceClaims).where(and(
-        eq(schema.resourceClaims.tenantId, key.tenantId), eq(schema.resourceClaims.projectId, key.projectId), inArray(schema.resourceClaims.resourceKey, [...want.keys()]), isNull(schema.resourceClaims.releasedAt)));
-      // Parts of one candidate share its claims by design: only another task's live claim is a conflict.
-      if ([...want].some(([k, m]) => live.some((h) => !partIds.includes(h.taskId ?? '') && h.key === k && (m === 'exclusive' || h.mode === 'exclusive')))) return { ok: false, reason: 'resource_conflict', taskId: part.taskId };
-      for (const [resourceKey, mode] of want) {
-        await tx.insert(schema.resourceClaims).values({ tenantId: key.tenantId, projectId: key.projectId, claimId: `clm_${randomUUID()}`, taskId: part.taskId, revision: part.revision, resourceKey, mode, attemptId: part.attemptId });
-      }
-    }
-    for (const rec of moved.value.attempts) {
-      const stored = attempts.find((a) => a.attemptId === rec.attemptId);
-      if (stored && stored.outcome !== rec.outcome) await tx.update(schema.attempts).set({ outcome: rec.outcome }).where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, rec.attemptId)));
-    }
-    const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
-    await tx.insert(schema.taskCommands).values({ tenantId: key.tenantId, projectId: key.projectId, operationId: `${operationId}_${part.taskId}`, taskId: part.taskId, revision: part.revision, command: 'reverify', state: 'applied', requestedBy, requestedAt: now });
-    await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: part.taskId, aggregateRevision }, now, { type: 'task.reopened', attemptId: part.attemptId, actor: { kind: 'integration', id: 'reverify' }, payload: { reason: 'owner_reverify_stale_record', status: 'verifying', requestedBy, candidateIds: [String(candidate['candidate_id'])] } });
+/**
+ * The exit when re-verifying is not the answer: the owner cancelled or replanned `leaving`, verified tasks of a candidate whose record no longer stands. The candidate holds work no
+ * longer wanted, so it is retired along with its check runs and cannot reach a pull request even if the hashes come back. Its other verified parts go back to `verifying` (or `blocked`
+ * on a claim conflict) for a verdict on a candidate without that work, and the run leaves review. The caller holds the lock from `lockStaleCandidate`.
+ */
+export async function retireStaleCandidate(ctx: { readonly now: () => Date }, tx: Tx, run: RunScope, candidate: StaleCandidate, leaving: readonly string[], reason: string): Promise<void> {
+  const now = ctx.now();
+  const partIds = candidate.parts.map((p) => p.taskId);
+  const reopened: string[] = [];
+  for (const part of [...candidate.parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
+    if (leaving.includes(part.taskId)) continue;
+    const key: TaskKey = { tenantId: run.tenantId, projectId: run.projectId, taskId: part.taskId };
+    const row = await lockStatusRow(tx, key);
+    if (!row || row.status !== 'verified' || row.currentRevision !== part.revision) continue;
+    const plan = await planReopen(tx, key, row.rowRevision, part, partIds);
+    if (!plan) throw new Error(`task ${part.taskId}: cannot be sent back for verification`);
+    await applyReopen(tx, now, run, plan, { reason, candidateIds: [candidate.candidateId] });
     reopened.push(part.taskId);
   }
-  // Its check runs are the old record's liveness: invalidated, the record can never read as valid again, and the verification driver sees a candidate with no live record.
-  await tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_sha = ${sha} AND result <> 'invalidated'`);
-  await tx.execute(sql`
-    UPDATE candidates SET detail = jsonb_set(detail - 'verificationRetry', '{reverification}', jsonb_build_object('requestedBy', ${requestedBy}::text, 'requestedAt', ${now.toISOString()}::text)), updated_at = ${now.toISOString()}::timestamptz
-    WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${String(candidate['candidate_id'])}`);
-  const reverted = await tx.execute(sql`UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review' RETURNING run_id`);
-  if (reverted.length > 0) await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: run.runId, aggregateRevision: 0 }, now, { type: 'run.reverted', attemptId: null, actor: { kind: 'integration', id: 'reverify' }, payload: { reason: 'owner_reverify_stale_record', candidateIds: [String(candidate['candidate_id'])], reopenedTasks: reopened } });
-  return { ok: true, reopened };
+  await invalidateCheckRuns(tx, run, candidate.sha);
+  await tx.execute(sql`UPDATE candidates SET status = 'invalidated', reason = ${reason}, updated_at = ${now.toISOString()}::timestamptz WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_id = ${candidate.candidateId}`);
+  await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: run.runId, aggregateRevision: 0 }, now, { type: 'candidate.failed', attemptId: null, actor: REVERIFY_ACTOR, payload: { candidateId: candidate.candidateId, reason, sha: candidate.sha } });
+  await leaveReview(tx, now, run, reason, candidate.candidateId, reopened);
 }
 
 /**

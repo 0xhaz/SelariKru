@@ -3,8 +3,8 @@ import type { AddressInfo } from 'node:net';
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
-async function open(page: Page, fixture: string): Promise<void> {
-  await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, { spiedFixture: fixture });
+async function open(page: Page, fixture: string, extra: Record<string, unknown> = {}): Promise<void> {
+  await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, { spiedFixture: fixture, ...extra });
   await page.goto('/tests/harness/index.html#/evidence');
   await expect(page.getByRole('heading', { name: 'Evidence', level: 1 })).toBeVisible();
 }
@@ -49,6 +49,41 @@ test('a failed criterion says why, as text only, with no markup from the failure
   await expect(list).toContainText('expected <li> to contain');
   await expect(list.locator('li li')).toHaveCount(0);
   await axe(page);
+});
+
+test('failure text is labelled as test output', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, 'failed-ci');
+  await expect(page.getByTestId('failure-list').first().getByTestId('failure-output-label')).toHaveText('Test output');
+});
+
+test('a failed load can be retried and then shows the failure', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, 'failed-ci', { refuseFailureLoads: true });
+  const error = page.getByTestId('failure-load-error').first();
+  await expect(error).toContainText('could not be loaded');
+  const retry = error.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeEnabled();
+  await page.evaluate(() => (window as unknown as { __allowFailureLoads: () => void }).__allowFailureLoads());
+  await retry.click();
+  await expect(page.getByTestId('failure-list').first()).toContainText('expected <li> to contain');
+  await axe(page);
+});
+
+test('retrying is off with the reason given while the connection is down', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, 'failed-ci', { fault: 'reconnecting' });
+  const error = page.getByTestId('failure-load-error').first();
+  await expect(error.getByRole('button', { name: 'Try again' })).toBeDisabled();
+  await expect(error).toContainText('once the connection is back');
+});
+
+test('a criterion that was not delivered does not read as still to come', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open(page, 'budget-stop');
+  const row = page.locator('tr[data-testid="criterion"][data-state="not_delivered"]').first();
+  await expect(row.getByTestId('criterion-judged')).toHaveText('Not delivered');
+  await expect(page.locator('tr[data-testid="criterion"][data-state="not_delivered"] [data-testid="criterion-judged"]', { hasText: 'Not yet' })).toHaveCount(0);
 });
 
 test('a fixture with no per-criterion evidence says so and never counts tasks', async ({ page }) => {

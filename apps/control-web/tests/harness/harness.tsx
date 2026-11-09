@@ -46,6 +46,8 @@ interface Scenario {
   holdExecute?: boolean;
   /** Mounts the shell on the real live data source against a test server, recording every delivered sequence to `window.__calls.sequences`. */
   liveApi?: { baseUrl: string; token: string; projectId: string };
+  /** Failure loads on the spied source are refused until the test calls `window.__allowFailureLoads`, to exercise retrying. */
+  refuseFailureLoads?: boolean;
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -55,6 +57,7 @@ declare global {
     __scenario?: Scenario;
     __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[] };
     __spiedSource?: EngineeringDataSource;
+    __allowFailureLoads?: () => void;
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
     __store: typeof useAssistantStore;
@@ -178,6 +181,8 @@ const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: 
 /** The demo source with `execute` and `openTerminal` spied. Everything else passes through. */
 async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; label: string }> {
   const session = (await loadDemoSession(sc.fault ?? null))!;
+  let refuseFailureLoads = sc.refuseFailureLoads === true;
+  window.__allowFailureLoads = () => { refuseFailureLoads = false; };
   const project = session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!;
   const source: EngineeringDataSource = {
     ...session.source,
@@ -193,6 +198,10 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       if (sc.holdExecute) return new Promise(() => {});
       if (sc.rejectWith) return Promise.resolve({ idempotencyKey: command.idempotencyKey, operationId: null, accepted: false, execution: 'rejected', rejection: sc.rejectWith as never, replayed: false, simulated: true });
       return session.source.execute(command);
+    },
+    getRunFailures: (projectId, runId) => {
+      if (refuseFailureLoads) return Promise.reject(new Error('refused by the test'));
+      return session.source.getRunFailures(projectId, runId);
     },
     openTerminal: (request) => {
       window.__calls.commands.push({ method: 'openTerminal', request });

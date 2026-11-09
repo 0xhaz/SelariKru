@@ -1,6 +1,7 @@
 import type { Tone } from '@selarikru/ui';
 import type { CriterionEvidenceView, ProjectViewSnapshot, RunEvidenceView, RunView } from '@selarikru/view-protocol';
 import { decisionHref, hrefFor } from '../../shell/route.ts';
+import { isClosedRun } from '../overview/attention.ts';
 
 export type DeliveryKey = 'verified' | 'merged' | 'deployed';
 
@@ -64,8 +65,8 @@ export const shortSha = (sha: string): string => sha.slice(0, 12);
 
 // C0 and C1 controls except tab and newline, and the bidi marks and embeddings that can reorder what a reader sees.
 const UNPRINTABLE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-/** Test output as a person should read it: candidate code can shape this text, so it can never carry control or direction characters onto the screen. */
-export const cleanFailureText = (text: string): string => text.replace(UNPRINTABLE, '');
+/** Test output as a person should read it: candidate code can shape this text, so it can never carry control or direction characters onto the screen. A carriage return still ends a line. */
+export const cleanFailureText = (text: string): string => text.replace(/\r\n?/g, '\n').replace(UNPRINTABLE, '');
 const CRITERION_STATE: Readonly<Record<CriterionEvidenceView['state'], { label: string; tone: Tone }>> = {
   not_delivered: { label: 'Not delivered', tone: 'warning' },
   passed: { label: 'Passed', tone: 'success' }, failed: { label: 'Failed', tone: 'danger' }, skipped: { label: 'Skipped', tone: 'warning' }, error: { label: 'Verifier error', tone: 'warning' }, not_run: { label: 'No check yet', tone: 'neutral' },
@@ -84,7 +85,11 @@ function verifiedState(run: RunView, evidence: RunEvidenceView | null): Delivery
   const { verified, total } = run.criteria;
   const at = evidence.candidate ? ` at candidate ${shortSha(evidence.candidate.sha)}` : '';
   if (evidence.candidate && !evidence.candidate.live) return { ...base, value: 'Not verified', tone: 'warning', detail: `The last candidate was ${evidence.candidate.status}, so its passes count for nothing. ${verified} of ${total} approved criteria verified.`, established: false };
-  if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count. Re-verifying judges the same commit again and runs no worker. 0 of ${total} approved criteria verified.`, established: false, link: { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Decisions', external: false } };
+  if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) {
+    // A closed run has nothing left to re-verify, so it is told what happened and offered nothing.
+    const open = !isClosedRun(run);
+    return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count.${open ? ' Re-verifying judges the same commit again and runs no worker.' : ''} 0 of ${total} approved criteria verified.`, established: false, link: open ? { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Decisions', external: false } : null };
+  }
   if (total > 0 && verified === total) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} approved criteria passed${at}.`, established: true };
   const missing = evidence.criteria.filter((c) => c.state === 'not_delivered').map((c) => c.criterionId);
   const accepted = run.reducedScope?.notDelivered.requirementIds ?? [];

@@ -197,6 +197,27 @@ describe('attention queue', () => {
     expect(buildAttention(snapshot, nowMs, nowMs).map((i) => i.kind)).toEqual(['information']);
   });
 
+  describe('a record that no longer stands', () => {
+    const shaped = (recordValid: boolean, lifecycle: 'ready_for_review' | 'merged' = 'ready_for_review') => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle, criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(30), recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state: 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
+      return s;
+    };
+
+    it('does not call the run ready for review, and sends the owner to re-verify', () => {
+      const items = buildAttention(shaped(false), NOW, NOW);
+      expect(items.find((i) => i.id === 'review:run')).toBeUndefined();
+      expect(items.find((i) => i.code === 'record_no_longer_valid')).toMatchObject({ kind: 'failed_gate', decisionId: 'reverify:run', needsOperator: true, affectedTaskIds: ['t'] });
+    });
+
+    it('a valid record is ready, and a merged run raises nothing', () => {
+      const valid = buildAttention(shaped(true), NOW, NOW);
+      expect(valid.find((i) => i.id === 'review:run')).toBeDefined();
+      expect(valid.find((i) => i.code === 'record_no_longer_valid')).toBeUndefined();
+      expect(buildAttention(shaped(false, 'merged'), NOW, NOW).find((i) => i.code === 'record_no_longer_valid')).toBeUndefined();
+    });
+  });
+
   it('says the reason is in Evidence when a failed check carries no summary, and only then', () => {
     const noSummary = { ci: { checkId: 'ci', taskId: 'a', state: 'failed' as const, summary: null, updatedAt: iso(50), evidenceRef: 'e' } };
     expect(buildAttention(snapshotOf({ tasks: [task('a', { status: 'ready' })], checks: noSummary }), NOW, NOW)[0]!.detail).toMatch(/is in Evidence/);

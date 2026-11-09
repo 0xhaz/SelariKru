@@ -210,14 +210,12 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
   const logLimit = deps.logLimitBytes ?? DEFAULT_LOG_LIMIT;
 
   const rows = await deps.db.execute(sql`
-    SELECT status, base_sha, tree_sha, parts, detail FROM candidates
+    SELECT status, base_sha, tree_sha, parts FROM candidates
     WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha}`);
   const row = rows[0];
   if (!row) throw new CandidateNotVerifiable('not_found', 'no such candidate');
   if (row['status'] !== 'assembled') throw new CandidateNotVerifiable('not_assembled', `the candidate is ${String(row['status'])}`);
   const parts = (row['parts'] as { taskId: string; revision: number; attemptId: string }[]) ?? [];
-  // An owner's re-verification of finished work: a failed verdict stops there and asks the owner, it does not start a repair worker.
-  const reverification = (row['detail'] as { reverification?: unknown } | null)?.reverification !== undefined;
   if (!parts.some((p) => p.taskId === candidate.taskId)) throw new CandidateNotVerifiable('task_not_in_candidate', 'the task is not a part of this candidate');
   const baseSha = String(row['base_sha']);
   const treeSha = String(row['tree_sha']);
@@ -330,7 +328,6 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
         const applied = await applyVerification({ db: deps.db, now }, key, {
           actor: deps.verifier, outcome: overall, expect: { revision: p.revision, attemptId: p.attemptId },
           detail: { recordId, candidateSha: candidate.sha, checkManifestSha256: want.manifestSha, verifierSha256: want.verifierSha, host: deps.host, result: overall, failedChecks, flaky },
-          repairable: !reverification,
         }, tx);
         taskOutcomes.push({ taskId: p.taskId, revision: p.revision, applied: applied.applied, taskStatus: applied.taskStatus, reason: applied.reason });
       }

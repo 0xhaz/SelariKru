@@ -181,17 +181,56 @@ describe('blocked work', () => {
     expect(action(cards[0]!, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', expectedRevision: 1, args: { runId: 'run' } } });
   });
 
-  it('a stale record on finished work gets a re-verify card; a valid record does not', () => {
-    const withRecord = (recordValid: boolean, state: 'passed' | 'failed' = 'passed') => {
-      const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
-      s.runs['run'] = { ...s.runs['run']!, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state, verified: false, taskIds: ['t'], check: null, candidateSha: null }] } };
+  describe('a record that no longer stands', () => {
+    // The shape the snapshot route sends: a run in review, a verified task, and the candidate's evidence.
+    const withRecord = (recordValid: boolean, over: { state?: 'passed' | 'failed'; lifecycle?: 'ready_for_review' | 'running' | 'merged' | 'cancelled' | 'failed'; pr?: 'open' | 'closed' | 'stale_candidate'; merged?: boolean } = {}) => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'verified', aggregateRevision: 4 })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: over.lifecycle ?? 'ready_for_review', criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state: over.state ?? 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
+      if (over.pr) (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: over.pr, candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: over.merged ? 'd'.repeat(40) : null, observedAt: '2026-11-09T01:00:00.000Z' }];
       return s;
     };
-    const card = build(withRecord(false)).cards.find((c) => c.id === 'reverify:run')!;
-    expect(card).toMatchObject({ kind: 'reverify', chip: 'Record no longer valid' });
-    expect(action(card, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', args: { runId: 'run' } } });
-    expect(build(withRecord(true)).cards.find((c) => c.id === 'reverify:run')).toBeUndefined();
-    expect(build(withRecord(false, 'failed')).cards.find((c) => c.id === 'reverify:run')).toBeUndefined();
+    const stale = (s: ReturnType<typeof withRecord>) => build(s).cards.find((c) => c.id === 'reverify:run');
+
+    it('offers re-verify, and replan or cancel as the way out at the limit', () => {
+      const card = stale(withRecord(false))!;
+      expect(card).toMatchObject({ kind: 'reverify', chip: 'Record no longer valid' });
+      expect(action(card, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', args: { runId: 'run' } }, confirm: null });
+      expect(labels(card)).toContain('Replan in the Assistant');
+      expect(card.actions.find((a) => a.id === 'cancel:t')).toMatchObject({ intent: { command: 'task.cancel', expectedRevision: 4 } });
+    });
+
+    it('is not offered on a valid record, a failed row, or a merged or closed run', () => {
+      expect(stale(withRecord(true))).toBeUndefined();
+      expect(stale(withRecord(false, { state: 'failed' }))).toBeUndefined();
+      for (const lifecycle of ['merged', 'failed', 'cancelled'] as const) expect(stale(withRecord(false, { lifecycle }))).toBeUndefined();
+    });
+
+    it('reads as nothing ready: no merge-readiness card, no Open PR action', () => {
+      for (const pr of [undefined, 'open', 'closed'] as const) {
+        const cards = build(withRecord(false, pr ? { pr } : {})).cards;
+        expect(cards.filter((c) => c.kind === 'merge_review')).toEqual([]);
+        expect(cards.flatMap((c) => c.actions).filter((a) => a.kind === 'command' && a.intent.command === 'run.open_pull_request')).toEqual([]);
+      }
+      expect(build(withRecord(true)).cards.filter((c) => c.kind === 'merge_review')).toHaveLength(1);
+    });
+
+    it('a stale pull request offers no Open PR while the record does not stand', () => {
+      const commands = (s: ReturnType<typeof withRecord>) => build(s).cards.flatMap((c) => c.actions).filter((a) => a.kind === 'command' && a.intent.command === 'run.open_pull_request');
+      expect(commands(withRecord(false, { pr: 'stale_candidate' }))).toEqual([]);
+      expect(commands(withRecord(true, { pr: 'stale_candidate', lifecycle: 'running' }))).toEqual([]);
+      expect(commands(withRecord(true, { pr: 'stale_candidate' }))).toHaveLength(1);
+    });
+
+    it('warns before re-verifying with a pull request open', () => {
+      expect(action(stale(withRecord(false, { pr: 'open' }))!, 'Re-verify the run')).toMatchObject({ confirm: { title: 'Re-verify while pull request #7 is open?', consequence: expect.stringMatching(/recorded as stale/) } });
+    });
+
+    it('a stale pull request that already merged does not say merging it would ship', () => {
+      const card = (merged: boolean) => build(withRecord(true, { pr: 'stale_candidate', merged })).cards.find((c) => c.kind === 'reconciliation')!;
+      expect(card(true).consequence).toMatch(/was merged on GitHub/);
+      expect(card(true).consequence).not.toMatch(/would ship/);
+      expect(card(false).consequence).toMatch(/would ship/);
+    });
   });
 
   it('demo mode says why replan is off rather than linking to a dead end', () => {

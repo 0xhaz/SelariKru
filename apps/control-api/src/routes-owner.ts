@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, type AcceptedReducedScope, type ReverifyOutcome } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -111,6 +111,23 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     return new AppError(422, verdict.reason === 'no_provider_detected' ? 'no_provider_detected' : verdict.reason === 'unsupported_provider' ? 'unsupported_provider' : 'unsupported_model', `cannot assign ${selection.provider}/${selection.model}: ${verdict.reason}`, { provider: selection.provider, model: selection.model });
   };
 
+  /**
+   * The SHA of a run's current candidate when its record no longer stands, else null. Read before a transaction, as the pull-request route does: loading a record takes its own
+   * connection. With no evidence wiring nothing can be judged, so nothing is reported stale. Under the locks `lockStaleCandidate` checks it is still this candidate.
+   */
+  const staleCandidateOf = async (projectId: string, runId: string): Promise<string | null> => {
+    if (!ctx.evidence) return null;
+    const [latest] = await db.execute(sql`
+      SELECT sha, status FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
+      ORDER BY created_at DESC, candidate_id DESC LIMIT 1`);
+    if (!latest || latest['status'] !== 'assembled') return null;
+    const sha = String(latest['sha']);
+    return (await ctx.evidence.loadRecord({ tenantId: config.tenantId, projectId, sha })) === null ? sha : null;
+  };
+  /** A verified task may only leave through cancel or replan while it is a part, at this revision, of a candidate whose record no longer stands. */
+  const isStalePart = (candidate: StaleCandidate | null, taskId: string, status: string, revision: number): boolean =>
+    status === 'verified' && candidate !== null && candidate.parts.some((p) => p.taskId === taskId && p.revision === revision);
+
   // ---- model assignments -------------------------------------------------------------------------------------
   app.post('/v1/projects/:id/model-assignments', auth, async (req, reply) => {
     const uid = ownerOf(req);
@@ -206,7 +223,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const tasks: TaskSpec[] = body.tasks.map((t) => TaskSpecSchema.parse({ ...t, title: redactSecrets(t.title) }));
     const at = now();
 
-    const persist = (tx: Tx) => async () => {
+    // Only a verified task needs its record judged, and the record is read outside the transaction.
+    const verified = await db.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, config.tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.status, 'verified'), inArray(schema.taskStatus.taskId, tasks.map((t) => t.taskId))));
+    const staleSha = verified.length > 0 ? await staleCandidateOf(projectId, run.runId) : null;
+    const runScope = { tenantId: config.tenantId, projectId, runId: run.runId };
+
+    const persist = (tx: Tx, stale: StaleCandidate | null) => async () => {
       const [locked] = await tx.select().from(schema.runs)
         .where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run.runId))).for('update');
       const current = locked?.planRevision ?? 0;
@@ -219,11 +241,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         if (!row) continue;
         const sameRun = (await loadSpecRow(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId: t.taskId, revision: row.currentRevision }))?.runId === run.runId;
         if (row.projectId !== projectId || !sameRun) throw new AppError(409, 'task_not_replannable', `task ${t.taskId} belongs to another run`, { taskId: t.taskId });
-        if (!REPLANNABLE.includes(row.status) || t.revision <= row.currentRevision) {
+        // A verified task is closed work, unless the record behind it no longer stands: then replanning is one of the ways out.
+        if ((!REPLANNABLE.includes(row.status) && !isStalePart(stale, t.taskId, row.status, row.currentRevision)) || t.revision <= row.currentRevision) {
           throw new AppError(409, 'task_not_replannable', `task ${t.taskId} cannot take this revision`, { taskId: t.taskId, status: row.status, currentRevision: row.currentRevision });
         }
         existing.set(t.taskId, row);
       }
+      const leaving = [...existing].filter(([taskId, row]) => isStalePart(stale, taskId, row.status, row.currentRevision)).map(([taskId]) => taskId);
       // Pending approvals for a replaced task revision are void; they can no longer be resolved.
       for (const taskId of existing.keys()) await supersedePendingApprovals(tx, config.tenantId, projectId, taskId, at);
       for (const t of tasks) {
@@ -245,6 +269,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           });
         }
       }
+      if (stale !== null && leaving.length > 0) await retireStaleCandidate({ now }, tx, runScope, stale, leaving, 'owner_replanned_stale_record');
       const planRevision = current + 1;
       // Accepting the first plan is what starts a run: `planning` becomes `running`, the state readiness and the PR gate require. Any later plan keeps the run's current lifecycle.
       await tx.update(schema.runs).set({ planRevision, lifecycle: sql`CASE WHEN lifecycle = 'planning' THEN 'running' ELSE lifecycle END` })
@@ -257,11 +282,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       return { planRevision, taskIds: tasks.map((t) => t.taskId) };
     };
 
-    const result = await withTx(db, (tx) =>
-      body.idempotencyKey === undefined
-        ? persist(tx)()
-        : idempotent(tx, { tenantId: config.tenantId, projectId, key: `plan.revise:${run.runId}:${body.idempotencyKey}` }, fingerprint(body), persist(tx)),
-    );
+    const result = await withTx(db, async (tx) => {
+      const stale = staleSha === null ? null : await lockStaleCandidate(tx, runScope, staleSha);
+      return body.idempotencyKey === undefined
+        ? persist(tx, stale)()
+        : idempotent(tx, { tenantId: config.tenantId, projectId, key: `plan.revise:${run.runId}:${body.idempotencyKey}` }, fingerprint(body), persist(tx, stale));
+    });
     return reply.code(201).send(result);
   });
 
@@ -274,7 +300,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       throw new AppError(403, 'command_not_supported', `${body.command} is not available yet`, { command: body.command });
     }
     const at = now();
+    // Only a cancel of a verified task needs its record judged, and the record is read outside the transaction.
+    const seen = body.command === 'cancel' ? await requireTaskStatus(db, config.tenantId, taskId) : null;
+    const seenRun = seen?.status === 'verified' ? (await loadSpecRow(db, { tenantId: config.tenantId, projectId: seen.projectId, taskId, revision: seen.currentRevision }))?.runId : undefined;
+    const staleSha = seen && seenRun ? await staleCandidateOf(seen.projectId, seenRun) : null;
     const result = await withTx(db, async (tx) => {
+      const stale = seen && seenRun && staleSha ? await lockStaleCandidate(tx, { tenantId: config.tenantId, projectId: seen.projectId, runId: seenRun }, staleSha) : null;
       const row = await requireTaskStatus(tx, config.tenantId, taskId, true);
       const key = { tenantId: config.tenantId, projectId: row.projectId, taskId };
       return idempotent(tx, { tenantId: config.tenantId, projectId: row.projectId, key: `task.command:${taskId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
@@ -303,7 +334,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, attemptIds: open.map((a) => a.attemptId) } });
             return { operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
           }
-          if (!IMMEDIATE_CANCEL.includes(row.status)) {
+          // A verified task is closed work, unless the record behind it no longer stands: then cancelling is one of the ways out.
+          const staleExit = isStalePart(stale, taskId, row.status, row.currentRevision);
+          if (!IMMEDIATE_CANCEL.includes(row.status) && !staleExit) {
             throw new AppError(403, 'command_not_allowed', `cannot cancel a task that is ${row.status}`, { status: row.status });
           }
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
@@ -311,6 +344,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.
           await releaseTaskClaims(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId }, row.currentRevision, at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });
+          if (staleExit) await retireStaleCandidate({ now }, tx, { tenantId: config.tenantId, projectId: row.projectId, runId: specRow.runId }, stale!, [taskId], 'owner_cancelled_stale_record');
           // Nothing is left to reap, so any request still open for this revision is closed with it.
           await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(and(
             eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.taskId, taskId),
@@ -480,20 +514,17 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     // The same gate as retry: re-verifying is work sent back to the drivers, so a policy that withholds replanning withholds it.
     const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow re-verifying', { reason: gate.reason, decision: gate.decision });
-    // The record is read before the transaction, as the pull-request route does: loading it takes its own connection. Under the locks the candidate must still be this one.
-    const [latest] = await db.execute(sql`
-      SELECT sha, status FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${seen.projectId} AND run_id = ${runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
-      ORDER BY created_at DESC, candidate_id DESC LIMIT 1`);
-    const staleSha = latest && latest['status'] === 'assembled' && ctx.evidence && (await ctx.evidence.loadRecord({ tenantId: config.tenantId, projectId: seen.projectId, sha: String(latest['sha']) })) === null ? String(latest['sha']) : null;
+    const staleSha = await staleCandidateOf(seen.projectId, runId);
+    const trusted = ctx.evidence?.trusted() ?? null;
     const result = await withTx(db, async (tx) => {
       const run = await requireRun(tx, config.tenantId, runId, true);
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
         if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
         const refuse = (o: Extract<ReverifyOutcome, { ok: false }>) => new AppError(o.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: o.reason, ...(o.taskId !== undefined ? { taskId: o.taskId } : {}) });
         const scope = { tenantId: config.tenantId, projectId: run.projectId, runId };
-        const stale: ReverifyOutcome = staleSha === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification({ now }, tx, scope, uid, newId('op'), staleSha);
+        const stale: ReverifyOutcome = staleSha === null || trusted === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification({ now }, tx, scope, uid, newId('op'), staleSha, trusted);
         if (!stale.ok && stale.reason !== 'nothing_to_reverify') throw refuse(stale);
-        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'));
+        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'), trusted);
         if (!blocked.ok && (blocked.reason !== 'nothing_to_reverify' || !stale.ok)) throw refuse(blocked);
         return { runId, reopened: [...(stale.ok ? stale.reopened : []), ...(blocked.ok ? blocked.reopened : [])] };
       });
