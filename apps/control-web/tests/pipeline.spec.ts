@@ -179,6 +179,14 @@ test('a narrow screen replaces the graph with the list and says so', async ({ pa
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
 });
 
+test('a graph wider than the screen says more stages follow', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await openPipeline(page, 'feature-delivery', 'graph');
+  await expect(page.getByTestId('graph-scroll-hint')).toContainText('More stages to the right');
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await expect(page.getByTestId('graph-scroll-hint')).toHaveCount(0);
+});
+
 test('no data is an empty state, not zeros', async ({ page }) => {
   await openPipeline(page, 'no-data');
   await expect(page.getByText('No plan yet')).toBeVisible();

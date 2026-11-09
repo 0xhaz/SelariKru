@@ -1,4 +1,4 @@
-import { useMemo, useRef, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { toneGlyph, type Tone } from '@selarikru/ui';
 import { roleName } from '../team/TeamSignals.tsx';
 import { NODE_H, NODE_W, edgePath, layoutGraph, nextNode } from './layout.ts';
@@ -94,11 +94,25 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
     buttons.current.get(to)?.focus();
   };
 
+  const scroller = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  // A horizontal scrollbar can be invisible, so a clipped stage has to say that more follows.
+  useEffect(() => {
+    const measure = (): void => {
+      const el = scroller.current;
+      setOverflows(el !== null && el.scrollWidth > el.clientWidth + 1);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [layout.width]);
+
   const totalHeight = layout.height + HEADER_H;
   const stageX = (index: number): { x: number; width: number } => layout.columns.find((c) => c.index === index) ?? { x: 0, width: 0 };
 
   return (
-    <div className="overflow-x-auto pb-2" data-testid="pipeline-graph">
+    <div data-testid="pipeline-graph">
+    <div ref={scroller} className="overflow-x-auto pb-2">
       <div className="relative" style={{ width: layout.width, height: totalHeight }}>
         {layout.columns.map((c) => (
           <div key={c.index} className="absolute top-0 border-b border-line-strong pb-1 text-sm font-semibold text-fg" style={{ left: c.x, width: c.width }}>{STAGES[c.index]!.label}</div>
@@ -152,6 +166,8 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
           })}
         </ul>
       </div>
+    </div>
+    {overflows ? <p className="mt-1 text-sm text-muted" data-testid="graph-scroll-hint">More stages to the right. Scroll sideways, or use the arrow keys.</p> : null}
     </div>
   );
 }
