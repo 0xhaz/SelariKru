@@ -95,6 +95,8 @@ export type TaskEvent =
   | { type: 'verification_unavailable'; reason: string }
   /** The evidence behind a verified task was invalidated. It goes back to `verifying`, or to `blocked` when its claims cannot be re-acquired. */
   | { type: 'verification_invalidated'; blockedReason?: string }
+  /** The owner sent work blocked by a verifier or assembly failure back for a verdict. The attempt that finished waits for one again; no worker runs. */
+  | { type: 'reverify_requested' }
   | { type: 'retry_requested' }
   /** The scheduler refused a further attempt (repair or infrastructure retry): the task stops at `blocked`, keeping the reason on the event. */
   | { type: 'repair_refused'; reason: string }
@@ -211,6 +213,15 @@ export function transition(state: TaskState, event: TaskEvent): Result<TaskState
     case 'verification_unavailable':
       if (state.status !== 'verifying') return bad('only a verifying task can have an unavailable verification');
       return move('blocked', closeLast(state.attempts, 'interrupted', event.reason));
+    case 'reverify_requested': {
+      if (state.status !== 'blocked') return bad('only a blocked task can be sent back for verification');
+      const attempts = state.attempts.slice();
+      const last = attempts[attempts.length - 1];
+      if (!last || last.outcome !== 'interrupted') return bad('there is no interrupted attempt to verify');
+      const { reason: _reason, ...waiting } = last;
+      attempts[attempts.length - 1] = { ...waiting, outcome: 'running' };
+      return move('verifying', attempts);
+    }
     case 'retry_requested':
       if (state.status !== 'failed') return bad('retry applies only to a failed task');
       if (budgetUsed(state.attempts) >= state.maxAttempts) return bad('attempt budget exhausted');

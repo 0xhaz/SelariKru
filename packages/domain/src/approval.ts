@@ -12,6 +12,21 @@ export type WorkerApprovalOperation = z.infer<typeof WorkerApprovalOperationSche
 export const DESTINATION_OPERATIONS: readonly WorkerApprovalOperation[] = ['new_domain', 'new_connector'];
 export const requiresDestination = (operation: string): boolean => (DESTINATION_OPERATIONS as readonly string[]).includes(operation);
 
+/**
+ * What a worker can actually be granted today, and so what `TASK.md` offers. A grant for either of these is a human decision the attempt then acts on; it
+ * needs nothing from the sandbox or the path gate that does not exist yet.
+ */
+export const HONOURED_APPROVAL_OPERATIONS = ['breaking_api_change', 'destructive_data_migration'] as const satisfies readonly WorkerApprovalOperation[];
+
+/**
+ * Why an operation cannot take effect even if a person granted it, or null when it can. These are refused when asked, so nobody is shown a decision that
+ * would change nothing: a network grant needs a sandbox that limits egress to the destination, and a scope grant needs a way to widen `allowedPaths`.
+ */
+export function approvalUnavailableReason(operation: string): 'egress_enforcement_unavailable' | 'scope_grant_unavailable' | null {
+  if (requiresDestination(operation)) return 'egress_enforcement_unavailable';
+  return operation === 'scope_change' || operation === 'broader_scope' ? 'scope_grant_unavailable' : null;
+}
+
 /** A DNS name with an alphabetic last label: no raw IP addresses, schemes, ports, paths or wildcards. */
 const NETWORK_HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 

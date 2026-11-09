@@ -1,4 +1,4 @@
-import { requiresDestination, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
+import { approvalUnavailableReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -200,18 +200,21 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
     case 'approval_requested': {
       // `operation` is the worker's claim of what it needs. `evaluate` is the authority; absent or unknown is denied, and admin kinds are denied for an agent.
       const op = { kind: result.operation, actor: 'agent' } as unknown as Operation;
-      // A network operation names where it reaches: the destination is part of the scope, so a grant covers exactly that place. Absent, there is nothing a person could grant.
-      const noDestination = result.operation !== undefined && requiresDestination(result.operation) && result.destination === undefined;
-      const destinationDetail = result.destination ? { destination: result.destination.host, destinationKind: result.destination.kind } : {};
-      const opened: Awaited<ReturnType<typeof openApproval>> = noDestination
-        ? { decision: { decision: 'deny', reason: 'destination_required', policyVersion: ctx.policy?.policyVersion ?? 'unknown', record: 'policy_decision' } }
-        : await openApproval(ctx, tx, key, spec.runId, lease.revision, { op, requester: runner.id, reason: result.reason, detail: { reason: result.reason, ...destinationDetail } }, now);
+      // A grant that could change nothing is not offered: the worker stops, visibly, and no person is asked. The runner refuses these too; this holds whatever a runner sends.
+      const unavailable = result.operation !== undefined ? approvalUnavailableReason(result.operation) : null;
+      if (unavailable !== null) {
+        state = must(state, { type: 'blocked', reason: unavailable });
+        exitReason = unavailable;
+        event = { type: 'task.blocked', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: unavailable, operation: result.operation, requestedReason: result.reason, ...(result.destination ? { requestedDestination: result.destination.host } : {}) } };
+        break;
+      }
+      const opened = await openApproval(ctx, tx, key, spec.runId, lease.revision, { op, requester: runner.id, reason: result.reason, detail: { reason: result.reason } }, now);
       if (opened.approval) {
         state = must(state, { type: 'approval_requested' });
         exitReason = result.reason;
         event = {
           type: 'approval.requested', actor: SCHEDULER_ACTOR,
-          payload: { fence: lease.fence, reason: result.reason, operation: result.operation, ...(result.destination ? { destination: result.destination.host } : {}), approvalId: opened.approval.approvalId, scopeHash: opened.approval.scopeHash, expiresAt: opened.approval.expiresAt },
+          payload: { fence: lease.fence, reason: result.reason, operation: result.operation, approvalId: opened.approval.approvalId, scopeHash: opened.approval.scopeHash, expiresAt: opened.approval.expiresAt },
         };
       } else {
         // Nothing to approve: a deny stays a deny, and an operation policy allows needs no approval. Either way the worker stops here, visibly.

@@ -10,6 +10,9 @@
  *   predecessor verified or merged), which by construction cannot finish first. Without it such a plan would wait for ever.
  * - A failed or conflicted row is the verdict on these inputs until they change: its `inputsKey` matches and nothing is written again. A new part, attempt
  *   or base is a new key.
+ * - An infrastructure failure (`INFRASTRUCTURE_FAILURES`, a stale git lock, a moved artifact directory, a tip that cannot be read) is no verdict. It writes
+ *   no failure row and no event, keeps its count and next time on a `retrying` row, and is tried again on a doubling delay. Past the bound the parts move to
+ *   `blocked` with the reason, one `task.blocked` each, so the owner sees it and can re-verify.
  *
  * Imports are relative for the same reason as `service.ts`.
  */
@@ -18,12 +21,16 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { TaskSpecSchema, type TaskSpec } from '../../../packages/domain/src/index.ts';
-import { sql, type Db } from '../../../packages/persistence/src/index.ts';
+import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
 import { assembleCandidate, type IntegrationDeps } from './integrate.ts';
 
 const execFileP = promisify(execFile);
 /** The integration lease held by a driven assembly: short, because it renews while live, so a crash frees the target within this window. */
 export const ASSEMBLY_LEASE_SECONDS = 120;
+/** Further tries after the first infrastructure failure, and the delay before the first of them (doubling): 31 minutes in all, enough for a restart. */
+export const ASSEMBLY_RETRIES = 5;
+export const ASSEMBLY_RETRY_BACKOFF_SECONDS = 60;
 const DONE_STATUSES = new Set(['verifying', 'verified', 'merged']);
 /** Finished for this rule: done, or never going to be part of the run's result. */
 const SETTLED_STATUSES = new Set([...DONE_STATUSES, 'cancelled', 'superseded']);
@@ -34,12 +41,18 @@ export interface AssemblyDriverOptions extends Pick<IntegrationDeps, 'db' | 'art
   readonly tenantId: string;
   /** Local source repository holding the base commits and receiving the candidate ref. */
   readonly repoPath: string;
+  /** Default `ASSEMBLY_RETRIES`. */
+  readonly maxInfrastructureRetries?: number;
+  /** Default `ASSEMBLY_RETRY_BACKOFF_SECONDS`. */
+  readonly infrastructureBackoffSeconds?: number;
 }
 
 export interface AssemblyTick {
   readonly assembled: readonly string[];
-  /** Runs where assembly ended in a recorded failure this tick. */
+  /** Runs where assembly ended in a recorded failure this tick, including those whose infrastructure retries ran out. */
   readonly failed: readonly { readonly runId: string; readonly reason: string }[];
+  /** Runs where an infrastructure failure was scheduled for another try. Absent when there were none. */
+  readonly retrying?: readonly { readonly runId: string; readonly reason: string }[];
 }
 
 export interface AssemblyDriver {
@@ -49,7 +62,11 @@ export interface AssemblyDriver {
 }
 
 interface TaskRow { readonly spec: TaskSpec; readonly status: string; readonly attemptId: string | null; readonly manifest: string | null }
-interface Due { readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string }
+type Part = { readonly taskId: string; readonly revision: number; readonly attemptId: string };
+interface Due { readonly target: string; readonly pinnedBaseSha: string; readonly currentBaseSha: string; readonly inputsKey: string; readonly partsKey: string; readonly parts: readonly Part[] }
+/** Nothing to do, due, or a failure before assembly could start (the tip could not be read). */
+type Assessment = { readonly kind: 'idle' } | { readonly kind: 'due'; readonly due: Due } | { readonly kind: 'infrastructure'; readonly partsKey: string; readonly parts: readonly Part[]; readonly pinnedBaseSha: string; readonly target: string; readonly reason: string; readonly message: string };
+const RETRY_STATUS = 'retrying';
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 const partKey = (p: { taskId: string; revision: number; attemptId: string }): string => `${p.taskId}\0${p.revision}\0${p.attemptId}`;
@@ -96,49 +113,103 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
   const { db, tenantId, repoPath } = options;
   const now = options.now ?? (() => new Date());
   const leaseSeconds = options.leaseSeconds ?? ASSEMBLY_LEASE_SECONDS;
+  const maxRetries = options.maxInfrastructureRetries ?? ASSEMBLY_RETRIES;
+  const backoffSeconds = options.infrastructureBackoffSeconds ?? ASSEMBLY_RETRY_BACKOFF_SECONDS;
+  const retryId = (runId: string, target: string) => `cand_assembly_retry_${sha256(`${runId}\0${target}`).slice(0, 24)}`;
+
+  /** The retry row is the one piece of durable state an infrastructure failure writes. Its count belongs to these parts; different parts start again. */
+  async function noteInfrastructure(tx: Tx, projectId: string, runId: string, target: string, partsKey: string, parts: readonly Part[], pinnedBaseSha: string, reason: string, message: string): Promise<'retrying' | 'blocked'> {
+    const id = retryId(runId, target);
+    const at = now();
+    const rows = await tx.execute(sql`SELECT detail FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${id} AND status = ${RETRY_STATUS} FOR UPDATE`);
+    const retry = (rows[0]?.['detail'] as { retry?: { partsKey?: string; count?: number } } | undefined)?.retry;
+    const count = retry?.partsKey === partsKey && typeof retry.count === 'number' ? retry.count + 1 : 1;
+    if (count > maxRetries) {
+      for (const p of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
+        await closeVerificationWithoutVerdict({ now }, tx, { tenantId, projectId, taskId: p.taskId }, { reason: `assembly_infrastructure:${reason}`, expect: { revision: p.revision, attemptId: p.attemptId } });
+      }
+      await tx.execute(sql`DELETE FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${id}`);
+      return 'blocked';
+    }
+    const notBefore = new Date(at.getTime() + backoffSeconds * 1000 * 2 ** (count - 1)).toISOString();
+    const detail = JSON.stringify({ retry: { partsKey, count, notBefore, reason, message } });
+    await tx.execute(sql`
+      INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
+      VALUES (${tenantId}, ${projectId}, ${id}, ${runId}, ${target}, NULL, ${pinnedBaseSha}, NULL, '[]'::jsonb, ${RETRY_STATUS}, ${reason}, ${detail}::jsonb, ${at.toISOString()}::timestamptz)
+      ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET status = EXCLUDED.status, reason = EXCLUDED.reason, detail = EXCLUDED.detail, updated_at = EXCLUDED.updated_at`);
+    return 'retrying';
+  }
+
+  const clearRetry = (projectId: string, runId: string, target: string) => db.execute(sql`DELETE FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${retryId(runId, target)} AND status = ${RETRY_STATUS}`);
 
   /** What assembling this run would mean right now, or null when nothing is due. */
-  async function assess(projectId: string, runId: string): Promise<Due | null> {
+  async function assess(projectId: string, runId: string): Promise<Assessment> {
     const tasks = await loadRunTasks(db, tenantId, projectId, runId);
     // A verifying part with no published change set cannot enter a candidate; it counts as unfinished below.
     const waiting = tasks.filter((t) => t.status === 'verifying' && t.attemptId !== null && t.manifest !== null);
-    if (waiting.length === 0) return null;
+    if (waiting.length === 0) return { kind: 'idle' };
     const liveRows = await db.execute(sql`SELECT parts FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status = 'assembled' AND sha IS NOT NULL`);
     const live = new Set(liveRows.flatMap((r) => (r['parts'] as { taskId: string; revision: number; attemptId: string }[]).map(partKey)));
-    if (waiting.every((t) => live.has(partKey({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! })))) return null;
+    if (waiting.every((t) => live.has(partKey({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! })))) return { kind: 'idle' };
 
     const waitingIds = new Set(waiting.map((t) => t.spec.taskId));
     const held = heldByDependency(tasks, waitingIds);
     const unfinished = tasks.filter((t) => !SETTLED_STATUSES.has(t.status) || (t.status === 'verifying' && t.manifest === null));
-    if (unfinished.some((t) => !held.has(t.spec.taskId))) return null;
+    if (unfinished.some((t) => !held.has(t.spec.taskId))) return { kind: 'idle' };
 
     const project = await db.execute(sql`SELECT default_branch FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
-    if (project.length === 0) return null;
+    if (project.length === 0) return { kind: 'idle' };
     const target = String(project[0]!['default_branch']);
-    const currentBaseSha = await resolveTip(repoPath, target);
     // The run's base: what its workers were planned on. A resolution task is built later on a newer tip and does not define it.
     const workers = tasks.filter((t) => DONE_STATUSES.has(t.status) && t.spec.role !== 'integration');
     const pinnedBaseSha = (workers[0] ?? waiting[0]!).spec.baseSha;
-    const inputsKey = sha256(JSON.stringify({ pinnedBaseSha, currentBaseSha, target, parts: waiting.map((t) => [t.spec.taskId, t.spec.revision, t.attemptId, t.manifest]).sort() }));
+    const parts = waiting.map((t) => ({ taskId: t.spec.taskId, revision: t.spec.revision, attemptId: t.attemptId! }));
+    const partsKey = sha256(JSON.stringify({ pinnedBaseSha, target, parts: waiting.map((t) => [t.spec.taskId, t.spec.revision, t.attemptId, t.manifest]).sort() }));
+
+    // Waiting out an infrastructure failure: no git, no work, nothing written.
+    const retrying = await db.execute(sql`SELECT detail FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${retryId(runId, target)} AND status = ${RETRY_STATUS}`);
+    const retry = (retrying[0]?.['detail'] as { retry?: { partsKey?: string; notBefore?: string } } | undefined)?.retry;
+    if (retry?.partsKey === partsKey && retry.notBefore !== undefined && Date.parse(retry.notBefore) > now().getTime()) return { kind: 'idle' };
+
+    let currentBaseSha: string;
+    try {
+      currentBaseSha = await resolveTip(repoPath, target);
+    } catch (e) {
+      return { kind: 'infrastructure', partsKey, parts, pinnedBaseSha, target, reason: 'base_unavailable', message: `the tip of ${target} could not be read: ${e instanceof Error ? e.message.slice(0, 200) : 'error'}` };
+    }
+    const inputsKey = sha256(JSON.stringify({ partsKey, currentBaseSha }));
     const handled = await db.execute(sql`SELECT 1 FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND status IN ('failed', 'conflicted') AND detail ->> 'inputsKey' = ${inputsKey} LIMIT 1`);
-    if (handled.length > 0) return null;
-    return { target, pinnedBaseSha, currentBaseSha, inputsKey };
+    if (handled.length > 0) return { kind: 'idle' };
+    return { kind: 'due', due: { target, pinnedBaseSha, currentBaseSha, inputsKey, partsKey, parts } };
   }
 
-  async function assembleRun(projectId: string, runId: string): Promise<{ sha?: string; failure?: string }> {
-    const due = await assess(projectId, runId);
-    if (!due) return {};
+  async function assembleRun(projectId: string, runId: string): Promise<{ sha?: string; failure?: string; retrying?: string }> {
+    const assessed = await assess(projectId, runId);
+    if (assessed.kind === 'idle') return {};
+    if (assessed.kind === 'infrastructure') {
+      const a = assessed;
+      const done = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, a.target, a.partsKey, a.parts, a.pinnedBaseSha, a.reason, a.message));
+      return done === 'blocked' ? { failure: `assembly_infrastructure:${a.reason}` } : { retrying: a.reason };
+    }
+    const { due } = assessed;
+    let deferred: { readonly reason: string; readonly outcome: 'retrying' | 'blocked' } | undefined;
     const r = await assembleCandidate(
       { tenantId, projectId, runId, target: due.target, pinnedBaseSha: due.pinnedBaseSha, currentBaseSha: due.currentBaseSha, repoPath, inputsKey: due.inputsKey },
       {
         db, artifacts: options.artifacts, now, leaseSeconds,
         ...(options.workRoot !== undefined ? { workRoot: options.workRoot } : {}), ...(options.protectedPaths !== undefined ? { protectedPaths: options.protectedPaths } : {}), ...(options.beforePublish !== undefined ? { beforePublish: options.beforePublish } : {}),
-        stillDue: async () => (await assess(projectId, runId))?.inputsKey === due.inputsKey,
+        stillDue: async () => { const again = await assess(projectId, runId); return again.kind === 'due' && again.due.inputsKey === due.inputsKey; },
+        onInfrastructureFailure: async (f) => {
+          const outcome = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, due.target, due.partsKey, due.parts, due.pinnedBaseSha, f.reason, f.message));
+          deferred = { reason: f.reason, outcome };
+        },
       },
     );
-    if (r.ok) return { sha: r.sha };
+    if (r.ok) { await clearRetry(projectId, runId, due.target); return { sha: r.sha }; }
+    if (deferred) return deferred.outcome === 'blocked' ? { failure: `assembly_infrastructure:${deferred.reason}` } : { retrying: deferred.reason };
     // Another pass holds or took the work: nothing happened here and nothing is recorded.
     if (r.reason === 'lease_held' || r.reason === 'lease_lost' || r.reason === 'not_due') return {};
+    await clearRetry(projectId, runId, due.target);
     return { failure: r.reason };
   }
 
@@ -152,6 +223,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
         ORDER BY r.project_id, r.run_id`);
       const assembled: string[] = [];
       const failed: { runId: string; reason: string }[] = [];
+      const retrying: { runId: string; reason: string }[] = [];
       const errors: unknown[] = [];
       // One run's trouble (an invalid stored spec, a missing ref) is that run's alone: the rest are still assembled.
       for (const row of runs) {
@@ -161,12 +233,13 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
           const out = await assembleRun(projectId, runId);
           if (out.sha) assembled.push(out.sha);
           if (out.failure) failed.push({ runId, reason: out.failure });
+          if (out.retrying) retrying.push({ runId, reason: out.retrying });
         } catch (e) {
           errors.push(e);
         }
       }
       if (errors.length > 0) throw new AggregateError(errors, `assembly: ${errors.length} run(s) failed`);
-      return { assembled, failed };
+      return { assembled, failed, ...(retrying.length > 0 ? { retrying } : {}) };
     },
   };
 }

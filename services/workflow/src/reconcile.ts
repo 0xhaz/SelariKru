@@ -29,10 +29,17 @@ export async function expireLeases(ctx: SchedulerContext, now: Date): Promise<re
     .orderBy(asc(schema.attempts.leaseExpiresAt), asc(schema.attempts.attemptId));
 
   const expired: ExpiredLease[] = [];
+  const failures: unknown[] = [];
   for (const c of candidates) {
-    const reason = await expireOne(ctx, c.attemptId, c, now);
-    if (reason) expired.push({ tenantId: c.tenantId, projectId: c.projectId, taskId: c.taskId, attemptId: c.attemptId, fence: c.fence ?? 0, reason });
+    // One lease's failure is that lease's alone: a stored spec that no longer parses must not strand every lease behind it.
+    try {
+      const reason = await expireOne(ctx, c.attemptId, c, now);
+      if (reason) expired.push({ tenantId: c.tenantId, projectId: c.projectId, taskId: c.taskId, attemptId: c.attemptId, fence: c.fence ?? 0, reason });
+    } catch (e) {
+      failures.push(e);
+    }
   }
+  if (failures.length > 0) throw new AggregateError(failures, `${failures.length} lease expiry row(s) failed (${expired.length} expired)`);
   return expired;
 }
 

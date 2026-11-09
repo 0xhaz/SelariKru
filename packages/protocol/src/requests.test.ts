@@ -53,6 +53,17 @@ describe('runner result fields', () => {
     }
   });
 
+  it.each(['sk-ant-api03-abcdefghijklmnop.example.com', 'glpat-abcdefghijklmnopqrstuv.example.com', 'xoxb-1234567890-abc.example.com'])('refuses a destination shaped like a secret: %s', (host) => {
+    expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination: { kind: 'network_host', host } } }).success).toBe(false);
+  });
+
+  it('an approval request names one of the closed operations, or none', () => {
+    const ask = (operation?: string) => ResultRequestSchema.safeParse({ lease, result: { outcome: 'approval_requested', reason: 'x', ...(operation !== undefined ? { operation } : {}) } }).success;
+    expect(ask('destructive_data_migration')).toBe(true);
+    expect(ask()).toBe(true);
+    for (const bad of ['deploy', 'grant_me_everything', 'budget_increase']) expect(ask(bad)).toBe(false);
+  });
+
   it('an approval destination is structured or absent, never a free string', () => {
     const ask = (destination: unknown) => ResultRequestSchema.safeParse({ lease, result: { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination } }).success;
     expect(ask({ kind: 'network_host', host: 'api.example.com' })).toBe(true);

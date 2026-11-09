@@ -324,6 +324,12 @@ describe('approval signal', () => {
     expect(ofType(events, 'approval_refused')).toEqual([]);
   });
 
+  it.each(['sk-ant-api03-abcdefghijklmnop.example.com', 'glpat-abcdefghijklmnopqrstuv.example.com', 'xoxb-1234567890-abc.example.com'])('refuses a destination shaped like a secret: %s', async (host) => {
+    const events = await run([write({ operation: 'new_domain', destination: { kind: 'network_host', host }, reason: 'x' })]);
+    expect(ofType(events, 'approval_refused')[0]).toMatchObject({ why: 'invalid_destination' });
+    expect(JSON.stringify(events)).not.toContain(host);
+  });
+
   it('without a configured path nothing is recognised', async () => {
     const events = await run([write({ operation: 'scope_change', reason: 'x' })], {});
     expect(ofType(events, 'approval_signal')).toEqual([]);

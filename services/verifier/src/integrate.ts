@@ -79,6 +79,11 @@ export interface IntegrationDeps {
   readonly keepClone?: boolean;
   /** Test seam: runs just before the final transaction, while the lease is still held. */
   readonly beforePublish?: () => Promise<void>;
+  /**
+   * Set by the assembly driver. An infrastructure failure (`INFRASTRUCTURE_FAILURES`) reaches this, under the lease, instead of writing a failure row and a
+   * `candidate.failed`: it says nothing about the work, and the driver retries. Without it the failure is recorded as any other.
+   */
+  readonly onInfrastructureFailure?: (failure: { readonly reason: FailureReason; readonly message: string }) => Promise<void>;
   /** Asked right after the lease is held, before any work. False stops here with `not_due` and records nothing, so a pass that lost a race to another assembly leaves no failure row. */
   readonly stillDue?: () => Promise<boolean>;
 }
@@ -128,6 +133,7 @@ export type FailureReason =
   | 'manifest_invalid'
   | 'manifest_identity'
   | 'content_missing'
+  | 'artifact_unreadable'
   | 'path_rejected'
   | 'protected_path'
   | 'dependency_cycle'
@@ -155,12 +161,20 @@ export interface CandidateFailure {
   readonly message: string;
   readonly candidateId?: string;
   readonly conflicts?: readonly Conflict[];
+  /** An infrastructure failure handed to `onInfrastructureFailure`: nothing was recorded against the work. */
+  readonly deferred?: boolean;
   /** The proposed plan revision holding the resolution task, for `conflict`. */
   readonly proposalId?: string;
   readonly invalidated?: Invalidation;
 }
 
 export type AssemblyResult = Candidate | CandidateFailure;
+
+/**
+ * Reasons that say nothing about the work: a stale git lock, a moved artifact directory, a base the checkout does not hold yet. Everything else (conflict,
+ * manifest identity, path rejections) is a verdict on these exact inputs.
+ */
+export const INFRASTRUCTURE_FAILURES: ReadonlySet<FailureReason> = new Set(['git_failed', 'base_unavailable', 'manifest_missing', 'content_missing', 'artifact_unreadable']);
 
 class Fail extends Error {
   constructor(readonly reason: FailureReason, message: string, readonly extra: { conflicts?: Conflict[]; parts?: ResolvedPartRef[] } = {}) {
@@ -323,7 +337,7 @@ async function readVerified(store: ArtifactStore, hash: string, missing: Failure
     bytes = await store.get(hash);
   } catch (err) {
     if (err instanceof ArtifactIntegrityError) throw new Fail('manifest_corrupt', `artifact ${hash.slice(0, 12)} does not match its hash`);
-    throw new Fail('manifest_corrupt', `artifact ${hash.slice(0, 12)} could not be read`);
+    throw new Fail('artifact_unreadable', `artifact ${hash.slice(0, 12)} could not be read`);
   }
   if (bytes === null) throw new Fail(missing, `artifact ${hash.slice(0, 12)} does not exist`);
   // The store verifies on read; an implementation that does not is still held to it.
@@ -995,6 +1009,11 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
     } catch (err) {
       const fail = err instanceof Fail ? err : new Fail('git_failed', `unexpected error: ${err instanceof Error ? clip(err.message, 160) : 'error'}`);
       if (fail.reason === 'lease_lost') return { ok: false, reason: 'lease_lost', message: fail.message, ...(invalidated ? { invalidated } : {}) };
+      if (deps.onInfrastructureFailure && INFRASTRUCTURE_FAILURES.has(fail.reason)) {
+        await withTx(deps.db, (tx) => recordIntegrationTime(tx, run, holder, startedAt, now())).catch(() => undefined);
+        await deps.onInfrastructureFailure({ reason: fail.reason, message: clip(fail.message, 400) });
+        return { ok: false, reason: fail.reason, message: fail.message, deferred: true, ...(invalidated ? { invalidated } : {}) };
+      }
       return await recordFailure(deps, run, holder, startedAt, now(), fail, invalidated);
     }
   } finally {

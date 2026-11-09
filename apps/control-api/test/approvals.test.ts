@@ -9,7 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startLeaseExpiryDriver } from '../src/expire.ts';
 import { CAPS, PROJECT, RUN, TENANT, API_POLICY, enrolRunner, bearer, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
-const POLICY_OPS: Policy = { ...API_POLICY, ...POLICY, operations: { assign_replan_tasks: 'allow', new_domain: 'require_approval', deploy: 'deny' } };
+const POLICY_OPS: Policy = { ...API_POLICY, ...POLICY, operations: { assign_replan_tasks: 'allow', destructive_data_migration: 'require_approval', deploy: 'deny' } };
 const CLOUD_APPROVAL: Policy = { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } };
 
 let t: TestDb;
@@ -36,7 +36,7 @@ const countEvents = async (type: string) => Number((await t.db.execute(sql`SELEC
 async function runnerRequest(id = 't1') {
   await seedTask(t.db, specFor(id));
   const lease = (await s.claimNext(runner('r1'), CAPS))!;
-  await s.publishResult(lease, { outcome: 'approval_requested', reason: 'needs docs.example.com', operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } });
+  await s.publishResult(lease, { outcome: 'approval_requested', reason: 'needs docs.example.com', operation: 'destructive_data_migration' });
   return { lease, row: (await approvalRows())[0]! };
 }
 const resolve = (approvalId: string, body: Record<string, unknown>) => post(h.app, `/v1/approvals/${approvalId}/resolve`, { decision: 'grant', expectedRevision: 0, ...body });
@@ -87,7 +87,7 @@ describe('approval rows through the API', () => {
 
   it('a grant cannot outrun a policy that now denies the operation', async () => {
     const { row } = await runnerRequest();
-    h = makeHarness(t, {}, { ...POLICY_OPS, operations: { assign_replan_tasks: 'allow', new_domain: 'deny' } }, { scheduler: s });
+    h = makeHarness(t, {}, { ...POLICY_OPS, operations: { assign_replan_tasks: 'allow', destructive_data_migration: 'deny' } }, { scheduler: s });
     const res = await resolve(String(row['approval_id']), { scopeHash: row['scope_hash'], expectedRevision: Number((await statusOf('t1'))['row_revision']), idempotencyKey: 'x1' });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('policy_denied');
@@ -177,11 +177,11 @@ describe('approval rows through the API', () => {
     const { token } = await enrolRunner(h.app);
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     const canary = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
-    await post(h.app, '/v1/runners/result', { lease: { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken }, result: { outcome: 'approval_requested', reason: `need ${canary}`, operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } } }, bearer(token));
+    await post(h.app, '/v1/runners/result', { lease: { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken }, result: { outcome: 'approval_requested', reason: `need ${canary}`, operation: 'destructive_data_migration' } }, bearer(token));
     const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
     expect(JSON.stringify(snap.body)).not.toContain(canary);
     expect(snap.body.approvals).toHaveLength(1);
-    expect(snap.body.approvals[0]).toMatchObject({ taskId: 't2', revision: 1, operation: 'new_domain', reason: 'need [REDACTED]' });
+    expect(snap.body.approvals[0]).toMatchObject({ taskId: 't2', revision: 1, operation: 'destructive_data_migration', reason: 'need [REDACTED]' });
     expect(typeof snap.body.approvals[0].expiresAt).toBe('string');
     expect(typeof snap.body.approvals[0].requestedAt).toBe('string');
   });

@@ -15,7 +15,8 @@
     "db:up": "docker compose -f infra/docker-compose.yml up -d --wait",
     "db:down": "docker compose -f infra/docker-compose.yml down -v",
     "dev:stack": "node infra/dev-stack.mjs",
-    "dev:demo": "node infra/dev-demo.mjs"
+    "dev:demo": "node infra/dev-demo.mjs",
+    "dev:real": "node infra/dev-real.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

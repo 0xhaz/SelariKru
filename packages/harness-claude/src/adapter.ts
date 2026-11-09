@@ -122,6 +122,7 @@ function parseApprovalSignal(raw: unknown): { kind: 'signal'; operation: Approva
   const declared = body['destination'] ?? null;
   const parsed = declared === null ? null : ApprovalDestinationSchema.safeParse(declared);
   if (parsed !== null && !parsed.success) return refuse('invalid_destination');
+  if (parsed?.success && redactSecrets(parsed.data.host) !== parsed.data.host) return refuse('invalid_destination');
   const needs = requiresDestination(operation.data);
   if (needs && parsed === null) return refuse('destination_required');
   if (!needs && parsed !== null) return refuse('destination_not_applicable');

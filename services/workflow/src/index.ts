@@ -13,7 +13,7 @@ export { APPROVAL_TTL_SECONDS, expireApprovals, openApproval, type ApprovalGate,
 export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
-export { applyVerification, closeVerificationWithoutVerdict, markRunReadyForReview, releaseTaskClaims, type VerificationApplication, type VerificationVerdict } from './verification.ts';
+export { applyVerification, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, REVERIFY_LIMIT, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
 export { reconcileObservedCost, runUsageLines, stopForExhaustedBudget, type ObservedCost, type ReconcileResult, type RunUsageLine } from './usage.ts';

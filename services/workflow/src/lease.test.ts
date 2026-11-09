@@ -128,11 +128,25 @@ describe('publishResult', () => {
   });
 
   it('approval_requested moves to awaiting_approval and records no grant', async () => {
-    s = createScheduler({ db: t.db, now: clock.now, policy: { ...POLICY, operations: { new_domain: 'require_approval' } } });
+    s = createScheduler({ db: t.db, now: clock.now, policy: { ...POLICY, operations: { destructive_data_migration: 'require_approval' } } });
     const lease = await claim();
-    expect(await s.publishResult(lease, { outcome: 'approval_requested', reason: 'need docs.example.com', operation: 'new_domain', destination: { kind: 'network_host', host: 'docs.example.com' } })).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
+    expect(await s.publishResult(lease, { outcome: 'approval_requested', reason: 'need docs.example.com', operation: 'destructive_data_migration' })).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
     expect(await eventTypes(t.db)).toEqual(['attempt.started', 'placement.decided', 'approval.requested']);
     expect((await eventTypes(t.db)).includes('approval.granted')).toBe(false);
+  });
+});
+
+describe('expiry sweep isolation', () => {
+  it('one lease that cannot be reaped does not strand the others', async () => {
+    await seedTask(t.db, specFor('t_bad'));
+    await seedTask(t.db, specFor('t_good'));
+    await s.claimNext(runner('r1'), CAPS);
+    await s.claimNext(runner('r2'), CAPS);
+    await t.db.execute(sql`UPDATE task_revisions SET spec = jsonb_set(spec, '{title}', 'null'::jsonb) WHERE task_id = 't_bad'`);
+    clock.advance(LEASE_EXPIRY_SECONDS + 1);
+    await expect(s.expireLeases(clock.now())).rejects.toBeInstanceOf(AggregateError);
+    expect((await statusOf(t.db, 't_good')).status).toBe('ready');
+    expect((await statusOf(t.db, 't_bad')).status).toBe('running');
   });
 });
 

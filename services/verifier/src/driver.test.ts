@@ -117,6 +117,15 @@ describe('verification driver', () => {
     expect(await q(`SELECT attempt_id, outcome FROM attempts WHERE task_id = 't1'`)).toEqual([{ attempt_id: 'att_t1', outcome: 'succeeded' }]);
   });
 
+  it('two passes that see the same error record count it once', async () => {
+    const { sha } = await assembled();
+    const runner: VerifierRunner = async () => ({ exitCode: null, result: null, log: 'boom' });
+    const opts = () => options(runner, { maxVerificationRetries: 5, retryBackoffSeconds: 3600 });
+    await Promise.all([createVerificationDriver(opts()).tick(), createVerificationDriver(opts()).tick()]);
+    const detail = (await q(`SELECT detail FROM candidates WHERE sha = '${sha}'`))[0]!['detail'] as { verificationRetry: { count: number } };
+    expect(detail.verificationRetry.count).toBe(1);
+  });
+
   it('the re-verify retries are bounded: after the last one the candidate closes as before', async () => {
     const { sha } = await assembled();
     let clock = new Date('2026-11-09T02:00:00Z');

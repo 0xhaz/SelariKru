@@ -24,7 +24,7 @@ import { createAssemblyDriver } from '../../../services/verifier/src/assembly-dr
 import { createVerificationDriver } from '../../../services/verifier/src/driver.ts';
 import { candidateContentHash, loadValidRecord, type RunnerInput, type RunnerOutput } from '../../../services/verifier/src/service.ts';
 import { verifierHashes } from '../../../services/verifier/src/hashing.ts';
-import { API_POLICY, PROJECT, TENANT, enrolRunner, fakeVerifier, owner, post, resetDb, setupTestDb, specFor, testConfig, type TestDb } from './helpers.ts';
+import { API_POLICY, INTRUDER_TOKEN, PROJECT, TENANT, enrolRunner, fakeVerifier, owner, post, resetDb, setupTestDb, specFor, testConfig, type TestDb } from './helpers.ts';
 import { buildApp } from '../src/index.ts';
 
 const verifierRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../services/verifier');
@@ -40,7 +40,7 @@ function passingResult(input: RunnerInput): unknown {
 }
 const verifierRunner = async (input: RunnerInput): Promise<RunnerOutput> => ({ exitCode: 0, result: passingResult(input), log: 'ran' });
 
-const policy = { ...API_POLICY, operations: { assign_replan_tasks: 'allow', create_draft_pr: 'allow', destructive_data_migration: 'require_approval', new_domain: 'require_approval', scope_change: 'deny' } } as const;
+const policy = { ...API_POLICY, operations: { assign_replan_tasks: 'allow', create_draft_pr: 'allow', destructive_data_migration: 'require_approval', new_domain: 'require_approval', new_connector: 'require_approval', scope_change: 'require_approval', broader_scope: 'require_approval' } } as const;
 
 let t: TestDb;
 let root: string;
@@ -313,27 +313,116 @@ describe('run orchestration chain', () => {
     expect(JSON.parse(Buffer.from(manifestBytes!).toString()).changes.map((c: { path: string }) => c.path)).toEqual(['src/migrated.ts']);
   });
 
-  it('a network grant is refused rather than run while the sandbox cannot enforce it, with the destination in the scope', async () => {
+  it.each(['new_domain', 'new_connector'] as const)('%s is refused when asked, because the runtime cannot enforce it: no approval is opened', async (operation) => {
     const runId = await newRun();
     await planOf(runId, [task(runId, 't_net')]);
-    const destination = { kind: 'network_host', host: 'api.example.com' };
-    const first = await claim();
-    const asked = await runWorker(first, ({ stream, cwd }) => { stream.push(`${toolWrite(SIGNAL(cwd), JSON.stringify({ operation: 'new_domain', destination, reason: 'fetch exchange rates' }))}\n`); return false; });
-    expect(asked.report.outcome).toBe('approval_requested');
-    const snap = await snapshot();
-    expect(snap.approvals[0]).toMatchObject({ operation: 'new_domain', destination: 'api.example.com' });
-    // The destination is part of the scope: a grant for another host is a different scope.
-    const row = (await t.db.select().from(schema.approvals).where(eq(schema.approvals.taskId, 't_net')))[0]!;
-    expect(row.detail).toMatchObject({ destination: 'api.example.com', destinationKind: 'network_host' });
-    await grant('t_net');
-
-    const second = await claim();
-    expect(second.grants[0]).toMatchObject({ operation: 'new_domain', destination });
-    const { report, sbx } = await runWorker(second, () => { throw new Error('the agent must never start'); });
+    const lease = await claim();
+    const { report } = await runWorker(lease, ({ stream, cwd }) => { stream.push(`${toolWrite(SIGNAL(cwd), JSON.stringify({ operation, destination: { kind: 'network_host', host: 'api.example.com' }, reason: 'fetch rates' }))}\n`); return false; });
     expect(report.outcome).toBe('blocked');
-    expect(report.reason).toMatch(/egress_enforcement_unavailable/);
-    expect(await taskStatus('t_net')).toBe('blocked');
-    // Fail closed: no sandbox exists for this attempt.
-    expect(sbx.calls.filter((c) => c[0] === 'create')).toEqual([]);
+    expect(report.reason).toBe('egress_enforcement_unavailable');
+    expect(await t.db.select().from(schema.approvals)).toHaveLength(0);
+    expect((await snapshot()).tasks.find((x) => x.taskId === 't_net')!.blockedReason).toBe('egress_enforcement_unavailable');
+  });
+
+  it.each(['scope_change', 'broader_scope'] as const)('%s is refused when asked: no approval is opened and TASK.md never offered it', async (operation) => {
+    const runId = await newRun();
+    await planOf(runId, [task(runId, 't_scope')]);
+    const lease = await claim();
+    let taskFile = '';
+    const { report } = await runWorker(lease, ({ stream, cwd }) => {
+      taskFile = readFileSync(join(cwd, 'TASK.md'), 'utf8');
+      stream.push(`${toolWrite(SIGNAL(cwd), JSON.stringify({ operation, reason: 'need more' }))}\n`);
+      return false;
+    });
+    expect(report).toMatchObject({ outcome: 'blocked', reason: 'scope_grant_unavailable' });
+    expect(await t.db.select().from(schema.approvals)).toHaveLength(0);
+    for (const never of ['new_domain', 'new_connector', 'scope_change', 'broader_scope']) expect(taskFile).not.toContain(never);
+    expect(taskFile).toContain('breaking_api_change');
+    expect(taskFile).toContain('destructive_data_migration');
+  });
+
+  it.each(['new_domain', 'new_connector', 'scope_change', 'broader_scope'] as const)('the runner route refuses %s whatever a runner sends', async (operation) => {
+    const runId = await newRun();
+    await planOf(runId, [task(runId, 't_route')]);
+    const c = await claim();
+    const destination = operation === 'new_domain' || operation === 'new_connector' ? { destination: { kind: 'network_host', host: 'api.example.com' } } : {};
+    const res = await post(app, '/v1/runners/result', { lease: { attemptId: c.attemptId, fence: c.fence, leaseToken: c.leaseToken }, result: { outcome: 'approval_requested', reason: 'r', operation, ...destination } }, { authorization: `Bearer ${token}` });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ taskStatus: 'blocked' });
+    expect(await t.db.select().from(schema.approvals)).toHaveLength(0);
+  });
+
+  it.each(['sk-ant-api03-abcdefghijklmnop.example.com', 'glpat-abcdefghijklmnopqrstuv.example.com', 'xoxb-1234567890-abc.example.com'])('the runner route refuses a secret-shaped destination: %s', async (host) => {
+    const runId = await newRun();
+    await planOf(runId, [task(runId, 't_host')]);
+    const c = await claim();
+    const res = await post(app, '/v1/runners/result', { lease: { attemptId: c.attemptId, fence: c.fence, leaseToken: c.leaseToken }, result: { outcome: 'approval_requested', reason: 'r', operation: 'new_domain', destination: { kind: 'network_host', host } } }, { authorization: `Bearer ${token}` });
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).not.toContain(host);
+    expect(await t.db.select().from(schema.approvals)).toHaveLength(0);
+  });
+
+  it('a change_merged edge is refused at plan acceptance with a typed error', async () => {
+    const runId = await newRun();
+    const dep = specFor('t_b', { runId, baseSha, allowedPaths: ['src'], execution: 'local', dependencies: [{ taskId: 't_a', revision: 1, condition: 'change_merged' }] });
+    const res = await planOf(runId, [task(runId, 't_a'), dep]);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('plan_invalid');
+    expect(res.body.error.details).toEqual([{ kind: 'unsupported_dependency_condition', taskId: 't_b', dependsOn: 't_a', condition: 'change_merged' }]);
+    expect(await lifecycle(runId)).toBe('planning');
+  });
+
+  describe('owner reverify', () => {
+    async function blockedOnVerifier(taskId: string): Promise<{ runId: string; sha: string; store: LocalDiskArtifactStore }> {
+      const runId = await newRun();
+      await planOf(runId, [task(runId, taskId)]);
+      const { report } = await runWorker(await claim(), ({ write }) => { write(`src/${taskId}.ts`, 'export const v = 1;\n'); });
+      expect(report.outcome).toBe('completed');
+      const store = new LocalDiskArtifactStore(artifactDir);
+      const { assembled } = await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick();
+      const sha = assembled[0]!;
+      const down = createVerificationDriver({ db: t.db, artifacts: store, runner: async () => ({ exitCode: null, result: null, log: 'docker daemon restarting' }), verifier: { kind: 'verifier', id: 'verifier-local-1' }, host: 'local-docker', tenantId: TENANT, repoPath: repo, workRoot: join(root, 'verify'), maxVerificationRetries: 0 });
+      expect((await down.tick()).reaped).toEqual([sha]);
+      expect(await taskStatus(taskId)).toBe('blocked');
+      return { runId, sha, store };
+    }
+    const reverify = (runId: string, key: string, over: Record<string, unknown> = {}) => post(app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: key, ...over });
+
+    it('sends finished work back and reaches a verdict without running a worker, idempotently', async () => {
+      const { runId, sha, store } = await blockedOnVerifier('t_redo');
+      const attemptsBefore = await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_redo'`);
+      const first = await reverify(runId, 'k1');
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({ runId, reopened: ['t_redo'] });
+      expect(await taskStatus('t_redo')).toBe('verifying');
+      const same = await reverify(runId, 'k1');
+      expect(same.status).toBe(200);
+      expect(await t.db.execute(sql`SELECT 1 FROM task_commands WHERE command = 'reverify'`)).toHaveLength(1);
+
+      const assembled = await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick();
+      expect(assembled.assembled).toEqual([sha]);
+      const up = createVerificationDriver({ db: t.db, artifacts: store, runner: verifierRunner, verifier: { kind: 'verifier', id: 'verifier-local-1' }, host: 'local-docker', tenantId: TENANT, repoPath: repo, workRoot: join(root, 'verify') });
+      expect((await up.tick()).verified).toBe(sha);
+      expect(await taskStatus('t_redo')).toBe('verified');
+      expect(await lifecycle(runId)).toBe('ready_for_review');
+      expect(await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = 't_redo'`)).toEqual(attemptsBefore);
+    });
+
+    it('is bounded, needs the owner, and refuses a run with nothing blocked on the verifier', async () => {
+      const { runId } = await blockedOnVerifier('t_lim');
+      expect((await post(app, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'a1' }, { authorization: `Bearer ${INTRUDER_TOKEN}` })).status).toBe(403);
+      expect((await reverify(runId, 'a2', { expectedPlanRevision: 7 })).status).toBe(409);
+      await t.db.insert(schema.taskCommands).values([1, 2, 3].map((n) => ({ tenantId: TENANT, projectId: PROJECT, operationId: `op_prev_${n}`, taskId: 't_lim', revision: 1, command: 'reverify', state: 'applied', requestedBy: 'owner', requestedAt: new Date() })));
+      const over = await reverify(runId, 'a3');
+      expect(over.status).toBe(403);
+      expect(over.body.error.details).toMatchObject({ reason: 'reverify_limit_reached', taskId: 't_lim' });
+      expect(await taskStatus('t_lim')).toBe('blocked');
+
+      const other = await newRun();
+      await planOf(other, [task(other, 't_other')]);
+      const none = await reverify(other, 'a4');
+      expect(none.status).toBe(403);
+      expect(none.body.error.details).toMatchObject({ reason: 'nothing_to_reverify' });
+    });
   });
 });

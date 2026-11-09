@@ -66,6 +66,20 @@ describe('completion gate hardening', () => {
   });
 });
 
+describe('the approval signal file', () => {
+  it('a request written by Bash is not a signal: the file fails the attempt through the diff gate', async () => {
+    const { w, deps } = await setup({
+      agent: async ({ stream, cwd, write }) => {
+        await write('.selarikru/approval-request.json', '{"operation":"destructive_data_migration","reason":"x"}');
+        stream.push(`${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: `echo '{}' > ${cwd}/.selarikru/approval-request.json` } }] } })}\n`);
+      },
+    });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/reserved \.selarikru/);
+  });
+});
+
 describe('MCP and tool restriction', () => {
   it('launches the agent with an empty strict MCP config and the explicit tool list', async () => {
     const { w, deps } = await setup({});

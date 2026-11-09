@@ -2,10 +2,10 @@ import { newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema,
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
-  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, TaskCommandRequestSchema,
+  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, reducedScopeContext, releaseTaskClaims, type AcceptedReducedScope } from '@selarikru/workflow';
+import { acceptanceCovers, assessRunScope, leaseHealth, loadAcceptedReducedScope, reducedScopeContext, releaseTaskClaims, reopenBlockedVerification, type AcceptedReducedScope } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -124,6 +124,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow planning', { reason: gate.reason, decision: gate.decision });
 
     const extra: PlanError[] = body.tasks.filter((t) => t.tenantId !== config.tenantId).map((t) => ({ kind: 'scope_mismatch', taskId: t.taskId, field: 'projectId' }));
+    // A dependent on a merge could never start: the run cannot reach a pull request while it has an unfinished task, so nothing would ever merge.
+    for (const t of body.tasks) for (const d of t.dependencies) if (d.condition === 'change_merged') extra.push({ kind: 'unsupported_dependency_condition', taskId: t.taskId, dependsOn: d.taskId, condition: d.condition });
     const validation = validatePlanRevision({ projectId, runId: run.runId, revision: body.expectedRevision + 1, tasks: body.tasks }, { projectId, runId: run.runId });
     const errors = [...extra, ...(validation.ok ? [] : validation.errors)];
     if (errors.length > 0) throw new AppError(422, 'plan_invalid', 'the proposed plan is not valid', errors);
@@ -388,6 +390,24 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       });
     });
     return reply.code(201).send(result);
+  });
+
+  // ---- re-verification ---------------------------------------------------------------------------------------
+  /** Sends finished work blocked by a verifier or assembly failure back for a verdict. No worker runs; the assembly and verification drivers do the rest. */
+  app.post('/v1/runs/:id/reverify', auth, async (req, reply) => {
+    const uid = ownerOf(req);
+    const body = parseBody(ReverifyRunRequestSchema, req.body);
+    const runId = idParam(req);
+    const result = await withTx(db, async (tx) => {
+      const run = await requireRun(tx, config.tenantId, runId, true);
+      return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
+        if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
+        const outcome = await reopenBlockedVerification({ now }, tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, uid, newId('op'));
+        if (!outcome.ok) throw new AppError(outcome.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: outcome.reason, ...(outcome.taskId !== undefined ? { taskId: outcome.taskId } : {}) });
+        return { runId, reopened: outcome.reopened };
+      });
+    });
+    return reply.code(200).send(result);
   });
 
   // ---- snapshot ----------------------------------------------------------------------------------------------

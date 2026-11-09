@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { ClaudeHarnessAdapter } from '@selarikru/harness-claude';
-import { redactSecrets, WORKER_APPROVAL_OPERATIONS, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { approvalUnavailableReason, HONOURED_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
@@ -75,12 +75,11 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     ...(opts.signalPath !== undefined
       ? [
           '## Asking for a human decision',
-          `If this task truly needs one of: ${WORKER_APPROVAL_OPERATIONS.join(', ')}, stop and ask. Do not attempt it.`,
+          `If this task truly needs one of: ${HONOURED_APPROVAL_OPERATIONS.join(', ')}, stop and ask. Do not attempt it.`,
           'Ask by writing, with the Write tool and nothing else, exactly this path:',
           `  ${opts.signalPath}`,
           'with this JSON and no other fields, then end your turn:',
           '  {"operation":"<one of the list above>","reason":"<one sentence>"}',
-          'new_domain and new_connector also need "destination":{"kind":"network_host","host":"<host name>"}.',
           ...(grants.length > 0 ? ['', '## Already approved for this attempt', 'A person approved these. Do not ask for them again:', ...grants.map((g) => `- ${grantedLabel(g)}`)] : []),
           '',
         ]
@@ -210,7 +209,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (!allowed.ok) return await finish('blocked', allowed.reason, null, null);
     if (!FULL_SHA.test(task.baseSha)) return await finish('blocked', 'task base is not a full commit id', null, null);
     // A grant that reaches the network is only honest if the sandbox can limit egress to exactly that destination. It cannot yet (see the runtime), so
-    // the task stops here, before any sandbox exists, and says why. An ordinary attempt never gets a network it was not granted either way.
+    // the task stops here, before any sandbox exists, and says why. New requests of this kind are refused when asked; this holds for a grant already issued.
+    // Note that every sandbox still has the machine-wide allowlist it inherits from sbx policy: no attempt runs with a network limited to what was granted.
     const grants = lease.grants ?? [];
     const egressGrants = grants.filter((g) => g.destination !== null);
     if (egressGrants.length > 0 && (await deps.runtime.capabilities()).egressAllowlist !== 'enforced') {
@@ -266,6 +266,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The agent's first approval signal ends the attempt: the runner stops it and the control plane decides whether a person is asked.
     let approvalRequest: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string } | null = null;
     let approvalRefused: ApprovalRefusalReason | null = null;
+    // Asked for something a grant could not make real. Stopped here; no person is asked.
+    let approvalUnavailable: string | null = null;
     let coveredSignal = false;
     const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
     reportedUsage = { reportedUsage: { setupSeconds } };
@@ -289,14 +291,21 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
             log(`approval signal for ${ev.operation} already covered by a grant`);
             break;
           }
-          if (approvalRequest === null && approvalRefused === null) {
-            approvalRequest = { operation: ev.operation, destination: ev.destination, reason: ev.reason };
-            log(`agent requested approval: ${ev.operation}`);
+          if (approvalRequest === null && approvalRefused === null && approvalUnavailable === null) {
+            const unavailable = approvalUnavailableReason(ev.operation);
+            // The runtime is the authority on egress; asking it keeps this right if a runtime ever can enforce one.
+            if (unavailable === 'egress_enforcement_unavailable' ? (await deps.runtime.capabilities()).egressAllowlist !== 'enforced' : unavailable !== null) {
+              approvalUnavailable = unavailable;
+              log(`agent asked for ${ev.operation}, which cannot take effect: ${unavailable}`);
+            } else {
+              approvalRequest = { operation: ev.operation, destination: ev.destination, reason: ev.reason };
+              log(`agent requested approval: ${ev.operation}`);
+            }
             requestStop();
           }
           break;
         case 'approval_refused':
-          if (approvalRequest === null && approvalRefused === null) {
+          if (approvalRequest === null && approvalRefused === null && approvalUnavailable === null) {
             approvalRefused = ev.why;
             log(`approval signal refused: ${ev.why}`);
             requestStop();
@@ -341,6 +350,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (refused !== null) return await finish('blocked', `harness capability unavailable: ${refused}`, cost, null);
     // A refused or requested approval is the agent's outcome even though it was stopped before producing a result.
     if (approvalRefused !== null) return await finish('blocked', `approval_signal_refused: ${approvalRefused}`, cost, null);
+    if (approvalUnavailable !== null) return await finish('blocked', approvalUnavailable, cost, null);
     if (approvalRequest !== null) return await finish('approval_requested', (approvalRequest as { reason: string }).reason, cost, null, approvalRequest);
     if (!resultOk) return await finish('failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote, cost, null);
     if (exitFailed) return await finish('failed', exitNote || 'agent exited with an error', cost, null);

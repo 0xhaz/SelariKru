@@ -23,6 +23,8 @@ export type PlanError =
   | { kind: 'scope_mismatch'; taskId?: string; field: 'projectId' | 'runId' }
   /** `allowedPaths` entries are plain repo-relative prefixes: no globs, absolute paths, `..` or `.git`. */
   | { kind: 'invalid_allowed_path'; taskId: string; path: string; reason: string }
+  /** A dependency condition no run can currently satisfy. */
+  | { kind: 'unsupported_dependency_condition'; taskId: string; dependsOn: string; condition: string }
   /** A task's cost ceiling is zero: no attempt could ever reserve budget, so it would wait forever with no signal. */
   | { kind: 'zero_cost_cap'; taskId: string; field: 'limits.maxCostUsd' };
 

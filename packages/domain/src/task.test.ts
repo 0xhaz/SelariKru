@@ -184,6 +184,10 @@ describe('task state machine', () => {
     const running = run(newTaskState({ taskId: 't', revision: 1, kind: 'repository', maxAttempts: 1 }), [{ type: 'dependencies_satisfied' }, start(1)]);
     const verifying = run(running, [{ type: 'attempt_completed' }]);
     const blocked = run(verifying, [{ type: 'verification_unavailable', reason: 'verification_error' }]);
+    const back = run(blocked, [{ type: 'reverify_requested' }]);
+    expect(back.status).toBe('verifying');
+    expect(back.attempts.at(-1)!.outcome).toBe('running');
+    expect(transition(verifying, { type: 'reverify_requested' }).ok).toBe(false);
     expect(blocked.status).toBe('blocked');
     expect(blocked.attempts).toEqual([{ attemptId: 'attempt_1', number: 1, outcome: 'interrupted', reason: 'verification_error' }]);
     expect(transition(running, { type: 'verification_unavailable', reason: 'x' }).ok).toBe(false);

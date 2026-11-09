@@ -84,6 +84,7 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
   const maxRetries = options.maxVerificationRetries ?? 0;
   const backoffSeconds = options.retryBackoffSeconds ?? DEFAULT_RETRY_BACKOFF_SECONDS;
   const candKey = (c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>) => sql`tenant_id = ${tenantId} AND project_id = ${c.project_id} AND run_id = ${c.run_id} AND sha = ${c.sha}`;
+  const candKeyFor = (alias: string, c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>) => sql`${sql.raw(alias)}.tenant_id = ${tenantId} AND ${sql.raw(alias)}.project_id = ${c.project_id} AND ${sql.raw(alias)}.run_id = ${c.run_id} AND ${sql.raw(alias)}.sha = ${c.sha}`;
 
   /** Atomically claims the oldest due candidate. Concurrent ticks and processes cannot claim the same one. */
   async function claimDue(holder: string): Promise<CandidateRow | null> {
@@ -148,21 +149,22 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
   }
 
   /**
-   * Keeps an infrastructure error alive for another run while retries remain: its check runs are invalidated, so the candidate is due again once the delay
-   * passes. Locks the candidate first so two passes cannot both count the same error. False when the bound is reached, and the caller closes it instead.
+   * Keeps one infrastructure error alive for another run while retries remain: its check runs are invalidated, so the candidate is due again once the delay
+   * passes. Under the candidate lock the same record must still be live, or another pass already dealt with it (`gone`). `exhausted` means the bound is reached
+   * and the caller closes the candidate.
    */
-  async function scheduleRetry(c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>): Promise<boolean> {
-    if (maxRetries <= 0) return false;
+  async function scheduleRetry(c: Pick<CandidateRow, 'project_id' | 'run_id' | 'sha'>, recordId: string): Promise<'scheduled' | 'exhausted' | 'gone'> {
+    if (maxRetries <= 0) return 'exhausted';
     return withTx(db, async (tx: Tx) => {
-      const locked = await tx.execute(sql`SELECT detail FROM candidates WHERE ${candKey(c)} AND status = 'assembled' FOR UPDATE`);
-      if (locked.length === 0) return false;
+      const locked = await tx.execute(sql`SELECT detail, (SELECT 1 ${sql`FROM artifacts a WHERE a.tenant_id = c.tenant_id AND a.project_id = c.project_id AND a.artifact_id = ${recordId} AND a.type = 'verification_record'`} AND a.locator ->> 'applied' = 'false' AND a.locator ->> 'result' = 'error' AND EXISTS (SELECT 1 FROM check_runs r WHERE r.tenant_id = a.tenant_id AND r.project_id = a.project_id AND r.candidate_sha = c.sha AND r.result <> 'invalidated' AND jsonb_exists(a.locator -> 'checkRunIds', r.check_run_id))) AS live FROM candidates c WHERE ${candKeyFor('c', c)} AND c.status = 'assembled' FOR UPDATE`);
+      if (locked.length === 0 || locked[0]!['live'] === null) return 'gone';
       const retry = (locked[0]!['detail'] as { verificationRetry?: { count?: number } }).verificationRetry;
       const count = typeof retry?.count === 'number' ? retry.count : 0;
-      if (count >= maxRetries) return false;
+      if (count >= maxRetries) return 'exhausted';
       const notBefore = new Date(now().getTime() + backoffSeconds * 1000 * 2 ** count).toISOString();
       await tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${tenantId} AND project_id = ${c.project_id} AND candidate_sha = ${c.sha} AND result <> 'invalidated'`);
       await tx.execute(sql`UPDATE candidates SET detail = jsonb_set(detail, '{verificationRetry}', jsonb_build_object('count', ${count + 1}::int, 'notBefore', ${notBefore}::text)), updated_at = ${now().toISOString()}::timestamptz WHERE ${candKey(c)}`);
-      return true;
+      return 'scheduled';
     });
   }
 
@@ -170,7 +172,8 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
   async function reap(retried: string[] = []): Promise<string[]> {
     const rows = await db.execute(sql`
       SELECT c.project_id, c.run_id, c.sha, c.parts,
-        (SELECT a.locator ->> 'result' ${LIVE_RECORD} AND a.locator ->> 'applied' = 'false' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1) AS result
+        (SELECT a.locator ->> 'result' ${LIVE_RECORD} AND a.locator ->> 'applied' = 'false' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1) AS result,
+        (SELECT a.artifact_id ${LIVE_RECORD} AND a.locator ->> 'applied' = 'false' ORDER BY a.created_at DESC, a.artifact_id DESC LIMIT 1) AS record_id
       FROM candidates c
       WHERE c.tenant_id = ${tenantId} AND c.status = 'assembled' AND c.sha IS NOT NULL
         AND NOT EXISTS (SELECT 1 ${LIVE_RECORD} AND a.locator ->> 'applied' = 'true')`);
@@ -179,7 +182,11 @@ export function createVerificationDriver(options: VerificationDriverOptions): Pi
       const reason = row['result'] === 'error' ? 'verification_error' : row['result'] === 'skipped' ? 'verification_skipped' : null;
       if (reason === null) continue;
       const c = row as unknown as CandidateRow;
-      if (reason === 'verification_error' && (await scheduleRetry(c))) { retried.push(c.sha); continue; }
+      if (reason === 'verification_error') {
+        const next = await scheduleRetry(c, String(row['record_id']));
+        if (next === 'gone') continue;
+        if (next === 'scheduled') { retried.push(c.sha); continue; }
+      }
       if (await close(c, reason)) reaped.push(c.sha);
     }
     return reaped;

@@ -119,6 +119,16 @@ export const AcceptReducedScopeRequestSchema = z
   .strict();
 export type AcceptReducedScopeRequest = z.infer<typeof AcceptReducedScopeRequestSchema>;
 
+/** Sends a run's finished work, blocked by a verifier or assembly failure, back for another verdict. No worker runs. */
+export const ReverifyRunRequestSchema = z
+  .object({
+    /** The run's plan revision as the owner saw it. A stale value is a 409. */
+    expectedPlanRevision: Revision,
+    idempotencyKey: Key,
+  })
+  .strict();
+export type ReverifyRunRequest = z.infer<typeof ReverifyRunRequestSchema>;
+
 export const INFERENCE_MODES = ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const;
 export const INFERENCE_SOURCES = ['on_device', 'in_cloud', 'unknown'] as const;
 

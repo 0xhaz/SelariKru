@@ -10,6 +10,7 @@ if (existsSync('.env')) process.loadEnvFile('.env');
 
 const env = { ...process.env };
 const demo = env.SELARIKRU_DEMO === '1'; // set by dev-demo.mjs
+const realRun = env.SELARIKRU_REAL_RUN === '1'; // set by dev-real.mjs
 const need = ['SELARIKRU_OWNER_UID'];
 const missing = need.filter((n) => !env[n]);
 if (missing.length > 0) {
@@ -43,6 +44,7 @@ for (const [k, v] of Object.entries(dev)) env[k] ??= v;
 env.SELARIKRU_ARTIFACT_DIR ??= join(homedir(), '.selarikru', 'artifacts');
 env.SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS ??= '5000';
 env.SELARIKRU_VERIFICATION_POLL_INTERVAL_MS ??= '5000';
+// SELARIKRU_GITHUB_ENABLED stays off here: a source repository alone never reaches GitHub.
 // A throwaway Feedback Board checkout in the git-ignored .local/ for the drivers to read when no source repository is configured. It is only a
 // default for this local stack: point SELARIKRU_SOURCE_REPO (and the runner's --repo) at a real checkout to run real work.
 const prepareLocalSourceRepo = () => {
@@ -50,13 +52,16 @@ const prepareLocalSourceRepo = () => {
   if (existsSync(join(dir, '.git'))) return dir;
   mkdirSync(dir, { recursive: true });
   cpSync('examples/feedback-board-starter', dir, { recursive: true, filter: (src) => !/(^|\/)(node_modules|dist)$/.test(src) && !/\.sqlite(-wal|-shm)?$/.test(src) });
-  const g = (...a) => spawnSync('git', ['-c', 'user.name=SelariKru', '-c', 'user.email=dev@selarikru.invalid', ...a], { cwd: dir, stdio: 'ignore' });
+  const g = (...a) => {
+    const r = spawnSync('git', ['-c', 'user.name=SelariKru', '-c', 'user.email=dev@selarikru.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: dir, stdio: 'inherit' });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')} failed in ${dir}`);
+  };
   g('init', '-q', '-b', 'main');
   g('add', '-A');
   g('commit', '-q', '-m', 'Feedback Board starter');
   return dir;
 };
-if (!env.SELARIKRU_SOURCE_REPO && !env.SELARIKRU_GITHUB_SOURCE_REPO) env.SELARIKRU_SOURCE_REPO = prepareLocalSourceRepo();
+if (!env.SELARIKRU_SOURCE_REPO) env.SELARIKRU_SOURCE_REPO = prepareLocalSourceRepo();
 
 const run = (cmd, args, opts = {}) => {
   const r = spawnSync(cmd, args, { stdio: 'inherit', env, ...opts });
@@ -93,6 +98,11 @@ for (let i = 0; i < 100; i++) {
 if (demo) {
   console.log('> seeding demo account, project and run');
   run('pnpm', ['--filter', '@selarikru/control-api', 'exec', 'tsx', 'src/demo-seed.ts']);
+}
+
+if (realRun) {
+  console.log('> seeding the real-run project from the source checkout');
+  run('pnpm', ['--filter', '@selarikru/control-api', 'exec', 'tsx', 'src/real-run-seed.ts']);
 }
 
 console.log('> starting control API');

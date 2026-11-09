@@ -28,6 +28,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/runs`],
   ['POST', `/v1/runs/${RUN}/plan-revisions`],
   ['POST', `/v1/runs/${RUN}/accept-reduced-scope`],
+  ['POST', `/v1/runs/${RUN}/reverify`],
   ['POST', `/v1/runs/${RUN}/proposals/review`],
   ['POST', `/v1/projects/${PROJECT}/draft-reclassifications`],
   ['POST', '/v1/tasks/t1/commands'],

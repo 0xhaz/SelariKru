@@ -1,5 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import type { VerificationRecord } from '@selarikru/domain';
-import { startReconciler, type GitHubPort } from '@selarikru/integrations-github';
+import { createGhCliPort, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
 import { createScheduler } from '@selarikru/workflow';
@@ -9,8 +12,8 @@ import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
 import { createFirebaseVerifier } from './firebase.ts';
-import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
-import { dockerRunner, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
+import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
+import { dockerRunner, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
 import { DEFAULT_VERIFICATION_RETRIES, startVerificationDriver, type VerificationDriverOptions } from '../../../services/verifier/src/driver.ts';
 import { ASSEMBLY_LEASE_SECONDS, startAssemblyDriver, type AssemblyDriverOptions } from '../../../services/verifier/src/assembly-driver.ts';
 
@@ -28,20 +31,49 @@ const pollInterval = (env: NodeJS.ProcessEnv, name: string, key: string): number
   return intervalMs;
 };
 
-/** The repository candidates are built from and verified against. `SELARIKRU_SOURCE_REPO`, falling back to the GitHub source repository setting. */
-const sourceRepo = (env: NodeJS.ProcessEnv): string | undefined => env['SELARIKRU_SOURCE_REPO'] || env['SELARIKRU_GITHUB_SOURCE_REPO'] || undefined;
+/**
+ * The repository candidates are built from, verified against, and pushed from: `SELARIKRU_SOURCE_REPO`, the one setting for it. Must be an absolute path to an
+ * existing git repository, because a wrong one would otherwise surface only as every assembly failing.
+ */
+export function sourceRepoFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  if (env['SELARIKRU_GITHUB_SOURCE_REPO']) throw new ConfigError('SELARIKRU_GITHUB_SOURCE_REPO was replaced: set SELARIKRU_SOURCE_REPO, and SELARIKRU_GITHUB_ENABLED=1 to open pull requests from it', [], ['SELARIKRU_GITHUB_SOURCE_REPO']);
+  const repo = env['SELARIKRU_SOURCE_REPO'];
+  if (!repo) return undefined;
+  if (!isAbsolute(repo) || !existsSync(repo)) throw new ConfigError('invalid configuration: SELARIKRU_SOURCE_REPO must be an absolute path to an existing git repository', [], ['SELARIKRU_SOURCE_REPO']);
+  const git = spawnSync('git', ['-C', repo, 'rev-parse', '--git-dir'], { stdio: 'ignore', env: { PATH: env['PATH'] ?? process.env['PATH'] ?? '', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+  if (git.status !== 0) throw new ConfigError('invalid configuration: SELARIKRU_SOURCE_REPO is not a git repository', [], ['SELARIKRU_SOURCE_REPO']);
+  return repo;
+}
+
+/**
+ * GitHub review from the environment. `SELARIKRU_GITHUB_ENABLED=1` turns on the owner route that opens a run's draft PR, from `SELARIKRU_SOURCE_REPO`, and the
+ * polling reconciler when `SELARIKRU_GITHUB_POLL_INTERVAL_MS` is set. Off by default, so setting a source repository never reaches GitHub by itself.
+ */
+export function githubOptionsFromEnv(env: NodeJS.ProcessEnv): GithubOptions | undefined {
+  const enabled = env['SELARIKRU_GITHUB_ENABLED'];
+  if (enabled !== undefined && enabled !== '' && enabled !== '1' && enabled !== '0') throw new ConfigError('invalid configuration: SELARIKRU_GITHUB_ENABLED must be 1 or 0', [], ['SELARIKRU_GITHUB_ENABLED']);
+  const interval = env['SELARIKRU_GITHUB_POLL_INTERVAL_MS'];
+  const on = enabled === '1';
+  const repo = sourceRepoFromEnv(env);
+  if (on && !repo) throw new ConfigError('missing required configuration: SELARIKRU_GITHUB_ENABLED needs SELARIKRU_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
+  const artifacts = on ? new LocalDiskArtifactStore(resolveArtifactDir(env)) : undefined;
+  return {
+    webhookSecret: env['SELARIKRU_GITHUB_WEBHOOK_SECRET'] || undefined,
+    ...(interval !== undefined && interval !== '' ? { pollIntervalMs: /^\d+$/.test(interval) ? Number(interval) : Number.NaN, port: createGhCliPort() } : {}),
+    ...(on && repo && artifacts ? { sourceRepoPath: repo, port: createGhCliPort(), loadRecord: (db: Db, key: { tenantId: string; projectId: string; sha: string }) => loadValidRecord(db, artifacts, key) } : {}),
+  };
+}
 
 /**
  * Reads the verification driver's settings from the environment. Off unless `SELARIKRU_VERIFICATION_POLL_INTERVAL_MS` is set; when on, the source
- * repository and artifact directory are required, because a missing one would stop every verification silently.
+ * repository is required, because a missing one would stop every verification silently.
  */
 export function verificationOptionsFromEnv(env: NodeJS.ProcessEnv): VerificationOptions | undefined {
   const intervalMs = pollInterval(env, 'SELARIKRU_VERIFICATION_POLL_INTERVAL_MS', 'verificationPollIntervalMs');
   if (intervalMs === undefined) return undefined;
-  const repoPath = sourceRepo(env);
-  const dir = env['SELARIKRU_ARTIFACT_DIR'];
-  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO or SELARIKRU_GITHUB_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
-  if (!dir) throw new ConfigError('missing required configuration: SELARIKRU_ARTIFACT_DIR', ['SELARIKRU_ARTIFACT_DIR']);
+  const repoPath = sourceRepoFromEnv(env);
+  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
+  const dir = resolveArtifactDir(env);
   const host = env['SELARIKRU_VERIFIER_HOST'] || LOCAL_DOCKER_HOST;
   const retries = env['SELARIKRU_VERIFICATION_RETRIES'];
   const maxVerificationRetries = retries === undefined || retries === '' ? DEFAULT_VERIFICATION_RETRIES : /^\d+$/.test(retries) ? Number(retries) : Number.NaN;
@@ -49,14 +81,13 @@ export function verificationOptionsFromEnv(env: NodeJS.ProcessEnv): Verification
   return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), runner: dockerRunner(), verifier: { kind: 'verifier', id: `verifier:${host}` }, host, maxVerificationRetries };
 }
 
-/** The assembly driver's settings. Off unless `SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS` is set; when on, the source repository and artifact directory are required. */
+/** The assembly driver's settings. Off unless `SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS` is set; when on, the source repository is required. */
 export function assemblyOptionsFromEnv(env: NodeJS.ProcessEnv): AssemblyOptions | undefined {
   const intervalMs = pollInterval(env, 'SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS', 'assemblyPollIntervalMs');
   if (intervalMs === undefined) return undefined;
-  const repoPath = sourceRepo(env);
-  const dir = env['SELARIKRU_ARTIFACT_DIR'];
-  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO or SELARIKRU_GITHUB_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
-  if (!dir) throw new ConfigError('missing required configuration: SELARIKRU_ARTIFACT_DIR', ['SELARIKRU_ARTIFACT_DIR']);
+  const repoPath = sourceRepoFromEnv(env);
+  if (!repoPath) throw new ConfigError('missing required configuration: SELARIKRU_SOURCE_REPO', ['SELARIKRU_SOURCE_REPO']);
+  const dir = resolveArtifactDir(env);
   return { intervalMs, repoPath, artifacts: new LocalDiskArtifactStore(dir), leaseSeconds: ASSEMBLY_LEASE_SECONDS };
 }
 

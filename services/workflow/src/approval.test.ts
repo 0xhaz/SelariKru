@@ -8,7 +8,7 @@ import {
   CAPS, CLOUD_POLICY, POLICY, PROJECT, RUN, TENANT, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
-const POLICY_OPS: Policy = { ...POLICY, operations: { new_domain: 'require_approval', deploy: 'deny', read_approved_docs: 'allow' } };
+const POLICY_OPS: Policy = { ...POLICY, operations: { destructive_data_migration: 'require_approval', deploy: 'deny', read_approved_docs: 'allow' } };
 const CLOUD_APPROVAL: Policy = { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } };
 const CLOUD_RUN = { mode: 'C1', cloudDestination: 'cloud-sandbox-eu' };
 
@@ -19,9 +19,8 @@ const sched = (policy: Policy): Scheduler => createScheduler({ db: t.db, now: cl
 const useCloudRun = () => t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify(CLOUD_RUN)}::jsonb`);
 const events = async (type: string) => [...(await t.db.execute(sql`SELECT payload, actor_kind, attempt_id FROM events WHERE type = ${type} ORDER BY sequence`))];
 const approvals = async () => [...(await t.db.execute(sql`SELECT * FROM approvals ORDER BY created_at`))];
-const DOCS_HOST = { kind: 'network_host', host: 'docs.example.com' } as const;
-const request = (lease: Lease, operation: string | undefined, reason = 'needs docs.example.com', destination: typeof DOCS_HOST | null = operation === 'new_domain' ? DOCS_HOST : null): Promise<unknown> =>
-  s.publishResult(lease, { outcome: 'approval_requested', reason, ...(operation !== undefined ? { operation } : {}), ...(destination ? { destination } : {}) } as PublishResult);
+const request = (lease: Lease, operation: string | undefined, reason = 'needs docs.example.com', over: Record<string, unknown> = {}): Promise<unknown> =>
+  s.publishResult(lease, { outcome: 'approval_requested', reason, ...(operation !== undefined ? { operation } : {}), ...over } as PublishResult);
 
 beforeAll(async () => { t = await setupTestDb(); });
 afterAll(async () => { await t.close(); });
@@ -44,8 +43,8 @@ describe('the worker approval vocabulary', () => {
 
 describe('expiry sweeps isolate each row', () => {
   it('a row whose spec no longer parses does not stop the others expiring', async () => {
-    await s.publishResult(await claimOne('t_bad'), { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination: DOCS_HOST } as PublishResult);
-    await s.publishResult(await claimOne('t_good'), { outcome: 'approval_requested', reason: 'y', operation: 'new_domain', destination: DOCS_HOST } as PublishResult);
+    await s.publishResult(await claimOne('t_bad'), { outcome: 'approval_requested', reason: 'x', operation: 'destructive_data_migration' } as PublishResult);
+    await s.publishResult(await claimOne('t_good'), { outcome: 'approval_requested', reason: 'y', operation: 'destructive_data_migration' } as PublishResult);
     await t.db.execute(sql`UPDATE task_revisions SET spec = jsonb_set(spec, '{title}', 'null'::jsonb) WHERE task_id = 't_bad'`);
     const past = new Date(clock.now().getTime() + 2 * 24 * 3600 * 1000);
     await expect(s.expireApprovals(past)).rejects.toBeInstanceOf(AggregateError);
@@ -56,51 +55,50 @@ describe('expiry sweeps isolate each row', () => {
 });
 
 describe('runner approval requests', () => {
-  it('a network request without a destination opens nothing: there is nothing a person could scope a grant to', async () => {
+  it.each([
+    ['new_domain', 'egress_enforcement_unavailable', { destination: { kind: 'network_host', host: 'docs.example.com' } }],
+    ['new_domain', 'egress_enforcement_unavailable', {}],
+    ['new_connector', 'egress_enforcement_unavailable', { destination: { kind: 'network_host', host: 'docs.example.com' } }],
+    ['scope_change', 'scope_grant_unavailable', {}],
+    ['broader_scope', 'scope_grant_unavailable', {}],
+  ] as const)('%s opens no approval: a grant could not take effect (%s)', async (operation, reason, over) => {
+    s = sched({ ...POLICY_OPS, operations: { ...POLICY_OPS.operations, new_domain: 'require_approval', new_connector: 'require_approval', scope_change: 'require_approval', broader_scope: 'require_approval' } });
     const lease = await claimOne();
-    expect(await request(lease, 'new_domain', 'needs the web', null)).toMatchObject({ ok: true, value: { taskStatus: 'blocked' } });
+    expect(await request(lease, operation, 'needs it', over)).toMatchObject({ ok: true, value: { taskStatus: 'blocked' } });
     expect(await approvals()).toHaveLength(0);
-    expect((await events('task.blocked'))[0]!['payload']).toMatchObject({ reason: 'policy_denied:destination_required' });
-  });
-
-  it('the destination is part of the scope and reaches the row', async () => {
-    const lease = await claimOne();
-    await request(lease, 'new_domain');
-    const row = (await approvals())[0]!;
-    expect(row['detail']).toMatchObject({ destination: 'docs.example.com', destinationKind: 'network_host' });
-    expect((await events('approval.requested'))[0]!['payload']).toMatchObject({ destination: 'docs.example.com' });
+    expect((await events('task.blocked'))[0]!['payload']).toMatchObject({ reason, operation });
   });
 
   it('runner approval request creates one pending row', async () => {
     const lease = await claimOne();
-    expect(await request(lease, 'new_domain')).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
+    expect(await request(lease, 'destructive_data_migration')).toMatchObject({ ok: true, value: { taskStatus: 'awaiting_approval' } });
     const rows = await approvals();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ task_id: 't1', revision: 1, run_id: RUN, requester: 'r1', outcome: 'pending', approver: null });
     expect(rows[0]!['scope_hash']).toMatch(/^[0-9a-f]{64}$/);
     expect(rows[0]!['action_hash']).toMatch(/^[0-9a-f]{64}$/);
     expect(rows[0]!['expected_revisions']).toEqual({ t1: 1 });
-    expect(rows[0]!['detail']).toMatchObject({ operation: 'new_domain', reason: 'needs docs.example.com', decisionReason: 'configured:new_domain' });
+    expect(rows[0]!['detail']).toMatchObject({ operation: 'destructive_data_migration', reason: 'needs docs.example.com', decisionReason: 'configured:destructive_data_migration' });
     expect(new Date(String(rows[0]!['expires_at'])).getTime()).toBe(clock.now().getTime() + 24 * 3600 * 1000);
     // A retried publish is the same operation: still one row.
-    await request(lease, 'new_domain');
+    await request(lease, 'destructive_data_migration');
     expect(await countRows(t.db, 'approvals')).toBe(1);
   });
 
   it('approval.requested carries approvalId, scopeHash and expiresAt', async () => {
     const lease = await claimOne();
-    await request(lease, 'new_domain');
+    await request(lease, 'destructive_data_migration');
     const row = (await approvals())[0]!;
     const [ev] = await events('approval.requested');
     expect(ev).toMatchObject({ actor_kind: 'scheduler', attempt_id: lease.attemptId });
     expect(ev!['payload']).toMatchObject({
-      approvalId: row['approval_id'], scopeHash: row['scope_hash'], expiresAt: new Date(String(row['expires_at'])).toISOString(), reason: 'needs docs.example.com', operation: 'new_domain', destination: 'docs.example.com',
+      approvalId: row['approval_id'], scopeHash: row['scope_hash'], expiresAt: new Date(String(row['expires_at'])).toISOString(), reason: 'needs docs.example.com', operation: 'destructive_data_migration',
     });
   });
 
   for (const [name, op, reasonCode] of [
     ['a hard-denied operation', 'deploy', 'policy_denied:hard_deny:deploy'],
-    ['an unconfigured operation', 'broader_scope', 'policy_denied:missing_operation_config:broader_scope'],
+    ['an unconfigured operation', 'breaking_api_change', 'policy_denied:missing_operation_config:breaking_api_change'],
     ['an unknown operation', 'grant_me_everything', 'policy_denied:unknown_operation'],
     ['a request naming no operation', undefined, 'policy_denied:unknown_operation'],
     ['a kind the runner cannot parameterise', 'start_cloud_worker', 'policy_denied:missing_limit:maxConcurrentTotal'],
@@ -128,7 +126,7 @@ describe('runner approval requests', () => {
 
   it('a grant returns the task to ready and the next attempt consumes it', async () => {
     const lease = await claimOne();
-    await request(lease, 'new_domain');
+    await request(lease, 'destructive_data_migration');
     await t.db.execute(sql`UPDATE approvals SET outcome = 'granted'`);
     await t.db.execute(sql`UPDATE task_status SET status = 'ready'`);
     const next = (await s.claimNext(runner('r1'), CAPS))!;
@@ -241,7 +239,7 @@ describe('cloud require_approval', () => {
 describe('approval expiry', () => {
   it('the sweep expires a pending approval, blocks the task with a readable reason, and is idempotent', async () => {
     const lease = await claimOne();
-    await request(lease, 'new_domain');
+    await request(lease, 'destructive_data_migration');
     const row = (await approvals())[0]!;
     expect(await s.expireApprovals(clock.now())).toEqual([]);
     expect((await approvals())[0]).toMatchObject({ outcome: 'pending' });
@@ -259,7 +257,7 @@ describe('approval expiry', () => {
 
   it('leaves a task that is no longer waiting on the approval alone', async () => {
     const lease = await claimOne();
-    await request(lease, 'new_domain');
+    await request(lease, 'destructive_data_migration');
     await t.db.execute(sql`UPDATE task_status SET status = 'cancelled'`);
     clock.advance(24 * 3600);
     await s.expireApprovals(clock.now());

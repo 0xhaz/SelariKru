@@ -1,5 +1,6 @@
-import { ApprovalDestinationSchema } from '@selarikru/domain';
+import { ApprovalDestinationSchema, WorkerApprovalOperationSchema } from '@selarikru/domain';
 import { z } from 'zod';
+import { redactSecrets } from './redact.ts';
 
 /** A git commit id. Anything else (and so any secret-shaped string) is rejected rather than stored in an event. */
 export const CommitSha = z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/, 'expected a 40 or 64 digit hex commit id');
@@ -14,6 +15,9 @@ const ReportedUsage = z
   .object({ inputTokens: Tokens, outputTokens: Tokens, cacheReadTokens: Tokens, cacheCreationTokens: Tokens, setupSeconds: Seconds, idleSeconds: Seconds, costBasis: CostBasis })
   .strict()
   .optional();
+
+/** A destination is stored and shown, so one shaped like a credential is refused here as well as in the harness parser. */
+const WireDestination = ApprovalDestinationSchema.refine((d) => redactSecrets(d.host) === d.host, 'the destination looks like a secret');
 
 /** The runner presents only what it was given at claim. The API rebuilds the rest from the database. */
 export const LeaseRefSchema = z
@@ -32,8 +36,8 @@ export const ResultRequestSchema = z
       z.object({ outcome: z.literal('completed'), headSha: CommitSha.optional(), changeManifestSha256: ManifestSha.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('failed'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('blocked'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
-      // `operation` is the policy operation the worker asks for. Absent or unknown is denied by policy; it is an identifier, never free text.
-      z.object({ outcome: z.literal('approval_requested'), reason: z.string().min(1).max(500), operation: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(), destination: ApprovalDestinationSchema.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
+      // `operation` is one of the closed worker list; anything else is refused here. Absent is denied by policy.
+      z.object({ outcome: z.literal('approval_requested'), reason: z.string().min(1).max(500), operation: WorkerApprovalOperationSchema.optional(), destination: WireDestination.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
     ]),
   })
   .strict();

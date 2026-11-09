@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfigFromEnv, parseConfig } from '../src/index.ts';
 import { testConfig } from './helpers.ts';
-import { assemblyOptionsFromEnv, verificationOptionsFromEnv } from '../src/server.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { assemblyOptionsFromEnv, githubOptionsFromEnv, sourceRepoFromEnv, verificationOptionsFromEnv } from '../src/server.ts';
 
 const ENV = {
   SELARIKRU_TENANT_ID: 'tenant_a',
@@ -61,23 +65,49 @@ describe('config', () => {
   });
 });
 
+const gitRepo = () => {
+  const dir = mkdtempSync(join(tmpdir(), 'source-repo-'));
+  execFileSync('git', ['init', '-q', dir]);
+  return dir;
+};
+
 describe('assembly driver settings', () => {
-  it('are off by default and require the repository and artifact directory when on', () => {
+  it('are off by default and need the source repository when on; the artifact directory has one resolver', () => {
     expect(assemblyOptionsFromEnv({})).toBeUndefined();
     expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: 'soon' })).toThrow(/positive integer/);
     expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000' })).toThrow(/SELARIKRU_SOURCE_REPO/);
-    expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_SOURCE_REPO: '/r' })).toThrow(/SELARIKRU_ARTIFACT_DIR/);
-    expect(assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_GITHUB_SOURCE_REPO: '/r', SELARIKRU_ARTIFACT_DIR: '/a' })).toMatchObject({ intervalMs: 5000, repoPath: '/r' });
+    const repo = gitRepo();
+    expect(assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_SOURCE_REPO: repo })).toMatchObject({ intervalMs: 5000, repoPath: repo });
+    expect(() => assemblyOptionsFromEnv({ SELARIKRU_ASSEMBLY_POLL_INTERVAL_MS: '5000', SELARIKRU_SOURCE_REPO: repo, SELARIKRU_ARTIFACT_DIR: 'relative' })).toThrow(/absolute/);
   });
 });
 
 describe('verification driver settings', () => {
-  it('are off by default and require the repository and artifact directory when on', () => {
+  it('are off by default and need the source repository when on', () => {
     expect(verificationOptionsFromEnv({})).toBeUndefined();
     expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: 'soon' })).toThrow(/positive integer/);
     expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000' })).toThrow(/SELARIKRU_SOURCE_REPO/);
-    expect(() => verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r' })).toThrow(/SELARIKRU_ARTIFACT_DIR/);
-    const options = verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_GITHUB_SOURCE_REPO: '/r', SELARIKRU_ARTIFACT_DIR: '/a', SELARIKRU_VERIFIER_HOST: 'local-docker' });
-    expect(options).toMatchObject({ intervalMs: 60000, repoPath: '/r', host: 'local-docker', verifier: { kind: 'verifier', id: 'verifier:local-docker' } });
+    const repo = gitRepo();
+    const options = verificationOptionsFromEnv({ SELARIKRU_VERIFICATION_POLL_INTERVAL_MS: '60000', SELARIKRU_SOURCE_REPO: repo, SELARIKRU_ARTIFACT_DIR: '/a', SELARIKRU_VERIFIER_HOST: 'local-docker' });
+    expect(options).toMatchObject({ intervalMs: 60000, repoPath: repo, host: 'local-docker', verifier: { kind: 'verifier', id: 'verifier:local-docker' } });
+  });
+});
+
+describe('the source repository setting', () => {
+  it('must be an absolute path to an existing git repository', () => {
+    expect(sourceRepoFromEnv({})).toBeUndefined();
+    expect(() => sourceRepoFromEnv({ SELARIKRU_SOURCE_REPO: 'relative/path' })).toThrow(/absolute/);
+    expect(() => sourceRepoFromEnv({ SELARIKRU_SOURCE_REPO: '/nonexistent/source' })).toThrow(/absolute/);
+    const notRepo = mkdtempSync(join(tmpdir(), 'not-a-repo-'));
+    expect(() => sourceRepoFromEnv({ SELARIKRU_SOURCE_REPO: notRepo })).toThrow(/not a git repository/);
+    const repo = gitRepo();
+    expect(sourceRepoFromEnv({ SELARIKRU_SOURCE_REPO: repo })).toBe(repo);
+    expect(() => sourceRepoFromEnv({ SELARIKRU_GITHUB_SOURCE_REPO: repo })).toThrow(/SELARIKRU_SOURCE_REPO/);
+  });
+
+  it('a source repository alone never reaches GitHub', () => {
+    expect(githubOptionsFromEnv({ SELARIKRU_SOURCE_REPO: gitRepo() })?.sourceRepoPath).toBeUndefined();
+    expect(() => githubOptionsFromEnv({ SELARIKRU_GITHUB_ENABLED: '1' })).toThrow(/SELARIKRU_SOURCE_REPO/);
+    expect(() => githubOptionsFromEnv({ SELARIKRU_GITHUB_ENABLED: 'yes' })).toThrow(/1 or 0/);
   });
 });
