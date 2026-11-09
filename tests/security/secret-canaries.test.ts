@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { assistantText, failingOn, launchPayload, passing, post, readTerminal, readTree, resultLine, signalPath, toolResult, toolUse, toolWrite, World } from './world.ts';
+import { assistantText, failingOn, launchPayload, passing, post, readTerminal, readTree, resultLine, signalPath, sql, toolResult, toolUse, toolWrite, World } from './world.ts';
 
 let w: World;
 beforeAll(async () => { w = await World.create(); });
@@ -123,9 +123,12 @@ describe('secret canaries', () => {
     expect(report.outcome, w.logs.join('\n')).toBe('completed');
     const sha = (await w.assembly().tick()).assembled[0]!;
     expect((await w.verification(passing).tick()).verified).toBe(sha);
+    // A poisoned row: the body's redaction is the last line of defence for anything stored, so something stored must carry a canary for that line to be tested.
+    await w.t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, action_hash, scope_hash, outcome, approver, detail) VALUES ('tenant_a', 'proj_a', 'apr_p', ${runId}, 't_pr', 1, 'worker', 'a', 's', 'granted', ${AGENT_TEXT}, ${JSON.stringify({ operation: 'destructive_data_migration' })}::jsonb)`);
     const res = await post(w.app, `/v1/runs/${runId}/pull-request`, {});
     expect(res.status).toBe(200);
     expect(w.gh.prs[0]!.body).toContain(sha);
+    expect(w.gh.prs[0]!.body).toContain('Approvals granted');
     absent('PR body', w.gh.prs[0]!.body);
     absent('PR title', w.gh.prs[0]!.title);
   });
@@ -146,6 +149,22 @@ describe('secret canaries', () => {
     for (const [name, rows] of Object.entries(tables)) expect(rows.includes(enrolled.token), `table ${name} has the runner token`).toBe(false);
     for (const [name, rows] of Object.entries(tables)) if (name !== 'attempts') expect(rows.includes(lease.leaseToken), `table ${name} has the lease token`).toBe(false);
     absent('snapshot', JSON.stringify(await w.snapshot()), secrets);
+  });
+
+  it('a runner that sends secrets itself is cleaned by the control plane, not trusted to have done it', async () => {
+    const runId = await w.newRun();
+    await w.plan(runId, [w.task(runId, 't_rogue', { maxAttempts: 3 })]);
+    const auth = { authorization: `Bearer ${w.token}` };
+    const ref = (l: { attemptId: string; fence: number; leaseToken: string }) => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
+    const first = await w.claim();
+    expect((await post(w.app, '/v1/runners/result', { lease: ref(first), result: { outcome: 'failed', reason: `boom ${RESULT_REASON}` } }, auth)).status).toBe(200);
+    const second = await w.claim();
+    expect((await post(w.app, '/v1/runners/result', { lease: ref(second), result: { outcome: 'approval_requested', operation: 'destructive_data_migration', reason: `because ${APPROVAL_REASON}` } }, auth)).status).toBe(200);
+
+    const tables = await w.dumpAllTables();
+    for (const [name, rows] of Object.entries(tables)) absent(`table ${name}`, rows);
+    expect(tables['events']).toContain('[REDACTED]');
+    absent('snapshot', JSON.stringify(await w.snapshot()));
   });
 
   it('a worker-reported failure reason, an approval reason and an odd tool name stay out of events and logs', async () => {

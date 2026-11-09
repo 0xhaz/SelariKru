@@ -38,6 +38,7 @@ describe('failed and untested criteria are shown, never smoothed over', () => {
     expect(await w.lifecycle(runId)).toBe('running');
     const pr = await post(w.app, `/v1/runs/${runId}/pull-request`, {});
     expect(pr.status).toBe(409);
+    expect(pr.body.error.details.reason).toBe('run_not_ready');
     expect(w.gh.calls).toEqual([]);
   });
 

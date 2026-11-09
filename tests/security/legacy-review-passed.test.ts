@@ -97,7 +97,9 @@ describe('review-passed never becomes verified', () => {
     expect(run.criteria).toMatchObject({ verified: 0 });
     expect(run.evidence.criteria[0]).toMatchObject({ criterionId: 'FB-01', verified: false });
     expect(await w.lifecycle(runId)).toBe('running');
-    expect((await post(w.app, `/v1/runs/${runId}/pull-request`, {})).status).toBe(409);
+    const pr = await post(w.app, `/v1/runs/${runId}/pull-request`, {});
+    expect(pr.status).toBe(409);
+    expect(pr.body.error.details.reason).toBe('run_not_ready');
     expect(await verified()).toBe(0);
     // And a real verdict cannot be applied to it either, since it is not verifying.
     await w.verification(async () => { throw new Error('the verifier must not treat this as a verdict'); }).tick();
