@@ -178,6 +178,7 @@ function CandidatePanel({ candidate, simulated }: { candidate: CandidateModel; s
         <p className="break-all font-mono text-lg font-semibold text-fg" data-testid="candidate-sha">{candidate.sha}</p>
         {candidate.commitHref ? <p className="mt-1 text-sm"><a className="font-medium text-active underline underline-offset-2" href={candidate.commitHref} target="_blank" rel="noreferrer">Open this commit on GitHub</a></p> : null}
         <Facts facts={candidate.facts} />
+        {candidate.mainMoved ? <p className="mt-3 text-sm text-warning" data-testid="candidate-main-moved">{candidate.mainMoved.note}</p> : null}
         {candidate.flaky.length > 0 ? <p className="mt-3 text-sm text-warning">Flaky between retries: {candidate.flaky.join(', ')}</p> : null}
       </div>
     </section>

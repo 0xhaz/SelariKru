@@ -382,6 +382,21 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   }
   // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.
   if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) return [];
+  const moved = cr?.status === 'open' ? cr.mainMoved : null;
+  if (cr && moved) {
+    return [{
+      ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Main moved', tone: 'warning', title: `Main moved since pull request #${cr.prNumber} was verified`,
+      summary: `${evidence}, on a commit built before main moved. SelariKru has not verified this change against what is on main now.`,
+      consequence: 'Merging now is only as safe as GitHub\'s own up-to-date rule. Nothing here rebuilds the commit under your review unless you ask.', note: 'Merging is a human action on GitHub.',
+      facts: [{ label: 'Target branch', value: cr.baseRef, mono: true }, { label: 'Verified on', value: short(moved.baseSha), mono: true }, { label: 'Main is now at', value: short(moved.tipSha), mono: true }, { label: 'Candidate', value: short(cr.candidateSha), mono: true }],
+      details: [{ label: 'Candidate', value: cr.candidateSha }, { label: 'Main is now at', value: moved.tipSha }, { label: 'Pull request URL', value: cr.url }, { label: 'Main moved, observed', value: moved.observedAt }],
+      actions: [prLink(cr, options.mode, simulated), {
+        kind: 'command', id: 'rebuild', label: 'Rebuild on current main', style: 'primary', disabledReason: paused, intent: { command: 'run.rebuild', expectedRevision: run.planRevision, args: { runId: run.runId } },
+        confirm: { title: `Rebuild while pull request #${cr.prNumber} is open?`, consequence: `The run leaves review until the rebuilt commit has a verdict, and no worker runs. Pull request #${cr.prNumber} keeps the old commit: close it to open one for the rebuilt candidate.`, keepLabel: 'Keep the pull request as it is' },
+      }],
+      since: moved.observedAt, fingerprint: ['review-moved', cr.status, cr.candidateSha, moved.tipSha].join('|'),
+    }];
+  }
   if (cr && cr.status === 'open') {
     return [{
       ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Merge readiness', tone: 'success', title: `Pull request #${cr.prNumber} is ready for your review`,

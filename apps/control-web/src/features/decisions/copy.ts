@@ -10,6 +10,7 @@ export function outcomeMessage(card: DecisionCardModel, action: Extract<Decision
     case 'task.cancel': return receipt.execution === 'cancel_requested' ? `Cancel requested for ${name}. It is not stopped until the runner confirms.` : `${name} was cancelled.`;
     case 'run.accept_reduced_scope': return 'Reduced scope accepted. The undelivered work stays listed as not delivered.';
     case 'run.reverify': return 'Sent back for verification. No worker was started.';
+    case 'run.rebuild': return 'Rebuild requested on the current main. No worker runs, and the run leaves review until there is a new verdict.';
     case 'run.open_pull_request': return 'Draft pull request opened. Merging stays on GitHub.';
     default: return 'Recorded.';
   }
@@ -36,6 +37,8 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   already_accepted: { text: 'This reduced scope was already accepted.', changed: false },
   nothing_to_reverify: { text: 'Nothing here can be re-verified any more. The block may already be cleared.', changed: false },
   reverify_limit_reached: { text: 'This task has used its re-verifications under this verifier. Replan or cancel it instead.', changed: false },
+  nothing_to_rebuild: { text: 'There is nothing to rebuild any more. Main may not have moved, or the pull request is no longer open.', changed: true },
+  rebuild_limit_reached: { text: 'This run has used its rebuilds. Close the pull request and the run rebuilds on its own.', changed: false },
   resource_conflict: { text: 'Re-verifying is waiting on a resource another task holds. Try again when it is free.', changed: false },
   run_not_ready: { text: 'This run is not ready for a pull request.', changed: false },
   reduced_scope_not_accepted: { text: 'Accept the reduced scope first: a pull request cannot open while budget-stopped work is undecided.', changed: false },

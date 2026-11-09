@@ -124,6 +124,8 @@ export const CandidateEvidenceViewSchema = z
     verifierSha256: Id.nullable(),
     /** Criteria whose result changed between suite retries. A flaky pass stays visible. */
     flaky: z.array(Id),
+    /** The target moved past this candidate's base while a pull request is open. Null: not observed. */
+    mainMoved: z.object({ tipSha: Id, observedAt: Iso }).strict().nullable().default(null),
   })
   .strict();
 export type CandidateEvidenceView = z.infer<typeof CandidateEvidenceViewSchema>;
@@ -341,6 +343,8 @@ export const ChangeRequestViewSchema = z
     observedHeadSha: z.string().nullable(),
     mergeCommitSha: z.string().nullable(),
     observedAt: Iso.nullable(),
+    /** The target moved past this pull request's verified commit while it was open. Null: not observed. */
+    mainMoved: z.object({ tipSha: Id, observedAt: Iso, baseSha: Id }).strict().nullable().default(null),
   })
   .strict();
 export type ChangeRequestView = z.infer<typeof ChangeRequestViewSchema>;

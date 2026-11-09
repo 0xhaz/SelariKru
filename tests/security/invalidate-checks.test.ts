@@ -48,10 +48,7 @@ describe('candidate change', () => {
     expect(w.gh.pushes.map((p) => p.sha)).toEqual([fresh]);
   });
 
-  // BLOCKED(T7.2): a safety failure this suite found and did not fix. `assess` in services/verifier/src/assembly-driver.ts returns idle as soon as every verifying part is in a live candidate,
-  // and when nothing is verifying, so a live candidate is never rebuilt when main advances. docs/architecture.md section 6 rule 8 requires it ("If main advances, rebuild the candidate and
-  // rerun affected gates"). `assembleCandidate` can already do the rebuild (integrate.test.ts:198); the driver never asks it to. `it.fails` so this turns red the moment the driver is fixed.
-  it.fails('BLOCKED(T7.2) the default branch moves after assembly: the candidate must be rebuilt and only the rebuilt commit judged', async () => {
+  it('the default branch moves after assembly, before any verdict: the candidate is rebuilt and only the rebuilt commit is judged', async () => {
     const runId = await w.newRun();
     await w.plan(runId, [w.task(runId, 't_base')]);
     await w.claimAndComplete('t_base');

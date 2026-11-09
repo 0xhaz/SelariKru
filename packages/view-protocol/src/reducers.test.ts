@@ -703,7 +703,7 @@ describe('verifiedCounts', () => {
 
 describe('decision facts', () => {
   const nd = { tasks: [{ taskId: 't1', revision: 1, status: 'cancelled', budgetStopped: true }], requirementIds: ['FB-02'], acceptanceCheckIds: ['chk-2'] };
-  const change = { runId: 'r1', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'merged_sha_mismatch', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'e'.repeat(40), mergeCommitSha: 'd'.repeat(40), observedAt: at(50) };
+  const change = { runId: 'r1', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'merged_sha_mismatch', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'e'.repeat(40), mergeCommitSha: 'd'.repeat(40), observedAt: at(50), mainMoved: null };
   const withFacts = (cursor: string, over: Partial<ProjectViewSnapshot> = {}): ProjectViewSnapshot => ({ ...base().snapshot, meta: { ...base().snapshot.meta, cursor }, ...over });
 
   it('approval.requested carries the operation and the structured destination', () => {

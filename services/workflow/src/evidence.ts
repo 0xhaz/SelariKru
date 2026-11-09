@@ -7,12 +7,19 @@ const STATUSES: readonly string[] = ['passed', 'failed', 'skipped', 'error'];
 const iso = (v: unknown): string => new Date(v as string | Date).toISOString();
 const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 
+const mainMovedOf = (v: unknown): { readonly tipSha: string; readonly observedAt: string } | null => {
+  const m = v as { tipSha?: unknown; observedAt?: unknown } | null;
+  return m && typeof m.tipSha === 'string' && typeof m.observedAt === 'string' ? { tipSha: m.tipSha, observedAt: m.observedAt } : null;
+};
+
 export interface RunEvidence {
   readonly criteria: { readonly verified: number; readonly total: number };
   readonly evidence: {
     readonly candidate: {
       readonly sha: string; readonly status: string; readonly live: boolean; readonly baseSha: string; readonly treeSha: string | null; readonly target: string; readonly recordedAt: string;
       readonly recordId: string | null; readonly recordValid: boolean; readonly verifierHost: string | null; readonly checkManifestSha256: string | null; readonly verifierSha256: string | null; readonly flaky: readonly string[];
+      /** The target has moved past this candidate's base while a pull request is open. Null: not observed. */
+      readonly mainMoved: { readonly tipSha: string; readonly observedAt: string } | null;
     } | null;
     readonly criteria: ReturnType<typeof deriveRunEvidence> extends infer R ? R extends { criteria: infer C } ? C : never : never;
   };
@@ -27,7 +34,7 @@ export interface RunEvidence {
 export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: string; readonly projectId: string; readonly runId: string }, tasks: readonly EvidenceTask[], bar: RecordBar | null): Promise<RunEvidence | null> {
   const { tenantId, projectId, runId } = scope;
   const candidates = await db.execute(sql`
-    SELECT sha, status, base_sha, tree_sha, target, updated_at FROM candidates
+    SELECT sha, status, base_sha, tree_sha, target, updated_at, detail -> 'mainMoved' AS main_moved FROM candidates
     WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND run_id = ${runId} AND sha IS NOT NULL AND status IN ('assembled', 'rejected')
     ORDER BY created_at DESC, candidate_id DESC LIMIT 1`);
   const row = candidates[0];
@@ -70,6 +77,7 @@ export async function loadRunEvidence(db: Executor, scope: { readonly tenantId: 
         sha, status: String(row['status']), live: row['status'] === 'assembled', baseSha: String(row['base_sha']), treeSha: str(row['tree_sha']), target: String(row['target']), recordedAt: iso(row['updated_at']),
         recordId, recordValid, verifierHost: str(verdict['host']), checkManifestSha256: str(verdict['checkManifestSha256']), verifierSha256: str(verdict['verifierSha256']),
         flaky: Array.isArray(verdict['flaky']) ? (verdict['flaky'] as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+        mainMoved: mainMovedOf(row['main_moved']),
       } : null,
       criteria: derived.criteria,
     },

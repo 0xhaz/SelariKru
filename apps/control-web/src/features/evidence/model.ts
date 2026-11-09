@@ -41,6 +41,8 @@ export interface CandidateModel {
   readonly anchor: string;
   readonly facts: readonly { readonly label: string; readonly value: string }[];
   readonly flaky: readonly string[];
+  /** Main moved past this candidate's base while a pull request is open. Null: not observed. */
+  readonly mainMoved: { readonly tipShort: string; readonly note: string } | null;
   /** A link to the commit on GitHub. Only an observed pull request makes it a real address. */
   readonly commitHref: string | null;
 }
@@ -153,6 +155,7 @@ function candidateOf(evidence: RunEvidenceView, run: RunView, snapshot: ProjectV
   const commitHref = !simulated && cr ? `${cr.url.replace(/\/pull\/\d+$/, '')}/commit/${c.sha}` : null;
   return {
     sha: c.sha, short: shortSha(c.sha), statusLabel: c.live ? 'Current' : (c.status === 'rejected' ? 'Rejected' : c.status), live: c.live, recordValid: c.recordValid, anchor: CANDIDATE_ANCHOR, commitHref, flaky: c.flaky,
+    mainMoved: c.mainMoved ? { tipShort: shortSha(c.mainMoved.tipSha), note: `Main moved to ${shortSha(c.mainMoved.tipSha)} since this was verified. It has not been verified against that commit; merging now is only as safe as GitHub's own up-to-date rule.` } : null,
     facts: [
       { label: 'Base commit', value: c.baseSha }, { label: 'Tree', value: c.treeSha ?? 'Not recorded' }, { label: 'Target branch', value: c.target },
       { label: 'Verification record', value: c.recordId ?? 'Not recorded' }, { label: 'Verified on', value: c.verifierHost ?? 'Not recorded' }, { label: 'Check manifest', value: c.checkManifestSha256 ? `sha256:${c.checkManifestSha256.slice(0, 16)}` : 'Not recorded' }, { label: 'Verifier', value: c.verifierSha256 ? `sha256:${c.verifierSha256.slice(0, 16)}` : 'Not recorded' },

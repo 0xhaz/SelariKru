@@ -57,6 +57,8 @@ export interface IntegrationRun {
    * conflict: change sets hold post-images only, and no three-way merge is attempted.
    */
   readonly currentBaseSha: string;
+  /** The run's live candidate was built on an earlier tip. Its evidence is retired first even when the tip is back at `pinnedBaseSha`. */
+  readonly baseMoved?: boolean;
   /** Local source repository holding both SHAs. */
   readonly repoPath: string;
   /**
@@ -837,6 +839,11 @@ async function invalidate(tx: Tx, run: IntegrationRun, reason: Invalidation['rea
         }
       }
       const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
+      // The re-verify lineage: this work was already judged and only main moved, so a failed verdict on the rebuild blocks it. No repair worker is started on its account.
+      if (reason === 'base_changed') {
+        await tx.execute(sql`INSERT INTO task_commands (tenant_id, project_id, operation_id, task_id, revision, command, state, requested_by, requested_at, detail)
+          VALUES (${run.tenantId}, ${run.projectId}, ${`op_base_changed_${randomUUID()}`}, ${part.taskId}, ${part.revision}, 'reverify', 'applied', 'integration', ${now.toISOString()}::timestamptz, ${JSON.stringify({ attemptId: part.attemptId, reason })}::jsonb)`);
+      }
       const scope = { projectId: run.projectId, runId: spec.runId, taskId: part.taskId, aggregateRevision };
       await emit(tx, scope, now, {
         type: 'task.reopened', attemptId: part.attemptId, actor: INTEGRATION_ACTOR,
@@ -930,7 +937,7 @@ export async function assembleCandidate(run: IntegrationRun, deps: IntegrationDe
   try {
     try {
       if (deps.stillDue && !(await deps.stillDue())) return { ok: false, reason: 'not_due', message: 'nothing is due to assemble' };
-      if (run.pinnedBaseSha !== run.currentBaseSha) {
+      if (run.pinnedBaseSha !== run.currentBaseSha || run.baseMoved === true) {
         invalidated = await withTx(deps.db, async (tx) => {
           await fence(tx, run, holder);
           return await invalidate(tx, run, 'base_changed', { baseNot: run.currentBaseSha }, now());

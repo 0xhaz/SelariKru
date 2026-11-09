@@ -181,11 +181,34 @@ describe('blocked work', () => {
     expect(action(cards[0]!, 'Re-verify the run')).toMatchObject({ intent: { command: 'run.reverify', expectedRevision: 1, args: { runId: 'run' } } });
   });
 
+  describe('main moved under an open pull request', () => {
+    const moved = (pr: 'open' | 'closed', mainMoved: { tipSha: string; observedAt: string } | null) => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'verified', aggregateRevision: 4 })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review', criteria: { verified: 1, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(0), recordId: 'r', recordValid: true, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [], mainMoved: null }, criteria: [] } };
+      (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: pr, candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: null, observedAt: iso(0), mainMoved: mainMoved ? { ...mainMoved, baseSha: 'b'.repeat(40) } : null }];
+      return s;
+    };
+    const card = (s: ReturnType<typeof moved>) => build(s).cards.find((c) => c.id === 'review:run')!;
+
+    it('says main moved, says plainly how safe merging is, and offers a confirmed rebuild', () => {
+      const c = card(moved('open', { tipSha: 'c'.repeat(40), observedAt: iso(0) }));
+      expect(c).toMatchObject({ kind: 'merge_review', chip: 'Main moved', tone: 'warning' });
+      expect(c.title).toContain('#7');
+      expect(c.consequence).toContain("only as safe as GitHub's own up-to-date rule");
+      expect(action(c, 'Rebuild on current main')).toMatchObject({ intent: { command: 'run.rebuild', expectedRevision: 1, args: { runId: 'run' } }, confirm: { keepLabel: expect.any(String) } });
+    });
+    it('is the ordinary review card, with no rebuild, when main has not moved', () => {
+      const c = card(moved('open', null));
+      expect(c.chip).toBe('Merge readiness');
+      expect(labels(c)).not.toContain('Rebuild on current main');
+    });
+  });
+
   describe('a record that no longer stands', () => {
     // The shape the snapshot route sends: a run in review, a verified task, and the candidate's evidence.
     const withRecord = (recordValid: boolean, over: { state?: 'passed' | 'failed'; lifecycle?: 'ready_for_review' | 'running' | 'merged' | 'cancelled' | 'failed'; pr?: 'open' | 'closed' | 'stale_candidate'; merged?: boolean } = {}) => {
       const s = snapshotOf({ tasks: [task('t', { status: 'verified', aggregateRevision: 4 })] });
-      s.runs['run'] = { ...s.runs['run']!, lifecycle: over.lifecycle ?? 'ready_for_review', criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state: over.state ?? 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: over.lifecycle ?? 'ready_for_review', criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: '2026-11-09T01:00:00.000Z', recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [], mainMoved: null }, criteria: [{ criterionId: 'FB-01', description: null, state: over.state ?? 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
       if (over.pr) (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: over.pr, candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: over.merged ? 'd'.repeat(40) : null, observedAt: '2026-11-09T01:00:00.000Z' }];
       return s;
     };
@@ -250,7 +273,7 @@ describe('merge readiness', () => {
   const ready = (over: Partial<import('@selarikru/view-protocol').ChangeRequestView> | null, tasks = [task('a', { status: 'verified' })]) => {
     const s = snapshotOf({ tasks, criteria: { verified: 2, total: 2 } });
     s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
-    if (over) s.changeRequests = [{ runId: 'run', prNumber: 12, url: 'https://github.com/acme/app/pull/12', status: 'open', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'c'.repeat(40), mergeCommitSha: null, observedAt: iso(30), ...over }];
+    if (over) s.changeRequests = [{ runId: 'run', prNumber: 12, url: 'https://github.com/acme/app/pull/12', status: 'open', candidateSha: 'c'.repeat(40), baseRef: 'main', observedHeadSha: 'c'.repeat(40), mergeCommitSha: null, observedAt: iso(30), mainMoved: null, ...over }];
     return s;
   };
 

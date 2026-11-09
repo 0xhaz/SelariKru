@@ -201,7 +201,7 @@ describe('attention queue', () => {
   describe('a record that no longer stands', () => {
     const shaped = (recordValid: boolean, lifecycle: 'ready_for_review' | 'merged' = 'ready_for_review') => {
       const s = snapshotOf({ tasks: [task('t', { status: 'verified' })] });
-      s.runs['run'] = { ...s.runs['run']!, lifecycle, criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(30), recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] }, criteria: [{ criterionId: 'FB-01', description: null, state: 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
+      s.runs['run'] = { ...s.runs['run']!, lifecycle, criteria: { verified: recordValid ? 1 : 0, total: 1 }, evidence: { candidate: { sha: 'a'.repeat(40), status: 'assembled', live: true, baseSha: 'b'.repeat(40), treeSha: null, target: 'main', recordedAt: iso(30), recordId: 'ver_1', recordValid, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [], mainMoved: null }, criteria: [{ criterionId: 'FB-01', description: null, state: 'passed', verified: recordValid, taskIds: ['t'], check: null, candidateSha: null }] } };
       return s;
     };
 
