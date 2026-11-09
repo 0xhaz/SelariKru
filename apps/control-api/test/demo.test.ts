@@ -1,6 +1,5 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schema } from '@selarikru/persistence';
@@ -9,6 +8,7 @@ import { createScheduler } from '@selarikru/workflow';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp, createFirebaseVerifier, loadPlanConfigFile } from '../src/index.ts';
+import { startAuthEmulator, type AuthEmulator } from './auth-emulator.ts';
 import { DEMO, assertEmulatorHost, ensureEmulatorAccount, seedDemo, writeDemoFiles } from '../src/demo.ts';
 import { resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
 
@@ -61,27 +61,19 @@ describe('demo seed', () => {
 const hasCli = spawnSync('firebase', ['--version'], { stdio: 'ignore' }).status === 0;
 const external = process.env['FIREBASE_AUTH_EMULATOR_HOST'];
 
-const freePort = () => new Promise<number>((resolve) => {
-  const s = createServer().listen(0, '127.0.0.1', () => {
-    const { port } = s.address() as { port: number };
-    s.close(() => resolve(port));
-  });
-});
+// Own project ID, so this file's emulator never shares a hub locator with another test file's. An external emulator (pnpm dev:stack) keeps its own.
+const PROJECT_ID = external ? 'selarikru' : 'selarikru-demo-test';
 
 describe.skipIf(!external && !hasCli)('demo smoke (Auth Emulator)', () => {
-  let child: ChildProcess | undefined;
+  let emulator: AuthEmulator | undefined;
   let host = external ?? '';
   let t: TestDb;
 
   beforeAll(async () => {
     t = await setupTestDb();
     if (!external) {
-      const port = await freePort();
-      const hub = await freePort();
-      const dir = mkdtempSync(join(tmpdir(), 'selarikru-demo-emulator-'));
-      writeFileSync(join(dir, 'firebase.json'), JSON.stringify({ emulators: { auth: { host: '127.0.0.1', port }, hub: { host: '127.0.0.1', port: hub }, ui: { enabled: false } } }));
-      child = spawn('firebase', ['emulators:start', '--only', 'auth', '--project', 'selarikru'], { cwd: dir, stdio: 'ignore', detached: true });
-      host = `127.0.0.1:${port}`;
+      emulator = await startAuthEmulator(PROJECT_ID);
+      host = emulator.host;
     }
     for (const end = Date.now() + 60_000; ; await new Promise((r) => setTimeout(r, 300))) {
       try { if ((await fetch(`http://${host}/`)).ok) break; } catch { /* not up yet */ }
@@ -91,15 +83,15 @@ describe.skipIf(!external && !hasCli)('demo smoke (Auth Emulator)', () => {
   }, 90_000);
 
   afterAll(async () => {
-    if (child?.pid) process.kill(-child.pid, 'SIGTERM');
+    emulator?.stop();
     if (!external) delete process.env['FIREBASE_AUTH_EMULATOR_HOST'];
     await t?.close();
   });
 
   it('creates the account once, signs in, reviews and accepts a plan through the real API', async () => {
     await resetDb(t.db);
-    const a = await ensureEmulatorAccount(host, 'selarikru');
-    const b = await ensureEmulatorAccount(host, 'selarikru');
+    const a = await ensureEmulatorAccount(host, PROJECT_ID);
+    const b = await ensureEmulatorAccount(host, PROJECT_ID);
     expect(a.uid).toBe(DEMO.ownerUid);
     expect(b.uid).toBe(DEMO.ownerUid);
     await seedDemo(t.db, { tenantId: 'tenant_local' });
@@ -108,12 +100,13 @@ describe.skipIf(!external && !hasCli)('demo smoke (Auth Emulator)', () => {
     const signIn = await fetch(`http://${host}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-key`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: DEMO.email, password: DEMO.password, returnSecureToken: true }),
     });
+    expect(signIn.ok, `sign-in failed (${signIn.status}): ${signIn.ok ? '' : await signIn.clone().text()}`).toBe(true);
     const { idToken } = (await signIn.json()) as { idToken: string };
 
     const clock = testClock();
     const policy = loadPolicyFile(files.policyFile);
     const app = buildApp({
-      config: testConfig({ tenantId: 'tenant_local', ownerUid: DEMO.ownerUid }), db: t.db, verifier: createFirebaseVerifier({ projectId: 'selarikru' }),
+      config: testConfig({ tenantId: 'tenant_local', ownerUid: DEMO.ownerUid }), db: t.db, verifier: createFirebaseVerifier({ projectId: PROJECT_ID }),
       now: clock.now, scheduler: createScheduler({ db: t.db, now: clock.now, policy }), policy, planConfig: loadPlanConfigFile(files.planConfigFile),
     });
     const headers = { authorization: `Bearer ${idToken}` };

@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { evaluate, parsePolicy } from '@selarikru/policy';
 import { ProjectPlanSettingsSchema } from '../src/index.ts';
-import { readRealRunConfig, seedRealRun, writeRealRunFiles } from '../src/real-run.ts';
+import { readRealRunConfig, realOwnerAccount, seedRealRun, writeRealRunFiles } from '../src/real-run.ts';
 import { githubOptionsFromEnv, startServer, type RunningServer } from '../src/server.ts';
 import { OWNER_TOKEN, RUN, fakeVerifier, resetDb, setupTestDb, testConfig, type TestDb } from './helpers.ts';
 
@@ -60,6 +60,12 @@ describe('the pull request route through startServer', () => {
 });
 
 describe('real-run seed', () => {
+  it('names the owner account after the configured UID, with emulator-only defaults', () => {
+    expect(realOwnerAccount({ SELARIKRU_OWNER_UID: 'uid_x' })).toEqual({ uid: 'uid_x', email: 'owner@selarikru.invalid', password: 'real-run-local-only-password' });
+    expect(realOwnerAccount({ SELARIKRU_OWNER_UID: 'uid_x', SELARIKRU_REAL_OWNER_EMAIL: 'me@selarikru.invalid' }).email).toBe('me@selarikru.invalid');
+    expect(() => realOwnerAccount({})).toThrow(/SELARIKRU_OWNER_UID/);
+  });
+
   const env = (over: Record<string, string> = {}) => ({ SELARIKRU_TENANT_ID: 'tenant_local', SELARIKRU_OWNER_UID: 'owner', SELARIKRU_SOURCE_REPO: repo, SELARIKRU_REAL_REPOSITORY: 'acme/feedback-board', SELARIKRU_REAL_ALLOWED_PATHS: 'src,public', SELARIKRU_REAL_BUDGET_LIMIT_USD: '5', ...over });
 
   it('takes the repository, branch and full base SHA from the environment and the checkout', () => {

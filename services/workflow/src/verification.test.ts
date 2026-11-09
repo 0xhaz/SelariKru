@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { withTx } from '@selarikru/persistence';
-import { applyVerification, markRunReadyForReview, type Scheduler } from './index.ts';
+import { applyVerification, closeVerificationWithoutVerdict, markRunReadyForReview, reopenBlockedVerification, type Scheduler } from './index.ts';
 import {
-  CAPS, PROJECT, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
+  CAPS, PROJECT, RUN, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
 let t: TestDb;
@@ -116,5 +116,26 @@ describe('markRunReadyForReview', () => {
     await t.db.execute(sql`UPDATE task_status SET status = 'cancelled' WHERE task_id = 'b'`);
     expect(await ready(['a', 'b'])).toBe(false);
     expect(await lifecycle()).toBe('running');
+  });
+});
+
+describe('reopenBlockedVerification eligibility', () => {
+  const run = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+  const reopen = () => withTx(t.db, (tx) => reopenBlockedVerification({ now: clock.now }, tx, run, 'owner', 'op_1'));
+
+  it('a reason the worker reported is not eligible, even when it reads like a verifier error', async () => {
+    await seedTask(t.db, specFor('t1'));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    await s.publishResult(lease, { outcome: 'blocked', reason: 'verification_error' });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+    expect(await reopen()).toEqual({ ok: false, reason: 'nothing_to_reverify' });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+  });
+
+  it('the scheduler\'s own close of a verification without a verdict is eligible', async () => {
+    await toVerifying('t1');
+    const attemptId = String((await t.db.execute(sql`SELECT attempt_id FROM attempts`))[0]!['attempt_id']);
+    expect(await withTx(t.db, (tx) => closeVerificationWithoutVerdict({ now: clock.now }, tx, key('t1'), { reason: 'verification_error', expect: { revision: 1, attemptId } }))).toBe(true);
+    expect(await reopen()).toEqual({ ok: true, reopened: ['t1'] });
   });
 });

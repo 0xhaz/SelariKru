@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { ClaudeHarnessAdapter } from '@selarikru/harness-claude';
-import { approvalUnavailableReason, HONOURED_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, type ApprovalDestination, type ApprovalRefusalReason, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
@@ -75,7 +75,7 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     ...(opts.signalPath !== undefined
       ? [
           '## Asking for a human decision',
-          `If this task truly needs one of: ${HONOURED_APPROVAL_OPERATIONS.join(', ')}, stop and ask. Do not attempt it.`,
+          `If this task truly needs one of: ${ADVISORY_APPROVAL_OPERATIONS.join(', ')}, stop and ask. Do not attempt it.`,
           'Ask by writing, with the Write tool and nothing else, exactly this path:',
           `  ${opts.signalPath}`,
           'with this JSON and no other fields, then end your turn:',

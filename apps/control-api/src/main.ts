@@ -1,3 +1,4 @@
+import { describeError } from './log.ts';
 import { ConfigError, loadConfigFromEnv } from './config.ts';
 import { assemblyOptionsFromEnv, githubOptionsFromEnv, startServer, verificationOptionsFromEnv } from './server.ts';
 
@@ -12,11 +13,17 @@ try {
     planConfigFile: process.env['SELARIKRU_PLAN_CONFIG_FILE'] || undefined,
     github: githubOptionsFromEnv(process.env),
     verification: verificationOptionsFromEnv(process.env),
-    assembly: assemblyOptionsFromEnv(process.env),
-    onAssemblyError: (e) => console.error('assembly driver pass failed:', e instanceof Error ? e.message : e),
-    onVerificationError: (e) => console.error('verification driver pass failed:', e instanceof Error ? e.message : e),
-    onReconcileError: (e) => console.error('github reconciler pass failed:', e instanceof Error ? e.message : e),
-    onError: (e) => console.error('lease expiry pass failed:', e instanceof Error ? e.message : e),
+    assembly: (() => {
+      const options = assemblyOptionsFromEnv(process.env);
+      return options && {
+        ...options,
+        onRetry: (r) => console.warn(`assembly infrastructure failure for run ${r.runId}: ${r.reason}; retry ${r.count} of ${r.maxRetries} scheduled`),
+      };
+    })(),
+    onAssemblyError: (e) => console.error('assembly driver pass failed:', describeError(e)),
+    onVerificationError: (e) => console.error('verification driver pass failed:', describeError(e)),
+    onReconcileError: (e) => console.error('github reconciler pass failed:', describeError(e)),
+    onError: (e) => console.error('lease expiry pass failed:', describeError(e)),
   });
   console.log(`control API listening on ${server.address}`);
   const shutdown = () => void server.stop().then(() => process.exit(0));

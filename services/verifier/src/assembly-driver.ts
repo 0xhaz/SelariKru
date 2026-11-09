@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { TaskSpecSchema, type TaskSpec } from '../../../packages/domain/src/index.ts';
 import { sql, withTx, type Db, type Tx } from '../../../packages/persistence/src/index.ts';
+import { redactSecrets } from '../../../packages/protocol/src/redact.ts';
 import { closeVerificationWithoutVerdict } from '../../workflow/src/verification.ts';
 import { assembleCandidate, type IntegrationDeps } from './integrate.ts';
 
@@ -45,6 +46,8 @@ export interface AssemblyDriverOptions extends Pick<IntegrationDeps, 'db' | 'art
   readonly maxInfrastructureRetries?: number;
   /** Default `ASSEMBLY_RETRY_BACKOFF_SECONDS`. */
   readonly infrastructureBackoffSeconds?: number;
+  /** Called once each time an infrastructure failure is scheduled for another try (the count changed), never per poll. `reason` is a code, not free text. */
+  readonly onRetry?: (info: { readonly runId: string; readonly reason: string; readonly count: number; readonly maxRetries: number }) => void;
 }
 
 export interface AssemblyTick {
@@ -118,7 +121,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
   const retryId = (runId: string, target: string) => `cand_assembly_retry_${sha256(`${runId}\0${target}`).slice(0, 24)}`;
 
   /** The retry row is the one piece of durable state an infrastructure failure writes. Its count belongs to these parts; different parts start again. */
-  async function noteInfrastructure(tx: Tx, projectId: string, runId: string, target: string, partsKey: string, parts: readonly Part[], pinnedBaseSha: string, reason: string, message: string): Promise<'retrying' | 'blocked'> {
+  async function noteInfrastructure(tx: Tx, projectId: string, runId: string, target: string, partsKey: string, parts: readonly Part[], pinnedBaseSha: string, reason: string, message: string): Promise<{ outcome: 'retrying' | 'blocked'; count: number }> {
     const id = retryId(runId, target);
     const at = now();
     const rows = await tx.execute(sql`SELECT detail FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${id} AND status = ${RETRY_STATUS} FOR UPDATE`);
@@ -129,7 +132,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
         await closeVerificationWithoutVerdict({ now }, tx, { tenantId, projectId, taskId: p.taskId }, { reason: `assembly_infrastructure:${reason}`, expect: { revision: p.revision, attemptId: p.attemptId } });
       }
       await tx.execute(sql`DELETE FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${id}`);
-      return 'blocked';
+      return { outcome: 'blocked', count };
     }
     const notBefore = new Date(at.getTime() + backoffSeconds * 1000 * 2 ** (count - 1)).toISOString();
     const detail = JSON.stringify({ retry: { partsKey, count, notBefore, reason, message } });
@@ -137,7 +140,7 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
       INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, tree_sha, parts, status, reason, detail, updated_at)
       VALUES (${tenantId}, ${projectId}, ${id}, ${runId}, ${target}, NULL, ${pinnedBaseSha}, NULL, '[]'::jsonb, ${RETRY_STATUS}, ${reason}, ${detail}::jsonb, ${at.toISOString()}::timestamptz)
       ON CONFLICT (tenant_id, project_id, candidate_id) DO UPDATE SET status = EXCLUDED.status, reason = EXCLUDED.reason, detail = EXCLUDED.detail, updated_at = EXCLUDED.updated_at`);
-    return 'retrying';
+    return { outcome: 'retrying', count };
   }
 
   const clearRetry = (projectId: string, runId: string, target: string) => db.execute(sql`DELETE FROM candidates WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND candidate_id = ${retryId(runId, target)} AND status = ${RETRY_STATUS}`);
@@ -189,7 +192,8 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
     if (assessed.kind === 'infrastructure') {
       const a = assessed;
       const done = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, a.target, a.partsKey, a.parts, a.pinnedBaseSha, a.reason, a.message));
-      return done === 'blocked' ? { failure: `assembly_infrastructure:${a.reason}` } : { retrying: a.reason };
+      if (done.outcome === 'retrying') options.onRetry?.({ runId, reason: a.reason, count: done.count, maxRetries });
+      return done.outcome === 'blocked' ? { failure: `assembly_infrastructure:${a.reason}` } : { retrying: a.reason };
     }
     const { due } = assessed;
     let deferred: { readonly reason: string; readonly outcome: 'retrying' | 'blocked' } | undefined;
@@ -201,7 +205,8 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
         stillDue: async () => { const again = await assess(projectId, runId); return again.kind === 'due' && again.due.inputsKey === due.inputsKey; },
         onInfrastructureFailure: async (f) => {
           const outcome = await withTx(db, (tx) => noteInfrastructure(tx, projectId, runId, due.target, due.partsKey, due.parts, due.pinnedBaseSha, f.reason, f.message));
-          deferred = { reason: f.reason, outcome };
+          deferred = { reason: f.reason, outcome: outcome.outcome };
+          if (outcome.outcome === 'retrying') options.onRetry?.({ runId, reason: f.reason, count: outcome.count, maxRetries });
         },
       },
     );
@@ -235,7 +240,8 @@ export function createAssemblyDriver(options: AssemblyDriverOptions): Pick<Assem
           if (out.failure) failed.push({ runId, reason: out.failure });
           if (out.retrying) retrying.push({ runId, reason: out.retrying });
         } catch (e) {
-          errors.push(e);
+          // The run ID travels with the cause, so a pass that fails for several runs says which is which.
+          errors.push(new Error(`run ${runId}: ${redactSecrets(e instanceof Error ? e.message : String(e))}`, { cause: e }));
         }
       }
       if (errors.length > 0) throw new AggregateError(errors, `assembly: ${errors.length} run(s) failed`);

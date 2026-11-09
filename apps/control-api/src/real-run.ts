@@ -40,6 +40,18 @@ function need(env: Env, name: string): string {
   return v;
 }
 
+/**
+ * The owner's Auth Emulator account for a real run: the UID is the configured owner, so the emulator's sign-in token names the same person the API trusts.
+ * The email and password live only in the emulator. The defaults are not secrets; the password is never printed.
+ */
+export function realOwnerAccount(env: Env): { readonly uid: string; readonly email: string; readonly password: string } {
+  return {
+    uid: need(env, 'SELARIKRU_OWNER_UID'),
+    email: env['SELARIKRU_REAL_OWNER_EMAIL']?.trim() || 'owner@selarikru.invalid',
+    password: env['SELARIKRU_REAL_OWNER_PASSWORD']?.trim() || 'real-run-local-only-password',
+  };
+}
+
 /** Reads the settings, and the base commit from the checkout. Fails on anything missing rather than inventing a default. */
 export function readRealRunConfig(env: Env): RealRunConfig {
   const repository = need(env, 'SELARIKRU_REAL_REPOSITORY');

@@ -151,7 +151,9 @@ describe('assembly driver', () => {
     await finished('bad', { 'src/x.txt': 'x\n' }, { runId: 'run_other' });
     await finished('good', { 'src/g.txt': 'g\n' });
     await db.execute(sql`UPDATE task_revisions SET spec = jsonb_set(spec, '{title}', 'null'::jsonb) WHERE task_id = 'bad'`);
-    await expect(createAssemblyDriver(options()).tick()).rejects.toBeInstanceOf(AggregateError);
+    const failure = await createAssemblyDriver(options()).tick().catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map((e: Error) => e.message)).toEqual([expect.stringContaining('run run_other:')]);
     expect((await q(`SELECT 1 FROM candidates WHERE status = 'assembled' AND run_id = '${RUN}'`))).toHaveLength(1);
   });
 
@@ -213,6 +215,25 @@ describe('assembly driver', () => {
       expect(recovered.assembled).toHaveLength(1);
       expect(await retrying()).toHaveLength(0);
       expect(await statusOf('t1')).toBe('verifying');
+    });
+
+    it('reports each scheduled retry once, with run ID, reason and count, and not on a waiting poll', async () => {
+      await finished('t1', { 'src/a.txt': 'a\n' });
+      const seen: unknown[] = [];
+      const moved = `${artifactRoot()}-moved`;
+      renameSync(artifactRoot(), moved);
+      try {
+        const d = driver({ onRetry: (r: unknown) => seen.push(r) });
+        await d.tick();
+        await d.tick(); // still waiting out the delay
+        expect(seen).toEqual([{ runId: RUN, reason: 'manifest_missing', count: 1, maxRetries: 2 }]);
+        later(61);
+        await d.tick();
+        expect(seen).toHaveLength(2);
+        expect(seen[1]).toMatchObject({ count: 2 });
+      } finally {
+        renameSync(moved, artifactRoot());
+      }
     });
 
     it('when the retries run out the parts reach blocked with one event, and the owner sees the reason', async () => {

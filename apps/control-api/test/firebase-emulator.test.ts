@@ -1,12 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createFirebaseVerifier } from '../src/index.ts';
 import { buildApp } from '../src/index.ts';
 import { createScheduler } from '@selarikru/workflow';
+import { startAuthEmulator, type AuthEmulator } from './auth-emulator.ts';
 import { API_POLICY, PROJECT, resetDb, setupTestDb, testClock, testConfig, type TestDb } from './helpers.ts';
 
 /**
@@ -18,12 +15,8 @@ const hasCli = spawnSync('firebase', ['--version'], { stdio: 'ignore' }).status 
 const external = process.env['FIREBASE_AUTH_EMULATOR_HOST'];
 const runnable = Boolean(external) || hasCli;
 
-const freePort = () => new Promise<number>((resolve) => {
-  const s = createServer().listen(0, '127.0.0.1', () => {
-    const { port } = s.address() as { port: number };
-    s.close(() => resolve(port));
-  });
-});
+// Own project ID, so this file's emulator never shares a hub locator with another test file's. An external emulator (pnpm dev:stack) keeps its own.
+const PROJECT_ID = external ? 'selarikru' : 'selarikru-auth-test';
 
 async function waitUp(host: string, ms = 60_000): Promise<void> {
   const end = Date.now() + ms;
@@ -43,32 +36,28 @@ async function signUp(host: string, email: string): Promise<{ idToken: string; u
 }
 
 describe.skipIf(!runnable)('Firebase Auth Emulator', () => {
-  let child: ChildProcess | undefined;
+  let emulator: AuthEmulator | undefined;
   let host = external ?? '';
   let t: TestDb;
 
   beforeAll(async () => {
     t = await setupTestDb();
     if (!external) {
-      const port = await freePort();
-      const hub = await freePort();
-      const dir = mkdtempSync(join(tmpdir(), 'selarikru-auth-emulator-'));
-      writeFileSync(join(dir, 'firebase.json'), JSON.stringify({ emulators: { auth: { host: '127.0.0.1', port }, hub: { host: '127.0.0.1', port: hub }, ui: { enabled: false } } }));
-      child = spawn('firebase', ['emulators:start', '--only', 'auth', '--project', 'selarikru'], { cwd: dir, stdio: 'ignore', detached: true });
-      host = `127.0.0.1:${port}`;
+      emulator = await startAuthEmulator(PROJECT_ID);
+      host = emulator.host;
     }
-    await waitUp(host);
+    if (external) await waitUp(host);
     process.env['FIREBASE_AUTH_EMULATOR_HOST'] = host;
   }, 90_000);
 
   afterAll(async () => {
-    if (child?.pid) process.kill(-child.pid, 'SIGTERM');
+    emulator?.stop();
     if (!external) delete process.env['FIREBASE_AUTH_EMULATOR_HOST'];
     await t?.close();
   });
 
   it('verifies a real emulator-issued ID token with firebase-admin and enforces the single owner', async () => {
-    const verifier = createFirebaseVerifier({ projectId: 'selarikru' });
+    const verifier = createFirebaseVerifier({ projectId: PROJECT_ID });
     const alice = await signUp(host, `alice-${Date.now()}@example.test`);
     const mallory = await signUp(host, `mallory-${Date.now()}@example.test`);
 

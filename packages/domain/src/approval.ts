@@ -13,10 +13,11 @@ export const DESTINATION_OPERATIONS: readonly WorkerApprovalOperation[] = ['new_
 export const requiresDestination = (operation: string): boolean => (DESTINATION_OPERATIONS as readonly string[]).includes(operation);
 
 /**
- * What a worker can actually be granted today, and so what `TASK.md` offers. A grant for either of these is a human decision the attempt then acts on; it
- * needs nothing from the sandbox or the path gate that does not exist yet.
+ * What a worker is offered today in `TASK.md`. A grant for either of these is advisory: it records a human decision that the attempt is told about and
+ * that the pull request lists for the reviewer, but nothing in the sandbox or the path gate enforces it. It needs nothing from enforcement that does not
+ * exist yet, which is why these two can be offered and the network and scope operations cannot.
  */
-export const HONOURED_APPROVAL_OPERATIONS = ['breaking_api_change', 'destructive_data_migration'] as const satisfies readonly WorkerApprovalOperation[];
+export const ADVISORY_APPROVAL_OPERATIONS = ['breaking_api_change', 'destructive_data_migration'] as const satisfies readonly WorkerApprovalOperation[];
 
 /**
  * Why an operation cannot take effect even if a person granted it, or null when it can. These are refused when asked, so nobody is shown a decision that

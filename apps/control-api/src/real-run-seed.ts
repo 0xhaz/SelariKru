@@ -1,12 +1,17 @@
 import { createDb } from '@selarikru/persistence';
-import { readRealRunConfig, seedRealRun, writeRealRunFiles } from './real-run.ts';
+import { assertEmulatorHost, ensureEmulatorAccount } from './demo.ts';
+import { readRealRunConfig, realOwnerAccount, seedRealRun, writeRealRunFiles } from './real-run.ts';
 
-// Run by `pnpm dev:real` after the database is up. No network call: everything comes from the environment and the local checkout.
+// Run by `pnpm dev:real` after the database and the Auth Emulator are up. The only network call is to the Auth Emulator on loopback (the seed refuses any other host).
 try {
   const url = process.env['DATABASE_URL'];
   const dir = process.env['SELARIKRU_REAL_RUN_DIR'];
   if (!url || !dir) throw new Error('DATABASE_URL and SELARIKRU_REAL_RUN_DIR are required');
   const cfg = readRealRunConfig(process.env);
+  const host = assertEmulatorHost(process.env);
+  const account = realOwnerAccount(process.env);
+  await ensureEmulatorAccount(host, process.env['FIREBASE_PROJECT_ID'] ?? 'selarikru', account);
+  console.log(`emulator owner account ready: ${account.email} (uid ${account.uid})`);
   const { db, close } = createDb(url, { max: 1 });
   const { created } = await seedRealRun(db, cfg);
   await close();

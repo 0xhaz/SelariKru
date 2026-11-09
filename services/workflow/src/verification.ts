@@ -147,12 +147,14 @@ export async function reopenBlockedVerification(
 ): Promise<{ readonly ok: true; readonly reopened: readonly string[] } | { readonly ok: false; readonly reason: ReverifyRefusal; readonly taskId?: string }> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
   const blocked = await tx.execute(sql`
-    SELECT s.task_id, s.current_revision AS revision, s.row_revision, r.spec, e.reason
+    SELECT s.task_id, s.current_revision AS revision, s.row_revision, r.spec, e.reason, e.by_scheduler
     FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision
-    LEFT JOIN LATERAL (SELECT payload ->> 'reason' AS reason FROM events x WHERE x.tenant_id = s.tenant_id AND x.project_id = s.project_id AND x.task_id = s.task_id AND x.type = 'task.blocked' ORDER BY sequence DESC LIMIT 1) e ON true
+    LEFT JOIN LATERAL (SELECT payload ->> 'reason' AS reason, (actor_kind = ${SCHEDULER_ACTOR.kind} AND actor_id = ${SCHEDULER_ACTOR.id} AND payload -> 'fence' IS NULL) AS by_scheduler FROM events x WHERE x.tenant_id = s.tenant_id AND x.project_id = s.project_id AND x.task_id = s.task_id AND x.type = 'task.blocked' ORDER BY sequence DESC LIMIT 1) e ON true
     WHERE s.tenant_id = ${run.tenantId} AND s.project_id = ${run.projectId} AND s.status = 'blocked' AND r.run_id = ${run.runId}
     ORDER BY s.task_id`);
-  const eligible = blocked.filter((b) => isReverifiableBlock(b['reason'] as string | null));
+  // The reason must come from the control plane's own verification close. A worker's reported `blocked` reason is free text (the scheduler records it
+  // under its own actor, with the lease `fence` in the payload), so a worker that reports `verification_error` must not earn a re-verification.
+  const eligible = blocked.filter((b) => b['by_scheduler'] === true && isReverifiableBlock(b['reason'] as string | null));
   if (eligible.length === 0) return { ok: false, reason: 'nothing_to_reverify' };
   const now = ctx.now();
   const reopened: string[] = [];

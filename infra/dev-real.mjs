@@ -5,6 +5,8 @@
 //   SELARIKRU_REAL_REPOSITORY      owner/repo the draft pull request opens against
 //   SELARIKRU_REAL_ALLOWED_PATHS   comma-separated paths workers may change
 //   SELARIKRU_REAL_BUDGET_LIMIT_USD  run budget in USD
+// The seed also creates the owner's account in the Auth Emulator (loopback only), with UID SELARIKRU_OWNER_UID. Sign in with SELARIKRU_REAL_OWNER_EMAIL
+// (default owner@selarikru.invalid) and SELARIKRU_REAL_OWNER_PASSWORD (default real-run-local-only-password; emulator-only, not a secret).
 // Optional: SELARIKRU_REAL_PROJECT_ID, SELARIKRU_REAL_RUN_ID, SELARIKRU_REAL_BASE_BRANCH (default main).
 // Generated files go to the git-ignored .local/real-run/. `dev:demo` is unaffected. Opening a PR stays an owner action.
 import { existsSync, mkdirSync } from 'node:fs';

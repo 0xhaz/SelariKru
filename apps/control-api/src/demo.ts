@@ -36,10 +36,12 @@ export function assertEmulatorHost(env: Readonly<Record<string, string | undefin
 const json = { 'content-type': 'application/json' };
 
 /** Creates the demo account with its fixed UID in the Auth Emulator, or confirms it exists. Idempotent. */
-export async function ensureEmulatorAccount(host: string, projectId: string): Promise<{ uid: string }> {
+export async function ensureEmulatorAccount(
+  host: string, projectId: string, account: { readonly uid: string; readonly email: string; readonly password: string } = { uid: DEMO.ownerUid, email: DEMO.email, password: DEMO.password },
+): Promise<{ uid: string }> {
   const base = `http://${host}/identitytoolkit.googleapis.com/v1`;
   const signIn = async () => {
-    const r = await fetch(`${base}/accounts:signInWithPassword?key=fake-key`, { method: 'POST', headers: json, body: JSON.stringify({ email: DEMO.email, password: DEMO.password, returnSecureToken: true }) });
+    const r = await fetch(`${base}/accounts:signInWithPassword?key=fake-key`, { method: 'POST', headers: json, body: JSON.stringify({ email: account.email, password: account.password, returnSecureToken: true }) });
     return r.ok ? ((await r.json()) as { localId: string }).localId : null;
   };
   let uid = await signIn();
@@ -47,13 +49,13 @@ export async function ensureEmulatorAccount(host: string, projectId: string): Pr
     // The emulator accepts a caller-chosen localId from an admin ("owner") bearer. It exists only in the emulator.
     const r = await fetch(`${base}/projects/${projectId}/accounts`, {
       method: 'POST', headers: { ...json, authorization: 'Bearer owner' },
-      body: JSON.stringify({ localId: DEMO.ownerUid, email: DEMO.email, password: DEMO.password, emailVerified: true }),
+      body: JSON.stringify({ localId: account.uid, email: account.email, password: account.password, emailVerified: true }),
     });
-    if (!r.ok) throw new Error(`could not create the demo emulator account (${r.status}): ${await r.text()}`);
+    if (!r.ok) throw new Error(`could not create the emulator account (${r.status}): ${await r.text()}`);
     uid = await signIn();
   }
-  if (uid !== DEMO.ownerUid) {
-    throw new Error(`the emulator already has ${DEMO.email} under a different UID (${uid ?? 'none'}); restart the emulator to clear it`);
+  if (uid !== account.uid) {
+    throw new Error(`the emulator already has ${account.email} under a different UID (${uid ?? 'none'}); restart the emulator to clear it`);
   }
   return { uid };
 }

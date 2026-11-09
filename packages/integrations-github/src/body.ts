@@ -18,6 +18,8 @@ export interface ReviewPackage {
   readonly record: VerificationRecord;
   readonly limitations: readonly string[];
   readonly usage: readonly UsageLine[];
+  /** Approvals a person granted for this run. Advisory: the sandbox does not enforce them, so the reviewer needs to see what was allowed. */
+  readonly grants?: readonly { readonly operation: string; readonly taskId: string | null; readonly approver: string | null }[];
   /** Present after the owner accepted a budget stop: what the run does not deliver. */
   readonly notDelivered?: { readonly tasks: readonly { readonly taskId: string; readonly status: string; readonly budgetStopped: boolean }[]; readonly requirementIds: readonly string[]; readonly acceptanceCheckIds: readonly string[] };
 }
@@ -47,6 +49,10 @@ export function buildPrBody(p: ReviewPackage): string {
   lines.push('## Limitations', '');
   if (limits.length === 0) lines.push('None recorded.');
   else for (const l of limits) lines.push(`- ${cell(l)}`);
+  if (p.grants && p.grants.length > 0) {
+    lines.push('', '## Approvals granted', '', 'A person granted these during the run. They are advisory: the sandbox did not enforce them, so check the diff for what they allowed.', '');
+    for (const g of p.grants) lines.push(`- \`${cell(g.operation)}\`${g.taskId !== null ? ` for task \`${cell(g.taskId)}\`` : ''}${g.approver !== null ? `, granted by ${cell(g.approver)}` : ''}`);
+  }
   if (p.notDelivered) {
     const n = p.notDelivered;
     lines.push('', '## Not delivered', '', 'The run was stopped by its budget and the owner accepted this reduced scope. None of the following is verified, whatever the checks above report.', '');

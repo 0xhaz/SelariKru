@@ -130,7 +130,10 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       if (prior.status !== 'closed' && prior.status !== 'stale_candidate') throw new PrNotAllowed('run_already_merged', `pull request #${prior.prNumber} for this run is ${prior.status}`, { prNumber: prior.prNumber });
     }
 
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
+    const granted = await tx.select({ taskId: schema.approvals.taskId, approver: schema.approvals.approver, detail: schema.approvals.detail }).from(schema.approvals).where(and(
+      eq(schema.approvals.tenantId, run.tenantId), eq(schema.approvals.projectId, run.projectId), eq(schema.approvals.runId, run.runId), eq(schema.approvals.outcome, 'granted'))).orderBy(schema.approvals.createdAt, schema.approvals.approvalId);
+    const grants = granted.flatMap((a) => (typeof a.detail['operation'] === 'string' ? [{ operation: a.detail['operation'], taskId: a.taskId, approver: a.approver }] : []));
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {

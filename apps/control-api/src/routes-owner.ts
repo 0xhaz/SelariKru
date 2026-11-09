@@ -400,6 +400,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const runId = idParam(req);
     const result = await withTx(db, async (tx) => {
       const run = await requireRun(tx, config.tenantId, runId, true);
+      // The same gate as retry: re-verifying is work sent back to the drivers, so a policy that withholds replanning withholds it.
+      const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
+      if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow re-verifying', { reason: gate.reason, decision: gate.decision });
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
         if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
         const outcome = await reopenBlockedVerification({ now }, tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, uid, newId('op'));

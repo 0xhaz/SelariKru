@@ -241,6 +241,20 @@ describe('policy gate', () => {
     await strict.app.close();
     await missing.app.close();
   });
+
+  it('denies reverify when policy denies or lacks assign_replan_tasks', async () => {
+    const body = { expectedPlanRevision: 0, idempotencyKey: 'rv1' };
+    const strict = makeHarness(t, {}, { policyVersion: 'p', operations: { assign_replan_tasks: 'deny' } });
+    const denied = await post(strict.app, `/v1/runs/${RUN}/reverify`, body);
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toMatchObject({ code: 'policy_denied', details: { reason: 'configured:assign_replan_tasks' } });
+    const missing = makeHarness(t, {}, null);
+    const absent = await post(missing.app, `/v1/runs/${RUN}/reverify`, body);
+    expect(absent.status).toBe(403);
+    expect(absent.body.error).toMatchObject({ code: 'policy_denied', details: { reason: 'missing_policy' } });
+    await strict.app.close();
+    await missing.app.close();
+  });
 });
 
 describe('task commands', () => {

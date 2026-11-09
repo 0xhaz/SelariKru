@@ -49,7 +49,8 @@ env.SELARIKRU_VERIFICATION_POLL_INTERVAL_MS ??= '5000';
 // default for this local stack: point SELARIKRU_SOURCE_REPO (and the runner's --repo) at a real checkout to run real work.
 const prepareLocalSourceRepo = () => {
   const dir = resolve('.local/dev/source-repo');
-  if (existsSync(join(dir, '.git'))) return dir;
+  // A `.git` with no commit (an interrupted earlier setup) is uninitialised: `rev-parse HEAD` fails there, so it is built again.
+  if (existsSync(join(dir, '.git')) && spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: dir, stdio: 'ignore' }).status === 0) return dir;
   mkdirSync(dir, { recursive: true });
   cpSync('examples/feedback-board-starter', dir, { recursive: true, filter: (src) => !/(^|\/)(node_modules|dist)$/.test(src) && !/\.sqlite(-wal|-shm)?$/.test(src) });
   const g = (...a) => {

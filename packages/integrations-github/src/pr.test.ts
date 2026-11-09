@@ -92,6 +92,27 @@ describe('openReviewablePr', () => {
     expect(body).toMatch(/human/i);
   });
 
+  it('lists the approvals a person granted, redacted, and not the ones refused or pending', async () => {
+    await seedTask(tdb.db, specFor('ta'), 'ready');
+    const row = (approvalId: string, outcome: string, operation: string) => ({
+      tenantId: TENANT, projectId: PROJECT, approvalId, runId: RUN, taskId: 'ta', revision: 1, requester: 'r1', approver: outcome === 'pending' ? null : 'owner_uid', actionHash: 'a', scopeHash: approvalId, outcome, detail: { operation },
+    });
+    await tdb.db.insert(schema.approvals).values([row('apr_1', 'granted', 'destructive_data_migration'), row('apr_2', 'denied', 'breaking_api_change'), row('apr_3', 'pending', 'scope_change'), row('apr_4', 'granted', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789')]);
+    await openReviewablePr(run, deps());
+    const body = gh.prs[0]!.body;
+    expect(body).toContain('## Approvals granted');
+    expect(body).toMatch(/advisory/);
+    expect(body).toMatch(/`destructive_data_migration` for task `ta`, granted by owner_uid/);
+    expect(body).not.toContain('breaking_api_change');
+    expect(body).not.toContain('scope_change');
+    expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+  });
+
+  it('prints no approvals section when none were granted', async () => {
+    await openReviewablePr(run, deps());
+    expect(gh.prs[0]!.body).not.toContain('Approvals granted');
+  });
+
   describe('budget-stopped work', () => {
     const notDelivered = { tasks: [{ taskId: 'stopped', revision: 1, status: 'cancelled', budgetStopped: true }, { taskId: 'later', revision: 1, status: 'ready', budgetStopped: false }], requirementIds: ['FB-02', 'FB-09'], acceptanceCheckIds: ['chk-2'] };
     const stop = async () => {
