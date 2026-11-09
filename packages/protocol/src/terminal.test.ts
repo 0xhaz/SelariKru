@@ -158,12 +158,69 @@ describe('prompts without a newline', () => {
     expect(r.write('y\nnext\n')).toEqual(['y', 'next']);
   });
 
-  it('a prompt naming a credential goes out only with echo off, and the whole next line is hidden', () => {
+  it('a prompt naming a credential goes out with echo on too, and the next line, where echo prints the value, is hidden', () => {
     const r = new TerminalRedactor();
     r.write('Database password: ');
-    expect(r.releasePrompt()).toBeNull();
-    expect(r.releasePrompt(true)).toBe('Database password: ');
+    expect(r.releasePrompt()).toBe('Database password: ');
     expect(r.write('two tokens\nvisible\n')).toEqual(['[REDACTED]', 'visible']);
+    const key = new TerminalRedactor();
+    key.write('api_key: ');
+    expect(key.releasePrompt()).toBe('api_key: ');
+    expect(key.write('two tokens\n')).toEqual(['[REDACTED]']);
+  });
+
+  it('with echo off a credential prompt goes out and nothing after it is hidden, because the value is not printed', () => {
+    const r = new TerminalRedactor();
+    r.write('Database password: ');
+    expect(r.releasePrompt(true)).toBe('Database password: ');
+    expect(r.write('Connected\n')).toEqual(['Connected']);
+  });
+
+  it('an unknown echo state is treated as echo on', () => {
+    const r = new TerminalRedactor();
+    r.write('Password: ');
+    expect(r.releasePrompt(false)).toBe('Password: ');
+    expect(r.write('hunter2\n')).toEqual(['[REDACTED]']);
+  });
+
+  it('a prompt of the form "password for someone" names a credential even though it ends in another word', () => {
+    const sudo = new TerminalRedactor();
+    sudo.write('[sudo] password for haz: ');
+    expect(sudo.releasePrompt()).toBe('[sudo] password for haz: ');
+    expect(sudo.write('typed-value\n')).toEqual(['[REDACTED]']);
+    const ssh = new TerminalRedactor();
+    ssh.write("Enter passphrase for key '/home/u/.ssh/id_ed25519': ");
+    expect(ssh.releasePrompt(true)).toBe("Enter passphrase for key '/home/u/.ssh/id_ed25519': ");
+    expect(ssh.write('done\n')).toEqual(['done']);
+    const ordinary = new TerminalRedactor();
+    ordinary.write('Waiting for input: ');
+    expect(ordinary.releasePrompt()).toBe('Waiting for input: ');
+    expect(ordinary.write('yes\n')).toEqual(['yes']);
+  });
+
+  it("releases git's prompts, whose URL is already closed by a quote", () => {
+    const user = new TerminalRedactor();
+    user.write("Username for 'https://github.com': ");
+    expect(user.releasePrompt()).toBe("Username for 'https://github.com': ");
+    expect(user.write('octocat\n')).toEqual(['octocat']);
+    const pass = new TerminalRedactor();
+    pass.write("Password for 'https://octocat@github.com': ");
+    expect(pass.releasePrompt(true)).toBe("Password for 'https://[REDACTED]@github.com': ");
+    expect(pass.write('remote: ok\n')).toEqual(['remote: ok']);
+    const passEchoed = new TerminalRedactor();
+    passEchoed.write("Password for 'https://octocat@github.com': ");
+    expect(passEchoed.releasePrompt()).toBe("Password for 'https://[REDACTED]@github.com': ");
+    expect(passEchoed.write('hunter2\n')).toEqual(['[REDACTED]']);
+    const double = new TerminalRedactor();
+    double.write('Open "https://example.com/a"? ');
+    expect(double.releasePrompt()).toBe('Open "https://example.com/a"? ');
+  });
+
+  it('a space after the URL closes it too: what follows a space was never part of its redaction', () => {
+    const r = new TerminalRedactor();
+    r.write('see https://admin: ');
+    expect(r.releasePrompt()).toBe('see https://admin: ');
+    expect(redactTerminalText('see https://admin: s3cretpw@db.example.com/x')).toContain('s3cretpw');
   });
 
   it('never shows part of a credential across a pause', () => {
@@ -172,17 +229,29 @@ describe('prompts without a newline', () => {
     expect(url.releasePrompt(true)).toBeNull();
     const out = url.write('s3cretpw@db.example.com/x\n').join('\n');
     expect(out).not.toContain('s3cretpw');
-    const spaced = new TerminalRedactor();
-    spaced.write('see https://admin: ');
-    expect(spaced.releasePrompt(true)).toBeNull();
-    const key = new TerminalRedactor();
-    key.write('api_key: ');
-    expect(key.releasePrompt()).toBeNull();
-    expect(key.write('two tokens\n').join('\n')).not.toContain('two tokens');
+    const quoteless = new TerminalRedactor();
+    quoteless.write('curl https://admin:secret?');
+    expect(quoteless.releasePrompt(true)).toBeNull();
     const pair = new TerminalRedactor();
     pair.write('API_KEY=abc123');
     expect(pair.releasePrompt()).toBeNull();
     expect(pair.write('def456\n')).toEqual(['API_KEY=[REDACTED]']);
+    const valued = new TerminalRedactor();
+    valued.write('password=abc: ');
+    expect(valued.releasePrompt(true)).toBeNull();
+  });
+
+  it('a prompt with no trailing space goes out only with echo off, and only one that ends like a question', () => {
+    const on = new TerminalRedactor();
+    on.write('Password:');
+    expect(on.releasePrompt()).toBeNull();
+    const off = new TerminalRedactor();
+    off.write('Password:');
+    expect(off.releasePrompt(true)).toBe('Password:');
+    expect(off.write('\nok\n')).toEqual(['', 'ok']);
+    const progress = new TerminalRedactor();
+    progress.write('[12/40]');
+    expect(progress.releasePrompt(true)).toBeNull();
   });
 
   it('holds what does not look like a prompt, or is too long to be one', () => {

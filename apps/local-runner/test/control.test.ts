@@ -75,13 +75,19 @@ describe('the control bridge', () => {
     expect(sent.filter((f) => f.type === 'output')).toEqual([]);
     shell.emit({ kind: 'output', text: 'def\nPassword: ' });
     await tick(25);
-    // Echo on: a name and a pause could be the front of a credential, so it stays held.
-    const held = sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
-    expect(held).toEqual([`TOKEN=${REDACTED}`]);
-    shell.emit({ kind: 'echo', on: false });
+    // Echo on: the prompt goes out and the next line, where the terminal prints the value, is hidden.
+    const outputs = (): string[] => sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
+    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ']);
+    shell.emit({ kind: 'output', text: 'typed-value\n' });
     await tick(25);
-    const lines = sent.flatMap((f) => (f.type === 'output' ? f.lines.map((l) => l.text) : []));
-    expect(lines).toEqual([`TOKEN=${REDACTED}`, 'Password: ']);
+    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED]);
+    // Echo off: the value is not printed, so what follows the prompt is real output and is shown.
+    shell.emit({ kind: 'echo', on: false });
+    shell.emit({ kind: 'output', text: 'Passphrase: ' });
+    await tick(25);
+    shell.emit({ kind: 'output', text: 'done\n' });
+    await tick(25);
+    expect(outputs()).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED, 'Passphrase: ', 'done']);
   });
 
   it('tells the API when the runtime has no shell to give', async () => {

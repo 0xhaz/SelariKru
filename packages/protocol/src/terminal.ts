@@ -134,6 +134,12 @@ export function redactTerminalText(text: string): string {
 const NEWLINE = /\r\n|\n|\r(?!$)/;
 /** What an interactive prompt looks like when it stops without a newline. */
 const PROMPT_END = /[:?>#$\])][ \t]+$/;
+/** With echo off a program is waiting to read, and some prompts, such as macOS sudo's `Password:`, stop with no space. Only `:` and `?`, because `]` and `>` also end progress counters. */
+const PROMPT_END_ECHO_OFF = /[:?]$/;
+/** The fragment stops inside a URL. The closing characters are the ones the URL redactions stop at, so what comes after a closing quote or space was never part of the URL's redaction. */
+const INSIDE_URL = /:\/\/[^\s'"]*$/;
+/** `password for haz: `, `Enter passphrase for key 'x': `: the credential is named before the end of the prompt. */
+const CREDENTIAL_FOR = /([A-Za-z0-9_.-]{1,128})\s+for\s/g;
 const MAX_PROMPT_CHARS = 200;
 
 export const fitTerminalLine = (line: string): string => (line.length > TERMINAL_MAX_LINE_CHARS ? `${line.slice(0, TERMINAL_MAX_LINE_CHARS)}${LINE_CUT_MARK}` : line);
@@ -201,20 +207,22 @@ export class TerminalRedactor {
   }
 
   /**
-   * Releases an interactive prompt that has no newline, such as `Continue? ` or, with echo off, `Password: `, so someone at the keyboard can answer it. Releasing a fragment gives up the rejoin that
-   * line-buffering guarantees, so only a fragment that cannot be the front of a credential goes out: short, ending like a prompt with a space after it, no URL in it, left alone by redaction, and naming
-   * no credential unless the shell's echo is off, when what follows is being read and not printed. A released prompt that names one hides the whole next line, whatever its shape. Null otherwise, and the line stays held.
+   * Releases an interactive prompt that has no newline, such as `Continue? `, `Password: ` or git's `Username for 'https://github.com': `, so someone at the keyboard can answer it. Releasing a fragment gives up the
+   * rejoin that line-buffering guarantees, so only a fragment that cannot be the front of a credential goes out: short, ending like a prompt, not stopped inside a URL, and left alone by redaction apart from a URL's
+   * userinfo. A prompt that names a credential goes out either way. With echo on (or unknown) the next line is where the terminal prints the value, so that line is hidden whatever its shape; with echo off it is being
+   * read and not printed, so nothing is hidden. Null otherwise, and the line stays held.
    */
   releasePrompt(echoOff = false): string | null {
     if (this.discarding || this.pemLines !== null || this.yamlBlock !== null || this.parts.length > 0 || this.hanging !== null || this.promptNamed) return null;
     const clean = sanitizeTerminalText(this.buffer);
-    if (clean === '' || clean.length > MAX_PROMPT_CHARS || !PROMPT_END.test(clean) || clean.includes('://')) return null;
-    if (redactTerminalText(clean) !== clean) return null;
-    const named = BEARER_END.test(clean) || endsWithName(clean, false);
-    if (named && !echoOff) return null;
+    if (clean === '' || clean.length > MAX_PROMPT_CHARS || INSIDE_URL.test(clean)) return null;
+    if (!PROMPT_END.test(clean) && !(echoOff && PROMPT_END_ECHO_OFF.test(clean))) return null;
+    const shown = clean.replace(URL_USERINFO, `$1${REDACTED}@`);
+    if (redactTerminalText(clean) !== shown) return null;
+    const named = BEARER_END.test(shown) || endsWithName(shown, false) || [...shown.matchAll(CREDENTIAL_FOR)].some((m) => kindOf(m[1]!) !== null && !fileLike(m[1]!));
     this.buffer = '';
-    this.promptNamed = named;
-    return fitTerminalLine(clean);
+    this.promptNamed = named && !echoOff;
+    return fitTerminalLine(shown);
   }
 
   /** Decides whether held messages were separate: only if reading them together redacts nothing that reading them apart would miss. */

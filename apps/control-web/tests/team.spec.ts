@@ -742,6 +742,19 @@ test('control mode: a prompt with echo off hides the field and says the line wil
   await expect(panel.getByTestId('control-input')).toHaveAttribute('autocomplete', 'new-password');
 });
 
+test('control mode: the hidden input label itself says the line is visible in the sandbox', async ({ page }) => {
+  await controlPage(page, { phase: 'on' });
+  const panel = drawer(page).getByTestId('terminal-panel');
+  await panel.getByRole('button', { name: 'Take control of the shell' }).click();
+  await page.getByRole('button', { name: 'Take control' }).click();
+  await expect(panel.getByTestId('control-input')).toHaveAttribute('type', 'text');
+  await page.evaluate(() => (window as unknown as { __controlSet: (s: unknown) => void }).__controlSet({ phase: 'on', reason: null, echo: false }));
+  // In the label, because a phone keyboard covers everything below the field.
+  await expect(panel.locator('label[for="control-input"]')).toContainText('Visible inside the sandbox. Do not type a real secret.');
+  await expect(panel.getByTestId('control-hidden-note')).toBeVisible();
+  await expect(panel.getByLabel(/Hidden input/)).toHaveAttribute('type', 'password');
+});
+
 test('control mode: Leave is on screen as soon as control mode is on at 375', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 900 });
   await controlPage(page, { phase: 'on' });
