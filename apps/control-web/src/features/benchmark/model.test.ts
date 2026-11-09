@@ -80,6 +80,39 @@ describe('the results file', () => {
     expect(refused({ ...r, quality: { ...r.quality, criteria: r.quality.criteria.map((c) => ({ ...c, evidenceReferences: [] })) } })).toBe(true);
   });
 
+  it('evidence must be in a form a reader can open, on a commit-shaped and unreused candidate with a unique result hash', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const other = workerRecord({ mode: 'C1', index: 0, dataKind: 'measured' });
+    const refused = (...records: (typeof r)[]): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records })).success;
+    expect(refused(r, other)).toBe(false);
+    expect(refused({ ...r, artifactReferences: ['file:///tmp/x'] })).toBe(true);
+    expect(refused({ ...r, artifactReferences: [''] })).toBe(true);
+    expect(refused({ ...r, quality: { ...r.quality, criteria: r.quality.criteria.map((c) => ({ ...c, evidenceReferences: ['see notes'] })) } })).toBe(true);
+    expect(refused({ ...r, configuration: { ...r.configuration, candidateSha: 'not-a-sha' } })).toBe(true);
+    expect(refused(r, { ...other, resultSha256: r.resultSha256 })).toBe(true);
+    expect(refused(r, { ...other, configuration: { ...other.configuration, candidateSha: r.configuration.candidateSha } })).toBe(true);
+    const unsupported = benchmarkFile({ assistantEvidence: [{ id: 'schema_validation', status: 'recorded', dataKind: 'measured', references: [] }] });
+    expect(BenchmarkFileSchema.safeParse(unsupported).success).toBe(false);
+  });
+
+  it('refuses a record saying no person intervened while logging intervention or correction minutes', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...r, humanMinutes: { ...r.humanMinutes, intervention: 3 } })).toBe(true);
+    expect(refused({ ...r, humanMinutes: { ...r.humanMinutes, correction: 1 } })).toBe(true);
+    expect(refused({ ...r, operations: { ...r.operations, humanIntervened: true }, humanMinutes: { ...r.humanMinutes, intervention: 3 } })).toBe(false);
+  });
+
+  it('refuses impossible timings on a passing attempt, and usage with no source', () => {
+    const r = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured' });
+    const refused = (record: typeof r): boolean => !BenchmarkFileSchema.safeParse(benchmarkFile({ records: [record] })).success;
+    expect(refused({ ...r, timings: { ...r.timings, endToEndVerifiedMs: null } })).toBe(true);
+    expect(refused({ ...r, timings: { ...r.timings, endToEndVerifiedMs: 0 } })).toBe(true);
+    const a = assistantRecord({ route: 'ONLY_IN_CLOUD', index: 0, dataKind: 'measured' });
+    expect(refused({ ...a, timings: { ...a.timings, firstOutputMs: 5000, generationCompleteMs: 1000 } })).toBe(true);
+    expect(refused({ ...r, resources: { ...r.resources, providerUsageByRole: [{ role: 'coding', inputTokens: 1, outputTokens: 1, cacheTokens: null, provenance: 'observed', source: null }] } })).toBe(true);
+  });
+
   it('a template record with no measurements is accepted only as not run', () => {
     const file = benchmarkFile({ records: [workerRecord({ mode: 'L1', index: 0, status: 'not_run', dataKind: 'measured' })] });
     expect(BenchmarkFileSchema.safeParse(file).success).toBe(true);
@@ -343,6 +376,14 @@ describe('the winner badge', () => {
     expect(reasonsOf(c)).toMatch(/one attempt/i);
   });
 
+  it('pass counts over different numbers of attempts name no winner', () => {
+    const c1 = Array.from({ length: 10 }, (_, index) => workerRecord({ mode: 'C1', index, dataKind: 'measured', ...(index === 9 ? { failedCriteria: ['FB-01'] } : {}) }));
+    const l1 = [0, 1, 2, 3, 4].map((index) => workerRecord({ mode: 'L1', index, dataKind: 'measured' }));
+    const c = comparison(workersOf(benchmarkFile({ records: [...l1, ...c1] })), 'L1-C1');
+    expect(c.verdict.kind).toBe('none');
+    expect(reasonsOf(c)).toMatch(/different numbers/i);
+  });
+
   it('a recorded confounder removes the badge and changes the scope', () => {
     const records = completeWorkers('measured');
     records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, confounders: ['ARM laptop against x86 VM'] });
@@ -489,6 +530,14 @@ describe('assistant rows', () => {
     expect(row.cost.text).toBe('$1.00');
     expect(row.warmups.text).toBe('$5.00');
     expect(row.warmups.detail).toContain('1 warm-up');
+  });
+
+  it('only route-blind reviews count', () => {
+    const base = assistantRecord({ route: 'ONLY_ON_DEVICE', index: 0, dataKind: 'measured' });
+    const open = { ...assistantRecord({ route: 'ONLY_ON_DEVICE', index: 1, dataKind: 'measured' }) };
+    open.assistant = { ...open.assistant!, semanticReview: { ...open.assistant!.semanticReview, routeLabelHidden: false } };
+    const row = buildBenchmark(ok(benchmarkFile({ records: [base, open] }))).assistant.measured[0]!.rows[0]!;
+    expect(row.review.text).toBe('1 of 2 reviewed');
   });
 
   it('device usage that was not reported stays unavailable', () => {

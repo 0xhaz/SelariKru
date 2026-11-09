@@ -14,6 +14,9 @@ const nullableUsd = z.number().finite().nonnegative().nullable();
 const nullableCount = z.number().int().nonnegative().nullable();
 const isoDate = z.iso.datetime({ offset: true });
 const provenanceField = z.enum(['observed', 'estimated', 'unavailable']);
+/** Evidence is something a reader can open: a route in this app or an https link. */
+const isEvidenceReference = (ref: string): boolean => /^(?:#\/|https:\/\/)\S+$/.test(ref);
+const COMMIT_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
 /** The eight required Feedback Board criteria. A worker record carries exactly these, and Passed is derived from them. */
 export const FEEDBACK_CRITERIA = ['FB-01', 'FB-02', 'FB-03', 'FB-04', 'FB-05', 'FB-06', 'FB-07', 'FB-08'] as const;
@@ -25,7 +28,8 @@ const UsageRoleSchema = z.strictObject({
   cacheTokens: nullableCount,
   provenance: z.enum(['observed', 'estimated', 'unavailable']),
   source: nullableText,
-}).refine((u) => u.provenance !== 'unavailable' || (u.inputTokens === null && u.outputTokens === null && u.cacheTokens === null), { message: 'unavailable usage must be null, never a number' });
+}).refine((u) => u.provenance !== 'unavailable' || (u.inputTokens === null && u.outputTokens === null && u.cacheTokens === null), { message: 'unavailable usage must be null, never a number' })
+  .refine((u) => u.provenance === 'unavailable' || u.source !== null, { message: 'usage needs a source unless it is unavailable' });
 
 const CriterionSchema = z.strictObject({
   id: z.string().min(1),
@@ -206,6 +210,8 @@ export const BenchmarkFileSchema = z.strictObject({
   const declared = new Map(file.cohorts.map((c) => [c.cohortId, c]));
   if (declared.size !== file.cohorts.length) ctx.addIssue({ code: 'custom', path: ['cohorts'], message: 'a cohort id appears twice' });
   const attemptIds = new Set<string>();
+  const resultHashes = new Set<string>();
+  const candidates = new Set<string>();
   file.records.forEach((record, i) => {
     const path = ['records', i];
     const refuse = (message: string): void => { ctx.addIssue({ code: 'custom', path, message }); };
@@ -241,13 +247,34 @@ export const BenchmarkFileSchema = z.strictObject({
 
     // `measured` is a claim. A record that ran must carry what would let someone check it.
     if (measured) {
-      if (record.track === 'workers' && record.configuration.candidateSha === null) refuse('a measured attempt needs its candidate SHA');
+      if (record.track === 'workers') {
+        const candidate = record.configuration.candidateSha;
+        if (candidate === null || !COMMIT_SHA.test(candidate)) refuse('a measured attempt needs its candidate as a commit SHA');
+        // Every attempt starts clean (plan section 3), so two attempts cannot share a commit.
+        else if (candidates.has(candidate)) refuse(`candidate ${candidate} is reused by another attempt`);
+        else candidates.add(candidate);
+      }
       if (record.configuration.manifestSha256 === null) refuse('a measured attempt needs its manifest hash');
       if (timings.clockDomain === null) refuse('a measured attempt needs its clock domain');
-      if (record.artifactReferences.length === 0) refuse('a measured attempt needs an artifact reference');
+      if (record.artifactReferences.length === 0 || !record.artifactReferences.every(isEvidenceReference)) refuse('a measured attempt needs artifact references starting #/ or https://');
       if (record.resultSha256 === null) refuse('a measured attempt needs its result hash');
-      if (record.quality.criteria.some((c) => c.status === 'passed' && c.evidenceReferences.length === 0)) refuse('a passing criterion needs evidence');
+      if (record.quality.criteria.some((c) => c.status === 'passed' && (c.evidenceReferences.length === 0 || !c.evidenceReferences.every(isEvidenceReference)))) refuse('a passing criterion needs evidence references starting #/ or https://');
     }
+    if (record.resultSha256 !== null) {
+      if (resultHashes.has(record.resultSha256)) refuse('a result hash is used by another attempt');
+      resultHashes.add(record.resultSha256);
+    }
+
+    const minutes = (humanMinutes.intervention ?? 0) + (humanMinutes.correction ?? 0);
+    if (record.operations.humanIntervened === false && minutes > 0) refuse('humanIntervened is false but intervention or correction minutes are recorded');
+
+    const passing = record.status === 'completed' && (record.track === 'workers' ? allCriteriaPassed(record) && record.quality.withinDeclaredLimits === true : assistant?.schemaValid === true);
+    if (passing && record.track === 'workers' && timings.endToEndVerifiedMs === null) refuse('a passing attempt needs its delivery time');
+    if (passing && [timings.endToEndVerifiedMs, timings.firstOutputMs, timings.generationCompleteMs].includes(0)) refuse('a passing attempt cannot have taken no time');
+    if (timings.firstOutputMs !== null && timings.generationCompleteMs !== null && timings.firstOutputMs > timings.generationCompleteMs) refuse('first output came after the complete response');
+  });
+  file.assistantEvidence.forEach((item, i) => {
+    if (item.dataKind === 'measured' && item.status === 'recorded' && (item.references.length === 0 || !item.references.every(isEvidenceReference))) ctx.addIssue({ code: 'custom', path: ['assistantEvidence', i], message: 'recorded evidence needs references starting #/ or https://' });
   });
 });
 

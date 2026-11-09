@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
-import type { ControlShellEvent } from '@selarikru/protocol';
+import { REDACTED, TerminalRedactor, type ControlShellEvent } from '@selarikru/protocol';
 import { CONTROL_HELPER, SbxControlShell, controlKillArgs, controlShellArgs } from './control-shell.ts';
 import { FakeSbx } from './fake-sbx.ts';
 import { assertSafeSbxArgs, UnsafeSbxCommandError } from './sbx.ts';
@@ -143,6 +143,47 @@ describe.skipIf(!hasPython)('the guest helper on a real pty', () => {
     const states = await run(`python3 -I -c 'import tty,time; tty.setraw(0); time.sleep(0.6)'`);
     expect(states).toContain(null);
     expect(states.slice(1)).not.toContain(0);
+  }, 20_000);
+
+  it('a value a program prints after a password prompt with echo off never reaches the output', async () => {
+    const child = spawn('python3', ['-I', '-c', CONTROL_HELPER, `p${process.pid}${Date.now()}`], { stdio: ['pipe', 'pipe', 'ignore'], cwd: tmpdir() });
+    const frames: { at: number; e?: number | null; o?: string }[] = [];
+    let held = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      held += chunk;
+      for (let i = held.indexOf('\n'); i >= 0; i = held.indexOf('\n')) {
+        const frame = JSON.parse(held.slice(0, i)) as { e?: number | null; o?: string; a?: number };
+        held = held.slice(i + 1);
+        if (frame.a === undefined) frames.push({ at: Date.now(), ...frame });
+      }
+    });
+    const raw = (): string => frames.map((f) => (f.o ? Buffer.from(f.o, 'base64').toString() : '')).join('');
+    try {
+      await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0), { timeout: 5_000 });
+      // The value is built in the shell, so the command echoed before stty -echo does not carry it.
+      child.stdin.write(`${JSON.stringify({ i: 1, d: Buffer.from("V=printed; stty -echo; printf 'password: '; sleep 1; echo $V-value; stty echo\n").toString('base64') })}\n`);
+      await vi.waitFor(() => expect(raw()).toContain('printed-value'), { timeout: 8_000 });
+    } finally {
+      child.stdin.write('{"x":1}\n');
+      child.kill();
+    }
+    // Replays what the runner does: redact every chunk, and offer the held text as a prompt after a pause.
+    const redactor = new TerminalRedactor();
+    const lines: string[] = [];
+    let echo: number | null | undefined;
+    frames.forEach((f, i) => {
+      if ('e' in f) echo = f.e;
+      if (f.o) lines.push(...redactor.write(Buffer.from(f.o, 'base64').toString()));
+      const next = frames[i + 1];
+      if (next === undefined || next.at - f.at >= 200) {
+        const released = redactor.releasePrompt(echo === 0);
+        if (released !== null) lines.push(released);
+      }
+    });
+    lines.push(...redactor.flush());
+    expect(lines).toContain('password: ');
+    expect(lines).toContain(REDACTED);
+    expect(lines.join('\n')).not.toContain('printed-value');
   }, 20_000);
 
   it('echo off with canonical input reports echo off', async () => {

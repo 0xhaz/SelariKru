@@ -1,10 +1,13 @@
 import { schema } from '@selarikru/persistence';
 import { eq, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
-import { DEFAULT_CONTROL_LIMITS } from '../src/control.ts';
+import { ControlHub, DEFAULT_CONTROL_LIMITS } from '../src/control.ts';
 import { API_POLICY, ORIGIN, PROJECT, RUN, TENANT, bearer, enrolRunner, get, makeHarness, owner, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
+/** Passes through. It is how a test reaches the hub the app built, to place a commit at one exact moment of a sweep. */
+const attachSpy = vi.spyOn(ControlHub.prototype, 'attach');
+let hub: { stillLive: (...args: unknown[]) => Promise<boolean> };
 let t: TestDb;
 let h: Harness;
 let base: string;
@@ -15,6 +18,7 @@ const POLICY_ALLOW = { ...API_POLICY, operations: { ...API_POLICY.operations, te
 beforeAll(async () => {
   t = await setupTestDb();
   h = makeHarness(t, {}, POLICY_ALLOW, { controlLimits: { ...DEFAULT_CONTROL_LIMITS, sweepMs: 20, ackTimeoutMs: 150, pingMs: 60_000, authTimeoutMs: 300, openTimeoutMs: 2_000 } });
+  hub = attachSpy.mock.contexts.at(-1) as unknown as typeof hub;
   base = await h.app.listen({ port: 0, host: '127.0.0.1' });
   wsBase = base.replace('http', 'ws');
 });
@@ -414,6 +418,40 @@ describe('a session', () => {
     h.clock.advance(Math.ceil(DEFAULT_CONTROL_LIMITS.idleMs / 1000) + 1);
     await c.waitFor((f) => f.type === 'ended' && f.reason === 'idle_timeout');
     link.close();
+  });
+
+  it('a sweep judges idleness and lease expiry against one clock reading', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    const original = hub.stillLive;
+    // The clock moves past both the idle limit and the lease while a sweep is in flight.
+    hub.stillLive = async (...args) => {
+      hub.stillLive = original;
+      h.clock.advance(Math.ceil(DEFAULT_CONTROL_LIMITS.idleMs / 1000) + 1);
+      return original(...args);
+    };
+    await c.waitFor((f) => f.type === 'ended');
+    expect(c.frames.find((f) => f.type === 'ended').reason).toBe('idle_timeout');
+    link.close();
+  });
+
+  it('a fence committing between the session check and the link check still ends the session as fenced', async () => {
+    const { runner, lease } = await runningAttempt();
+    const link = await FakeLink.open(runner.token, lease);
+    const c = await enter(lease.attemptId, link);
+    const original = hub.stillLive;
+    // The session check reads the attempt as live, and the fence commits just after it.
+    hub.stillLive = async (...args) => {
+      const live = await original(...args);
+      hub.stillLive = original;
+      await t.db.update(schema.attempts).set({ leaseFence: lease.fence + 1 }).where(eq(schema.attempts.attemptId, lease.attemptId));
+      return live;
+    };
+    await c.waitFor((f) => f.type === 'ended');
+    expect(c.frames.find((f) => f.type === 'ended').reason).toBe('attempt_fenced');
+    await vi.waitFor(async () => expect((await sessionRow()).endReason).toBe('attempt_fenced'));
+    await vi.waitFor(async () => expect((await eventsOf()).find((e) => e.type === 'terminal.control_ended')?.payload).toMatchObject({ reason: 'attempt_fenced' }));
   });
 
   it('fenced attempt closes the session', async () => {

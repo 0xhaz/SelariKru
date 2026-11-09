@@ -369,7 +369,8 @@ function assistantRow(mode: string, records: readonly BenchmarkRecord[], kind: D
     return input === null || output === null ? { provenance: 'unavailable' as const, total: null } : { provenance: 'observed' as const, total: input + output };
   });
   const valid = measured.filter((r) => r.assistant?.schemaValid === true);
-  const reviews = measured.filter((r) => r.assistant?.semanticReview.retainedFacts !== null);
+  // Only a review with route labels hidden counts: the plan's semantic judgement is route-blind.
+  const reviews = measured.filter((r) => r.assistant?.semanticReview.routeLabelHidden === true && r.assistant.semanticReview.retainedFacts !== null);
   const assistantCost = costFigures(records.filter((r) => !warmup(r)))[0]!;
   const clock = clockLabel(timed);
   const row: AssistantRow = {
@@ -381,7 +382,7 @@ function assistantRow(mode: string, records: readonly BenchmarkRecord[], kind: D
     complete: mixed ? withheld(BASIS.complete) : timingFigure(timed.map((r) => r.timings.generationCompleteMs).filter((v): v is number => v !== null), measured.length, timed.length > 0 ? `Complete and validated, ${clock}` : BASIS.complete),
     usage: usageFigure(usageRollups, measured.length, BASIS.assistantUsage),
     cost: assistantCost.text === NOT_MEASURED ? notMeasured(BASIS.assistantCost) : { ...assistantCost, basis: `${BASIS.assistantCost}. ${assistantCost.basis}` },
-    review: measured.length === 0 ? notMeasured(BASIS.review) : reviews.length === 0 ? unavailable(BASIS.review, 'Not reviewed yet.') : { text: `${reviews.length} of ${measured.length} reviewed`, detail: `${reviews.reduce((s, r) => s + (r.assistant?.semanticReview.inventedRequirements ?? 0), 0)} invented requirements found.`, provenance: 'observed', basis: BASIS.review },
+    review: measured.length === 0 ? notMeasured(BASIS.review) : reviews.length === 0 ? unavailable(BASIS.review, 'No route-blind review recorded.') : { text: `${reviews.length} of ${measured.length} reviewed`, detail: `${reviews.reduce((s, r) => s + (r.assistant?.semanticReview.inventedRequirements ?? 0), 0)} invented requirements found.`, provenance: 'observed', basis: BASIS.review },
     warmups: warmupLedger(records),
   };
   return kind === 'simulated' ? { ...row, warmups: stamp(row.warmups, kind), completion: stamp(row.completion, kind), routing: stamp(row.routing, kind), schema: stamp(row.schema, kind), firstOutput: stamp(row.firstOutput, kind), complete: stamp(row.complete, kind), usage: stamp(row.usage, kind), cost: stamp(row.cost, kind), review: stamp(row.review, kind) } : row;
@@ -557,6 +558,7 @@ function verdictFor(a: Side, b: Side, planned: number, kind: DataKind, aCounts: 
   const left = a.passedN * b.N;
   const right = b.passedN * a.N;
   if (left !== right) {
+    if (a.N !== b.N) return { kind: 'none', reasons: [`Different numbers of comparable attempts (${a.N} and ${b.N}), so pass counts cannot name a winner.`] };
     if (Math.abs(a.passedN - b.passedN) <= 1) return { kind: 'none', reasons: ['Pass counts differ by one attempt, too small a margin at this sample size to name a winner. Speed is not compared when pass rates differ.'] };
     const winner = left > right ? a : b;
     return winner.spread ? { kind: 'winner', mode: winner.mode, basis: 'completion', exploratory, statement: statementOf(winner) } : { kind: 'none', reasons: ['Passing runs have no recorded times.'] };

@@ -169,11 +169,18 @@ describe('prompts without a newline', () => {
     expect(key.write('two tokens\n')).toEqual(['[REDACTED]']);
   });
 
-  it('with echo off a credential prompt goes out and nothing after it is hidden, because the value is not printed', () => {
+  it('with echo off a credential prompt goes out and the next line is still hidden, because a program can print there', () => {
     const r = new TerminalRedactor();
     r.write('Database password: ');
     expect(r.releasePrompt(true)).toBe('Database password: ');
-    expect(r.write('Connected\n')).toEqual(['Connected']);
+    expect(r.write('printed-value\nConnected\n')).toEqual(['[REDACTED]', 'Connected']);
+  });
+
+  it.each(['Enter PIN: ', 'OTP code: '])('recognises %s as a credential', (prompt) => {
+    const r = new TerminalRedactor();
+    r.write(prompt);
+    expect(r.releasePrompt()).toBe(prompt);
+    expect(r.write('123456\n')).toEqual(['[REDACTED]']);
   });
 
   // A raw-mode program (Node readline) has ECHO and ICANON off and prints the typed value itself, so the helper reports it as unknown, never as echo off.
@@ -225,7 +232,7 @@ describe('prompts without a newline', () => {
     const ssh = new TerminalRedactor();
     ssh.write("Enter passphrase for key '/home/u/.ssh/id_ed25519': ");
     expect(ssh.releasePrompt(true)).toBe("Enter passphrase for key '/home/u/.ssh/id_ed25519': ");
-    expect(ssh.write('done\n')).toEqual(['done']);
+    expect(ssh.write('done\n')).toEqual(['[REDACTED]']);
     const ordinary = new TerminalRedactor();
     ordinary.write('Waiting for input: ');
     expect(ordinary.releasePrompt()).toBe('Waiting for input: ');
@@ -240,7 +247,7 @@ describe('prompts without a newline', () => {
     const pass = new TerminalRedactor();
     pass.write("Password for 'https://octocat@github.com': ");
     expect(pass.releasePrompt(true)).toBe("Password for 'https://[REDACTED]@github.com': ");
-    expect(pass.write('remote: ok\n')).toEqual(['remote: ok']);
+    expect(pass.write('remote: ok\n')).toEqual(['[REDACTED]']);
     const passEchoed = new TerminalRedactor();
     passEchoed.write("Password for 'https://octocat@github.com': ");
     expect(passEchoed.releasePrompt()).toBe("Password for 'https://[REDACTED]@github.com': ");
@@ -282,7 +289,7 @@ describe('prompts without a newline', () => {
     const off = new TerminalRedactor();
     off.write('Password:');
     expect(off.releasePrompt(true)).toBe('Password:');
-    expect(off.write('\nok\n')).toEqual(['', 'ok']);
+    expect(off.write('\nok\n')).toEqual(['[REDACTED]']);
     const progress = new TerminalRedactor();
     progress.write('[12/40]');
     expect(progress.releasePrompt(true)).toBeNull();

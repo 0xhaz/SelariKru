@@ -139,11 +139,7 @@ const PROMPT_END_ECHO_OFF = /[:?]$/;
 /** The fragment stops inside a URL. The closing characters are the ones the URL redactions stop at, so what comes after a closing quote or space was never part of the URL's redaction. */
 const INSIDE_URL = /:\/\/[^\s'"]*$/;
 /** A credential named anywhere in a prompt: `password for haz: `, `Enter your API key here: `, `Access token (optional): `. */
-const PROMPT_CREDENTIAL = /\b(?:pass(?:word|phrase|code)|passwd|pwd|secret|credentials?|cookie|authorization|(?:api|access|private|secret)[ _.-]*key|token)\b/i;
-/** What a person is asked to type and a terminal does not print, as opposed to a name a program may print a value after. */
-const ASKS_TYPED_SECRET = /\b(?:pass(?:word|phrase|code)|passwd|pin|otp)\b/i;
-/** `{"password":` is data being printed, whatever word it holds. */
-const DATA_SHAPED = /^\s*[{"']/;
+const PROMPT_CREDENTIAL = /\b(?:pass(?:word|phrase|code)|passwd|pwd|pin|otp|secret|credentials?|cookie|authorization|(?:api|access|private|secret)[ _.-]*key|token)\b/i;
 const MAX_PROMPT_CHARS = 200;
 
 export const fitTerminalLine = (line: string): string => (line.length > TERMINAL_MAX_LINE_CHARS ? `${line.slice(0, TERMINAL_MAX_LINE_CHARS)}${LINE_CUT_MARK}` : line);
@@ -213,9 +209,9 @@ export class TerminalRedactor {
   /**
    * Releases an interactive prompt that has no newline, such as `Continue? `, `Password: ` or git's `Username for 'https://github.com': `, so someone at the keyboard can answer it. Releasing a fragment gives up the
    * rejoin that line-buffering guarantees, so only a fragment that cannot be the front of a credential goes out: short, ending like a prompt, not stopped inside a URL, and left alone by redaction apart from a URL's
-   * userinfo. A prompt that names a credential goes out, and the whole next line is hidden whatever its shape: with echo on or unknown that is where the value appears, and `echoOff` is only reported for a canonical-mode
-   * terminal, because a raw-mode program (Node's readline) has ECHO clear and still prints what it reads. The one exception is a plain password prompt with echo off, such as sudo's, where nothing is printed and the next
-   * line is the command's own output. A program that prints a value straight after `password:` under `stty -echo` cannot be told apart from that. Null otherwise, and the line stays held.
+   * userinfo. A prompt that names a credential goes out, and the whole next line is hidden whatever its shape, in every echo state: echo off says what the terminal does with typed input, not what a program prints next.
+   * The cost is one hidden line after a real password prompt such as sudo's. `echoOff`, reported only for a canonical-mode terminal because a raw-mode program (Node's readline) prints what it reads, only allows a prompt
+   * with no trailing space to go out. Null otherwise, and the line stays held.
    */
   releasePrompt(echoOff = false): string | null {
     if (this.discarding || this.pemLines !== null || this.yamlBlock !== null || this.parts.length > 0 || this.hanging !== null || this.promptNamed) return null;
@@ -226,7 +222,7 @@ export class TerminalRedactor {
     if (redactTerminalText(clean) !== shown) return null;
     const named = BEARER_END.test(shown) || endsWithName(shown, false) || PROMPT_CREDENTIAL.test(shown);
     this.buffer = '';
-    this.promptNamed = named && !(echoOff && ASKS_TYPED_SECRET.test(shown) && !DATA_SHAPED.test(shown));
+    this.promptNamed = named;
     return fitTerminalLine(shown);
   }
 

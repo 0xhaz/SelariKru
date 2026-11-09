@@ -86,12 +86,12 @@ describe('the control bridge', () => {
     await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ']));
     shell.emit({ kind: 'output', text: 'typed-value\n' });
     await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED]));
-    // Echo off with a password prompt: nothing is printed, so what follows is real output and is shown.
+    // Echo off: a program can still print after the prompt, so the next line is hidden there too.
     shell.emit({ kind: 'echo', on: false });
     shell.emit({ kind: 'output', text: 'Passphrase: ' });
     await until(() => expect(outputs(sent)).toContain('Passphrase: '));
     shell.emit({ kind: 'output', text: 'done\n' });
-    await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED, 'Passphrase: ', 'done']));
+    await until(() => expect(outputs(sent)).toEqual([`TOKEN=${REDACTED}`, 'Password: ', REDACTED, 'Passphrase: ', REDACTED]));
   });
 
   it('a raw-mode program, reported as unknown echo, has what it prints after a credential prompt hidden', async () => {

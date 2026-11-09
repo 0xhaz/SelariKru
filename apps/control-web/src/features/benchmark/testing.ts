@@ -10,6 +10,12 @@ const blankQuality: BenchmarkRecord['quality'] = {
   withinDeclaredLimits: null,
 };
 
+/** A distinct 64-character hex string per attempt, shaped like the hash the exporter will write. */
+function hashOf(seed: string): string {
+  return [...seed].map((c) => c.charCodeAt(0).toString(16).padStart(2, '0')).join('').padEnd(64, '0').slice(0, 64);
+}
+const CANDIDATE_PREFIX: Readonly<Record<WorkerMode, string>> = { L1: 'a1', C1: 'c1', H2: 'e2', L2: 'a2', C2: 'c2' };
+
 const evidence = (id: string): string[] => [`#/evidence?check=${id}`];
 
 function passedQuality(): BenchmarkRecord['quality'] {
@@ -50,7 +56,7 @@ export function workerRecord(o: WorkerOver): BenchmarkRecord {
   const quality = !ran ? blankQuality : status === 'completed' ? (o.failedCriteria ? failedQuality(o.failedCriteria) : passedQuality()) : blankQuality;
   return {
     protocolVersion: '0.1', dataKind, status, track: 'workers', cohortId: o.cohortId ?? 'cohort-workers', trialId: `t-${o.mode}-${o.index}`, mode: o.mode, blockId: `block-${o.index}`,
-    attemptId: `${o.mode.toLowerCase()}-${o.index}-${dataKind}`, configuration: { ...baseConfig, candidateSha: ran ? `${String(o.index).repeat(2)}${'c'.repeat(38)}`.slice(0, 40) : null, ...o.config },
+    attemptId: `${o.mode.toLowerCase()}-${o.index}-${dataKind}`, configuration: { ...baseConfig, candidateSha: ran ? `${CANDIDATE_PREFIX[o.mode]}${String(o.index).padStart(2, '0')}`.padEnd(40, 'c') : null, ...o.config },
     assistant: null,
     timings: { clockDomain: 'server-monotonic', startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: ran ? (o.ms === undefined ? 900_000 : o.ms) : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
     resources: {
@@ -65,7 +71,7 @@ export function workerRecord(o: WorkerOver): BenchmarkRecord {
     failures: status === 'failed' ? [{ category: 'verifier_failed', detail: 'FB-03 did not pass' }] : [],
     confounders: [...(o.confounders ?? [])],
     artifactReferences: ran ? [`#/evidence?run=${o.mode}-${o.index}`] : [],
-    resultSha256: ran ? 'a'.repeat(64) : null,
+    resultSha256: ran ? hashOf(`${o.mode}${o.index}${dataKind}${o.cohortId ?? ''}`) : null,
     measuredResultsPresent: measured,
   };
 }
@@ -106,7 +112,7 @@ export function assistantRecord(o: AssistantOver): BenchmarkRecord {
     failures: status === 'failed' ? [{ category: 'adapter_error', detail: 'schema unsupported' }] : [],
     confounders: [],
     artifactReferences: ran ? [`#/evidence?run=assistant-${o.index}`] : [],
-    resultSha256: ran ? 'b'.repeat(64) : null,
+    resultSha256: ran ? hashOf(`${device ? 'd' : 'k'}${o.index}${dataKind}${o.warmup ? 'w' : ''}${o.cohortId ?? ''}`) : null,
     measuredResultsPresent: dataKind === 'measured' && ran,
   };
 }

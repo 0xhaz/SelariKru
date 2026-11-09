@@ -337,12 +337,13 @@ export class ControlHub {
     return and(eq(schema.controlSessions.tenantId, s.tenantId), eq(schema.controlSessions.projectId, s.projectId), eq(schema.controlSessions.sessionId, s.sessionId));
   }
 
-  private stillLive = async (tx: Executor, s: Session): Promise<boolean> => {
+  /** `nowMs`: the sweep passes the instant it started, so one pass judges idleness and lease expiry against the same clock reading. */
+  private stillLive = async (tx: Executor, s: Session, nowMs: number = this.nowMs): Promise<boolean> => {
     const [row] = await tx.select({ runner: schema.attempts.runner, fence: schema.attempts.leaseFence, endedAt: schema.attempts.endedAt, expires: schema.attempts.leaseExpiresAt, status: schema.taskStatus.status, revision: schema.attempts.revision, current: schema.taskStatus.currentRevision })
       .from(schema.attempts)
       .innerJoin(schema.taskStatus, and(eq(schema.taskStatus.tenantId, schema.attempts.tenantId), eq(schema.taskStatus.projectId, schema.attempts.projectId), eq(schema.taskStatus.taskId, schema.attempts.taskId)))
       .where(and(eq(schema.attempts.tenantId, s.tenantId), eq(schema.attempts.projectId, s.projectId), eq(schema.attempts.attemptId, s.attemptId)));
-    if (!row || row.runner !== s.runner || row.fence !== s.fence || row.endedAt !== null || row.expires === null || row.expires.getTime() <= this.nowMs || row.status !== 'running' || row.revision !== row.current) return false;
+    if (!row || row.runner !== s.runner || row.fence !== s.fence || row.endedAt !== null || row.expires === null || row.expires.getTime() <= nowMs || row.status !== 'running' || row.revision !== row.current) return false;
     // Also here, for a ticket spent in the moment before a cancel committed.
     return !(await this.cancelOpen(tx, s.projectId, s.taskId, row.revision));
   };
@@ -500,11 +501,16 @@ export class ControlHub {
     for (const s of [...this.sessions.values()]) {
       if (now - s.lastInputMs >= this.limits.idleMs) { this.end(s, 'idle_timeout'); continue; }
       if (now - s.startedMs >= this.limits.maxSessionMs) { this.end(s, 'session_limit'); continue; }
-      if (!(await this.stillLive(this.db, s))) this.end(s, 'attempt_fenced');
+      if (!(await this.stillLive(this.db, s, now))) this.end(s, 'attempt_fenced');
     }
     for (const [attemptId, link] of [...this.links]) {
       const [a] = await this.db.select({ fence: schema.attempts.leaseFence, endedAt: schema.attempts.endedAt, expires: schema.attempts.leaseExpiresAt }).from(schema.attempts).where(and(eq(schema.attempts.tenantId, this.ctx.config.tenantId), eq(schema.attempts.attemptId, attemptId)));
-      if (!a || a.fence !== link.fence || a.endedAt !== null || (a.expires !== null && a.expires.getTime() <= now)) { this.links.delete(attemptId); link.ws.close(WS_NORMAL); }
+      if (!a || a.fence !== link.fence || a.endedAt !== null || (a.expires !== null && a.expires.getTime() <= now)) {
+        // A fence can commit after the loop above read this attempt as live. Named here, or the link's close would record it as a lost link.
+        for (const s of [...this.sessions.values()]) if (s.link === link) this.end(s, 'attempt_fenced');
+        this.links.delete(attemptId);
+        link.ws.close(WS_NORMAL);
+      }
     }
   }
 
