@@ -64,3 +64,34 @@ describe('mock settings follow the real save-then-acknowledge rule', () => {
     expect(await ds.execute({ command: 'run.cancel', expectedRevision: before.runs[runId]!.planRevision, idempotencyKey: 'd', args: { runId } })).toMatchObject({ accepted: false, rejection: 'run_closed' });
   });
 });
+
+describe('mock pause holds the fixture\'s scripted attempt starts', () => {
+  const make = async () => {
+    const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)) });
+    const f = buildFixture('human-wait');
+    const s0 = await ds.getSnapshot(f.projectId);
+    return { ds, projectId: f.projectId, runId: Object.keys(s0.runs)[0]!, attempts: async () => Object.keys((await ds.getSnapshot(f.projectId)).attempts).length };
+  };
+
+  it('no attempt starts while paused, and the held start happens after resume', async () => {
+    const free = await make();
+    const before = await free.attempts();
+    free.ds.clock.advance(70_000);
+    expect(await free.attempts()).toBe(before + 1);
+
+    const { ds, projectId, runId, attempts } = await make();
+    await ds.execute({ command: 'setting.set', expectedRevision: 0, idempotencyKey: 'p', args: { projectId, key: runId, change: { scope: 'run', field: 'paused', value: true } } });
+    ds.clock.advance(70_000);
+    expect(await attempts()).toBe(before);
+    await ds.execute({ command: 'setting.set', expectedRevision: 1, idempotencyKey: 'r', args: { projectId, key: runId, change: { scope: 'run', field: 'paused', value: false } } });
+    expect(await attempts()).toBe(before);
+    ds.clock.advance(1_000);
+    expect(await attempts()).toBe(before + 1);
+    expect(ProjectViewSnapshotSchema.safeParse(await ds.getSnapshot(projectId)).success).toBe(true);
+  });
+
+  it('seeded assignments are reported as in force, not left unknown', async () => {
+    const { ds, projectId } = await make();
+    for (const a of (await ds.getSnapshot(projectId)).modelAssignments) expect(a.state).toBe('applied');
+  });
+});

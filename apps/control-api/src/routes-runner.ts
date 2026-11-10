@@ -1,4 +1,4 @@
-import { restrictedStoredReason, TaskSpecSchema } from '@selarikru/domain';
+import { restrictedStoredReason, TaskSpecSchema, type RunnerConfigAck } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, TerminalUploadRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
 import { INFRASTRUCTURE_REASON_PREFIX, type Lease, type LeaseConflict, type PublishResult, type Runner } from '@selarikru/workflow';
@@ -66,6 +66,18 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     return reply.code(201).send({ runnerId, token, location, tenantId: config.tenantId });
   });
 
+  /**
+   * Records a runner's config acknowledgement. Its own transaction, and never the request's outcome: a failure is logged and the claim or heartbeat it came
+   * with still answers, because the runner sends the same acknowledgement again on its next poll and the periodic pass settles what it can.
+   */
+  async function acknowledge(runner: Runner, ack: RunnerConfigAck): Promise<void> {
+    try {
+      await acknowledgeRunnerConfig(db, runner.tenantId, runner.runnerId, ack, now());
+    } catch (err) {
+      app.log.warn({ err, runnerId: runner.runnerId }, 'recording a config acknowledgement failed; the next poll retries');
+    }
+  }
+
   // ---- scheduler access --------------------------------------------------------------------------------------
   const guard = { onRequest: [ctx.runner] };
 
@@ -100,7 +112,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     }
     const harnesses = body.harnesses ?? stored ?? [];
     // The acknowledgement first, in its own transaction: what it puts in force is recorded whether or not this poll gets work.
-    if (body.config !== undefined) await acknowledgeRunnerConfig(db, runner.tenantId, runner.runnerId, body.config, now());
+    if (body.config !== undefined) await acknowledge(runner, body.config);
     const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
     // Sent with every answer, so a runner learns a change on its next poll whether or not it got work.
     const runnerConfig = await runnerConfigFor(db, runner.tenantId, runner.runnerId);
@@ -135,7 +147,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const result = await scheduler.heartbeat(await leaseFor(runner, body.lease), body.activity, body.setupComplete === true ? { setupComplete: true } : {});
     if (!result.ok) throw conflict(result.error);
     // A busy runner's heartbeat is where it acknowledges: its slots may all be held, so it is not polling for claims.
-    if (body.config !== undefined) await acknowledgeRunnerConfig(db, runner.tenantId, runner.runnerId, body.config, now());
+    if (body.config !== undefined) await acknowledge(runner, body.config);
     return reply.code(200).send({ ...result.value, config: await runnerConfigFor(db, runner.tenantId, runner.runnerId) });
   });
 
@@ -171,7 +183,12 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     ctx.terminal.markEnded(body.lease.attemptId);
     ctx.control.endForAttempt(body.lease.attemptId, 'attempt_finished');
     // The last attempt of a run being cancelled has ended: the run's cancel is confirmed now rather than on the next expiry pass.
-    await finishCancelledRuns({ db, tenantId: runner.tenantId, now }, { projectId: lease.projectId, runId: lease.runId });
+    // The result is committed: a failure here must not turn it into an error the runner would retry. The next expiry pass finishes the cancel.
+    try {
+      await finishCancelledRuns({ db, tenantId: runner.tenantId, now }, { projectId: lease.projectId, runId: lease.runId });
+    } catch (err) {
+      app.log.warn({ err, runId: lease.runId }, 'finishing a run cancel after a result failed; the next pass retries');
+    }
     return reply.code(200).send(published.value);
   });
 

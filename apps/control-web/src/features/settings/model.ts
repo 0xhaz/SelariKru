@@ -35,11 +35,16 @@ export function settingStatus(s: SettingView | undefined): FieldStatus | null {
         ? { label: 'Paused', tone: 'neutral', inForce: true, detail: 'The runner confirmed it. No new work is assigned; attempts already running continue until they finish.' }
         : { label: 'Scheduling', tone: 'active', inForce: true, detail: 'The runner confirmed the resume. Work is assigned again within the run\'s limits.' };
     }
+    if (s.state === 'waiting_for_runner_update') {
+      const u = updateNeeded(s.waitingOn);
+      return { ...u, detail: `${pausing ? 'Pause requested: no new work is assigned from now; attempts already running continue.' : 'Resume requested: work can be assigned again.'} ${u.detail}` };
+    }
     const none = s.state === 'waiting_for_runner' ? ' No runner is connected to confirm it yet.' : ' Waiting for the runner to confirm on its next heartbeat.';
     return pausing
       ? { label: 'Pause requested', tone: 'warning', inForce: false, detail: `No new work is assigned from now; attempts already running continue.${none}` }
       : { label: 'Resume requested', tone: 'warning', inForce: false, detail: `The budget, policy and leases were checked again and work can be assigned.${none}` };
   }
+  if (s.state === 'waiting_for_runner_update') return updateNeeded(s.waitingOn);
   if (s.state === 'applied') return { label: 'Applied', tone: 'success', inForce: true, detail: s.enforcer === 'server' ? 'The server enforces it from the moment it was saved.' : 'The runner confirmed it.' };
   if (s.state === 'waiting_for_runner') {
     return { label: s.scope === 'runner' ? 'Saved · applies when this runner connects' : 'Saved · applies when a runner connects', tone: 'warning', inForce: false, detail: 'The server already refuses new work it would forbid. No runner is connected to confirm it.' };
@@ -50,9 +55,17 @@ export function settingStatus(s: SettingView | undefined): FieldStatus | null {
   };
 }
 
-/** A model assignment between saved and in force. Absent state: a source with no acknowledgements, whose seeded assignments are in force. */
-export function assignmentStatus(state: SettingState | undefined): FieldStatus {
+/** A connected runner runs a build that never acknowledges, so nothing it holds can be shown in force until it is updated. */
+function updateNeeded(waitingOn: readonly string[] | undefined): FieldStatus {
+  const who = waitingOn && waitingOn.length > 0 ? waitingOn.join(', ') : 'a connected runner';
+  return { label: 'Waiting for runner update', tone: 'warning', inForce: false, detail: `Saved, and the server already refuses new work it would forbid. ${who} runs a build that cannot confirm settings: update it to put this in force.` };
+}
+
+/** A model assignment between saved and in force. A state the source did not report is unknown, never applied. */
+export function assignmentStatus(state: SettingState | undefined, waitingOn?: readonly string[]): FieldStatus {
   const pinned = 'Attempts already running keep the model they started with.';
+  if (state === undefined) return { label: 'Status unknown', tone: 'neutral', inForce: false, detail: `The source did not say whether this is in force. ${pinned}` };
+  if (state === 'waiting_for_runner_update') { const u = updateNeeded(waitingOn); return { ...u, detail: `${u.detail} ${pinned}` }; }
   if (state === 'applying') return { label: 'Saved · applies on next start', tone: 'warning', inForce: false, detail: `Waiting for the runner to confirm. ${pinned}` };
   if (state === 'waiting_for_runner') return { label: 'Saved · applies when a runner connects', tone: 'warning', inForce: false, detail: `No runner is connected to confirm it. ${pinned}` };
   return { label: 'Applied · used from the next attempt', tone: 'success', inForce: true, detail: pinned };

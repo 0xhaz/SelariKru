@@ -11,7 +11,7 @@ export const EVENT_TYPES = [
   'change.proposed', 'change.merged',
   'candidate.assembled', 'candidate.failed',
   'attempt.human_intervened', 'terminal.control_ended',
-  'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled',
+  'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -87,6 +87,8 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   /** The owner asked to cancel a run. Not confirmed termination: `run.cancelled` follows once every active attempt has ended or its lease expired. */
   'run.cancel_requested': [H],
   'run.cancelled': [S, Y],
+  /** A placement block cleared because the owner gave a grant back. The scheduler records it; who asked is in the payload. */
+  'placement.cleared': [S],
 };
 
 export interface ActorNotPermitted {

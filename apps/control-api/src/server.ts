@@ -13,7 +13,7 @@ import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
-import { finishCancelledRuns } from './settings.ts';
+import { finishCancelledRuns, settlePendingSettings } from './settings.ts';
 import { createFirebaseVerifier } from './firebase.ts';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
 import { dockerRunner, currentTrusted, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
@@ -213,7 +213,13 @@ export async function startServer(options: {
     } : undefined });
   const driver = startLeaseExpiryDriver({
     scheduler, now, intervalMs: config.expireLeasesIntervalMs,
-    afterPass: () => finishCancelledRuns({ db, tenantId: config.tenantId, now }),
+    // Two more independent sweeps: a run cancel waiting only on a lapsed lease, and a setting waiting only on a runner that has gone quiet.
+    afterPass: async () => {
+      const failures: unknown[] = [];
+      try { await finishCancelledRuns({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
+      try { await settlePendingSettings({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
+      if (failures.length > 0) throw new AggregateError(failures, 'settings pass failed');
+    },
     ...(options.onError ? { onError: options.onError } : {}),
   });
   const reconciler = options.github?.port && options.github.pollIntervalMs

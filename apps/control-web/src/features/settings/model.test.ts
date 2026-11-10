@@ -24,6 +24,13 @@ describe('a save is never shown as applied', () => {
     expect(settingStatus(setting({ desired: false, effective: true, desiredRevision: 2, effectiveRevision: 1 }))).toMatchObject({ label: 'Resume requested', inForce: false });
   });
 
+  it('a change held by a runner on an old build says the runner needs updating, and names it', () => {
+    const st = settingStatus(setting({ state: 'waiting_for_runner_update', waitingOn: ['runner_old'] }))!;
+    expect(st).toMatchObject({ label: 'Waiting for runner update', inForce: false });
+    expect(st.detail).toMatch(/runner_old/);
+    expect(st.detail).toMatch(/update/i);
+  });
+
   it('a server-enforced field is applying until the snapshot says it is in force', () => {
     expect(settingStatus(setting({ field: 'allowed_paths', enforcer: 'server', desired: ['src'], state: 'applying' }))).toMatchObject({ label: 'Applying', inForce: false });
     expect(settingStatus(setting({ field: 'allowed_paths', enforcer: 'server', desired: ['src'], effective: ['src'], state: 'applied', effectiveRevision: 1 }))).toMatchObject({ label: 'Applied', inForce: true });
@@ -40,7 +47,10 @@ describe('a save is never shown as applied', () => {
     expect(assignmentStatus('applying').detail).toMatch(/keep the model they started with/);
     expect(assignmentStatus('waiting_for_runner').label).toBe('Saved · applies when a runner connects');
     expect(assignmentStatus('applied')).toMatchObject({ label: 'Applied · used from the next attempt', inForce: true });
-    expect(assignmentStatus(undefined).inForce).toBe(true);
+    // Not reported is not applied.
+    expect(assignmentStatus(undefined)).toMatchObject({ label: 'Status unknown', inForce: false });
+    expect(assignmentStatus('waiting_for_runner_update', ['runner_old'])).toMatchObject({ label: 'Waiting for runner update', inForce: false });
+    expect(assignmentStatus('waiting_for_runner_update', ['runner_old']).detail).toMatch(/runner_old/);
   });
 });
 

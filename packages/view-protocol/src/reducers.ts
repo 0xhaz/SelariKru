@@ -205,6 +205,9 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'placement.blocked':
       return commit({ ...task, placementBlock: str(p, 'reason') ?? 'unknown' });
 
+    case 'placement.cleared':
+      return commit({ ...task, placementBlock: null });
+
     case 'placement.decided': {
       const w = workerFor(snap, e.attemptId);
       if (!w || !attempt || attempt.outcome !== 'running') return commit(task);

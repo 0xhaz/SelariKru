@@ -41,9 +41,10 @@ export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', deta
 
 /**
  * Whether a saved change is in force. `applied`: its enforcer acknowledged it. `applying`: saved, and the server already gates claims on it, but the runner
- * has not confirmed it yet. `waiting_for_runner`: no runner is connected to confirm it. A save is never `applied` by being saved.
+ * has not confirmed it yet. `waiting_for_runner`: no runner is connected to confirm it. `waiting_for_runner_update`: a connected runner runs a build that never
+ * acknowledges, so it must be updated; it is named in `waitingOn`. A save is never `applied` by being saved.
  */
-export const SETTING_STATES = ['applied', 'applying', 'waiting_for_runner'] as const;
+export const SETTING_STATES = ['applied', 'applying', 'waiting_for_runner', 'waiting_for_runner_update'] as const;
 export type SettingState = (typeof SETTING_STATES)[number];
 
 /** The current assignment for a role or task. `revision` is what a change must send back. Null provider and model: removed, listed only for its revision. */
@@ -52,6 +53,8 @@ export const ModelAssignmentViewSchema = z
     scope: z.enum(ASSIGNMENT_SCOPES), key: Id, provider: Id.nullable(), model: Id.nullable(), revision: z.number().int().min(1), updatedBy: z.string().min(1), updatedAt: Iso,
     /** Whether the runners have acknowledged this revision. Absent: the source has no acknowledgements at all (the demo's seeded assignments), and it reads as in force. */
     state: z.enum(SETTING_STATES).optional(),
+    /** The runners a `waiting_for_runner_update` assignment waits on. */
+    waitingOn: z.array(Id).optional(),
   })
   .strict();
 export type ModelAssignmentView = z.infer<typeof ModelAssignmentViewSchema>;
@@ -70,6 +73,8 @@ export const SettingViewSchema = z
     effectiveRevision: z.number().int().min(0),
     enforcer: z.enum(['server', 'runner']),
     state: z.enum(SETTING_STATES),
+    /** The runners a `waiting_for_runner_update` setting waits on. */
+    waitingOn: z.array(Id).optional(),
     updatedBy: z.string().min(1),
     updatedAt: Iso,
     appliedAt: Iso.nullable(),

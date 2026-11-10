@@ -31,6 +31,8 @@ export interface AssignmentTarget {
   readonly pinned: { readonly provider: string; readonly model: string } | null;
   /** Whether the runners have acknowledged the saved assignment. Null: nothing saved here. */
   readonly state: SettingState | 'unknown' | null;
+  /** The runners a `waiting_for_runner_update` assignment waits on. */
+  readonly waitingOn: readonly string[];
 }
 
 export interface AssignmentsModel {
@@ -58,7 +60,7 @@ export function taskTarget(t: TaskView, snapshot: ProjectViewSnapshot): Assignme
   const pinned = snapshot.runs[t.runId]?.pinnedModel ?? null;
   const role = t.role ? selectionOf(entryFor(snapshot, 'role', t.role)) : null;
   const inherited = role ?? snapshot.modelCatalog.projectDefault;
-  return { scope: 'task', key: t.taskId, label: t.title ?? t.taskId, current: selectionOf(entry), revision: entry?.revision ?? 0, fallback: inherited ? `Using ${role ? 'its role\'s model' : 'the project default'}: ${modelLabel(snapshot, inherited)}` : 'No model is assigned, and this project has no default', inherited, pinned, state: entry ? entry.state ?? 'unknown' : null };
+  return { scope: 'task', key: t.taskId, label: t.title ?? t.taskId, current: selectionOf(entry), revision: entry?.revision ?? 0, fallback: inherited ? `Using ${role ? 'its role\'s model' : 'the project default'}: ${modelLabel(snapshot, inherited)}` : 'No model is assigned, and this project has no default', inherited, pinned, state: entry ? entry.state ?? 'unknown' : null, waitingOn: entry?.waitingOn ?? [] };
 }
 
 const STATUS_TEXT: Readonly<Record<'none' | 'unknown', string>> = {
@@ -79,7 +81,7 @@ export function buildAssignments(snapshot: ProjectViewSnapshot): AssignmentsMode
   const roles = roleNames.map((role): AssignmentTarget => {
     const entry = entryFor(snapshot, 'role', role);
     const inherited = catalog.projectDefault;
-    return { scope: 'role', key: role, label: role, current: selectionOf(entry), revision: entry?.revision ?? 0, fallback: inherited ? `Using the project default: ${modelLabel(snapshot, inherited)}` : 'No model is assigned, and this project has no default', inherited, pinned: null, state: entry ? entry.state ?? 'unknown' : null };
+    return { scope: 'role', key: role, label: role, current: selectionOf(entry), revision: entry?.revision ?? 0, fallback: inherited ? `Using the project default: ${modelLabel(snapshot, inherited)}` : 'No model is assigned, and this project has no default', inherited, pinned: null, state: entry ? entry.state ?? 'unknown' : null, waitingOn: entry?.waitingOn ?? [] };
   });
   return { projectId: snapshot.meta.projectId, available, statusText, providers, roles };
 }

@@ -40,6 +40,9 @@ interface Project {
   settings: SettingView[];
   /** Run cancels requested and not yet confirmed. */
   readonly cancels: Map<string, { readonly requestedAt: string }>;
+  /** Scripted events held back while their run is paused: an attempt start, and everything after it for that task. Released, in order, on resume. */
+  held: ProjectViewEvent[];
+  readonly heldTasks: Set<string>;
 }
 
 export interface MockOptions {
@@ -105,8 +108,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
-      modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: [...(fixture.modelAssignments ?? [])], assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
-      settings: [], cancels: new Map(),
+      modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
+      settings: [], cancels: new Map(), held: [], heldTasks: new Set(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
   }
@@ -199,9 +202,31 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     if (numbered.type === 'task.cancelled') p.pending = p.pending.filter((e) => e.taskId !== numbered.taskId);
   }
 
+  const runPaused = (p: Project, runId: string): boolean => p.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'paused' && x.desired === true);
+
   function release(p: Project): void {
     const now = timeOf(p);
-    while (p.pending[0] && Date.parse(p.pending[0].occurredAt) <= now) accept(p, p.pending.shift()!);
+    while (p.pending[0] && Date.parse(p.pending[0].occurredAt) <= now) {
+      const e = p.pending.shift()!;
+      // As the server's claim gate does: a paused run starts no attempt. The start, and what the script has that task do next, wait for the resume.
+      if (p.heldTasks.has(e.taskId) || (e.type === 'attempt.started' && runPaused(p, e.runId))) {
+        p.held.push(e);
+        p.heldTasks.add(e.taskId);
+        continue;
+      }
+      accept(p, e);
+    }
+  }
+
+  /** On resume, the held starts happen at the scheduler's next claim, one second on, and the rest of those tasks' script moves with them. */
+  function releaseHeld(p: Project): void {
+    if (p.held.length === 0) return;
+    const delta = timeOf(p) + 1_000 - Date.parse(p.held[0]!.occurredAt);
+    const shift = (e: ProjectViewEvent): ProjectViewEvent => ({ ...e, occurredAt: isoOf(Date.parse(e.occurredAt) + delta), receivedAt: isoOf(Date.parse(e.receivedAt) + delta) });
+    const later = p.pending.filter((e) => p.heldTasks.has(e.taskId));
+    p.pending = [...p.pending.filter((e) => !p.heldTasks.has(e.taskId)), ...p.held.map(shift), ...later.map(shift)].sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt));
+    p.held = [];
+    p.heldTasks.clear();
   }
 
   function flush(p: Project, sub: Subscriber): void {
@@ -446,6 +471,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         : { effective: inForce, effectiveRevision: row?.effectiveRevision ?? 0, state: 'applying' as const, appliedAt: row?.appliedAt ?? null }),
     };
     p.settings = [...p.settings.filter((x) => x !== row), next];
+    if (change.field === 'paused' && change.value === false) releaseHeld(p);
     appendCommandEvent(p, eventRun, 'settings.changed', { scope: change.scope, key, field: change.field, from: row?.desired ?? null, to: change.value as SettingChange['value'], revision, enforcer });
     if (enforcer === 'runner') appendCommandEvent(p, eventRun, 'settings.applied', { scope: change.scope, key, field: change.field, revision }, { delayMs: HEARTBEAT_STEP_MS, system: true });
     return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: enforcer === 'server' ? 'applied' : 'pending' });

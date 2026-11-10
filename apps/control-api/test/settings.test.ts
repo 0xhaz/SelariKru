@@ -26,6 +26,8 @@ const refOf = (lease: any) => ({ attemptId: lease.attemptId, fence: lease.fence,
 describe('a save is not shown as applied until the enforcer acknowledges it', () => {
   it('a worker model change stays applying until every recent runner acknowledges the config that carries it', async () => {
     const r = await enrolRunner(h.app);
+    // A runner on a build that acknowledges says so from its first poll.
+    await claim(r.token, { revision: 0, slots: 2 });
     await seedTask(t.db, specFor('t1'));
     const saved = await post(h.app, `/v1/projects/${PROJECT}/model-assignments`, { scope: 'role', key: 'backend', selection: { provider: 'anthropic', model: 'claude-opus-5-5' }, expectedRevision: 0, idempotencyKey: 'm1' });
     expect(saved.status).toBe(200);
@@ -49,6 +51,7 @@ describe('a save is not shown as applied until the enforcer acknowledges it', ()
 
   it("a worker's slots apply when that runner acknowledges, and the server enforces them from the save", async () => {
     const r = await enrolRunner(h.app);
+    await claim(r.token, { revision: 0, slots: 2 });
     await seedTask(t.db, specFor('t1'));
     await seedTask(t.db, specFor('t2'));
     const saved = await save(r.runnerId, { scope: 'runner', field: 'slots', value: 1 });
@@ -191,6 +194,7 @@ describe('a revoke blocks the next claim in the save itself', () => {
 describe('pause and resume', () => {
   it('pause blocks claims at once, reads as requested until every recent runner acknowledges on heartbeat, then paused; running work continues', async () => {
     const r = await enrolRunner(h.app);
+    await claim(r.token, { revision: 0, slots: 2 });
     await seedTask(t.db, specFor('t1'));
     await seedTask(t.db, specFor('t2'));
     const lease = (await claim(r.token)).body.lease;

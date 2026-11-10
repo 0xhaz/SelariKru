@@ -1,11 +1,12 @@
 import {
-  RUNNER_RECENT_SECONDS, SETTING_ENFORCER, TaskSpecSchema, isReduction, policyRevokedReason,
+  RUNNER_RECENT_SECONDS, SETTING_ENFORCER, TaskSpecSchema, isReduction, policyRevokedReason, transition,
+  type TaskSpec, type TaskStatus,
   type RunnerConfig, type RunnerConfigAck, type SettingChange, type SettingField, type SettingValue,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { RunCancelRequestSchema, SettingRequestSchema } from '@selarikru/protocol';
-import { lockBudget, lockPartsForClaims, PLACEMENT_MODES, releaseTaskClaims, remainingBudgetMicros, requestPolicyStop, stopForExhaustedBudget, type SchedulerContext } from '@selarikru/workflow';
+import { buildTaskState, loadAttempts, lockBudget, lockPartsForClaims, PLACEMENT_MODES, releaseTaskClaims, remainingBudgetMicros, requestPolicyStop, stopForExhaustedBudget, type SchedulerContext } from '@selarikru/workflow';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
@@ -69,6 +70,17 @@ async function runTasks(db: Executor, tenantId: string, projectId: string, runId
   return rows.map((r) => { const p = TaskSpecSchema.safeParse(r.spec); return { ...r, spec: p.success ? p.data : null }; });
 }
 
+/**
+ * The run's tasks as they stand once their status rows are locked: the ids are read first, every row is locked in task order (with the claim lock after them
+ * when claims will change), then each row is read again. Anything decided from a row is decided from the locked one, never from the read before the lock.
+ */
+async function lockedRunTasks(tx: Tx, tenantId: string, projectId: string, runId: string, claims: boolean) {
+  const ids = (await runTasks(tx, tenantId, projectId, runId)).map((t) => t.taskId);
+  if (claims) await lockPartsForClaims(tx, { tenantId, projectId }, ids);
+  else if (ids.length > 0) await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId), inArray(schema.taskStatus.taskId, ids))).orderBy(asc(schema.taskStatus.taskId)).for('update');
+  return runTasks(tx, tenantId, projectId, runId);
+}
+
 const cloudSlotsOf = (placement: { mode: string } | null): number => {
   const mode = placement && Object.hasOwn(PLACEMENT_MODES, placement.mode) ? PLACEMENT_MODES[placement.mode as keyof typeof PLACEMENT_MODES] : null;
   return mode?.cloudSlots ?? 0;
@@ -113,7 +125,6 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
     const body = parseBody(SettingRequestSchema, req.body);
     await requireProject(db, config.tenantId, projectId);
     const at = now();
-    let budgetRun: string | null = null;
     // Filled in the transaction and acted on after it commits: a rollback must not have closed anyone's session.
     let stopped: string[] = [];
     const result = await withTx(db, async (tx) => {
@@ -169,7 +180,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         if (change.field === 'budget_limit_usd') {
           const budget = { ...run!.budget, limitUsd: change.value, ...(run!.budget['createdLimitUsd'] === undefined ? { createdLimitUsd: run!.budget['limitUsd'] ?? null } : {}) };
           await tx.update(schema.runs).set({ budget }).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run!.runId)));
-          if (isReduction('budget_limit_usd', before, change.value)) budgetRun = run!.runId;
+
         }
 
         await writeEvent(tx, at, {
@@ -183,8 +194,9 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         return { scope: change.scope, key: body.key, field: change.field, desiredRevision: revision, effectiveRevision: values.effectiveRevision, state: server ? 'applied' : 'applying', configRevision } satisfies SettingSaveResult;
       });
     });
-    // A budget lowered below what is already committed stops running work through the existing budget stop, in its own transactions.
-    if (budgetRun !== null) await stopForExhaustedBudget(schedulerCtx(), { tenantId: config.tenantId, projectId, runId: budgetRun });
+    // A budget lowered below what is already committed stops running work through the existing budget stop, in its own transactions. It runs after every
+    // accepted budget save, a replay included, so a retry still stops work a lost first pass did not; the stop itself acts only past the limit and only once.
+    if (body.change.field === 'budget_limit_usd') await stopForExhaustedBudget(schedulerCtx(), { tenantId: config.tenantId, projectId, runId: body.key });
     for (const attemptId of stopped) ctx.control.endForAttempt(attemptId, 'attempt_fenced');
     return reply.code(200).send(result);
   });
@@ -246,8 +258,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         if (TERMINAL_RUN.includes(run.lifecycle)) throw new AppError(409, 'run_closed', `this run is ${run.lifecycle}`, { lifecycle: run.lifecycle });
         if (run.cancelRequestedAt !== null) throw new AppError(409, 'cancel_pending', 'a cancel is already requested for this run');
         const operationId = newId('op');
-        const tasks = (await runTasks(tx, config.tenantId, run.projectId, runId)).filter((t) => ACTIVE_TASK.includes(t.status));
-        await lockPartsForClaims(tx, { tenantId: config.tenantId, projectId: run.projectId }, tasks.map((t) => t.taskId));
+        const tasks = (await lockedRunTasks(tx, config.tenantId, run.projectId, runId, true)).filter((t) => ACTIVE_TASK.includes(t.status));
         const stoppingTasks: string[] = [];
         const cancelled: string[] = [];
         for (const t of tasks) {
@@ -291,8 +302,12 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
 const resumeRefused = (reason: string): AppError => new AppError(409, 'resume_refused', 'Scheduling stays paused: the run cannot take work until this is resolved.', { reason });
 
 /** Cancels a task that holds no live attempt: its status, its open requests and its claims, with the owner named. Status row and claim lock already held. */
-async function closeTask(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, scope: { projectId: string; runId: string; taskId: string }, t: { status: string; revision: number; rowRevision: number }, by: string, operationId: string, at: Date): Promise<void> {
-  const rev = await bumpStatus(tx, key, t.rowRevision, 'cancelled', at);
+async function closeTask(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, scope: { projectId: string; runId: string; taskId: string }, t: { status: string; revision: number; rowRevision: number; spec: TaskSpec | null }, by: string, operationId: string, at: Date): Promise<void> {
+  // Through the domain's own transition, from the locked status: a status this cannot leave fails here rather than being overwritten.
+  const state = t.spec ? buildTaskState(t.spec, t.status as TaskStatus, await loadAttempts(tx, key, t.revision)) : null;
+  const moved = state ? transition(state, { type: 'cancel' }) : null;
+  if (!moved?.ok) throw new Error(`task ${key.taskId} cannot be cancelled from ${t.status}`);
+  const rev = await bumpStatus(tx, key, t.rowRevision, moved.value.status, at);
   await tx.update(schema.approvals).set({ outcome: 'superseded', resolvedAt: at }).where(and(eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId), eq(schema.approvals.outcome, 'pending')));
   await releaseTaskClaims(tx, key, t.revision, at);
   await tx.update(schema.taskCommands).set({ state: 'cancelled' }).where(and(eq(schema.taskCommands.tenantId, key.tenantId), eq(schema.taskCommands.projectId, key.projectId), eq(schema.taskCommands.taskId, key.taskId), eq(schema.taskCommands.command, 'cancel'), eq(schema.taskCommands.state, 'cancel_requested')));
@@ -328,8 +343,7 @@ export async function finishCancelledRuns(deps: { db: Db; tenantId: string; now:
         .where(and(eq(schema.attempts.tenantId, deps.tenantId), eq(schema.attempts.projectId, p.projectId), inArray(schema.attempts.taskId, tasks.length > 0 ? tasks.map((t) => t.taskId) : ['']), isNull(schema.attempts.endedAt))).limit(1);
       if (open.length > 0) return false;
       const at = deps.now();
-      const left = tasks.filter((t) => ACTIVE_TASK.includes(t.status));
-      await lockPartsForClaims(tx, { tenantId: deps.tenantId, projectId: p.projectId }, left.map((t) => t.taskId));
+      const left = (await lockedRunTasks(tx, deps.tenantId, p.projectId, p.runId, true)).filter((t) => ACTIVE_TASK.includes(t.status));
       for (const t of left) await closeTask(tx, { tenantId: deps.tenantId, projectId: p.projectId, taskId: t.taskId }, { projectId: p.projectId, runId: p.runId, taskId: t.taskId }, t, SYSTEM_ACTOR.id, newId('op'), at);
       await markCancelled(tx, { tenantId: deps.tenantId, projectId: p.projectId, runId: p.runId }, run.planRevision ?? 0, null, at);
       return true;
@@ -337,6 +351,15 @@ export async function finishCancelledRuns(deps: { db: Db; tenantId: string; now:
     if (finished) done.push(p.runId);
   }
   return done;
+}
+
+/** Sets a task's placement block at the revision it was locked at, and moves that revision. Leaves `updated_at`, which orders the queue, alone. */
+async function setBlock(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, rowRevision: number, reason: string | null): Promise<number> {
+  const moved = await tx.update(schema.taskStatus).set({ placementBlock: reason, rowRevision: rowRevision + 1 })
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId), eq(schema.taskStatus.rowRevision, rowRevision)))
+    .returning({ rowRevision: schema.taskStatus.rowRevision });
+  if (moved.length === 0) throw new Error(`task ${key.taskId}: status revision ${rowRevision} is no longer current`);
+  return rowRevision + 1;
 }
 
 interface EffectScope { readonly tenantId: string; readonly projectId: string; readonly run: typeof schema.runs.$inferSelect; readonly uid: string; readonly at: Date }
@@ -350,9 +373,8 @@ async function applyServerEffects(tx: Tx, s: EffectScope, change: SettingChange,
   const out = { blocked: [] as string[], unblocked: [] as string[], stopping: [] as string[], stoppingAttempts: [] as string[] };
   if (change.field !== 'allowed_paths' && change.field !== 'cloud_eligible') return out;
   const reason = policyRevokedReason(change.field);
-  const tasks = (await runTasks(tx, s.tenantId, s.projectId, s.run.runId)).filter((t) => ACTIVE_TASK.includes(t.status));
+  const tasks = (await lockedRunTasks(tx, s.tenantId, s.projectId, s.run.runId, false)).filter((t) => ACTIVE_TASK.includes(t.status));
   if (tasks.length === 0) return out;
-  await tx.select({ taskId: schema.taskStatus.taskId }).from(schema.taskStatus).where(and(eq(schema.taskStatus.tenantId, s.tenantId), eq(schema.taskStatus.projectId, s.projectId), inArray(schema.taskStatus.taskId, tasks.map((t) => t.taskId)))).orderBy(asc(schema.taskStatus.taskId)).for('update');
   const reduction = isReduction(change.field, before, change.value);
   for (const t of tasks) {
     const key = { tenantId: s.tenantId, projectId: s.projectId, taskId: t.taskId };
@@ -361,7 +383,9 @@ async function applyServerEffects(tx: Tx, s: EffectScope, change: SettingChange,
       : change.value === false;
     if (!forbidden) {
       if (t.placementBlock === reason) {
-        await tx.update(schema.taskStatus).set({ placementBlock: null }).where(and(eq(schema.taskStatus.tenantId, s.tenantId), eq(schema.taskStatus.projectId, s.projectId), eq(schema.taskStatus.taskId, t.taskId)));
+        // Given back: the block goes, the task's revision moves so a reader following events learns of it, and the event says who and why.
+        const rev = await setBlock(tx, key, t.rowRevision, null);
+        await writeEvent(tx, s.at, { projectId: s.projectId, runId: s.run.runId, taskId: t.taskId, aggregateRevision: rev, type: 'placement.cleared', actor: SCHEDULER_ACTOR, payload: { reason, cause: 'grant_restored', clearedBy: s.uid } });
         out.unblocked.push(t.taskId);
       }
       continue;
@@ -380,8 +404,7 @@ async function applyServerEffects(tx: Tx, s: EffectScope, change: SettingChange,
     }
     // Cloud taken away leaves a queued task free to run locally; the claim decides that. A path taken away forbids it anywhere.
     if (change.field === 'allowed_paths' && CLAIMABLE.includes(t.status) && t.placementBlock !== reason) {
-      const rev = t.rowRevision + 1;
-      await tx.update(schema.taskStatus).set({ placementBlock: reason, rowRevision: rev }).where(and(eq(schema.taskStatus.tenantId, s.tenantId), eq(schema.taskStatus.projectId, s.projectId), eq(schema.taskStatus.taskId, t.taskId)));
+      const rev = await setBlock(tx, key, t.rowRevision, reason);
       await writeEvent(tx, s.at, { projectId: s.projectId, runId: s.run.runId, taskId: t.taskId, aggregateRevision: rev, type: 'placement.blocked', actor: SCHEDULER_ACTOR, payload: { reason, mode: null } });
       out.blocked.push(t.taskId);
     }
@@ -411,46 +434,64 @@ export async function runnerConfigFor(db: Executor, tenantId: string, runnerId: 
 
 /**
  * Records what a runner says it has applied and puts in force every change that was waiting for it: this runner's own settings once it has acknowledged
- * their revision, and a run's pause or a model assignment once every recently seen runner has. A runner cannot acknowledge a revision that does not exist yet.
- * Lock order: the runner row, the waiting settings rows, the event sequence. No scheduler lock, run row or status row is taken.
+ * their revision, and a run's pause or a model assignment once every recently seen runner has. A runner cannot acknowledge a revision that does not exist
+ * yet. The project-wide check runs on every acknowledgement, whether or not this runner's own row moved, so a runner that falls out of the recent window
+ * stops holding a change back as soon as anyone acknowledges again (and on the periodic pass, `settlePendingSettings`).
+ *
+ * Lock order: the runner row, then this runner's waiting settings rows by field, the waiting run settings rows by project, run and field, the waiting
+ * assignment rows by project, scope and revision, all before the first event, then the event sequence. No scheduler lock, run row or status row is taken.
  */
 export async function acknowledgeRunnerConfig(db: Db, tenantId: string, runnerId: string, ack: RunnerConfigAck, now: Date): Promise<number> {
   return withTx(db, async (tx) => {
     const latest = await currentConfigRevision(tx, tenantId);
     if (ack.revision > latest) return 0;
-    const moved = await tx.update(schema.runners).set({ configAckRevision: ack.revision, configAckSlots: ack.slots, configAckAt: now })
-      .where(and(eq(schema.runners.tenantId, tenantId), eq(schema.runners.runnerId, runnerId), sql`(${schema.runners.configAckRevision} IS NULL OR ${schema.runners.configAckRevision} < ${ack.revision} OR ${schema.runners.configAckSlots} IS DISTINCT FROM ${ack.slots})`))
-      .returning({ runnerId: schema.runners.runnerId });
-    if (moved.length === 0) return 0;
-    // Every row this acknowledgement may put in force is locked before the first event is written: a save holds its setting row while it waits for the
-    // event sequence, so taking the sequence and then a setting row here could close a cycle with it.
-    const own = await tx.select().from(schema.runnerSettings).where(and(eq(schema.runnerSettings.tenantId, tenantId), eq(schema.runnerSettings.runnerId, runnerId), sql`${schema.runnerSettings.effectiveRevision} < ${schema.runnerSettings.desiredRevision}`, lte(schema.runnerSettings.configRevision, ack.revision))).for('update');
-    const recent = await recentRunners(tx, tenantId, now);
-    const everyone = recent.length === 0 ? null : Math.min(...recent.map((r) => r.ack ?? 0));
-    const runRows = everyone === null ? [] : await tx.select().from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.enforcer, 'runner'), sql`${schema.runSettings.effectiveRevision} < ${schema.runSettings.desiredRevision}`, lte(schema.runSettings.configRevision, everyone))).for('update');
-    const assignments = everyone === null ? [] : await tx.select().from(schema.modelAssignments).where(and(eq(schema.modelAssignments.tenantId, tenantId), isNull(schema.modelAssignments.appliedAt), isNotNull(schema.modelAssignments.configRevision), lte(schema.modelAssignments.configRevision, everyone))).for('update');
-    const by = recent.map((x) => x.runnerId).sort();
-    let applied = 0;
-    for (const r of own) {
-      // Slots in force are what the runner says it runs: it may have been started with fewer than the owner allowed.
-      const value = r.field === 'slots' ? Math.min(Number(r.desired), ack.slots) : r.desired;
-      await tx.update(schema.runnerSettings).set({ effective: value, effectiveRevision: r.desiredRevision, appliedAt: now }).where(and(eq(schema.runnerSettings.tenantId, tenantId), eq(schema.runnerSettings.runnerId, runnerId), eq(schema.runnerSettings.field, r.field)));
-      await writeEvent(tx, now, { projectId: r.eventProjectId, runId: r.eventRunId, taskId: r.eventRunId, aggregateRevision: r.desiredRevision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'runner', key: runnerId, field: r.field, value, revision: r.desiredRevision, acknowledgedBy: [runnerId], configRevision: ack.revision } });
-      applied += 1;
-    }
-    for (const r of runRows) {
-      await tx.update(schema.runSettings).set({ effective: r.desired, effectiveRevision: r.desiredRevision, appliedAt: now }).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.projectId, r.projectId), eq(schema.runSettings.runId, r.runId), eq(schema.runSettings.field, r.field)));
-      await writeEvent(tx, now, { projectId: r.projectId, runId: r.runId, taskId: r.runId, aggregateRevision: r.desiredRevision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'run', key: r.runId, field: r.field, value: r.desired, revision: r.desiredRevision, acknowledgedBy: by, configRevision: everyone } });
-      applied += 1;
-    }
-    for (const a of assignments) {
-      await tx.update(schema.modelAssignments).set({ appliedAt: now }).where(and(eq(schema.modelAssignments.tenantId, tenantId), eq(schema.modelAssignments.projectId, a.projectId), eq(schema.modelAssignments.scopeKind, a.scopeKind), eq(schema.modelAssignments.scopeKey, a.scopeKey), eq(schema.modelAssignments.revision, a.revision)));
-      const runId = await eventRunFor(tx, tenantId, a.projectId, a.scopeKind === 'task' ? a.scopeKey : null);
-      if (runId !== null) await writeEvent(tx, now, { projectId: a.projectId, runId, taskId: runId, aggregateRevision: a.revision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'assignment', key: `${a.scopeKind}:${a.scopeKey}`, value: a.provider !== null ? { provider: a.provider, model: a.model } : null, revision: a.revision, acknowledgedBy: by, configRevision: everyone } });
-      applied += 1;
-    }
-    return applied;
+    await tx.update(schema.runners).set({ configAckRevision: ack.revision, configAckSlots: ack.slots, configAckAt: now })
+      .where(and(eq(schema.runners.tenantId, tenantId), eq(schema.runners.runnerId, runnerId), sql`(${schema.runners.configAckRevision} IS NULL OR ${schema.runners.configAckRevision} < ${ack.revision} OR ${schema.runners.configAckSlots} IS DISTINCT FROM ${ack.slots})`));
+    return settle(tx, tenantId, now, { runnerId, ack });
   });
+}
+
+/** The periodic pass: puts in force whatever every recent runner has already acknowledged, so a runner going quiet is enough to release a change. */
+export async function settlePendingSettings(deps: { db: Db; tenantId: string; now: () => Date }): Promise<number> {
+  return withTx(deps.db, (tx) => settle(tx, deps.tenantId, deps.now(), null));
+}
+
+async function settle(tx: Tx, tenantId: string, now: Date, own: { readonly runnerId: string; readonly ack: RunnerConfigAck } | null): Promise<number> {
+  // Every row this may put in force is locked, in a fixed order, before the first event is written: a save holds its setting row while it waits for the
+  // event sequence, so taking the sequence and then a setting row here could close a cycle with it.
+  const mine = own === null ? [] : await tx.select().from(schema.runnerSettings)
+    .where(and(eq(schema.runnerSettings.tenantId, tenantId), eq(schema.runnerSettings.runnerId, own.runnerId), sql`${schema.runnerSettings.effectiveRevision} < ${schema.runnerSettings.desiredRevision}`, lte(schema.runnerSettings.configRevision, own.ack.revision)))
+    .orderBy(asc(schema.runnerSettings.field)).for('update');
+  const recent = await recentRunners(tx, tenantId, now);
+  // A recent runner that has never acknowledged runs a build that cannot: it is not counted as having acknowledged anything, so nothing waits on it as applied.
+  const everyone = recent.length === 0 || recent.some((r) => r.ack === null) ? null : Math.min(...recent.map((r) => r.ack!));
+  const runRows = everyone === null ? [] : await tx.select().from(schema.runSettings)
+    .where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.enforcer, 'runner'), sql`${schema.runSettings.effectiveRevision} < ${schema.runSettings.desiredRevision}`, lte(schema.runSettings.configRevision, everyone)))
+    .orderBy(asc(schema.runSettings.projectId), asc(schema.runSettings.runId), asc(schema.runSettings.field)).for('update');
+  const assignments = everyone === null ? [] : await tx.select().from(schema.modelAssignments)
+    .where(and(eq(schema.modelAssignments.tenantId, tenantId), isNull(schema.modelAssignments.appliedAt), isNotNull(schema.modelAssignments.configRevision), lte(schema.modelAssignments.configRevision, everyone)))
+    .orderBy(asc(schema.modelAssignments.projectId), asc(schema.modelAssignments.scopeKind), asc(schema.modelAssignments.scopeKey), asc(schema.modelAssignments.revision)).for('update');
+  const by = recent.map((x) => x.runnerId).sort();
+  let applied = 0;
+  for (const r of mine) {
+    // Slots in force are what the runner says it runs: it may have been started with fewer than the owner allowed.
+    const value = r.field === 'slots' ? Math.min(Number(r.desired), own!.ack.slots) : r.desired;
+    await tx.update(schema.runnerSettings).set({ effective: value, effectiveRevision: r.desiredRevision, appliedAt: now }).where(and(eq(schema.runnerSettings.tenantId, tenantId), eq(schema.runnerSettings.runnerId, own!.runnerId), eq(schema.runnerSettings.field, r.field)));
+    await writeEvent(tx, now, { projectId: r.eventProjectId, runId: r.eventRunId, taskId: r.eventRunId, aggregateRevision: r.desiredRevision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'runner', key: own!.runnerId, field: r.field, value, revision: r.desiredRevision, acknowledgedBy: [own!.runnerId], configRevision: own!.ack.revision } });
+    applied += 1;
+  }
+  for (const r of runRows) {
+    await tx.update(schema.runSettings).set({ effective: r.desired, effectiveRevision: r.desiredRevision, appliedAt: now }).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.projectId, r.projectId), eq(schema.runSettings.runId, r.runId), eq(schema.runSettings.field, r.field)));
+    await writeEvent(tx, now, { projectId: r.projectId, runId: r.runId, taskId: r.runId, aggregateRevision: r.desiredRevision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'run', key: r.runId, field: r.field, value: r.desired, revision: r.desiredRevision, acknowledgedBy: by, configRevision: everyone } });
+    applied += 1;
+  }
+  for (const a of assignments) {
+    await tx.update(schema.modelAssignments).set({ appliedAt: now }).where(and(eq(schema.modelAssignments.tenantId, tenantId), eq(schema.modelAssignments.projectId, a.projectId), eq(schema.modelAssignments.scopeKind, a.scopeKind), eq(schema.modelAssignments.scopeKey, a.scopeKey), eq(schema.modelAssignments.revision, a.revision)));
+    const runId = await eventRunFor(tx, tenantId, a.projectId, a.scopeKind === 'task' ? a.scopeKey : null);
+    if (runId !== null) await writeEvent(tx, now, { projectId: a.projectId, runId, taskId: runId, aggregateRevision: a.revision, type: 'settings.applied', actor: SYSTEM_ACTOR, payload: { scope: 'assignment', key: `${a.scopeKind}:${a.scopeKey}`, value: a.provider !== null ? { provider: a.provider, model: a.model } : null, revision: a.revision, acknowledgedBy: by, configRevision: everyone } });
+    applied += 1;
+  }
+  return applied;
 }
 
 /** The run an assignment change is recorded against: the task's own run, or the project's newest run still in play, or its newest. Null: the project has no run. */
@@ -465,7 +506,7 @@ export async function eventRunFor(tx: Executor, tenantId: string, projectId: str
 
 // ---- snapshot ----------------------------------------------------------------------------------------------------
 
-export type SettingState = 'applied' | 'applying' | 'waiting_for_runner';
+export type SettingState = 'applied' | 'applying' | 'waiting_for_runner' | 'waiting_for_runner_update';
 
 export interface SettingView {
   readonly scope: 'run' | 'runner';
@@ -478,35 +519,56 @@ export interface SettingView {
   readonly effectiveRevision: number;
   readonly enforcer: 'server' | 'runner';
   readonly state: SettingState;
+  /** The recent runners a `waiting_for_runner_update` change waits on: they run a build that does not acknowledge. */
+  readonly waitingOn?: readonly string[];
   readonly updatedBy: string;
   readonly updatedAt: string;
   readonly appliedAt: string | null;
 }
 
+/** Who a pending change waits on, as the screen should name it. */
+export interface Pending { readonly state: SettingState; readonly waitingOn?: readonly string[] }
+
+/**
+ * Where a change waiting on every recent runner stands: no runner seen (`waiting_for_runner`), a recent runner on a build that never acknowledges
+ * (`waiting_for_runner_update`, naming it), or acknowledgements still due (`applying`).
+ */
+export function pendingOnEveryone(recent: readonly { runnerId: string; ack: number | null }[]): Pending {
+  if (recent.length === 0) return { state: 'waiting_for_runner' };
+  const old = recent.filter((r) => r.ack === null).map((r) => r.runnerId).sort();
+  return old.length > 0 ? { state: 'waiting_for_runner_update', waitingOn: old } : { state: 'applying' };
+}
+
 /** The project's run settings and every worker's settings, each with whether it is in force. */
-export async function loadSettingsView(tx: Executor, tenantId: string, projectId: string, now: Date): Promise<{ settings: SettingView[]; recent: ReadonlySet<string>; anyRecent: boolean }> {
+export async function loadSettingsView(tx: Executor, tenantId: string, projectId: string, now: Date): Promise<{ settings: SettingView[]; everyone: Pending }> {
   const recentRows = await recentRunners(tx, tenantId, now);
-  const recent = new Set(recentRows.map((r) => r.runnerId));
+  const everyone = pendingOnEveryone(recentRows);
   const runRows = await tx.select().from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.projectId, projectId))).orderBy(asc(schema.runSettings.runId), asc(schema.runSettings.field));
   const runnerRows = await tx.select().from(schema.runnerSettings).where(eq(schema.runnerSettings.tenantId, tenantId)).orderBy(asc(schema.runnerSettings.runnerId), asc(schema.runnerSettings.field));
-  const stateOf = (r: Row & { enforcer: string }, waitingOn: boolean): SettingState => (r.effectiveRevision >= r.desiredRevision ? 'applied' : waitingOn ? 'waiting_for_runner' : 'applying');
-  const view = (scope: 'run' | 'runner', key: string, r: typeof runRows[number] | typeof runnerRows[number], waiting: boolean): SettingView => ({
-    scope, key, field: r.field as SettingField, desired: r.desired, effective: inForce(r), desiredRevision: r.desiredRevision, effectiveRevision: r.effectiveRevision,
-    enforcer: r.enforcer === 'runner' ? 'runner' : 'server', state: stateOf(r, waiting), updatedBy: r.updatedBy, updatedAt: r.updatedAt.toISOString(), appliedAt: r.appliedAt?.toISOString() ?? null,
-  });
+  const ofRunner = (runnerId: string): Pending => {
+    const r = recentRows.find((x) => x.runnerId === runnerId);
+    return !r ? { state: 'waiting_for_runner' } : r.ack === null ? { state: 'waiting_for_runner_update', waitingOn: [runnerId] } : { state: 'applying' };
+  };
+  const view = (scope: 'run' | 'runner', key: string, r: typeof runRows[number] | typeof runnerRows[number], pending: Pending): SettingView => {
+    const p: Pending = r.effectiveRevision >= r.desiredRevision ? { state: 'applied' } : r.enforcer === 'runner' ? pending : { state: 'applying' };
+    return {
+      scope, key, field: r.field as SettingField, desired: r.desired, effective: inForce(r), desiredRevision: r.desiredRevision, effectiveRevision: r.effectiveRevision,
+      enforcer: r.enforcer === 'runner' ? 'runner' : 'server', state: p.state, ...(p.waitingOn ? { waitingOn: [...p.waitingOn] } : {}),
+      updatedBy: r.updatedBy, updatedAt: r.updatedAt.toISOString(), appliedAt: r.appliedAt?.toISOString() ?? null,
+    };
+  };
   return {
     settings: [
-      ...runRows.map((r) => view('run', r.runId, r, r.enforcer === 'runner' && recent.size === 0)),
-      ...runnerRows.map((r) => view('runner', r.runnerId, r, !recent.has(r.runnerId))),
+      ...runRows.map((r) => view('run', r.runId, r, everyone)),
+      ...runnerRows.map((r) => view('runner', r.runnerId, r, ofRunner(r.runnerId))),
     ],
-    recent,
-    anyRecent: recent.size > 0,
+    everyone,
   };
 }
 
 /** A model assignment's place in the same rule: applied once every recent runner acknowledged it. One saved before acknowledgements existed has long been in force. */
-export const assignmentState = (a: { configRevision: number | null; appliedAt: Date | null }, anyRecent: boolean): SettingState =>
-  a.configRevision === null || a.appliedAt !== null ? 'applied' : anyRecent ? 'applying' : 'waiting_for_runner';
+export const assignmentState = (a: { configRevision: number | null; appliedAt: Date | null }, everyone: Pending): Pending =>
+  a.configRevision === null || a.appliedAt !== null ? { state: 'applied' } : everyone;
 
 export type PolicyBasis = 'configured' | 'recommended' | 'unresolved';
 export interface PolicyValue<T> { readonly value: T | null; readonly basis: PolicyBasis }

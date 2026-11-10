@@ -43,12 +43,15 @@ export async function loadSpecRow(db: Executor, key: { tenantId: string; project
   return rows[0];
 }
 
+/** Writes a task's status at the revision the caller locked and read. A row that has moved since fails loudly instead of being overwritten. */
 export async function bumpStatus(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, rowRevision: number, status: string, now: Date): Promise<number> {
   const next = rowRevision + 1;
-  await tx
+  const moved = await tx
     .update(schema.taskStatus)
     .set({ status, rowRevision: next, updatedAt: now })
-    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId), eq(schema.taskStatus.rowRevision, rowRevision)))
+    .returning({ rowRevision: schema.taskStatus.rowRevision });
+  if (moved.length === 0) throw new Error(`task ${key.taskId}: status revision ${rowRevision} is no longer current`);
   return next;
 }
 

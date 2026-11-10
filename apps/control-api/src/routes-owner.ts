@@ -255,6 +255,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         .where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run.runId))).for('update');
       const current = locked?.planRevision ?? 0;
       if (body.expectedRevision !== current) throw staleRevision(current, 'the plan');
+      // The owner narrowed this run's approved paths: a plan cannot bring one back. Refused here, naming the path, rather than blocked later at claim.
+      const [narrowed] = await tx.select({ desired: schema.runSettings.desired }).from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, config.tenantId), eq(schema.runSettings.projectId, projectId), eq(schema.runSettings.runId, run.runId), eq(schema.runSettings.field, 'allowed_paths')));
+      if (narrowed) {
+        const allowed = Array.isArray(narrowed.desired) ? narrowed.desired.filter((p): p is string => typeof p === 'string') : [];
+        const offending = tasks.filter((t) => t.allowedPaths.some((p) => !allowed.includes(p)));
+        if (offending.length > 0) {
+          const paths = [...new Set(offending.flatMap((t) => t.allowedPaths.filter((p) => !allowed.includes(p))))].sort();
+          throw new AppError(422, 'path_not_allowed', `This run's approved paths no longer include ${paths.join(', ')}. Give the path back under Bounded autonomy first, or plan the task without it.`, { paths, taskIds: offending.map((t) => t.taskId).sort() });
+        }
+      }
 
       // A criterion the plan leaves out would simply leave the denominator: the run could read "4 of 4" while the suite judged eight.
       const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
@@ -754,7 +764,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           modelAssignments: (await loadModelAssignments(tx, config.tenantId, projectId)).map((a) => {
             const row = assignmentRows.find((r) => r.scopeKind === a.scope && r.scopeKey === a.key && r.revision === a.revision);
             /** Whether the runners have acknowledged it: `applying` until every recent runner has, `waiting_for_runner` with none connected. */
-            return { ...a, state: row ? assignmentState(row, settingsView.anyRecent) : 'applied' };
+            const pending = row ? assignmentState(row, settingsView.everyone) : { state: 'applied' as const };
+            return { ...a, state: pending.state, ...(pending.waitingOn ? { waitingOn: [...pending.waitingOn] } : {}) };
           }),
           /** Every run and worker setting the owner saved, with what is in force and whether its enforcer has acknowledged it. Closed values only. */
           settings: settingsView.settings,

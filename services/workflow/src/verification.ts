@@ -33,14 +33,18 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *
  * The owner's settings and run controls (apps/control-api/src/settings.ts), each a path that takes the scheduler lock first:
  * - a run setting save: scheduler lock, run row (`lockBudget` re-takes it for a resume), the setting row, the runner config row, the run's status rows in task
- *   order (only for a narrowed or widened path or cloud grant, `requestPolicyStop` included), then the event sequence. A worker setting save: scheduler lock,
+ *   order (only for a narrowed or widened path or cloud grant, `requestPolicyStop` and `placement.cleared` included), then the event sequence. A worker setting save: scheduler lock,
  *   the setting row, the runner config row, the event sequence. A budget lowered below what is committed is stopped after the commit, by `stopForExhaustedBudget`.
  * - a run cancel, and finishing one (`finishCancelledRuns`): scheduler lock, run row, the run's open tasks' status rows in task order, this lock, the event
  *   sequence, then the run's approval and reservation rows.
  * - a model assignment: its own advisory lock, the runner config row, the event sequence.
- * - a runner's config acknowledgement (`acknowledgeRunnerConfig`): the runner row, then every setting and assignment row it may put in force, all locked before
- *   its first event, then the event sequence. It takes no scheduler lock, run row or status row. The claim poll reads settings rows after the scheduler lock
- *   without locking them, so a save is either committed before the claim's reads or waits for the claim to finish.
+ * - a runner's config acknowledgement (`acknowledgeRunnerConfig`) and the periodic settle (`settlePendingSettings`): the runner row (acknowledgement only),
+ *   then this runner's waiting `runner_settings` rows ordered by field, the waiting `run_settings` rows ordered by project, run and field, the waiting
+ *   `model_assignments` rows ordered by project, scope kind, scope key and revision, every one locked before the first event, then the event sequence. Two
+ *   of them lock in the same order, so they wait rather than cross. They take no scheduler lock, run row or status row. The claim poll reads settings rows
+ *   after the scheduler lock without locking them, so a save is either committed before the claim's reads or waits for the claim to finish.
+ * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
+ *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *
  * Paths that still disagree, all at the run row, and how the loser of each recovers:
  * - The claim poll (`tryClaim`) takes the scheduler lock, a claimable task's status row, then the run row (`lockBudget`). Replan and re-verify hold the scheduler lock before
