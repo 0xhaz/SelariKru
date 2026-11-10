@@ -178,6 +178,8 @@ describe('scheduler fault injection', () => {
     await seedTask(t.db, specFor('t1', { timeoutSeconds: 1800 }));
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
     expect(new Date(lease.deadlineAt).getTime() - new Date(lease.acquiredAt).getTime()).toBe(1_800_000);
+    // A running worker: its setup was acknowledged (at once, so its window is the full 1800 s). Without that, the deadline is the setup's interruption (below).
+    expect((await s.heartbeat(lease, undefined, { setupComplete: true })).ok).toBe(true);
 
     // A worker that heartbeats forever is still stopped by the deadline.
     for (let elapsed = 0; elapsed + 50 < 1800; elapsed += 50) {
@@ -199,6 +201,27 @@ describe('scheduler fault injection', () => {
     expect((await statusOf(t.db, 't1')).status).toBe('ready');
     const failed = await t.db.execute(sql`SELECT actor_kind, payload FROM events WHERE type = 'attempt.failed'`);
     expect(failed[0]).toMatchObject({ actor_kind: 'system', payload: { reason: 'attempt_timeout' } });
+  });
+
+  it('an attempt whose setup was never acknowledged is closed at its deadline as the setup\'s interruption, its hold released and no repair spent (T7.6)', async () => {
+    await seedTask(t.db, specFor('t1', { timeoutSeconds: 1800, maxAttempts: 1 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    // The runner heartbeats through a long setup and never reports it complete, so no worker can have started.
+    for (let elapsed = 0; elapsed + 50 < 1800; elapsed += 50) {
+      clock.advance(50);
+      expect((await s.heartbeat(lease)).ok).toBe(true);
+    }
+    clock.advance(50);
+    expect(await s.publishResult(lease, { outcome: 'infrastructure_failed', reason: 'provisioning_failed: x' })).toMatchObject({ ok: false, error: { httpStatus: 409, reason: 'attempt_timeout' } });
+    expect(await s.expireLeases(clock.now())).toEqual([expect.objectContaining({ attemptId: lease.attemptId, reason: 'attempt_timeout' })]);
+    expect((await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`))[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:attempt timeout reached during setup' });
+    expect((await t.db.execute(sql`SELECT state FROM budget_reservations`))[0]).toMatchObject({ state: 'released' });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    const failed = await t.db.execute(sql`SELECT actor_kind, payload FROM events WHERE type = 'attempt.failed'`);
+    expect(failed[0]).toMatchObject({ actor_kind: 'system', payload: { reason: 'infrastructure:attempt timeout reached during setup', outcome: 'interrupted' } });
+    // No repair spent: with maxAttempts 1 it is claimed again once the infrastructure backoff has passed.
+    clock.advance(CAPS.infraRetryBackoffSeconds);
+    expect((await s.claimNext(runner('r2'), CAPS))?.attemptNumber).toBe(2);
   });
 
   it('lease-expiry retries back off, are bounded, and stay outside the repair count', async () => {
