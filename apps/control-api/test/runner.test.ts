@@ -460,3 +460,29 @@ describe('verification failures', () => {
     expect((await get(h.app, '/v1/projects/proj_b/runs/run_a/failures')).status).toBe(404);
   });
 });
+
+describe('an attempt deadline that runs out during setup (T7.6)', () => {
+  it('is the setup\'s interruption on the server, whatever the runner reports late: no repair spent, the hold released, the task ready again', async () => {
+    await seedTask(t.db, specFor('t1', { maxAttempts: 1, timeoutSeconds: 30 }), 'ready');
+    const { token } = await enrolRunner(h.app, 'local');
+    const as = bearer(token);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, as)).body.lease;
+    const ref = { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken };
+    // The runner heartbeats while it builds and provisions, and never gets as far as reporting setup complete.
+    h.clock.advance(20);
+    expect((await post(h.app, '/v1/runners/heartbeat', { lease: ref }, as)).status).toBe(200);
+    h.clock.advance(11);
+    // Its own report arrives after the server's deadline: refused, as every report after the deadline is.
+    const late = await post(h.app, '/v1/runners/result', { lease: ref, result: { outcome: 'infrastructure_failed', reason: 'provisioning_failed: the attempt timeout was reached during setup' } }, as);
+    expect(late.status).toBe(409);
+    expect(late.body.error.details).toMatchObject({ reason: 'attempt_timeout' });
+    // The reaper decides: setup's interruption, not the work's failure.
+    await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY }).expireLeases(h.clock.now());
+    expect((await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`))[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:attempt timeout reached during setup' });
+    expect((await t.db.execute(sql`SELECT status FROM task_status`))[0]).toMatchObject({ status: 'ready' });
+    expect((await t.db.execute(sql`SELECT state FROM budget_reservations`))[0]).toMatchObject({ state: 'released' });
+    // No repair was spent: with maxAttempts 1 the task is claimed again once the infrastructure backoff has passed.
+    h.clock.advance(60);
+    expect((await post(h.app, '/v1/runners/claim', {}, as)).body.lease).toMatchObject({ taskId: 't1', attemptNumber: 2 });
+  });
+});

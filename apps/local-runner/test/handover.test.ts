@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { checkpointDigest } from '@selarikru/domain';
+import { buildTaskBundle } from '@selarikru/runtime-docker-local';
 import { runAttempt, type AttemptDeps } from '../src/attempt.ts';
 import { makeWorld, type World, type WorldOptions } from './world.ts';
 
@@ -120,6 +121,22 @@ describe('the successor of a handover', () => {
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/^checkpoint_tampered/);
     expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
     expect(w.sbx.streams).toHaveLength(0);
+  });
+
+  it('a deadline that ran out before the checkpoint is fetched fetches and applies nothing (T7.6)', async () => {
+    let fetched = 0;
+    const { w, deps } = await setup({ task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } }, fetchCheckpoint: async () => { fetched += 1; return null; } });
+    w.lease.handover = { checkpointId: 'ckpt_1', mode: 'resume', priorAttemptId: 'att_0', baseSha: w.sha, patchSha256: checkpointDigest(w.sha, files), fileCount: 1 };
+    const fired = () => w.logs.some((l) => l.includes('attempt timeout reached'));
+    const slowBundle: NonNullable<AttemptDeps['buildTaskBundle']> = async (opts) => {
+      for (let i = 0; i < 500 && !fired(); i++) await new Promise((r) => setTimeout(r, 10));
+      return buildTaskBundle(opts);
+    };
+    const report = await runAttempt({ ...deps, timeoutScale: 0.05, buildTaskBundle: slowBundle }, w.lease);
+    expect(fired()).toBe(true);
+    expect(report.outcome).toBe('infrastructure_failed');
+    expect(fetched).toBe(0);
+    expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
   });
 
   it('a patch hash other than the lease names refuses, even when the files match each other', async () => {

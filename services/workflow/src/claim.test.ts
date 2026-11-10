@@ -53,11 +53,39 @@ describe('claim preconditions', () => {
   it('a timeout consumes the repair budget', async () => {
     await seedTask(t.db, specFor('t1', { maxAttempts: 1, timeoutSeconds: 30 }));
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    // The worker started (a tool ran): the time ran out on the work, not on the setup.
+    await s.heartbeat(lease, 'Bash');
     clock.advance(30);
     expect(await s.expireLeases(clock.now())).toEqual([expect.objectContaining({ attemptId: lease.attemptId, reason: 'attempt_timeout' })]);
     expect((await statusOf(t.db, 't1')).status).toBe('blocked');
     const rows = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'task.blocked'`);
     expect(rows[0]!['payload']).toMatchObject({ reason: 'repair_budget_exhausted' });
+  });
+
+  it('a timeout before any worker started is the setup\'s interruption: no repair spent, the hold released, and bounded by the infrastructure retries (T7.6)', async () => {
+    await seedTask(t.db, specFor('t1', { maxAttempts: 1, timeoutSeconds: 30 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    // The runner kept the lease alive while it set up, and never reported setup complete or a tool.
+    clock.advance(20);
+    await s.heartbeat(lease);
+    clock.advance(10);
+    expect(await s.expireLeases(clock.now())).toEqual([expect.objectContaining({ attemptId: lease.attemptId, reason: 'attempt_timeout' })]);
+    const [a] = await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`);
+    expect(a).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:attempt timeout reached during setup' });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    expect((await t.db.execute(sql`SELECT state FROM budget_reservations`))[0]).toMatchObject({ state: 'released' });
+    expect((await t.db.execute(sql`SELECT payload FROM events WHERE type = 'attempt.failed'`))[0]!['payload']).toMatchObject({ outcome: 'interrupted', reason: 'infrastructure:attempt timeout reached during setup' });
+    // No repair was spent (maxAttempts 1 still lets one run), and the infrastructure limit counts it.
+    expect(await s.tryClaim(runner('r2'), { ...CAPS, maxInfraRetries: 0 })).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'infra_retry_limit_exhausted' }] });
+  });
+
+  it('a timeout after setup completed is still the work\'s failure', async () => {
+    await seedTask(t.db, specFor('t1', { maxAttempts: 2, timeoutSeconds: 30 }));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    await s.heartbeat(lease, undefined, { setupComplete: true });
+    clock.advance(31);
+    await s.expireLeases(clock.now());
+    expect((await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`))[0]).toMatchObject({ outcome: 'failed', exit_reason: 'attempt_timeout' });
   });
 
   it('a lease that went silent before the deadline is reaped as lease_expired', async () => {

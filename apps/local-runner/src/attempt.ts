@@ -50,6 +50,8 @@ export interface AttemptDeps {
   readonly control?: ControlDeps;
   /** How the completion gate reads the workspace's changes. Default: the runtime's `computeChanges`; tests replace it to make it fail. */
   readonly computeChanges?: typeof computeChanges;
+  /** How the task bundle is built. Default: the runtime's `buildTaskBundle`; tests replace it to make it slow. */
+  readonly buildTaskBundle?: typeof buildTaskBundle;
   /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
   readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
 }
@@ -435,7 +437,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let baseIgnores;
     try {
       // The repository's own skills directory never ships: a pack reaches a worker only by review, binding and digest. Recorded as an omission.
-      const b = await buildTaskBundle({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs, extraExclude: [SKILL_WORKSPACE_ROOT] });
+      const b = await (deps.buildTaskBundle ?? buildTaskBundle)({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs, extraExclude: [SKILL_WORKSPACE_ROOT] });
       const ownSkills = b.excluded.filter((p) => p.startsWith(`${SKILL_WORKSPACE_ROOT}/`)).length;
       baseline = b.baseline;
       baseIgnores = b.baseIgnores;
@@ -468,6 +470,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // attempt publishes is the whole combined candidate. A checkpoint that cannot be checked or applied starts nothing: no sandbox, no worker.
     if (lease.handover?.mode === 'resume') {
       const refuse = (text: string) => finish('infrastructure_failed', why('provisioning_failed', text), null);
+      // A deadline that already ran out fetches and applies nothing.
+      if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
       if (deps.api.fetchCheckpoint === undefined) return await refuse('checkpoint_apply_failed: this runner cannot fetch a checkpoint');
       let raw: unknown;
       try {

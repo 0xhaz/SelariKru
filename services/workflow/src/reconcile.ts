@@ -3,7 +3,7 @@ import { schema, withTx } from '@selarikru/persistence';
 import { and, asc, eq, isNull, lte, isNotNull, or } from 'drizzle-orm';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR } from './events.ts';
-import { closeLease, failAttempt } from './lease.ts';
+import { closeLease, failAttempt, INFRASTRUCTURE_REASON_PREFIX } from './lease.ts';
 import { heldTaskBlocked } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAbandonedAttempt } from './usage.ts';
@@ -19,6 +19,9 @@ import type { ExpiredLease, SchedulerContext } from './types.ts';
  * reservation stays consumed at worst case, because the lost worker may still have spent up to it. An attempt that
  * ran out its deadline is a real failure, closed as `attempt_timeout`: it consumes the repair budget.
  */
+/** How a deadline that ran out before any worker started is recorded: an infrastructure interruption, never the work's failure. */
+export const SETUP_TIMEOUT_REASON = `${INFRASTRUCTURE_REASON_PREFIX}attempt timeout reached during setup`;
+
 export async function expireLeases(ctx: SchedulerContext, now: Date): Promise<readonly ExpiredLease[]> {
   const candidates = await ctx.db
     .select({
@@ -74,7 +77,10 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
       .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), eq(schema.taskRevisions.taskId, key.taskId), eq(schema.taskRevisions.revision, attempt.revision)));
     const revisionRow = revisionRows[0]!;
     const runScope = { tenantId: key.tenantId, projectId: key.projectId, runId: revisionRow.runId };
-    await settle(tx, runScope, reservationIdFor(attempt.attemptId), 'expired');
+    // The deadline ran out before any worker started: the runner never reported setup complete and no tool ran. Whatever the runner says (and a runner that crashed during
+    // setup says nothing), that is the setup's failure, not the work's: no model ran, so the hold is released, no repair is spent, and the infrastructure retries bound it.
+    const setupTimeout = reason === 'attempt_timeout' && attempt.lastTool === null && (attempt.detail as { setupCompletedAt?: unknown } | null)?.setupCompletedAt === undefined;
+    await settle(tx, runScope, reservationIdFor(attempt.attemptId), setupTimeout ? 'released' : 'expired');
     const role = (revisionRow.spec as { role?: unknown }).role;
     await recordAbandonedAttempt(tx, { scope: runScope, role: typeof role === 'string' ? role : 'unknown', attempt, now });
 
@@ -99,7 +105,7 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
       return reason;
     }
 
-    if (reason === 'attempt_timeout') {
+    if (reason === 'attempt_timeout' && !setupTimeout) {
       const failure = failAttempt(state, reason);
       await closeLease(tx, key, attemptId, now, { outcome: 'failed', exitReason: reason });
       const aggregateRevision = await setStatus(tx, key, statusRow.rowRevision, failure.state.status, now);
@@ -110,16 +116,18 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
       return reason;
     }
 
-    const blocked = transition(state, { type: 'blocked', reason });
+    // A lapsed lease, or a deadline that ran out during setup: interrupted, back to ready, counted by the infrastructure retry limit (`isInfraInterruption`).
+    const exitReason = setupTimeout ? SETUP_TIMEOUT_REASON : reason;
+    const blocked = transition(state, { type: 'blocked', reason: exitReason });
     if (!blocked.ok) throw new Error(`illegal reap transition: ${JSON.stringify(blocked.error)}`);
     const ready = transition(blocked.value, { type: 'unblocked' });
     if (!ready.ok) throw new Error(`illegal reap transition: ${JSON.stringify(ready.error)}`);
 
-    await closeLease(tx, key, attemptId, now, { outcome: 'interrupted', exitReason: reason });
+    await closeLease(tx, key, attemptId, now, { outcome: 'interrupted', exitReason });
     const aggregateRevision = await setStatus(tx, key, statusRow.rowRevision, ready.value.status, now);
     const scope = { ...eventScope, aggregateRevision };
-    await emit(tx, scope, now, { type: 'attempt.failed', attemptId, actor: SYSTEM_ACTOR, payload: { fence: attempt.leaseFence, reason, outcome: 'interrupted' } });
-    await emit(tx, scope, now, { type: 'task.ready', attemptId, actor: SCHEDULER_ACTOR, payload: { reason } });
+    await emit(tx, scope, now, { type: 'attempt.failed', attemptId, actor: SYSTEM_ACTOR, payload: { fence: attempt.leaseFence, reason: exitReason, outcome: 'interrupted' } });
+    await emit(tx, scope, now, { type: 'task.ready', attemptId, actor: SCHEDULER_ACTOR, payload: { reason: exitReason } });
     return reason;
   });
 }

@@ -393,6 +393,18 @@ describe('checkpoint continuation', () => {
       expect(await decideHandover(ctx, key, id, 'decline', 'owner')).toMatchObject({ ok: true, value: { state: 'declined' } });
     });
 
+    it('a successor whose deadline runs out during setup is lost, and offered again at a new fence (T7.6)', async () => {
+      await released();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), { ...CAPS, attemptTimeoutSeconds: 30 });
+      if (!next.ok) throw new Error(next.reason);
+      clock.advance(31);
+      await s.expireLeases(clock.now());
+      expect(await handoverRow()).toMatchObject({ state: 'fenced', successor_retries: 1 });
+      await freshRunners();
+      clock.advance(CAPS.infraRetryBackoffSeconds);
+      expect(await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).toMatchObject({ ok: true, lease: { fence: next.lease.fence + 1, handover: { mode: 'resume' } } });
+    });
+
     it('a successor that fails before its worker starts is offered again, not closed and placed anywhere', async () => {
       await released();
       const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);

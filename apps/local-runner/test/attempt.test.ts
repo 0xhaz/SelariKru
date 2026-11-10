@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
 import { ApiStatusError, HttpRunnerApi, LeaseLostError } from '../src/api.ts';
-import { sandboxName } from '@selarikru/runtime-docker-local';
+import { buildTaskBundle, sandboxName } from '@selarikru/runtime-docker-local';
 import { makeWorld, type World, type WorldOptions } from './world.ts';
 
 let w: World | null = null;
@@ -574,7 +574,6 @@ describe('toolchain provisioning', () => {
         get(target, prop) {
           if (prop === 'create') return async (...args: Parameters<typeof target.create>) => {
             for (let i = 0; i < 500 && !fired(); i++) await new Promise((r) => setTimeout(r, 10));
-            expect(fired()).toBe(true);
             return target.create(...args);
           };
           const v = Reflect.get(target, prop) as unknown;
@@ -582,9 +581,25 @@ describe('toolchain provisioning', () => {
         },
       });
       const report = await runAttempt({ ...deps, runtime }, w.lease);
+      expect(fired()).toBe(true);
       expect(report.outcome).toBe('infrastructure_failed');
       expect(w.sbx.streams).toHaveLength(0);
       expect((w.api.published[0] as { outcome: string; reason: string })).toMatchObject({ outcome: 'infrastructure_failed', reason: expect.stringMatching(/timeout was reached during setup/) });
+    });
+
+    it('the attempt timeout running out while the bundle is built creates no sandbox at all (T7.6)', async () => {
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } } }, { timeoutScale: 0.05 });
+      const fired = () => w.logs.some((l) => l.includes('attempt timeout reached'));
+      // Deterministic: the bundle is not finished until the deadline has fired.
+      const slowBundle: NonNullable<AttemptDeps['buildTaskBundle']> = async (opts) => {
+        for (let i = 0; i < 500 && !fired(); i++) await new Promise((r) => setTimeout(r, 10));
+        return buildTaskBundle(opts);
+      };
+      const report = await runAttempt({ ...deps, buildTaskBundle: slowBundle }, w.lease);
+      expect(fired()).toBe(true);
+      expect(report.outcome).toBe('infrastructure_failed');
+      expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
+      expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout was reached during setup/);
     });
 
     it('a lease lost on a heartbeat starts no worker', async () => {
