@@ -53,7 +53,8 @@ export function reconcileSlots(views: readonly SlotView[]): ReconciledSlots {
   };
 }
 
-/** The attempt ids that a later attempt in the same slot supersedes. */
+/** The attempt ids that a later attempt in the same slot, and of the same data kind, supersedes. A simulated attempt never replaces a measured one. */
 export function supersededAttemptIds(records: readonly BenchmarkRecord[]): Set<string> {
-  return new Set(reconcileSlots(slotViews(records)).superseded.map((r) => r.attemptId));
+  const kinds = [...new Set(records.map((r) => r.dataKind))];
+  return new Set(kinds.flatMap((kind) => reconcileSlots(slotViews(records.filter((r) => r.dataKind === kind))).superseded.map((r) => r.attemptId)));
 }

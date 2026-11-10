@@ -135,4 +135,11 @@ describe('slot reconciliation', () => {
     expect(views.map((v) => [v.representative?.trialId, v.superseded.map((s) => s.trialId)])).toEqual([['x', []], ['b', ['a']], ['y', []]]);
     expect(supersededAttemptIds([attempt('s', 1, 'a', 'not_run'), attempt('s', 2, 'b')])).toEqual(new Set(['a-a']));
   });
+
+  it('a simulated attempt never supersedes a measured one in the same slot, or the reverse', () => {
+    const measured = attempt('workers/block-1/L1', 1, 'm', 'abandoned');
+    const simulated = { ...attempt('workers/block-1/L1', 2, 's'), dataKind: 'simulated' as const };
+    expect(supersededAttemptIds([measured, simulated])).toEqual(new Set());
+    expect(supersededAttemptIds([measured, simulated, attempt('workers/block-1/L1', 2, 'm2')])).toEqual(new Set(['m-a']));
+  });
 });

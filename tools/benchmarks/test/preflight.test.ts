@@ -194,6 +194,11 @@ describe('T8.1 manifest loader and preflight', () => {
     expect(preflight(input(fromFile.manifest, { starts })).liveDispatch.workers.allowed).toBe(true);
     // A file from another cohort, one that disagrees with the stamp, nothing to repair, or nothing started: refused.
     expect(() => repairStart(unstamped, 'workers', { ...w, cohortId: 'another-cohort' })).toThrow(/another cohort/);
+    // A file with the same cohortId but from a different manifest is refused up front, before any stamp is written.
+    expect(() => repairStart(unstamped, 'workers', { ...w, manifestSha256: 'a'.repeat(64) })).toThrow(/different manifest/);
+    const edited = structuredClone(unstamped);
+    edited.environment.codingModel = 'other';
+    expect(() => repairStart(edited, 'workers', w)).toThrow(/different manifest/);
     expect(() => repairStart(manifest, 'workers', { ...w, startedAtUtc: '2026-11-17T00:00:00.000Z' })).toThrow(/disagree/);
     expect(() => repairStart(manifest, 'workers', w)).toThrow(/nothing to repair/);
     expect(() => repairStart(unstamped, 'workers', null)).toThrow(/has not started/);

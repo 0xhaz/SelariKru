@@ -193,18 +193,25 @@ function countRecords(records: readonly BenchmarkRecord[], passed: (r: Benchmark
 
 function exclusionNotes(c: Counts): string[] {
   const notes: string[] = [];
-  if (c.humanIntervened > 0) notes.push(`${c.humanIntervened} human-intervened ${c.humanIntervened === 1 ? 'attempt' : 'attempts'} excluded`);
-  if (c.notRecorded > 0) notes.push(`${plural(c.notRecorded, 'attempt')} with human intervention not recorded, excluded`);
+  if (c.humanIntervened > 0) notes.push(`${c.humanIntervened} human-intervened ${c.humanIntervened === 1 ? 'attempt' : 'attempts'} excluded from comparisons`);
+  if (c.notRecorded > 0) notes.push(`${plural(c.notRecorded, 'attempt')} with human intervention not recorded, excluded from comparisons`);
   return notes;
 }
 
-function completionFigure(c: Counts, n: number, planned: number | null): Figure {
+/** Completion as the report defines it: every attempt that ran (warm-ups aside), control-mode trials included. */
+function completionOf(records: readonly BenchmarkRecord[], passed: (r: BenchmarkRecord) => boolean): { passed: number; of: number } {
+  const counted = records.filter((r) => ran(r) && !warmup(r));
+  return { passed: counted.filter(passed).length, of: counted.length };
+}
+
+function completionFigure(c: Counts, completion: { passed: number; of: number }, planned: number | null): Figure {
+  const n = completion.of;
   const run = planned === null ? null : `${c.total - c.warmups} run of ${planned} planned.`;
   if (c.total === 0) return run !== null && c.notRun > 0 ? { ...notMeasured(BASIS.completion), detail: run } : notMeasured(BASIS.completion);
   const notes = exclusionNotes(c);
   const detail = [notes.length > 0 ? `${notes.join('; ')}.` : null, run].filter(Boolean).join(' ') || null;
   if (n === 0) return { text: 'No comparable attempts', detail, provenance: 'unavailable', basis: BASIS.completion };
-  return { text: `${c.passed} of ${n} passed`, detail, provenance: 'observed', basis: BASIS.completion };
+  return { text: `${completion.passed} of ${n} passed`, detail, provenance: 'observed', basis: BASIS.completion };
 }
 
 /** One total per provenance. Observed and estimated are never added, and an attempt with no figure is named, not treated as zero. */
@@ -323,13 +330,15 @@ function inferenceCell(records: readonly BenchmarkRecord[]): HostCell {
  */
 function workerRow(mode: WorkerMode, records: readonly BenchmarkRecord[], timed: readonly BenchmarkRecord[], kind: DataKind, planned: number): WorkerRow {
   const counts = countRecords(records, workerPassed);
+  // Control mode keeps a trial out of times and pairs, never out of completion.
+  const completion = completionOf(records, workerPassed);
   const N = records.filter(comparable).length;
   const all = records.filter(ran);
   const passing = timed.filter((r) => comparable(r) && workerPassed(r) && r.timings.endToEndVerifiedMs !== null);
   const mixed = new Set(records.filter(comparable).map((r) => r.configuration.cacheCondition)).size > 1;
   const row: WorkerRow = {
     mode, workerCount: WORKER_COUNT[mode], workerLabel: workerLabel(mode), executionHost: hostCell(mode, records), inference: inferenceCell(records), cache: cacheLabel(records), counts,
-    completion: completionFigure(counts, N, planned),
+    completion: completionFigure(counts, completion, planned),
     time: mixed ? withheld(BASIS.time) : passing.some((r) => r.timings.clockDomain !== SERVER_CLOCK) ? { text: 'Withheld', detail: `Recorded on ${clockLabel(passing)}, not a server monotonic clock.`, provenance: 'unavailable', basis: BASIS.time } : timingFigure(passing.map((r) => r.timings.endToEndVerifiedMs!), N, BASIS.time),
     usage: workerUsageFigure(all),
     // A mode only has hours on the hosts it uses: L1 has no cloud hours to be unavailable.
@@ -380,7 +389,7 @@ function assistantRow(mode: string, records: readonly BenchmarkRecord[], represe
   const clock = clockLabel(timed);
   const row: AssistantRow = {
     mode, requested: POLICY[mode] ?? mode, observedSource: sources.length > 0 ? sources.join(', ') : NOT_MEASURED, cache: cacheLabel(records), counts,
-    completion: completionFigure(counts, measured.length, planned),
+    completion: completionFigure(counts, completionOf(records, assistantPassed), planned),
     routing: measured.length === 0 ? notMeasured(BASIS.routing) : { text: `${correct.length} of ${measured.length} correct`, detail: null, provenance: 'observed', basis: BASIS.routing },
     schema: measured.length === 0 ? notMeasured(BASIS.schema) : { text: `${valid.length} of ${measured.length} valid`, detail: null, provenance: 'observed', basis: BASIS.schema },
     firstOutput: mixed ? withheld(BASIS.firstOutput) : timingFigure(timed.map((r) => r.timings.firstOutputMs).filter((v): v is number => v !== null), measured.length, timed.length > 0 ? `First output, ${clock}` : BASIS.firstOutput),
@@ -592,6 +601,7 @@ const costExclusionsOf = (records: readonly BenchmarkRecord[]): string[] => [...
 function workerCohort(cohort: BenchmarkCohort, records: readonly BenchmarkRecord[], kind: DataKind): WorkerCohortView {
   const present = WORKER_MODES.filter((m) => records.some((r) => r.mode === m));
   const modes = WORKER_MODES.filter((m) => cohort.requiredModes.includes(m) || present.includes(m));
+  // The replacement rule (a slot is retried only after denied_start, abandoned or not_run) is enforced upstream, in tools/benchmarks checkResults.
   const superseded = supersededAttemptIds(records);
   const byMode = new Map(modes.map((mode) => [mode, records.filter((r) => r.mode === mode)]));
   const repsOf = (mode: WorkerMode): BenchmarkRecord[] => byMode.get(mode)!.filter((r) => !superseded.has(r.attemptId));

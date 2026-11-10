@@ -389,11 +389,15 @@ describe('worker rows', () => {
     expect(attempts[1]!.time.basis).toBe('End-to-end verified, host wall');
   });
 
-  it('no 0 of 0: runs and planned attempts are shown instead', () => {
+  it('no 0 of 0: runs and planned attempts are shown, and control-mode trials still count towards completion', () => {
     const records = [0, 1, 2].map((index) => workerRecord({ mode: 'L1', index, dataKind: 'measured', humanIntervened: true, ms: 60_000 }));
     const row = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
-    expect(row.completion.text).toBe('No comparable attempts');
+    // The report's definition: every attempt that ran. Control mode keeps a trial out of pairs only.
+    expect(row.completion.text).toBe('3 of 3 passed');
     expect(row.completion.detail).toContain('3 run of 5 planned.');
+    expect(row.completion.detail).toContain('3 human-intervened attempts excluded from comparisons');
+    // Nothing comparable, so no time.
+    expect(row.time.text).toBe('Not measured');
   });
 
   it('an over-limit attempt with all checks passing does not pass and says why', () => {
@@ -561,8 +565,8 @@ describe('the winner badge', () => {
     const cohort = workersOf(benchmarkFile({ records }));
     const l1 = cohort.rows.find((r) => r.mode === 'L1')!;
     expect(l1.counts.humanIntervened).toBe(1);
-    expect(l1.completion.text).toBe('4 of 4 passed');
-    expect(l1.completion.detail).toContain('1 human-intervened attempt excluded');
+    expect(l1.completion.text).toBe('5 of 5 passed');
+    expect(l1.completion.detail).toContain('1 human-intervened attempt excluded from comparisons');
     expect(comparison(cohort, 'L1-C1').verdict.kind).toBe('none');
     expect(reasonsOf(comparison(cohort, 'L1-C1'))).toContain('L1: 4 of 5 planned attempts');
     expect(reasonsOf(comparison(cohort, 'L1-C1'))).toContain('human-intervened');
