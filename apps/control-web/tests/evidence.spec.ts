@@ -124,8 +124,8 @@ function wire(): Promise<Wire> {
       req.on('close', () => streams.delete(res));
       return;
     }
-    // This wire serves no Project Brain and no product records: the Decisions screen asks for both and is told there are none.
-    if (req.url?.includes('/brain') || req.url?.includes('/product')) { res.writeHead(404, { ...cors, 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { code: 'not_found', message: 'no such route' } })); return; }
+    // This wire serves no Project Brain, no product records and no handovers: the Decisions screen asks for each and is told there are none.
+    if (req.url?.includes('/brain') || req.url?.includes('/product') || req.url?.includes('/handover')) { res.writeHead(404, { ...cors, 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { code: 'not_found', message: 'no such route' } })); return; }
     res.writeHead(200, { ...cors, 'content-type': 'application/json' });
     approval.granted += 1;
     res.end(JSON.stringify({ approvalId: 'a1', outcome: 'granted', taskStatus: 'ready' }));

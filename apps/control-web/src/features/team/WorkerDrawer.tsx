@@ -216,9 +216,11 @@ export interface WorkerDrawerProps {
   readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
   /** The Context tab's content: the Project Brain bundle the attempt received. Absent: the tab says none is connected. */
   readonly context?: ReactNode;
+  /** "Continue in cloud" for this worker's task, on the Task tab. Absent: the source has no handovers. */
+  readonly handover?: ReactNode;
 }
 
-export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context }: WorkerDrawerProps) {
+export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context, handover }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -408,7 +410,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
 
         {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person opened a shell in this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
-          {tab === 'task' ? <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} /> : null}
+          {tab === 'task' ? <>{handover ?? null}<TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} /></> : null}
           {/* Kept mounted while another tab shows, so a retry's idempotency key, a reported outcome and an unsaved choice survive a look at another tab. */}
           <div hidden={tab !== 'settings'}>{settings(() => selectTab('terminal', true))}</div>
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}

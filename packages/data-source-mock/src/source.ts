@@ -14,6 +14,7 @@ import { createDemoBrain } from './brain.ts';
 import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
+import { createDemoHandover } from './handover.ts';
 
 interface Subscriber {
   cursor: number;
@@ -388,7 +389,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled';
+  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
+    | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided';
+  /** Who the services record as the actor of each simulated type that is not a person's. */
+  const SCHEDULER_TYPES: readonly CommandEvent[] = ['task.ready', 'attempt.started', 'attempt.route_changed', 'checkpoint.recorded'];
+  const SYSTEM_TYPES: readonly CommandEvent[] = ['attempt.failed', 'attempt.fenced', 'checkpoint.refused'];
   const RUN_ADDRESSED: readonly CommandEvent[] = ['run.created', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
   function appendCommandEvent(p: Project, taskId: string, type: CommandEvent, payload: Record<string, unknown>, o: { delayMs?: number; revisionStep?: number; attemptId?: string | null; system?: boolean } = {}): void {
     const task = p.state.snapshot.tasks[taskId];
@@ -396,7 +401,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const at = isoOf(timeOf(p) + (o.delayMs ?? 0));
     const event: ProjectViewEvent = {
       schemaVersion: 1, eventId: seededId(prng, 'evt'), projectId: p.fixture.projectId, runId, taskId, attemptId: o.attemptId ?? null, type, sequence: 0,
-      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: o.system ? REAPER : type === 'task.ready' ? SCHEDULER : type === 'task.reopened' || type === 'change.proposed' ? INTEGRATION : HUMAN,
+      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: o.system || SYSTEM_TYPES.includes(type) ? REAPER : SCHEDULER_TYPES.includes(type) ? SCHEDULER : type === 'task.reopened' || type === 'change.proposed' ? INTEGRATION : HUMAN,
       occurredAt: at, receivedAt: at, causationId: null, traceId: `trace_${p.fixture.projectId}`, payload, provenance: 'simulated',
     };
     p.pending.push(event);
@@ -595,6 +600,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   const skills = createDemoSkills({ nowIso: (id) => new Date(timeOf(project(id))).toISOString(), snapshotOf: (id) => snapshotOf(project(id)), stackOf: (id) => stack.document(id) });
   const stack = createDemoStack((id) => new Date(timeOf(project(id))).toISOString(), (id) => skills.forStack(id));
   const product = createDemoProduct((id) => snapshotOf(project(id)), (id) => new Date(timeOf(project(id))).toISOString());
+  const handover = createDemoHandover({
+    snapshotOf: (id) => snapshotOf(project(id)), nowMs: (id) => timeOf(project(id)),
+    emit: (id, taskId, type, payload, o) => appendCommandEvent(project(id), taskId, type, payload, { ...(o.delayMs !== undefined ? { delayMs: o.delayMs } : {}), ...(o.revisionStep !== undefined ? { revisionStep: o.revisionStep } : {}), attemptId: o.attemptId ?? null }),
+  });
 
   return {
     mode: 'mock',
@@ -621,6 +630,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     getAttemptSkills: (projectId, attemptId) => skills.attempt(project(projectId).fixture.projectId, attemptId),
     getProduct: (projectId) => product.get(project(projectId).fixture.projectId),
     productAction: (projectId, action) => product.act(project(projectId).fixture.projectId, action),
+    getHandovers: (projectId) => handover.get(project(projectId).fixture.projectId),
+    handoverAction: (projectId, action) => handover.act(project(projectId).fixture.projectId, action),
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);

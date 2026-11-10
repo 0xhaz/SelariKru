@@ -24,6 +24,7 @@ import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts
 import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
 import { BrainConflicts, BrainView } from '../features/brain/BrainView.tsx';
 import { ProductFollowUps, ProductView } from '../features/product/ProductView.tsx';
+import { HandoverDecisions } from '../features/handover/ContinueInCloud.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute, type Route } from './route.ts';
@@ -358,7 +359,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : null}
         {route === 'pipeline' ? (
           <RouteBoundary resetKey={`pipeline:${builtPipeline.failure === undefined ? 'ok' : 'failed'}`}>
-            <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+            <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} handover={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} />
           </RouteBoundary>
         ) : null}
         {route === 'decisions' ? (
@@ -369,7 +370,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
               elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
               counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
-              brain={<><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /></>}
+              brain={<><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /><HandoverDecisions port={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} live={connection === 'live'} titleOf={(id) => snapshot?.tasks[id]?.title ?? null} /></>}
             />
           </RouteBoundary>
         ) : null}
@@ -420,7 +421,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         <WorkerDrawerHost
           workerId={workerId} tab={isTabId(workerTab) ? workerTab : undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
           onClose={closeWorker} onTab={(t: TabId) => replaceHashQuery({ wtab: t === 'task' ? null : t })}
-          onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} brain={state.brain} skills={state.skills}
+          onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} brain={state.brain} skills={state.skills} handover={state.handover}
         />
       ) : null}
     </div>

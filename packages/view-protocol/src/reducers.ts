@@ -398,6 +398,17 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'terminal.control_ended':
       return commit(task);
 
+    // A handover is read on demand (the task's handover view), not from the snapshot: these advance the cursor and touch the task, and the attempt events around them
+    // (`attempt.failed`, `task.ready`, `attempt.started`) carry the state change.
+    case 'handover.requested':
+    case 'checkpoint.recorded':
+    case 'checkpoint.refused':
+    case 'attempt.fenced':
+    case 'attempt.route_changed':
+    case 'attempt.publish_refused':
+    case 'handover.decided':
+      return commit(task);
+
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.
       const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled' | 'product.recorded' | 'product.proposed' = e.type;

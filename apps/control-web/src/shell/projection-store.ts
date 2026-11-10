@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductActionResult, type ProductView } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductActionResult, type ProductView, type HandoverAction, type HandoversView } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -44,6 +44,14 @@ export interface ProjectionStoreState {
   readonly skills: SkillsPort | null;
   /** The project's product-learning records. Null when the source has none. */
   readonly product: ProductPort | null;
+  /** Checkpoint continuation: which running tasks may continue on a cloud runner, and each handover's state. Null when the source has none. */
+  readonly handover: HandoverPort | null;
+}
+
+/** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
+export interface HandoverPort {
+  load(): Promise<HandoversView>;
+  act(action: HandoverAction): Promise<HandoversView>;
 }
 
 /** Reads and writes of the product-learning records. A write refuses to send while the session is not live, as a command does. */
@@ -187,6 +195,13 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         act: async (action) => {
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.productAction!(projectId, action);
+        },
+      } : null,
+      handover: source?.getHandovers && source.handoverAction ? {
+        load: () => source.getHandovers!(projectId),
+        act: async (action) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.handoverAction!(projectId, action);
         },
       } : null,
       stack: source?.getStack && source.stackAction ? {

@@ -6,6 +6,8 @@ import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionSt
 import type { ConnectionState } from '../../shell/projection-store.ts';
 import { GraphLegend, PipelineGraph } from './PipelineGraph.tsx';
 import { PipelineCards, PipelineTable } from './PipelineTable.tsx';
+import { useHandovers } from '../handover/useHandovers.ts';
+import type { HandoverPort } from '../../shell/projection-store.ts';
 import { TaskInspector } from './TaskInspector.tsx';
 import { filterRows, type PipelineModel, type PipelineRow, type StageGroup } from './model.ts';
 import { pipelinePresentation, type PipelineView as ViewMode } from './presentation.ts';
@@ -125,9 +127,14 @@ export interface PipelineViewProps {
   readonly onRestart: () => void;
   readonly leaveDemoHref?: string | undefined;
   readonly failure?: unknown;
+  /** Checkpoint continuation: each running task row offers "Continue in cloud" with its eligibility. Absent: the source has none. */
+  readonly handover?: HandoverPort | null;
+  /** The projection's cursor: the handovers are read again when it moves. */
+  readonly refreshKey?: string;
 }
 
-export function PipelineView({ connection, error, pipeline, confirmedAt, mode, onRestart, leaveDemoHref, failure }: PipelineViewProps) {
+export function PipelineView({ connection, error, pipeline, confirmedAt, mode, onRestart, leaveDemoHref, failure, handover = null, refreshKey = '0' }: PipelineViewProps) {
+  const handovers = useHandovers(handover, refreshKey);
   if (failure !== undefined) throw failure;
   const presentation = useStore(pipelinePresentation);
   const { view, selectedTaskId, inspecting, groupByStage, criticalOnly, highlightFor } = presentation;
@@ -246,9 +253,9 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
                 </div>
               </>
             ) : tableFits ? (
-              <PipelineTable groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} />
+              <PipelineTable groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} handovers={handovers} live={connection === 'live'} />
             ) : (
-              <PipelineCards groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} />
+              <PipelineCards groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} handovers={handovers} live={connection === 'live'} />
             )}
             <p className="mt-3 border-t border-line pt-2 text-sm text-muted">{pipeline.stageNote}</p>
           </Panel>

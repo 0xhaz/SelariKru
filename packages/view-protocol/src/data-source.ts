@@ -5,6 +5,7 @@ import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainVie
 import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
+import type { HandoverAction, HandoversView } from './handover.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -53,6 +54,10 @@ export interface EngineeringDataSource {
   getProduct?(projectId: string): Promise<ProductView>;
   /** One owner product write. Answers with the product view as it is afterwards, and whether text was redacted before saving. */
   productAction?(projectId: string, action: ProductAction): Promise<ProductActionResult>;
+  /** Checkpoint continuation: which running tasks may continue on a cloud runner, why not, and each handover's state. Read on demand. Absent: this source has none. */
+  getHandovers?(projectId: string): Promise<HandoversView>;
+  /** Ask to continue a task in cloud (or restart it from its persisted input), or answer a restart offer. Answers with the handovers afterwards. */
+  handoverAction?(projectId: string, action: HandoverAction): Promise<HandoversView>;
   disconnect(): void;
 }
 

@@ -1,6 +1,6 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
+  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
@@ -257,6 +257,16 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
         case 'add_release': return readJson(`${base}/releases`, after, 'the product records', false, { content: action.content, ...raise });
         case 'add_review': return readJson(`${base}/outcome-reviews`, after, 'the product records', false, { content: action.content, ...raise });
       }
+    },
+
+    getHandovers: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/handovers`, HandoversViewSchema, 'the handovers'),
+    async handoverAction(projectId, action) {
+      const task = `/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(action.taskId)}/handover`;
+      const any = { parse: (v: unknown) => v };
+      if (action.kind === 'request') await readJson(task, any, 'a handover receipt', false, { mode: action.mode, idempotencyKey: action.idempotencyKey });
+      else await readJson(`${task}/decision`, any, 'a handover decision', false, { checkpointId: action.checkpointId, choice: action.choice, idempotencyKey: action.idempotencyKey });
+      // Every action answers with the handovers as they are afterwards.
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/handovers`, HandoversViewSchema, 'the handovers');
     },
 
     getStack: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings'),
