@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
-import { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, type Scheduler } from './index.ts';
+import { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, lockBeforeRunRow, markRunReadyForReview, releaseTaskClaims, reopenBlockedVerification, reverifyRun, type Scheduler } from './index.ts';
 import { lockStatusRow, setStatus } from './taskstate.ts';
 import {
   CAPS, PROJECT, RUN, TENANT, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb,
@@ -210,5 +210,64 @@ describe('a claim row whose holder and heir leave at the same moment', () => {
       ]);
       expect(await live(), `round ${round}`).toEqual([]);
     }
+  });
+});
+
+describe('an owner re-verify of a stale candidate and blocked work together', () => {
+  const run = { tenantId: TENANT, projectId: PROJECT, runId: RUN };
+  const SHA = 'c'.repeat(40);
+  const TRUSTED = { checkManifestSha256: 'a'.repeat(64), verifierSha256: 'b'.repeat(64) };
+  const attemptOf = async (taskId: string) => String((await t.db.execute(sql`SELECT attempt_id FROM attempts WHERE task_id = ${taskId} ORDER BY attempt_number DESC LIMIT 1`))[0]!['attempt_id']);
+
+  /** `a` verified and the only part of an assembled candidate whose record no longer stands; `b` closed by the scheduler for a verifier error. */
+  async function seed(): Promise<void> {
+    await t.db.execute(sql`TRUNCATE candidates CASCADE`);
+    await toVerifying('a');
+    await apply('a', 'passed');
+    const parts = [{ taskId: 'a', revision: 1, attemptId: await attemptOf('a') }];
+    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, parts, status) VALUES (${TENANT}, ${PROJECT}, 'cand_1', ${RUN}, 'main', ${SHA}, ${'0'.repeat(40)}, ${JSON.stringify(parts)}::jsonb, 'assembled')`);
+    await toVerifying('b');
+    const b = await attemptOf('b');
+    expect(await withTx(t.db, (tx) => closeVerificationWithoutVerdict({ now: clock.now }, tx, key('b'), { reason: 'verification_error', expect: { revision: 1, attemptId: b } }))).toBe(true);
+  }
+
+  /** What the route does under its transaction, after its idempotency record. */
+  const reverify = (tx: Tx) => lockBeforeRunRow(tx, run, SHA).then(() => tx.execute(sql`SELECT 1 FROM runs WHERE run_id = ${RUN} FOR UPDATE`))
+    .then(() => reverifyRun({ now: clock.now }, tx, run, { requestedBy: 'owner', staleSha: SHA, trusted: TRUSTED, baseMoved: false, operationId: () => `op_${Math.random().toString(36).slice(2)}` }));
+
+  it('reopens both halves', async () => {
+    await seed();
+    expect(await withTx(t.db, reverify)).toEqual({ ok: true, reopened: ['a', 'b'] });
+    expect((await statusOf(t.db, 'a')).status).toBe('verifying');
+    expect((await statusOf(t.db, 'b')).status).toBe('verifying');
+  });
+
+  it('does not deadlock against a cancel of the blocked part (its status row, then the claim lock)', async () => {
+    await seed();
+    let held!: () => void;
+    const holding = new Promise<void>((r) => { held = r; });
+    let reverified: Promise<unknown> | undefined;
+    const cancel = withTx(t.db, async (tx) => {
+      // A long timeout here, so a cycle aborts the re-verify, where the test sees it.
+      await tx.execute(sql`SET LOCAL deadlock_timeout = '20s'`);
+      const row = (await lockStatusRow(tx, key('b')))!;
+      held();
+      const [me] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      for (let i = 0; ; i++) {
+        const [w] = await t.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${Number(me!['pid'])} = ANY(pg_blocking_pids(pid))`);
+        if (Number(w!['n']) > 0) break;
+        if (i > 500) throw new Error('the re-verify never queued behind the cancel');
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await setStatus(tx, key('b'), row.rowRevision, 'cancelled', clock.now());
+      await releaseTaskClaims(tx, key('b'), row.currentRevision, clock.now());
+    });
+    await holding;
+    reverified = withTx(t.db, reverify);
+    reverified.catch(() => {});
+    await cancel;
+    // The cancel won the row first: only the stale half is sent back, and nothing deadlocked.
+    expect(await reverified).toEqual({ ok: true, reopened: ['a'] });
+    expect((await statusOf(t.db, 'b')).status).toBe('cancelled');
   });
 });

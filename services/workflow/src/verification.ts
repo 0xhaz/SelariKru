@@ -22,9 +22,14 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  * Serialises every change to a project's live claim rows made on behalf of a run's parts: a release that may hand a row to another part, and taking a row back. Row locks cannot do
  * this alone, because a part with no row yet has nothing to lock and would miss a row that is being handed to it.
  *
- * Lock order, across a whole transaction: candidate row, scheduler lock, task status rows (ascending task id when there are several), this lock, then `resource_claims` rows and the
- * project's event sequence. Holding this lock, nothing waits for a status row or the scheduler lock, and a transaction that writes for several parts takes it before its first event.
- * The scheduler lock could not serve here: claiming takes it before status rows, and every caller of `releaseTaskClaims` already holds one.
+ * Lock order, across a whole transaction: candidate row, scheduler lock, run row (`runs`, which `lockBudget` takes), task status rows (ascending task id when there are several), this
+ * lock, then `resource_claims` rows and the project's event sequence. Holding this lock, nothing waits for a status row or the scheduler lock, and a transaction that writes for several
+ * parts takes it before its first event. The scheduler lock could not serve here: claiming takes it before status rows, and every caller of `releaseTaskClaims` already holds one.
+ *
+ * The run row is the one place paths disagree. The claim poll and the lease paths (publish, expiry, budget stop) lock a task's status row and then its run row, through `lockBudget`.
+ * The claim poll does so under the scheduler lock, so an owner route that locks a run row first (re-verify, replan) takes the candidate and the scheduler lock before it
+ * (`lockBeforeRunRow`). A lease path holds no scheduler lock: a route that then waits on a leased task's status row can still meet it in a cycle, and Postgres breaks that by
+ * rolling one back, which the API returns as a retryable `transaction_conflict`.
  */
 const lockClaimRows = (tx: Tx, scope: ClaimScope) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.claim_rows:${scope.tenantId}:${scope.projectId}`}, 0))`);
 
@@ -304,6 +309,38 @@ export async function reopenBlockedVerification(
     reopened.push(p.taskId);
   }
   return reopened.length > 0 ? { ok: true, reopened } : { ok: false, reason: 'nothing_to_reverify' };
+}
+
+/**
+ * The locks an owner route takes before it locks `run`'s row, in the documented order: the stale candidate when `sha` names one (null when it moved on), then the scheduler
+ * lock. The claim poll holds the scheduler lock and then takes a run row (`lockBudget`), so a route that locked the run row first could wait on it while it waits on the route.
+ */
+export async function lockBeforeRunRow(tx: Tx, run: RunScope, sha: string | null): Promise<StaleCandidate | null> {
+  const candidate = sha === null ? null : await lockStaleCandidate(tx, run, sha);
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${run.tenantId}`}, 0))`);
+  return candidate;
+}
+
+/**
+ * An owner's re-verify of a run: a current candidate whose record no longer stands, then work blocked by a verifier or assembly failure. The caller holds the locks from
+ * `lockBeforeRunRow` and the run row, and has recorded the idempotency key. Refusals come back unwritten: a refused stale half stops before the blocked half is tried, and the
+ * request is refused only when neither half had anything to send back.
+ */
+export async function reverifyRun(
+  ctx: { readonly now: () => Date }, tx: Tx, run: RunScope,
+  input: { readonly requestedBy: string; readonly staleSha: string | null; readonly trusted: TrustedVerifier | null; readonly baseMoved: boolean; readonly operationId: () => string },
+): Promise<ReverifyOutcome> {
+  // Every status row either half may move, before the stale half takes the claim lock: the blocked half locking its rows after that would wait, holding the claim lock, on a
+  // cancel that holds one of them and wants the claim lock. Ascending task id, so two of these cannot cross either.
+  await tx.execute(sql`
+    SELECT s.task_id FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision
+    WHERE s.tenant_id = ${run.tenantId} AND s.project_id = ${run.projectId} AND r.run_id = ${run.runId} AND s.status IN ('verified', 'blocked')
+    ORDER BY s.task_id FOR UPDATE OF s`);
+  const stale: ReverifyOutcome = input.staleSha === null || input.trusted === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification(ctx, tx, run, input.requestedBy, input.operationId(), input.staleSha, input.trusted);
+  if (!stale.ok && stale.reason !== 'nothing_to_reverify') return stale;
+  const blocked = await reopenBlockedVerification(ctx, tx, run, input.requestedBy, input.operationId(), input.trusted, { baseMoved: input.baseMoved });
+  if (!blocked.ok && (blocked.reason !== 'nothing_to_reverify' || !stale.ok)) return blocked;
+  return { ok: true, reopened: [...(stale.ok ? stale.reopened : []), ...(blocked.ok ? blocked.reopened : [])] };
 }
 
 export interface StaleCandidate { readonly candidateId: string; readonly sha: string; readonly parts: readonly { readonly taskId: string; readonly revision: number; readonly attemptId: string }[] }

@@ -52,6 +52,8 @@ export const ERROR_CODES = [
   'control_ticket_used',
   'control_unavailable',
   'credential_in_input', 'step_not_available', 'onboarding_not_found', 'onboarding_cancelled', 'onboarding_not_activated', 'template_not_supported', 'pilot_criteria_fixed', 'criteria_not_covered', 'roles_not_covered', 'role_has_many_tasks', 'model_over_run_budget', 'plan_over_run_budget', 'project_already_started', 'second_repository_refused', 'readiness_failed', 'already_activated', 'not_ready', 'restricted_stays_on_device', 'route_not_recorded', 'outside_recorded_limits',
+  /** The database aborted the transaction to break a deadlock or a serialization conflict. Nothing was recorded; the same request may be sent again. */
+  'transaction_conflict',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

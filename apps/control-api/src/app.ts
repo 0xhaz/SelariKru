@@ -99,6 +99,18 @@ export interface AppContext extends AppDeps {
 const RUNNER_SEEN_WRITE_MS = 5_000;
 const ALLOWED_LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
+/** SQLSTATEs where Postgres rolled the transaction back to let another finish: `deadlock_detected` and `serialization_failure`. */
+const RETRYABLE_SQLSTATES = new Set(['40P01', '40001']);
+
+/** True when the error, or one it wraps (drizzle puts the driver's error in `cause`), carries a retryable SQLSTATE. */
+export function isRetryableConflict(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e !== null && typeof e === 'object' && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === 'string' && RETRYABLE_SQLSTATES.has(code)) return true;
+  }
+  return false;
+}
+
 function hostName(header: string | undefined): string {
   const h = (header ?? '').toLowerCase();
   if (h.startsWith('[')) return h.slice(0, h.indexOf(']') + 1);
@@ -151,6 +163,8 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     }
     // A failed read says nothing about the record: nothing may be decided from it, and the caller can try again.
     if (error instanceof RecordStoreUnavailableError) return reply.code(503).send({ error: { code: 'record_store_unavailable', message: 'the verification record store could not be read; try again' } });
+    // Postgres broke a deadlock or a serialization conflict by rolling this transaction back: nothing was recorded, and the same request can simply go again.
+    if (isRetryableConflict(error)) return reply.code(503).send({ error: { code: 'transaction_conflict', message: 'another change was being written at the same moment, so nothing was recorded; try again' } });
     const status = (error as { statusCode?: number }).statusCode;
     if (typeof status === 'number' && status >= 400 && status < 500) {
       return reply.code(400).send({ error: { code: 'invalid_request', message: 'malformed request' } });

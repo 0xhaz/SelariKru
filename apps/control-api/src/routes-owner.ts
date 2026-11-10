@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, reopenBlockedVerification, reopenStaleVerification, retireStaleCandidate, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -315,7 +315,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     };
 
     const result = await withTx(db, async (tx) => {
-      const stale = staleSha === null ? null : await lockStaleCandidate(tx, runScope, staleSha);
+      // The candidate and the scheduler lock come before the run row `persist` takes: the claim poll holds the scheduler lock and a ready task's status row, then takes the run row.
+      const stale = await lockBeforeRunRow(tx, runScope, staleSha);
       return body.idempotencyKey === undefined
         ? persist(tx, stale)()
         : idempotent(tx, { tenantId: config.tenantId, projectId, key: `plan.revise:${run.runId}:${body.idempotencyKey}` }, fingerprint(body), persist(tx, stale));
@@ -559,17 +560,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const [latestCandidate] = await db.execute(sql`SELECT c.status, c.base_sha, c.target, p.repository FROM candidates c JOIN projects p ON p.tenant_id = c.tenant_id AND p.project_id = c.project_id WHERE c.tenant_id = ${config.tenantId} AND c.project_id = ${seen.projectId} AND c.run_id = ${runId} AND c.sha IS NOT NULL AND c.status IN ('assembled', 'rejected') ORDER BY c.created_at DESC, c.candidate_id DESC LIMIT 1`);
     const tip = latestCandidate?.['status'] === 'rejected' && ctx.tipOf ? await ctx.tipOf({ repository: String(latestCandidate['repository']), target: String(latestCandidate['target']) }).catch(() => null) : null;
     const baseMoved = tip !== null && tip !== latestCandidate!['base_sha'];
+    const scope = { tenantId: config.tenantId, projectId: seen.projectId, runId };
     const result = await withTx(db, async (tx) => {
+      // The candidate and the scheduler lock come before the run row: the claim poll and a stale replan take them first and the run row after.
+      await lockBeforeRunRow(tx, scope, staleSha);
       const run = await requireRun(tx, config.tenantId, runId, true);
       return idempotent(tx, { tenantId: config.tenantId, projectId: run.projectId, key: `run.reverify:${runId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
         if (body.expectedPlanRevision !== (run.planRevision ?? 0)) throw staleRevision(run.planRevision ?? 0, 'the plan');
-        const refuse = (o: Extract<ReverifyOutcome, { ok: false }>) => new AppError(o.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: o.reason, ...(o.taskId !== undefined ? { taskId: o.taskId } : {}) });
-        const scope = { tenantId: config.tenantId, projectId: run.projectId, runId };
-        const stale: ReverifyOutcome = staleSha === null || trusted === null ? { ok: false, reason: 'nothing_to_reverify' } : await reopenStaleVerification({ now }, tx, scope, uid, newId('op'), staleSha, trusted);
-        if (!stale.ok && stale.reason !== 'nothing_to_reverify') throw refuse(stale);
-        const blocked = await reopenBlockedVerification({ now }, tx, scope, uid, newId('op'), trusted, { baseMoved });
-        if (!blocked.ok && (blocked.reason !== 'nothing_to_reverify' || !stale.ok)) throw refuse(blocked);
-        return { runId, reopened: [...(stale.ok ? stale.reopened : []), ...(blocked.ok ? blocked.reopened : [])] };
+        const outcome: ReverifyOutcome = await reverifyRun({ now }, tx, scope, { requestedBy: uid, staleSha, trusted, baseMoved, operationId: () => newId('op') });
+        if (!outcome.ok) throw new AppError(outcome.reason === 'resource_conflict' ? 409 : 403, 'command_not_allowed', 'this run cannot be re-verified', { reason: outcome.reason, ...(outcome.taskId !== undefined ? { taskId: outcome.taskId } : {}) });
+        return { runId, reopened: outcome.reopened };
       });
     });
     return reply.code(200).send(result);
