@@ -7,6 +7,7 @@ import {
 import type { StackView } from '@selarikru/view-protocol';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import type { ConnectionState, StackPort } from '../../shell/projection-store.ts';
+import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { inputClass } from '../onboarding/ui.tsx';
 import { categoryRows, componentRows, detectionRows, type CategoryRow, type ItemRow, type SearchOption } from './model.ts';
 import { StackSearch } from './StackSearch.tsx';
@@ -46,11 +47,18 @@ function Readiness({ item }: { item: ItemRow }) {
 function Category({ row, component, live, onAct }: { row: CategoryRow; component: StackComponent; live: boolean; onAct: (a: StackAction, done: string) => void }) {
   const legend = useId();
   const name = `stack-state-${component.path}-${row.id}`;
-  const set = (state: 'not_decided' | 'none'): void => {
-    if (state === row.state) return;
+  const [asking, setAsking] = useState<'not_decided' | 'none' | null>(null);
+  const apply = (state: 'not_decided' | 'none'): void => {
     const cleared = row.items.length > 0 ? ` Its ${row.items.length} selection${row.items.length === 1 ? ' was' : 's were'} removed from the record; no provider data was deleted.` : '';
     onAct({ kind: 'category.set', path: component.path, category: row.id, state }, `${row.label} for ${component.path}: ${state === 'none' ? 'None · not used' : 'Not decided'}.${cleared}`);
   };
+  // Moving between Not decided and None loses nothing. Leaving a selection would clear it, and an arrow key on the radio group is enough to get here, so it asks first.
+  const set = (state: 'not_decided' | 'none'): void => {
+    if (state === row.state) return;
+    if (row.items.length > 0) setAsking(state);
+    else apply(state);
+  };
+  const n = row.items.length;
   return (
     <li data-testid="stack-category" data-category={row.id} data-state={row.state} className="rounded-chip border border-line p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -61,6 +69,18 @@ function Category({ row, component, live, onAct }: { row: CategoryRow; component
           <label className="inline-flex items-center gap-1.5 text-muted"><input type="radio" name={name} checked={row.state === 'selected'} disabled={row.state !== 'selected'} readOnly />{row.state === 'selected' ? row.stateLabel : 'Selected (search to add)'}</label>
         </span>
       </div>
+      {asking !== null ? (
+        <ConfirmDialog
+          copy={{
+            title: `Clear ${n} selection${n === 1 ? '' : 's'} from ${row.label}?`,
+            consequence: `${row.label} for ${component.path} becomes ${asking === 'none' ? 'None · not used' : 'Not decided'}, and ${row.items.map((i) => i.label).join(', ')} ${n === 1 ? 'is' : 'are'} removed from the stack record. This deletes no provider data and revokes no credential.`,
+            keepLabel: 'Keep the selections',
+          }}
+          confirmLabel={asking === 'none' ? 'Clear and set None' : 'Clear and set Not decided'}
+          onConfirm={() => { const st = asking; setAsking(null); apply(st); }}
+          onKeep={() => setAsking(null)}
+        />
+      ) : null}
       {row.state !== 'not_decided' ? <p id={`${legend}-x`} className="mt-1 text-sm text-muted">{row.explanation}</p> : null}
       {row.items.length > 0 ? (
         <ul className="mt-2 space-y-2">
@@ -134,6 +154,7 @@ function AddComponent({ live, onAct, taken }: { live: boolean; onAct: (a: StackA
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [targets, setTargets] = useState<StackTarget[]>([]);
+  const [restricted, setRestricted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = (e: FormEvent): void => {
     e.preventDefault();
@@ -142,8 +163,8 @@ function AddComponent({ live, onAct, taken }: { live: boolean; onAct: (a: StackA
     if (!StackComponentPathSchema.safeParse(p).success) { setError('Use . for the repository root, or a relative path such as apps/web, with no .. segment.'); return; }
     if (taken.includes(p)) { setError('A component already uses that path.'); return; }
     setError(null);
-    onAct({ kind: 'component.upsert', path: p, name: name.trim(), targets }, `Added the component ${name.trim()} at ${p}. Every category starts Not decided.`);
-    setName(''); setPath(''); setTargets([]);
+    onAct({ kind: 'component.upsert', path: p, name: name.trim(), targets, ...(restricted ? { classification: 'restricted' as const } : {}) }, `Added the component ${name.trim()} at ${p}. Every category starts Not decided.`);
+    setName(''); setPath(''); setTargets([]); setRestricted(false);
   };
   return (
     <form onSubmit={submit} className="mt-4 space-y-2 rounded-chip border border-line p-3" aria-labelledby="stack-add-component">
@@ -158,6 +179,7 @@ function AddComponent({ live, onAct, taken }: { live: boolean; onAct: (a: StackA
           {STACK_TARGETS.map((t) => <label key={t} className="inline-flex items-center gap-1.5"><input type="checkbox" checked={targets.includes(t)} onChange={(e) => setTargets(e.target.checked ? [...targets, t] : targets.filter((x) => x !== t))} />{STACK_TARGET_LABELS[t]}</label>)}
         </span>
       </fieldset>
+      <label className="flex items-start gap-2 text-sm text-fg"><input type="checkbox" className="mt-0.5" checked={restricted} onChange={(e) => setRestricted(e.target.checked)} /><span>Restricted: its stack goes only to local workers whose output stays on this device</span></label>
       {error ? <p className="text-sm text-danger">{error}</p> : null}
       <button type="submit" className={buttonQuiet} disabled={!live}>Add component</button>
     </form>
@@ -173,7 +195,7 @@ export interface StackSettingsProps {
 /** Settings → Stack: what the target application is built with, per component. Recording only; setup and runtime tests are separate actions. */
 export function StackSettings({ port, connection, mode }: StackSettingsProps) {
   const stack = useStack(port);
-  const live = connection === 'live' && !stack.busy;
+  const live = connection === 'live' && !stack.busy && stack.view?.unreadable !== true;
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
   const view = stack.view;
@@ -206,6 +228,7 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
       <p role="status" aria-live="polite" data-testid="stack-notice" className="text-sm text-fg">{notice}</p>
       {stack.error ? <p role="alert" className="text-danger">{stack.error} <button type="button" className={buttonQuiet} onClick={stack.reload}>Read again</button></p> : null}
       {stack.loading && !view ? <p role="status" className="text-muted">Loading the stack settings</p> : null}
+      {view?.unreadable ? <p role="alert" data-testid="stack-unreadable" className="text-danger">The stored stack settings cannot be read by this version, so they are shown as empty and nothing can be changed here. Nothing was written over them.</p> : null}
       {view ? (
         <>
           <Panel title="Selected components" labelId="stack-components" aside={`${components.length} component${components.length === 1 ? '' : 's'}`}>
@@ -221,6 +244,7 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
                           <span className="block font-medium text-fg wrap-anywhere">{c.name} <span className="font-mono text-mono text-muted">{c.path}</span></span>
                           <span className="block text-sm text-muted">Targets: {c.targets} · {c.decided} decided · {c.undecided} not decided</span>
                           <span className="block text-sm text-muted wrap-anywhere">{c.toolchain}</span>
+                          {c.restricted ? <span className="block text-sm text-fg">Restricted: local workers only</span> : null}
                           {c.gates.map((g) => <span key={g.target} className="mt-1 block text-sm text-warning">{STACK_TARGET_LABELS[g.target]} gate incomplete: {g.label}. <span className="text-muted">{g.explanation}</span></span>)}
                         </span>
                       </label>

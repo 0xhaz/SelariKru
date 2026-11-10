@@ -3,7 +3,7 @@ import { applyStackAction, emptyStack, type StackAction, type StackDocument } fr
 import type { StackView } from '@selarikru/view-protocol';
 import { categoryRows, componentRows, detectionRows, searchOptions } from './model.ts';
 
-const view = (document: StackDocument): StackView => ({ projectId: 'p', revision: 3, catalogVersion: 'v', document, updatedBy: null, updatedAt: null, native: { ios: false, android: false } });
+const view = (document: StackDocument): StackView => ({ projectId: 'p', revision: 3, detectionRevision: 0, unreadable: false, catalogVersion: 'v', document, updatedBy: null, updatedAt: null, native: { ios: false, android: false } });
 function doc(...actions: StackAction[]): StackDocument {
   let d = emptyStack();
   for (const a of actions) {
@@ -49,13 +49,29 @@ describe('stack settings model', () => {
     const comp = componentRows(view(d))[0]!;
     expect(comp.gates.map((g) => g.label)).toEqual(['iOS runner required', 'Android build not assessed']);
     expect(comp.toolchain).toBe('Package and build tools: not decided · Runtime: not decided');
+    expect(comp.restricted).toBe(false);
+    expect(componentRows(view(doc({ kind: 'component.upsert', path: 'svc', name: 'S', targets: [], classification: 'restricted' })))[0]!.restricted).toBe(true);
   });
 
-  it('a pilot-tested entry cites the suite, and nothing else claims to be tested', () => {
-    const d = doc(web, { kind: 'item.add', path: 'apps/web', category: 'testing', item: { kind: 'catalog', entryId: 'vitest' } }, { kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'fastify' } });
-    const vitest = categoryRows(d.components[0]!, 'services').find((r) => r.id === 'testing')!.items[0]!;
+  it('a pilot-tested entry cites the suite only at the pinned version on a matching target; otherwise it says what the pilot ran', () => {
+    const d = doc(
+      web,
+      { kind: 'item.add', path: 'apps/web', category: 'testing', item: { kind: 'catalog', entryId: 'vitest', version: '5.1.0' } },
+      { kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'fastify' } },
+      { kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'react', version: '16.0.0' } },
+      mobile,
+      { kind: 'item.add', path: 'apps/mobile', category: 'frameworks', item: { kind: 'catalog', entryId: 'react', version: '19.3.1' } },
+    );
+    const webC = d.components.find((c) => c.path === 'apps/web')!;
+    const vitest = categoryRows(webC, 'services').find((r) => r.id === 'testing')!.items[0]!;
     expect(vitest.axes.at(-1)).toMatchObject({ label: 'Run by the pilot suite (web)', detail: expect.stringContaining('feedback-board 0.1') });
-    expect(categoryRows(d.components[0]!, 'frameworks')[0]!.items[0]!.axes.at(-1)!.label).toBe('Not tested');
+    expect(vitest.summary).toBe('Selected · not connected · run by the pilot suite on web');
+    const [fastify, react16] = categoryRows(webC, 'frameworks')[0]!.items;
+    expect(fastify!.axes.at(-1)!.label).toBe('Not tested');
+    expect(react16!.axes.at(-1)).toMatchObject({ label: 'Not tested', detail: expect.stringMatching(/pilot ran 19\.3\.1 on web/) });
+    expect(react16!.summary).toBe('Selected · not tested');
+    const reactIos = categoryRows(d.components.find((c) => c.path === 'apps/mobile')!, 'frameworks')[0]!.items[0]!;
+    expect(reactIos.axes.at(-1)!.label).toBe('Not tested');
   });
 
   it('grouped search marks what the component already has, within the section and filter', () => {

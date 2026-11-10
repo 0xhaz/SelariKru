@@ -112,6 +112,68 @@ test('keyboard only: confirm a detection, search and select two entries for each
   expect(requests.filter((u) => !u.startsWith(ORIGIN))).toEqual([]);
 });
 
+test('keyboard: moving off a category with selections asks first, and Escape keeps the selections', async ({ page }) => {
+  await open(page);
+  const main = page.locator('#main');
+  const services = main.getByRole('combobox', { name: 'Search tools & services for Feedback Board' });
+  await typeInto(page, services, 'stripe');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Escape');
+  const payments = category(page, 'payments');
+  await expect(payments).toHaveAttribute('data-state', 'selected');
+  // The radio group's tab stop is the checked radio. An arrow key alone never clears the selection.
+  await tabTo(page, payments.getByRole('radio', { name: 'Selected (1)' }));
+  await page.keyboard.press('ArrowLeft');
+  const dialog = page.getByRole('dialog', { name: /Clear 1 selection from Payments/ });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('deletes no provider data');
+  await expect(payments).toHaveAttribute('data-state', 'selected');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(payments).toHaveAttribute('data-state', 'selected');
+  await expect(payments.locator('[data-item="stripe"]')).toBeVisible();
+  await expect(payments.getByRole('radio', { name: 'Selected (1)' })).toBeChecked();
+  // Asked again, and confirmed by keyboard: now None.
+  await tabTo(page, payments.getByRole('radio', { name: 'Selected (1)' }));
+  await page.keyboard.press('ArrowLeft');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', { name: 'Clear and set None' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(payments).toHaveAttribute('data-state', 'none');
+  await expect(notice(page)).toContainText('no provider data was deleted');
+  // Moving between Not decided and None has nothing to lose, so it needs no confirmation.
+  await tabTo(page, payments.getByRole('radio', { name: 'None · not used' }));
+  await page.keyboard.press('ArrowLeft');
+  await expect(payments).toHaveAttribute('data-state', 'not_decided');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('keyboard: the active result is scrolled into view as the arrow keys move through a long list', async ({ page }) => {
+  await open(page);
+  const main = page.locator('#main');
+  const services = main.getByRole('combobox', { name: 'Search tools & services for Feedback Board' });
+  await tabTo(page, services);
+  await page.keyboard.press('ArrowDown');
+  const list = page.getByTestId('stack-results');
+  await expect(list).toBeVisible();
+  const inView = async () => {
+    const id = await services.getAttribute('aria-activedescendant');
+    return page.evaluate((optionId) => {
+      const o = document.getElementById(optionId!)!.getBoundingClientRect();
+      const l = document.querySelector('[data-testid="stack-results"]')!.getBoundingClientRect();
+      return o.top >= l.top - 0.5 && o.bottom <= l.bottom + 0.5;
+    }, id);
+  };
+  await page.keyboard.press('End');
+  await expect.poll(inView).toBe(true);
+  for (let i = 0; i < 12; i++) await page.keyboard.press('ArrowUp');
+  await expect.poll(inView).toBe(true);
+  await page.keyboard.press('Home');
+  await expect.poll(inView).toBe(true);
+  expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+});
+
 test('a service shows separate readiness axes and a disabled Disconnect; a mobile component shows its native gates as incomplete', async ({ page }) => {
   await open(page);
   const main = page.locator('#main');

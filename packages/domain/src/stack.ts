@@ -463,6 +463,8 @@ export interface PilotEvidence {
   /** The key in that file. */
   readonly pin: string;
   readonly version: string;
+  /** The component targets the suite ran it for: the Feedback Board's web screen, its server, or both. */
+  readonly targets: readonly StackTarget[];
 }
 
 const SUITE = 'services/verifier/suites/feedback-board/manifest.json' as const;
@@ -472,15 +474,15 @@ const STARTER = 'examples/feedback-board-starter/package.json' as const;
  * Express and SQLite server started with `pnpm start`, and the suite's Vitest and Playwright (Chromium) checks against it. Nothing else in the catalog has been run here.
  */
 const PILOT_PINS: readonly Omit<PilotEvidence, 'suiteId' | 'suiteVersion' | 'platform'>[] = [
-  { entryId: 'nodejs', pin: 'node', version: '24.x', path: SUITE, actions: ['install', 'build', 'test'] },
-  { entryId: 'pnpm', pin: 'pnpm', version: '9.12.2', path: SUITE, actions: ['install', 'build', 'test'] },
-  { entryId: 'vitest', pin: 'vitest', version: '5.1.0', path: SUITE, actions: ['test'] },
-  { entryId: 'playwright', pin: '@playwright/test', version: '1.65.0', path: SUITE, actions: ['test'] },
-  { entryId: 'react', pin: 'react', version: '19.3.1', path: STARTER, actions: ['build', 'test'] },
-  { entryId: 'vite', pin: 'vite', version: '8.3.6', path: STARTER, actions: ['build'] },
-  { entryId: 'typescript', pin: 'typescript', version: '5.9.3', path: STARTER, actions: ['build'] },
-  { entryId: 'express', pin: 'express', version: '5.3.0', path: STARTER, actions: ['test'] },
-  { entryId: 'sqlite', pin: 'better-sqlite3', version: '13.0.3', path: STARTER, actions: ['test'] },
+  { entryId: 'nodejs', pin: 'node', version: '24.x', path: SUITE, actions: ['install', 'build', 'test'], targets: ['web', 'server'] },
+  { entryId: 'pnpm', pin: 'pnpm', version: '9.12.2', path: SUITE, actions: ['install', 'build', 'test'], targets: ['web', 'server'] },
+  { entryId: 'vitest', pin: 'vitest', version: '5.1.0', path: SUITE, actions: ['test'], targets: ['web', 'server'] },
+  { entryId: 'playwright', pin: '@playwright/test', version: '1.65.0', path: SUITE, actions: ['test'], targets: ['web'] },
+  { entryId: 'react', pin: 'react', version: '19.3.1', path: STARTER, actions: ['build', 'test'], targets: ['web'] },
+  { entryId: 'vite', pin: 'vite', version: '8.3.6', path: STARTER, actions: ['build'], targets: ['web'] },
+  { entryId: 'typescript', pin: 'typescript', version: '5.9.3', path: STARTER, actions: ['build'], targets: ['web', 'server'] },
+  { entryId: 'express', pin: 'express', version: '5.3.0', path: STARTER, actions: ['test'], targets: ['server'] },
+  { entryId: 'sqlite', pin: 'better-sqlite3', version: '13.0.3', path: STARTER, actions: ['test'], targets: ['server'] },
 ];
 export const PILOT_EVIDENCE: readonly PilotEvidence[] = PILOT_PINS.map((e) => ({ ...e, suiteId: 'feedback-board', suiteVersion: '0.1', platform: 'web' }));
 
@@ -489,7 +491,7 @@ export type ReadinessAxisId = (typeof READINESS_AXES)[number];
 export const READINESS_AXIS_LABELS: Readonly<Record<ReadinessAxisId, string>> = {
   knowledge: 'Profile knowledge', skills: 'Skills', connector: 'Connector', auth: 'Authentication', tested: 'Tested execution',
 };
-export type ReadinessState = 'not_linked' | 'none_reviewed' | 'not_applicable' | 'none_available' | 'not_connected' | 'not_tested' | 'tested' | 'unknown';
+export type ReadinessState = 'not_linked' | 'none_reviewed' | 'not_applicable' | 'none_available' | 'unverified' | 'not_connected' | 'not_tested' | 'tested' | 'unknown';
 
 export interface ReadinessAxis {
   readonly axis: ReadinessAxisId;
@@ -502,34 +504,77 @@ export interface ReadinessAxis {
 const UNKNOWN = 'Unknown · not reviewed';
 
 /**
- * The readiness of one selection, axis by axis. Never one badge. Every axis that nothing has checked says so: no reviewed knowledge or skills exist yet, no connector
- * exists, selecting creates no credential, and tested means only that the pilot suite ran it on web at the version it pins.
+ * Whether a selected version is the one the pilot pinned. Exact after a leading `v` or `=`; a pinned major line (`24.x`) also takes that major's own versions and the
+ * range `>=24 <25`. A wider range (`^19.0.0`) is not the pinned version: it may resolve elsewhere.
  */
-export function readinessOf(item: StackItem): ReadinessAxis[] {
+export function pilotVersionMatches(selected: string, pinned: string): boolean {
+  const v = selected.trim().replace(/^[v=]+/, '');
+  if (v === pinned) return true;
+  const line = /^(\d+)\.x$/.exec(pinned);
+  if (!line) return false;
+  const major = line[1]!;
+  if (v === major || v === `${major}.x` || v === `${major}.*` || new RegExp(`^${major}\\.\\d+(?:\\.\\d+)?$`).test(v)) return true;
+  const range = /^>=\s*(\d+)(?:\.0(?:\.0)?)?\s+<\s*(\d+)(?:\.0(?:\.0)?)?$/.exec(v);
+  return range !== null && range[1] === major && Number(range[2]) === Number(major) + 1;
+}
+
+export interface ReadinessContext {
+  /** The targets of the component the selection belongs to. Absent: unknown, so nothing reads as tested. */
+  readonly targets?: readonly StackTarget[];
+  /** What is known about a connection. Discovery (an MCP listing, say) is not an authenticated, scoped connection. */
+  readonly connection?: { readonly discovered: boolean };
+}
+
+const ranText = (evidence: readonly PilotEvidence[]): string => evidence.map((x) => `${x.version} on ${x.targets.join(' and ')}`).join(', ');
+
+/** The tested axis: tested only for the version the pilot pinned, on a component target the pilot ran it for. Otherwise not tested, citing what did run. */
+function testedAxis(e: StackEntry, item: Extract<StackItem, { kind: 'catalog' }>, ctx: ReadinessContext): ReadinessAxis {
+  const evidence = PILOT_EVIDENCE.filter((p) => p.entryId === e.id);
+  if (evidence.length === 0) {
+    return { axis: 'tested', state: 'not_tested', label: 'Not tested', explanation: e.kind === 'preset' ? `A preset of ${(e.presetOf ?? []).map((id) => stackEntry(id)?.label ?? id).join(' and ')}: see each for what has run.` : 'Nothing in this workspace has run it. Selecting it is not a tested integration.' };
+  }
+  const ran = ranText(evidence);
+  const actions = [...new Set(evidence.flatMap((x) => x.actions))].join(', ');
+  if (item.version === null) {
+    return { axis: 'tested', state: 'not_tested', label: `Pilot ran ${ran}`, evidence, explanation: `No version is recorded for this selection. The Feedback Board verifier suite (feedback-board 0.1) ran ${ran} (${e.label}: ${actions}); record that version on a matching component to count it.` };
+  }
+  const target = evidence.flatMap((x) => x.targets).find((t) => ctx.targets?.includes(t));
+  const version = evidence.some((x) => pilotVersionMatches(item.version!, x.version));
+  if (!version || target === undefined) {
+    const why = !version ? `${item.version} is not the version the pilot pinned` : ctx.targets === undefined ? 'the component\'s targets are not known' : 'this component does not build for a target the pilot ran';
+    return { axis: 'tested', state: 'not_tested', label: 'Not tested', evidence, explanation: `Not tested here: ${why}. The pilot ran ${ran} (${e.label}).` };
+  }
+  return {
+    axis: 'tested', state: 'tested', label: `Run by the pilot suite (${target})`, evidence,
+    explanation: `Run on ${target} by the Feedback Board verifier suite (feedback-board 0.1): ${actions}, at ${evidence.map((x) => x.version).join(', ')}. Other versions, platforms and actions are not tested.`,
+  };
+}
+
+/**
+ * The readiness of one selection, axis by axis. Never one badge. Every axis that nothing has checked says so: no reviewed knowledge or skills exist yet, no connector
+ * exists (discovery alone never makes one usable), selecting creates no credential, and tested means only that the pilot suite ran this version for this target.
+ */
+export function readinessOf(item: StackItem, ctx: ReadinessContext = {}): ReadinessAxis[] {
   if (item.kind === 'custom') {
     return READINESS_AXES.map((axis) => ({ axis, state: 'unknown', label: UNKNOWN, explanation: 'A custom entry is recorded as you named it. Nothing about it has been reviewed, linked, connected or run.' }));
   }
   const e = stackEntry(item.entryId);
   if (!e) return READINESS_AXES.map((axis) => ({ axis, state: 'unknown', label: UNKNOWN, explanation: 'This entry is not in the catalog this build carries.' }));
   const service = sectionOf(e) === 'services';
-  const evidence = PILOT_EVIDENCE.filter((p) => p.entryId === e.id);
-  const out: ReadinessAxis[] = [
+  const connector: ReadinessAxis = !service
+    ? { axis: 'connector', state: 'not_applicable', label: 'Not applicable', explanation: 'A framework or library is recorded as context; it needs no connection.' }
+    : ctx.connection?.discovered === true
+      ? { axis: 'connector', state: 'unverified', label: 'Discovered · not usable', explanation: 'A connector was discovered (for example an MCP listing), but discovery alone does not make it usable: that needs an authenticated, scoped connection, and none exists.' }
+      : { axis: 'connector', state: 'none_available', label: 'No connector', explanation: 'No connector, MCP server or API connection exists for this entry. Setting one up will be a separate action.' };
+  return [
     { axis: 'knowledge', state: 'not_linked', label: 'Not linked', explanation: 'No version-matched documentation is linked to this entry yet, so a worker gets only what you recorded here.' },
     { axis: 'skills', state: 'none_reviewed', label: 'No reviewed skills', explanation: 'Skills appear here only once a reviewed, pinned binding exists. None does yet.' },
-    service
-      ? { axis: 'connector', state: 'none_available', label: 'No connector', explanation: 'No connector, MCP server or API connection exists for this entry. Setting one up will be a separate action.' }
-      : { axis: 'connector', state: 'not_applicable', label: 'Not applicable', explanation: 'A framework or library is recorded as context; it needs no connection.' },
+    connector,
     service
       ? { axis: 'auth', state: 'not_connected', label: 'Not connected', explanation: 'Selecting records your stack only. It creates no credential, makes no request and grants no access.' }
       : { axis: 'auth', state: 'not_applicable', label: 'Not applicable', explanation: 'Nothing to authenticate.' },
-    evidence.length > 0
-      ? {
-        axis: 'tested', state: 'tested', label: 'Run by the pilot suite (web)', evidence,
-        explanation: `Run on web by the Feedback Board verifier suite (feedback-board 0.1): ${[...new Set(evidence.flatMap((x) => x.actions))].join(', ')}, at ${evidence.map((x) => x.version).join(', ')}. Other versions, platforms and actions are not tested.`,
-      }
-      : { axis: 'tested', state: 'not_tested', label: 'Not tested', explanation: e.kind === 'preset' ? `A preset of ${(e.presetOf ?? []).map((id) => stackEntry(id)?.label ?? id).join(' and ')}: see each for what has run.` : 'Nothing in this workspace has run it. Selecting it is not a tested integration.' },
+    testedAxis(e, item, ctx),
   ];
-  return out;
 }
 
 export interface NativeCapabilities {
@@ -613,8 +658,14 @@ export const StackComponentSchema = z.strictObject({
   path: StackComponentPathSchema,
   name: Text(80),
   targets: z.array(z.enum(STACK_TARGETS)).max(STACK_TARGETS.length),
+  /** The component's own label, when it is stronger than ordinary internal project data. Its Brain source takes the stronger of this and the project's label. */
+  classification: z.enum(['public', 'internal', 'restricted', 'secret']).optional(),
   /** Every category, explicitly. A category this build does not know yet reads as Not decided. */
-  categories: z.partialRecord(StackCategoryIdSchema, StackCategoryStateSchema).transform((c) => ({ ...allNotDecided(), ...c }) as Record<StackCategoryId, StackCategoryState>),
+  categories: z.preprocess(
+    // A category this build does not know (written by a newer catalog) is dropped rather than failing the whole document.
+    (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).filter(([k]) => (STACK_CATEGORY_IDS as readonly string[]).includes(k))) : v),
+    z.partialRecord(StackCategoryIdSchema, StackCategoryStateSchema),
+  ).transform((c) => ({ ...allNotDecided(), ...c }) as Record<StackCategoryId, StackCategoryState>),
 });
 export type StackComponent = z.infer<typeof StackComponentSchema>;
 
@@ -666,7 +717,7 @@ const AddItemSchema = z.discriminatedUnion('kind', [
 
 /** What an owner can change. Each is metadata only: none authenticates, installs, requests, spends or touches a repository. */
 export const StackActionSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('component.upsert'), path: StackComponentPathSchema, name: Text(80), targets: z.array(z.enum(STACK_TARGETS)).max(STACK_TARGETS.length) }),
+  z.strictObject({ kind: z.literal('component.upsert'), path: StackComponentPathSchema, name: Text(80), targets: z.array(z.enum(STACK_TARGETS)).max(STACK_TARGETS.length), classification: z.enum(['public', 'internal', 'restricted', 'secret']).optional() }),
   z.strictObject({ kind: z.literal('component.remove'), path: StackComponentPathSchema }),
   z.strictObject({ kind: z.literal('category.set'), path: StackComponentPathSchema, category: StackCategoryIdSchema, state: z.enum(['not_decided', 'none']) }),
   z.strictObject({ kind: z.literal('item.add'), path: StackComponentPathSchema, category: StackCategoryIdSchema, item: AddItemSchema }),
@@ -709,10 +760,11 @@ export function applyStackAction(doc: StackDocument, action: StackAction): Stack
       if (have) {
         have.name = action.name.trim();
         have.targets = targets;
+        if (action.classification !== undefined) have.classification = action.classification;
         return done(components);
       }
       if (components.length >= STACK_MAX_COMPONENTS) return fail('stack_limit', `at most ${STACK_MAX_COMPONENTS} components`);
-      return done([...components, { path: action.path, name: action.name.trim(), targets, categories: allNotDecided() }]);
+      return done([...components, { path: action.path, name: action.name.trim(), targets, ...(action.classification !== undefined ? { classification: action.classification } : {}), categories: allNotDecided() }]);
     }
     case 'component.remove': {
       if (!find(action.path)) return fail('stack_component_not_found', 'no component at that path');
@@ -777,15 +829,29 @@ export function applyStackAction(doc: StackDocument, action: StackAction): Stack
 export interface StackSourceDraft {
   readonly sourceId: string;
   readonly title: string;
+  /** The component's label, `internal` when it states none. The server raises it to the project's when that is stronger. */
+  readonly classification: 'public' | 'internal' | 'restricted' | 'secret';
   readonly sections: BrainSection[];
 }
 
-const itemText = (i: StackItem): string => {
+const clipPath = (p: string): string => (p.length > 60 ? `…${p.slice(-59)}` : p);
+const itemText = (i: StackItem, targets: readonly StackTarget[]): string => {
   if (i.kind === 'custom') return `${i.label} (custom, not reviewed${i.canonicalSource ? `; source ${i.canonicalSource}` : ''})`;
   const e = stackEntry(i.entryId);
-  const tested = PILOT_EVIDENCE.some((p) => p.entryId === i.entryId);
-  return `${e?.label ?? i.entryId}${i.version ? ` ${i.version}` : ''} (${i.origin === 'detected' && i.evidence ? `detected in ${i.evidence.path}` : 'declared'}; ${tested ? 'run on web by the pilot verifier suite' : 'not tested'})`;
+  const tested = readinessOf(i, { targets }).find((a) => a.axis === 'tested')!;
+  const ev = tested.evidence ?? [];
+  const status = tested.state === 'tested' ? `run on ${tested.label.replace(/^.*\((.*)\)$/, '$1')} by the pilot verifier suite at ${ev.map((x) => x.version).join(', ')}` : ev.length > 0 ? `not tested; the pilot ran ${ranText(ev)}` : 'not tested';
+  return `${e?.label ?? i.entryId}${i.version ? ` ${i.version}` : ''} (${i.origin === 'detected' && i.evidence ? `detected in ${clipPath(i.evidence.path)}` : 'declared'}; ${status})`;
 };
+
+/** A selection's suffix in a Brain key and anchor: its key, or a short hash of it when the whole key would not fit. */
+function itemSuffix(prefix: string, item: StackItem): string {
+  const k = stackItemKey(item);
+  if (prefix.length + 1 + k.length <= 160) return k;
+  let h = 5381;
+  for (const ch of k) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+  return `h${h.toString(16)}`;
+}
 
 /**
  * One Brain source per component: its targets, and every category the owner decided (a selection, or None). Undecided categories state nothing. The text describes the
@@ -801,17 +867,23 @@ export function stackBrainSources(doc: StackDocument): StackSourceDraft[] {
     for (const cat of STACK_CATEGORIES) {
       const s = c.categories[cat.id];
       if (s.state === 'not_decided') continue;
-      sections.push({
-        anchor: `stack/${c.path}/${cat.id}`, heading: `${cat.label} (${c.path})`, key: `component:${c.path}:${cat.id}`,
-        text: s.state === 'none' ? `None: no ${cat.label} is used in this component.` : `Selected: ${s.items.map(itemText).join('; ')}.`,
-      });
+      if (s.state === 'none') {
+        sections.push({ anchor: `stack/${c.path}/${cat.id}`, heading: `${cat.label} (${c.path})`, key: `component:${c.path}:${cat.id}`, text: `None: no ${cat.label} is used in this component.` });
+        continue;
+      }
+      // One claim per selection, so a long category can never be left out of a bundle as too large.
+      for (const item of s.items) {
+        const prefix = `component:${c.path}:${cat.id}`;
+        const suffix = itemSuffix(prefix, item);
+        sections.push({ anchor: `stack/${c.path}/${cat.id}/${suffix}`, heading: `${cat.label} (${c.path})`, key: `${prefix}:${suffix}`, text: `Selected: ${itemText(item, c.targets)}.` });
+      }
     }
-    return { sourceId: `stack:${c.path}`, title: `Stack: ${c.name} (${c.path})`, sections };
+    return { sourceId: `stack:${c.path}`, title: `Stack: ${c.name} (${c.path})`, classification: c.classification ?? 'internal', sections };
   });
 }
 
 /**
- * The component path a Brain key about a component's stack names (`component:<path>` or `component:<path>:<category>`), or null when the key is not one. The accepted
+ * The component path a Brain key about a component's stack names (`component:<path>`, `component:<path>:<category>` or `component:<path>:<category>:<entry>`), or null when the key is not one. The accepted
  * brief's own `stack:<n>` lines are project-wide and are not component keys.
  */
 export function stackKeyPath(key: string): string | null {
@@ -843,8 +915,12 @@ const FILE_SIGNATURES: readonly { readonly re: RegExp; readonly glob: string; re
   (e.detect?.files ?? []).map((glob) => ({ re: globRe(glob), glob, entryId: e.id, lockfile: /(?:lock|\.lockb)(?:\.|$)|lock\.json$|lock\.yaml$/.test(glob) })),
 );
 
+/** Control, zero-width and bidi characters: a path carrying one is never read or reported as it is. */
+const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/;
 const safeRepoPath = (path: string): boolean =>
-  path.length > 0 && path.length <= 200 && !path.includes('\\') && !path.includes('\0') && !path.startsWith('/') && path.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+  path.length > 0 && path.length <= 200 && !HIDDEN.test(path) && !path.includes('\\') && !path.startsWith('/') && path.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+/** A path as a report may carry it: hidden characters replaced, bounded. */
+export const reportablePath = (path: string): string => path.replace(new RegExp(HIDDEN.source, 'g'), '?').slice(0, 200) || '?';
 
 /** Whether detection reads this path: a named manifest, lockfile or config file, not inside a vendored or generated tree, at a safe relative path. */
 export function isStackDetectionPath(path: string): boolean {
@@ -910,7 +986,7 @@ export function detectStack(input: readonly StackDetectionFile[]): StackDetectio
   let read = 0;
   // Manifests first, so an entry's evidence is the line that names it and its version; then the files whose presence is the signature.
   for (const f of files) {
-    if (!isStackDetectionPath(f.path)) { skipped.push({ path: clean(f.path, 200) || '?', reason: 'unsafe_path' }); continue; }
+    if (!isStackDetectionPath(f.path)) { skipped.push({ path: reportablePath(f.path), reason: 'unsafe_path' }); continue; }
     const name = f.path.split('/').at(-1)!;
     if (!MANIFESTS.has(name)) continue;
     const comp = dirOf(f.path);

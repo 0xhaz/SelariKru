@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from 'react';
 import { STACK_FILTER_LABELS, STACK_FILTERS, type StackComponent, type StackFilter, type StackSection } from '@selarikru/domain';
 import { inputClass } from '../onboarding/ui.tsx';
 import { searchOptions, type SearchOption } from './model.ts';
@@ -30,6 +30,11 @@ export function StackSearch({ section, label, component, disabled, onToggle }: S
   const index = Math.min(active, Math.max(0, flat.length - 1));
   const optionId = (o: SearchOption): string => `${id}-opt-${o.entryId}`;
   const activeOption = open ? flat[index] : undefined;
+  const activeId = activeOption ? optionId(activeOption) : null;
+  // The active result stays in view as the keys move through a long list.
+  useEffect(() => {
+    if (activeId !== null) document.getElementById(activeId)?.scrollIntoView({ block: 'nearest' });
+  }, [activeId]);
 
   const onKey = (e: KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

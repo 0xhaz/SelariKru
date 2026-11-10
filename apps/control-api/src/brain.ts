@@ -198,10 +198,11 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
   }
   // The owner's stack settings: one source per component, citing each decided category. Undecided categories state nothing; detections that were not confirmed are
   // proposals and are not read at all.
+  // A stored stack this build cannot read states nothing: its earlier claims go stale rather than being guessed at.
   const stack = await loadStack(db, tenantId, projectId);
-  for (const st of stackBrainSources(stack.document)) {
+  for (const st of stack.unreadable ? [] : stackBrainSources(stack.document)) {
     out.push(draft({
-      sourceId: st.sourceId, kind: 'stack', title: text(st.title, 200) || 'Stack', standing: 'accepted', classification: projectLabel, taskId: null,
+      sourceId: st.sourceId, kind: 'stack', title: text(st.title, 200) || 'Stack', standing: 'accepted', classification: label(projectLabel, st.classification), taskId: null,
       provenance: { origin: 'owner', ref: `stack@r${stack.revision}`, recordedBy: (stack.updatedBy ?? SYSTEM).slice(0, 200) },
       sections: st.sections.map((x) => sec(x.anchor, x.heading, x.text, x.key)),
     }));
@@ -266,7 +267,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
  * The version of `recordSources`, the code that reads records into sources. It is part of the records fingerprint with the generator's version, so a deploy that
  * changes either reads every project's records again. Raise it whenever that code changes what it produces.
  */
-export const RECORDS_READER_VERSION = '2';
+export const RECORDS_READER_VERSION = '3';
 
 /** A source that could not be stored: its id and a code, never its text. */
 export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;

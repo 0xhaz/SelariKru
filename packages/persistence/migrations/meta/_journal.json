@@ -162,6 +162,13 @@
       "when": 1794307787585,
       "tag": "0022_stack",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794310134315,
+      "tag": "0023_stack_detection_revision",
+      "breakpoints": true
     }
   ]
 }

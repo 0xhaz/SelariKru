@@ -22,4 +22,4 @@ export type StackDetectionReport = z.infer<typeof StackDetectionReportSchema>;
 export const StackDetectionRequestSchema = z.strictObject({ lease: LeaseRefSchema, detection: StackDetectionReportSchema });
 
 /** The runner's static detection reads git objects and parses them with the domain's pure detector; re-exported here so the runner needs no other package. */
-export { detectStack, isStackDetectionPath, isStackManifestPath, STACK_DETECTION_MAX_BYTES, STACK_DETECTION_MAX_FILES, type StackDetectionFile } from '@selarikru/domain';
+export { detectStack, isStackDetectionPath, isStackManifestPath, reportablePath, STACK_DETECTION_MAX_BYTES, STACK_DETECTION_MAX_FILES, type StackDetectionFile } from '@selarikru/domain';

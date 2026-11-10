@@ -22,18 +22,28 @@ import { requireProject } from './store.ts';
  */
 
 export interface StackRow {
+  /** Owner writes only. */
   readonly revision: number;
+  /** Stored detections only. */
+  readonly detectionRevision: number;
   readonly document: StackDocument;
+  /** The stored document could not be read by this build. It is shown as empty and is never overwritten: every write is refused until it is repaired. */
+  readonly unreadable: boolean;
   readonly updatedBy: string | null;
   readonly updatedAt: string | null;
 }
 
-/** The project's stack as stored, or an empty one at revision 0. A stored document this build cannot read fails closed as empty rather than half-read. */
+const unreadableError = (): AppError => new AppError(409, 'stack_unreadable', 'the stored stack settings cannot be read by this build, so nothing was written over them');
+
+/**
+ * The project's stack as stored, or an empty one at revision 0. Categories a newer catalog added are dropped on read. A document that still cannot be read fails closed:
+ * it reads as empty and unreadable, and no write replaces it.
+ */
 export async function loadStack(db: Executor, tenantId: string, projectId: string): Promise<StackRow> {
   const [row] = await db.select().from(schema.projectStacks).where(and(eq(schema.projectStacks.tenantId, tenantId), eq(schema.projectStacks.projectId, projectId)));
-  if (!row) return { revision: 0, document: emptyStack(), updatedBy: null, updatedAt: null };
+  if (!row) return { revision: 0, detectionRevision: 0, document: emptyStack(), unreadable: false, updatedBy: null, updatedAt: null };
   const doc = StackDocumentSchema.safeParse(row.document);
-  return { revision: row.revision, document: doc.success ? doc.data : emptyStack(), updatedBy: row.updatedBy, updatedAt: row.updatedAt.toISOString() };
+  return { revision: row.revision, detectionRevision: row.detectionRevision, document: doc.success ? doc.data : emptyStack(), unreadable: !doc.success, updatedBy: row.updatedBy, updatedAt: row.updatedAt.toISOString() };
 }
 
 /** The project's stack lock. Taken with no other lock held. */
@@ -43,13 +53,13 @@ async function lockStack(tx: Tx, tenantId: string, projectId: string, at: Date):
   return loadStack(tx, tenantId, projectId);
 }
 
-async function writeStack(tx: Tx, tenantId: string, projectId: string, revision: number, document: StackDocument, by: string, at: Date): Promise<void> {
-  await tx.update(schema.projectStacks).set({ revision, document: StackDocumentSchema.parse(document) as unknown as Record<string, unknown>, catalogVersion: STACK_CATALOG_VERSION, updatedBy: by, updatedAt: at })
+async function writeStack(tx: Tx, tenantId: string, projectId: string, revisions: { revision: number } | { detectionRevision: number }, document: StackDocument, by: string, at: Date): Promise<void> {
+  await tx.update(schema.projectStacks).set({ ...revisions, document: StackDocumentSchema.parse(document) as unknown as Record<string, unknown>, catalogVersion: STACK_CATALOG_VERSION, updatedBy: by, updatedAt: at })
     .where(and(eq(schema.projectStacks.tenantId, tenantId), eq(schema.projectStacks.projectId, projectId)));
 }
 
 const view = (projectId: string, s: StackRow) => ({
-  projectId, revision: s.revision, catalogVersion: STACK_CATALOG_VERSION, document: s.document, updatedBy: s.updatedBy, updatedAt: s.updatedAt,
+  projectId, revision: s.revision, detectionRevision: s.detectionRevision, unreadable: s.unreadable, catalogVersion: STACK_CATALOG_VERSION, document: s.document, updatedBy: s.updatedBy, updatedAt: s.updatedAt,
   /** What runners report they can build natively. None reports a native toolchain in this build, so iOS and Android gates stay incomplete. */
   native: NO_NATIVE,
 });
@@ -89,11 +99,13 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
     const at = now();
     const after = await withTx(db, async (tx) => {
       const current = await lockStack(tx, config.tenantId, projectId, at);
+      if (current.unreadable) throw unreadableError();
+      // Owner writes only: a detection stored since this was read does not make it stale. The action is applied to the locked, current document.
       if (current.revision !== body.expectedRevision) throw new AppError(409, 'stack_revision_conflict', 'the stack changed since it was read; reload and try again', { revision: current.revision });
       const r = applyStackAction(current.document, body.action);
       if (!r.ok) throw new AppError(ACTION_STATUS[r.code] ?? 400, r.code, r.message);
-      await writeStack(tx, config.tenantId, projectId, current.revision + 1, r.doc, uid, at);
-      return { revision: current.revision + 1, document: r.doc, updatedBy: uid, updatedAt: at.toISOString() };
+      await writeStack(tx, config.tenantId, projectId, { revision: current.revision + 1 }, r.doc, uid, at);
+      return { ...current, revision: current.revision + 1, document: r.doc, updatedBy: uid, updatedAt: at.toISOString() };
     });
     return view(projectId, after);
   });
@@ -115,6 +127,7 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
     const commands = d.commands.map((c) => ({ ...c, body: redactSecrets(c.body).slice(0, 200), command: redactSecrets(c.command).slice(0, 100) }));
     await withTx(db, async (tx) => {
       const current = await lockStack(tx, p.tenantId, a.projectId, at);
+      if (current.unreadable) throw unreadableError();
       const prior = new Map((current.document.detection?.items ?? []).map((i) => [i.detectionId, i.state]));
       const detection: StackDetectionRecord = {
         commit: d.commit, detectedAt: at.toISOString(), runnerId: p.runnerId.slice(0, 200), commands, skipped: d.skipped,
@@ -123,7 +136,7 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
       };
       const same = current.document.detection !== null && JSON.stringify({ ...current.document.detection, detectedAt: '' }) === JSON.stringify({ ...detection, detectedAt: '' });
       if (same) return;
-      await writeStack(tx, p.tenantId, a.projectId, current.revision + 1, { ...current.document, detection }, `runner:${p.runnerId}`.slice(0, 200), at);
+      await writeStack(tx, p.tenantId, a.projectId, { detectionRevision: current.detectionRevision + 1 }, { ...current.document, detection }, `runner:${p.runnerId}`.slice(0, 200), at);
     });
     return { recorded: true, items: items.length };
   });

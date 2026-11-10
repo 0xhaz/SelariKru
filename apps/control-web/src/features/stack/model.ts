@@ -38,19 +38,21 @@ export interface CategoryRow {
 
 const DISCONNECT = 'No connector exists for this entry yet, so there is nothing to disconnect. Removing the selection only changes your stack record: it deletes no provider data and revokes no credential.';
 
-export function itemRow(item: StackItem, native: NativeCapabilities = NO_NATIVE): ItemRow {
-  const axes = readinessOf(item).map((a) => ({ name: READINESS_AXIS_LABELS[a.axis], label: a.label, detail: a.explanation }));
+export function itemRow(item: StackItem, native: NativeCapabilities = NO_NATIVE, targets: readonly StackTarget[] = []): ItemRow {
+  const readiness = readinessOf(item, { targets });
+  const axes = readiness.map((a) => ({ name: READINESS_AXIS_LABELS[a.axis], label: a.label, detail: a.explanation }));
   if (item.kind === 'custom') {
     return { key: stackItemKey(item), label: item.label, version: null, origin: item.canonicalSource ? `Custom · source ${item.canonicalSource}` : 'Custom', custom: true, summary: 'Custom · not reviewed', axes, gates: [], disconnect: null };
   }
   const e = stackEntry(item.entryId);
   const service = e !== undefined && sectionOf(e) === 'services';
-  const tested = readinessOf(item).find((a) => a.axis === 'tested')!.state === 'tested';
+  const testedAxis = readiness.find((a) => a.axis === 'tested')!;
+  const tested = testedAxis.state === 'tested';
   const native2 = (e?.targets ?? []).filter((t): t is StackTarget => t === 'ios' || t === 'android');
   return {
     key: stackItemKey(item), label: e?.label ?? item.entryId, version: item.version, custom: false,
     origin: item.origin === 'detected' && item.evidence ? `Detected in ${item.evidence.path}` : 'Declared',
-    summary: ['Selected', ...(service ? ['not connected'] : []), tested ? 'run by the pilot suite on web' : 'not tested'].join(' · '),
+    summary: ['Selected', ...(service ? ['not connected'] : []), tested ? `run by the pilot suite on ${testedAxis.label.replace(/^.*\((.*)\)$/, '$1')}` : 'not tested'].join(' · '),
     axes,
     gates: native2.length > 0 ? targetGates((e?.targets ?? []) as StackTarget[], { webChecks: 'not_run', native }) : [],
     disconnect: service ? { enabled: false, explanation: DISCONNECT } : null,
@@ -66,7 +68,7 @@ const STATE_EXPLANATION = {
 export function categoryRows(component: StackComponent, section: StackSection, native: NativeCapabilities = NO_NATIVE): CategoryRow[] {
   return STACK_CATEGORIES.filter((c) => c.section === section).map((c) => {
     const s = component.categories[c.id];
-    const items = s.state === 'selected' ? s.items.map((i) => itemRow(i, native)) : [];
+    const items = s.state === 'selected' ? s.items.map((i) => itemRow(i, native, component.targets)) : [];
     return {
       id: c.id, label: c.label, state: s.state, items, explanation: STATE_EXPLANATION[s.state],
       stateLabel: s.state === 'none' ? 'None · not used' : s.state === 'not_decided' ? 'Not decided' : `Selected (${items.length})`,
@@ -84,6 +86,8 @@ export interface ComponentRow {
   readonly gates: readonly TargetGate[];
   /** The package/build tools and runtimes recorded, or how those categories stand. */
   readonly toolchain: string;
+  /** Set when the component is labelled restricted or secret. */
+  readonly restricted: boolean;
 }
 
 const stateText = (c: StackComponent, id: StackCategoryId): string => {
@@ -100,6 +104,7 @@ export function componentRows(view: StackView): ComponentRow[] {
       path: c.path, name: c.name, targets: c.targets.map((t) => STACK_TARGET_LABELS[t]).join(', ') || 'None declared',
       decided: states.filter((s) => s.state !== 'not_decided').length, undecided: states.filter((s) => s.state === 'not_decided').length,
       gates: targetGates(c.targets, { webChecks: 'not_run', native: view.native }).filter((g) => g.state === 'incomplete' || g.state === 'not_assessed'),
+      restricted: c.classification === 'restricted' || c.classification === 'secret',
       toolchain: `Package and build tools: ${stateText(c, 'package_build')} · Runtime: ${stateText(c, 'runtimes')}`,
     };
   });

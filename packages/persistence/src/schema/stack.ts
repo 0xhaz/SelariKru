@@ -4,13 +4,16 @@ import { projects } from './projects.ts';
 
 /**
  * A project's stack settings (docs/framework-tool-catalog.md §3): components, their per-category selections and the latest static detection. Metadata only: no column
- * holds a credential, a connection or a command in effect. The row is the project's stack lock, and `revision` rises with every owner write, so a stale write is refused.
+ * holds a credential, a connection or a command in effect. The row is the project's stack lock, and `revision` rises with every owner write, so a stale owner write is refused.
  */
 export const projectStacks = pgTable(
   'project_stacks',
   {
     ...scope(),
+    /** Rises with every owner write. An owner's write names the revision it read; a detection never moves it. */
     revision: integer('revision').notNull().default(0),
+    /** Rises with every stored detection, separately, so a runner's report never makes an owner's edit stale. */
+    detectionRevision: integer('detection_revision').notNull().default(0),
     /** The catalog version the document was written against. */
     catalogVersion: text('catalog_version').notNull(),
     /** A `StackDocument`: components with every category explicit (Not decided, None or a selection), and the latest detection with each item's state. */

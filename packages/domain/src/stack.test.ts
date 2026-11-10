@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { allowedUseFor, buildContextBundle, compileBrain, type BrainSourceRevision } from './brain.ts';
 import {
   applyStackAction, detectStack, emptyStack, isStackDetectionPath, normalizeStackLabel, PILOT_EVIDENCE, readinessOf, resolveStackLabel, STACK_CATALOG, STACK_CATEGORIES,
-  StackDocumentSchema, stackBrainSources, stackEntry, targetGates, type StackDocument,
+  StackDetectionRecordSchema, StackDocumentSchema, stackBrainSources, stackEntry, targetGates, type StackDocument,
 } from './stack.ts';
 
 /** The seed tables of docs/framework-tool-catalog.md §4 and §5, copied as written. Every label must be selectable. */
@@ -172,13 +172,48 @@ describe('stack catalog: readiness is several axes and honest about what was tes
   const axis = (label: string, name: string) => readinessOf(item(label)).find((a) => a.axis === name)!;
 
   it('every seed entry starts not tested, except what the pilot verifier suite runs, which cites that evidence', () => {
-    const tested = STACK_CATALOG.filter((e) => readinessOf({ kind: 'catalog', entryId: e.id, version: null, origin: 'declared', evidence: null }).find((a) => a.axis === 'tested')!.state === 'tested').map((e) => e.id).sort();
+    // Each entry at the version the pilot pinned, on a web and server component: only what the suite runs reads as tested.
+    const pinned = (id: string) => PILOT_EVIDENCE.find((p) => p.entryId === id)?.version ?? '1.0.0';
+    const tested = STACK_CATALOG.filter((e) => readinessOf({ kind: 'catalog', entryId: e.id, version: pinned(e.id), origin: 'declared', evidence: null }, { targets: ['web', 'server'] }).find((a) => a.axis === 'tested')!.state === 'tested').map((e) => e.id).sort();
     expect(tested).toEqual(['express', 'nodejs', 'playwright', 'pnpm', 'react', 'sqlite', 'typescript', 'vite', 'vitest']);
     // The pilot's API is Express; Fastify is the control plane's own stack and has not been run by the suite.
     expect(axis('Fastify', 'tested').state).toBe('not_tested');
     expect(axis('Next.js', 'tested')).toMatchObject({ state: 'not_tested', label: 'Not tested' });
     const vitest = axis('Vitest', 'tested');
     expect(vitest.evidence).toEqual([expect.objectContaining({ suiteId: 'feedback-board', platform: 'web', version: '5.1.0', path: 'services/verifier/suites/feedback-board/manifest.json' })]);
+  });
+
+  it('tested needs the pinned version and a target the pilot ran: a mismatch cites what ran instead', () => {
+    const tested = (version: string | null, targets: ('web' | 'server' | 'ios' | 'android' | 'desktop')[] | undefined) =>
+      readinessOf({ kind: 'catalog', entryId: 'react', version, origin: 'declared', evidence: null }, targets === undefined ? {} : { targets }).find((a) => a.axis === 'tested')!;
+    expect(tested('19.3.1', ['web'])).toMatchObject({ state: 'tested', label: 'Run by the pilot suite (web)' });
+    // Another version: not tested, and says what did run.
+    const old = tested('16.0.0', ['web']);
+    expect(old).toMatchObject({ state: 'not_tested', label: 'Not tested' });
+    expect(old.explanation).toMatch(/pilot ran 19\.3\.1 on web/i);
+    expect(old.evidence).toEqual([expect.objectContaining({ version: '19.3.1' })]);
+    // A range is not the pinned version.
+    expect(tested('^19.0.0', ['web']).state).toBe('not_tested');
+    // The right version on a component that does not build for web.
+    const ios = tested('19.3.1', ['ios']);
+    expect(ios.state).toBe('not_tested');
+    expect(ios.explanation).toMatch(/pilot ran 19\.3\.1 on web/i);
+    expect(tested('19.3.1', undefined).state).toBe('not_tested');
+    // No version selected: the pilot's run is reported, never plain tested.
+    expect(tested(null, ['web'])).toMatchObject({ state: 'not_tested', label: 'Pilot ran 19.3.1 on web' });
+    // A pinned major line accepts its own versions only.
+    const node = (v: string) => readinessOf({ kind: 'catalog', entryId: 'nodejs', version: v, origin: 'declared', evidence: null }, { targets: ['server'] }).find((a) => a.axis === 'tested')!.state;
+    expect(node('24.x')).toBe('tested');
+    expect(node('24.11.0')).toBe('tested');
+    expect(node('>=24 <25')).toBe('tested');
+    expect(node('22.0.0')).toBe('not_tested');
+  });
+
+  it('MCP discovery alone never makes a connector usable', () => {
+    const c = readinessOf({ kind: 'catalog', entryId: 'stripe', version: null, origin: 'declared', evidence: null }, { connection: { discovered: true } }).find((a) => a.axis === 'connector')!;
+    expect(c).toMatchObject({ state: 'unverified', label: 'Discovered · not usable' });
+    expect(c.explanation).toMatch(/authenticated, scoped connection/i);
+    expect(readinessOf({ kind: 'catalog', entryId: 'stripe', version: null, origin: 'declared', evidence: null }, { connection: { discovered: true } }).find((a) => a.axis === 'auth')!.state).toBe('not_connected');
   });
 
   it('the pilot evidence matches the verifier suite manifest and the starter it builds, so it cannot drift silently', () => {
@@ -241,6 +276,13 @@ describe('stack selections: per component, None is not Not decided', () => {
   };
   const withComponent = (path: string, name: string, targets: ('web' | 'server' | 'ios' | 'android' | 'desktop')[]) => (doc: StackDocument) => ok(doc, { kind: 'component.upsert', path, name, targets });
 
+  it('a stored document from a newer catalog keeps its known categories: unknown ones are dropped, not fatal', () => {
+    const p = StackDocumentSchema.safeParse({ components: [{ path: '.', name: 'x', targets: [], categories: { future_cat: { state: 'none' }, payments: { state: 'none' } } }], detection: null });
+    expect(p.success).toBe(true);
+    expect(p.success && p.data.components[0]!.categories.payments).toEqual({ state: 'none' });
+    expect(p.success && 'future_cat' in p.data.components[0]!.categories).toBe(false);
+  });
+
   it('a new component has every category Not decided; None is stored, read and reported as a different state', () => {
     const doc = withComponent('apps/web', 'Web', ['web'])(emptyStack());
     const web = doc.components[0]!;
@@ -300,12 +342,13 @@ describe('stack selections: per component, None is not Not decided', () => {
     const compilation = compileBrain({ revisions, revocations: [], kept: new Set(), previous: [], version: 1, generatedAt: '2026-11-10T08:00:00.000Z' });
     const bundle = (paths: string[]) => buildContextBundle({ compilation, revisions, revocations: [], sourceHead: seq, destination: 'local', streamable: false, task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: [], dependsOn: [], paths } });
     const web = bundle(['apps/web/src']);
-    expect(web.claims.map((c) => c.key).sort()).toEqual(['component:apps/web', 'component:apps/web:frameworks']);
-    expect(web.claims.find((c) => c.key === 'component:apps/web:frameworks')).toMatchObject({ text: expect.stringContaining('Next.js'), citations: [{ sourceId: 'stack:apps/web', revision: 1, anchor: 'stack/apps/web/frameworks' }] });
-    expect(web.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks', reason: 'out_of_scope' }]));
+    expect(web.claims.map((c) => c.key).sort()).toEqual(['component:apps/web', 'component:apps/web:frameworks:nextjs']);
+    expect(web.claims.find((c) => c.key === 'component:apps/web:frameworks:nextjs')).toMatchObject({ text: expect.stringContaining('Next.js'), citations: [{ sourceId: 'stack:apps/web', revision: 1, anchor: 'stack/apps/web/frameworks/nextjs' }] });
+    expect(web.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks:expo', reason: 'out_of_scope' }]));
     expect(JSON.stringify(web.claims)).not.toMatch(/FastAPI|Expo/);
     const mobile = bundle(['apps/mobile']);
-    expect(mobile.claims.find((c) => c.key === 'component:apps/mobile:frameworks')!.text).toMatch(/Expo.*React Native/);
+    expect(mobile.claims.find((c) => c.key === 'component:apps/mobile:frameworks:expo')!.text).toMatch(/Expo/);
+    expect(mobile.claims.find((c) => c.key === 'component:apps/mobile:frameworks:react-native')!.text).toMatch(/React Native/);
     expect(JSON.stringify(mobile.claims)).not.toMatch(/Next\.js|FastAPI/);
     const api = bundle(['services/api']);
     expect(api.claims.find((c) => c.key === 'component:services/api:payments')!.text).toMatch(/None/);
@@ -324,12 +367,50 @@ describe('stack selections: per component, None is not Not decided', () => {
     expect(b.claims.map((c) => c.key)).toEqual(['stack:1']);
   });
 
+  it('the Brain text says what the pilot ran, never that a mismatched selection is tested', () => {
+    let doc = withComponent('apps/mobile', 'Mobile', ['ios'])(emptyStack());
+    doc = ok(doc, { kind: 'item.add', path: 'apps/mobile', category: 'frameworks', item: { kind: 'catalog', entryId: 'react', version: '17.0.2' } });
+    doc = withComponent('apps/web', 'Web', ['web'])(doc);
+    doc = ok(doc, { kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'react', version: '19.3.1' } });
+    const [mobile, web] = stackBrainSources(doc);
+    const text = (s: typeof mobile) => s!.sections.find((x) => x.key?.endsWith(':react'))!.text;
+    expect(text(mobile)).toMatch(/not tested; the pilot ran 19\.3\.1 on web/);
+    expect(text(mobile)).not.toMatch(/run on web by/);
+    expect(text(web)).toMatch(/19\.3\.1 .*run on web by the pilot verifier suite at 19\.3\.1/);
+  });
+
+  it('a category with many detected entries is never dropped as too large: one claim per entry', () => {
+    let doc = withComponent('apps/web', 'Web', ['web'])(emptyStack());
+    const ids = STACK_CATALOG.filter((e) => e.categories.includes('ui')).slice(0, 15).map((e) => e.id);
+    const long = `apps/web/${'deeply/nested/'.repeat(10)}package.json`;
+    doc = { ...doc, detection: { commit: 'c'.repeat(40), detectedAt: '2026-11-10T08:00:00.000Z', runnerId: 'r', commands: [], skipped: [], items: ids.map((id) => ({ detectionId: `det:apps/web:${id}`, componentPath: 'apps/web', entryId: id, version: '1.2.3-beta.4+build.5678', evidence: { path: long, detail: `dependencies.${id} 1.2.3-beta.4+build.5678` }, state: 'proposed' as const })) } };
+    for (const id of ids) doc = ok(doc, { kind: 'detection.confirm', detectionId: `det:apps/web:${id}` });
+    let seq = 0;
+    const revisions: BrainSourceRevision[] = stackBrainSources(doc).map((s) => ({
+      ...s, revision: 1, kind: 'stack', standing: 'accepted', classification: 'internal', allowedUse: allowedUseFor('internal'), derivedFrom: [], taskId: null,
+      provenance: { origin: 'owner', ref: 'stack@1', recordedBy: 'owner' }, contentSha256: 'a'.repeat(64), seq: (seq += 1), recordedAt: '2026-11-10T08:00:00.000Z',
+    }));
+    const compilation = compileBrain({ revisions, revocations: [], kept: new Set(), previous: [], version: 1, generatedAt: '2026-11-10T08:00:00.000Z' });
+    const b = buildContextBundle({ compilation, revisions, revocations: [], sourceHead: seq, destination: 'local', streamable: false, task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: [], dependsOn: [], paths: ['apps/web'] } });
+    expect(b.claims.filter((c) => c.key.startsWith('component:apps/web:ui:'))).toHaveLength(15);
+    expect(b.omissions.filter((o) => o.reason === 'too_large')).toEqual([]);
+  });
+
+  it('a component can be labelled restricted; its source carries that label, and a later upsert without one keeps it', () => {
+    let doc = ok(emptyStack(), { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'restricted' });
+    expect(doc.components[0]!.classification).toBe('restricted');
+    doc = ok(doc, { kind: 'component.upsert', path: 'services/billing', name: 'Billing API', targets: ['server'] });
+    expect(doc.components[0]).toMatchObject({ name: 'Billing API', classification: 'restricted' });
+    expect(stackBrainSources(doc)[0]!.classification).toBe('restricted');
+    expect(stackBrainSources(withComponent('apps/web', 'Web', ['web'])(emptyStack()))[0]!.classification).toBe('internal');
+  });
+
   it('the repository root component is in scope for every task', () => {
     let doc = withComponent('.', 'Repository', ['web'])(emptyStack());
     doc = ok(doc, { kind: 'item.add', path: '.', category: 'package_build', item: { kind: 'catalog', entryId: 'pnpm' } });
     const s = stackBrainSources(doc);
     expect(s[0]!.sourceId).toBe('stack:.');
-    expect(s[0]!.sections.map((x) => x.key)).toContain('component:.:package_build');
+    expect(s[0]!.sections.map((x) => x.key)).toContain('component:.:package_build:pnpm');
   });
 });
 
@@ -376,6 +457,15 @@ describe('static detection: manifests, lockfiles and config, never scripts', () 
     const r = detectStack([{ path: 'package.json', content: '{not json' }, { path: 'a/package.json', content: 'x'.repeat(300_000) }]);
     expect(r.items).toEqual([]);
     expect(r.skipped).toEqual([{ path: 'a/package.json', reason: 'too_large' }, { path: 'package.json', reason: 'unreadable' }]);
+  });
+
+  it('a path with control or bidi characters is never read or reported raw, so one odd file name cannot spoil a report', () => {
+    expect(isStackDetectionPath('a\u001b[31m/package.json')).toBe(false);
+    expect(isStackDetectionPath('apps/\u202eweb/package.json')).toBe(false);
+    const r = detectStack([{ path: 'a\u001b[31m/package.json', content: '{}' }, { path: 'vite.config.<b>x</b>' }, { path: 'package.json', content: JSON.stringify({ dependencies: { react: '19.3.1' } }) }]);
+    expect(r.items.map((i) => i.entryId)).toEqual(['react']);
+    for (const s of r.skipped) expect(s.path).toMatch(/^[\x20-\x7e]+$/);
+    expect(StackDetectionRecordSchema.shape.skipped.safeParse(r.skipped).success).toBe(true);
   });
 
   it('reads only named manifest, lockfile and config paths, never vendored trees or VCS metadata', () => {

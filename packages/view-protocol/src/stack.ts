@@ -4,8 +4,12 @@ import { z } from 'zod';
 /** A project's stack settings as the server reports them. Metadata only: no credential, connection or command in effect is part of it. */
 export const StackViewSchema = z.object({
   projectId: z.string(),
-  /** Every write names the revision it was made against; a stale one is refused. */
+  /** Every owner write names the revision it was made against; a stale one is refused. */
   revision: z.number().int().min(0),
+  /** Rises with each stored detection, separately from the owner's revision. */
+  detectionRevision: z.number().int().min(0),
+  /** The stored document could not be read by this build: it is shown as empty and every write is refused. */
+  unreadable: z.boolean(),
   catalogVersion: z.string(),
   document: StackDocumentSchema,
   updatedBy: z.string().nullable(),

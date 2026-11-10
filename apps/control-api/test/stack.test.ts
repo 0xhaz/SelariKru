@@ -136,7 +136,7 @@ describe('stack settings: selections are metadata only', () => {
 
 describe('stack settings feed the Project Brain as a cited source, scoped per component', () => {
   it('an owner write compiles the Brain; each worker gets only its component\'s stack, cited, and the records reader version moved', async () => {
-    expect(RECORDS_READER_VERSION).toBe('2');
+    expect(RECORDS_READER_VERSION).toBe('3');
     await seedTask(t.db, specFor('T1', { title: 'Build the web screen', baseSha: BASE, allowedPaths: ['apps/web'] }), 'ready');
     await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
     await mustAct({ kind: 'component.upsert', path: 'apps/mobile', name: 'Mobile', targets: ['ios', 'android'] });
@@ -150,8 +150,8 @@ describe('stack settings feed the Project Brain as a cited source, scoped per co
     const [head] = await t.db.execute(sql`SELECT compiled_version FROM brain_heads`);
     expect(Number(head!['compiled_version'])).toBeGreaterThan(0);
     const brain = (await get(h.app, brainUrl)).body;
-    const web = claimsOf(brain).find((c: any) => c.key === 'component:apps/web:frameworks');
-    expect(web).toMatchObject({ page: 'architecture', status: 'current', text: expect.stringContaining('Next.js 15.1.0'), citations: [{ sourceId: 'stack:apps/web', anchor: 'stack/apps/web/frameworks' }] });
+    const web = claimsOf(brain).find((c: any) => c.key === 'component:apps/web:frameworks:nextjs');
+    expect(web).toMatchObject({ page: 'architecture', status: 'current', text: expect.stringContaining('Next.js 15.1.0'), citations: [{ sourceId: 'stack:apps/web', anchor: 'stack/apps/web/frameworks/nextjs' }] });
     const cite = web.citations[0];
     const src = await get(h.app, `${brainUrl}/sources/${encodeURIComponent(cite.sourceId)}/revisions/${cite.revision}`);
     expect(src.status).toBe(200);
@@ -162,18 +162,54 @@ describe('stack settings feed the Project Brain as a cited source, scoped per co
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     const ctx = claim.body.lease.context;
     const keys = ctx.claims.map((c: any) => c.key);
-    expect(keys).toEqual(expect.arrayContaining(['component:apps/web', 'component:apps/web:frameworks']));
+    expect(keys).toEqual(expect.arrayContaining(['component:apps/web', 'component:apps/web:frameworks:nextjs']));
     expect(keys.filter((k: string) => k.startsWith('component:apps/mobile') || k.startsWith('component:services/api'))).toEqual([]);
-    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks', reason: 'out_of_scope' }]));
+    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks:expo', reason: 'out_of_scope' }]));
   });
 
-  it('a restricted project\'s stack is never served to a streamable attempt, and is named only by its source', async () => {
-    await t.db.execute(sql`UPDATE projects SET classification = 'restricted'`);
-    await seedTask(t.db, specFor('T1', { title: 'Build', baseSha: BASE, allowedPaths: ['apps/web'], classification: 'restricted' }), 'ready');
+  it('a restricted component\'s stack is never served to a streamable attempt: the real claim omits it, named only by its source', async () => {
+    await seedTask(t.db, specFor('T1', { title: 'Build', baseSha: BASE, allowedPaths: ['apps/web', 'services/billing'] }), 'ready');
     await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
     await mustAct({ kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'nextjs' } });
+    await mustAct({ kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'restricted' });
+    await mustAct({ kind: 'item.add', path: 'services/billing', category: 'payments', item: { kind: 'custom', label: 'Acme ledger bridge', canonicalSource: null } });
     const brain = (await get(h.app, brainUrl)).body;
-    expect(brain.sources.find((s: any) => s.sourceId === 'stack:apps/web')).toMatchObject({ classification: 'restricted', allowedUse: ['local'] });
+    expect(brain.sources.find((s: any) => s.sourceId === 'stack:services/billing')).toMatchObject({ classification: 'restricted', allowedUse: ['local'] });
+    await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+    const { token } = await enrolRunner(h.app);
+    const claimed = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body;
+    const lease = claimed.lease;
+    expect(lease, JSON.stringify(claimed)).toMatchObject({ taskId: 'T1', streamable: true });
+    const ctx = lease.context;
+    const keys = ctx.claims.map((c: any) => c.key);
+    expect(keys).toContain('component:apps/web:frameworks:nextjs');
+    expect(keys.filter((k: string) => k.startsWith('component:services/billing'))).toEqual([]);
+    expect(JSON.stringify(ctx)).not.toContain('Acme ledger');
+    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'source', id: 'stack:services/billing', reason: 'restricted_for_destination' }]));
+    expect(JSON.stringify(ctx.omissions)).not.toContain('component:services/billing');
+  });
+});
+
+describe('stack settings: stored documents and revisions', () => {
+  it('a stored category this build does not know is dropped on read, and the rest is kept', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    await mustAct({ kind: 'category.set', path: 'apps/web', category: 'payments', state: 'none' });
+    await t.db.execute(sql`UPDATE project_stacks SET document = jsonb_set(document, '{components,0,categories,future_cat}', '{"state":"none"}')`);
+    const view = (await get(h.app, stackUrl)).body;
+    expect(view.unreadable).toBe(false);
+    expect(view.document.components[0].categories.payments).toEqual({ state: 'none' });
+    expect(view.document.components[0].categories.future_cat).toBeUndefined();
+  });
+
+  it('a stored document that cannot be read is never overwritten: writes are refused with stack_unreadable', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    await t.db.execute(sql`UPDATE project_stacks SET document = '{"components": "not a list", "detection": null}'::jsonb`);
+    const before = (await t.db.execute(sql`SELECT document::text AS d, revision FROM project_stacks`))[0];
+    const view = (await get(h.app, stackUrl)).body;
+    expect(view).toMatchObject({ unreadable: true, document: { components: [], detection: null } });
+    const r = await post(h.app, stackUrl, { expectedRevision: view.revision, action: { kind: 'component.upsert', path: '.', name: 'R', targets: [] } });
+    expect(r).toMatchObject({ status: 409, body: { error: { code: 'stack_unreadable' } } });
+    expect((await t.db.execute(sql`SELECT document::text AS d, revision FROM project_stacks`))[0]).toEqual(before);
   });
 });
 
@@ -215,6 +251,27 @@ describe('static detection from a runner: a proposal until the owner confirms it
     // A later detection of the same commit keeps what the owner settled.
     expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(200);
     expect((await get(h.app, stackUrl)).body.document.detection.items[0].state).toBe('confirmed');
+  });
+
+  it('a detection has its own revision: it never makes an owner\'s edit stale', async () => {
+    const { ref, token } = await lease();
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    const read = (await get(h.app, stackUrl)).body;
+    expect(read.detectionRevision).toBe(0);
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(200);
+    const after = (await get(h.app, stackUrl)).body;
+    expect(after).toMatchObject({ revision: read.revision, detectionRevision: 1 });
+    const edit = await post(h.app, stackUrl, { expectedRevision: read.revision, action: { kind: 'category.set', path: 'apps/web', category: 'payments', state: 'none' } });
+    expect(edit.status).toBe(200);
+    expect(edit.body).toMatchObject({ revision: read.revision + 1, detectionRevision: 1, document: { detection: { commit: BASE } } });
+  });
+
+  it('a detection for a stack that cannot be read is refused rather than overwriting it', async () => {
+    const { ref, token } = await lease();
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    await t.db.execute(sql`UPDATE project_stacks SET document = '{"components": 7}'::jsonb`);
+    const r = await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token));
+    expect(r).toMatchObject({ status: 409, body: { error: { code: 'stack_unreadable' } } });
   });
 
   it('is refused for work whose data stays on the device', async () => {

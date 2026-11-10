@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DataSourceException } from '@selarikru/view-protocol';
 import { createLiveDataSource } from '../src/index.ts';
 
-const STACK = { projectId: 'p', revision: 0, catalogVersion: '2026-11-10.1', document: { components: [], detection: null }, updatedBy: null, updatedAt: null, native: { ios: false, android: false } };
+const STACK = { projectId: 'p', revision: 0, detectionRevision: 0, unreadable: false, catalogVersion: '2026-11-10.1', document: { components: [], detection: null }, updatedBy: null, updatedAt: null, native: { ios: false, android: false } };
 
 function source(answer: (url: string) => Response) {
   const calls: { url: string; method: string; body: unknown }[] = [];

@@ -61,7 +61,7 @@ export const ERROR_CODES = [
   /** Stack settings: a write over a newer revision; no such component, selection or detection; an entry the catalog does not have or lists elsewhere; a duplicate or a
    * settled detection; a limit; a detection from work whose data stays on the device. */
   'stack_revision_conflict', 'stack_component_not_found', 'stack_item_not_found', 'stack_detection_not_found', 'stack_entry_unknown', 'stack_entry_wrong_category',
-  'stack_item_exists', 'stack_detection_settled', 'stack_limit', 'stack_detection_restricted',
+  'stack_item_exists', 'stack_detection_settled', 'stack_limit', 'stack_detection_restricted', 'stack_unreadable',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

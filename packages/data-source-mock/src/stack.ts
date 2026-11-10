@@ -45,7 +45,7 @@ export function createDemoStack(nowIso: (projectId: string) => string): DemoStac
   };
   const view = (projectId: string): StackView => {
     const s = stateOf(projectId);
-    return { projectId, revision: s.revision, catalogVersion: STACK_CATALOG_VERSION, document: structuredClone(s.document), updatedBy: s.updatedAt ? 'demo owner' : null, updatedAt: s.updatedAt, native: NO_NATIVE };
+    return { projectId, revision: s.revision, detectionRevision: 1, unreadable: false, catalogVersion: STACK_CATALOG_VERSION, document: structuredClone(s.document), updatedBy: s.updatedAt ? 'demo owner' : null, updatedAt: s.updatedAt, native: NO_NATIVE };
   };
   return {
     async get(projectId) { return view(projectId); },

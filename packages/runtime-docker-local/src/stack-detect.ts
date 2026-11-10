@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { detectStack, isStackDetectionPath, isStackManifestPath, STACK_DETECTION_MAX_BYTES, STACK_DETECTION_MAX_FILES, type StackDetectionFile, type StackDetectionReport } from '@selarikru/protocol';
+import { detectStack, isStackDetectionPath, reportablePath, isStackManifestPath, STACK_DETECTION_MAX_BYTES, STACK_DETECTION_MAX_FILES, type StackDetectionFile, type StackDetectionReport } from '@selarikru/protocol';
 import { BundleError, gitEnv, isExcludedPath, readBlobs } from './bundle.ts';
 
 const execFileP = promisify(execFile);
@@ -23,18 +23,18 @@ export async function readStackDetection(repoPath: string, sha: string): Promise
     const [mode, type, oid, size] = rec.slice(0, tab).trim().split(/\s+/);
     const path = rec.slice(tab + 1);
     if (!isStackDetectionPath(path) || isExcludedPath(path)) continue;
-    if (mode === '120000') { skipped.push({ path, reason: 'symlink' }); continue; }
+    if (mode === '120000') { skipped.push({ path: reportablePath(path), reason: 'symlink' }); continue; }
     if (type !== 'blob' || !oid || (mode !== '100644' && mode !== '100755')) continue;
     if (!isStackManifestPath(path)) { files.push({ path }); continue; }
     const bytes = Number(size);
-    if (!Number.isFinite(bytes) || bytes > STACK_DETECTION_MAX_BYTES) { skipped.push({ path, reason: 'too_large' }); continue; }
-    if (toRead.length >= STACK_DETECTION_MAX_FILES) { skipped.push({ path, reason: 'limit' }); continue; }
+    if (!Number.isFinite(bytes) || bytes > STACK_DETECTION_MAX_BYTES) { skipped.push({ path: reportablePath(path), reason: 'too_large' }); continue; }
+    if (toRead.length >= STACK_DETECTION_MAX_FILES) { skipped.push({ path: reportablePath(path), reason: 'limit' }); continue; }
     toRead.push({ path, oid });
   }
   const blobs = await readBlobs(repoPath, toRead.map((f) => f.oid));
   for (const f of toRead) {
     const buf = blobs.get(f.oid);
-    if (buf === undefined) { skipped.push({ path: f.path, reason: 'unreadable' }); continue; }
+    if (buf === undefined) { skipped.push({ path: reportablePath(f.path), reason: 'unreadable' }); continue; }
     files.push({ path: f.path, content: buf.toString('utf8') });
   }
   const r = detectStack(files);

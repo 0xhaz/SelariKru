@@ -1,0 +1,1 @@
+ALTER TABLE "project_stacks" ADD COLUMN "detection_revision" integer DEFAULT 0 NOT NULL;

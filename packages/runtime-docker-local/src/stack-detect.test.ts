@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { StackDetectionReportSchema } from '@selarikru/protocol';
 import { readStackDetection } from './stack-detect.ts';
 
 let root: string;
@@ -84,6 +85,20 @@ describe('static stack detection from git objects', () => {
     expect(r.skipped).toEqual(expect.arrayContaining([{ path: 'apps/web/package.json', reason: 'symlink' }]));
     expect(JSON.stringify(r)).not.toContain('node_modules');
     expect(JSON.stringify(r)).not.toContain('etc-link');
+  });
+
+  it('a file name with control or bidi characters never spoils the report: the rest is still sent and passes the server schema', async () => {
+    await put('apps/we\u0001b/package.json', JSON.stringify({ dependencies: { next: '15.0.0' } }));
+    await put('apps/\u202ex/package.json', JSON.stringify({ dependencies: { vue: '3' } }));
+    await symlink('../package.json', join(repo, 'odd\u001b[31m-package.json'));
+    await mkdir(join(repo, 'lnk\u0007'), { recursive: true });
+    await symlink('../package.json', join(repo, 'lnk\u0007/package.json'));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'odd names');
+    const r = await readStackDetection(repo, git('rev-parse', 'HEAD'));
+    expect(StackDetectionReportSchema.safeParse(r).success).toBe(true);
+    expect(r.items.map((i) => i.entryId)).toEqual(expect.arrayContaining(['react', 'stripe']));
+    expect(r.items.some((i) => i.entryId === 'nextjs' || i.entryId === 'vue')).toBe(false);
   });
 
   it('refuses a base that is not a full commit id', async () => {
