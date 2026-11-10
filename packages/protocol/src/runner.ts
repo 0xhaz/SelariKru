@@ -53,6 +53,8 @@ export const ResultRequestSchema = z
       z.object({ outcome: z.literal('completed'), headSha: CommitSha.optional(), changeManifestSha256: ManifestSha.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('failed'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       z.object({ outcome: z.literal('blocked'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
+      // The attempt never reached the worker: the sandbox could not be made ready. It is retried on the infrastructure budget and spends no repair.
+      z.object({ outcome: z.literal('infrastructure_failed'), reason: z.string().min(1).max(500), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
       // `operation` is one of the closed worker list; anything else is refused here. Absent is denied by policy.
       z.object({ outcome: z.literal('approval_requested'), reason: z.string().min(1).max(500), operation: WorkerApprovalOperationSchema.optional(), destination: WireDestination.optional(), reportedCostUsd: Cost, reportedUsage: ReportedUsage }).strict(),
     ]),

@@ -45,6 +45,14 @@ describe('runner result fields', () => {
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: 'abc123' } }).success).toBe(false);
   });
 
+  it('accepts an infrastructure failure with a reason, and only with a reason', () => {
+    const r = (result: object) => ResultRequestSchema.safeParse({ lease, result }).success;
+    expect(r({ outcome: 'infrastructure_failed', reason: 'provisioning_failed: x', reportedUsage: { setupSeconds: 3 } })).toBe(true);
+    expect(r({ outcome: 'infrastructure_failed' })).toBe(false);
+    expect(r({ outcome: 'infrastructure_failed', reason: '' })).toBe(false);
+    expect(r({ outcome: 'infrastructure_failed', reason: 'x', headSha: 'a'.repeat(40) })).toBe(false);
+  });
+
   it('accepts bounded usage numbers and rejects anything else', () => {
     const ok = { outcome: 'failed', reason: 'x', reportedUsage: { inputTokens: 5, outputTokens: null, setupSeconds: 2.5, costBasis: 'list' } };
     expect(ResultRequestSchema.safeParse({ lease, result: ok }).success).toBe(true);

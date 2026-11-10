@@ -57,6 +57,12 @@ describe('usage ledger', () => {
     expect(tokensByRole['lead']!.input_tokens).toEqual({ value: '900', provenance: 'observed', unavailableEntries: 0 });
   });
 
+  it('time spent setting up a toolchain counts as setup even when that setup failed', async () => {
+    await claimAndPublish('a', 'backend', { outcome: 'infrastructure_failed', reason: 'provisioning_failed: x', reportedUsage: { setupSeconds: 20 } }, 100);
+    const { workerSeconds } = await summary();
+    expect(workerSeconds.byPhase.setup).toMatchObject({ value: '20', provenance: 'estimated' });
+  });
+
   it('worker-hours include setup, idle, abandoned', async () => {
     await claimAndPublish('a', 'backend', { outcome: 'completed', reportedUsage: { setupSeconds: 20, idleSeconds: 5 } }, 100);
 

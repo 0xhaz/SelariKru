@@ -55,6 +55,15 @@ export const sentence = (code: string): string => {
 };
 const stripPrefix = (code: string): string => code.replace(/^(policy_denied|approval_required):/, '');
 
+const INFRA_LIMIT = 'infra_retry_limit_exhausted';
+const INFRA_HEAD = 'infrastructure';
+const PROVISIONING = /^provisioning_failed:\s*/;
+/** Never reads as the worker's fault: the attempt did not get as far as a worker. */
+const infrastructureExplanation = (arg: string): string => {
+  const what = arg.replace(PROVISIONING, '').trim();
+  return `The sandbox could not be set up: ${what || 'no reason was reported'}. This is an infrastructure failure, not the worker's, and it does not use a repair attempt.`;
+};
+
 /** Plain words for the codes the scheduler and policy engine emit. An unlisted code is spelled out, and the raw code is always in details. */
 const EXPLAIN: Readonly<Record<string, string>> = {
   restricted_data_cloud_destination: 'Restricted data may not reach a cloud destination.',
@@ -70,6 +79,7 @@ const EXPLAIN: Readonly<Record<string, string>> = {
   no_free_slot: 'No eligible slot is free.',
   cloud_start: 'Starting a cloud worker needs your approval.',
   'configured_require_approval:start_cloud_worker': 'Starting a cloud worker needs your approval.',
+  infra_retry_limit_exhausted: 'The retries for infrastructure failures ran out, so no further attempt will start.',
   execution_conflicts_with_role_pin: 'The task\'s execution setting conflicts with where its role is pinned.',
 };
 
@@ -79,6 +89,8 @@ export function explain(code: string): string {
   if (known) return known;
   const [head, ...rest] = bare.split(':');
   const arg = rest.join(':');
+  if (head === INFRA_HEAD) return infrastructureExplanation(arg);
+  if (head === 'toolchain_unresolved') return `The repository's Node toolchain could not be resolved: ${arg.trim()}.`;
   if (head === 'resource_conflict') return arg ? `Another task holds a resource this one needs (${arg}).` : 'Another task holds a resource this one needs.';
   if (head === 'no_provider_detected') return 'No runner has reported an installed harness, so no model can run.';
   if (head === 'model_not_on_runner') return `The runner that tried this task cannot launch ${arg || 'its model'}. A runner that has it can still take the task.`;
@@ -209,7 +221,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
       // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
       const nextAction = modelNextAction(code, task.status) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.');
       return make({
-        ...base, kind: 'blocked', title: `${name}: blocked`, detail: explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction,
+        ...base, kind: 'blocked', title: `${name}: blocked`, detail: code === INFRA_LIMIT && lastFailure ? `${explain(code)} The last attempt ended with: ${explain(lastFailure)}` : explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction: code === INFRA_LIMIT ? 'Check the runner\'s log and the sandbox\'s network access, then replan or cancel this task.' : nextAction,
       });
     }
   }
@@ -231,10 +243,19 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
     const expiredRequestShown = blockCode === 'approval_expired' && Object.values(snapshot.approvals).some((a) => a.taskId === task.taskId && approvalStateAt(a, nowMs) === 'expired');
     if (blockCode !== null && !expiredRequestShown) {
       // The block only says the repairs ran out. What stopped them is on the last attempt, and it is what the operator has to fix.
-      const lastFailure = Object.values(snapshot.attempts).filter((a) => a.taskId === task.taskId && a.outcome === 'failed' && a.exitReason !== null).sort((a, b) => b.number - a.number)[0]?.exitReason ?? null;
+      const lastFailure = Object.values(snapshot.attempts).filter((a) => a.taskId === task.taskId && a.exitReason !== null && (a.outcome === 'failed' || (blockCode === INFRA_LIMIT && a.outcome === 'interrupted'))).sort((a, b) => b.number - a.number)[0]?.exitReason ?? null;
       const item = blockItem(task, blockCode, affected(task), lastFailure);
       // Only then does the Decisions card for this block exist.
       items.push(blockCode === 'reverification_failed' && snapshot.runs[task.runId]?.failedRebuildMainMoved === true ? { ...item, decisionId: `reverify:${task.runId}` } : item);
+    }
+    // The scheduler is already retrying this, so it is shown and nobody is asked to do anything. Only the latest attempt counts: one that ran since has its own story.
+    const latest = Object.values(snapshot.attempts).filter((a) => a.taskId === task.taskId).sort((a, b) => b.number - a.number)[0];
+    if (task.status === 'ready' && latest?.outcome === 'interrupted' && latest.exitReason?.startsWith(`${INFRA_HEAD}:`)) {
+      items.push(make({
+        id: `infra:${task.taskId}`, kind: 'information', code: latest.exitReason, since: latest.endedAt ?? task.enteredStatusAt, affectedTaskIds: affected(task), owner: 'Scheduler', needsOperator: false,
+        title: `${titleOf(task)}: retrying after a setup failure`, detail: explain(latest.exitReason),
+        consequence: 'It starts again by itself, up to the infrastructure retry limit.', nextAction: 'No action needed unless it keeps failing.',
+      }));
     }
     const latestCheck = latestCheckOf(snapshot, task.taskId);
     if (atFailedGate(task, latestCheck)) {

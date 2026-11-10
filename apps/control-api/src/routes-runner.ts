@@ -1,8 +1,8 @@
 import { TaskSpecSchema } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, TerminalUploadRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
-import type { Lease, LeaseConflict, PublishResult, Runner } from '@selarikru/workflow';
-import { and, eq, sql } from 'drizzle-orm';
+import { INFRASTRUCTURE_REASON_PREFIX, type Lease, type LeaseConflict, type PublishResult, type Runner } from '@selarikru/workflow';
+import { and, desc, eq, lt, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
 import { bearerToken, newSecret, PAIRING_CODE_PREFIX, RUNNER_TOKEN_PREFIX, sha256Hex } from './auth.ts';
@@ -70,8 +70,10 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   /** Why the last attempt at this task revision did not stand, for the repair's TASK.md: the verifier's verdict when there is one, else the attempt's own reason. Redacted and bounded. */
   async function priorFailureOf(lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptNumber: number }): Promise<string | null> {
-    const [prior] = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason }).from(schema.attempts).where(and(
-      eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.taskId, lease.taskId), eq(schema.attempts.revision, lease.revision), eq(schema.attempts.attemptNumber, lease.attemptNumber - 1)));
+    const earlier = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason }).from(schema.attempts).where(and(
+      eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.taskId, lease.taskId), eq(schema.attempts.revision, lease.revision), lt(schema.attempts.attemptNumber, lease.attemptNumber))).orderBy(desc(schema.attempts.attemptNumber));
+    // A sandbox that could not be set up says nothing about the worker's code, so a repair is told about the last attempt that actually ran.
+    const prior = earlier.find((a) => !a.exitReason?.startsWith(INFRASTRUCTURE_REASON_PREFIX));
     if (!prior) return null;
     const [verdict] = await db.execute(sql`SELECT payload FROM events WHERE tenant_id = ${lease.tenantId} AND project_id = ${lease.projectId} AND attempt_id = ${prior.attemptId} AND type = 'verification.failed' ORDER BY sequence DESC LIMIT 1`);
     const payload = (verdict?.['payload'] ?? null) as { summary?: unknown; failedChecks?: unknown } | null;

@@ -6,3 +6,4 @@ export * from './guards.ts';
 export * from './launcher.ts';
 export * from './names.ts';
 export * from './sbx.ts';
+export * from './toolchain.ts';

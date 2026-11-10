@@ -360,6 +360,102 @@ describe('the base .gitignore at the completion gate', () => {
   });
 });
 
+describe('toolchain provisioning', () => {
+  const NODE_PROJECT = { '.nvmrc': '24\n', 'package.json': JSON.stringify({ packageManager: 'pnpm@9.12.2' }), 'pnpm-lock.yaml': 'lockfileVersion: 9\n' };
+  const fail = (step: string, code: number) => ({ provision: (s: string) => (s === step ? { code, stdout: '', stderr: `boom in ${step}`, timedOut: false } : undefined) });
+  const execSteps = (world: World) => world.sbx.calls.filter((c) => c[0] === 'exec').map((c) => /selarikru-provision:(\w+)/.exec(c.join(' '))?.[1]).filter(Boolean);
+
+  it('installs the toolchain after the sandbox exists and before the harness starts, and launches with it on PATH', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('completed');
+    expect(execSteps(w)).toEqual(['node', 'pnpm', 'deps']);
+    const order = w.sbx.calls.map((c) => c[0]);
+    expect(order.indexOf('create')).toBeLessThan(order.indexOf('exec'));
+    const agent = w.sbx.streams.at(-1)!;
+    expect(agent.args.join(' ')).toContain('export PATH="$HOME/.node/bin:$PATH";');
+    expect(w.logs.join('\n')).toMatch(/toolchain ready: node 24\.\d+\.\d+ pnpm 9\.12\.2 arch arm64/);
+  });
+
+  it('records the time as setup', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: { provision: async () => { await new Promise((r) => setTimeout(r, 30)); return undefined; } } });
+    await runAttempt(deps, w.lease);
+    const usage = (w.api.published[0] as { reportedUsage: { setupSeconds: number } }).reportedUsage;
+    expect(usage.setupSeconds).toBeGreaterThanOrEqual(0.03);
+  });
+
+  it('a repository with no toolchain pins runs nothing extra', async () => {
+    const { w, deps } = await setup({});
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+    expect(execSteps(w)).toEqual([]);
+  });
+
+  it('a pin that cannot be resolved blocks before any sandbox exists', async () => {
+    const { w, deps } = await setup({ baseFiles: { ...NODE_PROJECT, '.nvmrc': 'lts/*\n' } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('blocked');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/^toolchain_unresolved: .*\.nvmrc/);
+    expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
+  });
+
+  it.each([['node', 66, /SHA-256/], ['pnpm', 70, /could not install pnpm/], ['deps', 1, /frozen-lockfile/]] as const)('%s failing is an infrastructure failure, the harness never starts, the sandbox is removed', async (step, code, reason) => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: fail(step, code) });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('infrastructure_failed');
+    expect(w.api.published).toHaveLength(1);
+    const published = w.api.published[0] as { outcome: string; reason: string; reportedUsage?: { setupSeconds: number } };
+    expect(published.outcome).toBe('infrastructure_failed');
+    expect(published.reason).toMatch(/^provisioning_failed: /);
+    expect(published.reason).toMatch(reason);
+    expect(published.reason).not.toContain('boom');
+    expect(published.reportedUsage?.setupSeconds).toEqual(expect.any(Number));
+    expect(w.sbx.streams).toHaveLength(0);
+    expect([...w.sbx.sandboxes.keys()]).toEqual(['hq-askwell-jim']);
+    expect(w.logs.join('\n')).toContain('boom in');
+  });
+
+  it('secrets in the guest\'s stderr stay out of the runner\'s log', async () => {
+    const leak = 'ghp_012345678901234567890123456789012345';
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: { provision: () => ({ code: 1, stdout: '', stderr: `token ${leak}`, timedOut: false }) } });
+    await runAttempt(deps, w.lease);
+    expect(w.logs.join('\n')).not.toContain(leak);
+  });
+
+  it('nothing from provisioning reaches the terminal feed', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: { provision: (s) => (s === 'deps' ? { code: 0, stdout: 'Packages: +200\nghp_012345678901234567890123456789012345', stderr: '', timedOut: false } : undefined) } });
+    await runAttempt(deps, w.lease);
+    for (const call of (w.api.terminal as unknown as { mock: { calls: unknown[][] } }).mock.calls) expect(JSON.stringify(call)).not.toContain('Packages');
+  });
+
+  it('a timeout during setup is an infrastructure failure, not the worker\'s', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } }, fake: { provision: async (_s, _a, o) => {
+      await new Promise<void>((r) => o.signal?.addEventListener('abort', () => r(), { once: true }));
+      return { code: null, stdout: '', stderr: '', timedOut: false };
+    } } }, { timeoutScale: 0.4 });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('infrastructure_failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout/);
+  });
+
+  it('a cancel during setup stops it and is never reported as a setup failure', async () => {
+    let beats = 0;
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, heartbeat: async () => ({ cancelRequested: (beats += 1) >= 1 }), fake: { provision: async (_s, _a, o) => {
+      await new Promise<void>((r) => o.signal?.addEventListener('abort', () => r(), { once: true }));
+      return { code: null, stdout: '', stderr: '', timedOut: false };
+    } } });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/cancel/);
+    expect(w.sbx.streams).toHaveLength(0);
+  });
+
+  it('a runtime that cannot provision does not launch a worker that cannot build', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT });
+    const runtime = new Proxy(w.runtime, { get: (t, k) => (k === 'provision' ? undefined : Reflect.get(t, k, t)) }) as typeof w.runtime;
+    expect((await runAttempt({ ...deps, runtime }, w.lease)).outcome).toBe('infrastructure_failed');
+    expect(w.sbx.streams).toHaveLength(0);
+  });
+});
+
 describe('TASK.md', () => {
   const spec = (over: object) => ({ taskId: 't', revision: 1, role: 'backend', title: 'API', requirementIds: [], acceptanceCheckIds: [], allowedPaths: ['server', 'migrations', 'tests/backend'], ...over }) as never;
 
@@ -371,6 +467,19 @@ describe('TASK.md', () => {
     expect(file).toMatch(/backend worker/i);
     expect(file).toMatch(/frontend worker/i);
     expect(file).toMatch(/dist\//);
+  });
+
+  it('tells the worker the toolchain and dependencies are ready, and how to build and test', () => {
+    const file = renderTaskFile(spec({}), { toolchain: { nodeVersion: '24.22.1', pnpmVersion: '9.12.2' } });
+    expect(file).toMatch(/Node 24\.22\.1/);
+    expect(file).toMatch(/pnpm 9\.12\.2/);
+    expect(file).toMatch(/dependencies are installed/i);
+    expect(file).toContain('pnpm build');
+    expect(file).toContain('pnpm test');
+  });
+
+  it('says nothing about a toolchain when none was set up', () => {
+    expect(renderTaskFile(spec({}))).not.toMatch(/## Toolchain/);
   });
 
   it('a generic task gets no pilot text', () => {

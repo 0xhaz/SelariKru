@@ -9,6 +9,12 @@ export interface SbxResult {
   readonly timedOut: boolean;
 }
 
+export interface SbxRunOptions {
+  readonly timeoutMs?: number;
+  /** Kills the host client when aborted. It does not stop anything inside the sandbox: a caller using this destroys the sandbox afterwards. */
+  readonly signal?: AbortSignal;
+}
+
 export interface SbxStream {
   readonly output: AsyncIterable<string>;
   readonly stdin: { write(data: string): void; end(): void };
@@ -18,7 +24,7 @@ export interface SbxStream {
 
 /** The only door to the `sbx` binary. Unit tests inject a fake; production uses `NodeSbxRunner`. */
 export interface SbxCommandRunner {
-  run(args: readonly string[], opts?: { timeoutMs?: number }): Promise<SbxResult>;
+  run(args: readonly string[], opts?: SbxRunOptions): Promise<SbxResult>;
   stream(args: readonly string[]): SbxStream;
 }
 
@@ -83,10 +89,13 @@ export function assertSafeSbxArgs(args: readonly string[]): void {
 export class NodeSbxRunner implements SbxCommandRunner {
   constructor(private readonly bin = 'sbx') {}
 
-  run(args: readonly string[], opts: { timeoutMs?: number } = {}): Promise<SbxResult> {
+  run(args: readonly string[], opts: SbxRunOptions = {}): Promise<SbxResult> {
     assertSafeSbxArgs(args);
     return new Promise((resolve) => {
       const child = spawn(this.bin, ['--no-input', ...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+      const onAbort = (): void => void child.kill('SIGKILL');
+      if (opts.signal?.aborted) onAbort();
+      else opts.signal?.addEventListener('abort', onAbort, { once: true });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let timedOut = false;
@@ -102,6 +111,7 @@ export class NodeSbxRunner implements SbxCommandRunner {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        opts.signal?.removeEventListener('abort', onAbort);
         resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') + extraErr, timedOut });
       };
       child.stdout.on('data', (b: Buffer) => out.push(b));

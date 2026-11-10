@@ -7,7 +7,7 @@ import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, op
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { resolveAssignment, routeRefusal, worstCaseHold, type WorstCaseHold } from './assignment.ts';
-import { leaseDeadline } from './lease.ts';
+import { INFRASTRUCTURE_REASON_PREFIX, leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -52,18 +52,19 @@ function resolveLimits(caps: Caps): ClaimLimits | string {
   return caps as ClaimLimits;
 }
 
-const isLeaseExpiry = (a: AttemptRow): boolean => a.outcome === 'interrupted' && a.exitReason === 'lease_expired';
+/** The attempts the infrastructure retry limit counts: a lapsed lease, or a sandbox that could not be made ready. */
+const isInfraInterruption = (a: AttemptRow): boolean => a.outcome === 'interrupted' && (a.exitReason === 'lease_expired' || a.exitReason?.startsWith(INFRASTRUCTURE_REASON_PREFIX) === true);
 
 /**
  * Infrastructure retries for this task revision, counted from attempt rows. They are separate from the repair count.
  * The earliest retry follows the last expiry by a delay that doubles per expiry, capped at the configured maximum.
  */
 function infraRetryDecision(attempts: readonly AttemptRow[], limits: ClaimLimits, now: Date): 'allowed' | 'backoff' | 'exhausted' {
-  const expiries = attempts.filter(isLeaseExpiry).length;
+  const expiries = attempts.filter(isInfraInterruption).length;
   if (expiries === 0) return 'allowed';
   if (expiries > limits.maxInfraRetries) return 'exhausted';
   const last = attempts[attempts.length - 1];
-  if (!last || !isLeaseExpiry(last) || last.endedAt === null) return 'allowed';
+  if (!last || !isInfraInterruption(last) || last.endedAt === null) return 'allowed';
   const delaySeconds = Math.min(limits.infraRetryBackoffMaxSeconds, limits.infraRetryBackoffSeconds * 2 ** (expiries - 1));
   return now.getTime() < last.endedAt.getTime() + delaySeconds * 1000 ? 'backoff' : 'allowed';
 }

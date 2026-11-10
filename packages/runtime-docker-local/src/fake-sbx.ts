@@ -1,5 +1,5 @@
 import type { AttemptExit } from '@selarikru/protocol';
-import { assertSafeSbxArgs, execNameIndex, type SbxCommandRunner, type SbxResult, type SbxStream } from './sbx.ts';
+import { assertSafeSbxArgs, execNameIndex, type SbxCommandRunner, type SbxResult, type SbxRunOptions, type SbxStream } from './sbx.ts';
 
 export interface FakeSandbox {
   status: 'running' | 'stopped';
@@ -21,6 +21,8 @@ export interface FakeOptions {
   /** `sbx stop` returns success but the sandbox stays running. */
   stopDoesNotStop?: boolean;
   signalExitCode?: number;
+  /** Scripts one toolchain step's result. `undefined` is the step succeeding. */
+  provision?: (step: 'node' | 'pnpm' | 'deps', args: readonly string[], opts: SbxRunOptions) => SbxResult | undefined | Promise<SbxResult | undefined>;
   /** Called when an agent exec starts, so a test can script what the "agent" does. */
   onStream?: (stream: FakeStream, args: readonly string[]) => void;
 }
@@ -87,7 +89,7 @@ export class FakeSbx implements SbxCommandRunner {
     for (const s of this.streams) if (s.args.includes(name) && !s.isEnded) s.end(code);
   }
 
-  async run(args: readonly string[], opts: { timeoutMs?: number } = {}): Promise<SbxResult> {
+  async run(args: readonly string[], opts: SbxRunOptions = {}): Promise<SbxResult> {
     assertSafeSbxArgs(args);
     this.calls.push([...args]);
     const ok = (stdout = ''): SbxResult => ({ code: 0, stdout, stderr: '', timedOut: false });
@@ -116,6 +118,8 @@ export class FakeSbx implements SbxCommandRunner {
         const sb = this.sandboxes.get(name);
         if (!sb) return fail('error: sandbox not found', 125);
         sb.status = 'running';
+        const step = /^# selarikru-provision:(node|pnpm|deps)/.exec(args[execNameIndex(args) + 3] ?? '')?.[1] as 'node' | 'pnpm' | 'deps' | undefined;
+        if (step !== undefined) return (await this.options.provision?.(step, args, opts)) ?? ok(step === 'node' ? 'arm64\n' : '');
         if (!this.options.ignoreSignal) this.endStreamsOf(name, this.options.signalExitCode ?? 130);
         return ok();
       }

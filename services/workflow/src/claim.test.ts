@@ -229,6 +229,30 @@ describe('claim preconditions', () => {
     expect((await statusOf(t.db, 't1')).status).toBe('blocked');
   });
 
+  it('an infrastructure failure is interrupted, not failed: no repair spent, the task returns to ready, and the retry backs off', async () => {
+    await seedTask(t.db, specFor('t1', { maxAttempts: 1 }));
+    const first = (await s.claimNext(runner('r1'), CAPS))!;
+    const published = await s.publishResult(first, { outcome: 'infrastructure_failed', reason: 'provisioning_failed: could not download Node 24.22.1 from nodejs.org', reportedUsage: { setupSeconds: 4 } });
+    expect(published.ok && published.value).toMatchObject({ outcome: 'infrastructure_failed', taskStatus: 'ready' });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    const rows = await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`);
+    expect(rows[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:provisioning_failed: could not download Node 24.22.1 from nodejs.org' });
+    expect(await s.tryClaim(runner('r2'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'infra_retry_backoff' }] });
+    clock.advance(CAPS.infraRetryBackoffSeconds);
+    const second = (await s.claimNext(runner('r2'), CAPS))!;
+    expect(second.attemptNumber).toBe(2);
+    expect((await eventTypes(t.db)).filter((e) => e === 'attempt.failed')).toHaveLength(1);
+  });
+
+  it('an infrastructure failure can only retry so often, and the task then blocks with its reason', async () => {
+    const caps = { ...CAPS, maxInfraRetries: 0 };
+    await seedTask(t.db, specFor('t1'));
+    const first = (await s.claimNext(runner('r1'), caps))!;
+    await s.publishResult(first, { outcome: 'infrastructure_failed', reason: 'provisioning_failed: x' });
+    expect(await s.tryClaim(runner('r2'), caps)).toMatchObject({ ok: false, skipped: [{ reason: 'infra_retry_limit_exhausted' }] });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+  });
+
   it('an unblocked task with no attempts left is refused again, not silently stuck', async () => {
     await seedTask(t.db, specFor('t1', { maxAttempts: 1 }));
     const first = (await s.claimNext(runner('r1'), CAPS))!;

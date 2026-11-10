@@ -407,6 +407,47 @@ describe('a worker\'s failure reason, in its own words', () => {
   });
 });
 
+describe('a sandbox setup failure', () => {
+  const REASON = 'infrastructure:provisioning_failed: could not download Node 24.22.1 from nodejs.org';
+  const attemptRow = (over = {}) => ({ attemptId: 'att', taskId: 't', number: 1, fence: 1, outcome: 'interrupted' as const, exitReason: REASON, runnerId: 'r', startedAt: iso(10), endedAt: iso(5), lastHeartbeatAt: iso(6), assignment: null, ...over });
+
+  it('reads as infrastructure, never as the worker\'s failure', () => {
+    const text = explain(REASON);
+    expect(text).toContain('could not download Node 24.22.1 from nodejs.org');
+    expect(text).toMatch(/not the worker/i);
+    expect(text).toMatch(/does not use a repair/i);
+  });
+
+  it('says what stopped retrying once the infrastructure retries run out, and sends nobody to the repair path', () => {
+    const snapshot = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'infra_retry_limit_exhausted' })] });
+    snapshot.attempts['att'] = attemptRow();
+    const [item] = buildAttention(snapshot, NOW, NOW);
+    expect(item).toMatchObject({ kind: 'blocked', code: 'infra_retry_limit_exhausted' });
+    expect(item!.detail).toContain('could not download Node 24.22.1 from nodejs.org');
+    expect(item!.detail).toMatch(/not the worker/i);
+    expect(item!.nextAction).not.toMatch(/repair/i);
+  });
+
+  it('shows the scheduler retrying on Mission Control while the task waits, with nothing for a person to do', () => {
+    const snapshot = snapshotOf({ tasks: [task('t', { status: 'ready' })] });
+    snapshot.attempts['att'] = attemptRow();
+    const [item] = buildAttention(snapshot, NOW, NOW);
+    expect(item).toMatchObject({ kind: 'information', owner: 'Scheduler', needsOperator: false });
+    expect(item!.detail).toContain('could not download Node 24.22.1 from nodejs.org');
+  });
+
+  it('a task that ran again after the failure says nothing more about it', () => {
+    const snapshot = snapshotOf({ tasks: [task('t', { status: 'ready' })] });
+    snapshot.attempts['att'] = attemptRow();
+    snapshot.attempts['att2'] = attemptRow({ attemptId: 'att2', number: 2, outcome: 'failed', exitReason: 'agent result error' });
+    expect(buildAttention(snapshot, NOW, NOW)).toHaveLength(0);
+  });
+
+  it('names an unresolved toolchain plainly', () => {
+    expect(explain('toolchain_unresolved: .nvmrc must name a Node major or an exact version such as 24.22.1')).toMatch(/could not be resolved.*\.nvmrc/i);
+  });
+});
+
 describe('a budget refusal', () => {
   it('reaches Mission Control and Decisions with what to do', () => {
     const [item] = buildAttention(snapshotOf({ tasks: [task('t', { status: 'ready', placementBlock: 'budget:exceeds_limit' })] }), NOW, NOW);

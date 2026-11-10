@@ -128,6 +128,8 @@ export type PublishResult =
   | ({ readonly outcome: 'completed'; readonly headSha?: string; readonly changeManifestSha256?: string } & ReportedCost)
   | ({ readonly outcome: 'failed'; readonly reason: string } & ReportedCost)
   | ({ readonly outcome: 'blocked'; readonly reason: string } & ReportedCost)
+  /** The sandbox could not be made ready for the worker. Interrupted, not failed: it spends no repair and the claim's infrastructure limit bounds the retries. */
+  | ({ readonly outcome: 'infrastructure_failed'; readonly reason: string } & ReportedCost)
   /** `operation` names the policy operation asked for; `evaluate` decides. Absent or unknown is denied, and the worker's `reason` is never an operation. */
   | ({ readonly outcome: 'approval_requested'; readonly reason: string; readonly operation?: string; readonly destination?: ApprovalDestination } & ReportedCost);
 

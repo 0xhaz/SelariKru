@@ -1002,6 +1002,24 @@ describe('controller', () => {
       expect(repair.lease.priorFailure.length).toBeLessThanOrEqual(1000);
     });
 
+    it('a repair is told about the last attempt that ran, never about a sandbox that could not be set up', async () => {
+      const h = harness();
+      const { runner, claim, fail } = await twoWorkerRun(h, 25);
+      const first = await claim();
+      await claim();
+      await fail(first.lease, 'tests in server/ failed');
+      const second = await claim();
+      expect(second.lease.taskId).toBe(first.lease.taskId);
+      const lease = { attemptId: second.lease.attemptId, fence: second.lease.fence, leaseToken: second.lease.leaseToken };
+      const infra = await post(h.app, '/v1/runners/result', { lease, result: { outcome: 'infrastructure_failed', reason: 'provisioning_failed: could not download Node 24.22.1 from nodejs.org' } }, bearer(runner.token));
+      expect(infra.status, JSON.stringify(infra.body)).toBe(200);
+      await t.db.execute(sql`UPDATE attempts SET ended_at = ended_at - interval '1 hour' WHERE attempt_id = ${second.lease.attemptId}`);
+      const third = await claim();
+      expect(third.lease.taskId).toBe(first.lease.taskId);
+      expect(third.lease.priorFailure).toBe('tests in server/ failed');
+      expect(JSON.stringify(third.lease)).not.toContain('nodejs.org');
+    });
+
     it('a repair after a failed verification carries the failed checks', async () => {
       const h = harness();
       const { v, runId, claim, fail } = await twoWorkerRun(h, 25);

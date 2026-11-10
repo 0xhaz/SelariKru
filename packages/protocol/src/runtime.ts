@@ -47,6 +47,24 @@ export interface TaskBundle {
   readonly timeoutSeconds?: number;
 }
 
+/** The exact toolchain to set up. Both are validated as exact versions before they reach a command line. */
+export interface ToolchainSpec {
+  readonly nodeVersion: string;
+  readonly pnpmVersion: string;
+}
+
+export interface ProvisionOptions {
+  /** Whatever makes the attempt stop while provisioning (cancel, lease lost, shutdown). */
+  readonly signal?: AbortSignal;
+  /** Caps the whole sequence, on top of each step's own limit. */
+  readonly timeoutMs?: number;
+}
+
+/** `reason` is written by the runtime and safe to publish. `detail` is the end of the guest's stderr, redacted, for the runner's log only. */
+export type ProvisionResult =
+  | { readonly ok: true; readonly arch: string; readonly nodeVersion: string; readonly pnpmVersion: string; readonly seconds: number }
+  | { readonly ok: false; readonly reason: string; readonly detail: string | null };
+
 export interface AttemptExit {
   readonly code: number | null;
   readonly signal: string | null;
@@ -110,6 +128,8 @@ export interface RuntimeAdapter {
   inspect(handle: SandboxHandle): Promise<RuntimeSnapshot>;
   /** Idempotent: destroying an absent sandbox succeeds. */
   destroy(handle: SandboxHandle): Promise<void>;
+  /** Installs the pinned toolchain and dependencies in this sandbox. Absent: this runtime cannot, and a task needing it does not run here. Never throws. */
+  provision?(handle: SandboxHandle, spec: ToolchainSpec, opts?: ProvisionOptions): Promise<ProvisionResult>;
   /** A shell in this sandbox for a control session. Only the sandbox, never the host. Absent: this runtime cannot open one. */
   openControlShell?(handle: SandboxHandle, sessionId: string): Promise<ControlShell>;
 }

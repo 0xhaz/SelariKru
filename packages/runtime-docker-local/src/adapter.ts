@@ -1,6 +1,8 @@
 import type {
   AttemptHandle,
   ControlShell,
+  ProvisionOptions,
+  ProvisionResult,
   RuntimeAdapter,
   RuntimeCapabilities,
   RuntimeSnapshot,
@@ -9,12 +11,14 @@ import type {
   SandboxSpec,
   SandboxState,
   TaskBundle,
+  ToolchainSpec,
 } from '@selarikru/protocol';
 import { redactSecrets } from '@selarikru/protocol';
 import { SbxControlShell, controlShellArgs } from './control-shell.ts';
 import { assertSafeWorkspace, auditMounts } from './guards.ts';
 import { isOurSandbox, sandboxName, taskPrefix } from './names.ts';
 import type { SbxCommandRunner } from './sbx.ts';
+import { EXACT_VERSION, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT } from './toolchain.ts';
 
 export class SandboxCreateError extends Error {
   constructor(detail: string) {
@@ -33,9 +37,13 @@ export interface RuntimeTimeouts {
   readonly lsMs: number;
   readonly createMs: number;
   readonly rmMs: number;
+  /** Downloading, checking and unpacking Node (`curl`'s own limits fit inside this). */
+  readonly provisionNodeMs: number;
+  readonly provisionPnpmMs: number;
+  readonly provisionDepsMs: number;
 }
 
-export const DEFAULT_TIMEOUTS: RuntimeTimeouts = { signalMs: 5_000, graceMs: 10_000, stopMs: 30_000, lsMs: 10_000, createMs: 600_000, rmMs: 60_000 };
+export const DEFAULT_TIMEOUTS: RuntimeTimeouts = { signalMs: 5_000, graceMs: 10_000, stopMs: 30_000, lsMs: 10_000, createMs: 600_000, rmMs: 60_000, provisionNodeMs: 300_000, provisionPnpmMs: 180_000, provisionDepsMs: 480_000 };
 
 export interface SbxRuntimeOptions {
   readonly home: string;
@@ -63,12 +71,20 @@ interface SbxListEntry {
   workspaces: string[];
 }
 
+/** The end of a step's stderr, where the error is. Redacted: this goes to the runner's log. */
+const tail = (stderr: string): string | null => {
+  const t = redactSecrets(stderr).trim();
+  return t === '' ? null : t.slice(-240);
+};
+
 const stateOf = (status: string): SandboxState => (status === 'running' ? 'running' : status === 'stopped' ? 'stopped' : 'unknown');
 
 export class SbxRuntimeAdapter implements RuntimeAdapter {
   private readonly t: RuntimeTimeouts;
   /** Attempts whose host client we killed. Their `exited` says nothing about the agent in the sandbox (spike section 5). */
   private readonly clientKilled = new WeakSet<AttemptHandle>();
+  /** Sandboxes whose toolchain is installed and verified. Only these launch with it on PATH. */
+  private readonly provisioned = new Set<string>();
   constructor(
     private readonly sbx: SbxCommandRunner,
     private readonly opts: SbxRuntimeOptions,
@@ -151,7 +167,9 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   }
 
   async start(handle: SandboxHandle, task: TaskBundle): Promise<AttemptHandle> {
-    const wrapper = task.timeoutSeconds !== undefined ? timedWrapper(task.timeoutSeconds) : PID_WRAPPER;
+    const base = task.timeoutSeconds !== undefined ? timedWrapper(task.timeoutSeconds) : PID_WRAPPER;
+    // `sbx exec` takes no environment, so PATH is set inside the guest. `exec` keeps it for the agent and every shell its tools start.
+    const wrapper = this.provisioned.has(handle.sandboxId) ? `${PATH_EXPORT} ${base}` : base;
     const stream = this.sbx.stream(['exec', '-w', task.cwd, handle.sandboxId, 'sh', '-c', wrapper, 'sh', ...task.command]);
     const attempt: AttemptHandle = {
       attemptId: task.attemptId,
@@ -237,7 +255,46 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   }
 
   async destroy(handle: SandboxHandle): Promise<void> {
+    this.provisioned.delete(handle.sandboxId);
     await this.removeByName(handle.sandboxId);
+  }
+
+  /**
+   * Installs the pinned toolchain in this sandbox, then the frozen dependencies, through `sbx exec` like everything else here. Never throws. A failed step ends the sequence; the
+   * caller's `reason` is written by this adapter and safe to publish, and the raw stderr stays in `detail`, redacted and for the runner's log only.
+   */
+  async provision(handle: SandboxHandle, spec: ToolchainSpec, opts: ProvisionOptions = {}): Promise<ProvisionResult> {
+    if (!EXACT_VERSION.test(spec.nodeVersion) || !EXACT_VERSION.test(spec.pnpmVersion)) return { ok: false, reason: 'invalid toolchain version', detail: null };
+    const { nodeVersion: node, pnpmVersion: pnpm } = spec;
+    const startedMs = Date.now();
+    const deadlineMs = opts.timeoutMs !== undefined ? startedMs + opts.timeoutMs : Infinity;
+    let arch: string | null = null;
+    const steps: readonly { readonly label: string; readonly args: readonly string[]; readonly limitMs: number; readonly failed: (code: number | null) => string; readonly done?: (stdout: string) => void }[] = [
+      {
+        label: 'Node install', args: ['exec', handle.sandboxId, 'sh', '-c', PROVISION_NODE_SCRIPT, 'sh', node], limitMs: this.t.provisionNodeMs,
+        failed: (code) => ({ 64: 'unsupported sandbox architecture', 65: `could not download Node ${node} from nodejs.org`, 66: `the Node ${node} download failed its SHA-256 check against nodejs.org's SHASUMS256.txt`, 67: `could not unpack Node ${node}` } as Record<number, string>)[code ?? -1] ?? `Node install exited ${code}`,
+        done: (stdout) => { arch = /(?:x64|arm64)/.exec(stdout)?.[0] ?? null; },
+      },
+      {
+        label: 'pnpm install', args: ['exec', handle.sandboxId, 'sh', '-c', PROVISION_PNPM_SCRIPT, 'sh', node, pnpm], limitMs: this.t.provisionPnpmMs,
+        failed: (code) => ({ 70: `could not install pnpm ${pnpm}`, 71: 'the installed toolchain did not report the pinned versions' } as Record<number, string>)[code ?? -1] ?? `pnpm install exited ${code}`,
+      },
+      {
+        label: 'pnpm install --frozen-lockfile', args: ['exec', '-w', handle.workspacePath, handle.sandboxId, 'sh', '-c', PROVISION_DEPS_SCRIPT], limitMs: this.t.provisionDepsMs,
+        failed: (code) => `pnpm install --frozen-lockfile failed (exit ${code})`,
+      },
+    ];
+    for (const step of steps) {
+      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', detail: null };
+      const timeoutMs = Math.max(1, Math.min(step.limitMs, deadlineMs - Date.now()));
+      const r = await this.sbx.run(step.args, { timeoutMs, ...(opts.signal ? { signal: opts.signal } : {}) }).catch((err: unknown) => ({ code: null, stdout: '', stderr: err instanceof Error ? err.message : 'error', timedOut: false }));
+      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', detail: null };
+      if (r.timedOut) return { ok: false, reason: `${step.label} timed out`, detail: tail(r.stderr) };
+      if (r.code !== 0) return { ok: false, reason: step.failed(r.code), detail: tail(r.stderr) };
+      step.done?.(r.stdout);
+    }
+    this.provisioned.add(handle.sandboxId);
+    return { ok: true, arch: arch ?? 'unknown', nodeVersion: node, pnpmVersion: pnpm, seconds: (Date.now() - startedMs) / 1000 };
   }
 
   /** Removes every selarikru-managed sandbox that no active attempt owns (startup: after a crash or laptop sleep). */

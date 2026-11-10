@@ -96,6 +96,9 @@ function must(state: TaskState, event: TaskEvent): TaskState {
   return r.value;
 }
 
+/** Marks an attempt's exit reason as a failure of the infrastructure rather than the worker. */
+export const INFRASTRUCTURE_REASON_PREFIX = 'infrastructure:';
+
 export interface FailureOutcome {
   readonly state: TaskState;
   readonly repair: 'scheduled' | 'refused';
@@ -190,6 +193,14 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
       follow = failure.follow;
       exitReason = result.reason;
       event = { type: 'attempt.failed', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: result.reason, outcome: 'failed' } };
+      break;
+    }
+    case 'infrastructure_failed': {
+      // The same path as a lapsed lease: interrupted, back to ready, and `infraRetryDecision` bounds the retries. The prefix is added here, so a runner's text cannot claim the class.
+      exitReason = `${INFRASTRUCTURE_REASON_PREFIX}${result.reason}`;
+      state = must(must(state, { type: 'blocked', reason: exitReason }), { type: 'unblocked' });
+      event = { type: 'attempt.failed', actor: SCHEDULER_ACTOR, payload: { fence: lease.fence, reason: exitReason, outcome: 'interrupted' } };
+      follow = { type: 'task.ready', reason: exitReason };
       break;
     }
     case 'blocked':

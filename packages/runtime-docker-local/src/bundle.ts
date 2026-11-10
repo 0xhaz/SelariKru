@@ -7,7 +7,7 @@ import { snapshotTree, type TreeSnapshot, type BaseIgnores } from './diff.ts';
 const execFileP = promisify(execFile);
 
 /** Git sees no user or system config and no templates while building: nothing outside the repo can inject a hook or filter. */
-const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' });
+export const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' });
 
 export const REQUIRED_CONTRACT_PATH = 'contract/runtime.md';
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;

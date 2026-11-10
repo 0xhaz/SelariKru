@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
-import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type WorkerApprovalOperation } from '@selarikru/protocol';
-import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
+import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type ToolchainSpec, type WorkerApprovalOperation } from '@selarikru/protocol';
+import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, resolveToolchain, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
@@ -52,7 +52,7 @@ export interface AttemptDeps {
 }
 
 export interface AttemptReport {
-  readonly outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested' | 'lease_lost' | 'aborted';
+  readonly outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested' | 'infrastructure_failed' | 'lease_lost' | 'aborted';
   readonly reason: string | null;
   /** sha256 of the stored change manifest (artifact store), when a diff was captured. */
   readonly changeManifest: string | null;
@@ -92,7 +92,7 @@ const pilotRoleText = (task: TaskSpec): string[] => {
   ];
 };
 
-export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[]; readonly priorFailure?: string } = {}): string {
+export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: string; readonly grants?: readonly LeaseGrant[]; readonly priorFailure?: string; readonly toolchain?: ToolchainSpec } = {}): string {
   const grants = opts.grants ?? [];
   return [
     `# Task: ${task.title}`,
@@ -109,6 +109,14 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
     'Change files only under these paths. Any change outside them is rejected after the run.',
     ...(task.allowedPaths.length > 0 ? task.allowedPaths.map((p) => `- ${p}`) : ['- (none: make no changes)']),
     '',
+    ...(opts.toolchain !== undefined
+      ? [
+          '## Toolchain',
+          `Node ${opts.toolchain.nodeVersion} and pnpm ${opts.toolchain.pnpmVersion} are installed and on PATH, and the dependencies are installed from the frozen lockfile. Do not install them again.`,
+          'Run the project\'s scripts with pnpm, for example `pnpm build` and `pnpm test`.',
+          '',
+        ]
+      : []),
     '## Rules',
     '- Read contract/runtime.md first; it is the contract the result is verified against.',
     '- Do not commit, push, or change git configuration.',
@@ -159,9 +167,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   let feed: TerminalFeed | null = null;
   let stopping: Promise<unknown> | null = null;
   let control: ControlBridge | null = null;
+  let provisioning: AbortController | null = null;
   const requestStop = (): void => {
     // Before the worker: nobody should be typing into an attempt that is stopping.
     void control?.shutdown();
+    provisioning?.abort();
     if (stopping === null && launcher?.current) stopping = launcher.stop(lease.attemptId).catch(() => undefined);
   };
 
@@ -234,7 +244,12 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   // Sent once the agent started: the harness's own totals and how long setup took. The controller treats these as estimates.
   const startedMs = Date.now();
   let reportedUsage: { readonly reportedUsage: NonNullable<Extract<RunnerResult, { outcome: 'completed' }>['reportedUsage']> } | Record<string, never> = {};
-  const finish = async (outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested', reason: string | null, cost: number | null, manifest: string | null, approval?: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null }): Promise<AttemptReport> => {
+  const markSetup = (): number => {
+    const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
+    reportedUsage = { reportedUsage: { setupSeconds } };
+    return setupSeconds;
+  };
+  const finish = async (outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested' | 'infrastructure_failed', reason: string | null, cost: number | null, manifest: string | null, approval?: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null }): Promise<AttemptReport> => {
     const result: RunnerResult =
       outcome === 'completed'
         ? { outcome, ...(manifest !== null ? { changeManifestSha256: manifest } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
@@ -277,8 +292,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (harnessEntry === undefined) return await finish('blocked', `unsupported_provider:${assignment.provider}/${assignment.model}`, null, null);
     if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', `unsupported_model:${assignment.provider}/${assignment.model}`, null, null);
 
+    // Read from the base commit before any sandbox exists: a pin that cannot be read fails the same way every time, so it blocks instead of spending retries.
+    const toolchain = await resolveToolchain(repo, task.baseSha);
+    if (toolchain.kind === 'unresolved') return await finish('blocked', `toolchain_unresolved: ${toolchain.reason}`, null, null);
+    const toolchainSpec: ToolchainSpec | null = toolchain.kind === 'pinned' ? { nodeVersion: toolchain.nodeVersion, pnpmVersion: toolchain.pnpmVersion } : null;
+
     const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
-    const taskFile = renderTaskFile(task, { signalPath, grants, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}) });
+    const taskFile = renderTaskFile(task, { signalPath, grants, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
       return await finish('blocked', 'task text contains a secret-shaped value; it was not sent to the agent', null, null);
     }
@@ -316,6 +336,25 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (flags.cancelled || flags.timedOut) return await finish('failed', flags.timedOut ? 'attempt timeout reached before the agent started' : 'cancelled by owner request before the agent started', null, null);
 
+    if (toolchainSpec !== null) {
+      if (deps.runtime.provision === undefined) return await finish('infrastructure_failed', 'provisioning_failed: this runtime cannot set up a Node toolchain', null, null);
+      log(`provisioning toolchain: node ${toolchainSpec.nodeVersion} pnpm ${toolchainSpec.pnpmVersion}`);
+      provisioning = new AbortController();
+      const provisioned = await deps.runtime.provision(handle, toolchainSpec, { signal: provisioning.signal, timeoutMs: Math.max(1, budgetMs - (Date.now() - startedMs)) });
+      provisioning = null;
+      markSetup();
+      if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
+      if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+      if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
+      // Nothing ran yet, so even the clock running out here is the setup's doing, not the worker's.
+      if (flags.timedOut) return await finish('infrastructure_failed', 'provisioning_failed: the attempt timeout was reached during setup', null, null);
+      if (!provisioned.ok) {
+        if (provisioned.detail !== null) log(`provisioning detail: ${provisioned.detail}`);
+        return await finish('infrastructure_failed', `provisioning_failed: ${provisioned.reason}`, null, null);
+      }
+      log(`toolchain ready: node ${provisioned.nodeVersion} pnpm ${provisioned.pnpmVersion} arch ${provisioned.arch} in ${provisioned.seconds.toFixed(1)}s`);
+    }
+
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(budgetMs / 1000)));
     const harness = harnessEntry.create(launcher);
     let resultOk = false;
@@ -335,8 +374,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // Asked for something a grant could not make real. Stopped here; no person is asked.
     let approvalUnavailable: string | null = null;
     let coveredSignal = false;
-    const setupSeconds = Math.min(86_400, (Date.now() - startedMs) / 1000);
-    reportedUsage = { reportedUsage: { setupSeconds } };
+    const setupSeconds = markSetup();
     // The claim decided this from every source's label. Work that may not leave this machine never turns previews on, so there is nothing to upload.
     feed = lease.streamable === true ? new TerminalFeed(deps.api, ref, log, deps.terminalFeedLimits) : null;
     feed?.start();
