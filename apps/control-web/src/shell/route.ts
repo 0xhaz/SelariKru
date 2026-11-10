@@ -35,3 +35,26 @@ export function useRoute(): Route {
   }, []);
   return route;
 }
+
+/** The current hash with one query key set, or removed when `value` is null. The route and its other keys are kept. */
+export function hashWith(key: string, value: string | null, hash: string = window.location.hash): string {
+  const [path = '', query = ''] = hash.replace(/^#/, '').split('?');
+  const params = new URLSearchParams(query);
+  if (value === null) params.delete(key);
+  else params.set(key, value);
+  const rest = params.toString();
+  return `#${path || '/overview'}${rest ? `?${rest}` : ''}`;
+}
+
+/**
+ * Changes the hash's query in place: no history entry and no page move, so a drawer opened over a view leaves that view where it was. Listeners hear it as a hash change.
+ */
+export function replaceHashQuery(changes: Readonly<Record<string, string | null>>): void {
+  const next = Object.entries(changes).reduce((hash, [key, value]) => hashWith(key, value, hash), window.location.hash);
+  if (next === window.location.hash) return;
+  window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}${next}`);
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
+/** The worker whose drawer is open, from `?worker=` on any route, so a drawer can be linked to and survives a reload. */
+export const workerHref = (route: Route, workerId: string): string => `${hrefFor(route)}?worker=${encodeURIComponent(workerId)}`;

@@ -145,8 +145,11 @@ test('tabs follow the arrow keys and show exact times', async ({ page }) => {
   await openTeam(page, fixture('failed-ci'));
   await openWorker(page, 'runner_local_1');
   await page.keyboard.press('ArrowRight');
+  await expect(drawer(page).getByRole('tab', { name: 'Settings' })).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(drawer(page).getByRole('tab', { name: 'Task' })).toBeFocused();
+  await drawer(page).getByRole('tab', { name: 'Timeline' }).click();
   const timeline = drawer(page).getByRole('tab', { name: 'Timeline' });
-  await expect(timeline).toBeFocused();
   await expect(timeline).toHaveAttribute('aria-selected', 'true');
   await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Check failed');
   await expect(drawer(page).getByTestId('drawer-panel').locator('time').first()).toContainText('2026');
@@ -167,7 +170,7 @@ test('opening a worker is read-only', async ({ page }) => {
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i += 1) {
     await rows(page).nth(i).locator('[data-open-worker]').click();
-    for (const tab of ['Task', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) await drawer(page).getByRole('tab', { name: tab }).click();
+    for (const tab of ['Task', 'Settings', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) await drawer(page).getByRole('tab', { name: tab }).click();
     await page.keyboard.press('Escape');
     await expect(drawer(page)).toHaveCount(0);
   }
@@ -365,7 +368,7 @@ test('axe pass: drawer light theme and every tab', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
   await openTeam(page, fixture('failed-ci'));
   await rows(page).first().locator('[data-open-worker]').click();
-  for (const tab of ['Task', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) {
+  for (const tab of ['Task', 'Settings', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) {
     await drawer(page).getByRole('tab', { name: tab }).click();
     await expectNoAxeViolations(page);
   }
@@ -614,10 +617,12 @@ test.describe('model assignment', () => {
   test('the drawer offers a per-task override, and a trial shows its pin', async ({ page }) => {
     await openTeam(page, fixture('healthy-parallel-work'));
     await openWorker(page, 'runner_local_1');
+    await drawer(page).getByRole('tab', { name: 'Settings' }).click();
     await expect(drawer(page).getByRole('heading', { name: 'Model override for this task' })).toBeVisible();
     await page.keyboard.press('Escape');
     await openTeam(page, fixture('benchmark-trial'));
     await rows(page).first().locator('[data-open-worker]').click();
+    await drawer(page).getByRole('tab', { name: 'Settings' }).click();
     await expect(drawer(page).getByTestId('trial-pin')).toContainText('claude-sonnet-5-5');
     await expect(drawer(page).getByTestId('trial-pin')).toContainText('Overrides are refused');
   });

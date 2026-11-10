@@ -140,8 +140,23 @@ export interface WorkerDetail {
   readonly usage: readonly UsageLine[];
 }
 
+/** One word for where a worker stands, for the team panel. Separate from the three signals, which keep the detail. */
+export type PresenceState = 'idle' | 'working' | 'needs_you' | 'blocked' | 'lost' | 'unknown';
+
+export interface Presence {
+  readonly state: PresenceState;
+  readonly label: string;
+  readonly tone: Tone;
+  /** What lies behind the word: the activity, the blocker, or what was last confirmed. */
+  readonly detail: string | null;
+  /** Time in this state; for `unknown`, how long ago it was last confirmed. */
+  readonly since: string;
+  readonly sinceIso: string;
+}
+
 export interface TeamRow {
   readonly workerId: string;
+  readonly presence: Presence;
   readonly role: string | null;
   /** The run of the task held now, or of the last one. Null when the worker has had no task. */
   readonly runId: string | null;
@@ -428,6 +443,30 @@ function lastConfirmedOf(w: WorkerView, health: WorkerHealthReading['health']): 
   return Date.parse(w.enteredStateAt) > Date.parse(w.lastHeartbeatAt) ? w.enteredStateAt : w.lastHeartbeatAt;
 }
 
+const PRESENCE_LABEL: Readonly<Record<PresenceState, string>> = { idle: 'Idle', working: 'Working', needs_you: 'Needs you', blocked: 'Blocked', lost: 'Lost', unknown: 'Unknown' };
+
+/**
+ * A lost connection is said first, then a stale reading as unknown: neither can be called working. A person's decision outranks a block, and a block is never idle.
+ * The word is the panel's; the row's three signals still carry the detail.
+ */
+function presenceOf(w: WorkerView, health: WorkerHealthDisplay, stale: boolean, activity: ActivitySignal, blockers: readonly Blocker[], lastConfirmedAt: string, nowMs: number, snapshot: ProjectViewSnapshot): Presence {
+  const at = (state: PresenceState, tone: Tone, detail: string | null, sinceIso = w.enteredStateAt, suffix = ''): Presence => ({ state, label: PRESENCE_LABEL[state], tone, detail, since: `${formatAge(nowMs - Date.parse(sinceIso))}${suffix}`, sinceIso });
+  if (health.state === 'disconnected' || health.state === 'failed' || w.availability === 'offline') {
+    const detail = health.state === 'failed' ? (w.stateReason ? `Failed: ${explain(w.stateReason)}` : 'Failed') : health.state === 'disconnected' ? 'Connection lost' : 'Offline';
+    return at('lost', 'danger', detail, lastConfirmedAt, ' ago');
+  }
+  if (stale || health.state === 'unknown') return at('unknown', 'neutral', activity.reported ? `Last confirmed: ${activity.label}` : 'Nothing confirmed yet', lastConfirmedAt, ' ago');
+  if (w.activity === 'waiting_human' || w.blockedByApprovalId !== null) {
+    // The operation, never the worker's free text: the panel row is too short to keep a worker's words apart from ours.
+    const operation = w.blockedByApprovalId !== null ? (snapshot.approvals[w.blockedByApprovalId]?.operation ?? null) : null;
+    return at('needs_you', 'warning', operation ? `Decision: ${sentence(operation)}` : 'A decision is waiting');
+  }
+  if (w.activity === 'blocked_policy') return at('blocked', 'danger', blockers[0]?.text ?? activity.label);
+  if (w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' || blockers.length > 0) return at('blocked', 'neutral', w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' ? activity.label : blockers[0]!.text);
+  if (w.availability === 'assigned') return at('working', health.state === 'suspected_stall' ? 'warning' : 'active', health.state === 'suspected_stall' ? `${activity.label}; progress may be stalled` : activity.label);
+  return at('idle', 'neutral', null);
+}
+
 function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, sessionStale: boolean): TeamRow {
   const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
   const health = workerHealthDisplay(w, reading, sessionStale);
@@ -456,7 +495,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   const progressTimes = [w.enteredStateAt, w.latestAction?.at, w.latestEvidence?.at].filter((t): t is string => t !== undefined);
 
   return {
-    workerId: w.workerId, role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
+    workerId: w.workerId, presence: presenceOf(w, health, stale, activity, blockers, lastConfirmedAt, nowMs, snapshot), role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
     execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, humanIntervenedAt: attempt?.humanIntervenedAt ?? null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,

@@ -4,7 +4,7 @@ import type { DecisionAction, DecisionCardModel, Fact, NotDeliveredModel } from 
 
 const STYLE: Readonly<Record<DecisionAction['style'], string>> = { primary: buttonPrimary, quiet: buttonQuiet, danger: buttonDanger };
 
-function ActionControl({ action, busyId, cardId, describedBy, onCommand }: { action: DecisionAction; busyId: string | null; cardId: string; describedBy: string | undefined; onCommand: (a: Extract<DecisionAction, { kind: 'command' }>) => void }) {
+export function ActionControl({ action, busyId, cardId, describedBy, onCommand }: { action: DecisionAction; busyId: string | null; cardId: string; describedBy: string | undefined; onCommand: (a: Extract<DecisionAction, { kind: 'command' }>) => void }) {
   const cls = `${STYLE[action.style]} w-full text-center`;
   if (action.kind === 'link') {
     if (action.disabledReason !== null) return <button type="button" disabled data-action={action.id} aria-describedby={describedBy} className={cls}>{action.label}</button>;

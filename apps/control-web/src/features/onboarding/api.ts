@@ -24,11 +24,29 @@ export interface OnboardingApi {
   reviewAssist(input: { envelope: { operation: string; status: string; data: unknown }; restricted?: boolean; projectId?: string; observed?: { source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN'; requestedMode: InferenceChoice | null } }): Promise<ApiResult<AssistReviewResponse>>;
 }
 
+const SIGN_IN_AGAIN = 'Your sign-in has expired or is no longer valid. Sign in again; your answers are still here.';
+/** Firebase Auth codes a retry can fix. Any other `auth/` code (signed out, expired, revoked or disabled) needs the person to sign in again. */
+const TRANSIENT_AUTH_CODES: readonly string[] = ['auth/network-request-failed', 'auth/too-many-requests', 'auth/internal-error', 'auth/timeout'];
+const AUTH_REFUSALS: readonly string[] = ['unauthenticated', 'invalid_token', 'not_owner'];
+
+/** True for a sign-in that cannot give a token, read by its code and never by its wording. */
+function isSignInFailure(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.startsWith('auth/') && !TRANSIENT_AUTH_CODES.includes(code);
+}
+
 export function createOnboardingApi(opts: { baseUrl: string; getToken: () => Promise<string> }): OnboardingApi {
   const base = opts.baseUrl.replace(/\/+$/, '');
   async function send<S extends z.ZodType>(schema: S, path: string, body?: unknown): Promise<ApiResult<z.infer<S>>> {
+    let token: string;
     try {
-      const token = await opts.getToken();
+      token = await opts.getToken();
+    } catch (e) {
+      // Nothing was sent: a stale sign-in is not the server being down, and saying so would send the person to check the wrong thing.
+      if (isSignInFailure(e)) return { ok: false, status: 0, code: 'unauthenticated', message: SIGN_IN_AGAIN };
+      return { ok: false, status: 0, code: 'network_error', message: 'Could not reach the server. Your answers are still here; try again.' };
+    }
+    try {
       const res = await fetch(`${base}${path}`, {
         method: body === undefined ? 'GET' : 'POST',
         headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), authorization: `Bearer ${token}` },
@@ -37,7 +55,9 @@ export function createOnboardingApi(opts: { baseUrl: string; getToken: () => Pro
       const json: unknown = await res.json().catch(() => null);
       if (!res.ok) {
         const e = (json as { error?: { code?: string; message?: string; details?: unknown } } | null)?.error;
-        return { ok: false, status: res.status, code: e?.code ?? 'internal_error', message: e?.message ?? 'The request failed.', details: e?.details };
+        const code = e?.code ?? 'internal_error';
+        if (res.status === 401 || AUTH_REFUSALS.includes(code)) return { ok: false, status: res.status, code, message: SIGN_IN_AGAIN, details: e?.details };
+        return { ok: false, status: res.status, code, message: e?.message ?? 'The request failed.', details: e?.details };
       }
       const parsed = schema.safeParse(json);
       return parsed.success ? { ok: true, value: parsed.data } : { ok: false, status: 0, code: 'bad_response', message: 'The server sent a response this page could not read.' };

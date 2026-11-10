@@ -5,14 +5,14 @@ import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import { decisionHref } from '../../shell/route.ts';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import type { Fact, TeamRow, WorkerDetail } from './model.ts';
-import { TaskModelOverride } from './ModelAssignments.tsx';
 import { TerminalPanel } from './TerminalPanel.tsx';
 
 const TABS = [
-  { id: 'task', label: 'Task' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' }, { id: 'terminal', label: 'Terminal' },
+  { id: 'task', label: 'Task' }, { id: 'settings', label: 'Settings' }, { id: 'terminal', label: 'Terminal' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
   { id: 'permissions', label: 'Permissions' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
 ] as const;
-type TabId = (typeof TABS)[number]['id'];
+export type TabId = (typeof TABS)[number]['id'];
+export const isTabId = (v: string | null): v is TabId => TABS.some((t) => t.id === v);
 
 const Exact = ({ iso }: { iso: string }) => <time dateTime={iso}>{formatExact(iso)}</time>;
 
@@ -33,9 +33,8 @@ const Note = ({ children }: { children: ReactNode }) => <p className="text-sm te
 const Empty = ({ children }: { children: ReactNode }) => <p className="py-2 text-muted">{children}</p>;
 const SIMULATED_NOTE = <p className="mb-3 text-sm text-warning">Simulated data. It is not evidence.</p>;
 
-type AssignProps = Omit<Parameters<typeof TaskModelOverride>[0], 'target'>;
 
-function TaskPanel({ detail, row, assign }: { detail: WorkerDetail; row: TeamRow; assign: AssignProps }) {
+function TaskPanel({ detail, row, onSettings }: { detail: WorkerDetail; row: TeamRow; onSettings: () => void }) {
   const t = detail.task;
   return (
     <div className="space-y-4">
@@ -80,7 +79,10 @@ function TaskPanel({ detail, row, assign }: { detail: WorkerDetail; row: TeamRow
           {t.current ? <Note>Accepted contract versions, per-task criteria and the branch or pull request are not reported in this snapshot.</Note> : null}
         </>
       ) : <Empty>No task has been assigned to this worker.</Empty>}
-      {row.overrideTarget ? <TaskModelOverride {...assign} target={row.overrideTarget} /> : null}
+      <p className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3 text-sm text-muted">
+        <span>Model, stop and control mode are in Settings.</span>
+        <button type="button" className={buttonQuiet} onClick={onSettings}>Open Settings</button>
+      </p>
     </div>
   );
 }
@@ -193,13 +195,30 @@ const MIN_WIDTH = 440;
 const maxWidth = (): number => Math.max(MIN_WIDTH, Math.min(window.innerWidth - 120, 1100));
 const clampWidth = (w: number): number => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
-export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assign, onOpenTerminal, onOpenTerminalControl }: { row: TeamRow; mode: 'mock' | 'live'; simulated: boolean; wide: boolean; nowMs: number; onClose: () => void; assign: AssignProps; onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>; onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined }) {
+export interface WorkerDrawerProps {
+  readonly row: TeamRow;
+  readonly mode: 'mock' | 'live';
+  readonly simulated: boolean;
+  readonly wide: boolean;
+  readonly nowMs: number;
+  readonly onClose: () => void;
+  /** The tab to open on, from a deep link. Task when absent. */
+  readonly initialTab?: TabId;
+  /** Called on every tab change, so the link to this drawer can name the tab. */
+  readonly onTab?: (tab: TabId) => void;
+  /** The Settings tab's content. Given a way to bring up the Terminal tab, where control mode is entered. */
+  readonly settings: (openTerminal: () => void) => ReactNode;
+  readonly onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>;
+  readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
+}
+
+export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
   const tabsId = useId();
-  const [tab, setTab] = useState<TabId>('task');
-  const [width, setWidth] = useState(() => clampWidth(640));
+  const [tab, setTab] = useState<TabId>(initialTab);
+  const [width, setWidth] = useState(() => clampWidth(720));
   const [maximized, setMaximized] = useState(false);
   const dragging = useRef(false);
 
@@ -207,7 +226,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
     const dialog = dialogRef.current;
     if (!dialog) return;
     if (!dialog.open) dialog.showModal();
-    tabRefs.current.task?.focus();
+    tabRefs.current[initialTab]?.focus();
     return () => {
       if (dialog.open) dialog.close();
     };
@@ -228,6 +247,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
 
   const selectTab = (id: TabId, focus: boolean): void => {
     setTab(id);
+    onTab?.(id);
     if (focus) tabRefs.current[id]?.focus();
   };
   const onTabKey = (e: KeyboardEvent<HTMLButtonElement>, index: number): void => {
@@ -326,7 +346,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
           </div>
         </header>
 
-        <div role="tablist" aria-label="Worker detail" className="sticky top-0 z-10 flex flex-wrap gap-1 border-b border-line bg-panel px-2 sm:px-4">
+        <div role="tablist" aria-label="Worker detail" className="sticky top-0 z-10 flex flex-wrap gap-0.5 border-b border-line bg-panel px-2 sm:px-4">
           {TABS.map((t, i) => (
             <button
               key={t.id}
@@ -339,7 +359,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
               tabIndex={tab === t.id ? 0 : -1}
               onClick={() => selectTab(t.id, false)}
               onKeyDown={(e) => onTabKey(e, i)}
-              className={`border-b-2 px-2.5 py-2 text-sm font-medium ${tab === t.id ? 'border-active text-fg' : 'border-transparent text-muted hover:text-fg'}`}
+              className={`shrink-0 whitespace-nowrap border-b-2 px-2 py-2 focus-visible:outline-offset-[-2px] text-sm font-medium ${tab === t.id ? 'border-active text-fg' : 'border-transparent text-muted hover:text-fg'}`}
             >
               {t.label}
             </button>
@@ -348,7 +368,8 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
 
         {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person opened a shell in this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
-          {tab === 'task' ? <TaskPanel detail={detail} row={row} assign={assign} /> : null}
+          {tab === 'task' ? <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} /> : null}
+          {tab === 'settings' ? settings(() => selectTab('terminal', true)) : null}
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
           {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
@@ -359,7 +380,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, assig
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          Inspecting is read-only unless you take control in the Terminal tab, and closing this ends that. It never stops the worker; a model saved here applies only to its next attempt.
+          Inspecting is read-only. Closing this never stops the worker, and ends any control mode. Only Stop in Settings stops it, after you confirm; a model saved here applies only to its next attempt.
         </footer>
       </div>
     </dialog>

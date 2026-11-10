@@ -121,7 +121,7 @@ const OPERATION: Readonly<Record<string, OpCopy>> = {
 const ADVISORY_TEXT = 'This approval is a recorded human pause. A grant records your decision and tells the worker, and the pull request lists it for the reviewer. It does not check or limit what the worker then changes.';
 const WORKER_REASON = 'Reason given by the worker (worker-supplied, not verified)';
 const REPLAN_OFF = 'Replanning runs through the Assistant, which is off under demo data.';
-const CANCEL_CONSEQUENCE = 'It stops for good. Work so far stays on record, but it only runs again through a new plan revision.';
+export const CANCEL_CONSEQUENCE = 'It stops for good. Work so far stays on record, but it only runs again through a new plan revision.';
 const STALE_CANCEL_CONSEQUENCE = 'Cancelling retires this candidate and its check runs, so it can never reach a pull request. Its other verified parts go back for a new verdict on a candidate without this work, and that verdict may start a repair worker. This task only runs again through a new plan revision.';
 
 function replanAction(mode: DecisionOptions['mode'], paused: string | null, target: { readonly runId: string; readonly taskId?: string }): DecisionAction {
@@ -130,7 +130,7 @@ function replanAction(mode: DecisionOptions['mode'], paused: string | null, targ
   return { kind: 'link', id: 'replan', label: 'Replan in the Assistant', style: 'quiet', href: `${hrefFor('assistant')}?${query.toString()}`, external: false, disabledReason };
 }
 
-function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task', consequence = CANCEL_CONSEQUENCE): DecisionAction {
+export function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task', consequence = CANCEL_CONSEQUENCE): DecisionAction {
   return {
     kind: 'command', id: `cancel:${t.taskId}`, label, style: 'danger', disabledReason: paused,
     intent: { command: 'task.cancel', expectedRevision: t.aggregateRevision, args: { taskId: t.taskId } },

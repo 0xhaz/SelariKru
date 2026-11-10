@@ -110,8 +110,10 @@ export function PipelineGraph({ rows, edges, selectedId, highlight, onSelect, on
       setOverflows(el !== null && el.scrollWidth > el.clientWidth + 1);
     };
     measure();
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
+    // The scroller's own size, not the window's: the team panel beside the page changes it without a resize.
+    const observer = new ResizeObserver(measure);
+    if (scroller.current) observer.observe(scroller.current);
+    return () => observer.disconnect();
   }, [layout.width]);
 
   const totalHeight = layout.height + HEADER_H;

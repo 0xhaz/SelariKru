@@ -9,6 +9,7 @@ import { createApiClient } from '../features/assistant/api.ts';
 import { auth, createAdapter, getOwnerToken, usingAuthEmulator } from '../firebase.ts';
 import { AppShell, type AccountInfo } from './AppShell.tsx';
 import { createProjectionStore, type Scheduler } from './projection-store.ts';
+import { NO_PROJECT, projectFromUrl, useActiveProject } from './active-project.ts';
 
 // Its own chunk, so a failed load is caught by the route's boundary inside the shell.
 const AssistantPanel = lazy(() => import('../features/assistant/AssistantPanel.tsx').then((m) => ({ default: m.AssistantPanel })));
@@ -25,9 +26,10 @@ function App({ account }: { account: AccountInfo }) {
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '');
   const api = useMemo(() => (baseUrl ? createApiClient({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
   const onboardingApi = useMemo(() => (baseUrl ? createOnboardingApi({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
+  // A project set up here opens with `?project=`, and activating a setup on this page opens it in place. The env defaults still serve the seeded `dev:demo` and `dev:real` stacks.
+  const { projectId, activate } = useActiveProject(projectFromUrl() || (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '');
   const defaults = {
-    // A project set up here opens with `?project=`. The env defaults still serve the seeded `dev:demo` and `dev:real` stacks.
-    projectId: new URLSearchParams(window.location.search).get('project') || (import.meta.env.VITE_DEMO_PROJECT_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_PROJECT_ID as string | undefined) || '',
+    projectId,
     runId: (import.meta.env.VITE_DEMO_RUN_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) || '',
   };
   // No URL or project configured means no source: the shell then says data is unavailable. It never shows mock data.
@@ -48,7 +50,7 @@ function App({ account }: { account: AccountInfo }) {
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || 'No project selected'} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" />} />;
+  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} />} />;
 }
 
 export default function LiveRoot() {

@@ -144,9 +144,12 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
   }, [pipeline]);
 
   useEffect(() => {
-    const params = new URLSearchParams();
+    // Keys this view does not own, such as an open worker drawer's, are kept.
+    const params = new URLSearchParams(window.location.hash.split('?')[1] ?? '');
     if (view !== 'table') params.set('view', view);
+    else params.delete('view');
     if (selectedTaskId) params.set('task', selectedTaskId);
+    else params.delete('task');
     const query = params.toString();
     const url = new URL(window.location.href);
     url.hash = `#/pipeline${query ? `?${query}` : ''}`;

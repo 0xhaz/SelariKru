@@ -8,6 +8,7 @@ import { AppShell } from '../../src/shell/AppShell.tsx';
 import { OnboardingView } from '../../src/features/onboarding/OnboardingView.tsx';
 import { createOnboardingApi } from '../../src/features/onboarding/index.ts';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
+import { NO_PROJECT, projectFromUrl, useActiveProject } from '../../src/shell/active-project.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
 import type { EngineeringDataSource, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlState, TerminalState } from '@selarikru/view-protocol';
@@ -260,7 +261,14 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
 const root = createRoot(document.getElementById('root')!);
 if (sc.onboardingApi) {
   const o = sc.onboardingApi;
-  root.render(<StrictMode><AppShell store={createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined })} mode="live" projectLabel="New project" assistant={null} onboarding={<OnboardingView api={createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => o.token ?? 'test-token' })} adapter={adapter} hold={hold} mode="live" />} /></StrictMode>);
+  const api = createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => o.token ?? 'test-token' });
+  const empty = createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined });
+  // The live root's project handling, without Firebase: the header follows an activation the same way.
+  function OnboardingShell() {
+    const { projectId, activate } = useActiveProject(projectFromUrl());
+    return <AppShell store={empty} mode="live" projectLabel={projectId || NO_PROJECT} assistant={null} onboarding={<OnboardingView api={api} adapter={adapter} hold={hold} mode="live" onActivated={activate} />} />;
+  }
+  root.render(<StrictMode><OnboardingShell /></StrictMode>);
 } else if (sc.liveApi) {
   const live = sc.liveApi;
   const source = createLiveDataSource({ baseUrl: live.baseUrl, getToken: async () => live.token });

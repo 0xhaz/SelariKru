@@ -8,6 +8,8 @@ import type { AssignmentTarget, AssignmentsModel, ProviderChoice } from './assig
 
 const selectClass = 'rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg';
 const APPLIES = 'Applies to the next attempt. Work already running keeps its model.';
+/** Why no assignment can be sent while the session is not live. */
+export const ASSIGNMENTS_OFF = 'Assignments are off until the connection is live, so nothing is changed on stale state.';
 const STALE_ASSIGNMENT = 'This assignment changed in the meantime. Nothing was saved; choose again.';
 
 interface AssignProps {
@@ -17,6 +19,8 @@ interface AssignProps {
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
   readonly onResync: () => void;
+  /** Keeps control ids unique when the same assignment is also on the page behind, as a role's is under the drawer on the Team view. */
+  readonly idScope?: string;
 }
 
 const text = (t: AssignmentTarget): string => (t.scope === 'role' ? roleName(t.label) : t.label);
@@ -32,8 +36,8 @@ function choiceFor(providers: readonly ProviderChoice[], target: AssignmentTarge
 }
 
 /** One assignment: provider, model, and a Save whose outcome is reported beside it. Only a person pressing Save sends anything. */
-function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, onResync }: AssignProps & { target: AssignmentTarget }) {
-  const ids = useMemo(() => `${target.scope}-${target.key}`.replace(/[^A-Za-z0-9_-]/g, '_'), [target.scope, target.key]);
+function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, onResync, idScope = '' }: AssignProps & { target: AssignmentTarget }) {
+  const ids = useMemo(() => `${idScope}${target.scope}-${target.key}`.replace(/[^A-Za-z0-9_-]/g, '_'), [idScope, target.scope, target.key]);
   const [choice, setChoice] = useState(() => choiceFor(model.providers, target));
   // A save, a clear or a resync changes what applies: the dropdowns follow it rather than holding an old choice.
   const appliesKey = `${target.revision}|${target.current?.provider}/${target.current?.model}|${target.inherited?.provider}/${target.inherited?.model}`;
@@ -140,6 +144,17 @@ export function TaskModelOverride({ target, ...props }: AssignProps & { target: 
     <section aria-label="Model for this task" className="rounded-chip border border-line p-3">
       <h3 className="mb-2 font-medium text-fg">Model override for this task</h3>
       <AssignmentRow {...props} target={target} />
+    </section>
+  );
+}
+
+/** One role's assignment, in the drawer: the same control as the Team view's panel, for the role this worker's task belongs to. */
+export function RoleModelAssignment({ target, ...props }: AssignProps & { target: AssignmentTarget }) {
+  if (!props.model.available) return null;
+  return (
+    <section aria-label={`Model for every ${roleName(target.label)} task`} className="rounded-chip border border-line p-3">
+      <h3 className="mb-2 font-medium text-fg">Model for every {roleName(target.label)} task</h3>
+      <AssignmentRow {...props} idScope="drawer-" target={target} />
     </section>
   );
 }

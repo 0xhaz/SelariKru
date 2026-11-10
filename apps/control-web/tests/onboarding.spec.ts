@@ -205,6 +205,21 @@ test.describe('behaviour', () => {
     await expect(page.getByLabel('GitHub repository')).toBeDisabled();
   });
 
+  test('after activation the header names the activated project, and the address keeps it', async ({ page }) => {
+    await open(page, { ...ready, state: 'activated', firstRunId: 'run_7f2' }, '#/onboarding?id=proj_1');
+    await expect(page.getByRole('heading', { name: 'Your first run is accepted' })).toBeVisible();
+    await expect(page.getByTestId('project-label')).toHaveText(/proj_1$/);
+    await expect(page.getByTestId('project-label')).not.toContainText('No project selected');
+    expect(new URL(page.url()).searchParams.get('project')).toBe('proj_1');
+    expect(new URL(page.url()).hash).toBe('#/onboarding?id=proj_1');
+  });
+
+  test('before activation the header still says no project is selected', async ({ page }) => {
+    await open(page, ready, '#/onboarding?id=proj_1');
+    await expect(page.getByTestId('project-label')).toHaveText(/No project selected$/);
+    expect(new URL(page.url()).searchParams.get('project')).toBeNull();
+  });
+
   test('a hint and an error are tied to their control', async ({ page }) => {
     await page.addInitScript((url) => { (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url } }; }, API);
     await page.route('**/mockapi/v1/onboarding**', (route) => route.request().method() === 'POST'

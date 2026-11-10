@@ -18,6 +18,8 @@ export interface OnboardingViewProps {
   readonly hold: RestrictedDraftHold | null;
   readonly mode: 'mock' | 'live';
   readonly leaveDemoHref?: string | undefined;
+  /** Called once a setup is activated: the project now exists, so the shell can open it. */
+  readonly onActivated?: ((projectId: string) => void) | undefined;
 }
 
 function Stepper({ current, reach, onGo }: { current: StepId; reach: number; onGo: (s: StepId) => void }) {
@@ -118,7 +120,7 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
 }
 
 /** Onboarding wizard. The server owns state; this keeps only the step being looked at. */
-export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: OnboardingViewProps) {
+export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActivated }: OnboardingViewProps) {
   const query = useHashQuery();
   const projectId = query.get('id');
   const [creating, setCreating] = useState(false);
@@ -144,6 +146,10 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref }: Onbo
   }, [projectId, load]);
 
   useEffect(() => { heading.current?.focus(); }, [step]);
+
+  // Activated is the server's word that the project exists: from then on the header names it rather than "No project selected".
+  const activatedId = view?.state === 'activated' ? view.projectId : null;
+  useEffect(() => { if (activatedId !== null) onActivated?.(activatedId); }, [activatedId, onActivated]);
 
   const openProject = (id: string): void => {
     window.location.hash = `#/onboarding?id=${encodeURIComponent(id)}`;

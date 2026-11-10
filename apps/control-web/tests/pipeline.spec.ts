@@ -243,7 +243,8 @@ test('a graph wider than the screen says more stages follow', async ({ page }) =
   await page.setViewportSize({ width: 1024, height: 800 });
   await openPipeline(page, 'feature-delivery', 'graph');
   await expect(page.getByTestId('graph-scroll-hint')).toContainText('More stages to the right');
-  await page.setViewportSize({ width: 1440, height: 800 });
+  // Wide enough for the whole graph beside the team panel.
+  await page.setViewportSize({ width: 1920, height: 800 });
   await expect(page.getByTestId('graph-scroll-hint')).toHaveCount(0);
 });
 

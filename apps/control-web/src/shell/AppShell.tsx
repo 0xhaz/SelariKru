@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useStore } from 'zustand';
 import { TONE_TEXT, buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
@@ -6,6 +6,11 @@ import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
 import { TeamView } from '../features/team/TeamView.tsx';
 import { buildTeam, type TeamModel } from '../features/team/model.ts';
+import { panelOf } from '../features/team/panel.ts';
+import { TeamFoldRegion, TeamFoldToggle, TeamPanelSide, type PanelStatus } from '../features/team/TeamPanel.tsx';
+import { isTabId, type TabId } from '../features/team/WorkerDrawer.tsx';
+import { WorkerDrawerHost } from './WorkerDrawerHost.tsx';
+import { PANEL_WIDE, useMediaQuery } from './media.ts';
 import { PipelineView } from '../features/pipeline/PipelineView.tsx';
 import { buildPipeline, type PipelineModel } from '../features/pipeline/model.ts';
 import { pipelinePresentation } from '../features/pipeline/presentation.ts';
@@ -16,7 +21,7 @@ import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts
 import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
-import { hrefFor, useHashQuery, useRoute, type Route } from './route.ts';
+import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute, type Route } from './route.ts';
 import { useTheme } from './theme.ts';
 
 export interface AccountInfo {
@@ -127,15 +132,35 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     }
   }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   const overview = built.overview;
-  // Same containment as the overview: a snapshot that cannot be read fails this route, not the shell.
+  // Always built: the team panel is on every view. Same containment as the overview: a snapshot that cannot be read fails the Team route and empties the panel, not the shell.
   const builtTeam = useMemo((): { team: TeamModel | null; failure?: unknown } => {
-    if (route !== 'team' || !snapshot) return { team: null };
+    if (!snapshot) return { team: null };
     try {
       return { team: buildTeam(snapshot, state.nowMs, liveness, { lastConfirmedMs: state.livenessAsOfMs, stale }) };
     } catch (failure) {
       return { team: null, failure };
     }
-  }, [route, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
+  }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
+  const team = builtTeam.team;
+  const panelStatus = useMemo((): PanelStatus => {
+    if (team) return { kind: 'ready', panel: panelOf(team), stale };
+    return connection === 'unavailable' || connection === 'dead' || builtTeam.failure !== undefined ? { kind: 'unavailable' } : { kind: 'loading' };
+  }, [team, stale, connection, builtTeam.failure]);
+  const panelWide = useMediaQuery(PANEL_WIDE);
+  const [foldOpen, setFoldOpen] = useState(false);
+  const foldId = useId();
+  useEffect(() => { if (panelWide) setFoldOpen(false); }, [panelWide]);
+  // The side panel sticks below the header, whose height changes with the width and with the folded panel.
+  const headerRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const header = headerRef.current;
+    if (!header) return;
+    const set = (): void => document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`);
+    set();
+    const observer = new ResizeObserver(set);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, []);
   const pipelineRunId = useStore(pipelinePresentation, (s) => s.runId);
   const builtPipeline = useMemo((): { pipeline: PipelineModel | null; failure?: unknown } => {
     if (route !== 'pipeline' || !snapshot) return { pipeline: null };
@@ -156,6 +181,36 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   }, [snapshot, state.nowMs, mode, connection]);
   const decisionCount = builtDecisions.decisions?.waiting ?? 0;
   const query = useHashQuery();
+  // The open drawer lives in the hash (`?worker=`, and `&wtab=` for its tab), so it can be linked to and the view under it stays put.
+  const workerId = query.get('worker');
+  const workerTab = query.get('wtab');
+  const opener = useRef<HTMLElement | null>(null);
+  const openWorker = (id: string): void => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    replaceHashQuery({ wtab: null, worker: id });
+  };
+  const focusAfterDrawer = (id: string | null): void => {
+    // Back to what opened it, or the same worker elsewhere on the page, or the folded panel's toggle, so focus is never stranded.
+    const sameWorker = id !== null ? document.querySelector<HTMLElement>(`[data-panel-worker="${CSS.escape(id)}"], [data-open-worker="${CSS.escape(id)}"]`) : null;
+    const target = [opener.current, sameWorker, document.querySelector<HTMLElement>('[data-team-toggle]')].find((el) => el?.isConnected && el.offsetParent !== null);
+    opener.current = null;
+    (target ?? document.getElementById('main'))?.focus();
+  };
+  const closeWorker = (): void => {
+    // Following a link out of the drawer has already moved on: that view decides where focus goes.
+    const id = hashQuery().get('worker');
+    if (id === null) return;
+    replaceHashQuery({ wtab: null, worker: null });
+    focusAfterDrawer(id);
+  };
+  // A worker that is not in the snapshot, from a stale link or a project change, closes the drawer and focus lands on the page.
+  const workerMissing = workerId !== null && team !== null && !team.rows.some((r) => r.workerId === workerId);
+  useEffect(() => {
+    if (!workerMissing) return;
+    replaceHashQuery({ wtab: null, worker: null });
+    opener.current = null;
+    document.getElementById('main')?.focus();
+  }, [workerMissing]);
   const evidenceRun = route === 'evidence' ? query.get('run') : null;
   const builtEvidence = useMemo((): { evidence: EvidenceModel | null; failure?: unknown } => {
     if (route !== 'evidence' || !snapshot) return { evidence: null };
@@ -196,18 +251,20 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     <div className="min-h-screen">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
       <Announcer message={announcement} />
-      <header className="sticky top-0 z-40 border-b border-line bg-panel">
-        <div className="mx-auto flex max-w-[1320px] items-center gap-x-3 px-4 pt-2 sm:gap-x-4 sm:px-6">
+      <header ref={headerRef} className="sticky top-0 z-40 border-b border-line bg-panel">
+        <div className="mx-auto flex max-w-[1600px] items-center gap-x-3 px-4 pt-2 sm:gap-x-4 sm:px-6">
           <p className="flex min-w-0 flex-1 items-baseline gap-2">
-            <span className="text-base font-semibold tracking-tight text-fg">SelariKru</span>
-            <span aria-hidden="true" className="text-muted">/</span>
-            <span className="truncate text-sm text-muted" data-testid="project-label">{projectLabel}</span>
+            {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
+            <span className="sr-only text-base font-semibold tracking-tight text-fg sm:not-sr-only">SelariKru</span>
+            <span aria-hidden="true" className="hidden text-muted sm:inline">/</span>
+            <span className="truncate text-sm font-medium text-fg sm:font-normal sm:text-muted" data-testid="project-label"><span className="sr-only">, project </span>{projectLabel}</span>
           </p>
-          <div className="ml-auto flex shrink-0 items-center justify-end gap-x-3">
+          <div className="ml-auto flex shrink-0 items-center justify-end gap-x-2 sm:gap-x-3">
+            {panelWide ? null : <TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
             <DemoBadge mode={mode} />
             {attentionCount ? <a data-testid="attention-count" href={hrefFor('overview')} className={`hidden text-sm font-medium underline-offset-2 hover:underline sm:inline ${overview!.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{attentionCount}</a> : null}
             <button type="button" aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} className="rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
-              <span className="sm:hidden">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+              <span aria-hidden="true" className="sm:hidden">◐</span>
               <span className="hidden sm:inline">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
             </button>
             {account ? (
@@ -218,7 +275,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             ) : null}
           </div>
         </div>
-        <div className="mx-auto flex max-w-[1320px] items-center gap-2 pr-4 sm:pr-6">
+        <div className="mx-auto flex max-w-[1600px] items-center gap-2 pr-4 sm:pr-6">
           <nav ref={navRef} aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1 pt-1 sm:px-5">
             {NAV.map((item) =>
               item.route ? (
@@ -245,8 +302,13 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             {route === 'onboarding' && connection === 'unavailable' ? null : <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />}
           </div>
         </div>
+        {panelWide ? null : <TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} />}
       </header>
 
+      {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
+      <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''}`}>
+      {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} /> : null}
+      <div className="min-w-0">
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
@@ -255,7 +317,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : null}
         {route === 'team' ? (
           <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`}>
-            <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} />
+            <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenWorker={openWorker} />
           </RouteBoundary>
         ) : null}
         {route === 'pipeline' ? (
@@ -300,6 +362,15 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : null}
       </main>
       {devPanel ? <div className="mx-auto max-w-[1320px] px-4 pb-8 sm:px-6">{devPanel}</div> : null}
+      </div>
+      </div>
+      {workerId !== null && team !== null && snapshot !== null ? (
+        <WorkerDrawerHost
+          workerId={workerId} tab={isTabId(workerTab) ? workerTab : undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
+          onClose={closeWorker} onTab={(t: TabId) => replaceHashQuery({ wtab: t === 'task' ? null : t })}
+          onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl}
+        />
+      ) : null}
     </div>
   );
 }
