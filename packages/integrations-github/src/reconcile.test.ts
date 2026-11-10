@@ -205,21 +205,24 @@ describe('reconciliation', () => {
     // A replan takes the run out of review and holds its row until it commits. The reconcile has already read the old lifecycle by the time it needs that row.
     let commit!: () => void;
     const released = new Promise<void>((r) => { commit = r; });
-    let locked!: () => void;
-    const holding = new Promise<void>((r) => { locked = r; });
+    let locked!: (pid: number) => void;
+    const holding = new Promise<number>((r) => { locked = r; });
     const replan = withTx(tdb.db, async (tx) => {
       await tx.execute(sql`UPDATE runs SET lifecycle = 'running'`);
-      locked();
+      const [me] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      locked(Number(me!['pid']));
       await released;
     });
-    await holding;
+    const holder = await holding;
     const pending = reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps());
-    // Let the reconcile reach the run row, then let the replan commit under it.
-    for (let i = 0; i < 500; i++) {
-      const [row] = await tdb.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0 AND datname = current_database()`);
-      if (Number(row!['n']) > 0) break;
-      await new Promise((r) => setTimeout(r, 10));
+    // Let the reconcile reach the run row, which this test's replan holds, then let the replan commit under it. Nothing else counts as reaching it.
+    let queued = false;
+    for (let i = 0; i < 500 && !queued; i++) {
+      const [row] = await tdb.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE pg_blocking_pids(pid) @> ARRAY[${holder}::int]`);
+      queued = Number(row!['n']) > 0;
+      if (!queued) await new Promise((r) => setTimeout(r, 10));
     }
+    expect(queued, 'the reconcile never waited on the replan\'s run row').toBe(true);
     commit();
     await replan;
     expect((await pending).status).toBe('stale');

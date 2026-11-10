@@ -417,7 +417,7 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
       summary: copy.summary,
       consequence: 'A merge of this pull request would not be recorded for this run, and no task would count as merged.',
       note: `${copy.next} Agents never close pull requests.`,
-      facts: [{ label: 'Status', value: 'Out of date: main moved' }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Rebuild', value: rebuild }],
+      facts: [{ label: 'Status', value: copy.status }, { label: 'Old commit', value: short(cr.candidateSha), mono: true }, { label: 'Rebuilt commit', value: rebuiltSha ? short(rebuiltSha) : 'Not built yet', mono: rebuiltSha !== null }, { label: 'Rebuild', value: rebuild }],
       details: [{ label: 'Old commit', value: cr.candidateSha }, { label: 'Rebuilt commit', value: rebuiltSha ?? 'None' }, { label: 'Pull request URL', value: cr.url }],
       actions: [prLink(cr, options.mode, simulated)], since: at, fingerprint: ['out-of-date', cr.prNumber, cr.candidateSha, rebuiltSha, rebuild].join('|'),
     }];

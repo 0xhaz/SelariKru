@@ -74,6 +74,31 @@ describe('a restricted attempt stored before the closed list', () => {
     expect(stream).toContain(OPEN);
   });
 
+  it.each([[false], [null]] as const)('shows no agent words in an approval stored before T7.4a, open or resolved (terminalStreamable %s)', async (label) => {
+    /** An approval requested by the task's attempt, with the agent's own words as its reason, as rows were stored before the fixed sentence. */
+    const oldApproval = async (taskId: string, approvalId: string, outcome: 'pending' | 'denied', words: string) => {
+      await t.db.insert(schema.approvals).values({
+        tenantId: TENANT, projectId: PROJECT, approvalId, runId: RUN, taskId, revision: 1, requester: 'runner_1', actionHash: 'a'.repeat(64), scopeHash: 'b'.repeat(64), outcome,
+        detail: { operation: 'destructive_data_migration', reason: `drop the patients table holding ${words} rows` }, ...(outcome === 'denied' ? { resolvedAt: new Date('2026-11-08T06:06:00Z'), approver: 'owner' } : {}),
+      });
+      await withTx(t.db, (tx) => appendEvent(tx, {
+        schemaVersion: 1, eventId: `evt_${approvalId}`, projectId: PROJECT, runId: RUN, taskId, attemptId: `att_${taskId}`, type: 'approval.requested', sequence: 0, aggregateRevision: 2,
+        actor: { kind: 'scheduler', id: 'scheduler' }, occurredAt: '2026-11-08T06:05:00.000Z', receivedAt: '2026-11-08T06:05:00.000Z', causationId: null, traceId: 'trace',
+        payload: { fence: 1, approvalId, operation: 'destructive_data_migration', reason: 'x' },
+      }));
+    };
+    await oldRow('t_old', label, 'OTHER');
+    await oldApproval('t_old', 'apr_open', 'pending', CANARY);
+    await oldApproval('t_old', 'apr_done', 'denied', CANARY);
+    await oldRow('t_open', true, 'OTHER2');
+    await oldApproval('t_open', 'apr_open_s', 'pending', OPEN);
+    const snap = (await h.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json() as { approvals: { approvalId: string; reason: string | null }[]; approvalHistory: { approvalId: string; reason: string | null }[] };
+    expect(JSON.stringify(snap)).not.toContain(CANARY);
+    expect(snap.approvals.find((a) => a.approvalId === 'apr_open')?.reason).toBe('reason_withheld');
+    expect(snap.approvalHistory.find((a) => a.approvalId === 'apr_done')?.reason).toBe('reason_withheld');
+    expect(snap.approvals.find((a) => a.approvalId === 'apr_open_s')?.reason).toContain(OPEN);
+  });
+
   it('the stored rows themselves are not rewritten', async () => {
     await oldRow('t_old', false, CANARY);
     await h.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() });

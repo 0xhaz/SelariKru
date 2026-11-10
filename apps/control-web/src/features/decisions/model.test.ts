@@ -246,6 +246,14 @@ describe('blocked work', () => {
       expect(c.summary).not.toMatch(/main moved/i);
       expect(`${c.summary} ${c.note}`).toMatch(/Do not merge it/);
       expect(c.actions.filter((a) => a.kind === 'command')).toEqual([]);
+      // The Status fact names the cause too: a replan is not main moving.
+      expect(c.facts.find((f) => f.label === 'Status')?.value).toBe('Out of date: the run\'s work changed');
+    });
+
+    it('a pull request main left behind still says main moved in its Status fact', () => {
+      const s = moved('running', null, 'building');
+      (s.changeRequests[0] as { outOfDate: { reason: string } }).outOfDate.reason = 'main_moved';
+      expect(card(s)!.facts.find((f) => f.label === 'Status')?.value).toBe('Out of date: main moved');
     });
 
     it('once the run is ready again on the new candidate, never reads as ready for review', () => {

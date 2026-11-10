@@ -652,6 +652,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         // A restricted attempt's block reason is read through the same rule as its exit reason: rows from before the closed list may hold a runner's sentence.
         const restrictedIds = new Set(attempts.filter((a) => !a.streamable).map((a) => a.attemptId));
         for (const b of blockEvents) if (typeof b['attempt_id'] === 'string' && restrictedIds.has(b['attempt_id'])) b['payload'] = restrictedStoredPayload(b['payload'] as Record<string, unknown>);
+        // An approval's reason is read the same way when the attempt that asked for it is restricted: rows from before T7.4a hold the agent's own words. The request event names
+        // that attempt; one whose attempt is not on record counts as restricted.
+        const streamableIds = new Set(attempts.filter((a) => a.streamable).map((a) => a.attemptId));
+        const askedBy = new Map((await tx.execute(sql`SELECT payload ->> 'approvalId' AS approval_id, attempt_id FROM events WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type = 'approval.requested' AND attempt_id IS NOT NULL`))
+          .map((r) => [String(r['approval_id']), String(r['attempt_id'])] as const));
+        const approvalReason = (a: { approvalId: string; detail: Record<string, unknown> }): string | null => {
+          const reason = typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null;
+          const by = askedBy.get(a.approvalId);
+          return reason !== null && by !== undefined && !streamableIds.has(by) ? restrictedStoredReason(reason) : reason;
+        };
 
         // The status a task is in now came with its latest status event; a row bumped for any other reason keeps its time.
         const statusEvents = await tx.execute(sql`
@@ -778,14 +788,14 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, requester: a.requester, scopeHash: a.scopeHash,
             expiresAt: a.expiresAt?.toISOString() ?? null, requestedAt: a.createdAt.toISOString(), resolvedAt: a.resolvedAt?.toISOString() ?? null,
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
-            reason: typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null,
+            reason: approvalReason(a),
             destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
           })),
           /** The most recent resolved requests, newest first. A grant is a record; `consumedAt` says whether an attempt used it. */
           approvalHistory: resolved.map((a) => ({
             approvalId: a.approvalId, runId: a.runId, taskId: a.taskId, revision: a.revision, outcome: a.outcome, approver: a.approver ?? null, scopeHash: a.scopeHash,
             operation: typeof a.detail['operation'] === 'string' ? a.detail['operation'] : null,
-            reason: typeof a.detail['reason'] === 'string' ? a.detail['reason'] : null,
+            reason: approvalReason(a),
             destination: typeof a.detail['destination'] === 'string' ? a.detail['destination'] : null,
             requestedAt: a.createdAt.toISOString(), resolvedAt: a.resolvedAt?.toISOString() ?? null, consumedAt: a.consumedAt?.toISOString() ?? null, consumedBy: a.consumedBy ?? null,
           })),
