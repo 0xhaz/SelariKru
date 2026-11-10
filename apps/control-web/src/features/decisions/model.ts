@@ -142,11 +142,16 @@ function cancelAction(t: TaskView, paused: string | null, label = 'Cancel task',
  * Once a run's budget is spent, every hold stays at its worst case and none is released: a replan is refused as over budget, and cancelling frees nothing. What works is a new run,
  * through the same owner route as any run, which the server holds to the project's recorded ceiling. The command carries no budget; the data source reads the ceiling.
  */
-function newRunAction(snapshot: ProjectViewSnapshot, paused: string | null): DecisionAction {
+function newRunAction(snapshot: ProjectViewSnapshot, paused: string | null, runId: string): DecisionAction {
+  // A run with no tasks, made after this block, is a new run nobody has planned yet. Starting another would give a second full budget for nothing.
+  const waiting = Object.values(snapshot.runs).some((r) => r.runId !== runId && r.lifecycle === 'planning' && !Object.values(snapshot.tasks).some((t) => t.runId === r.runId));
+  const limit = snapshot.runs[runId]?.budgetLimitUsd;
+  const amount = typeof limit === 'number' ? ` up to $${limit}, the ceiling this project's runs have been given,` : " at or under the project's recorded ceiling,";
   return {
-    kind: 'command', id: 'start-new-run', label: 'Start a new run', style: 'primary', disabledReason: paused,
+    kind: 'command', id: 'start-new-run', label: 'Start a new run', style: 'primary',
+    disabledReason: paused ?? (waiting ? 'A new run with no plan yet already exists. Plan it in the Assistant instead of starting another.' : null),
     intent: { command: 'run.start_new', expectedRevision: 0, args: { projectId: snapshot.meta.projectId, title: 'Follow-up run' } },
-    confirm: { title: 'Start a new run?', consequence: "This run's budget stays spent and its work stays on record. The new run gets a fresh budget at or under this project's recorded ceiling, and starts with no plan.", keepLabel: 'Not now' },
+    confirm: { title: 'Start a new run?', consequence: `The new run gets a fresh budget${amount} in addition to what this run has already spent, which stays spent. This run's work stays on record. The new run starts with no plan.`, keepLabel: 'Not now' },
   };
 }
 
@@ -276,7 +281,7 @@ function blockCards(snapshot: ProjectViewSnapshot, nowMs: number, options: Decis
     const item = blockItem(task, code, hit);
     const policy = classifyBlock(code) === 'policy';
     const spent = classifyBlock(code) === 'repair' || code.endsWith('budget:exceeds_limit');
-    const actions: DecisionAction[] = [spent ? newRunAction(snapshot, paused) : replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused)];
+    const actions: DecisionAction[] = [spent ? newRunAction(snapshot, paused, task.runId) : replanAction(options.mode, paused, { runId: task.runId, taskId: task.taskId }), ...openCancel(task, paused)];
     out.push({
       id: `placement:${task.taskId}`, kind: policy ? 'policy_deny' : 'blocked', chip: policy ? 'Policy denied' : code === 'approval_denied' ? 'Denied' : 'Blocked', tone: policy ? 'danger' : 'warning', state: 'open',
       title: policy ? `${titleOf(task)}: denied by policy` : item.title, summary: item.detail, consequence: item.consequence, reason: null, advisory: null,
@@ -349,7 +354,7 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
       intent: { command: 'run.accept_reduced_scope', expectedRevision: run.planRevision, args: { runId: run.runId, notDeliveredHash: assessment?.notDeliveredHash ?? 'unknown' } },
       confirm: { title: 'Accept this run at reduced scope?', consequence: `${n} task${n === 1 ? '' : 's'}${reqs} will be recorded as not delivered. A pull request can then open without them. This cannot be undone.`, keepLabel: 'Keep deciding' },
     },
-    newRunAction(snapshot, paused),
+    newRunAction(snapshot, paused, run.runId),
     ...tasks.filter((t) => !isClosedTask(t)).map((t) => cancelAction(t, paused, `Cancel "${titleOf(t)}"`)),
   ];
   const stoppedNames = stopped.map(titleOf).join(', ');

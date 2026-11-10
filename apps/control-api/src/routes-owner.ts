@@ -261,7 +261,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         // Sized here, on the models recorded now: a dearer model fits by shrinking the caps, and every attempt's worst-case hold still fits the budget.
         if (settings.rolePaths !== undefined) {
           const cap = await planCapMicros(tx, { tenantId: config.tenantId, projectId, runId: run.runId, tasks: tasks.map((t) => ({ taskId: t.taskId, role: t.role, attempts: t.limits.maxAttempts })), catalog: ctx.catalog ?? NO_HARNESS_CATALOG, policy: ctx.policy });
-          if (cap === 0) throw new AppError(422, 'plan_over_run_budget', 'This run has no budget left for these tasks, once what is already held is counted. Raise the budget, or cancel work to free it.');
+          if (cap === 0) throw new AppError(422, 'plan_over_run_budget', 'This run has no budget left for these tasks, once what is already held is counted. What a run holds is not released, so start a new run under the recorded ceiling.');
           if (cap !== null) tasks = tasks.map((t) => ({ ...t, limits: { ...t.limits, maxCostUsd: cap / 1_000_000 } }));
         }
       }

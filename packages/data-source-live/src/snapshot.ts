@@ -21,7 +21,7 @@ interface RawUsage { entryId: string; runId: string; taskId: string | null; atte
 export interface RawSnapshot {
   projectId: string; cursor: number; generatedAt: string; modelCatalog: unknown; modelAssignments: unknown[];
   limits: unknown; runners: unknown[]; checks: unknown[]; usage: RawUsage[];
-  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown }[];
+  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown; budget?: unknown }[];
   tasks: RawTask[]; approvals: RawApproval[]; approvalHistory: RawHistory[]; changeRequests: unknown[];
   clientReports: { kind: string; payload: unknown; createdAt: string }[];
 }
@@ -80,6 +80,12 @@ function buildWorkers(tasks: readonly RawTask[], approvals: readonly RawApproval
 const HISTORY_STATES: readonly ApprovalView['state'][] = ['granted', 'denied', 'superseded'];
 
 /** Maps the server's snapshot to the view snapshot and validates it. Throws if the result does not match the strict schema: a screen must never read a shape it was not built for. */
+/** The run's limit when the server says one is set. Anything else is unknown, never zero. */
+function limitOf(budget: unknown): number | null {
+  const b = budget as { status?: unknown; limitUsd?: unknown } | null | undefined;
+  return b?.status === 'set' && typeof b.limitUsd === 'number' ? b.limitUsd : null;
+}
+
 export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
   const tasks: Record<string, unknown> = {};
   const attempts: Record<string, unknown> = {};
@@ -111,7 +117,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
   return ProjectViewSnapshotSchema.parse({
     meta: { schemaVersion: 1, projectId: raw.projectId, cursor: String(raw.cursor), observedAt: raw.generatedAt, provenance: 'observed' },
     assistant: report ?? { mode: null, observedSource: 'unknown' },
-    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}) }])),
+    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, budgetLimitUsd: limitOf(r.budget), ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}) }])),
     tasks, attempts, approvals,
     workers: buildWorkers(raw.tasks, raw.approvals),
     checks: Object.fromEntries((raw.checks as { checkId: string }[]).map((c) => [c.checkId, c])),

@@ -163,6 +163,8 @@ export const RunViewSchema = z
     scopeAssessment: ScopeAssessmentSchema.nullable().default(null),
     /** A benchmark trial's one model. Set, no assignment can change it. */
     pinnedModel: ModelSelectionSchema.nullable().default(null),
+    /** The USD limit this run was created with. Absent or null: the source does not report it. */
+    budgetLimitUsd: z.number().nullable().optional(),
     /** Every attempt of this run a person opened a shell in, older task revisions included. Absent: the source does not report it. */
     humanInterventions: z.array(z.object({ attemptId: Id, taskId: Id, at: Iso }).strict()).optional(),
   })

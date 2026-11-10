@@ -523,6 +523,29 @@ describe('after the run budget is spent', () => {
     expect(card.facts.find((f) => f.label === 'Next')!.value).toMatch(/start a new run/i);
     expect(card.consequence + card.summary).not.toMatch(/replan/i);
   });
+  it('says what it costs: the amount, and that it comes on top of what was spent', () => {
+    const s = cases[0]![1];
+    s.runs['run'] = { ...s.runs['run']!, budgetLimitUsd: 25 };
+    const a = action(build(s).cards.find((c) => c.id === 'placement:t')!, 'Start a new run');
+    expect(a.kind === 'command' && a.confirm?.consequence).toMatch(/\$25/);
+    expect(a.kind === 'command' && a.confirm?.consequence).toMatch(/in addition to/i);
+  });
+  it('does not state an amount it does not know', () => {
+    const fresh = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_budget_exhausted' })] });
+    const a = action(build(fresh).cards.find((c) => c.id === 'placement:t')!, 'Start a new run');
+    expect(a.kind === 'command' && a.confirm?.consequence).not.toMatch(/\$/);
+  });
+  it('is disabled, with a reason, once a newer run with no tasks exists, so a second click cannot start another', () => {
+    const s = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_budget_exhausted' })] });
+    s.runs['run_new'] = { ...s.runs['run']!, runId: 'run_new', lifecycle: 'planning', planRevision: 0 };
+    for (const snap of [s]) {
+      const card = build(snap).cards.find((c) => c.id === 'placement:t')!;
+      expect(action(card, 'Start a new run').disabledReason).toMatch(/new run.*no plan|no plan.*new run/i);
+    }
+    // Once that run has tasks it is real work, and the block is no longer the way forward only there.
+    const planned = snapshotOf({ tasks: [task('t', { status: 'blocked', statusReason: 'repair_budget_exhausted' })] });
+    expect(action(build(planned).cards.find((c) => c.id === 'placement:t')!, 'Start a new run').disabledReason).toBeNull();
+  });
   it('is enabled under demo data, where the mock mirrors it', () => {
     const card = build(cases[0]![1], { mode: 'mock' }).cards.find((c) => c.id === 'placement:t')!;
     expect(action(card, 'Start a new run').disabledReason).toBeNull();

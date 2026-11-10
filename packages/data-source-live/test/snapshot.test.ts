@@ -13,6 +13,13 @@ const raw = (over: Partial<RawSnapshot> = {}): RawSnapshot => ({
 });
 
 describe('toViewSnapshot', () => {
+  it('carries a run\'s set budget limit, and anything else is unknown, never zero', () => {
+    const run = (budget: unknown) => toViewSnapshot(raw({ runs: [{ ...raw().runs[0]!, budget }] })).runs['r']!.budgetLimitUsd;
+    expect(run({ status: 'set', limitUsd: 25 })).toBe(25);
+    expect(run({ status: 'missing', limitUsd: null })).toBeNull();
+    expect(run(undefined)).toBeNull();
+  });
+
   it('passes the strict schema and strips the route the recorded model must not carry', () => {
     const v = toViewSnapshot(raw());
     expect(ProjectViewSnapshotSchema.safeParse(v).success).toBe(true);

@@ -183,7 +183,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
     case 'repair':
       return make({
         ...base, kind: 'failed_gate', title: `${name}: out of repair attempts`, detail: `Its repair attempts are used up, so no further attempt will start.${lastFailure ? ` The last attempt ended with: ${explain(lastFailure)}` : ''}`,
-        consequence: `${whoWaits(hit)} This run's budget is spent, so it stays blocked.`, nextAction: "Inspect the failing check. This run's budget is spent, and cancelling frees nothing. Start a new run to try again; the work so far stays on record.",
+        consequence: `${whoWaits(hit)} Repairs have run out for this run, so it stays blocked.`, nextAction: "Inspect the failing check. Repairs have run out for this run, and what it already held stays held, so cancelling frees nothing. Start a new run to try again; the work so far stays on record.",
       });
     case 'budget': {
       const exceeds = code.endsWith('budget:exceeds_limit');

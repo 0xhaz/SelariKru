@@ -106,9 +106,11 @@ describe('attention queue', () => {
     for (const code of ['repair_budget_exhausted', 'repair_limit_exhausted']) {
       const [item] = buildAttention(blockedBy(code), NOW, NOW);
       const said = `${item!.consequence} ${item!.nextAction}`;
-      expect(said, code).toMatch(/budget is spent/i);
+      expect(said, code).toMatch(/repairs have run out for this run/i);
       expect(said, code).toMatch(/start a new run/i);
       expect(said, code).not.toMatch(/replan/i);
+      // An attempt count is not a dollar figure: nothing here says money is gone.
+      expect(said, code).not.toMatch(/budget is spent/i);
     }
   });
 
