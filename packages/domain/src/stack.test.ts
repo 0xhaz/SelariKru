@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { allowedUseFor, buildContextBundle, compileBrain, type BrainSourceRevision } from './brain.ts';
 import {
   applyStackAction, detectStack, emptyStack, isStackDetectionPath, normalizeStackLabel, PILOT_EVIDENCE, readinessOf, resolveStackLabel, STACK_CATALOG, STACK_CATEGORIES,
-  StackDetectionRecordSchema, StackDocumentSchema, stackBrainSources, stackEntry, targetGates, type StackDocument,
+  StackDetectionRecordSchema, StackDocumentSchema, stackBrainSources, stackItemKey, withholdRestrictedDetection, stackEntry, targetGates, type StackDocument,
 } from './stack.ts';
 
 /** The seed tables of docs/framework-tool-catalog.md §4 and §5, copied as written. Every label must be selectable. */
@@ -403,6 +403,55 @@ describe('stack selections: per component, None is not Not decided', () => {
     expect(doc.components[0]).toMatchObject({ name: 'Billing API', classification: 'restricted' });
     expect(stackBrainSources(doc)[0]!.classification).toBe('restricted');
     expect(stackBrainSources(withComponent('apps/web', 'Web', ['web'])(emptyStack()))[0]!.classification).toBe('internal');
+  });
+
+  it('a component\'s label only rises: lowering it is refused, and the explicit way is to remove the component, which is recorded', () => {
+    let doc = ok(emptyStack(), { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'restricted' });
+    expect(applyStackAction(doc, { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'internal' })).toMatchObject({ ok: false, code: 'classification_downgrade' });
+    expect(applyStackAction(doc, { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'public' })).toMatchObject({ ok: false, code: 'classification_downgrade' });
+    doc = ok(doc, { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'secret' });
+    expect(doc.components[0]!.classification).toBe('secret');
+    // An unlabelled component counts as internal: public would lower it.
+    const plain = ok(emptyStack(), { kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    expect(applyStackAction(plain, { kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'], classification: 'public' })).toMatchObject({ ok: false, code: 'classification_downgrade' });
+    // Removing a labelled component needs an explicit acknowledgement, and is logged with who and when.
+    expect(applyStackAction(doc, { kind: 'component.remove', path: 'services/billing' })).toMatchObject({ ok: false, code: 'classification_downgrade' });
+    const r = applyStackAction(doc, { kind: 'component.remove', path: 'services/billing', acknowledgeLabel: true }, { by: 'owner_1', at: '2026-11-10T09:00:00.000Z' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.doc.components).toEqual([]);
+    expect(r.doc.labelLog).toEqual([{ path: 'services/billing', classification: 'secret', removedBy: 'owner_1', removedAt: '2026-11-10T09:00:00.000Z' }]);
+    expect(ok(r.doc, { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'] }).components[0]!.classification).toBeUndefined();
+  });
+
+  it('detection under a restricted or secret component is withheld, keeping only a count', () => {
+    let doc = ok(emptyStack(), { kind: 'component.upsert', path: 'services/billing', name: 'Billing', targets: ['server'], classification: 'restricted' });
+    const ev = (path: string) => ({ path, detail: 'x' });
+    doc = { ...doc, detection: { commit: 'c'.repeat(40), detectedAt: '2026-11-10T08:00:00.000Z', runnerId: 'r', items: [
+      { detectionId: 'det:services/billing:stripe', componentPath: 'services/billing', entryId: 'stripe', version: null, evidence: ev('services/billing/package.json'), state: 'proposed' as const },
+      { detectionId: 'det:services/billing/sub:react', componentPath: 'services/billing/sub', entryId: 'react', version: null, evidence: ev('services/billing/sub/package.json'), state: 'proposed' as const },
+      { detectionId: 'det:services/billing-ui:react', componentPath: 'services/billing-ui', entryId: 'react', version: null, evidence: ev('services/billing-ui/package.json'), state: 'proposed' as const },
+    ], commands: [{ componentPath: 'services/billing', kind: 'build', script: 'build', command: 'npm run build', body: 'tsc', evidencePath: 'services/billing/package.json' }],
+    skipped: [{ path: 'services/billing/x/package.json', reason: 'symlink' }, { path: 'other/package.json', reason: 'symlink' }] } } as StackDocument;
+    const w = withholdRestrictedDetection(doc);
+    expect(w.detection!.items.map((i) => i.detectionId)).toEqual(['det:services/billing-ui:react']);
+    expect(w.detection!.commands).toEqual([]);
+    expect(w.detection!.skipped).toEqual([{ path: 'other/package.json', reason: 'symlink' }]);
+    expect(w.detection!.withheld).toBe(4);
+    expect(JSON.stringify(w)).not.toContain('stripe');
+  });
+
+  it('custom labels with no Latin letters or digits keep distinct keys', () => {
+    const a = stackItemKey({ kind: 'custom', label: '框架', canonicalSource: null });
+    const b = stackItemKey({ kind: 'custom', label: 'フレーム', canonicalSource: null });
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^custom:u[0-9a-f]+$/);
+    expect(stackItemKey({ kind: 'custom', label: '框架', canonicalSource: null })).toBe(a);
+    let doc = withComponent('.', 'Repository', [])(emptyStack());
+    doc = ok(doc, { kind: 'item.add', path: '.', category: 'frameworks', item: { kind: 'custom', label: '框架', canonicalSource: null } });
+    doc = ok(doc, { kind: 'item.add', path: '.', category: 'frameworks', item: { kind: 'custom', label: 'フレーム', canonicalSource: null } });
+    expect(doc.components[0]!.categories.frameworks).toMatchObject({ state: 'selected', items: [{ label: '框架' }, { label: 'フレーム' }] });
+    expect(stackItemKey({ kind: 'custom', label: 'In-house router', canonicalSource: null })).toBe('custom:inhouserouter');
   });
 
   it('the repository root component is in scope for every task', () => {

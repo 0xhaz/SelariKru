@@ -1,5 +1,5 @@
 import {
-  applyStackAction, emptyStack, NO_NATIVE, STACK_CATALOG_VERSION, StackDocumentSchema, stackEntry,
+  applyStackAction, emptyStack, NO_NATIVE, withholdRestrictedDetection, STACK_CATALOG_VERSION, StackDocumentSchema, stackEntry,
   type StackAction, type StackDetectionRecord, type StackDocument,
 } from '@selarikru/domain';
 import { schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
@@ -53,8 +53,13 @@ async function lockStack(tx: Tx, tenantId: string, projectId: string, at: Date):
   return loadStack(tx, tenantId, projectId);
 }
 
-async function writeStack(tx: Tx, tenantId: string, projectId: string, revisions: { revision: number } | { detectionRevision: number }, document: StackDocument, by: string, at: Date): Promise<void> {
-  await tx.update(schema.projectStacks).set({ ...revisions, document: StackDocumentSchema.parse(document) as unknown as Record<string, unknown>, catalogVersion: STACK_CATALOG_VERSION, updatedBy: by, updatedAt: at })
+/**
+ * Stores the document. An owner write moves `revision` and records who and when; a detection moves only `detectionRevision` and leaves both alone (the detection carries
+ * its own `detectedAt`). Either way, nothing detected under a restricted or secret component is kept, only its count.
+ */
+async function writeStack(tx: Tx, tenantId: string, projectId: string, change: { revision: number; by: string; at: Date } | { detectionRevision: number }, document: StackDocument): Promise<void> {
+  const owner = 'revision' in change ? { revision: change.revision, updatedBy: change.by, updatedAt: change.at } : { detectionRevision: change.detectionRevision };
+  await tx.update(schema.projectStacks).set({ ...owner, document: StackDocumentSchema.parse(withholdRestrictedDetection(document)) as unknown as Record<string, unknown>, catalogVersion: STACK_CATALOG_VERSION })
     .where(and(eq(schema.projectStacks.tenantId, tenantId), eq(schema.projectStacks.projectId, projectId)));
 }
 
@@ -73,7 +78,7 @@ const textsOf = (a: StackAction): string[] => {
 
 const ACTION_STATUS: Readonly<Record<string, number>> = {
   stack_component_not_found: 404, stack_item_not_found: 404, stack_detection_not_found: 404, stack_entry_unknown: 400, stack_entry_wrong_category: 400,
-  stack_item_exists: 409, stack_detection_settled: 409, stack_limit: 409,
+  stack_item_exists: 409, stack_detection_settled: 409, stack_limit: 409, classification_downgrade: 409,
 };
 
 export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -102,10 +107,10 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
       if (current.unreadable) throw unreadableError();
       // Owner writes only: a detection stored since this was read does not make it stale. The action is applied to the locked, current document.
       if (current.revision !== body.expectedRevision) throw new AppError(409, 'stack_revision_conflict', 'the stack changed since it was read; reload and try again', { revision: current.revision });
-      const r = applyStackAction(current.document, body.action);
+      const r = applyStackAction(current.document, body.action, { by: uid, at: at.toISOString() });
       if (!r.ok) throw new AppError(ACTION_STATUS[r.code] ?? 400, r.code, r.message);
-      await writeStack(tx, config.tenantId, projectId, { revision: current.revision + 1 }, r.doc, uid, at);
-      return { ...current, revision: current.revision + 1, document: r.doc, updatedBy: uid, updatedAt: at.toISOString() };
+      await writeStack(tx, config.tenantId, projectId, { revision: current.revision + 1, by: uid, at }, r.doc);
+      return { ...current, revision: current.revision + 1, document: withholdRestrictedDetection(r.doc), updatedBy: uid, updatedAt: at.toISOString() };
     });
     return view(projectId, after);
   });
@@ -134,10 +139,11 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
         // What the owner already confirmed or dismissed stays settled.
         items: items.map((i) => ({ ...i, state: prior.get(i.detectionId) ?? 'proposed' })),
       };
-      const same = current.document.detection !== null && JSON.stringify({ ...current.document.detection, detectedAt: '' }) === JSON.stringify({ ...detection, detectedAt: '' });
+      const next = withholdRestrictedDetection({ ...current.document, detection });
+      const same = current.document.detection !== null && JSON.stringify({ ...current.document.detection, detectedAt: '' }) === JSON.stringify({ ...next.detection, detectedAt: '' });
       if (same) return;
-      await writeStack(tx, p.tenantId, a.projectId, { detectionRevision: current.detectionRevision + 1 }, { ...current.document, detection }, `runner:${p.runnerId}`.slice(0, 200), at);
+      await writeStack(tx, p.tenantId, a.projectId, { detectionRevision: current.detectionRevision + 1 }, next);
     });
-    return { recorded: true, items: items.length };
+    return { recorded: true };
   });
 }

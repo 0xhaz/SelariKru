@@ -699,12 +699,19 @@ export const StackDetectionRecordSchema = z.strictObject({
   items: z.array(StackDetectedItemSchema.extend({ state: z.enum(['proposed', 'confirmed', 'dismissed']) })).max(400),
   commands: z.array(StackCommandProposalSchema).max(40),
   skipped: z.array(StackSkipSchema).max(200),
+  /** Items, commands and skipped paths under a restricted or secret component, dropped before storing. Only their number is kept. */
+  withheld: z.number().int().min(0).optional(),
 });
 export type StackDetectionRecord = z.infer<typeof StackDetectionRecordSchema>;
+
+const LabelSchema = z.enum(['public', 'internal', 'restricted', 'secret']);
+/** A labelled component that was removed: the only way its label can go down is to remove it and add it again, and that is recorded here. */
+export const StackLabelLogEntrySchema = z.strictObject({ path: StackComponentPathSchema, classification: LabelSchema, removedBy: Printable(200).min(1), removedAt: z.iso.datetime() });
 
 export const StackDocumentSchema = z.strictObject({
   components: z.array(StackComponentSchema).max(STACK_MAX_COMPONENTS),
   detection: StackDetectionRecordSchema.nullable(),
+  labelLog: z.array(StackLabelLogEntrySchema).max(200).optional(),
 });
 export type StackDocument = z.infer<typeof StackDocumentSchema>;
 
@@ -718,7 +725,8 @@ const AddItemSchema = z.discriminatedUnion('kind', [
 /** What an owner can change. Each is metadata only: none authenticates, installs, requests, spends or touches a repository. */
 export const StackActionSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('component.upsert'), path: StackComponentPathSchema, name: Text(80), targets: z.array(z.enum(STACK_TARGETS)).max(STACK_TARGETS.length), classification: z.enum(['public', 'internal', 'restricted', 'secret']).optional() }),
-  z.strictObject({ kind: z.literal('component.remove'), path: StackComponentPathSchema }),
+  /** Removing a restricted or secret component names that choice explicitly: it is how its label is lowered, and it is recorded. */
+  z.strictObject({ kind: z.literal('component.remove'), path: StackComponentPathSchema, acknowledgeLabel: z.literal(true).optional() }),
   z.strictObject({ kind: z.literal('category.set'), path: StackComponentPathSchema, category: StackCategoryIdSchema, state: z.enum(['not_decided', 'none']) }),
   z.strictObject({ kind: z.literal('item.add'), path: StackComponentPathSchema, category: StackCategoryIdSchema, item: AddItemSchema }),
   z.strictObject({ kind: z.literal('item.remove'), path: StackComponentPathSchema, category: StackCategoryIdSchema, key: z.string().min(1).max(120) }),
@@ -729,23 +737,44 @@ export type StackAction = z.input<typeof StackActionSchema>;
 
 export const STACK_ACTION_CODES = [
   'stack_component_not_found', 'stack_entry_unknown', 'stack_entry_wrong_category', 'stack_item_exists', 'stack_item_not_found', 'stack_detection_not_found',
-  'stack_detection_settled', 'stack_limit',
+  'stack_detection_settled', 'stack_limit', 'classification_downgrade',
 ] as const;
 export type StackActionCode = (typeof STACK_ACTION_CODES)[number];
 export type StackActionResult = { readonly ok: true; readonly doc: StackDocument } | { readonly ok: false; readonly code: StackActionCode; readonly message: string };
 
-/** A selection's key within its category: the canonical id, or the custom label's spelling. */
-export const stackItemKey = (item: StackItem): string => (item.kind === 'catalog' ? item.entryId : `custom:${normalizeStackLabel(item.label)}`);
+const shortHash = (text: string): string => {
+  let h = 5381;
+  for (const ch of text) h = ((h * 33) ^ ch.codePointAt(0)!) >>> 0;
+  return h.toString(16);
+};
+/**
+ * A selection's key within its category: the canonical id, or the custom label's spelling. A label with no Latin letters or digits (`框架`) has an empty spelling, so it
+ * is keyed by a short hash of its NFKC form instead, and two such labels never collide.
+ */
+export const stackItemKey = (item: StackItem): string => {
+  if (item.kind === 'catalog') return item.entryId;
+  const n = normalizeStackLabel(item.label);
+  return n !== '' ? `custom:${n}` : `custom:u${shortHash(item.label.normalize('NFKC').trim())}`;
+};
 
 const itemsOf = (s: StackCategoryState): StackItem[] => (s.state === 'selected' ? [...s.items] : []);
 const byPath = (a: { path: string }, b: { path: string }): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
 /** Applies one owner action. Pure: the same document and action always give the same result. */
-export function applyStackAction(doc: StackDocument, action: StackAction): StackActionResult {
+const LABEL_RANK = { public: 0, internal: 1, restricted: 2, secret: 3 } as const;
+const isProtected = (c: { classification?: string | undefined }): boolean => c.classification === 'restricted' || c.classification === 'secret';
+
+/** Who made a change and when, for what a document records about it (a labelled component's removal). */
+export interface StackActionContext {
+  readonly by: string;
+  readonly at: string;
+}
+
+export function applyStackAction(doc: StackDocument, action: StackAction, ctx: StackActionContext = { by: 'unknown', at: new Date(0).toISOString() }): StackActionResult {
   const fail = (code: StackActionCode, message: string): StackActionResult => ({ ok: false, code, message });
   const components = doc.components.map((c) => ({ ...c, categories: { ...c.categories } }));
   const find = (path: string) => components.find((c) => c.path === path);
-  const done = (next: StackComponent[], detection = doc.detection): StackActionResult => ({ ok: true, doc: { components: [...next].sort(byPath), detection } });
+  const done = (next: StackComponent[], detection = doc.detection, labelLog = doc.labelLog): StackActionResult => ({ ok: true, doc: { components: [...next].sort(byPath), detection, ...(labelLog !== undefined ? { labelLog } : {}) } });
   const add = (c: StackComponent, category: StackCategoryId, item: StackItem): StackActionCode | null => {
     const items = itemsOf(c.categories[category]);
     if (items.some((i) => stackItemKey(i) === stackItemKey(item))) return 'stack_item_exists';
@@ -760,15 +789,22 @@ export function applyStackAction(doc: StackDocument, action: StackAction): Stack
       if (have) {
         have.name = action.name.trim();
         have.targets = targets;
-        if (action.classification !== undefined) have.classification = action.classification;
+        if (action.classification !== undefined) {
+          // Monotone: a label only rises in place. An unlabelled component counts as internal.
+          if (LABEL_RANK[action.classification] < LABEL_RANK[have.classification ?? 'internal']) return fail('classification_downgrade', `the component is ${have.classification ?? 'internal'}; to lower its label, remove the component and add it again`);
+          have.classification = action.classification;
+        }
         return done(components);
       }
       if (components.length >= STACK_MAX_COMPONENTS) return fail('stack_limit', `at most ${STACK_MAX_COMPONENTS} components`);
       return done([...components, { path: action.path, name: action.name.trim(), targets, ...(action.classification !== undefined ? { classification: action.classification } : {}), categories: allNotDecided() }]);
     }
     case 'component.remove': {
-      if (!find(action.path)) return fail('stack_component_not_found', 'no component at that path');
-      return done(components.filter((c) => c.path !== action.path));
+      const have = find(action.path);
+      if (!have) return fail('stack_component_not_found', 'no component at that path');
+      if (isProtected(have) && action.acknowledgeLabel !== true) return fail('classification_downgrade', `the component is ${have.classification}; removing it drops that label, so it needs an explicit acknowledgement`);
+      const log = isProtected(have) ? [...(doc.labelLog ?? []), { path: have.path, classification: have.classification!, removedBy: ctx.by.slice(0, 200) || 'unknown', removedAt: ctx.at }].slice(-200) : doc.labelLog;
+      return done(components.filter((c) => c.path !== action.path), doc.detection, log);
     }
     case 'category.set': {
       const c = find(action.path);
@@ -822,6 +858,25 @@ export function applyStackAction(doc: StackDocument, action: StackAction): Stack
       return done(components, detection);
     }
   }
+}
+
+const under = (path: string, component: string): boolean => component === '.' || path === component || path.startsWith(`${component}/`);
+
+/**
+ * The document with every detected item, command proposal and skipped path that falls under a restricted or secret component removed, and their number kept as
+ * `withheld`. Restricted repository content is not stored even as a proposal.
+ */
+export function withholdRestrictedDetection(doc: StackDocument): StackDocument {
+  const d = doc.detection;
+  const guarded = doc.components.filter(isProtected).map((c) => c.path);
+  if (!d || guarded.length === 0) return doc;
+  const hidden = (path: string): boolean => guarded.some((g) => under(path, g));
+  const items = d.items.filter((i) => !hidden(i.componentPath) && !hidden(i.evidence.path));
+  const commands = d.commands.filter((c) => !hidden(c.componentPath) && !hidden(c.evidencePath));
+  const skipped = d.skipped.filter((x) => !hidden(x.path));
+  const dropped = d.items.length - items.length + d.commands.length - commands.length + d.skipped.length - skipped.length;
+  if (dropped === 0) return doc;
+  return { ...doc, detection: { ...d, items, commands, skipped, withheld: (d.withheld ?? 0) + dropped } };
 }
 
 // ---- the Project Brain's view of it ------------------------------------------------------------------------------------

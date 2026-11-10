@@ -143,7 +143,7 @@ const SKIP: Readonly<Record<string, string>> = { symlink: 'a symlink, not follow
 
 export function detectionRows(view: StackView) {
   const d = view.document.detection;
-  if (!d) return { commit: null, detectedAt: null, runner: null, items: [], commands: [], skipped: [] };
+  if (!d) return { commit: null, detectedAt: null, runner: null, items: [], commands: [], skipped: [], withheld: 0 };
   return {
     commit: d.commit.slice(0, 12), detectedAt: d.detectedAt, runner: d.runnerId,
     items: d.items.map((i) => ({
@@ -153,5 +153,6 @@ export function detectionRows(view: StackView) {
     })),
     commands: d.commands.map((c) => ({ ...c, status: 'Proposed · needs review · not in effect' })),
     skipped: d.skipped.map((s) => `${s.path}: ${SKIP[s.reason] ?? s.reason}`),
+    withheld: d.withheld ?? 0,
   };
 }

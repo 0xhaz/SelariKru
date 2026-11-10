@@ -267,7 +267,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
  * The version of `recordSources`, the code that reads records into sources. It is part of the records fingerprint with the generator's version, so a deploy that
  * changes either reads every project's records again. Raise it whenever that code changes what it produces.
  */
-export const RECORDS_READER_VERSION = '3';
+export const RECORDS_READER_VERSION = '4';
 
 /** A source that could not be stored: its id and a code, never its text. */
 export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;

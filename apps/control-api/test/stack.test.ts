@@ -136,7 +136,7 @@ describe('stack settings: selections are metadata only', () => {
 
 describe('stack settings feed the Project Brain as a cited source, scoped per component', () => {
   it('an owner write compiles the Brain; each worker gets only its component\'s stack, cited, and the records reader version moved', async () => {
-    expect(RECORDS_READER_VERSION).toBe('3');
+    expect(RECORDS_READER_VERSION).toBe('4');
     await seedTask(t.db, specFor('T1', { title: 'Build the web screen', baseSha: BASE, allowedPaths: ['apps/web'] }), 'ready');
     await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
     await mustAct({ kind: 'component.upsert', path: 'apps/mobile', name: 'Mobile', targets: ['ios', 'android'] });
@@ -187,6 +187,20 @@ describe('stack settings feed the Project Brain as a cited source, scoped per co
     expect(JSON.stringify(ctx)).not.toContain('Acme ledger');
     expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'source', id: 'stack:services/billing', reason: 'restricted_for_destination' }]));
     expect(JSON.stringify(ctx.omissions)).not.toContain('component:services/billing');
+  });
+});
+
+describe('stack settings: a component\'s label only rises', () => {
+  it('lowering a label is refused with classification_downgrade; removing the component is explicit and recorded', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'svc', name: 'Service', targets: ['server'], classification: 'restricted' });
+    const lower = await act({ kind: 'component.upsert', path: 'svc', name: 'Service', targets: ['server'], classification: 'internal' });
+    expect(lower).toMatchObject({ status: 409, body: { error: { code: 'classification_downgrade' } } });
+    expect((await act({ kind: 'component.remove', path: 'svc' })).body.error.code).toBe('classification_downgrade');
+    const removed = await mustAct({ kind: 'component.remove', path: 'svc', acknowledgeLabel: true });
+    expect(removed.document.components).toEqual([]);
+    expect(removed.document.labelLog).toEqual([{ path: 'svc', classification: 'restricted', removedBy: 'owner_uid_1', removedAt: expect.any(String) }]);
+    const again = await mustAct({ kind: 'component.upsert', path: 'svc', name: 'Service', targets: ['server'] });
+    expect(again.document.labelLog).toHaveLength(1);
   });
 });
 
@@ -272,6 +286,33 @@ describe('static detection from a runner: a proposal until the owner confirms it
     await t.db.execute(sql`UPDATE project_stacks SET document = '{"components": 7}'::jsonb`);
     const r = await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token));
     expect(r).toMatchObject({ status: 409, body: { error: { code: 'stack_unreadable' } } });
+  });
+
+  it('nothing detected under a restricted component is stored, only a count; raising a label later withholds what was stored', async () => {
+    const { ref, token } = await lease();
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'], classification: 'restricted' });
+    const mixed = { ...detection, items: [...detection.items, { detectionId: 'det:svc:stripe', componentPath: 'svc', entryId: 'stripe', version: null, evidence: { path: 'svc/package.json', detail: 'dependencies.stripe 1' } }] };
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection: mixed }, bearer(token))).status).toBe(200);
+    const stored = JSON.stringify((await t.db.execute(sql`SELECT document FROM project_stacks`))[0]);
+    expect(stored).not.toMatch(/nextjs|next build|apps\/web\/linked/);
+    const view = (await get(h.app, stackUrl)).body;
+    expect(view.document.detection.items.map((i: any) => i.detectionId)).toEqual(['det:svc:stripe']);
+    expect(view.document.detection).toMatchObject({ commands: [], skipped: [], withheld: 3 });
+    // A component labelled restricted after a detection was stored: what is under it is withheld on that write.
+    await mustAct({ kind: 'component.upsert', path: 'svc', name: 'Service', targets: ['server'], classification: 'secret' });
+    const after = (await get(h.app, stackUrl)).body.document.detection;
+    expect(after).toMatchObject({ items: [], withheld: 4 });
+  });
+
+  it('a detection changes neither who last edited the stack nor when; it keeps its own detectedAt', async () => {
+    const { ref, token } = await lease();
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    const before = (await get(h.app, stackUrl)).body;
+    h.clock.advance(60);
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(200);
+    const after = (await get(h.app, stackUrl)).body;
+    expect(after).toMatchObject({ updatedBy: before.updatedBy, updatedAt: before.updatedAt });
+    expect(after.document.detection.detectedAt).not.toBe(before.updatedAt);
   });
 
   it('is refused for work whose data stays on the device', async () => {

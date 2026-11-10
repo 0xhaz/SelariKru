@@ -198,6 +198,7 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
   const live = connection === 'live' && !stack.busy && stack.view?.unreadable !== true;
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
   const view = stack.view;
   const components = view?.document.components ?? [];
   useEffect(() => {
@@ -248,7 +249,7 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
                           {c.gates.map((g) => <span key={g.target} className="mt-1 block text-sm text-warning">{STACK_TARGET_LABELS[g.target]} gate incomplete: {g.label}. <span className="text-muted">{g.explanation}</span></span>)}
                         </span>
                       </label>
-                      <button type="button" className={buttonQuiet} disabled={!live} onClick={() => act({ kind: 'component.remove', path: c.path }, `Removed the component at ${c.path} from the stack record. Nothing in the repository or any provider changed.`)}>Remove<span className="sr-only"> component {c.path}</span></button>
+                      <button type="button" className={buttonQuiet} disabled={!live} onClick={() => (c.restricted ? setRemoving(c.path) : act({ kind: 'component.remove', path: c.path }, `Removed the component at ${c.path} from the stack record. Nothing in the repository or any provider changed.`))}>Remove<span className="sr-only"> component {c.path}</span></button>
                     </li>
                   ))}
                 </ul>
@@ -295,6 +296,7 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
                   ))}
                 </ul>
                 {detection.skipped.length > 0 ? <p className="mt-2 text-sm text-muted">Not read: {detection.skipped.join('; ')}.</p> : null}
+                {detection.withheld > 0 ? <p data-testid="stack-withheld" className="mt-2 text-sm text-muted">{detection.withheld} detected item{detection.withheld === 1 ? '' : 's'} under a restricted component {detection.withheld === 1 ? 'was' : 'were'} not stored.</p> : null}
               </>
             )}
           </Panel>
@@ -304,6 +306,14 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
               <SectionPanel section="frameworks" component={component} live={live} native={view.native} onAct={act} />
               <SectionPanel section="services" component={component} live={live} native={view.native} onAct={act} />
             </>
+          ) : null}
+          {removing !== null ? (
+            <ConfirmDialog
+              copy={{ title: `Remove the restricted component at ${removing}?`, consequence: 'Its stack record and its restricted label are removed, and the removal is recorded with who did it and when. This is the only way to lower a component\'s label: add it again to start over. Nothing in the repository or any provider changes.', keepLabel: 'Keep the component' }}
+              confirmLabel="Remove and record it"
+              onConfirm={() => { const path = removing; setRemoving(null); act({ kind: 'component.remove', path, acknowledgeLabel: true }, `Removed the restricted component at ${path}. The removal is recorded.`); }}
+              onKeep={() => setRemoving(null)}
+            />
           ) : null}
           <p className="text-sm text-muted">Revision {view.revision} · catalog {view.catalogVersion}{view.updatedAt ? <> · changed <Exact iso={view.updatedAt} /></> : null}. Skills appear here only once a reviewed binding exists; none does yet.</p>
         </>

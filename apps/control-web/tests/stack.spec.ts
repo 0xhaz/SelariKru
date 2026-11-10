@@ -222,6 +222,26 @@ test('a service shows separate readiness axes and a disabled Disconnect; a mobil
   await expect(page.getByTestId('stack-command').first()).toContainText('Proposed · needs review · not in effect');
 });
 
+test('a restricted component is removed only through an explicit, recorded confirmation', async ({ page }) => {
+  await open(page);
+  const main = page.locator('#main');
+  await main.getByLabel('Component name').fill('Billing');
+  await main.getByLabel('Repository path').fill('services/billing');
+  await main.getByRole('checkbox', { name: /Restricted/ }).check();
+  await main.getByRole('button', { name: 'Add component' }).click();
+  const row = page.locator('[data-testid="stack-component"][data-path="services/billing"]');
+  await expect(row).toContainText('Restricted: local workers only');
+  await row.getByRole('button', { name: /Remove/ }).click();
+  const dialog = page.getByRole('dialog', { name: /Remove the restricted component/ });
+  await expect(dialog).toContainText('recorded');
+  await page.keyboard.press('Escape');
+  await expect(row).toBeVisible();
+  await row.getByRole('button', { name: /Remove/ }).click();
+  await dialog.getByRole('button', { name: 'Remove and record it' }).click();
+  await expect(row).toHaveCount(0);
+  await expect(notice(page)).toContainText('The removal is recorded.');
+});
+
 test('at 390 px the stack settings fit, and a search result list stays usable', async ({ page }) => {
   await open(page, 390);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
