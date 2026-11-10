@@ -7,11 +7,12 @@ Parts of this app's layout, pixel theme and office canvas are adapted from the j
 Adapted files:
 
 - `src/theme/tokens.ts`, `src/theme/fonts.ts`
-- `src/index.css` (the pixel panel, button, chip, field and font-switch rules)
+- `src/index.css` (the reference's @theme colours and its panel, panel-dark, button, chip, field, kbd and led rules, and the font switch)
 - `src/office/**` except `src/office/model.ts` (engine, layout, drawing, actors, scene, input; drawn on a 2D canvas instead of PixiJS)
 - `src/shell/ui-store.ts`, `src/shell/shortcuts.ts`
 - `src/shell/hud/TopBar.tsx`, `ActivityFeed.tsx`, `ConnectionBanner.tsx`, `Tooltip.tsx`, `ViewDrawer.tsx`, `Portrait.tsx`
 - `src/features/settings/SettingsPage.tsx` (the settings tab layout)
+- `src/features/team/TeamPanel.tsx` (the floating agent-card column; the panel's data and wording are SelariKru's)
 
 The office's data model (`src/office/model.ts`), the activity feed's model (`src/shell/hud/activity.ts`) and the office screen's text panel (`src/shell/hud/OfficeHome.tsx`) are SelariKru's own.
 

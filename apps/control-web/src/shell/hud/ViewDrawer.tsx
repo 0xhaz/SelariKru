@@ -1,26 +1,111 @@
-// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
+// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the side drawer (resize handle, maximise) and the centred settings modal.
 
-import type { ReactNode } from 'react';
-import { hrefFor } from '../route.ts';
+import { useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { hrefFor, type Route } from '../route.ts';
+import { DRAWER_DEFAULT, ui, useUi } from '../ui-store.ts';
+import { MISSION_CONTROL } from '../views.ts';
+
+function MaximizeButton() {
+  const max = useUi((s) => s.drawerMaximized);
+  const label = max ? 'Restore size' : 'Maximize';
+  return (
+    <button type="button" className="btn hidden h-[30px] w-[34px] place-items-center px-0 xl:grid" aria-label={label} title={label} aria-pressed={max} onClick={() => ui.toggleDrawerMaximized()} data-testid="drawer-maximize">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2">
+        {max ? <><rect x="1" y="4" width="9" height="9" /><path d="M4 4V1h9v9h-3" /></> : <rect x="1" y="1" width="12" height="12" />}
+      </svg>
+    </button>
+  );
+}
+
+/** The drawer's left edge: drag to resize (remembered in this browser), double-click for the default width. Pointer only; Maximize is the key path. */
+function ResizeHandle() {
+  const start = useRef<{ x: number; width: number } | null>(null);
+  const down = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return;
+    const aside = e.currentTarget.parentElement;
+    if (!aside) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    start.current = { x: e.clientX, width: aside.getBoundingClientRect().width };
+    document.body.style.userSelect = 'none';
+  };
+  const move = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (start.current) ui.setDrawerWidth(start.current.width + (start.current.x - e.clientX));
+  };
+  const up = (): void => {
+    start.current = null;
+    document.body.style.userSelect = '';
+  };
+  return (
+    <div
+      aria-hidden="true" data-testid="drawer-resize" title="Drag to resize. Double-click to reset."
+      className="group absolute -left-[9px] top-0 z-10 hidden h-full w-[12px] cursor-col-resize justify-center xl:flex"
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onDoubleClick={() => ui.setDrawerWidth(DRAWER_DEFAULT)}
+    >
+      <div className="my-auto h-12 w-[4px] bg-ink opacity-0 group-hover:opacity-60" />
+    </div>
+  );
+}
+
+const CLOSE = 'btn grid h-[30px] place-items-center px-2.5';
 
 /**
- * The drawer a screen opens in, over the office. It is the screen's route, so it can be linked to and the browser's back button leaves it;
- * "Office" or Escape (from anywhere that is not a control) go back to the office.
+ * A screen in the reference's right-side drawer, over the office. It is the screen's route, so it can be linked to; ✕ or Escape on the page go
+ * back to the office. Below the floating layout's width it is a full-width panel in the page.
  */
-export function ViewDrawer({ view, group, title, children, after }: { view: string; group: string | null; title: string; children: ReactNode; after?: ReactNode }) {
+export function ViewDrawer({ view, title, route, decisionCount, paused, children, after }: { view: string; title: string; route: Route; decisionCount: number; paused: ReactNode; children: ReactNode; after?: ReactNode }) {
+  const width = useUi((s) => s.drawerWidth);
+  const maximized = useUi((s) => s.drawerMaximized);
+  const mc = MISSION_CONTROL.some((m) => m.route === route);
   return (
-    <div data-testid="view-drawer" data-view={view} className="panel pointer-events-auto relative min-w-0 border-x-0 sm:my-3 sm:border-l-[3px] 2xl:mx-4 2xl:border-x-[3px]">
-      <main id="main" tabIndex={-1} className="outline-none">
-      <div className="flex items-center gap-2 border-b-[3px] border-edge px-3 py-1.5 sm:px-4">
-        <a href={hrefFor('office')} className="btn" data-testid="view-drawer-close">
-          <span aria-hidden="true">◀</span> Office
-        </a>
-        <span aria-hidden="true" className="min-w-0 truncate text-sm text-muted">{group && group !== title ? `${group} · ` : ''}{title}</span>
-        <span className="ml-auto hidden text-sm text-muted md:inline" data-testid="view-drawer-keys"><kbd className="kbd">Esc</kbd> on the page goes back to the office</span>
-      </div>
-      <div className="mx-auto max-w-[1320px] px-4 py-6 sm:px-5">{children}</div>
+    <div
+      data-testid="view-drawer" data-view={view}
+      className={`panel pointer-events-auto relative z-20 m-0 flex min-w-0 flex-col xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 ${maximized ? 'xl:left-4' : 'xl:w-[var(--drawer-w)]'}`}
+      style={{ ['--drawer-w' as string]: `min(${width}px, calc(100vw - 32px))` }}
+    >
+      {maximized ? null : <ResizeHandle />}
+      <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
+        <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b-[3px] border-ink px-3 py-2">
+          {mc ? (
+            <nav aria-label="Mission Control" className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+              <span className="mr-1 text-[15px] font-bold text-fg">Mission Control</span>
+              {MISSION_CONTROL.map((m) => (
+                <a key={m.route} href={hrefFor(m.route)} aria-current={route === m.route ? 'page' : undefined} className="btn text-sm">
+                  {m.label}
+                  {m.route === 'decisions' && decisionCount > 0 ? <span className="ml-1.5 text-warning"><span className="sr-only">, </span>{decisionCount}<span className="sr-only"> waiting</span></span> : null}
+                </a>
+              ))}
+            </nav>
+          ) : <span className="min-w-0 flex-1 truncate text-[15px] font-bold text-fg" aria-hidden="true">{title}</span>}
+          <span className="hidden text-[13px] text-muted 2xl:inline" data-testid="view-drawer-keys"><kbd className="kbd">Esc</kbd> on the page closes</span>
+          <MaximizeButton />
+          <a href={hrefFor('office')} className={CLOSE} aria-label="Close, back to the office" data-testid="view-drawer-close">✕</a>
+        </div>
+        <div className="scroll-thin min-h-0 flex-1 xl:overflow-y-auto">
+          <div className="@container mx-auto max-w-[1320px] px-4 py-5 sm:px-5">{children}</div>
+          {after}
+        </div>
       </main>
-      {after}
+      {paused}
+    </div>
+  );
+}
+
+/** Settings: the reference's centred modal over the office. The rest of the app is inert while it is open, so focus stays inside it. */
+export function SettingsModal({ children, paused }: { children: ReactNode; paused: ReactNode }) {
+  return (
+    <div className="pointer-events-auto fixed inset-0 z-30 grid place-items-center bg-[rgba(36,26,46,0.55)] p-2 sm:p-4" data-testid="settings-backdrop"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) window.location.hash = hrefFor('office'); }}>
+      <div role="dialog" aria-modal="true" aria-label="Settings" data-testid="view-drawer" data-view="settings" className="panel relative flex h-[min(760px,calc(100dvh-1rem))] w-[min(1080px,100%)] flex-col sm:h-[min(760px,calc(100dvh-2rem))]">
+        <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
+          <div className="flex shrink-0 items-center gap-3 border-b-[3px] border-ink px-4 py-2">
+            <span className="min-w-0 flex-1 truncate text-[13px] text-muted"><kbd className="kbd">Esc</kbd> on the page closes</span>
+            <a href={hrefFor('office')} className={CLOSE} aria-label="Close settings" data-testid="view-drawer-close">✕</a>
+          </div>
+          <div className="scroll-thin @container min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">{children}</div>
+        </main>
+        {paused}
+      </div>
     </div>
   );
 }

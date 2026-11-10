@@ -15,26 +15,42 @@
 @import "@selarikru/ui/tokens.css";
 @source "../../../packages/ui/src";
 
-/* Pixel-only colours, for the office lawn and the thick panel edges. Text always uses the semantic tokens below. */
+/*
+ * The reference theme, one theme only (owner decision, T5.12 round 2): its @theme colours and fonts as given, and SelariKru's semantic tokens
+ * mapped onto them. Two reference colours fail WCAG AA as text and were adjusted minimally: muted #7d6b73 -> #625059 (3.80:1 on cream-2) and the
+ * activity feed's time colour #7f8bb5 -> #8f9bc4 (4.11:1 on navy). The bright state colours (blue, red, orange, green) stay for pixels and
+ * swatches; text in those tones uses the darker semantic values below. tests/quality.spec.ts measures the painted result.
+ */
 @theme {
+  --color-ink: #241a2e;
+  --color-cream: #fff6e9;
+  --color-cream-2: #f0dfc2;
+  --color-cream-3: #e2cba6;
+  --color-navy: #1d2b53;
+  --color-navy-2: #16213f;
+  --color-blue: #29adff;
+  --color-red: #ff004d;
+  --color-orange: #ffa300;
+  --color-green: #00e436;
+  --color-lav: #83769c;
+  --color-yellow: #ffec27;
+  --color-pink: #ff77a8;
   --color-grass: #4a8f3d;
   --color-edge: #241a2e;
+  --font-ui: "Pixelify Sans", "Trebuchet MS", system-ui, sans-serif;
+  --font-term: "VT323", ui-monospace, Menlo, Consolas, monospace;
 }
 
-/*
- * The pixel theme, mapped onto the semantic tokens every view already uses. Light is the reference's cream and ink; dark is its navy.
- * Where a reference colour failed WCAG AA as text it was darkened (light) or lightened (dark); see the T5.12 report for the list.
- * tests/quality.spec.ts measures the painted result in both themes.
- */
-:root {
+:root,
+:root[data-theme] {
   color-scheme: light;
   --color-bg: #fff6e9;
-  --color-panel: #fffaf2;
+  --color-panel: #fff6e9;
   --color-panel-2: #f0dfc2;
-  --color-line: #c9b28c;
+  --color-line: #e2cba6;
   --color-line-strong: #241a2e;
   --color-fg: #241a2e;
-  --color-muted: #5e4d56;
+  --color-muted: #625059;
   --color-active: #1a5aa0;
   --color-success: #0a6631;
   --color-warning: #7f4600;
@@ -44,76 +60,35 @@
   --color-warning-tint: #fbe6c4;
   --color-danger-tint: #fadbe3;
   --color-backdrop: #241a2e8c;
-  --color-edge: #241a2e;
-  --pixel-drop: #241a2e73;
-  --pixel-bevel-hi: #ffffff;
-  --pixel-bevel-lo: #f0dfc2;
+  --pixel-drop: rgba(36, 26, 46, 0.45);
   --radius-card: 0px;
   --radius-chip: 0px;
-  --font-sans: "Pixelify Sans", "Trebuchet MS", system-ui, sans-serif;
-  --font-mono: "VT323", ui-monospace, Menlo, Consolas, monospace;
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-term);
   --text-mono: 18px;
-  /* The sticky header must never cover a focused element (WCAG 2.2, 2.4.11). */
-  scroll-padding-top: 9rem;
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --color-bg: #16213f;
-  --color-panel: #1d2b53;
-  --color-panel-2: #26376a;
-  --color-line: #3b4a7a;
-  --color-line-strong: #8a96c0;
-  --color-fg: #fff6e9;
-  --color-muted: #bfc8e8;
-  --color-active: #4dbcff;
-  --color-success: #3ee07a;
-  --color-warning: #ffd23a;
-  --color-danger: #ff8fb5;
-  --color-active-tint: #1b3a66;
-  --color-success-tint: #173d33;
-  --color-warning-tint: #3b3318;
-  --color-danger-tint: #3d1d3b;
-  --color-backdrop: #000000a6;
-  --color-edge: #0b0f1f;
-  --pixel-drop: #00000080;
-  --pixel-bevel-hi: #ffffff14;
-  --pixel-bevel-lo: #00000040;
-}
-/* The light block in the shared tokens is replaced, not layered: the pixel light values above stand. */
-:root[data-theme="light"] {
-  --color-bg: #fff6e9;
-  --color-panel: #fffaf2;
-  --color-panel-2: #f0dfc2;
-  --color-line: #c9b28c;
-  --color-line-strong: #241a2e;
-  --color-fg: #241a2e;
-  --color-muted: #5e4d56;
-  --color-active: #1a5aa0;
-  --color-success: #0a6631;
-  --color-warning: #7f4600;
-  --color-danger: #b0003a;
-  --color-active-tint: #dcebfa;
-  --color-success-tint: #dcf2df;
-  --color-warning-tint: #fbe6c4;
-  --color-danger-tint: #fadbe3;
-  --color-backdrop: #241a2e8c;
+  scroll-padding-top: 6rem;
 }
 
 /* Font styles (Settings, Project, Font). The office canvas keeps its own pixel lettering. */
 html[data-font="clean"] {
+  --font-ui: "Inter", system-ui, sans-serif;
+  --font-term: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --text-mono: 13px;
 }
 html[data-font="mono"] {
+  --font-ui: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --font-term: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --font-sans: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
   --text-mono: 13px;
 }
 
+/* The office canvas paints the reference's grass behind the shell; the page itself is cream, so any surface without a panel still reads. */
 body {
-  background: var(--color-bg);
-  color: var(--color-fg);
+  background: var(--color-cream);
+  color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.5;
@@ -163,90 +138,121 @@ button.rounded-chip:disabled {
 }
 
 @layer components {
-/* Chunky game panel: thick edge, light bevel, hard drop shadow with no blur. */
-.panel {
-  background: var(--color-panel);
-  border: 3px solid var(--color-edge);
-  box-shadow: inset -3px -3px 0 var(--pixel-bevel-lo), inset 3px 3px 0 var(--pixel-bevel-hi), 0 4px 0 var(--pixel-drop);
-}
-/* The reference's button, for the HUD. */
-.btn {
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.375rem;
-  min-height: 2rem;
-  border: 2px solid var(--color-edge);
-  background: var(--color-panel);
-  color: var(--color-fg);
-  padding: 1px 10px;
-  font-weight: 600;
-  font-size: 14px;
-  white-space: nowrap;
-  box-shadow: inset -2px -2px 0 var(--pixel-bevel-lo), 0 3px 0 var(--color-edge);
-}
-.btn:hover {
-  background: var(--color-panel-2);
-}
-.btn:active,
-.btn[aria-pressed="true"],
-.btn[aria-current="page"] {
-  transform: translateY(3px);
-  box-shadow: inset -2px -2px 0 var(--pixel-bevel-lo), 0 0 0 var(--color-edge);
-}
-.btn[aria-pressed="true"],
-.btn[aria-current="page"] {
-  background: var(--color-active-tint);
-}
-.btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-  transform: none;
-}
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  font-weight: 600;
-  padding: 0 6px 1px;
-  border: 2px solid var(--color-edge);
-  background: var(--color-panel-2);
-  color: var(--color-fg);
-  white-space: nowrap;
-}
-.kbd {
-  font-family: var(--font-mono);
-  font-size: var(--text-mono);
-  line-height: 1;
-  border: 2px solid var(--color-edge);
-  padding: 0 4px;
-  background: var(--color-panel);
-  color: var(--color-fg);
-}
-/* A coloured square beside a state word: never the only signal. */
-.swatch {
-  display: inline-block;
-  flex-shrink: 0;
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--color-edge);
-}
-
-.led {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  background: #00e436;
-  box-shadow: 0 0 0 2px var(--color-edge);
-  animation: pixel-blink 1s steps(1) infinite;
-}
-.led[data-off] {
-  background: #83769c;
-  animation: none;
-}
-
+  /* Chunky game panel: ink outline, light bevel, hard drop shadow (no blur) */
+  .panel {
+    background: var(--color-cream);
+    border: 3px solid var(--color-ink);
+    box-shadow:
+      inset -3px -3px 0 var(--color-cream-2),
+      inset 3px 3px 0 #fff,
+      0 4px 0 rgba(36, 26, 46, 0.45);
+  }
+  .panel-dark {
+    background: var(--color-navy);
+    color: var(--color-cream);
+    border: 3px solid var(--color-ink);
+    box-shadow:
+      inset -3px -3px 0 rgba(0, 0, 0, 0.25),
+      inset 3px 3px 0 rgba(255, 255, 255, 0.08),
+      0 4px 0 rgba(36, 26, 46, 0.45);
+  }
+  .btn {
+    cursor: pointer;
+    border: 3px solid var(--color-ink);
+    background: var(--color-cream);
+    color: var(--color-ink);
+    padding: 1px 10px;
+    font-weight: 600;
+    box-shadow:
+      inset -2px -2px 0 var(--color-cream-3),
+      0 3px 0 var(--color-ink);
+    transition: transform 0.06s;
+    white-space: nowrap;
+  }
+  .btn:hover {
+    background: #fff;
+  }
+  .btn:active,
+  .btn[aria-pressed="true"],
+  .btn[aria-current="page"],
+  .btn[aria-expanded="true"] {
+    transform: translateY(3px);
+    box-shadow:
+      inset -2px -2px 0 var(--color-cream-3),
+      0 0 0 var(--color-ink);
+  }
+  .btn[aria-pressed="true"],
+  .btn[aria-current="page"] {
+    background: var(--color-yellow);
+  }
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+    transform: none;
+  }
+  .btn:focus-visible,
+  .field:focus-visible {
+    outline: 3px solid var(--color-blue);
+    outline-offset: 1px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 6px 1px;
+    border: 2px solid var(--color-ink);
+    background: var(--c, var(--color-cream-2));
+    color: var(--color-ink);
+    white-space: nowrap;
+  }
+  .chip-dot::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    background: var(--color-ink);
+  }
+  .field {
+    border: 3px solid var(--color-ink);
+    background: #fff;
+    padding: 2px 8px;
+    font-size: 15px;
+    width: 100%;
+    min-width: 0;
+  }
+  input.field,
+  select.field {
+    height: 2.25rem;
+  }
+  .kbd {
+    font-family: var(--font-term);
+    font-size: 16px;
+    line-height: 1;
+    border: 2px solid var(--color-ink);
+    padding: 0 4px;
+    background: #fff;
+    color: var(--color-ink);
+  }
+  .swatch {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--color-ink);
+  }
+  .led {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: var(--color-green);
+    box-shadow: 0 0 0 2px var(--color-ink);
+    animation: pixel-blink 1s steps(1) infinite;
+  }
+  .led[data-off] {
+    background: var(--color-lav);
+    animation: none;
+  }
 }
 
 @keyframes pixel-blink {
@@ -257,7 +263,8 @@ button.rounded-chip:disabled {
 }
 @media (prefers-reduced-motion: reduce) {
   .progress-fill,
-  .led {
+  .led,
+  .btn {
     transition: none;
     animation: none;
   }

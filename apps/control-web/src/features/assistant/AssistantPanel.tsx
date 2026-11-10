@@ -172,7 +172,7 @@ export function AssistantPanel({ adapter, api, hold, defaults, recordedMode }: A
       </header>
       <p role="status" aria-live="polite" className="sr-only">{announce}</p>
       {replanFor ? <p data-testid="replan-context" className="mb-4 rounded-chip border border-active bg-active-tint p-3 text-fg">Replanning {replanFor.taskId ? <>task <span className="font-mono text-mono">{replanFor.taskId}</span> in </> : null}run <span className="font-mono text-mono">{replanFor.runId}</span>. Draft a task plan below; a new revision replaces the current one once you accept it.</p> : null}
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
+      <div className="@container"><div className="grid gap-4 @3xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <div className="space-y-4">
           <RequestForm target={target} onTarget={setTarget} onGenerate={() => void onGenerate()} recordedMode={recordedMode} />
           <ModelCard onDownload={() => void onDownload()} />
@@ -182,7 +182,7 @@ export function AssistantPanel({ adapter, api, hold, defaults, recordedMode }: A
           <OutputView result={result} semantic={semantic} onDiscard={discard} />
           {result ? <HandoffPanel key={result.requestId + result.briefId + String(result.demo)} result={result} semantic={semantic} api={api} /> : null}
         </div>
-      </div>
+      </div></div>
     </div>
   );
 }

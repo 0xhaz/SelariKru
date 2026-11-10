@@ -1,8 +1,8 @@
 import { hrefFor, type Route } from './route.ts';
 
 /**
- * Where each screen lives in the office layout (T5.12). The office canvas is the centre. Every other screen opens in a drawer over it,
- * chosen from the top bar, and Settings opens as one large panel with its own tabs. All of them are routes, so each can still be linked to.
+ * Where each screen lives in the office layout (T5.12). The office canvas is always in view. Every other screen opens in a right-side drawer
+ * over it, chosen from the top bar, and Settings opens as a centred modal with its own tabs. All of them are routes, so each can be linked to.
  */
 export type ViewFrame = 'office' | 'drawer' | 'settings';
 
@@ -22,18 +22,17 @@ export interface NavItem {
   readonly route: Route;
 }
 
-/** The top bar's tabs. Mission Control's three screens sit together under its name; the labels are the ones every screen already had. */
-export const NAV_GROUPS: readonly { readonly label: string | null; readonly items: readonly NavItem[] }[] = [
-  { label: null, items: [{ label: 'Office', route: 'office' }] },
-  { label: 'Mission Control', items: [{ label: 'Overview', route: 'overview' }, { label: 'Pipeline', route: 'pipeline' }, { label: 'Decisions', route: 'decisions' }] },
-  {
-    label: null,
-    items: [
-      { label: 'Team', route: 'team' }, { label: 'Evidence and PR', route: 'evidence' }, { label: 'Product', route: 'product' }, { label: 'Brain', route: 'brain' },
-      { label: 'Benchmark', route: 'benchmark' }, { label: 'Assistant', route: 'assistant' }, { label: 'Settings', route: 'settings' }, { label: 'New project', route: 'onboarding' },
-    ],
-  },
+/** Mission Control's three screens: one drawer, with these as its tabs. */
+export const MISSION_CONTROL: readonly NavItem[] = [{ label: 'Overview', route: 'overview' }, { label: 'Pipeline', route: 'pipeline' }, { label: 'Decisions', route: 'decisions' }];
+
+/** The top bar's buttons. Each opens a drawer over the office (Settings opens its modal); closing it is the way back to the office. */
+export const TOP_BAR: readonly NavItem[] = [
+  { label: 'Mission Control', route: 'overview' }, { label: 'Team', route: 'team' }, { label: 'Evidence and PR', route: 'evidence' }, { label: 'Product', route: 'product' },
+  { label: 'Brain', route: 'brain' }, { label: 'Benchmark', route: 'benchmark' }, { label: 'Assistant', route: 'assistant' }, { label: 'Settings', route: 'settings' }, { label: 'New project', route: 'onboarding' },
 ];
+
+/** The top bar button a route belongs to: Mission Control's tabs all light its button. */
+export const topBarRouteOf = (route: Route): Route | null => (MISSION_CONTROL.some((m) => m.route === route) ? 'overview' : TOP_BAR.some((t) => t.route === route) ? route : null);
 
 export type SettingsTab = 'team' | 'workflow' | 'stack' | 'mcp' | 'sandbox' | 'boards' | 'project';
 

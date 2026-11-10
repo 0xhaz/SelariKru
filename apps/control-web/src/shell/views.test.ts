@@ -1,22 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTES } from './route.ts';
-import { NAV_GROUPS, SETTINGS_TABS, frameOf, settingsSection, settingsHref, TITLES } from './views.ts';
+import { MISSION_CONTROL, SETTINGS_TABS, TOP_BAR, frameOf, settingsSection, settingsHref, TITLES, topBarRouteOf } from './views.ts';
 
 describe('where each screen lives', () => {
-  it('the office is the centre; every other screen opens in a drawer over it, and Settings in its own tabbed panel', () => {
+  it('the office is always in view; every other screen opens in a drawer over it, and Settings in its modal', () => {
     expect(frameOf('office')).toBe('office');
     expect(frameOf('settings')).toBe('settings');
     for (const r of ROUTES.filter((x) => x !== 'office' && x !== 'settings')) expect(frameOf(r), r).toBe('drawer');
   });
 
-  it('every route can be reached from the top bar: nothing that exists becomes unreachable', () => {
-    const reachable = new Set(NAV_GROUPS.flatMap((g) => g.items.map((i) => i.route)));
-    for (const r of ROUTES) expect(reachable.has(r), r).toBe(true);
+  it('every route can be reached from the top bar or Mission Control\'s tabs; the office is what closing a drawer leaves', () => {
+    const reachable = new Set([...TOP_BAR, ...MISSION_CONTROL].map((i) => i.route));
+    for (const r of ROUTES.filter((x) => x !== 'office')) expect(reachable.has(r), r).toBe(true);
   });
 
-  it('Mission Control groups Overview, Pipeline and Decisions, with their existing names', () => {
-    const mc = NAV_GROUPS.find((g) => g.label === 'Mission Control');
-    expect(mc?.items.map((i) => [i.label, i.route])).toEqual([['Overview', 'overview'], ['Pipeline', 'pipeline'], ['Decisions', 'decisions']]);
+  it('Mission Control is one drawer whose tabs are Overview, Pipeline and Decisions, with their existing names', () => {
+    expect(MISSION_CONTROL.map((i) => [i.label, i.route])).toEqual([['Overview', 'overview'], ['Pipeline', 'pipeline'], ['Decisions', 'decisions']]);
+    for (const r of ['overview', 'pipeline', 'decisions'] as const) expect(topBarRouteOf(r)).toBe('overview');
+    expect(topBarRouteOf('brain')).toBe('brain');
+    expect(topBarRouteOf('office')).toBeNull();
   });
 
   it('every route has a page title', () => {

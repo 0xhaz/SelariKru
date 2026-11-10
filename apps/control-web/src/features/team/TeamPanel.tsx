@@ -1,3 +1,5 @@
+// Card column adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
+
 import type { KeyboardEvent, ReactNode } from 'react';
 import { TONE_TEXT, formatClock, type Tone } from '@selarikru/ui';
 import type { PresenceState } from './model.ts';
@@ -27,7 +29,7 @@ function WorkerRow({ row, selected, onOpen, mark }: { row: PanelRow; selected: b
         data-state={row.state}
         aria-current={selected ? 'true' : undefined}
         onClick={() => onOpen(row.workerId)}
-        className={`relative block w-full overflow-hidden rounded-chip border bg-panel-2 py-2 pr-2.5 pl-3.5 text-left before:absolute before:inset-y-0 before:left-0 before:w-[3px] ${rail} ${selected ? 'border-active' : 'border-line hover:border-line-strong'}`}
+        className={`panel relative block w-full overflow-hidden py-2 pr-2.5 pl-3.5 text-left motion-safe:transition-transform before:absolute before:inset-y-0 before:left-0 before:w-[3px] hover:-translate-x-px hover:-translate-y-px ${rail} ${row.state === 'needs_you' ? 'outline-[3px] outline-red outline-solid' : ''} ${selected ? 'bg-[#fff]' : ''}`}
       >
         <span className="flex items-baseline justify-between gap-2">
           {mark ? <span aria-hidden="true" className="flex shrink-0 items-center gap-1.5 self-center">{mark}</span> : null}
@@ -55,8 +57,8 @@ function Rows({ status, selectedId, onOpen, grid, mark }: { status: PanelStatus;
   if (status.panel.rows.length === 0) return <p className="px-1 py-2 text-sm text-muted">No workers yet. They appear once a plan is accepted and a task starts.</p>;
   return (
     <>
-      {status.stale ? <p className="mb-2 px-1 text-sm text-muted" data-testid="team-panel-stale">The connection is not live, so states are the last confirmed and shown as unknown.</p> : null}
-      <ul className={grid ? 'grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
+      {status.stale ? <p className="panel mb-2 px-2 py-1 text-sm text-muted" data-testid="team-panel-stale">The connection is not live, so states are the last confirmed and shown as unknown.</p> : null}
+      <ul className={grid ? 'grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2.5'}>
         {status.panel.rows.map((r, i) => <WorkerRow key={r.workerId} row={r} selected={r.workerId === selectedId} onOpen={onOpen} mark={mark ? mark(r.workerId, i) : null} />)}
       </ul>
     </>
@@ -103,14 +105,15 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 /** The roster beside every page at wide widths. Selecting a worker opens its drawer over the page; nothing navigates. */
 export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   return (
-    <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="border-r border-line bg-panel xl:sticky xl:top-[var(--header-h,6rem)] xl:h-[calc(100dvh-var(--header-h,6rem))] xl:overflow-y-auto">
-      <div className="px-3 pt-4 pb-6">
-        <div className="mb-3 px-1">
-          {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}
-          <p id="team-panel-title" className="text-sm font-semibold tracking-wide text-fg">Team</p>
-          <p className="text-sm" data-testid="team-panel-summary"><Count status={status} /></p>
-        </div>
-        <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} />
+    <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[74px] z-10 flex w-[280px] flex-col gap-2">
+      <div className="panel px-2.5 py-1">
+        {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}
+        <p id="team-panel-title" className="text-[13px] font-semibold uppercase tracking-[0.12em] text-fg">Team</p>
+        <p className="text-sm" data-testid="team-panel-summary"><Count status={status} /></p>
+      </div>
+      <div className="scroll-thin -ml-4 flex min-h-0 flex-col overflow-y-auto pt-1 pr-1 pb-2 pl-4">
+        {status.kind === 'ready' && status.panel.rows.length > 0 ? null : <div className="panel px-2.5 py-1"><Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /></div>}
+        {status.kind === 'ready' && status.panel.rows.length > 0 ? <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /> : null}
       </div>
     </aside>
   );
@@ -184,7 +187,7 @@ export function TeamFoldRegion({ status, open, onOpenChange, regionId, selectedI
     document.querySelector<HTMLElement>('[data-team-toggle]')?.focus();
   };
   return (
-    <section id={regionId} aria-label="Team" data-testid="team-panel" data-variant="fold" hidden={!open} onKeyDown={onKey} className="max-h-[60dvh] overflow-y-auto border-t border-line bg-panel">
+    <section id={regionId} aria-label="Team" data-testid="team-panel" data-variant="fold" hidden={!open} onKeyDown={onKey} className="max-h-[60dvh] overflow-y-auto border-t-[3px] border-ink bg-cream-2">
       <div className="mx-auto max-w-[1600px] px-4 py-3 sm:px-6">
         <p className="mb-2 px-1 text-sm" data-testid="team-panel-summary"><Count status={status} testId="team-fold-needs-you" /></p>
         <Rows status={status} selectedId={selectedId} onOpen={(id) => { onOpenChange(false); onOpen(id); }} grid mark={mark} />

@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useStore } from 'zustand';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
@@ -26,7 +26,7 @@ import { HandoverDecisions } from '../features/handover/ContinueInCloud.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute } from './route.ts';
-import { useTheme } from './theme.ts';
+import { applyTheme } from './theme.ts';
 import { applyFont, savedFont } from '../theme/fonts.ts';
 import { OfficeCanvas } from '../office/OfficeCanvas.tsx';
 import { buildOfficeWorld, type OfficeWorld } from '../office/model.ts';
@@ -37,10 +37,11 @@ import { OfficeHome } from './hud/OfficeHome.tsx';
 import { Tooltip } from './hud/Tooltip.tsx';
 import { Portrait } from './hud/Portrait.tsx';
 import { CONNECTION, TopBar } from './hud/TopBar.tsx';
-import { ViewDrawer } from './hud/ViewDrawer.tsx';
+import { SettingsModal, ViewDrawer } from './hud/ViewDrawer.tsx';
 import { shortcutFor } from './shortcuts.ts';
 import { ui } from './ui-store.ts';
-import { NAV_GROUPS, TITLES, frameOf } from './views.ts';
+import { TITLES, frameOf } from './views.ts';
+import { useUi } from './ui-store.ts';
 
 export interface AccountInfo {
   readonly label: string;
@@ -90,7 +91,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
  */
 export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref }: AppShellProps) {
   const route = useRoute();
-  const [theme, toggleTheme] = useTheme();
+  useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
   useEffect(() => applyFont(savedFont()), []);
   const state = useStore(store);
@@ -235,9 +236,9 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     try { return buildOfficeWorld(snapshot, team, projectLabel); } catch { return null; }
   }, [snapshot, team, projectLabel]);
   const activity = useMemo(() => {
-    if (route !== 'office' || !snapshot) return [];
+    if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
-  }, [route, snapshot]);
+  }, [route, panelWide, snapshot]);
   const frame = frameOf(route);
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
   const colorById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a.color]) ?? []), [world]);
@@ -247,8 +248,22 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   };
   const headerH = useHeaderHeight(headerRef);
   // On the office screen its own panels sit at the left of the canvas; the camera keeps the office clear of them where there is room.
-  const officeWide = useMediaQuery('(min-width: 1024px)');
-  const insets = useMemo(() => ({ top: headerH + 8, left: (panelWide ? 280 : 0) + (frame === 'office' && officeWide ? 330 : 16), right: workerId !== null ? 584 : 16, bottom: 16 }), [headerH, panelWide, officeWide, frame, workerId]);
+  const drawerWidth = useUi((s) => s.drawerWidth);
+  const drawerMaximized = useUi((s) => s.drawerMaximized);
+  // The camera centres the office in what the floating panels leave free: the team cards on the left, an open drawer on the right.
+  const insets = useMemo(() => {
+    if (!panelWide) return { top: headerH + 8, left: 8, right: 8, bottom: 8 };
+    const right = workerId !== null ? 600 : frame === 'drawer' && !drawerMaximized ? Math.min(drawerWidth, window.innerWidth - 32) + 32 : 16;
+    return { top: 74, left: 312, right, bottom: 16 };
+  }, [headerH, panelWide, frame, workerId, drawerWidth, drawerMaximized]);
+  // Settings is modal: everything else is inert while it is open, so focus cannot leave it.
+  const chromeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chromeRef.current;
+    if (!el) return;
+    el.inert = frame === 'settings';
+    return () => { el.inert = false; };
+  }, [frame]);
 
   // Shortcuts: 1 to 9 open a worker in the panel's order, + and - zoom the office, Escape on the page goes back to the office. Never from text entry,
   // a terminal, a dialog or the drawer (see shortcuts.ts).
@@ -258,7 +273,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   routeRef.current = route;
   const openRef = useRef(openWorker);
   openRef.current = openWorker;
-  useEffect(() => {
+  // A layout effect, so the keys work from the first painted frame.
+  useLayoutEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target instanceof Element ? e.target : null;
       const action = shortcutFor({ key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey, defaultPrevented: e.defaultPrevented, target });
@@ -284,7 +300,6 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   const openPlace = (place: 'plan' | 'prs'): void => { window.location.hash = hrefFor(place === 'plan' ? 'pipeline' : 'evidence'); };
-  const group = NAV_GROUPS.find((g) => g.items.some((i) => i.route === route))?.label ?? null;
 
   const views = (
     <>
@@ -360,40 +375,49 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     </>
   );
 
+  const pausedHint = drawerBeside ? (
+    <div className="pointer-events-none absolute inset-0 z-20 bg-cream/60">
+      <p data-testid="page-paused-hint" className="sticky top-3 mx-4 mt-3 max-w-[24rem] border-[3px] border-ink bg-cream px-3 py-2 text-sm text-fg shadow-[0_3px_0_rgba(36,26,46,0.45)]">The page is paused while a worker is open. Close the worker to use the page.</p>
+    </div>
+  ) : null;
+
   return (
     <div className="relative min-h-screen">
-      <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} />
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
-      <Announcer message={announcement} />
-      <TopBar
-        ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} theme={theme} onToggleTheme={toggleTheme} account={account}
-        attentionCount={attentionCount} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
-        teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
-        teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
-      />
+      <div ref={chromeRef}>
+        <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} />
+        <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:bg-cream focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
+        <Announcer message={announcement} />
+        <TopBar
+          ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
+          attentionCount={attentionCount} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
+          teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
+          teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
+        />
+        <ConnectionBanner connection={connection} />
+        {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
+        {panelWide ? <ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} /> : null}
+      </div>
 
-      {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
-      {/* An inert region is not hit-tested, so the arrow comes from here; the scrim and the hint below say why it does not respond. */}
-      <div className={`relative z-10 mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''} ${frame === 'office' ? 'pointer-events-none' : ''} ${drawerBeside ? 'cursor-default' : ''}`}>
-      {panelWide ? <div className="pointer-events-auto"><TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /></div> : null}
-      <div ref={contentRef} className={`relative min-w-0 ${drawerBeside ? 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:bg-bg/60 after:content-[\'\']' : ''}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
-      {/* On the scrim, out of the flow, so pausing moves nothing on the page; sticky under the header, so it stays in view however far the page is scrolled. */}
-      {drawerBeside ? (
-        <div className="pointer-events-none absolute inset-0 z-20">
-          <p data-testid="page-paused-hint" className="sticky top-[calc(var(--header-h,6rem)+0.75rem)] mx-4 mt-3 max-w-[24rem] border-2 border-edge bg-panel px-3 py-2 text-sm text-fg shadow-sm sm:mx-6">The page is paused while a worker is open. Close the worker to use the page.</p>
-        </div>
-      ) : null}
-      {frame === 'office' ? (
-        <main id="main" tabIndex={-1} className="outline-none">
-          <OfficeHome world={world} banner={<ConnectionBanner connection={connection} />} activity={<ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} />} devPanel={devPanel} />
-        </main>
-      ) : (
-        <ViewDrawer view={route} group={group} title={TITLES[route]} after={devPanel ? <div className="mx-auto max-w-[1320px] px-4 pb-8 sm:px-6">{devPanel}</div> : null}>
-          {views}
-        </ViewDrawer>
-      )}
+      {/* The screen in front of the office. Under a worker open beside the team cards it is inert; the scrim and the hint say why it does not respond. */}
+      {/* Floating, it is the area right of the team cards; it only takes the pointer while paused, so the office stays clickable around a drawer. */}
+      <div ref={contentRef} className={`relative z-20 min-w-0 xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px] ${drawerBeside ? 'cursor-default after:pointer-events-none after:absolute after:inset-0 after:z-30 after:bg-cream/40 after:content-[\'\']' : 'pointer-events-none'}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
+        {frame === 'office' ? (
+          <>
+            {pausedHint ? <div className="fixed inset-x-0 top-[74px]">{pausedHint}</div> : null}
+            <OfficeHome world={world} wide={panelWide} activity={<ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} />} />
+          </>
+        ) : frame === 'settings' ? (
+          <SettingsModal paused={pausedHint}>{views}</SettingsModal>
+        ) : (
+          <ViewDrawer view={route} title={TITLES[route]} route={route} decisionCount={decisionCount} paused={pausedHint}>
+            {views}
+          </ViewDrawer>
+        )}
       </div>
-      </div>
+      {/* The page under a worker open beside the team cards is inert, and an inert region is not hit-tested: this catcher gives the paused area its arrow pointer. */}
+      {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}
+      {/* Demo controls (dev only): outside every landmark's content, at the bottom left of the office beside the activity feed. */}
+      {devPanel ? <div className="relative z-10 mx-3 my-3 max-w-[22rem] bg-cream xl:fixed xl:bottom-4 xl:left-[312px] xl:m-0 xl:w-[300px]">{devPanel}</div> : null}
       <Tooltip />
       {workerId !== null && team !== null && snapshot !== null ? (
         <WorkerDrawerHost
@@ -412,8 +436,10 @@ function useHeaderHeight(ref: RefObject<HTMLElement | null>): number {
   useEffect(() => {
     const header = ref.current;
     if (!header) return;
+    // Floating, the bar ends 60 px down and the panels start at 74 px; in the page flow it is its own height.
     const set = (): void => {
-      document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`);
+      const floating = getComputedStyle(header).position === 'fixed';
+      document.documentElement.style.setProperty('--header-h', floating ? '74px' : `${header.offsetHeight}px`);
       setH(header.offsetHeight);
     };
     set();

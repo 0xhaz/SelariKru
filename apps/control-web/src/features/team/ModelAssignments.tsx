@@ -130,7 +130,7 @@ export function ModelAssignmentsPanel(props: AssignProps) {
       ) : model.roles.length === 0 ? (
         <p className="text-muted">Roles appear here once a plan is accepted.</p>
       ) : (
-        <ul className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <ul className="grid grid-cols-1 gap-4 @3xl:grid-cols-2">
           {model.roles.map((r) => <li key={r.key} className="min-w-0"><AssignmentRow {...props} target={r} /></li>)}
         </ul>
       )}

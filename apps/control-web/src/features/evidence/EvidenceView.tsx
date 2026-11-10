@@ -317,7 +317,7 @@ export function EvidenceView({ connection, error, model, failure, hasSnapshot, c
           </Panel>
         ) : null}
         {model.connected ? (
-          <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-4 @4xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
             <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
               <Panel title="Acceptance criteria" labelId="evidence-criteria-title" aside={`${model.simulated ? 'Simulated, not evidence. ' : ''}${model.counts.map((c) => `${c.n} ${c.label}`).join(', ')}`}>
                 {wide ? <CriteriaTable rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} onRetry={retryFailures} live={live} /> : <CriteriaCards rows={model.criteria} openIds={openIds} onToggle={toggle} failures={failures} onRetry={retryFailures} live={live} />}

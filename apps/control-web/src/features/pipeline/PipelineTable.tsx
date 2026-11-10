@@ -116,13 +116,13 @@ function Card({ row, selected, showStage, onOpen, handovers, live }: { row: Pipe
     <li data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} data-rail={row.rail ?? 'none'} className={`wrap-anywhere rounded-chip border border-line border-l-4 p-3 ${selected ? 'bg-panel-2' : ''} ${rail}`}>
       <TaskIdentity row={row} showStage={showStage} onOpen={onOpen} />
       <div className="mt-2"><StateCell row={row} onOpen={onOpen} handovers={handovers ?? null} live={live ?? false} /></div>
-      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-4">
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 @3xl:grid-cols-4">
         <Field label="Owner"><span className="block text-fg">{roleName(row.owner.role)}</span>{row.owner.workerId ? <span className="block break-all font-mono text-mono text-muted">{row.owner.workerId}</span> : <span className="block text-sm text-muted">No worker</span>}</Field>
         <Field label="Age"><span className="text-sm text-muted"><Timestamp iso={row.since} tabStop={false}>{row.age}</Timestamp></span></Field>
         {!row.accepted.startsWith('None') ? <Field label="Accepted revision">{row.accepted}</Field> : null}
         {row.branch ? <Field label="Branch or candidate">{row.branch}</Field> : null}
-        {row.predecessors === null || row.predecessors.length > 0 ? <Field label="Predecessors" className="col-span-2 lg:col-span-1"><PredecessorList row={row} /></Field> : null}
-        {row.checks ? <Field label="Checks" className="col-span-2 lg:col-span-1"><div>{checksCell(row)}</div></Field> : null}
+        {row.predecessors === null || row.predecessors.length > 0 ? <Field label="Predecessors" className="col-span-2 @3xl:col-span-1"><PredecessorList row={row} /></Field> : null}
+        {row.checks ? <Field label="Checks" className="col-span-2 @3xl:col-span-1"><div>{checksCell(row)}</div></Field> : null}
         <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span>{row.decisionId ? <a onClick={(e) => e.stopPropagation()} data-testid="decision-link" className="mt-1 block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a> : null}</Field>
       </dl>
     </li>

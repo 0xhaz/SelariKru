@@ -344,7 +344,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
       <div className="grid gap-4">
         <AttentionQueue items={overview.attention} titles={titlesOf(snapshot)} nowMs={nowMs} stale={stale} />
-        <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid items-start gap-4 @3xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <div className="grid gap-4">
             <DeliverySummary model={overview.delivery} stale={stale} />
             <EvidencePanel rows={overview.evidence} simulated={overview.simulated} />

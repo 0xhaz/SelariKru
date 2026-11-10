@@ -91,7 +91,7 @@ export function DecisionCard({ card, actions, changedNotice, busyId, nowMs, feed
   const chip = STATE_CHIP[card.state];
   return (
     <article id={`card-${card.id}`} data-testid="decision-card" data-card-id={card.id} data-kind={card.kind} data-state={card.state} aria-labelledby={`${card.id}-title`} className={`rounded-card border border-line bg-panel ${RAIL_SHADOW[card.tone]}`}>
-      <div className="grid gap-x-6 gap-y-4 p-4 sm:p-5 lg:grid-cols-[minmax(0,1fr)_21rem]">
+      <div className="grid gap-x-6 gap-y-4 p-4 sm:p-5 @3xl:grid-cols-[minmax(0,1fr)_21rem]">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Chip tone={card.tone}>{card.chip}</Chip>
@@ -133,7 +133,7 @@ export function DecisionCard({ card, actions, changedNotice, busyId, nowMs, feed
           </details>
         </div>
 
-        <div role="group" aria-label={`Your decision: ${card.title}`} className="flex flex-col gap-3 rounded-chip border border-line bg-panel-2 p-3 lg:self-start">
+        <div role="group" aria-label={`Your decision: ${card.title}`} className="flex flex-col gap-3 rounded-chip border border-line bg-panel-2 p-3 @3xl:self-start">
           <div>
             <h3 className="text-sm font-semibold text-fg">If you do nothing</h3>
             <p className="mt-0.5 text-sm text-fg">{card.consequence}</p>
