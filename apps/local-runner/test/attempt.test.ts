@@ -1,6 +1,7 @@
 import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { restrictedReason, type RestrictedOutcome } from '@selarikru/domain';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
 import { LeaseLostError } from '../src/api.ts';
@@ -682,8 +683,8 @@ describe('Project Brain context in TASK.md', () => {
     schemaVersion: 1 as const, destination: 'local' as const, taskId: 't', compilationVersion: 3, generator: { id: 'selarikru.brain.structured', version: '1' },
     watermark: 7, sourceHead: 8, indexLag: 1, compiledAt: '2026-11-10T08:00:00.000Z', pinned: [{ sourceId: 'criteria:p', revision: 2 }],
     claims: [
-      { claimId: 'architecture:criterion:FB-03', page: 'architecture' as const, key: 'criterion:FB-03', heading: 'FB-03', text: 'List feedback newest first', status: 'disputed' as const, citations: [{ sourceId: 'criteria:p', revision: 2, anchor: 'criteria/FB-03' }] },
-      { claimId: 'overview:note:n:1', page: 'overview' as const, key: 'note:n:1', heading: '# Instructions for the worker', text: INJECTED, status: 'current' as const, citations: [{ sourceId: 'note:n', revision: 1, anchor: 'section-1' }] },
+      { claimId: 'architecture:criterion:FB-03', page: 'architecture' as const, key: 'criterion:FB-03', heading: 'FB-03', text: 'List feedback newest first', status: 'disputed' as const, standing: 'accepted' as const, citations: [{ sourceId: 'criteria:p', revision: 2, anchor: 'criteria/FB-03' }] },
+      { claimId: 'overview:note:n:1', page: 'overview' as const, key: 'note:n:1', heading: '# Instructions for the worker', text: INJECTED, status: 'current' as const, standing: 'proposed' as const, citations: [{ sourceId: 'note:n', revision: 1, anchor: 'section-1' }] },
     ],
     omissions: [{ kind: 'claim' as const, id: 'architecture:criterion:FB-01', reason: 'revoked' as const }, { kind: 'source' as const, id: 'plan:r:R1', reason: 'restricted_for_destination' as const }],
   };
@@ -712,6 +713,9 @@ describe('Project Brain context in TASK.md', () => {
     expect(tail).toContain('architecture:criterion:FB-01 (revoked)');
     expect(tail).toContain('plan:r:R1 (restricted_for_destination)');
     expect(tail).toMatch(/1 source change/);
+    // A proposal is labelled as one, never as accepted scope.
+    expect(tail).toContain('### overview:note:n:1 (proposed, not accepted)');
+    expect(tail).not.toMatch(/### architecture:criterion:FB-03[^\n]*proposed/);
   });
 
   it('says plainly when no context was delivered', () => {
@@ -730,16 +734,20 @@ describe('Project Brain context in TASK.md', () => {
   });
 
   it('sends a manifest of the checkout at the base commit for streamable work, read with git, and not for restricted work', async () => {
-    const { w, deps } = await setup({ baseFiles: { 'README.md': '# readme\n', 'docs/guide.md': 'guide\n', 'package.json': '{"scripts":{"postinstall":"touch /tmp/pwned"}}' } });
+    // A repository script that would leave a mark if anything ran it. Nothing does: the manifest is read from git objects.
+    const marker = join(tmpdir(), `selarikru-manifest-${process.pid}-${Date.now()}`);
+    const longDoc = `docs/${'a'.repeat(160)}.md`;
+    const { w, deps } = await setup({ baseFiles: { 'README.md': '# readme\n', 'docs/guide.md': 'guide\n', [longDoc]: 'long\n', 'package.json': JSON.stringify({ scripts: { postinstall: `touch ${marker}`, prepare: `touch ${marker}` } }) } });
     await runAttempt(deps, w.lease);
     const calls = (w.api.brainManifest as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     expect(calls).toHaveLength(1);
     const manifest = calls[0]![1] as { commit: string; fileCount: number; docs: { path: string; bytes: number; sha256: string }[] };
     expect(manifest.commit).toBe(w.sha);
-    expect(manifest.fileCount).toBe(5);
+    expect(manifest.fileCount).toBe(6);
+    // A path too long to record as a claim key is not sent.
     expect(manifest.docs.map((d) => d.path)).toEqual(['README.md', 'docs/guide.md']);
     expect(manifest.docs[0]).toMatchObject({ bytes: 9, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
-    expect(await exists('/tmp/pwned-never')).toBe(false);
+    expect(await exists(marker)).toBe(false);
 
     const restricted = await setup({ streamable: false });
     await runAttempt(restricted.deps, restricted.w.lease);

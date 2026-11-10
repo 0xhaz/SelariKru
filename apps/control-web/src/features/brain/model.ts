@@ -14,6 +14,8 @@ export interface ClaimRow {
   readonly heading: string;
   readonly text: string;
   readonly status: { readonly label: string; readonly tone: Tone; readonly detail: string };
+  /** `Accepted`, or a proposal that is never accepted scope. */
+  readonly standing: string;
   /** False: this claim is not served to workers now. */
   readonly served: boolean;
   readonly restricted: boolean;
@@ -74,7 +76,7 @@ export function brainModel(view: BrainView, nowMs: number): BrainModel {
   const pages = (c?.pages ?? []).map((p) => ({
     id: p.page, title: p.title, classification: labelOf(p.classification),
     claims: p.claims.map((cl): ClaimRow => ({
-      claimId: cl.claimId, key: cl.key, heading: cl.heading, text: cl.text, status: STATUS[cl.status], served: cl.status === 'current' || cl.status === 'disputed',
+      claimId: cl.claimId, key: cl.key, heading: cl.heading, text: cl.text, status: STATUS[cl.status], standing: cl.standing === 'accepted' ? 'Accepted' : 'Proposed, not accepted scope', served: cl.status === 'current' || cl.status === 'disputed',
       restricted: isRestricted(cl.classification), classification: labelOf(cl.classification), citations: cl.citations.map(cite), disputedBy: cl.disputedBy.map(cite), conflictId: cl.conflictId,
     })),
   }));
@@ -118,14 +120,16 @@ export function conflictCards(view: BrainView | null): ConflictCard[] {
 
 const OMISSION: Readonly<Record<BrainOmissionReason, string>> = {
   revoked: 'Revoked source', stale: 'Stale', restricted_for_destination: 'Restricted for this destination', too_large: 'Too large to include', out_of_scope: 'Out of scope for this task',
+  accepted_source_revoked: 'Its accepted source was revoked; a proposal is not served in its place', not_a_claim: 'States no claim',
 };
+const OMITTED_KIND: Readonly<Record<string, string>> = { claim: 'Claim', source: 'Source', section: 'Section' };
 
 export interface ContextModel {
   readonly destination: string;
   readonly recordedAt: string;
   readonly version: string;
   readonly lag: string;
-  readonly claims: readonly { readonly claimId: string; readonly key: string; readonly heading: string; readonly text: string; readonly status: string; readonly citations: readonly CitationLink[] }[];
+  readonly claims: readonly { readonly claimId: string; readonly key: string; readonly heading: string; readonly text: string; readonly status: string; readonly standing: string; readonly citations: readonly CitationLink[] }[];
   readonly omissions: readonly { readonly id: string; readonly kind: string; readonly reason: string }[];
   readonly pinned: readonly string[];
 }
@@ -136,8 +140,8 @@ export function contextModel(ctx: AttemptContextView | null): ContextModel | nul
   return {
     destination: ctx.destination === 'cloud' ? 'Cloud worker' : 'Local worker', recordedAt: ctx.recordedAt,
     version: b.compilationVersion === null ? 'Nothing was compiled yet' : `Version ${b.compilationVersion}`, lag: changes(b.indexLag, true),
-    claims: b.claims.map((c) => ({ claimId: c.claimId, key: c.key, heading: c.heading, text: c.text, status: c.status === 'disputed' ? 'Disputed' : 'Current', citations: c.citations.map(cite) })),
-    omissions: b.omissions.map((o) => ({ id: o.id, kind: o.kind === 'claim' ? 'Claim' : 'Source', reason: OMISSION[o.reason] })),
+    claims: b.claims.map((c) => ({ claimId: c.claimId, key: c.key, heading: c.heading, text: c.text, status: c.status === 'disputed' ? 'Disputed' : 'Current', standing: c.standing === 'accepted' ? 'Accepted' : 'Proposed, not accepted', citations: c.citations.map(cite) })),
+    omissions: b.omissions.map((o) => ({ id: o.id, kind: OMITTED_KIND[o.kind] ?? o.kind, reason: OMISSION[o.reason] })),
     pinned: b.pinned.map((p) => `${p.sourceId} · revision ${p.revision}`),
   };
 }

@@ -43,10 +43,13 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   `model_assignments` rows ordered by project, scope kind, scope key and revision, every one locked before the first event, then the event sequence. Two
  *   of them lock in the same order, so they wait rather than cross. They take no scheduler lock, run row or status row. The claim poll reads settings rows
  *   after the scheduler lock without locking them, so a save is either committed before the claim's reads or waits for the claim to finish.
- * - the Project Brain (apps/control-api/src/brain.ts: a sync, an owner's note, a revocation, a settled conflict, a runner's manifest, and the context bundle built at
- *   claim): the project's `brain_heads` row and nothing else. It is taken with no other lock held, never inside the claim's transaction (the bundle is built after the
- *   claim committed), and while it is held only brain tables are written and every other table is only read, without a lock. It appends no event. So it takes no
- *   scheduler lock, run row, status row or event sequence, and no path above takes it.
+ * - the Project Brain (apps/control-api/src/brain.ts): every write takes the project's `brain_heads` row and nothing else, with no other lock held. A compile runs
+ *   on change, never inside another path's transaction: an owner's note, revocation or kept conflict and a runner's manifest compile in their own transaction; a plan
+ *   accepted, an approval resolved, reduced scope accepted, a reclassification decided or a project activated compile after that request's transaction committed (an
+ *   `onSend` hook); a verifier's verdict or a merge is compiled by the periodic pass (`refreshBrains`, after the settings sweep) and by an owner's read, each only
+ *   when the records' fingerprint moved. While the brain lock is held only brain tables are written and every other table is read without a lock; no event is
+ *   appended. The context bundle built after a claim commits compiles nothing and takes no lock: it reads the last compilation and inserts the attempt's bundle row.
+ *   So no brain path takes the scheduler lock, a run row, a status row or the event sequence, and no path above takes the brain lock.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

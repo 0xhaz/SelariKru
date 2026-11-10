@@ -18,6 +18,9 @@ export type BrainNoteRequest = z.infer<typeof BrainNoteRequestSchema>;
 
 export const BrainRevokeRequestSchema = z.strictObject({ reason: z.string().trim().min(1).max(200) });
 
+/** The longest document path a manifest records: `repo:doc:<path>` must fit a claim key (160 characters) and `docs/<path>` an anchor (200). Longer ones are skipped, with a reason. */
+export const REPO_MANIFEST_DOC_PATH_MAX = 160 - 'repo:doc:'.length;
+
 /** A repository path: relative, no `..`, no backslash. */
 const RepoPath = z.string().regex(/^(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9_.-][A-Za-z0-9_./-]{0,199}$/, 'expected a relative repository path');
 

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import { promisify } from 'node:util';
+import { REPO_MANIFEST_DOC_PATH_MAX } from '@selarikru/protocol';
 import { snapshotTree, type TreeSnapshot, type BaseIgnores } from './diff.ts';
 
 const execFileP = promisify(execFile);
@@ -233,7 +234,7 @@ export async function readRepoManifest(repoPath: string, sha: string): Promise<R
     const bytes = Number(size);
     fileCount += 1;
     totalBytes += Number.isFinite(bytes) ? bytes : 0;
-    if (MANIFEST_DOC.test(path) && docs.length < MANIFEST_MAX_DOCS && Number.isFinite(bytes) && bytes <= MANIFEST_MAX_DOC_BYTES) docs.push({ path, oid, bytes });
+    if (MANIFEST_DOC.test(path) && path.length <= REPO_MANIFEST_DOC_PATH_MAX && docs.length < MANIFEST_MAX_DOCS && Number.isFinite(bytes) && bytes <= MANIFEST_MAX_DOC_BYTES) docs.push({ path, oid, bytes });
   }
   const blobs = await readBlobs(repoPath, docs.map((d) => d.oid));
   return {

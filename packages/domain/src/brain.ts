@@ -32,7 +32,8 @@ export const BRAIN_PAGES = ['overview', 'architecture', 'decisions'] as const;
 export type BrainPageId = (typeof BRAIN_PAGES)[number];
 export const BRAIN_PAGE_TITLES: Readonly<Record<BrainPageId, string>> = { overview: 'Project overview', architecture: 'Architecture and constraints', decisions: 'Decision log' };
 
-export const BRAIN_OMISSION_REASONS = ['revoked', 'stale', 'restricted_for_destination', 'too_large', 'out_of_scope'] as const;
+/** `accepted_source_revoked`: the key's accepted value was revoked and only a different proposal remains, which is never served as accepted. `not_a_claim`: a section that states no claim. */
+export const BRAIN_OMISSION_REASONS = ['revoked', 'stale', 'restricted_for_destination', 'too_large', 'out_of_scope', 'accepted_source_revoked', 'not_a_claim'] as const;
 export type BrainOmissionReason = (typeof BRAIN_OMISSION_REASONS)[number];
 
 export const BRAIN_DESTINATIONS = ['local', 'cloud'] as const;
@@ -123,13 +124,15 @@ export const BrainClaimSchema = z.strictObject({
   heading: z.string().min(1).max(200),
   text: z.string().max(BRAIN_SECTION_TEXT_MAX),
   status: z.enum(BRAIN_CLAIM_STATUSES),
+  /** `accepted` when a live accepted source states it (or, unsupported, when its accepted source was revoked). `proposed`: only proposals state it. Never served as accepted. */
+  standing: z.enum(BRAIN_STANDINGS).default('accepted'),
   /** Every source revision and anchor stating exactly this text. */
   citations: z.array(BrainCitationSchema).min(1),
   /** The independent roots behind the citations, transitively. Two citations with one root are one piece of evidence. */
   roots: z.array(BrainSourceIdSchema),
   /** Roots that are still live: not revoked, at a current revision. Zero means nothing supports the claim now. */
   liveSupport: z.number().int().min(0),
-  /** Sources stating a different value for the same key while an accepted one stands. Set only on a disputed claim. */
+  /** Live sources stating a different value for the same key against an accepted value: they dispute it, or, when the accepted source was revoked, wait without an accepted value. */
   disputedBy: z.array(BrainCitationSchema),
   conflictId: z.string().nullable(),
   classification: BrainClassificationSchema,
@@ -167,6 +170,9 @@ export const BrainCompilationSchema = z.strictObject({
 export type BrainCompilation = z.infer<typeof BrainCompilationSchema>;
 
 const norm = (s: string): string => s.replace(/\s+/g, ' ').trim();
+/** A conflict's id: the key and the exact source revision that disputes it. */
+export const brainConflictId = (key: string, ref: BrainRevisionRef): string => `conflict:${key}:${ref.sourceId}@${ref.revision}`;
+const conflictIdOf = (key: string, c: { rev: BrainSourceRevision }): string => brainConflictId(key, c.rev);
 
 /** Source text as it is stored: control, bidi and zero-width characters removed, so nothing hidden can ride along, and bounded. */
 export const cleanSourceText = (s: string, max = BRAIN_SECTION_TEXT_MAX): string => sanitizeTerminalText(s).slice(0, max);
@@ -264,44 +270,49 @@ export function compileBrain(input: CompileInput): BrainCompilation {
   const claims: BrainClaim[] = [];
   const conflicts: BrainConflict[] = [];
   const cite = (c: Candidate): BrainCitation => ({ sourceId: c.rev.sourceId, revision: c.rev.revision, anchor: c.section.anchor });
-  const conflictIdOf = (key: string, c: Candidate): string => `conflict:${key}:${c.rev.sourceId}@${c.rev.revision}`;
 
   for (const key of [...groups.keys()].sort(byString)) {
-    const cands = groups.get(key)!.filter((c) => !(c.rev.standing === 'proposed' && [...input.kept].some((k) => k.startsWith(`conflict:${key}:${c.rev.sourceId}@`))));
+    // A conflict a person settled by keeping the accepted value is bound to that exact source revision: a later revision that disputes again is shown again.
+    const cands = groups.get(key)!.filter((c) => !input.kept.has(conflictIdOf(key, c)));
     if (cands.length === 0) continue;
     const accepted = cands.filter((c) => c.rev.standing === 'accepted');
     const liveFirst = (c: Candidate): boolean => live(c.rev);
-    const head = accepted.find(liveFirst) ?? cands.find(liveFirst) ?? accepted[0] ?? cands[0]!;
+    // A proposal never takes an accepted value's place: when every accepted source is revoked the key keeps its accepted head, unsupported.
+    const head = accepted.length > 0 ? (accepted.find(liveFirst) ?? accepted[0]!) : (cands.find(liveFirst) ?? cands[0]!);
     const supports = cands.filter((c) => c.text === head.text);
-    const disputers = head.rev.standing === 'accepted' && live(head.rev) ? cands.filter((c) => c.rev.standing === 'proposed' && c.text !== head.text && live(c.rev)) : [];
+    // Against an accepted value, any live source stating another value disputes it, accepted or proposed.
+    const disputers = head.rev.standing === 'accepted' ? cands.filter((c) => c.text !== head.text && live(c.rev)) : [];
     const roots = [...new Set(supports.flatMap((c) => rootsOf(c.rev, all)))].sort(byString);
-    const liveRoots = [...new Set(supports.filter((c) => live(c.rev)).flatMap((c) => rootsOf(c.rev, all)))];
+    const liveSupports = supports.filter((c) => live(c.rev));
+    const liveRoots = [...new Set(liveSupports.flatMap((c) => rootsOf(c.rev, all)))];
+    const headLive = live(head.rev);
     const everyone = [...supports, ...disputers];
     const classification = everyone.reduce<BrainClassification>((acc, c) => strongerLabel(acc, c.rev.classification), 'public');
     const allowedUse = BRAIN_DESTINATIONS.filter((d) => everyone.every((c) => c.rev.allowedUse.includes(d)) && allowedUseFor(classification).includes(d));
     const page = PAGE_OF_KIND[(accepted[0] ?? head).rev.kind];
-    const firstDisputer = disputers[0];
-    const conflictId = firstDisputer ? conflictIdOf(key, firstDisputer) : null;
-    for (const d of disputers) {
+    const recorded = headLive ? disputers : [];
+    const conflictId = recorded[0] ? conflictIdOf(key, recorded[0]) : null;
+    for (const d of recorded) {
       conflicts.push({
         conflictId: conflictIdOf(key, d), key, classification: strongerLabel(head.rev.classification, d.rev.classification),
         accepted: { ...cite(head), text: head.text }, proposed: { ...cite(d), text: d.text },
       });
     }
+    const status: BrainClaimStatus = liveRoots.length === 0 ? 'unsupported' : recorded.length > 0 ? 'disputed' : 'current';
     claims.push({
-      claimId: `${page}:${key}`, page, key, heading: head.section.heading, text: head.text,
-      status: liveRoots.length === 0 ? 'unsupported' : disputers.length > 0 ? 'disputed' : 'current',
+      claimId: `${page}:${key}`, page, key, heading: head.section.heading, text: head.text, status,
+      standing: liveSupports.some((c) => c.rev.standing === 'accepted') || (status === 'unsupported' && head.rev.standing === 'accepted') ? 'accepted' : 'proposed',
       citations: supports.map(cite).sort(citationOrder), roots, liveSupport: liveRoots.length, disputedBy: disputers.map(cite).sort(citationOrder), conflictId,
       classification, allowedUse, taskId: head.rev.taskId, commit: head.rev.kind === 'repo_manifest' ? commitOf(head.rev) : null,
       generator, generatedAt: input.generatedAt, watermark,
     });
   }
 
-  // A claim the last compilation served whose source no longer states it (the anchor went away in a newer revision) is kept once, as stale, citing the revision that
-  // did state it. A revoked source's claim is unsupported instead. Either way it cannot be served, and the next bundle names it as left out.
+  // A claim an earlier compilation held whose source no longer states it (the anchor went away in a newer revision) stays, as stale, citing the revision that did state
+  // it, until a source states the key again. A revoked source's claim is unsupported instead. Neither is served, and every bundle names it as left out.
   const present = new Set(claims.map((c) => c.key));
   for (const prev of [...input.previous].sort((a, b) => byString(a.key, b.key))) {
-    if (present.has(prev.key) || prev.status === 'stale' || prev.status === 'unsupported') continue;
+    if (present.has(prev.key) || prev.status === 'unsupported') continue;
     const gone = prev.citations.some((c) => revoked.has(c.sourceId));
     claims.push({ ...prev, status: gone ? 'unsupported' : 'stale', liveSupport: 0, disputedBy: [], conflictId: null, generator, generatedAt: input.generatedAt, watermark });
     present.add(prev.key);
@@ -338,15 +349,17 @@ export const BrainBundleClaimSchema = z.strictObject({
   heading: z.string().max(200),
   text: z.string().max(BRAIN_SECTION_TEXT_MAX),
   status: z.enum(['current', 'disputed']),
+  /** `accepted` only when a cited, live source is accepted. A proposal is shown to the worker as proposed, never as accepted scope. */
+  standing: z.enum(BRAIN_STANDINGS),
   citations: z.array(BrainCitationSchema).min(1),
 });
 export type BrainBundleClaim = z.infer<typeof BrainBundleClaimSchema>;
 
 /** What was left out. Ids and codes only: an omission never carries the text it withheld. */
 export const BrainOmissionSchema = z.strictObject({
-  kind: z.enum(['claim', 'source']),
+  kind: z.enum(['claim', 'source', 'section']),
   /** A claim id, or a source id. */
-  id: z.string().min(1).max(220),
+  id: z.string().min(1).max(420),
   reason: z.enum(BRAIN_OMISSION_REASONS),
 });
 export type BrainOmission = z.infer<typeof BrainOmissionSchema>;
@@ -389,6 +402,11 @@ export interface BundleInput {
   /** The source log's position now. */
   readonly sourceHead: number;
   readonly destination: BrainDestination;
+  /**
+   * Whether the attempt's output may leave the device (the claim's `streamable`). A streamable attempt, wherever it runs, is served only what a cloud worker may see:
+   * restricted and secret claims go only to a local attempt whose output stays on the device.
+   */
+  readonly streamable: boolean;
   readonly task: BundleTask;
   readonly maxTextChars?: number;
 }
@@ -410,36 +428,50 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
   const served: BrainBundleClaim[] = [];
   const pinned = new Map<string, BrainRevisionRef>();
   const c = input.compilation;
+  // Output that may leave the device gets only what a cloud worker may see.
+  const reach: BrainDestination = input.streamable ? 'cloud' : input.destination;
+  const permitted = (classification: string, allowedUse: readonly string[]): boolean => allowedUse.includes(input.destination) && allowedUse.includes(reach) && allowedUseFor(classification).includes(reach);
+  const isDead = (x: BrainRevisionRef): boolean => [...dependsOn(x, all)].some((s) => revoked.has(s));
   let used = 0;
 
-  const deadNow = (cl: BrainClaim): boolean => cl.citations.every((x) => [...dependsOn(x, all)].some((s) => revoked.has(s)));
+  const deadNow = (cl: BrainClaim): boolean => cl.citations.every(isDead);
   // Stale now: a citation's source has a newer revision that no longer states this text at all.
   const staleNow = (cl: BrainClaim): boolean => cl.citations.every((x) => {
     const now = latest.get(x.sourceId);
     return now !== undefined && now.revision !== x.revision && !now.sections.some((s) => s.key === cl.key && norm(s.text) === cl.text);
   });
+  /** Why each source's claims were left out, for sources none of whose claims were served. */
+  const dropped = new Map<string, BrainOmissionReason>();
+  const servedFrom = new Set<string>();
 
   for (const page of c?.pages ?? []) {
     for (const cl of page.claims) {
-      const omit = (reason: BrainOmissionReason): void => { omissions.push({ kind: 'claim', id: cl.claimId, reason }); };
-      if (cl.status === 'unsupported' || deadNow(cl)) { omit('revoked'); continue; }
+      const omit = (reason: BrainOmissionReason): void => {
+        omissions.push({ kind: 'claim', id: cl.claimId, reason });
+        for (const x of cl.citations) if (!dropped.has(x.sourceId)) dropped.set(x.sourceId, reason);
+      };
+      if (cl.status === 'unsupported' || deadNow(cl)) { omit(cl.standing === 'accepted' && cl.disputedBy.some((x) => !isDead(x)) ? 'accepted_source_revoked' : 'revoked'); continue; }
       if (cl.status === 'stale' || staleNow(cl) || (cl.commit !== null && cl.commit !== input.task.baseSha)) { omit('stale'); continue; }
-      if (!cl.allowedUse.includes(input.destination) || !allowedUseFor(cl.classification).includes(input.destination)) { omit('restricted_for_destination'); continue; }
+      if (!permitted(cl.classification, cl.allowedUse)) { omit('restricted_for_destination'); continue; }
       const crit = CRITERION_KEY.exec(cl.key);
       if ((cl.taskId !== null && !inScopeTasks.has(cl.taskId)) || (crit !== null && !criteria.has(crit[1]!))) { omit('out_of_scope'); continue; }
       const size = cl.text.length + cl.heading.length;
       if (cl.text.length > BRAIN_BUNDLE_MAX_CLAIM_CHARS || used + size > max) { omit('too_large'); continue; }
       used += size;
-      const citations = cl.citations.filter((x) => ![...dependsOn(x, all)].some((s) => revoked.has(s)));
-      for (const x of citations) pinned.set(refKey(x), { sourceId: x.sourceId, revision: x.revision });
-      served.push({ claimId: cl.claimId, page: cl.page, key: cl.key, heading: cl.heading, text: cl.text, status: cl.status === 'disputed' ? 'disputed' : 'current', citations });
+      const citations = cl.citations.filter((x) => !isDead(x));
+      for (const x of citations) { pinned.set(refKey(x), { sourceId: x.sourceId, revision: x.revision }); servedFrom.add(x.sourceId); }
+      const standing = citations.some((x) => all.get(refKey(x))?.standing === 'accepted') ? 'accepted' : 'proposed';
+      served.push({ claimId: cl.claimId, page: cl.page, key: cl.key, heading: cl.heading, text: cl.text, status: cl.status === 'disputed' ? 'disputed' : 'current', standing, citations });
     }
   }
 
-  // Sources, by their latest revision: what this destination may not see at all, and what is revoked.
+  // Sources, by their latest revision: revoked, not for this destination at all, or every claim they state left out; then the sections that state no claim.
   for (const rev of [...latest.values()].sort((a, b) => byString(a.sourceId, b.sourceId))) {
-    if (revoked.has(rev.sourceId)) omissions.push({ kind: 'source', id: rev.sourceId, reason: 'revoked' });
-    else if (!rev.allowedUse.includes(input.destination) || !allowedUseFor(rev.classification).includes(input.destination)) omissions.push({ kind: 'source', id: rev.sourceId, reason: 'restricted_for_destination' });
+    if (revoked.has(rev.sourceId)) { omissions.push({ kind: 'source', id: rev.sourceId, reason: 'revoked' }); continue; }
+    if (!permitted(rev.classification, rev.allowedUse)) { omissions.push({ kind: 'source', id: rev.sourceId, reason: 'restricted_for_destination' }); continue; }
+    const why = dropped.get(rev.sourceId);
+    if (why !== undefined && !servedFrom.has(rev.sourceId)) omissions.push({ kind: 'source', id: rev.sourceId, reason: why });
+    for (const sec of rev.sections) if (sec.key === undefined) omissions.push({ kind: 'section', id: `${rev.sourceId}@${rev.revision}#${sec.anchor}`, reason: 'not_a_claim' });
   }
 
   return {

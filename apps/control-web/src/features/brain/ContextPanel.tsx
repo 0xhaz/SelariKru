@@ -39,7 +39,7 @@ export function ContextPanel({ attemptId, port }: { attemptId: string | null; po
           <ul className="space-y-2">
             {m.claims.map((c) => (
               <li key={c.claimId} data-testid="context-claim" data-key={c.key} className="rounded-chip border border-line p-2">
-                <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium wrap-anywhere text-fg">{c.heading}</span><Chip tone={c.status === 'Disputed' ? 'warning' : 'success'}>{c.status}</Chip></div>
+                <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium wrap-anywhere text-fg">{c.heading}</span><span className="flex flex-wrap gap-1.5"><Chip tone={c.status === 'Disputed' ? 'warning' : 'success'}>{c.status}</Chip>{c.standing !== 'Accepted' ? <Chip tone="neutral">{c.standing}</Chip> : null}</span></div>
                 <p className="whitespace-pre-wrap wrap-anywhere text-fg">{c.text}</p>
                 <p className="text-sm text-muted">{c.citations.map((x, i) => <span key={x.href}>{i > 0 ? ', ' : ''}<a className={LINK} href={x.href}>{x.label}</a></span>)}</p>
               </li>

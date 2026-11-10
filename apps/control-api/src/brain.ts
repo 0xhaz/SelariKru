@@ -3,7 +3,7 @@ import {
   type BrainBundle, type BrainClaim, type BrainClassification, type BrainCompilation, type BrainDestination, type BrainRevocation, type BrainSection, type BrainSourceRevision, type TaskSpec,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
-import { BrainManifestRequestSchema, BrainNoteRequestSchema, BrainRevokeRequestSchema, redactSecrets, type RepoManifest } from '@selarikru/protocol';
+import { BrainManifestRequestSchema, BrainNoteRequestSchema, BrainRevokeRequestSchema, redactSecrets, REPO_MANIFEST_DOC_PATH_MAX, type RepoManifest } from '@selarikru/protocol';
 import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
@@ -31,6 +31,7 @@ const SYSTEM = 'control-api';
 const contentSha = (d: Draft): string =>
   sha256Hex(canonicalJson({ kind: d.kind, title: d.title, standing: d.standing, classification: d.classification, allowedUse: d.allowedUse, derivedFrom: d.derivedFrom, taskId: d.taskId, sections: d.sections }));
 const CODE = /^[A-Za-z0-9_.:-]{1,80}$/;
+
 const HEX = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const text = (s: string, max = 1000): string => cleanSourceText(redactSecrets(s), max).replace(/\s+/g, ' ').trim();
 const sec = (anchor: string, heading: string, body: string, key?: string): BrainSection => ({ anchor, heading: text(heading, 200) || anchor, text: text(body, 2000), ...(key !== undefined ? { key } : {}) });
@@ -94,16 +95,37 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
         ...(b.rolePaths ? Object.entries(b.rolePaths).map(([role, paths]) => sec(`constraints/role-paths/${role}`, `${role} paths`, paths.join(', '), `role_paths:${role}`)) : []),
       ],
     }));
-  } else if (run) {
-    const seen = new Map<string, { text: string; classification: BrainClassification }>();
-    for (const s of specs) for (const c of s.criteria ?? []) if (!seen.has(c.id) && CODE.test(c.id)) seen.set(c.id, { text: c.text, classification: label(projectLabel, s.classification) });
-    if (seen.size > 0) {
-      out.push(draft({
-        sourceId: `criteria:${projectId}`, kind: 'criteria', title: 'Accepted criteria', standing: 'accepted', classification: label(projectLabel, ...[...seen.values()].map((v) => v.classification)),
-        provenance: { origin: 'plan', ref: `${run.runId}@${run.planRevision}`, recordedBy: SYSTEM }, taskId: null,
-        sections: [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, v]) => sec(`criteria/${id}`, id, v.text, `criterion:${id}`)),
-      }));
+  }
+  // Criteria the plan's tasks carry. The canonical text of an id is the blueprint's, or else the first task's by task id. A task that states another text for the same id
+  // is an accepted source of its own (`criteria_task:<task>`), so the compiler disputes the claim and records a decision proposal; nothing picks one silently.
+  const canonical = new Map<string, string>(blueprint?.success ? blueprint.data.acceptanceCriteria.map((c) => [c.id, c.text.replace(/\s+/g, ' ').trim()]) : []);
+  const fromTasks = new Map<string, { text: string; classification: BrainClassification }>();
+  const variants = new Map<string, { spec: TaskSpec; sections: BrainSection[] }>();
+  for (const s of specs) {
+    for (const c of s.criteria ?? []) {
+      if (!CODE.test(c.id)) continue;
+      const said = c.text.replace(/\s+/g, ' ').trim();
+      const want = canonical.get(c.id) ?? fromTasks.get(c.id)?.text;
+      if (want === undefined) { fromTasks.set(c.id, { text: said, classification: label(projectLabel, s.classification) }); continue; }
+      if (said === want) continue;
+      const v = variants.get(s.taskId) ?? { spec: s, sections: [] };
+      v.sections.push(sec(`criteria/${c.id}`, c.id, c.text, `criterion:${c.id}`));
+      variants.set(s.taskId, v);
     }
+  }
+  if (run && !blueprint?.success && fromTasks.size > 0) {
+    out.push(draft({
+      sourceId: `criteria:${projectId}`, kind: 'criteria', title: 'Accepted criteria', standing: 'accepted', classification: label(projectLabel, ...[...fromTasks.values()].map((v) => v.classification)),
+      provenance: { origin: 'plan', ref: `${run.runId}@${run.planRevision}`, recordedBy: SYSTEM }, taskId: null,
+      sections: [...fromTasks.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([id, v]) => sec(`criteria/${id}`, id, v.text, `criterion:${id}`)),
+    }));
+  }
+  for (const [taskId, v] of [...variants.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    out.push(draft({
+      sourceId: `criteria_task:${taskId}`, kind: 'criteria', title: `Criteria as task ${text(taskId, 80)} states them`, standing: 'accepted', classification: label(projectLabel, v.spec.classification),
+      provenance: { origin: 'plan', ref: `${v.spec.runId}/${taskId}@${v.spec.revision}`, recordedBy: SYSTEM }, taskId,
+      sections: v.sections,
+    }));
   }
 
   const taskLabel = new Map<string, BrainClassification>();
@@ -122,7 +144,9 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
   for (const d of await db.select().from(schema.decisions).where(and(eq(schema.decisions.tenantId, tenantId), eq(schema.decisions.projectId, projectId))).orderBy(asc(schema.decisions.decisionId))) {
     if (!CODE.test(d.decisionId)) continue;
     out.push(draft({
-      sourceId: `decision:${d.decisionId}`, kind: 'decision', title: `Decision ${d.decisionId}`, standing: 'accepted', classification: projectLabel,
+      // The strongest of the project's label and every label the decision covers: a reclassification of restricted material is itself restricted.
+      sourceId: `decision:${d.decisionId}`, kind: 'decision', title: `Decision ${d.decisionId}`, standing: 'accepted',
+      classification: label(projectLabel, ...d.affected.flatMap((x) => (x !== null && typeof x === 'object' && 'sourceClassification' in x ? [(x as { sourceClassification: unknown }).sourceClassification] : []))),
       provenance: { origin: 'decisions', ref: d.decisionId, recordedBy: d.author.slice(0, 200) || SYSTEM }, taskId: null,
       sections: [sec(`decision/${d.decisionId}`, d.context, `${d.rationale}${d.supersededBy ? ` (superseded by ${d.supersededBy})` : ''}`, `decision:${d.decisionId}`)],
     }));
@@ -134,7 +158,7 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
     const op = typeof a.detail['operation'] === 'string' && /^[a-z_]{1,60}$/.test(a.detail['operation']) ? a.detail['operation'] : 'an operation';
     out.push(draft({
       sourceId: `approval:${a.approvalId}`, kind: 'decision', title: `Approval ${a.approvalId}`, standing: 'accepted', classification: await labelOfTask(a.taskId),
-      provenance: { origin: 'approvals', ref: a.approvalId, recordedBy: a.approver ?? SYSTEM }, taskId: a.taskId,
+      provenance: { origin: 'approvals', ref: a.approvalId, recordedBy: (a.approver ?? SYSTEM).slice(0, 200) }, taskId: a.taskId,
       sections: [sec(`approval/${a.approvalId}`, `Approval: ${op}`, `${op} was ${a.outcome}${a.taskId ? ` for task ${a.taskId}` : ''}${a.resolvedAt ? ` on ${a.resolvedAt.toISOString().slice(0, 10)}` : ''}.`, `approval:${a.approvalId}`)],
     }));
   }
@@ -203,11 +227,31 @@ export async function loadBrain(db: Executor, tenantId: string, projectId: strin
 }
 
 /** The project's brain lock. Taken with no other lock held; see the note at the top of this file. */
-async function lockHead(tx: Tx, tenantId: string, projectId: string): Promise<{ lastSeq: number; compiledVersion: number }> {
+async function lockHead(tx: Tx, tenantId: string, projectId: string): Promise<{ lastSeq: number; compiledVersion: number; recordsMark: string | null }> {
   await tx.insert(schema.brainHeads).values({ tenantId, projectId }).onConflictDoNothing();
   const [head] = await tx.select().from(schema.brainHeads).where(where(schema.brainHeads, tenantId, projectId)).for('update');
-  return { lastSeq: head!.lastSeq, compiledVersion: head!.compiledVersion };
+  return { lastSeq: head!.lastSeq, compiledVersion: head!.compiledVersion, recordsMark: head!.recordsMark };
 }
+
+/**
+ * A fingerprint of every record `recordSources` reads: the latest relevant event, decisions, resolved approvals, task revisions, runs, the accepted blueprint and the
+ * project label. One small read, no lock. When it has not moved, a sync reads no records.
+ */
+export async function recordsMark(db: Executor, tenantId: string, projectId: string): Promise<string> {
+  const [row] = await db.execute(sql`SELECT concat_ws('|',
+    (SELECT coalesce(max(sequence), 0) FROM events WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND type IN ('verification.passed', 'verification.failed', 'change.proposed', 'change.merged', 'plan.accepted', 'approval.granted', 'approval.denied', 'run.reduced_scope_accepted')),
+    (SELECT count(*) || ':' || count(superseded_by) || ':' || coalesce(max(created_at)::text, '') FROM decisions WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT count(*) || ':' || coalesce(max(resolved_at)::text, '') FROM approvals WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND outcome IN ('granted', 'denied')),
+    (SELECT count(*) || ':' || coalesce(sum(current_revision), 0) FROM task_status WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT count(*) FROM task_revisions WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT count(*) || ':' || coalesce(max(plan_revision), 0) FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT coalesce(max(accepted_blueprint_version), 0) FROM project_onboardings WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT classification FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId})) AS mark`);
+  return String(row?.['mark'] ?? '');
+}
+
+/** A source that could not be stored: its id and a code, never its text. */
+export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;
 
 interface Writer {
   readonly tx: Tx;
@@ -215,18 +259,26 @@ interface Writer {
   readonly projectId: string;
   seq: number;
   changed: boolean;
+  readonly onSkip: SkipReport;
 }
 
-async function writeRevision(w: Writer, d: Draft, previous: BrainSourceRevision | undefined, at: Date): Promise<BrainSourceRevision> {
+/** Stores the next revision of a source, or skips a draft that does not validate (and says so), so one bad record can never roll every sync back. */
+async function writeRevision(w: Writer, d: Draft, previous: BrainSourceRevision | undefined, at: Date): Promise<BrainSourceRevision | null> {
+  const rev: BrainSourceRevision = { ...d, revision: (previous?.revision ?? 0) + 1, contentSha256: contentSha(d), seq: w.seq + 1, recordedAt: at.toISOString() };
+  const checked = BrainSourceRevisionSchema.safeParse(rev);
+  if (!checked.success) {
+    w.onSkip({ sourceId: d.sourceId.slice(0, 200), code: 'brain_source_invalid' });
+    return null;
+  }
   w.seq += 1;
   w.changed = true;
-  const rev: BrainSourceRevision = { ...d, revision: (previous?.revision ?? 0) + 1, contentSha256: contentSha(d), seq: w.seq, recordedAt: at.toISOString() };
+  const r = checked.data;
   await w.tx.insert(schema.brainSources).values({
-    tenantId: w.tenantId, projectId: w.projectId, sourceId: rev.sourceId, revision: rev.revision, kind: rev.kind, title: rev.title, standing: rev.standing,
-    classification: rev.classification, allowedUse: rev.allowedUse, provenance: rev.provenance, derivedFrom: rev.derivedFrom, taskId: rev.taskId, sections: rev.sections,
-    contentSha256: rev.contentSha256, seq: rev.seq, recordedAt: at,
+    tenantId: w.tenantId, projectId: w.projectId, sourceId: r.sourceId, revision: r.revision, kind: r.kind, title: r.title, standing: r.standing,
+    classification: r.classification, allowedUse: r.allowedUse, provenance: r.provenance, derivedFrom: r.derivedFrom, taskId: r.taskId, sections: r.sections,
+    contentSha256: r.contentSha256, seq: r.seq, recordedAt: at,
   });
-  return rev;
+  return r;
 }
 
 /** Compiles from what is stored now and publishes it as the next version, with its support graph. */
@@ -256,50 +308,92 @@ async function publish(w: Writer, version: number, at: Date): Promise<BrainCompi
   return compilation;
 }
 
+const quiet: SkipReport = () => undefined;
+
 /**
- * Brings the source library up to date with the records, then compiles if anything changed (or nothing was ever compiled). `change` runs first, under the same lock,
- * for an owner's note, a revocation, a settled conflict or a runner's manifest.
+ * Compiles on change. Under the project's brain lock: `change` runs first (an owner's note, a revocation, a settled conflict, a runner's manifest); then, only when the
+ * records' fingerprint moved since the last sync, the records are read and every changed one becomes a new source revision; then, when anything was written (or
+ * nothing was ever compiled), the pages are compiled. Resolves true when it compiled.
  */
-export async function syncBrain(db: Db, tenantId: string, projectId: string, at: Date, change?: (w: Writer, state: BrainState) => Promise<void>): Promise<void> {
-  await withTx(db, async (tx) => {
+export async function syncBrain(db: Db, tenantId: string, projectId: string, at: Date, change?: (w: Writer, state: BrainState) => Promise<void>, onSkip: SkipReport = quiet): Promise<boolean> {
+  return withTx(db, async (tx) => {
     const head = await lockHead(tx, tenantId, projectId);
-    const w: Writer = { tx, tenantId, projectId, seq: head.lastSeq, changed: false };
+    const w: Writer = { tx, tenantId, projectId, seq: head.lastSeq, changed: false, onSkip };
     const state = await loadBrain(tx, tenantId, projectId);
     if (change) await change(w, state);
-    const latest = new Map<string, BrainSourceRevision>();
-    for (const r of state.revisions) if ((latest.get(r.sourceId)?.revision ?? 0) < r.revision) latest.set(r.sourceId, r);
-    const drafts = await recordSources(tx, tenantId, projectId);
-    const produced = new Set<string>();
-    for (const d of drafts) {
-      produced.add(d.sourceId);
-      const prev = latest.get(d.sourceId);
-      if (prev && prev.contentSha256 === contentSha(d)) continue;
-      await writeRevision(w, d, prev, at);
+    const mark = await recordsMark(tx, tenantId, projectId);
+    if (mark !== head.recordsMark || head.compiledVersion === 0) {
+      const latest = new Map<string, BrainSourceRevision>();
+      for (const r of state.revisions) if ((latest.get(r.sourceId)?.revision ?? 0) < r.revision) latest.set(r.sourceId, r);
+      const produced = new Set<string>();
+      for (const d of await recordSources(tx, tenantId, projectId)) {
+        produced.add(d.sourceId);
+        const prev = latest.get(d.sourceId);
+        if (prev && prev.contentSha256 === contentSha(d)) continue;
+        await writeRevision(w, d, prev, at);
+      }
+      // A record that is gone (a task replanned away) leaves an empty revision behind, so its claims go stale rather than staying current forever.
+      for (const prev of latest.values()) {
+        if (produced.has(prev.sourceId) || prev.kind === 'note' || prev.kind === 'repo_manifest' || prev.sections.length === 0) continue;
+        await writeRevision(w, { ...prev, title: `${prev.title} (no longer in the records)`.slice(0, 200), sections: [] }, prev, at);
+      }
+      await tx.update(schema.brainHeads).set({ recordsMark: mark }).where(where(schema.brainHeads, tenantId, projectId));
     }
-    // A record that is gone (a task replanned away) leaves an empty revision behind, so its claims go stale rather than staying current forever.
-    for (const prev of latest.values()) {
-      if (produced.has(prev.sourceId) || prev.kind === 'note' || prev.kind === 'repo_manifest' || prev.sections.length === 0) continue;
-      await writeRevision(w, { ...prev, title: `${prev.title} (no longer in the records)`.slice(0, 200), sections: [] }, prev, at);
+    if (w.changed || head.compiledVersion === 0) {
+      await publish(w, head.compiledVersion + 1, at);
+      return true;
     }
-    if (w.changed || head.compiledVersion === 0) await publish(w, head.compiledVersion + 1, at);
+    return false;
   });
+}
+
+/**
+ * The periodic pass: compiles each of the tenant's projects whose records moved (a verifier's verdict, a merge the reconciler saw) without waiting for anyone to look.
+ * One unlocked fingerprint read per project when nothing moved. Resolves with the projects it compiled.
+ */
+export async function refreshBrains(ctx: { db: Db; tenantId: string; now: () => Date; onSkip?: SkipReport }): Promise<string[]> {
+  const compiled: string[] = [];
+  const projects = await ctx.db.select({ projectId: schema.projects.projectId }).from(schema.projects).where(eq(schema.projects.tenantId, ctx.tenantId)).orderBy(asc(schema.projects.projectId));
+  for (const { projectId } of projects) {
+    const [head] = await ctx.db.select().from(schema.brainHeads).where(where(schema.brainHeads, ctx.tenantId, projectId));
+    if (head && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(ctx.db, ctx.tenantId, projectId))) continue;
+    if (await syncBrain(ctx.db, ctx.tenantId, projectId, ctx.now(), undefined, ctx.onSkip)) compiled.push(projectId);
+  }
+  return compiled;
 }
 
 // ---- the bundle at claim ------------------------------------------------------------------------------------------
 
-/** The context bundle for one claimed attempt, recorded with it. Runs after the claim committed, outside its transaction. */
-export async function bundleForAttempt(db: Db, lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptId: string; location: BrainDestination }, at: Date): Promise<BrainBundle | null> {
-  await syncBrain(db, lease.tenantId, lease.projectId, at);
+/**
+ * The context bundle for one claimed attempt, recorded with it. Runs after the claim committed, outside its transaction, and compiles nothing: it serves the last
+ * compilation, re-checked for revocation and for what this attempt may see. Reads: the spec, the last compilation, the revocations, and the revisions (sections of
+ * the latest revision of each source only, for the staleness check).
+ */
+export async function bundleForAttempt(db: Db, lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptId: string; location: BrainDestination; streamable?: boolean | undefined }, at: Date): Promise<BrainBundle | null> {
   const row = await loadSpecRow(db, lease);
   const spec = TaskSpecSchema.safeParse(row?.spec);
   if (!spec.success) return null;
   const s = spec.data;
-  const state = await loadBrain(db, lease.tenantId, lease.projectId);
+  const { tenantId, projectId } = lease;
+  const [head] = await db.select().from(schema.brainHeads).where(where(schema.brainHeads, tenantId, projectId));
+  const [c] = await db.select().from(schema.brainCompilations).where(where(schema.brainCompilations, tenantId, projectId)).orderBy(desc(schema.brainCompilations.version)).limit(1);
+  const compilation = c ? BrainCompilationSchema.parse({ version: c.version, generator: { id: c.generatorId, version: c.generatorVersion }, generatedAt: c.generatedAt.toISOString(), watermark: c.watermark, pages: c.pages, conflicts: c.conflicts }) : null;
+  const revocations = (await db.select().from(schema.brainRevocations).where(where(schema.brainRevocations, tenantId, projectId))).map(toRevocation);
+  const rows = await db.execute(sql`SELECT source_id, revision, kind, title, standing, classification, allowed_use, provenance, derived_from, task_id, content_sha256, seq, recorded_at,
+      CASE WHEN revision = max(revision) OVER (PARTITION BY source_id) THEN sections ELSE '[]'::jsonb END AS sections
+    FROM brain_sources WHERE tenant_id = ${tenantId} AND project_id = ${projectId}`);
+  const revisions = rows.map((r) => toRevision({
+    tenantId, projectId, sourceId: String(r['source_id']), revision: Number(r['revision']), kind: String(r['kind']), title: String(r['title']), standing: String(r['standing']),
+    classification: String(r['classification']), allowedUse: r['allowed_use'] as string[], provenance: r['provenance'] as Record<string, unknown>, derivedFrom: r['derived_from'] as unknown[],
+    taskId: (r['task_id'] as string | null) ?? null, sections: r['sections'] as unknown[], contentSha256: String(r['content_sha256']), seq: Number(r['seq']), recordedAt: new Date(r['recorded_at'] as string),
+  }));
   const bundle = buildContextBundle({
-    compilation: state.compilation, revisions: state.revisions, revocations: state.revocations, sourceHead: state.lastSeq, destination: lease.location,
-    task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((c) => c.id)], dependsOn: s.dependencies.map((d) => d.taskId) },
+    compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: lease.location,
+    // Anything but a clear yes from the claim is treated as output that may leave the device: restricted claims are then left out.
+    streamable: lease.streamable !== false,
+    task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((x) => x.id)], dependsOn: s.dependencies.map((d) => d.taskId) },
   });
-  await db.insert(schema.brainBundles).values({ tenantId: lease.tenantId, projectId: lease.projectId, attemptId: lease.attemptId, taskId: s.taskId, destination: lease.location, compilationVersion: bundle.compilationVersion, bundle, createdAt: at }).onConflictDoNothing();
+  await db.insert(schema.brainBundles).values({ tenantId, projectId, attemptId: lease.attemptId, taskId: s.taskId, destination: lease.location, compilationVersion: bundle.compilationVersion, bundle, createdAt: at }).onConflictDoNothing();
   return bundle;
 }
 
@@ -310,12 +404,10 @@ async function brainView(db: Executor, tenantId: string, projectId: string, now:
   const latest = new Map<string, BrainSourceRevision>();
   for (const r of state.revisions) if ((latest.get(r.sourceId)?.revision ?? 0) < r.revision) latest.set(r.sourceId, r);
   const revokedIds = new Set(state.revocations.map((r) => r.sourceId));
-  const resolved = new Map(state.resolutions.map((r) => [r.conflictId, r]));
-  // Every conflict ever recorded, open or settled: a settled one leaves the newest compilation, so the earlier ones are read too.
-  const all = await db.select({ conflicts: schema.brainCompilations.conflicts }).from(schema.brainCompilations).where(where(schema.brainCompilations, tenantId, projectId)).orderBy(asc(schema.brainCompilations.version));
-  const conflicts = new Map<string, Record<string, unknown>>();
-  for (const c of all) for (const x of c.conflicts as { conflictId: string }[]) conflicts.set(x.conflictId, x as unknown as Record<string, unknown>);
-  const open = new Set((state.compilation?.conflicts ?? []).map((c) => c.conflictId));
+  const resolved = new Set(state.resolutions.map((r) => r.conflictId));
+  // Open conflicts come from the current compilation; settled ones from the snapshot kept with their resolution.
+  const open = (state.compilation?.conflicts ?? []).filter((c) => !resolved.has(c.conflictId)).map((c) => ({ ...c, state: 'open' as const, resolvedBy: null, resolvedAt: null }));
+  const kept = state.resolutions.filter((r) => r.conflict !== null).map((r) => ({ ...(r.conflict as Record<string, unknown>), state: r.outcome, resolvedBy: r.resolvedBy, resolvedAt: r.resolvedAt.toISOString() }));
   return {
     projectId,
     observedAt: now.toISOString(),
@@ -327,10 +419,7 @@ async function brainView(db: Executor, tenantId: string, projectId: string, now:
       latestRevision: r.revision, recordedAt: r.recordedAt, revoked: revokedIds.has(r.sourceId), sectionCount: r.sections.length,
     })),
     revocations: state.revocations,
-    conflicts: [...conflicts.entries()].filter(([id]) => open.has(id) || resolved.has(id)).map(([id, c]) => {
-      const r = resolved.get(id);
-      return { ...c, state: r ? r.outcome : 'open', resolvedBy: r?.resolvedBy ?? null, resolvedAt: r?.resolvedAt.toISOString() ?? null };
-    }),
+    conflicts: [...open, ...kept],
   };
 }
 
@@ -344,6 +433,31 @@ const ownerOf = (req: FastifyRequest): string => {
 export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
+  /** A record that cannot be stored: logged by id and code, and the sync goes on without it. */
+  const onSkip: SkipReport = (skip) => app.log.warn(skip, 'a Project Brain source could not be stored and was skipped');
+  const sync = (projectId: string, change?: Parameters<typeof syncBrain>[4]) => syncBrain(db, config.tenantId, projectId, now(), change, onSkip);
+
+  // Compile on change: after an owner write that changes what sources are read from (a plan accepted, an approval resolved, reduced scope accepted, a reclassification
+  // decided, a project activated), just before the answer is sent. It runs outside that write's transaction and takes only the brain lock. A failure is logged; the next
+  // periodic pass or owner read compiles it.
+  const project = async (url: string, id: string): Promise<string | null> => {
+    if (url.startsWith('/v1/projects/') || url.startsWith('/v1/onboarding/')) return id;
+    if (url.startsWith('/v1/runs/')) return (await db.select({ p: schema.runs.projectId }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, id))))[0]?.p ?? null;
+    if (url.startsWith('/v1/approvals/')) return (await db.select({ p: schema.approvals.projectId }).from(schema.approvals).where(and(eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.approvalId, id))))[0]?.p ?? null;
+    return null;
+  };
+  const CHANGES = /^\/v1\/(?:runs\/[^/]+\/(?:plan-revisions|accept-reduced-scope)|approvals\/[^/]+\/resolve|projects\/[^/]+\/draft-reclassifications|onboarding\/[^/]+\/activate)$/;
+  // Before the answer is sent: the write has committed by then, and a caller that reads the Brain next sees the compile. Its failure never changes the answer.
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.method !== 'POST' || reply.statusCode >= 300 || req.principal?.kind !== 'owner' || !CHANGES.test(req.routeOptions.url ?? '')) return payload;
+    try {
+      const projectId = await project(req.routeOptions.url ?? '', (req.params as { id?: string }).id ?? '');
+      if (projectId && (await db.select({ p: schema.projects.projectId }).from(schema.projects).where(and(eq(schema.projects.tenantId, config.tenantId), eq(schema.projects.projectId, projectId)))).length > 0) await sync(projectId);
+    } catch (err) {
+      app.log.warn({ error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown } | null)?.code ?? null }, 'compiling the Project Brain after a change failed; the next pass retries');
+    }
+    return payload;
+  });
   const projectOf = async (req: FastifyRequest): Promise<string> => {
     ownerOf(req);
     const id = (req.params as { id: string }).id;
@@ -353,7 +467,8 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
 
   app.get('/v1/projects/:id/brain', auth, async (req) => {
     const projectId = await projectOf(req);
-    await syncBrain(db, config.tenantId, projectId, now());
+    // Reads records only when their fingerprint moved since the last sync, and compiles only when that wrote something.
+    await sync(projectId);
     return brainView(db, config.tenantId, projectId, now());
   });
 
@@ -376,7 +491,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     const project = await requireProject(db, config.tenantId, projectId);
     const sourceId = `note:${newId('n').slice(2)}`;
     let stored: BrainSourceRevision | null = null;
-    await syncBrain(db, config.tenantId, projectId, now(), async (w, state) => {
+    await sync(projectId, async (w, state) => {
       for (const p of body.derivedFrom ?? []) if (!state.revisions.some((r) => r.sourceId === p.sourceId && r.revision === p.revision)) throw invalidRequest('derivedFrom names a source revision that does not exist');
       const classification = label(project.classification, body.classification ?? project.classification);
       stored = await writeRevision(w, draft({
@@ -384,6 +499,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
         derivedFrom: body.derivedFrom ?? [],
         sections: body.sections.map((s, i) => sec(`section-${i + 1}`, s.heading, s.text, s.key ?? `note:${sourceId.slice(5)}:${i + 1}`)),
       }), undefined, now());
+      if (stored === null) throw invalidRequest('the note could not be stored as a source');
     });
     return reply.code(201).send({ source: stored, brain: await brainView(db, config.tenantId, projectId, now()) });
   });
@@ -394,7 +510,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     const { sourceId } = req.params as { sourceId: string };
     const body = parseBody(BrainRevokeRequestSchema, req.body);
     if (redactSecrets(body.reason) !== body.reason) throw new AppError(400, 'credential_in_input', 'the reason contains something shaped like a secret');
-    await syncBrain(db, config.tenantId, projectId, now(), async (w, state) => {
+    await sync(projectId, async (w, state) => {
       if (!state.revisions.some((r) => r.sourceId === sourceId)) throw new AppError(404, 'brain_source_not_found', 'no such source');
       if (state.revocations.some((r) => r.sourceId === sourceId)) throw new AppError(409, 'brain_source_revoked', 'this source is already revoked');
       w.seq += 1;
@@ -408,10 +524,11 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     const projectId = await projectOf(req);
     const uid = ownerOf(req);
     const { conflictId } = req.params as { conflictId: string };
-    await syncBrain(db, config.tenantId, projectId, now(), async (w, state) => {
+    await sync(projectId, async (w, state) => {
       if (state.resolutions.some((r) => r.conflictId === conflictId)) throw new AppError(409, 'brain_conflict_resolved', 'this conflict is already settled');
-      if (!(state.compilation?.conflicts ?? []).some((c) => c.conflictId === conflictId)) throw new AppError(404, 'brain_conflict_not_found', 'no such open conflict');
-      await w.tx.insert(schema.brainConflictResolutions).values({ tenantId: config.tenantId, projectId, conflictId, outcome: 'kept_accepted', resolvedBy: uid, resolvedAt: now() });
+      const conflict = (state.compilation?.conflicts ?? []).find((c) => c.conflictId === conflictId);
+      if (!conflict) throw new AppError(404, 'brain_conflict_not_found', 'no such open conflict');
+      await w.tx.insert(schema.brainConflictResolutions).values({ tenantId: config.tenantId, projectId, conflictId, outcome: 'kept_accepted', resolvedBy: uid, resolvedAt: now(), conflict });
       w.changed = true;
     });
     return brainView(db, config.tenantId, projectId, now());
@@ -436,6 +553,9 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     if (a.detail['terminalStreamable'] !== true) throw new AppError(403, 'brain_manifest_restricted', 'a manifest is not accepted for work whose data stays on the device');
     const project = await requireProject(db, p.tenantId, a.projectId);
     const m: RepoManifest = body.manifest;
+    // A path whose key or anchor would not fit is not recorded; the answer and an unkeyed section say how many were left out and why.
+    const skipped = m.docs.flatMap((doc, index) => (doc.path.length > REPO_MANIFEST_DOC_PATH_MAX ? [{ index, reason: 'path_too_long' as const }] : []));
+    const docs = m.docs.filter((doc) => doc.path.length <= REPO_MANIFEST_DOC_PATH_MAX);
     await syncBrain(db, p.tenantId, a.projectId, now(), async (w, state) => {
       const sourceId = `repo_manifest:${a.projectId}`;
       const prev = state.revisions.filter((r) => r.sourceId === sourceId).sort((x, y) => y.revision - x.revision)[0];
@@ -445,12 +565,13 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
         sections: [
           sec('repo/commit', 'Commit', m.commit, 'repo:commit'),
           sec('repo/files', 'Files', `${m.fileCount} files, ${m.totalBytes} bytes`, 'repo:files'),
-          ...[...m.docs].sort((x, y) => (x.path < y.path ? -1 : 1)).map((doc) => sec(`docs/${doc.path}`, doc.path, `sha256 ${doc.sha256}, ${doc.bytes} bytes`, `repo:doc:${doc.path}`)),
+          ...[...docs].sort((x, y) => (x.path < y.path ? -1 : 1)).map((doc) => sec(`docs/${doc.path}`, doc.path, `sha256 ${doc.sha256}, ${doc.bytes} bytes`, `repo:doc:${doc.path}`)),
+          ...(skipped.length > 0 ? [sec('repo/skipped', 'Documents not recorded', `${skipped.length} document path${skipped.length === 1 ? ' was' : 's were'} too long to record.`)] : []),
         ],
       });
       if (prev && prev.contentSha256 === contentSha(d)) return;
       await writeRevision(w, d, prev, now());
-    });
-    return { recorded: true };
+    }, onSkip);
+    return { recorded: true, skipped };
   });
 }

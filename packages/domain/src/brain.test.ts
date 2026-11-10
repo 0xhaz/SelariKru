@@ -24,7 +24,7 @@ const claimsOf = (c: ReturnType<typeof compileBrain>) => c.pages.flatMap((p) => 
 const claim = (c: ReturnType<typeof compileBrain>, key: string) => claimsOf(c).find((x) => x.key === key);
 const TASK: BundleTask = { taskId: 'T1', baseSha: COMMIT, criteria: ['FB-01', 'FB-03'], dependsOn: [] };
 const bundle = (c: ReturnType<typeof compileBrain> | null, revisions: BrainSourceRevision[], over: Partial<Parameters<typeof buildContextBundle>[0]> = {}) =>
-  buildContextBundle({ compilation: c, revisions, revocations: [], sourceHead: Math.max(0, ...revisions.map((r) => r.seq), ...(over.revocations ?? []).map((r) => r.seq)), destination: 'local', task: TASK, ...over });
+  buildContextBundle({ compilation: c, revisions, revocations: [], sourceHead: Math.max(0, ...revisions.map((r) => r.seq), ...(over.revocations ?? []).map((r) => r.seq)), destination: 'local', streamable: false, task: TASK, ...over });
 
 /** A seeded generator, so the property test is repeatable. */
 function prng(seed: number): () => number {
@@ -142,8 +142,121 @@ describe('compileBrain', () => {
       { kind: 'source', id: 'plan:r', reason: 'restricted_for_destination' },
     ]));
     expect(JSON.stringify(cloud)).not.toContain('Build the API');
-    const local = bundle(c, [open, restricted, mixed]);
-    expect(local.claims.map((x) => x.key)).toEqual(['criterion:FB-01', 'task:T1']);
+    // A local attempt whose output may leave the device (streamable) is treated as cloud: no restricted claim, no restricted source text.
+    const streamable = bundle(c, [open, restricted, mixed], { streamable: true });
+    expect(streamable.claims).toEqual([]);
+    expect(streamable.omissions).toEqual(expect.arrayContaining([
+      { kind: 'claim', id: 'architecture:criterion:FB-01', reason: 'restricted_for_destination' },
+      { kind: 'source', id: 'plan:r', reason: 'restricted_for_destination' },
+      { kind: 'source', id: 'note:m', reason: 'restricted_for_destination' },
+    ]));
+    expect(JSON.stringify(streamable)).not.toContain('Build the API');
+    // Only a local attempt whose output stays on the device gets them.
+    const onDevice = bundle(c, [open, restricted, mixed], { streamable: false });
+    expect(onDevice.claims.map((x) => x.key)).toEqual(['criterion:FB-01', 'task:T1']);
+  });
+
+  it('a proposal is never served as accepted: revoking the accepted value omits the key while a different proposal stands', () => {
+    const crit = rev('criteria:p', [sec('criteria/FB-03', 'monthly renewal', 'criterion:FB-03')]);
+    const note = rev('note:x', [sec('section-1', 'annual renewal', 'criterion:FB-03')], { kind: 'note', standing: 'proposed' });
+    const revocations = [revoke('criteria:p')];
+    const c = compileBrain(input([crit, note], { revocations }));
+    expect(claim(c, 'criterion:FB-03')).toMatchObject({ status: 'unsupported', standing: 'accepted', text: 'monthly renewal', disputedBy: [{ sourceId: 'note:x', revision: 1, anchor: 'section-1' }] });
+    expect(c.conflicts).toEqual([]);
+    const b = bundle(c, [crit, note], { revocations, destination: 'cloud', streamable: true });
+    expect(b.claims).toEqual([]);
+    expect(b.omissions).toContainEqual({ kind: 'claim', id: 'architecture:criterion:FB-03', reason: 'accepted_source_revoked' });
+    // A proposal that states the same value keeps the claim served, labelled as proposed.
+    const same = rev('note:y', [sec('section-1', 'monthly renewal', 'criterion:FB-03')], { kind: 'note', standing: 'proposed' });
+    const c2 = compileBrain(input([crit, same], { revocations }));
+    expect(claim(c2, 'criterion:FB-03')).toMatchObject({ status: 'current', standing: 'proposed' });
+    expect(bundle(c2, [crit, same], { revocations }).claims).toEqual([expect.objectContaining({ key: 'criterion:FB-03', standing: 'proposed' })]);
+    // While the accepted source stands, a served claim is accepted.
+    const c3 = compileBrain(input([crit, same]));
+    expect(bundle(c3, [crit, same]).claims[0]).toMatchObject({ standing: 'accepted' });
+  });
+
+  it('two accepted sources that state different values for one key make a disputed claim and a conflict', () => {
+    const crit = rev('criteria:p', [sec('criteria/FB-03', 'Newest first', 'criterion:FB-03')]);
+    const task = rev('criteria_task:T2', [sec('criteria/FB-03', 'Oldest first', 'criterion:FB-03')], { taskId: 'T2' });
+    const c = compileBrain(input([crit, task]));
+    expect(claim(c, 'criterion:FB-03')).toMatchObject({ status: 'disputed', text: 'Newest first', disputedBy: [{ sourceId: 'criteria_task:T2', revision: 1, anchor: 'criteria/FB-03' }] });
+    expect(c.conflicts.map((x) => x.conflictId)).toEqual(['conflict:criterion:FB-03:criteria_task:T2@1']);
+  });
+
+  it('keeping the accepted value is bound to the exact source revision: a later revision that disputes again is shown again', () => {
+    const crit = rev('criteria:p', [sec('criteria/FB-03', 'Newest first', 'criterion:FB-03')]);
+    const n1 = rev('note:n', [sec('section-1', 'Oldest first', 'criterion:FB-03')], { kind: 'note', standing: 'proposed' });
+    const n2 = rev('note:n', [sec('section-1', 'Random order', 'criterion:FB-03')], { kind: 'note', standing: 'proposed', revision: 2 });
+    const kept = new Set(['conflict:criterion:FB-03:note:n@1']);
+    expect(claim(compileBrain(input([crit, n1], { kept })), 'criterion:FB-03')!.status).toBe('current');
+    const again = compileBrain(input([crit, n1, n2], { kept }));
+    expect(claim(again, 'criterion:FB-03')!.status).toBe('disputed');
+    expect(again.conflicts.map((x) => x.conflictId)).toEqual(['conflict:criterion:FB-03:note:n@2']);
+    // A kept id for another key does not settle this one.
+    expect(claim(compileBrain(input([crit, n1], { kept: new Set(['conflict:criterion:FB-0:note:n@1']) })), 'criterion:FB-03')!.status).toBe('disputed');
+  });
+
+  it('lists a source as left out when every claim it states was dropped, and every section that states no claim', () => {
+    const crit = rev('criteria:p', [sec('criteria/FB-02', 'Reject', 'criterion:FB-02'), sec('criteria/preamble', 'How these are judged')]);
+    const c = compileBrain(input([crit]));
+    const b = bundle(c, [crit]);
+    expect(b.claims).toEqual([]);
+    expect(b.omissions).toEqual(expect.arrayContaining([
+      { kind: 'claim', id: 'architecture:criterion:FB-02', reason: 'out_of_scope' },
+      { kind: 'source', id: 'criteria:p', reason: 'out_of_scope' },
+      { kind: 'section', id: 'criteria:p@1#criteria/preamble', reason: 'not_a_claim' },
+    ]));
+  });
+
+  it('every served claim cites live revisions that state its text, never restricted to a streamed destination, and every claim is accounted for (property, 1500 seeds)', () => {
+    let checked = 0;
+    for (let s = 1; s <= 1500; s++) {
+      const r = prng(s);
+      const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
+      let n = 0;
+      const revisions: BrainSourceRevision[] = [];
+      for (let i = 0, count = 1 + Math.floor(r() * 6); i < count; i++) {
+        const cls = pick(['public', 'internal', 'restricted', 'secret'] as const);
+        for (let v = 1, vs = 1 + Math.floor(r() * 3); v <= vs; v++) {
+          const parent = revisions.length > 0 && r() < 0.4 ? pick(revisions) : null;
+          revisions.push(rev(`note:s${i}`, Array.from({ length: Math.floor(r() * 4) }, (_, k) => sec(`a${i}${k}`, pick(['one', 'two']), r() < 0.9 ? pick(['k1', 'k2', 'k3']) : undefined)), {
+            revision: v, kind: pick(['brief', 'criteria', 'plan', 'decision', 'note'] as const), standing: r() < 0.5 ? 'accepted' : 'proposed', classification: cls, allowedUse: allowedUseFor(cls),
+            derivedFrom: parent ? [{ sourceId: parent.sourceId, revision: parent.revision }] : [], seq: (n += 1),
+          }));
+        }
+      }
+      const ids = [...new Set(revisions.map((x) => x.sourceId))];
+      const rv1 = ids.filter(() => r() < 0.2).map((id) => ({ ...revoke(id), seq: (n += 1) }));
+      const c1 = compileBrain(input(revisions, { revocations: rv1 }));
+      const rv2 = [...rv1, ...ids.filter((id) => !rv1.some((x) => x.sourceId === id) && r() < 0.3).map((id) => ({ ...revoke(id), seq: (n += 1) }))];
+      const revoked = new Set(rv2.map((x) => x.sourceId));
+      const byRef = new Map(revisions.map((x) => [`${x.sourceId}@${x.revision}`, x]));
+      const deps = (ref: { sourceId: string; revision: number }, seen = new Set<string>()): string[] => {
+        const k = `${ref.sourceId}@${ref.revision}`;
+        if (seen.has(k)) return [ref.sourceId];
+        seen.add(k);
+        return [ref.sourceId, ...(byRef.get(k)?.derivedFrom ?? []).flatMap((p) => deps(p, seen))];
+      };
+      for (const [destination, streamable] of [['local', false], ['local', true], ['cloud', true]] as const) {
+        const b = buildContextBundle({ compilation: c1, revisions, revocations: rv2, sourceHead: n, destination, streamable, task: { taskId: 'T1', baseSha: COMMIT, criteria: [], dependsOn: [] } });
+        const all = claimsOf(c1);
+        for (const cl of b.claims) {
+          checked += 1;
+          for (const ci of cl.citations) {
+            expect(citationResolves(ci, revisions), `seed ${s}`).toBe(true);
+            expect(deps(ci).some((x) => revoked.has(x)), `seed ${s} revoked citation`).toBe(false);
+          }
+          const full = all.find((x) => x.claimId === cl.claimId)!;
+          if (streamable) expect(allowedUseFor(full.classification), `seed ${s}`).toContain('cloud');
+          expect(cl.citations.some((ci) => byRef.get(`${ci.sourceId}@${ci.revision}`)!.sections.some((x) => x.anchor === ci.anchor && x.text.replace(/\s+/g, ' ').trim() === cl.text)), `seed ${s} text`).toBe(true);
+          if (cl.standing === 'accepted') expect(cl.citations.some((ci) => byRef.get(`${ci.sourceId}@${ci.revision}`)!.standing === 'accepted'), `seed ${s} standing`).toBe(true);
+        }
+        const accounted = new Set([...b.claims.map((x) => x.claimId), ...b.omissions.filter((o) => o.kind === 'claim').map((o) => o.id)]);
+        for (const cl of all) expect(accounted.has(cl.claimId), `seed ${s} ${cl.claimId}`).toBe(true);
+      }
+    }
+    expect(checked).toBeGreaterThan(500);
   });
 
   it('a new source that contradicts an accepted criterion makes a disputed claim and a conflict, and the accepted value stands', () => {
@@ -175,15 +288,19 @@ describe('compileBrain', () => {
     expect(Object.keys(b).sort()).toEqual(['claims', 'compilationVersion', 'compiledAt', 'destination', 'generator', 'indexLag', 'omissions', 'pinned', 'schemaVersion', 'sourceHead', 'taskId', 'watermark']);
   });
 
-  it('a claim whose anchor left the newer revision is shown stale once and omitted as stale; a manifest for another commit is stale', () => {
+  it('a claim whose anchor left the newer revision stays stale and omitted until restated; a manifest for another commit is stale', () => {
     const v1 = rev('plan:run', [sec('tasks/T1', 'Build the API', 'task:T1'), sec('tasks/T2', 'Build the screen', 'task:T2')], { kind: 'plan' });
     const first = compileBrain(input([v1]));
     const v2 = rev('plan:run', [sec('tasks/T1', 'Build the API', 'task:T1')], { kind: 'plan', revision: 2 });
     const second = compileBrain(input([v1, v2], { previous: claimsOf(first), version: 2 }));
     expect(claim(second, 'task:T2')).toMatchObject({ status: 'stale', citations: [{ sourceId: 'plan:run', revision: 1, anchor: 'tasks/T2' }] });
     expect(bundle(second, [v1, v2]).omissions).toContainEqual({ kind: 'claim', id: 'architecture:task:T2', reason: 'stale' });
-    // Once: the compilation after that drops it.
-    expect(claim(compileBrain(input([v1, v2], { previous: claimsOf(second), version: 3 })), 'task:T2')).toBeUndefined();
+    // It stays stale, and left out, until a source states it again.
+    const third = compileBrain(input([v1, v2], { previous: claimsOf(second), version: 3 }));
+    expect(claim(third, 'task:T2')).toMatchObject({ status: 'stale' });
+    expect(bundle(third, [v1, v2]).omissions).toContainEqual({ kind: 'claim', id: 'architecture:task:T2', reason: 'stale' });
+    const v3 = rev('plan:run', [sec('tasks/T1', 'Build the API', 'task:T1'), sec('tasks/T2', 'Build the screen again', 'task:T2')], { kind: 'plan', revision: 3 });
+    expect(claim(compileBrain(input([v1, v2, v3], { previous: claimsOf(third), version: 4 })), 'task:T2')).toMatchObject({ status: 'current', citations: [{ sourceId: 'plan:run', revision: 3, anchor: 'tasks/T2' }] });
 
     const manifest = rev('repo_manifest:p', [sec('repo/commit', 'd'.repeat(40), 'repo:commit'), sec('repo/files', '42 files', 'repo:files')], { kind: 'repo_manifest' });
     const m = compileBrain(input([manifest]));

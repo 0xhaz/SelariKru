@@ -110,7 +110,7 @@ function contextSection(ctx: BrainBundle): string[] {
     `Compiled version ${ctx.compilationVersion ?? 'none'} at source position ${ctx.watermark}; ${ctx.indexLag === 0 ? 'no source change is waiting to be compiled' : `${ctx.indexLag} source change${ctx.indexLag === 1 ? ' is' : 's are'} not compiled yet`}.`,
     '',
     ...(ctx.claims.length === 0 ? ['No project context claims were delivered for this task.', ''] : ctx.claims.flatMap((c) => [
-      `### ${c.claimId}${c.status === 'disputed' ? ' (disputed: a newer source says otherwise; this is the accepted value)' : ''}`,
+      `### ${c.claimId}${c.standing === 'proposed' ? ' (proposed, not accepted)' : ''}${c.status === 'disputed' ? ' (disputed: another source says otherwise; this is the accepted value)' : ''}`,
       ...quoted(c.heading),
       ...quoted(c.text),
       `Source: ${c.citations.map(cite).join(', ')}`,

@@ -5,6 +5,7 @@ import { createScheduler } from '@selarikru/workflow';
 import { CLOUD_POLICY, TEST_CATALOG } from '@selarikru/workflow/test-helpers';
 import type { Policy } from '@selarikru/policy';
 import { blueprintFromAnswers } from '@selarikru/domain';
+import { refreshBrains } from '../src/brain.ts';
 import { bearer, enrolRunner, get, makeHarness, post, PROJECT, resetDb, RUN, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 const TENANT = 'tenant_a';
@@ -37,7 +38,10 @@ async function seedPlan(): Promise<void> {
 }
 const claimsOf = (brain: any): any[] => brain.compilation.pages.flatMap((p: any) => p.claims);
 const claimOf = (brain: any, key: string): any => claimsOf(brain).find((c: any) => c.key === key);
+/** What the periodic pass does: compile each project whose records moved. A claim compiles nothing itself. */
+const compileNow = () => refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
 async function claimAs(token: string): Promise<any> {
+  await compileNow();
   const res = await post(h.app, '/v1/runners/claim', {}, bearer(token));
   expect(res.status).toBe(200);
   return res.body.lease;
@@ -167,7 +171,10 @@ describe('Project Brain: the task context bundle at claim', () => {
     expect(claimOf(brain, 'criterion:FB-01')).toMatchObject({ status: 'unsupported' });
     const { token } = await enrolRunner(h.app);
     const lease = await claimAs(token);
-    expect(lease.context.claims.find((c: any) => c.key === 'criterion:FB-03').citations).toEqual([{ sourceId: expect.stringMatching(/^note:/), revision: 1, anchor: 'section-1' }]);
+    const served = lease.context.claims.find((c: any) => c.key === 'criterion:FB-03');
+    expect(served.citations).toEqual([{ sourceId: expect.stringMatching(/^note:/), revision: 1, anchor: 'section-1' }]);
+    // Only a proposal still states it, so the worker is told it is proposed, not accepted scope.
+    expect(served.standing).toBe('proposed');
   });
 
   it('an injected instruction in a source grants nothing: policy, paths, scope and approvals are unchanged, and the bundle carries it as data', async () => {
@@ -214,6 +221,7 @@ describe('Project Brain: the task context bundle at claim', () => {
       const secretNote = await post(cloud.app, `${brainUrl}/notes`, { title: 'Restricted note', classification: 'restricted', sections: [{ heading: 'Customer list', text: 'Acme and Globex are pilots' }] });
       expect(secretNote.status).toBe(201);
       const { token } = await enrolRunner(cloud.app, 'cloud');
+      await compileNow();
       const res = await post(cloud.app, '/v1/runners/claim', {}, bearer(token));
       expect(res.body.lease).toMatchObject({ taskId: 'C1', location: 'cloud' });
       const ctx = res.body.lease.context;
@@ -284,5 +292,125 @@ describe('Project Brain: the repository manifest a runner reads', () => {
 
     await t.db.execute(sql`UPDATE attempts SET detail = jsonb_set(detail, '{terminalStreamable}', 'false')`);
     expect((await post(h.app, '/v1/runners/brain/manifest', { lease: ref, manifest }, bearer(token))).status).toBe(403);
+  });
+});
+
+describe('Project Brain: fix round 1', () => {
+  it('a streamable local attempt gets no restricted claim or source text: a restricted note and a restricted sibling task are left out', async () => {
+    await seedTask(t.db, specFor('T1', { title: 'Build the API', baseSha: BASE }), 'ready');
+    await seedTask(t.db, specFor('R1', { classification: 'restricted', title: 'Restricted work for Acme', baseSha: BASE }), 'planned');
+    const n = await note([{ heading: 'Customer list', text: 'Acme and Globex are pilots' }], { title: 'Restricted note', classification: 'restricted' });
+    expect(n.status).toBe(201);
+    const { token } = await enrolRunner(h.app);
+    const lease = await claimAs(token);
+    expect(lease).toMatchObject({ taskId: 'T1', location: 'local', streamable: true });
+    const text = JSON.stringify(lease.context);
+    expect(text).not.toContain('Acme and Globex');
+    expect(text).not.toContain('Restricted work for Acme');
+    expect(lease.context.omissions).toEqual(expect.arrayContaining([
+      { kind: 'source', id: n.body.source.sourceId, reason: 'restricted_for_destination' },
+      { kind: 'source', id: `plan:${RUN}:R1`, reason: 'restricted_for_destination' },
+      { kind: 'claim', id: 'architecture:task:R1', reason: 'restricted_for_destination' },
+    ]));
+    // The restricted plan source carries its own task's label.
+    expect((await get(h.app, brainUrl)).body.sources.find((s: any) => s.sourceId === `plan:${RUN}:R1`)).toMatchObject({ classification: 'restricted', allowedUse: ['local'] });
+  });
+
+  it('a manifest path too long for a key is skipped with a reason, and a record that cannot be stored never breaks the sync', async () => {
+    await seedPlan();
+    await seedTask(t.db, specFor('T 9', { title: 'A task id with a space', baseSha: BASE }), 'planned');
+    const { token } = await enrolRunner(h.app);
+    const lease = await claimAs(token);
+    const ref = { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken };
+    const long = `docs/${'a'.repeat(160)}.md`;
+    const m = await post(h.app, '/v1/runners/brain/manifest', { lease: ref, manifest: { commit: BASE, fileCount: 2, totalBytes: 2, docs: [{ path: long, bytes: 1, sha256: 'e'.repeat(64) }, { path: 'README.md', bytes: 1, sha256: 'e'.repeat(64) }] } }, bearer(token));
+    expect(m.status).toBe(200);
+    expect(m.body.skipped).toEqual([{ index: 0, reason: 'path_too_long' }]);
+    const brain = await get(h.app, brainUrl);
+    expect(brain.status).toBe(200);
+    expect(claimOf(brain.body, 'repo:doc:README.md')).toBeDefined();
+    expect(brain.body.sources.map((s: any) => s.sourceId)).not.toContain(`plan:${RUN}:T 9`);
+    expect(claimOf(brain.body, 'task:T1')).toBeDefined();
+  });
+
+  it('clips a long approver id', async () => {
+    await seedPlan();
+    await t.db.execute(sql`INSERT INTO approvals (tenant_id, project_id, approval_id, run_id, task_id, revision, requester, approver, action_hash, scope_hash, outcome, detail, resolved_at) VALUES (${TENANT}, ${PROJECT}, 'ap1', ${RUN}, 'T1', 1, 'scheduler', ${'u'.repeat(300)}, 'h', 's', 'granted', ${JSON.stringify({ operation: 'start_cloud_worker', reason: 'agent words' })}::jsonb, now())`);
+    const brain = await get(h.app, brainUrl);
+    expect(brain.status).toBe(200);
+    expect(claimOf(brain.body, 'approval:ap1').text).not.toContain('agent words');
+  });
+
+  it('different text for one criterion across tasks makes a disputed claim and a decision proposal', async () => {
+    await seedTask(t.db, specFor('T1', { baseSha: BASE, requirementIds: ['FB-03'], criteria: [{ id: 'FB-03', text: 'List feedback newest first' }] }), 'ready');
+    await seedTask(t.db, specFor('T2', { baseSha: BASE, requirementIds: ['FB-03'], criteria: [{ id: 'FB-03', text: 'List feedback oldest first' }] }), 'planned');
+    const brain = (await get(h.app, brainUrl)).body;
+    expect(claimOf(brain, 'criterion:FB-03')).toMatchObject({ status: 'disputed', text: 'List feedback newest first' });
+    expect(brain.conflicts).toEqual([expect.objectContaining({ key: 'criterion:FB-03', state: 'open', proposed: expect.objectContaining({ sourceId: 'criteria_task:T2', text: 'List feedback oldest first' }) })]);
+  });
+
+  it('a task spec criterion that differs from the accepted blueprint is disputed too', async () => {
+    const content = blueprintFromAnswers({ goal: { name: 'FB', idea: 'A board', audience: 'Teams', firstOutcome: 'Collect feedback' }, source: { kind: 'new' }, focus: { tracks: ['saas_web'] } } as never);
+    await seedTask(t.db, specFor('T1', { baseSha: BASE, requirementIds: ['FB-03'], criteria: [{ id: 'FB-03', text: 'Something else entirely' }] }), 'ready');
+    await t.db.execute(sql`INSERT INTO project_onboardings (tenant_id, project_id, name, name_key, state, accepted_blueprint_version, project_created, created_by) VALUES (${TENANT}, ${PROJECT}, 'FB', 'fb', 'activated', 1, true, 'owner_uid_1')`);
+    await t.db.execute(sql`INSERT INTO project_blueprints (tenant_id, project_id, version, content, content_sha256, origin, created_by) VALUES (${TENANT}, ${PROJECT}, 1, ${JSON.stringify(content)}::jsonb, ${'f'.repeat(64)}, 'controller', 'owner_uid_1')`);
+    const brain = (await get(h.app, brainUrl)).body;
+    expect(claimOf(brain, 'criterion:FB-03')).toMatchObject({ status: 'disputed', citations: [{ sourceId: 'criteria:proj_a', revision: 1, anchor: 'criteria/FB-03' }] });
+  });
+
+  it('a decision takes the strongest label of what it covers', async () => {
+    await seedPlan();
+    await t.db.execute(sql`INSERT INTO decisions (tenant_id, project_id, decision_id, context, rationale, author, affected) VALUES (${TENANT}, ${PROJECT}, 'd2', 'reclassification', 'Lowered for a draft', 'owner_uid_1', ${JSON.stringify([{ draftId: 'x', sourceClassification: 'restricted', targetClassification: 'internal' }])}::jsonb)`);
+    const brain = (await get(h.app, brainUrl)).body;
+    expect(brain.sources.find((s: any) => s.sourceId === 'decision:d2')).toMatchObject({ classification: 'restricted' });
+  });
+
+  it('the claim compiles nothing: it serves the last compilation, re-checked for revocation and destination', async () => {
+    await seedPlan();
+    await get(h.app, brainUrl);
+    const sourcesBefore = Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM brain_sources`))[0]!['n']);
+    await t.db.execute(sql`INSERT INTO decisions (tenant_id, project_id, decision_id, context, rationale, author) VALUES (${TENANT}, ${PROJECT}, 'd3', 'ruling', 'Not yet read', 'owner_uid_1')`);
+    const { token } = await enrolRunner(h.app);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    expect(lease.context.compilationVersion).toBe(1);
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM brain_sources`))[0]!['n'])).toBe(sourcesBefore);
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM brain_compilations`))[0]!['n'])).toBe(1);
+    // A record changed, so the next owner read compiles; one that did not change compiles nothing.
+    expect((await get(h.app, brainUrl)).body.compilation.version).toBe(2);
+    expect((await get(h.app, brainUrl)).body.compilation.version).toBe(2);
+  });
+
+  it('a verification recorded by the verifier is compiled by the periodic pass, without an owner read', async () => {
+    await seedPlan();
+    await get(h.app, brainUrl);
+    await withTx(t.db, async (tx) => {
+      await appendEvent(tx, { schemaVersion: 1, eventId: 'evt_v9', projectId: PROJECT, runId: RUN, taskId: 'T1', attemptId: null, type: 'verification.passed', sequence: 0, aggregateRevision: 1, actor: { kind: 'verifier', id: 'v1' }, occurredAt: h.clock.now().toISOString(), receivedAt: h.clock.now().toISOString(), causationId: null, traceId: 't', payload: { candidateSha: 'a'.repeat(40) } });
+    });
+    const compiled = await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+    expect(compiled).toEqual([PROJECT]);
+    const versions = await t.db.execute(sql`SELECT max(version)::int AS v FROM brain_compilations`);
+    expect(versions[0]!['v']).toBe(2);
+    // Nothing changed since: the next pass compiles nothing.
+    expect(await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now })).toEqual([]);
+  });
+
+  it('an approval resolved through its route is compiled before the answer is sent, with no owner read of the Brain', async () => {
+    const policy = { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } } as Policy;
+    const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date('2026-11-08T06:00:00.000Z'), policy });
+    const app = makeHarness(t, {}, policy, { scheduler });
+    await app.app.ready();
+    try {
+      await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'C1', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);
+      await seedTask(t.db, specFor('c1', { execution: 'cloud' }));
+      await scheduler.tryClaim({ runnerId: 'cloud1', tenantId: TENANT, location: 'cloud', harnesses: [{ provider: 'anthropic', harnessVersion: '2.1.316', models: ['claude-sonnet-5-5'] }] }, { maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 });
+      const [row] = await t.db.execute(sql`SELECT approval_id, scope_hash FROM approvals`);
+      const [st] = await t.db.execute(sql`SELECT row_revision FROM task_status WHERE task_id = 'c1'`);
+      const res = await post(app.app, `/v1/approvals/${String(row!['approval_id'])}/resolve`, { decision: 'grant', scopeHash: String(row!['scope_hash']), expectedRevision: Number(st!['row_revision']), idempotencyKey: 'k1' });
+      expect(res.status).toBe(200);
+      const [c] = await t.db.execute(sql`SELECT pages FROM brain_compilations ORDER BY version DESC LIMIT 1`);
+      expect(JSON.stringify(c?.['pages'] ?? null)).toContain(`approval:${String(row!['approval_id'])}`);
+    } finally {
+      await app.app.close();
+    }
   });
 });

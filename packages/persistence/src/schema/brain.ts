@@ -16,6 +16,8 @@ export const brainHeads = pgTable(
     lastSeq: integer('last_seq').notNull().default(0),
     /** The latest compilation. 0: none yet. */
     compiledVersion: integer('compiled_version').notNull().default(0),
+    /** A fingerprint of the records sources are read from, as of the last sync. A sync whose fingerprint is unchanged reads no records. Null: never synced. */
+    recordsMark: text('records_mark'),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId] }),
@@ -122,6 +124,8 @@ export const brainConflictResolutions = pgTable(
     outcome: text('outcome').notNull(),
     resolvedBy: text('resolved_by').notNull(),
     resolvedAt: tstz('resolved_at').notNull(),
+    /** The conflict as it stood when settled, so the view can show it without reading old compilations. */
+    conflict: jsonb('conflict').$type<Record<string, unknown>>(),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId, t.conflictId] }),

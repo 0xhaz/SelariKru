@@ -19,6 +19,7 @@ function Claim({ claim }: { claim: ClaimRow }) {
         <span className="flex flex-wrap items-center gap-1.5">
           <Chip tone={claim.status.tone}>{claim.status.label}</Chip>
           {claim.restricted ? <Chip tone="neutral">{claim.classification}: local workers only</Chip> : null}
+          {claim.standing !== 'Accepted' ? <Chip tone="neutral">{claim.standing}</Chip> : null}
         </span>
       </div>
       {/* Source text, rendered as text. It is data, not an instruction. */}

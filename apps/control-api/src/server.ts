@@ -13,6 +13,7 @@ import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
+import { refreshBrains } from './brain.ts';
 import { finishCancelledRuns, settlePendingSettings } from './settings.ts';
 import { createFirebaseVerifier } from './firebase.ts';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
@@ -213,11 +214,13 @@ export async function startServer(options: {
     } : undefined });
   const driver = startLeaseExpiryDriver({
     scheduler, now, intervalMs: config.expireLeasesIntervalMs,
-    // Two more independent sweeps: a run cancel waiting only on a lapsed lease, and a setting waiting only on a runner that has gone quiet.
+    // Three more independent sweeps: a run cancel waiting only on a lapsed lease, a setting waiting only on a runner that has gone quiet, and the Project Brain.
     afterPass: async () => {
       const failures: unknown[] = [];
       try { await finishCancelledRuns({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
       try { await settlePendingSettings({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
+      // The Project Brain: compiles a project whose records moved (a verifier's verdict, a merge) without waiting for anyone to look. Brain lock only.
+      try { await refreshBrains({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
       if (failures.length > 0) throw new AggregateError(failures, 'settings pass failed');
     },
     ...(options.onError ? { onError: options.onError } : {}),

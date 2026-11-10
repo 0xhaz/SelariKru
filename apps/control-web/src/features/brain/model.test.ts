@@ -34,6 +34,8 @@ describe('brainModel', () => {
     expect(fb3.disputedBy.map((c) => c.label)).toEqual(['note:n · revision 1 · section-1']);
     const revoked = m.pages[0]!.claims.find((c) => c.key === 'note:r:1')!;
     expect(revoked.status.label).toBe('Unsupported');
+    expect(m.pages[0]!.claims.find((c) => c.key === 'note:n:2')!.standing).toBe('Proposed, not accepted scope');
+    expect(fb3.standing).toBe('Accepted');
     expect(revoked.served).toBe(false);
     expect(revoked.restricted).toBe(true);
     // Source text is kept as text: the view renders it as a text node, never markup.
@@ -77,11 +79,12 @@ describe('conflictCards', () => {
 
 describe('contextModel', () => {
   it('shows what an attempt was given and every omission with its reason in words', () => {
-    const bundle = buildContextBundle({ compilation, revisions, revocations: [{ sourceId: 'note:r', reason: 'owner', revokedBy: 'o', revokedAt: AT, seq }], sourceHead: seq + 1, destination: 'cloud', task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: ['FB-03'], dependsOn: [] } });
+    const bundle = buildContextBundle({ compilation, revisions, revocations: [{ sourceId: 'note:r', reason: 'owner', revokedBy: 'o', revokedAt: AT, seq }], sourceHead: seq + 1, destination: 'cloud', streamable: true, task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: ['FB-03'], dependsOn: [] } });
     const m = contextModel({ attemptId: 'a1', taskId: 'T1', destination: 'cloud', recordedAt: AT, bundle })!;
     expect(m.destination).toBe('Cloud worker');
     expect(m.claims.map((c) => c.key)).toEqual(['note:n:2', 'criterion:FB-03']);
     expect(m.claims[1]!.status).toBe('Disputed');
+    expect(m.claims.map((c) => c.standing)).toEqual(['Proposed, not accepted', 'Accepted']);
     expect(m.omissions).toEqual([
       { id: 'overview:note:r:1', kind: 'Claim', reason: 'Revoked source' },
       { id: 'architecture:criterion:FB-01', kind: 'Claim', reason: 'Out of scope for this task' },
@@ -89,5 +92,10 @@ describe('contextModel', () => {
     ]);
     expect(m.lag).toBe('1 source change was not compiled yet');
     expect(contextModel(null)).toBeNull();
+    const other = contextModel({ attemptId: 'a1', taskId: 'T1', destination: 'local', recordedAt: AT, bundle: { ...bundle, omissions: [{ kind: 'claim', id: 'x', reason: 'accepted_source_revoked' }, { kind: 'section', id: 'criteria:p@1#preamble', reason: 'not_a_claim' }] } })!;
+    expect(other.omissions).toEqual([
+      { id: 'x', kind: 'Claim', reason: 'Its accepted source was revoked; a proposal is not served in its place' },
+      { id: 'criteria:p@1#preamble', kind: 'Section', reason: 'States no claim' },
+    ]);
   });
 });

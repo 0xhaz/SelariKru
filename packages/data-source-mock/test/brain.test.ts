@@ -30,7 +30,8 @@ describe('the demo Project Brain', () => {
     const [first, second] = Object.keys(snap.attempts);
     const before = AttemptContextViewSchema.parse(await ds.getAttemptContext!(projectId, first!));
     expect(before.bundle.claims.length).toBeGreaterThan(0);
-    expect(before.bundle.omissions).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'out_of_scope' })]));
+    expect(before.bundle.omissions).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'out_of_scope' }), { kind: 'source', id: 'note:demo-pilots', reason: 'restricted_for_destination' }]));
+    expect(JSON.stringify(before.bundle.claims)).not.toContain('Pilot customers');
     const after = await ds.brainAction!(projectId, { kind: 'revoke', sourceId: `criteria:${projectId}`, reason: 'demo' });
     expect(after.compilation!.pages.flatMap((p) => p.claims).find((c) => c.key === 'criterion:FB-01')!.status).toBe('unsupported');
     expect(await ds.getAttemptContext!(projectId, first!)).toEqual(before);

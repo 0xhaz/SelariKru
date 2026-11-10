@@ -151,7 +151,8 @@ export function createDemoBrain(snapshotOf: (projectId: string) => ProjectViewSn
       const destination = worker?.execution === 'cloud' ? 'cloud' : 'local';
       // Recorded the first time it is asked for, as the server records it at claim: a later revocation shows in the next attempt's bundle, not this one's.
       const bundle: BrainBundle = buildContextBundle({
-        compilation: s.compilation, revisions: s.revisions, revocations: s.revocations, sourceHead: s.seq, destination,
+        // Demo tasks are internal, so their output may leave the device: restricted claims are left out, as the server leaves them out for a streamable attempt.
+        compilation: s.compilation, revisions: s.revisions, revocations: s.revocations, sourceHead: s.seq, destination, streamable: true,
         task: { taskId: task.taskId, baseSha: DEMO_COMMIT, criteria: ROLE_CRITERIA[task.role ?? ''] ?? [], dependsOn: task.dependsOn ?? [] },
       });
       const v: AttemptContextView = { attemptId, taskId: task.taskId, destination, recordedAt: attempt.startedAt, bundle };
