@@ -2,6 +2,7 @@ import { Children, cloneElement, createContext, isValidElement, useContext, useI
 import { Chip, toneGlyph, TONE_TEXT, type Tone } from '@selarikru/ui';
 import type { ExecutionChoice, ReadinessStatus } from '@selarikru/domain';
 import { SIGN_IN_CODES, type InferenceChoice } from './api.ts';
+import type { ReauthOutcome } from './reauth.ts';
 
 export const usd = (n: number): string => `$${n.toLocaleString('en-US', { minimumFractionDigits: n % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 })}`;
 export const inputClass = 'w-full rounded-chip border border-line-strong bg-bg px-3 py-2 text-fg placeholder:text-muted';
@@ -47,7 +48,10 @@ export const ReadOnlyContext = createContext(false);
  */
 export interface SignInAgain {
   readonly email: string | null;
-  readonly reauthenticate: (password: string) => Promise<boolean>;
+  /** False when the account has no password to confirm (it signs in another way): the form is then not offered, only Sign out. */
+  readonly canUsePassword: boolean;
+  readonly reauthenticate: (password: string) => Promise<ReauthOutcome>;
+  readonly signOut: () => void;
 }
 export const SignInContext = createContext<SignInAgain | null>(null);
 
@@ -57,9 +61,17 @@ const REAUTH_CODES: readonly string[] = SIGN_IN_CODES.filter((c) => c !== 'not_o
 function SignInAgainForm({ signIn }: { signIn: SignInAgain }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<'ok' | 'failed' | null>(null);
+  const [result, setResult] = useState<ReauthOutcome | null>(null);
   const id = useId();
   if (result === 'ok') return <span role="status" className="mt-2 block text-fg" data-testid="signed-in-again">Signed in again. Try that step again; nothing on this page was lost.</span>;
+  if (!signIn.canUsePassword) {
+    return (
+      <span className="mt-2 block" data-testid="sign-out-instead">
+        <span className="block text-sm text-muted">This account does not sign in with a password, so it cannot be confirmed here. Signing out and in again ends this session, so anything typed here and not saved is lost.</span>
+        <button type="button" className="mt-2 rounded-chip border border-line-strong bg-panel-2 px-3 py-1.5 text-sm font-medium text-fg hover:border-active" onClick={signIn.signOut}>Sign out</button>
+      </span>
+    );
+  }
   if (!open) return <span className="mt-2 block"><button type="button" className="rounded-chip border border-line-strong bg-panel-2 px-3 py-1.5 text-sm font-medium text-fg hover:border-active" onClick={() => setOpen(true)}>Sign in again</button></span>;
   const submit = async (e: FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
@@ -68,10 +80,11 @@ function SignInAgainForm({ signIn }: { signIn: SignInAgain }) {
     setResult(null);
     const ok = await signIn.reauthenticate(password);
     setBusy(false);
-    setResult(ok ? 'ok' : 'failed');
+    setResult(ok);
   };
   return (
-    <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => void submit(e)}>
+    <form aria-labelledby={`${id}-title`} className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => void submit(e)}>
+      <span id={`${id}-title`} className="block w-full text-sm font-semibold text-fg">Confirm your SelariKru sign-in</span>
       <span className="block w-full text-sm text-muted">Signing in again here keeps everything on this page, including what you have typed and not saved.</span>
       <span className="min-w-0 flex-1 basis-48">
         <label htmlFor={`${id}-password`} className="mb-1 block text-sm text-fg">Password{signIn.email ? ` for ${signIn.email}` : ''}</label>
@@ -79,6 +92,7 @@ function SignInAgainForm({ signIn }: { signIn: SignInAgain }) {
       </span>
       <button type="submit" disabled={busy} className="rounded-chip bg-active px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-50">{busy ? 'Signing in' : 'Sign in'}</button>
       {result === 'failed' ? <span role="status" className="block w-full text-sm text-danger">The sign-in did not work. Check the password and try again.</span> : null}
+      {result === 'too_many' ? <span role="status" className="block w-full text-sm text-danger">Too many sign-in attempts. Wait a few minutes, then try again.</span> : null}
     </form>
   );
 }

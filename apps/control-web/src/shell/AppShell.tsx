@@ -321,9 +321,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       </header>
 
       {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
-      <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''}`}>
+      {/* An inert region is not hit-tested, so the arrow comes from here; the scrim and the hint below say why it does not respond. */}
+      <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''} ${drawerBeside ? 'cursor-default' : ''}`}>
       {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} /> : null}
-      <div ref={contentRef} className="min-w-0" data-testid="page-content">
+      <div ref={contentRef} className={`relative min-w-0 ${drawerBeside ? 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:bg-bg/60 after:content-[\'\']' : ''}`} data-testid="page-content" data-paused={drawerBeside ? 'true' : undefined}>
+      {drawerBeside ? <p data-testid="page-paused-hint" className="relative z-20 max-w-[24rem] px-4 pt-3 text-sm text-fg sm:px-6">The page is paused while a worker is open. Close the worker to use the page.</p> : null}
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>

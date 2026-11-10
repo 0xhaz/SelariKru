@@ -91,6 +91,27 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+/** The session is live, but the worker waiting on a person has health the server reports as unknown, and it was last confirmed as needing you. */
+for (const [width, height] of [[1024, 768], [375, 800]] as const) {
+  test(`at ${width}, an unknown worker is never summed up as nobody needing you`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await spied(page, { spiedFixture: 'human-wait', workerPatch: { runner_local_1: { health: 'unknown' } } }, 'overview');
+    const toggle = page.getByTestId('team-panel-toggle');
+    await expect(toggle).toBeVisible();
+    if (width >= 1280) await expect(panel(page)).toHaveAttribute('data-variant', 'side');
+    await expect(toggle).toHaveAccessibleName(/1 unknown \(last: needs you\)/);
+    await expect(toggle).not.toContainText('nobody needs you');
+    await expect(toggle.getByTestId('team-needs-you')).toHaveAttribute('data-has-unknown', '');
+    if (width === 375) await expect(toggle.getByTestId('team-needs-you').locator('[aria-hidden="true"]')).toHaveText('? 1');
+    else await expect(toggle.getByTestId('team-needs-you')).toBeVisible();
+    await shot(page, `panel-unknown-${width}`);
+    await showPanel(page);
+    await expect(panelRow(page, 'runner_local_1')).toHaveAttribute('data-state', 'unknown');
+    await expect(panel(page).getByTestId('team-fold-needs-you')).toContainText('1 unknown (last: needs you)');
+    await expect(panel(page)).not.toContainText('nobody needs you');
+  });
+}
+
 test('selecting a worker opens the drawer without navigation', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/?demo&fixture=human-wait#/pipeline?view=table');
@@ -286,7 +307,10 @@ for (const [width, height] of [[1440, 900], [1280, 800]] as const) {
       if (!(a instanceof HTMLElement) || a === document.body || d.contains(a)) return null;
       const r = a.getBoundingClientRect();
       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      return hit !== null && d.contains(hit) ? `${a.tagName} ${a.textContent?.trim().slice(0, 40)}` : null;
+      const name = `${a.tagName} ${a.textContent?.trim().slice(0, 40)}`;
+      // Nothing under the point means focus is on something not visible, which is no better than one hidden under the drawer.
+      if (hit === null) return `not visible: ${name}`;
+      return d.contains(hit) ? name : null;
     });
     for (const key of ['Tab', 'Shift+Tab']) {
       for (let i = 0; i < 45; i += 1) {
@@ -296,13 +320,43 @@ for (const [width, height] of [[1440, 900], [1280, 800]] as const) {
     }
     // The page under the drawer is inert; the panel and the nav are not.
     expect(await page.getByTestId('page-content').evaluate((el) => (el as HTMLElement).inert)).toBe(true);
-    await panelRow(page, 'runner_cloud_1').focus();
-    await expect(panelRow(page, 'runner_cloud_1')).toBeFocused();
+    // The panel is reachable by the keyboard alone: from the drawer's first control, Shift+Tab arrives at a panel row without any call to focus().
+    await drawer(page).getByRole('tab', { name: 'Task' }).focus();
+    let onRow = false;
+    for (let i = 0; i < 12 && !onRow; i += 1) {
+      await page.keyboard.press('Shift+Tab');
+      onRow = await page.evaluate(() => document.activeElement?.getAttribute('data-testid') === 'team-panel-row');
+    }
+    expect(onRow, 'Shift+Tab from the drawer reaches a panel row').toBe(true);
     await page.keyboard.press('Escape');
     await expect(drawer(page)).toHaveCount(0);
     expect(await page.getByTestId('page-content').evaluate((el) => (el as HTMLElement).inert)).toBe(false);
   });
 }
+
+test('the page beside an open drawer is dimmed and says why it does not respond', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?demo&fixture=human-wait#/overview');
+  const content = page.getByTestId('page-content');
+  await expect(content).not.toHaveAttribute('data-paused', 'true');
+  await expect(page.getByTestId('page-paused-hint')).toHaveCount(0);
+  await panelRow(page, 'runner_local_1').click();
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
+  await expect(content).toHaveAttribute('data-paused', 'true');
+  await expect(page.getByTestId('page-paused-hint')).toContainText('Close the worker to use the page');
+  // Dimmed: a scrim covers the page; the pointer there is the default arrow, not a link hand.
+  const veil = await content.evaluate((el) => { const a = getComputedStyle(el, '::after'); return { content: a.content, bg: a.backgroundColor }; });
+  expect(veil.content).not.toBe('none');
+  expect(veil.bg).not.toBe('rgba(0, 0, 0, 0)');
+  const box = (await content.boundingBox())!;
+  const cursor = await page.evaluate(([x, y]) => getComputedStyle(document.elementFromPoint(x!, y!)!).cursor, [box.x + 40, box.y + 300]);
+  expect(cursor).toBe('default');
+  await shot(page, 'drawer-paused-page-1440');
+  await expect(page.getByTestId('page-paused-hint')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(content).not.toHaveAttribute('data-paused', 'true');
+  await expect(page.getByTestId('page-paused-hint')).toHaveCount(0);
+});
 
 test('crossing the panel width with the drawer open keeps what is in Settings', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });

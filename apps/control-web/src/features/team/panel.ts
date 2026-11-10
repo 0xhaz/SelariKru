@@ -22,9 +22,17 @@ export interface TeamPanelModel {
   readonly needsYou: number | null;
   /** Workers the server itself reports as unknown while the session is live. Only they are uncounted; the count covers the rest. */
   readonly unknown: number;
+  /** Of the unknown rows, how many were last confirmed as needing you. They are not counted in `needsYou`, and they are never to be read as nobody. */
+  readonly unknownLastNeedsYou: number;
   /** How many needed you at the last confirmation. Shown, labelled as such, only when `needsYou` is null. */
   readonly confirmedNeedsYou: number;
   readonly summary: string;
+}
+
+/** "1 unknown (last: needs you)": the unknown rows, and how many of them needed you when last confirmed. */
+export function unknownText(unknown: number, lastNeedsYou: number): string {
+  if (lastNeedsYou === 0) return `${unknown} unknown`;
+  return unknown === 1 ? '1 unknown (last: needs you)' : `${unknown} unknown (${lastNeedsYou} last: needs you)`;
 }
 
 const roleName = (role: string | null): string => (role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Unassigned');
@@ -38,11 +46,14 @@ export function panelOf(team: TeamModel, sessionStale: boolean): TeamPanelModel 
   }));
   const confirmedNeedsYou = team.rows.filter((r) => r.presence.confirmedState === 'needs_you').length;
   const unknown = sessionStale ? 0 : rows.filter((r) => r.state === 'unknown').length;
+  const unknownLastNeedsYou = sessionStale ? 0 : rows.filter((r, i) => r.state === 'unknown' && team.rows[i]!.presence.confirmedState === 'needs_you').length;
   const needsYou = sessionStale ? null : rows.filter((r) => r.state === 'needs_you').length;
   const workers = `${rows.length} worker${rows.length === 1 ? '' : 's'}`;
-  const counted = needsYou === null ? null : needsYou === 0 ? 'nobody needs you' : `${needsYou} need${needsYou === 1 ? 's' : ''} you`;
-  const summary = counted === null
+  const others = unknown > 0 ? unknownText(unknown, unknownLastNeedsYou) : null;
+  // Zero is only "nobody" when no row is unknown: an unknown row could be the one that needs you.
+  const counted = needsYou === null ? null : needsYou === 0 ? (others === null ? 'nobody needs you' : null) : `${needsYou} need${needsYou === 1 ? 's' : ''} you`;
+  const summary = needsYou === null
     ? `${workers}, who needs you is unknown (${confirmedNeedsYou} when last confirmed)`
-    : `${workers}, ${counted}${unknown > 0 ? `, ${unknown} unknown` : ''}`;
-  return { rows, needsYou, unknown, confirmedNeedsYou, summary };
+    : [workers, counted, others].filter((x) => x !== null).join(', ');
+  return { rows, needsYou, unknown, unknownLastNeedsYou, confirmedNeedsYou, summary };
 }

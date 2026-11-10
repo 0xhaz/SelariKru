@@ -49,6 +49,8 @@ interface Scenario {
   dependsOn?: Record<string, string[] | null>;
   /** Field overrides by task id in that fixture's snapshots, for states fixtures do not reach, such as a superseded dependency. */
   taskPatch?: Record<string, Record<string, unknown>>;
+  /** Fields merged over a worker. */
+  workerPatch?: Record<string, Record<string, unknown>>;
   /** Simulates a transport fault on the spied source, e.g. 'reconnecting'. */
   fault?: 'reconnecting' | 'dead';
   /** Refuses commands with this rejection, to exercise a server refusal. */
@@ -60,7 +62,7 @@ interface Scenario {
   /** Failure loads on the spied source are refused until the test calls `window.__allowFailureLoads`, to exercise retrying. */
   refuseFailureLoads?: boolean;
   /** Mounts the onboarding screen over the real HTTP client, against a route the test answers. */
-  onboardingApi?: { baseUrl: string; token?: string };
+  onboardingApi?: { baseUrl: string; token?: string; /** 'federated' stands for an account with no password. */ signIn?: 'federated' };
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
 }
@@ -202,9 +204,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     getSnapshot: async (projectId) => {
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
-      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch) return base;
+      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch && !sc.workerPatch) return base;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
-      return { ...base, runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
+      return { ...base, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
@@ -263,8 +265,13 @@ if (sc.onboardingApi) {
   const o = sc.onboardingApi;
   const api = createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => o.token ?? 'test-token' });
   const empty = createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined });
-  // Stands in for Firebase re-authentication: 'right' is the password.
-  const signInAgain = { email: 'owner@example.test', reauthenticate: async (password: string) => { window.__calls.api.push({ kind: 'sign-in' }); return password === 'right'; } };
+  // Stands in for Firebase re-authentication: 'right' is the password, and 'limit' is rate limited.
+  const signInAgain = {
+    email: 'owner@example.test',
+    canUsePassword: o.signIn !== 'federated',
+    signOut: () => { window.__calls.api.push({ kind: 'sign-out' }); },
+    reauthenticate: async (password: string) => { window.__calls.api.push({ kind: 'sign-in' }); return password === 'right' ? 'ok' as const : password === 'limit' ? 'too_many' as const : 'failed' as const; },
+  };
   // The live root's project handling, without Firebase: the header follows an activation the same way.
   function OnboardingShell() {
     const { projectId, activate } = useActiveProject(projectFromUrl());

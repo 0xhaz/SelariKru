@@ -92,11 +92,11 @@ async function mockApi(page: Page, view: unknown, list: unknown = { items: [] })
   return calls;
 }
 
-async function open(page: Page, view: unknown, hash: string, theme: 'dark' | 'light' = 'dark'): Promise<void> {
-  await page.addInitScript(([url, t]) => {
-    (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url } };
+async function open(page: Page, view: unknown, hash: string, theme: 'dark' | 'light' = 'dark', signIn?: string): Promise<void> {
+  await page.addInitScript(([url, t, si]) => {
+    (window as unknown as { __scenario: unknown }).__scenario = { onboardingApi: { baseUrl: url, ...(si ? { signIn: si } : {}) } };
     window.localStorage.setItem('selarikru.theme', t!);
-  }, [API, theme]);
+  }, [API, theme, signIn]);
   await mockApi(page, view);
   await page.goto(`/tests/harness/index.html${hash}`);
 }
@@ -231,6 +231,7 @@ test.describe('behaviour', () => {
     await expect(page.getByText(/Could not reach/)).toHaveCount(0);
     await page.getByRole('button', { name: 'Sign in again' }).click();
     await expect(page.getByText('keeps everything on this page')).toBeVisible();
+    await expect(page.getByRole('form', { name: 'Confirm your SelariKru sign-in' })).toBeVisible();
     await page.getByLabel('Password for owner@example.test').fill('wrong');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByText('The sign-in did not work. Check the password')).toBeVisible();
@@ -239,6 +240,29 @@ test.describe('behaviour', () => {
     await expect(page.getByTestId('signed-in-again')).toContainText('nothing on this page was lost');
     await expect(page.getByRole('heading', { name: 'Confirm the first run' })).toBeVisible();
     expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-in'))).toHaveLength(2);
+  });
+
+  test('too many attempts is said as such, not as a wrong password', async ({ page }) => {
+    await open(page, ready, '#/onboarding?id=proj_1');
+    await page.route('**/mockapi/v1/onboarding/proj_1/activate', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'invalid_token', message: 'token is not valid' } }) }));
+    await page.getByRole('button', { name: 'Start first run' }).click();
+    await page.getByRole('button', { name: 'Sign in again' }).click();
+    await page.getByLabel('Password for owner@example.test').fill('limit');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByText(/Too many sign-in attempts/)).toBeVisible();
+    await expect(page.getByText('Check the password and try again')).toHaveCount(0);
+  });
+
+  test('an account without a password is offered sign out with true copy, not a password form', async ({ page }) => {
+    await open(page, ready, '#/onboarding?id=proj_1', 'dark', 'federated');
+    await page.route('**/mockapi/v1/onboarding/proj_1/activate', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'invalid_token', message: 'token is not valid' } }) }));
+    await page.getByRole('button', { name: 'Start first run' }).click();
+    await expect(page.getByText('Your sign-in has expired')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in again' })).toHaveCount(0);
+    await expect(page.locator('input[type="password"]')).toHaveCount(0);
+    await expect(page.getByText(/does not sign in with a password/)).toBeVisible();
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-out'))).toHaveLength(1);
   });
 
   test('an account that is not the owner is told so, and is not offered a sign-in that cannot help', async ({ page }) => {

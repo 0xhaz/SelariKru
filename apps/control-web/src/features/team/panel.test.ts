@@ -96,6 +96,21 @@ describe('team panel model', () => {
     expect(panel).toMatchObject({ needsYou: 1, unknown: 1, summary: '2 workers, 1 needs you, 1 unknown' });
   });
 
+  it('an unknown row whose last confirmed state was needs you is counted apart, and the summary never says nobody needs you while any row is unknown', () => {
+    const snapshot = snapshotOf({
+      tasks: [task('c', { status: 'awaiting_approval' }), task('d')],
+      workers: [worker('u', { taskId: 'c', activity: 'waiting_human', blockedByApprovalId: 'ap2', lastHeartbeatAt: iso(5) }), worker('v', { taskId: 'd', lastHeartbeatAt: iso(5) })],
+      approvals: [approval('ap2', { taskId: 'c' })],
+    });
+    const team = buildTeam(snapshot, NOW, NOW - 120_000);
+    const u = team.rows.find((r) => r.workerId === 'u')!;
+    expect(u.presence).toMatchObject({ state: 'unknown', confirmedState: 'needs_you' });
+    const panel = panelOf(team, false);
+    expect(panel).toMatchObject({ needsYou: 0, unknown: 2, unknownLastNeedsYou: 1 });
+    expect(panel.summary).not.toMatch(/nobody needs you/);
+    expect(panel.summary).toContain('2 unknown (1 last: needs you)');
+  });
+
   it('with nobody waiting, the summary says so rather than showing zero as a warning', () => {
     const panel = panelOf(buildTeam(snapshotOf({ workers: [worker('w', { availability: 'idle', activity: null, leaseHeld: false })] }), NOW, NOW), false);
     expect(panel).toMatchObject({ needsYou: 0, summary: '1 worker, nobody needs you' });

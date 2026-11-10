@@ -4,6 +4,7 @@ import { EmailAuthProvider, reauthenticateWithCredential, signOut } from 'fireba
 import { RestrictedDraftHold, type InferenceMode } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
 import { OnboardingView } from '../features/onboarding/OnboardingView.tsx';
+import { canReauthenticateWithPassword, reauthOutcomeOf, type ReauthOutcome } from '../features/onboarding/reauth.ts';
 import { createOnboardingApi } from '../features/onboarding/index.ts';
 import { createApiClient } from '../features/assistant/api.ts';
 import { auth, createAdapter, getOwnerToken, usingAuthEmulator } from '../firebase.ts';
@@ -22,15 +23,18 @@ const every: Scheduler = (fn, ms) => {
 /** Re-authenticates the signed-in owner in place: the same account, so the app is not remounted and nothing typed is lost. */
 const signInAgain = {
   get email() { return auth.currentUser?.email ?? null; },
-  async reauthenticate(password: string): Promise<boolean> {
+  get canUsePassword() { return canReauthenticateWithPassword(auth.currentUser); },
+  signOut: () => void signOut(auth),
+  /** The password goes to Firebase Auth and nowhere else: it is not kept in state, logged or stored. */
+  async reauthenticate(password: string): Promise<ReauthOutcome> {
     const user = auth.currentUser;
-    if (!user?.email) return false;
+    if (!user?.email) return 'failed';
     try {
       await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
       await user.getIdToken(true);
-      return true;
-    } catch {
-      return false;
+      return 'ok';
+    } catch (error) {
+      return reauthOutcomeOf(error);
     }
   },
 };

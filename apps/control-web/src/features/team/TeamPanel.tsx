@@ -1,7 +1,7 @@
 import type { KeyboardEvent } from 'react';
 import { TONE_TEXT, formatClock, type Tone } from '@selarikru/ui';
 import type { PresenceState } from './model.ts';
-import type { PanelRow, TeamPanelModel } from './panel.ts';
+import { unknownText, type PanelRow, type TeamPanelModel } from './panel.ts';
 
 /** Each state has its own glyph as well as its word, so no two read alike in color, in grayscale or to a screen reader. */
 const GLYPH: Readonly<Record<PresenceState, string>> = { idle: '○', working: '◆', needs_you: '▲', blocked: '‖', lost: '✕', unknown: '?' };
@@ -63,7 +63,7 @@ const confirmedClock = (status: Extract<PanelStatus, { kind: 'ready' }>): string
 
 /** The "needs you" count, or, while the session is stale, that it is unknown and what it was when last confirmed. A stale zero is never shown as nobody. */
 function NeedsYou({ status, testId }: { status: Extract<PanelStatus, { kind: 'ready' }>; testId: string }) {
-  const { needsYou, confirmedNeedsYou, unknown } = status.panel;
+  const { needsYou, confirmedNeedsYou, unknown, unknownLastNeedsYou } = status.panel;
   if (needsYou === null) {
     const at = status.confirmedAt ? ` at ${formatClock(status.confirmedAt)}` : '';
     return (
@@ -73,10 +73,14 @@ function NeedsYou({ status, testId }: { status: Extract<PanelStatus, { kind: 're
       </span>
     );
   }
-  const others = unknown > 0 ? <span className="text-muted" data-testid="team-unknown"><span aria-hidden="true"> · </span><span className="sr-only">; </span>{unknown} unknown</span> : null;
-  return needsYou > 0
-    ? <span data-testid={testId}><span className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou} need{needsYou === 1 ? 's' : ''} you</span>{others}</span>
-    : <span data-testid={testId}><span className="text-muted">nobody needs you</span>{others}</span>;
+  const text = unknownText(unknown, unknownLastNeedsYou);
+  if (needsYou > 0) {
+    return <span data-testid={testId}><span className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou} need{needsYou === 1 ? 's' : ''} you</span>{unknown > 0 ? <span className="text-muted" data-testid="team-unknown"><span aria-hidden="true"> · </span><span className="sr-only">; </span>{text}</span> : null}</span>;
+  }
+  // Never "nobody needs you" while a row is unknown: that row could be the one that does.
+  return unknown > 0
+    ? <span data-testid={testId}><span className="text-muted" data-testid="team-unknown">{text}</span></span>
+    : <span data-testid={testId}><span className="text-muted">nobody needs you</span></span>;
 }
 
 function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; testId?: string }) {
@@ -123,6 +127,10 @@ export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldPro
   const ready = status.kind === 'ready' ? status : null;
   const needsYou = ready ? ready.panel.needsYou : 0;
   const workers = ready ? ready.panel.rows.length : null;
+  const unknown = ready ? ready.panel.unknown : 0;
+  const unknownBit = unknown > 0 && ready
+    ? <span data-testid="team-toggle-unknown" className="text-muted font-normal"><span aria-hidden="true"> ? {unknown}</span><span className="sr-only">; {unknownText(unknown, ready.panel.unknownLastNeedsYou)}</span></span>
+    : null;
   const onKey = (e: KeyboardEvent<HTMLButtonElement>): void => {
     if (e.key === 'Escape' && open) {
       e.stopPropagation();
@@ -133,7 +141,10 @@ export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldPro
   if (ready && needsYou === null) {
     count = <span data-testid="team-needs-you" data-unknown="" className="text-muted"><span aria-hidden="true">? </span><span className="sr-only sm:not-sr-only">needs you unknown</span><span className="sr-only">; {ready.panel.confirmedNeedsYou} when last confirmed{confirmedClock(ready)}</span></span>;
   } else if (needsYou !== null && needsYou > 0) {
-    count = <span data-testid="team-needs-you" className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou}<span className="sr-only sm:not-sr-only"> need{needsYou === 1 ? 's' : ''} you</span></span>;
+    count = <span data-testid="team-needs-you" className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou}<span className="sr-only sm:not-sr-only"> need{needsYou === 1 ? 's' : ''} you</span>{unknownBit}</span>;
+  } else if (ready && unknown > 0) {
+    // Zero confirmed is not nobody while a row is unknown: the glyph and number at phone width, the words from sm up.
+    count = <span data-testid="team-needs-you" data-has-unknown="" className="text-muted"><span aria-hidden="true" className="sm:hidden">? {unknown}</span><span className="sr-only sm:not-sr-only">{unknownText(unknown, ready.panel.unknownLastNeedsYou)}</span></span>;
   } else {
     count = <span data-testid="team-needs-you" className="text-muted"><span className="sr-only sm:not-sr-only">nobody needs you</span><span aria-hidden="true" className="sm:hidden">0</span></span>;
   }
