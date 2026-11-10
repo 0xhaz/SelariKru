@@ -7,6 +7,8 @@ import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView
 import type { Fact, TeamRow, WorkerDetail } from './model.ts';
 import { TerminalPanel } from './TerminalPanel.tsx';
 
+/** A key name, drawn as a key. */
+const KBD = 'rounded-chip border border-line-strong px-1 font-mono text-mono text-fg';
 const TABS = [
   { id: 'task', label: 'Task' }, { id: 'settings', label: 'Settings' }, { id: 'terminal', label: 'Terminal' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
   { id: 'permissions', label: 'Permissions' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
@@ -417,6 +419,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
+          <span className="mb-1 block" data-testid="drawer-keys"><kbd className={KBD}>Esc</kbd> closes · <kbd className={KBD}><span aria-hidden="true">←</span><span className="sr-only">Left arrow</span></kbd> <kbd className={KBD}><span aria-hidden="true">→</span><span className="sr-only">Right arrow</span></kbd> switch tabs</span>
           Viewing changes nothing; only the buttons in Settings act, each after you confirm what it does. Closing this never stops the worker, and ends any control mode.
         </footer>
       </div>

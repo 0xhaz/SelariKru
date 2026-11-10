@@ -18,6 +18,7 @@ export function ConfirmDialog({ copy, confirmLabel, onConfirm, onKeep }: { copy:
     <dialog ref={ref} aria-labelledby="confirm-title" aria-describedby="confirm-body" onCancel={(e) => { e.preventDefault(); onKeep(); }} className="m-auto w-[min(32rem,calc(100vw-2rem))] rounded-card border border-line-strong bg-panel p-5 text-fg backdrop:bg-backdrop">
       <h2 id="confirm-title" className="text-lg font-semibold text-fg">{copy.title}</h2>
       <p id="confirm-body" className="mt-2 text-fg">{copy.consequence}</p>
+      <p className="mt-3 text-sm text-muted" data-testid="confirm-keys"><kbd className="rounded-chip border border-line-strong px-1 font-mono text-mono text-fg">Esc</kbd> keeps it as it was.</p>
       <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
         <button type="button" autoFocus className={buttonQuiet} onClick={onKeep}>{copy.keepLabel}</button>
         <button type="button" className={buttonDangerSolid} onClick={onConfirm}>{confirmLabel}</button>
