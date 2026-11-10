@@ -1,5 +1,5 @@
 import {
-  allowedUseFor, BRAIN_GENERATOR, BlueprintContentSchema, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
+  allowedUseFor, BRAIN_GENERATOR, BlueprintContentSchema, stackBrainSources, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
   type BrainBundle, type BrainClaim, type BrainClassification, type BrainCompilation, type BrainDestination, type BrainRevocation, type BrainSection, type BrainSourceRevision, type TaskSpec,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
@@ -10,6 +10,7 @@ import type { AppContext } from './app.ts';
 import { sha256Hex } from './auth.ts';
 import { AppError, invalidRequest } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
+import { loadStack } from './stack.ts';
 import { loadSpecRow, newId, requireProject } from './store.ts';
 
 /**
@@ -195,6 +196,16 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
       }));
     }
   }
+  // The owner's stack settings: one source per component, citing each decided category. Undecided categories state nothing; detections that were not confirmed are
+  // proposals and are not read at all.
+  const stack = await loadStack(db, tenantId, projectId);
+  for (const st of stackBrainSources(stack.document)) {
+    out.push(draft({
+      sourceId: st.sourceId, kind: 'stack', title: text(st.title, 200) || 'Stack', standing: 'accepted', classification: projectLabel, taskId: null,
+      provenance: { origin: 'owner', ref: `stack@r${stack.revision}`, recordedBy: (stack.updatedBy ?? SYSTEM).slice(0, 200) },
+      sections: st.sections.map((x) => sec(x.anchor, x.heading, x.text, x.key)),
+    }));
+  }
   return out;
 }
 
@@ -246,6 +257,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
     (SELECT count(*) FROM task_revisions WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT count(*) || ':' || coalesce(max(plan_revision), 0) FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT coalesce(max(accepted_blueprint_version), 0) FROM project_onboardings WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT coalesce(max(revision), 0) FROM project_stacks WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT classification FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId})) AS mark`);
   return String(row?.['mark'] ?? '');
 }
@@ -254,7 +266,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
  * The version of `recordSources`, the code that reads records into sources. It is part of the records fingerprint with the generator's version, so a deploy that
  * changes either reads every project's records again. Raise it whenever that code changes what it produces.
  */
-export const RECORDS_READER_VERSION = '1';
+export const RECORDS_READER_VERSION = '2';
 
 /** A source that could not be stored: its id and a code, never its text. */
 export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;
@@ -405,7 +417,7 @@ export async function bundleForAttempt(db: Db, lease: { tenantId: string; projec
     compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: lease.location, recordsPending,
     // Anything but a clear yes from the claim is treated as output that may leave the device: restricted claims are then left out.
     streamable: lease.streamable !== false,
-    task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((x) => x.id)], dependsOn: s.dependencies.map((d) => d.taskId) },
+    task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((x) => x.id)], dependsOn: s.dependencies.map((d) => d.taskId), paths: s.allowedPaths },
   });
   await db.insert(schema.brainBundles).values({ tenantId, projectId, attemptId: lease.attemptId, taskId: s.taskId, destination: lease.location, compilationVersion: bundle.compilationVersion, bundle, createdAt: at }).onConflictDoNothing();
   return bundle;
@@ -460,7 +472,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     if (url.startsWith('/v1/approvals/')) return (await db.select({ p: schema.approvals.projectId }).from(schema.approvals).where(and(eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.approvalId, id))))[0]?.p ?? null;
     return null;
   };
-  const CHANGES = /^\/v1\/(?:runs\/[^/]+\/(?:plan-revisions|accept-reduced-scope)|approvals\/[^/]+\/resolve|projects\/[^/]+\/draft-reclassifications|onboarding\/[^/]+\/activate)$/;
+  const CHANGES = /^\/v1\/(?:runs\/[^/]+\/(?:plan-revisions|accept-reduced-scope)|approvals\/[^/]+\/resolve|projects\/[^/]+\/(?:draft-reclassifications|stack)|onboarding\/[^/]+\/activate)$/;
   // Before the answer is sent: the write has committed by then, and a caller that reads the Brain next sees the compile. Its failure never changes the answer.
   app.addHook('onSend', async (req, reply, payload) => {
     if (req.method !== 'POST' || reply.statusCode >= 300 || req.principal?.kind !== 'owner' || !CHANGES.test(req.routeOptions.url ?? '')) return payload;

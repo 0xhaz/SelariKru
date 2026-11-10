@@ -1,0 +1,232 @@
+import net from 'node:net';
+import { sql } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RECORDS_READER_VERSION, refreshBrains } from '../src/brain.ts';
+import { bearer, enrolRunner, get, makeHarness, post, PROJECT, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+
+const TENANT = 'tenant_a';
+const BASE = 'b'.repeat(40);
+const stackUrl = `/v1/projects/${PROJECT}/stack`;
+const brainUrl = `/v1/projects/${PROJECT}/brain`;
+
+let t: TestDb;
+let h: Harness;
+
+beforeAll(async () => {
+  t = await setupTestDb();
+  h = makeHarness(t);
+  await h.app.ready();
+});
+afterAll(async () => {
+  await h.app.close();
+  await t.close();
+});
+beforeEach(async () => {
+  await resetDb(t.db);
+  await t.db.execute(sql`TRUNCATE runners, runner_pairing_codes, project_onboardings, project_blueprints CASCADE`);
+  await t.db.execute(sql`UPDATE runs SET plan_revision = 1`);
+});
+
+/** Applies one stack action against the revision the server last reported. */
+async function act(action: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  const now = await get(h.app, stackUrl);
+  return post(h.app, stackUrl, { expectedRevision: now.body.revision, action });
+}
+async function mustAct(action: Record<string, unknown>): Promise<any> {
+  const r = await act(action);
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  return r.body;
+}
+const claimsOf = (brain: any): any[] => brain.compilation.pages.flatMap((p: any) => p.claims);
+
+/**
+ * A fingerprint of every table in this test's schema: row count and an md5 of the rows. Used to show that an action changed nothing but what it says it changes.
+ */
+async function fingerprint(): Promise<Record<string, string>> {
+  const tables = await t.db.execute(sql`SELECT table_name FROM information_schema.tables WHERE table_schema = ${t.schema} AND table_type = 'BASE TABLE' ORDER BY table_name`);
+  const out: Record<string, string> = {};
+  for (const row of tables) {
+    const name = String(row['table_name']);
+    if (name.startsWith('__')) continue;
+    const [r] = await t.db.execute(sql.raw(`SELECT count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' ORDER BY x::text)), '') AS f FROM "${t.schema}"."${name}" x`));
+    out[name] = String(r!['f']);
+  }
+  return out;
+}
+const changed = (a: Record<string, string>, b: Record<string, string>): string[] => Object.keys({ ...a, ...b }).filter((k) => a[k] !== b[k]).sort();
+
+describe('stack settings: selections are metadata only', () => {
+  it('starts empty at revision 0 and carries the catalog version', async () => {
+    const res = await get(h.app, stackUrl);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ projectId: PROJECT, revision: 0, catalogVersion: expect.any(String), document: { components: [], detection: null }, native: { ios: false, android: false } });
+  });
+
+  it('selecting Clerk, Stripe, Supabase, PostHog or Arcjet creates no credential, outbound request, runner command or repository change', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    const before = await fingerprint();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const sockets: unknown[] = [];
+    const real = net.Socket.prototype.connect;
+    net.Socket.prototype.connect = function (this: net.Socket, ...args: unknown[]) { sockets.push(args[0]); return (real as (...a: unknown[]) => net.Socket).apply(this, args); } as typeof real;
+    try {
+      for (const [category, label] of [['auth', 'clerk'], ['payments', 'stripe'], ['database_platforms', 'supabase'], ['analytics', 'posthog'], ['security', 'arcjet']] as const) {
+        await mustAct({ kind: 'item.add', path: 'apps/web', category, item: { kind: 'catalog', entryId: label } });
+      }
+    } finally {
+      net.Socket.prototype.connect = real;
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    // The only sockets opened are to this test's own database: no provider was contacted.
+    const dbPort = Number(new URL(process.env['DATABASE_URL'] ?? 'postgres://x@127.0.0.1:54329/x').port || 5432);
+    for (const s of sockets) expect(JSON.stringify(s)).toContain(String(dbPort));
+    const after = await fingerprint();
+    // The stack row and the Brain's own tables changed. Nothing else did: no runner command, event, outbox entry, setting, approval or credential store.
+    expect(changed(before, after).filter((n) => !n.startsWith('brain_'))).toEqual(['project_stacks']);
+    for (const table of ['task_commands', 'events', 'outbox', 'runner_config', 'runner_settings', 'run_settings', 'approvals', 'integration_deliveries']) expect(after[table], table).toBe(before[table]);
+    const stored = JSON.stringify((await t.db.execute(sql`SELECT document FROM project_stacks`))[0]);
+    expect(stored).not.toMatch(/credential|token|secret|apiKey|install/i);
+  });
+
+  it('a credential pasted into a custom label or source is refused and stored nowhere', async () => {
+    await mustAct({ kind: 'component.upsert', path: '.', name: 'Repository', targets: [] });
+    const before = await fingerprint();
+    const r = await act({ kind: 'item.add', path: '.', category: 'payments', item: { kind: 'custom', label: 'sk_live_abcdefghijklmnop1234' } });
+    expect(r.status).toBe(400);
+    expect(r.body.error.code).toBe('credential_in_input');
+    expect(JSON.stringify(r.body)).not.toContain('sk_live_abcdefghijklmnop1234');
+    expect(await fingerprint()).toEqual(before);
+    // A field the schema does not know, such as an API key, is refused outright.
+    const extra = await act({ kind: 'item.add', path: '.', category: 'payments', item: { kind: 'catalog', entryId: 'stripe', apiKey: 'x' } });
+    expect(extra.status).toBe(400);
+  });
+
+  it('None and Not decided differ in storage and in the API; removing a selection deletes no provider data and revokes nothing', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    let view = await mustAct({ kind: 'category.set', path: 'apps/web', category: 'payments', state: 'none' });
+    expect(view.document.components[0].categories.payments).toEqual({ state: 'none' });
+    expect(view.document.components[0].categories.auth).toEqual({ state: 'not_decided' });
+    const stored = (await t.db.execute(sql`SELECT document FROM project_stacks`))[0]!['document'] as any;
+    expect(stored.components[0].categories.payments).toEqual({ state: 'none' });
+    expect(stored.components[0].categories.auth).toEqual({ state: 'not_decided' });
+
+    view = await mustAct({ kind: 'item.add', path: 'apps/web', category: 'auth', item: { kind: 'catalog', entryId: 'clerk' } });
+    const before = await fingerprint();
+    view = await mustAct({ kind: 'item.remove', path: 'apps/web', category: 'auth', key: 'clerk' });
+    expect(view.document.components[0].categories.auth).toEqual({ state: 'not_decided' });
+    expect(changed(before, await fingerprint()).filter((n) => !n.startsWith('brain_'))).toEqual(['project_stacks']);
+  });
+
+  it('refuses a write against a stale revision, an unknown entry and a wrong category, with nothing recorded', async () => {
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    const stale = await post(h.app, stackUrl, { expectedRevision: 0, action: { kind: 'category.set', path: 'apps/web', category: 'auth', state: 'none' } });
+    expect(stale).toMatchObject({ status: 409, body: { error: { code: 'stack_revision_conflict' } } });
+    expect((await act({ kind: 'item.add', path: 'apps/web', category: 'auth', item: { kind: 'catalog', entryId: 'nope' } })).body.error.code).toBe('stack_entry_unknown');
+    expect((await act({ kind: 'item.add', path: 'apps/web', category: 'auth', item: { kind: 'catalog', entryId: 'stripe' } })).body.error.code).toBe('stack_entry_wrong_category');
+    expect((await get(h.app, stackUrl)).body.revision).toBe(1);
+  });
+
+  it('is for the owner only', async () => {
+    const { token } = await enrolRunner(h.app);
+    expect((await get(h.app, stackUrl, bearer(token))).status).toBe(403);
+    expect((await get(h.app, '/v1/projects/nope/stack')).status).toBe(404);
+  });
+});
+
+describe('stack settings feed the Project Brain as a cited source, scoped per component', () => {
+  it('an owner write compiles the Brain; each worker gets only its component\'s stack, cited, and the records reader version moved', async () => {
+    expect(RECORDS_READER_VERSION).toBe('2');
+    await seedTask(t.db, specFor('T1', { title: 'Build the web screen', baseSha: BASE, allowedPaths: ['apps/web'] }), 'ready');
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    await mustAct({ kind: 'component.upsert', path: 'apps/mobile', name: 'Mobile', targets: ['ios', 'android'] });
+    await mustAct({ kind: 'component.upsert', path: 'services/api', name: 'API', targets: ['server'] });
+    await mustAct({ kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'nextjs', version: '15.1.0' } });
+    await mustAct({ kind: 'item.add', path: 'apps/mobile', category: 'frameworks', item: { kind: 'catalog', entryId: 'expo' } });
+    await mustAct({ kind: 'item.add', path: 'apps/mobile', category: 'frameworks', item: { kind: 'catalog', entryId: 'react-native' } });
+    await mustAct({ kind: 'item.add', path: 'services/api', category: 'frameworks', item: { kind: 'catalog', entryId: 'fastapi' } });
+
+    // Compiled by the write itself (no read in between): the head moved past the write.
+    const [head] = await t.db.execute(sql`SELECT compiled_version FROM brain_heads`);
+    expect(Number(head!['compiled_version'])).toBeGreaterThan(0);
+    const brain = (await get(h.app, brainUrl)).body;
+    const web = claimsOf(brain).find((c: any) => c.key === 'stack:apps/web:frameworks');
+    expect(web).toMatchObject({ page: 'architecture', status: 'current', text: expect.stringContaining('Next.js 15.1.0'), citations: [{ sourceId: 'stack:apps/web', anchor: 'stack/apps/web/frameworks' }] });
+    const cite = web.citations[0];
+    const src = await get(h.app, `${brainUrl}/sources/${encodeURIComponent(cite.sourceId)}/revisions/${cite.revision}`);
+    expect(src.status).toBe(200);
+    expect(src.body).toMatchObject({ kind: 'stack', standing: 'accepted', provenance: { origin: 'owner' } });
+
+    await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+    const { token } = await enrolRunner(h.app);
+    const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
+    const ctx = claim.body.lease.context;
+    const keys = ctx.claims.map((c: any) => c.key);
+    expect(keys).toEqual(expect.arrayContaining(['stack:apps/web', 'stack:apps/web:frameworks']));
+    expect(keys.filter((k: string) => k.startsWith('stack:apps/mobile') || k.startsWith('stack:services/api'))).toEqual([]);
+    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:stack:apps/mobile:frameworks', reason: 'out_of_scope' }]));
+  });
+
+  it('a restricted project\'s stack is never served to a streamable attempt, and is named only by its source', async () => {
+    await t.db.execute(sql`UPDATE projects SET classification = 'restricted'`);
+    await seedTask(t.db, specFor('T1', { title: 'Build', baseSha: BASE, allowedPaths: ['apps/web'], classification: 'restricted' }), 'ready');
+    await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
+    await mustAct({ kind: 'item.add', path: 'apps/web', category: 'frameworks', item: { kind: 'catalog', entryId: 'nextjs' } });
+    const brain = (await get(h.app, brainUrl)).body;
+    expect(brain.sources.find((s: any) => s.sourceId === 'stack:apps/web')).toMatchObject({ classification: 'restricted', allowedUse: ['local'] });
+  });
+});
+
+describe('static detection from a runner: a proposal until the owner confirms it', () => {
+  const detection = {
+    commit: BASE,
+    items: [
+      { detectionId: 'det:apps/web:nextjs', componentPath: 'apps/web', entryId: 'nextjs', version: '15.1.0', evidence: { path: 'apps/web/package.json', detail: 'dependencies.next 15.1.0' } },
+      { detectionId: 'det:apps/web:made-up', componentPath: 'apps/web', entryId: 'made-up', version: null, evidence: { path: 'apps/web/package.json', detail: 'x' } },
+    ],
+    commands: [{ componentPath: 'apps/web', kind: 'build', script: 'build', command: 'pnpm run build', body: 'next build && echo token=ghp_abcdefghijklmnopqrstuvwxyz123', evidencePath: 'apps/web/package.json' }],
+    skipped: [{ path: 'apps/web/linked/package.json', reason: 'symlink' }],
+  };
+
+  async function lease(): Promise<{ ref: Record<string, unknown>; token: string }> {
+    await seedTask(t.db, specFor('T1', { title: 'Build', baseSha: BASE, allowedPaths: ['apps/web'] }), 'ready');
+    await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+    const { token } = await enrolRunner(h.app);
+    const l = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    return { ref: { attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken }, token };
+  }
+
+  it('records the detection with evidence, drops entries the catalog does not know, redacts command text, and proposes commands that are not in effect', async () => {
+    const { ref, token } = await lease();
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: { ...ref, leaseToken: 'nope' }, detection }, bearer(token))).status).toBe(409);
+    const before = await fingerprint();
+    const ok = await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token));
+    expect(ok.status).toBe(200);
+    expect(changed(before, await fingerprint())).toEqual(['project_stacks']);
+    const view = (await get(h.app, stackUrl)).body;
+    expect(view.document.components).toEqual([]);
+    expect(view.document.detection).toMatchObject({ commit: BASE, items: [{ detectionId: 'det:apps/web:nextjs', state: 'proposed', evidence: { path: 'apps/web/package.json' } }] });
+    expect(view.document.detection.items).toHaveLength(1);
+    expect(view.document.detection.commands[0].body).not.toContain('ghp_');
+    expect(view.document.detection.commands[0].body).toContain('[REDACTED]');
+
+    const confirmed = await mustAct({ kind: 'detection.confirm', detectionId: 'det:apps/web:nextjs' });
+    expect(confirmed.document.components[0]).toMatchObject({ path: 'apps/web', categories: { frameworks: { state: 'selected', items: [{ entryId: 'nextjs', origin: 'detected', version: '15.1.0' }] } } });
+    // A later detection of the same commit keeps what the owner settled.
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(200);
+    expect((await get(h.app, stackUrl)).body.document.detection.items[0].state).toBe('confirmed');
+  });
+
+  it('is refused for work whose data stays on the device', async () => {
+    const { ref, token } = await lease();
+    await t.db.execute(sql`UPDATE attempts SET detail = jsonb_set(detail, '{terminalStreamable}', 'false')`);
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(403);
+    expect((await get(h.app, stackUrl)).body.document.detection).toBeNull();
+  });
+
+  it('owner credentials cannot post a detection, and a runner cannot write selections', async () => {
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: { attemptId: 'a', fence: 1, leaseToken: 'x' }, detection })).status).toBe(403);
+    const { token } = await enrolRunner(h.app);
+    expect((await post(h.app, stackUrl, { expectedRevision: 0, action: { kind: 'component.upsert', path: '.', name: 'R', targets: [] } }, bearer(token))).status).toBe(403);
+  });
+});

@@ -5,7 +5,7 @@ import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
 import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type ToolchainSpec, type WorkerApprovalOperation } from '@selarikru/protocol';
-import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, resolveToolchain, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
+import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, readStackDetection, resolveToolchain, RuntimeHarnessLauncher, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
@@ -354,6 +354,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (!restricted && deps.api.brainManifest !== undefined) {
       const api = deps.api;
       manifestSent = readRepoManifest(repo, task.baseSha).then((m) => api.brainManifest?.(ref, { commit: m.commit, fileCount: m.fileCount, totalBytes: m.totalBytes, docs: [...m.docs] })).catch((err: unknown) => log(`repository manifest not sent: ${err instanceof Error ? clip(err.message, 120) : 'error'}`));
+    }
+    // Static stack detection, the same way and under the same rule: git objects only, no script or package manager runs, and a proposal the owner confirms.
+    if (!restricted && deps.api.stackDetection !== undefined) {
+      const api = deps.api;
+      const sent = readStackDetection(repo, task.baseSha).then((d) => api.stackDetection?.(ref, d)).catch((err: unknown) => log(`stack detection not sent: ${err instanceof Error ? clip(err.message, 120) : 'error'}`));
+      const before = manifestSent;
+      manifestSent = Promise.all([before, sent]);
     }
     const taskFile = renderTaskFile(task, { signalPath, grants, context: lease.context ?? null, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {

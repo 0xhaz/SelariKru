@@ -70,7 +70,7 @@ async function listTree(repo: string, sha: string): Promise<TreeItem[]> {
 }
 
 /** Reads blobs in one `git cat-file --batch` process. */
-async function readBlobs(repo: string, oids: readonly string[]): Promise<Map<string, Buffer>> {
+export async function readBlobs(repo: string, oids: readonly string[]): Promise<Map<string, Buffer>> {
   const out = new Map<string, Buffer>();
   if (oids.length === 0) return out;
   const unique = [...new Set(oids)];

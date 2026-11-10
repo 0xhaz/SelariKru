@@ -7,3 +7,4 @@ export * from './launcher.ts';
 export * from './names.ts';
 export * from './sbx.ts';
 export * from './toolchain.ts';
+export * from './stack-detect.ts';

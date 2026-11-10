@@ -761,6 +761,29 @@ describe('Project Brain context in TASK.md', () => {
     expect((restricted.w.api.brainManifest as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(0);
   });
 
+  it('sends a static stack detection for streamable work, read with git at the base, with no script run, and none for restricted work', async () => {
+    const marker = join(tmpdir(), `selarikru-detect-${process.pid}-${Date.now()}`);
+    const pkg = JSON.stringify({ scripts: { postinstall: `touch ${marker}`, build: `touch ${marker} && vite build`, test: 'vitest run' }, dependencies: { react: '19.3.1' }, devDependencies: { vitest: '5.1.0' } });
+    const { w, deps } = await setup({ baseFiles: { 'package.json': pkg } });
+    await runAttempt(deps, w.lease);
+    const calls = (w.api.stackDetection as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls, w.logs.join('\n')).toHaveLength(1);
+    const report = calls[0]![1] as { commit: string; items: { entryId: string; evidence: { path: string } }[]; commands: { kind: string; command: string }[] };
+    expect(report.commit).toBe(w.sha);
+    expect(report.items.map((i) => i.entryId)).toEqual(expect.arrayContaining(['react', 'vitest']));
+    expect(report.commands.map((c) => c.command)).toEqual(['npm run build', 'npm run test']);
+    expect(await exists(marker)).toBe(false);
+
+    const restricted = await setup({ streamable: false });
+    await runAttempt(restricted.deps, restricted.w.lease);
+    expect((restricted.w.api.stackDetection as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(0);
+  });
+
+  it('a detection upload that fails does not change the attempt', async () => {
+    const { w, deps } = await setup({ stackDetection: async () => { throw new Error('down'); }, agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+  });
+
   it('a manifest upload that fails does not change the attempt', async () => {
     const { w, deps } = await setup({ brainManifest: async () => { throw new Error('down'); }, agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
     expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');

@@ -17,6 +17,7 @@ import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
 import { registerSettingsRoutes } from './settings.ts';
 import { registerBrainRoutes } from './brain.ts';
+import { registerStackRoutes } from './stack.ts';
 import { registerEventStream } from './sse.ts';
 import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
@@ -237,6 +238,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerRunnerRoutes(app, ctx);
   registerSettingsRoutes(app, ctx);
   registerBrainRoutes(app, ctx);
+  registerStackRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
   registerControlRoutes(app, ctx);

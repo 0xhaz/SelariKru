@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { stackInScope, stackKeyPath } from './stack.ts';
 import { sanitizeTerminalText } from './terminal.ts';
 
 /**
@@ -17,7 +18,7 @@ import { sanitizeTerminalText } from './terminal.ts';
 
 export const BRAIN_GENERATOR = { id: 'selarikru.brain.structured', version: '1' } as const;
 
-export const BRAIN_SOURCE_KINDS = ['brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note'] as const;
+export const BRAIN_SOURCE_KINDS = ['brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note', 'stack'] as const;
 export const BrainSourceKindSchema = z.enum(BRAIN_SOURCE_KINDS);
 export type BrainSourceKind = z.infer<typeof BrainSourceKindSchema>;
 
@@ -59,7 +60,8 @@ export const allowedUseFor = (classification: unknown): BrainDestination[] => (c
 export const BrainKeySchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,159}$/, 'expected a structured key');
 /** A heading path inside one source, such as `criteria/FB-03`. */
 export const BrainAnchorSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,199}$/, 'expected an anchor');
-export const BrainSourceIdSchema = z.string().regex(/^[a-z_]+:[A-Za-z0-9][A-Za-z0-9_.:@-]{0,159}$/, 'expected a source id');
+/** `kind:name`. A stack source is named by its component's path, so `/` is allowed, and `stack:.` names the repository root. */
+export const BrainSourceIdSchema = z.string().regex(/^[a-z_]+:[A-Za-z0-9.][A-Za-z0-9_.:/@-]{0,159}$/, 'expected a source id');
 
 export const BRAIN_SECTION_TEXT_MAX = 2000;
 export const BrainSectionSchema = z.strictObject({
@@ -182,7 +184,7 @@ const refKey = (r: { sourceId: string; revision: number }): string => `${r.sourc
 const citationOrder = (a: BrainCitation, b: BrainCitation): number => byString(a.sourceId, b.sourceId) || a.revision - b.revision || byString(a.anchor, b.anchor);
 
 const PAGE_OF_KIND: Readonly<Record<BrainSourceKind, BrainPageId>> = {
-  brief: 'overview', note: 'overview', criteria: 'architecture', plan: 'architecture', repo_manifest: 'architecture', decision: 'decisions', verification: 'decisions',
+  brief: 'overview', note: 'overview', criteria: 'architecture', plan: 'architecture', repo_manifest: 'architecture', stack: 'architecture', decision: 'decisions', verification: 'decisions',
 };
 
 export interface CompileInput {
@@ -393,6 +395,8 @@ export interface BundleTask {
   readonly criteria: readonly string[];
   /** Tasks this one depends on: their claims are in scope too. */
   readonly dependsOn: readonly string[];
+  /** The paths the task may change. A stack claim is in scope only for the components these touch (the repository root's always). Absent: the root's only. */
+  readonly paths?: readonly string[];
 }
 
 export interface BundleInput {
@@ -467,7 +471,8 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
       if (cl.status === 'unsupported' || deadNow(cl)) { omit(cl.standing === 'accepted' && cl.disputedBy.some((x) => !isDead(x)) ? 'accepted_source_revoked' : 'revoked'); continue; }
       if (cl.status === 'stale' || staleNow(cl) || (cl.commit !== null && cl.commit !== input.task.baseSha)) { omit('stale'); continue; }
       const crit = CRITERION_KEY.exec(cl.key);
-      if ((cl.taskId !== null && !inScopeTasks.has(cl.taskId)) || (crit !== null && !criteria.has(crit[1]!))) { omit('out_of_scope'); continue; }
+      const component = stackKeyPath(cl.key);
+      if ((cl.taskId !== null && !inScopeTasks.has(cl.taskId)) || (crit !== null && !criteria.has(crit[1]!)) || (component !== null && !stackInScope(component, input.task.paths ?? []))) { omit('out_of_scope'); continue; }
       const size = cl.text.length + cl.heading.length;
       if (cl.text.length > BRAIN_BUNDLE_MAX_CLAIM_CHARS || used + size > max) { omit('too_large'); continue; }
       used += size;

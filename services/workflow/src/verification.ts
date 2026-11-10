@@ -50,6 +50,10 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   when the records' fingerprint moved. While the brain lock is held only brain tables are written and every other table is read without a lock; no event is
  *   appended. The context bundle built after a claim commits compiles nothing and takes no lock: it reads the last compilation and inserts the attempt's bundle row.
  *   So no brain path takes the scheduler lock, a run row, a status row or the event sequence, and no path above takes the brain lock.
+ * - stack settings (apps/control-api/src/stack.ts): an owner's stack write and a runner's static detection each take the project's `project_stacks` row and
+ *   nothing else, with no other lock held, and write only that row; no event is appended and no runner command is issued. An owner's write is followed, after
+ *   its transaction committed, by a Brain compile through the same `onSend` hook (its own transaction on the brain lock, as above); the Brain reads the stack row
+ *   without a lock. A detection compiles nothing. So no stack path takes the scheduler lock, a run row, a status row, the event sequence or the brain lock.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

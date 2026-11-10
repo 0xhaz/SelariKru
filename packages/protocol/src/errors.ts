@@ -58,6 +58,10 @@ export const ERROR_CODES = [
   'transaction_conflict',
   /** Project Brain: no such source, revision or conflict; a source already revoked; a conflict already settled; a manifest from work whose data stays on the device. */
   'brain_source_not_found', 'brain_source_revoked', 'brain_conflict_not_found', 'brain_conflict_resolved', 'brain_manifest_restricted',
+  /** Stack settings: a write over a newer revision; no such component, selection or detection; an entry the catalog does not have or lists elsewhere; a duplicate or a
+   * settled detection; a limit; a detection from work whose data stays on the device. */
+  'stack_revision_conflict', 'stack_component_not_found', 'stack_item_not_found', 'stack_detection_not_found', 'stack_entry_unknown', 'stack_entry_wrong_category',
+  'stack_item_exists', 'stack_detection_settled', 'stack_limit', 'stack_detection_restricted',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

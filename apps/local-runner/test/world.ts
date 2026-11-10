@@ -59,6 +59,8 @@ export interface WorldOptions {
   context?: ClaimedLease['context'];
   /** What the manifest upload does. Default: succeeds. */
   brainManifest?: () => Promise<void>;
+  /** What the stack detection upload does. Default: succeeds. */
+  stackDetection?: () => Promise<void>;
 }
 
 export async function makeWorld(o: WorldOptions = {}): Promise<World> {
@@ -135,6 +137,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     setupComplete: vi.fn(async () => (o.setupComplete ? o.setupComplete() : { deadlineAt: lease.deadlineAt })),
     terminal: vi.fn(async () => undefined),
     brainManifest: vi.fn(async () => (o.brainManifest ? o.brainManifest() : undefined)),
+    stackDetection: vi.fn(async () => (o.stackDetection ? o.stackDetection() : undefined)),
   } as unknown as World['api'];
 
   return {

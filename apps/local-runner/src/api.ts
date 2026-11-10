@@ -1,5 +1,5 @@
 import { BrainBundleSchema, TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type RepoManifest, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type RepoManifest, type StackDetectionReport, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 import type { RunnerSettings } from './settings.ts';
 
@@ -65,6 +65,8 @@ export interface RunnerApi {
   terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>): Promise<void>;
   /** What this checkout holds at the task's base commit, for the Project Brain. Counts and hashes only. Absent: this runner sends none. */
   brainManifest?(lease: LeaseRef, manifest: RepoManifest): Promise<void>;
+  /** What static detection found in this checkout at the task's base commit: proposals for the owner to confirm. Absent: this runner sends none. */
+  stackDetection?(lease: LeaseRef, detection: StackDetectionReport): Promise<void>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -129,5 +131,8 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async brainManifest(lease: LeaseRef, manifest: RepoManifest) {
     await this.post('/v1/runners/brain/manifest', { lease, manifest }, 10_000);
+  }
+  async stackDetection(lease: LeaseRef, detection: StackDetectionReport) {
+    await this.post('/v1/runners/stack/detection', { lease, detection }, 10_000);
   }
 }
