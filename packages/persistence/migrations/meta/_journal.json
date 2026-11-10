@@ -204,6 +204,13 @@
       "when": 1794321321525,
       "tag": "0028_product_proposal_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1794323254190,
+      "tag": "0029_checkpoints",
+      "breakpoints": true
     }
   ]
 }

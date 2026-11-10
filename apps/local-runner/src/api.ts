@@ -1,5 +1,5 @@
 import { BrainBundleSchema, TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type RepoManifest, type StackDetectionReport, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type CheckpointUpload, type LeaseRef, type RepoManifest, type StackDetectionReport, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 import type { RunnerSettings } from './settings.ts';
 
@@ -25,12 +25,26 @@ export const ClaimedLeaseSchema = z
     context: BrainBundleSchema.nullable().catch(null).default(null),
     /** The knowledge packs the claim resolved, with their content. Absent: an older server, so none. Anything else is checked before start, and a delivery that cannot be read starts nothing. */
     skills: z.unknown().optional(),
+    /** Set on a handover's successor: the checkpoint it starts from (ids and hashes), or a restart from the persisted input. Absent: an ordinary attempt. */
+    handover: z.object({
+      checkpointId: z.string().min(1), mode: z.enum(['resume', 'restart']), priorAttemptId: z.string().min(1), baseSha: z.string().min(1),
+      patchSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(), fileCount: z.number().int().min(0).nullable(),
+    }).optional(),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
 
 const ClaimResponseSchema = z.object({ lease: ClaimedLeaseSchema.nullable(), reason: z.string().nullable().optional(), config: z.unknown().optional() }).passthrough();
-const HeartbeatResponseSchema = z.object({ cancelRequested: z.boolean(), config: z.unknown().optional() }).passthrough();
+const HandoverStopSchema = z.object({ checkpointId: z.string().min(1), mode: z.enum(['resume', 'restart']) }).nullable().catch(null).default(null);
+const HeartbeatResponseSchema = z.object({ cancelRequested: z.boolean(), handover: HandoverStopSchema, config: z.unknown().optional() }).passthrough();
+/** What the successor fetches: the checkpoint's files with their bytes and the hashes to check them against. Checked again here before anything is written. */
+export const FetchedCheckpointSchema = z.object({
+  checkpointId: z.string().min(1), baseSha: z.string().min(1), patchSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  files: z.array(z.object({ path: z.string().min(1), status: z.enum(['added', 'modified', 'deleted']), sha256: z.string().nullable(), size: z.number().int().nullable(), executable: z.boolean(), content: z.string().nullable() })).max(500),
+});
+export type FetchedCheckpoint = z.infer<typeof FetchedCheckpointSchema>;
+/** A stop the server says is a handover to another location. */
+export type HandoverStop = { readonly checkpointId: string; readonly mode: 'resume' | 'restart' };
 const SetupCompleteResponseSchema = z.object({ deadlineAt: z.string() }).passthrough();
 const TaskResponseSchema = z.object({ task: TaskSpecSchema });
 
@@ -59,7 +73,7 @@ export interface RunnerApi {
   /** `harnesses`: what this runner can launch now. `projects`: the project ids it has a checkout for. */
   claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
   task(lease: LeaseRef): Promise<TaskSpec>;
-  heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean }>;
+  heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean; handover?: HandoverStop | null }>;
   /** The sandbox is ready and the worker is about to start. Returns the attempt's deadline, restarted from now. */
   setupComplete(lease: LeaseRef): Promise<{ deadlineAt: string }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
@@ -71,6 +85,10 @@ export interface RunnerApi {
   stackDetection?(lease: LeaseRef, detection: StackDetectionReport): Promise<void>;
   /** After its own digest check, before the worker starts: the packs this runner materialized, by version and digest. Absent: the server never learns they were delivered. */
   skillsConfirmed?(lease: LeaseRef, packs: readonly { versionId: string; digest: string }[]): Promise<void>;
+  /** A handover's prior attempt, stopped: its change set against the base, every file hashed, the paths it left out with the reason. Absent: this runner sends none. */
+  checkpoint?(lease: LeaseRef, body: Omit<CheckpointUpload, 'lease'>): Promise<void>;
+  /** A handover's successor: the checkpoint its lease names, before the worker starts. Absent: this runner cannot resume one. */
+  fetchCheckpoint?(lease: LeaseRef): Promise<unknown>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -122,7 +140,7 @@ export class HttpRunnerApi implements RunnerApi {
   async heartbeat(lease: LeaseRef, activity?: string) {
     const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', { lease, ...(activity === undefined ? {} : { activity }), ...this.ack() }));
     this.settings?.apply(r.config);
-    return { cancelRequested: r.cancelRequested };
+    return { cancelRequested: r.cancelRequested, handover: r.handover };
   }
   async setupComplete(lease: LeaseRef) {
     const r = SetupCompleteResponseSchema.parse(await this.post('/v1/runners/heartbeat', { lease, setupComplete: true }));
@@ -142,5 +160,11 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async stackDetection(lease: LeaseRef, detection: StackDetectionReport) {
     await this.post('/v1/runners/stack/detection', { lease, detection }, 10_000);
+  }
+  async checkpoint(lease: LeaseRef, body: Omit<CheckpointUpload, 'lease'>) {
+    await this.post('/v1/runners/checkpoint', { lease, ...body }, 60_000);
+  }
+  async fetchCheckpoint(lease: LeaseRef) {
+    return this.post('/v1/runners/checkpoint/fetch', { lease }, 60_000);
   }
 }

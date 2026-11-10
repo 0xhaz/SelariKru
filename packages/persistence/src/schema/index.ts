@@ -12,3 +12,4 @@ export * from './brain.ts';
 export * from './stack.ts';
 export * from './skills.ts';
 export * from './product.ts';
+export * from './checkpoints.ts';

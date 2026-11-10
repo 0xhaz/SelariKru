@@ -1,10 +1,11 @@
-import { approvalUnavailableReason, restrictedApproval, restrictedReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
+import { approvalUnavailableReason, isHandoverReason, restrictedApproval, restrictedReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
 import { openApproval } from './approval.ts';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
+import { handoverStopFor, markSuccessorRunning, recordLatePublish, successorRefused } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAttemptUsage } from './usage.ts';
 import { buildTaskState, lockStatusRow, loadAttempts, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -74,8 +75,12 @@ export async function heartbeat(ctx: SchedulerContext, lease: Lease, activity?: 
       .update(schema.attempts)
       .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt, ...(activity !== undefined ? { lastTool: activity, lastToolAt: now } : {}), ...(rebase ? { deadlineAt, detail: { ...(live.detail ?? {}), setupCompletedAt: now.toISOString() } } : {}) })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
+    // A successor of a handover whose worker now starts: the handover reads Running.
+    if (rebase && (live.detail as { handover?: unknown } | null)?.handover !== undefined) await markSuccessorRunning(tx, lease, lease.attemptId, now);
     const cancelRequested = await hasCancelRequest(tx, lease, lease.revision);
-    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(), cancelRequested });
+    // A stop that is a handover says so, so the runner sends its checkpoint before it acknowledges.
+    const handover = cancelRequested ? await handoverStopFor(tx, lease, lease.revision, lease.attemptId) : null;
+    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(), cancelRequested, handover });
   });
 }
 
@@ -130,6 +135,11 @@ export async function publishResult(ctx: SchedulerContext, lease: Lease, result:
     // Identity is checked before the receipt lookup, so a wrong token can never read back another holder's receipt.
     const held = await loadAttempt(tx, lease);
     if (!held || held.taskId !== lease.taskId || held.revision !== lease.revision || held.leaseFence !== lease.fence || held.leaseToken !== lease.leaseToken) {
+      return err(conflict(lease, 'stale_fence'));
+    }
+    // An attempt fenced by a handover publishes nothing more, not even a replay of its acknowledgement: refused as stale, and recorded.
+    if (held.endedAt !== null && isHandoverReason(held.exitReason)) {
+      await recordLatePublish(tx, lease, held, lease.fence, ctx.now());
       return err(conflict(lease, 'stale_fence'));
     }
     // The key names the attempt and fence only: the token is a credential and stays out of the receipts table.
@@ -284,6 +294,8 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
   const scope: EventScope = { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId, aggregateRevision };
   await emit(tx, scope, now, { type: event.type, attemptId: lease.attemptId, actor: event.actor, payload: event.payload });
   if (follow) await emit(tx, scope, now, { type: follow.type, attemptId: lease.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: follow.reason } });
+  // A handover's successor that could not start from its checkpoint: the task waits for the owner's choice instead of retrying the same checkpoint.
+  if (result.outcome === 'infrastructure_failed' && (live.detail as { handover?: unknown } | null)?.handover !== undefined) await successorRefused(tx, key, live, result.reason, scope, now);
 
   return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: state.status, ...(repair ? { repair } : {}) };
 }

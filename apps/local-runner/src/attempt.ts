@@ -7,7 +7,8 @@ import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLa
 import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type ToolchainSpec, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, readStackDetection, resolveToolchain, RuntimeHarnessLauncher, unlockTree, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
-import { ApiStatusError, LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
+import { ApiStatusError, FetchedCheckpointSchema, LeaseLostError, leaseRef, type ClaimedLease, type HandoverStop, type RunnerApi, type RunnerResult } from './api.ts';
+import { applyCheckpoint, buildCheckpoint } from './checkpoint.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
 import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
@@ -255,6 +256,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
   if (deps.signal?.aborted) flags.aborted = true;
   else deps.signal?.addEventListener('abort', onAbort, { once: true });
 
+  let handoverStop: HandoverStop | null = null;
   // Heartbeat from the very start: creating a sandbox can take longer than the lease.
   let missed = 0;
   let beating = false;
@@ -277,7 +279,9 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
         if (sending !== null && pendingActivity?.start === sending.start) pendingActivity = null;
         if (hb.cancelRequested) {
           flags.cancelled = true;
-          log('cancel requested by the owner; stopping the agent');
+          // A handover: the owner asked to continue this task on another runner. The worker stops the same way; its checkpoint goes before the acknowledgement.
+          if (hb.handover) handoverStop = hb.handover;
+          log(hb.handover ? `handover requested (${hb.handover.mode}); stopping the agent` : 'cancel requested by the owner; stopping the agent');
           requestStop();
         }
       })
@@ -460,6 +464,27 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
         }
       }
     }
+    // A handover's successor starts from the base with the checkpoint applied, every hash checked here first. The baseline above is the base alone, so the change set this
+    // attempt publishes is the whole combined candidate. A checkpoint that cannot be checked or applied starts nothing: no sandbox, no worker.
+    if (lease.handover?.mode === 'resume') {
+      const refuse = (text: string) => finish('infrastructure_failed', why('provisioning_failed', text), null);
+      if (deps.api.fetchCheckpoint === undefined) return await refuse('checkpoint_apply_failed: this runner cannot fetch a checkpoint');
+      let raw: unknown;
+      try {
+        raw = await deps.api.fetchCheckpoint(ref);
+      } catch (err) {
+        if (err instanceof LeaseLostError) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+        if (err instanceof ApiStatusError && err.status === 422) return await refuse('checkpoint_tampered: the control plane found the stored checkpoint changed since it was checked');
+        if (err instanceof ApiStatusError && err.status === 404) return await refuse('no_checkpoint: the lease names a checkpoint the control plane does not have');
+        return await refuse(`checkpoint_apply_failed: the checkpoint could not be fetched: ${err instanceof Error ? err.message : 'error'}`);
+      }
+      const fetched = FetchedCheckpointSchema.safeParse(raw);
+      if (!fetched.success) return await refuse('checkpoint_tampered: the checkpoint could not be read');
+      const applied = await applyCheckpoint(workspace, fetched.data, { baseSha: task.baseSha, patchSha256: lease.handover.patchSha256, allowedPaths: allowed.normalized });
+      if (!applied.ok) return await refuse(`${applied.reason}: ${applied.detail}`);
+      log(`checkpoint ${lease.handover.checkpointId} applied: ${applied.files} file(s), patch ${lease.handover.patchSha256}`);
+    }
+
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
@@ -636,7 +661,23 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (mcpViolation !== null) return await finish('failed', why('unexpected_mcp_server', `unexpected MCP server connected: ${(mcpViolation as string[]).join(', ')}`), cost);
     // Blocked, not failed: this is a configuration fault, and repairs would only repeat it.
     if (modelFault !== null) return await finish('blocked', modelFault, cost);
-    if (flags.cancelled) return await finish('failed', why('cancelled', 'cancelled by owner request; agent stopped and confirmed'), cost);
+    if (flags.cancelled) {
+      // The worker is stopped and confirmed, so the workspace can be read: a handover's checkpoint goes now, before the acknowledgement below fences this attempt.
+      // Restricted work sends none: its changes stay on this machine.
+      const stop = handoverStop as HandoverStop | null;
+      if (stop?.mode === 'resume' && !restricted && deps.api.checkpoint !== undefined) {
+        try {
+          const changes = await (deps.computeChanges ?? computeChanges)(baseline, workspace, baseIgnores);
+          const built = await buildCheckpoint(workspace, changes, task, [RESERVED_DIR, SKILL_WORKSPACE_ROOT]);
+          await deps.api.checkpoint(ref, built.body);
+          log(`checkpoint sent for ${stop.checkpointId}: ${built.body.files.length} file(s), ${built.exclusions.length} excluded, patch ${built.body.patchSha256}`);
+        } catch (err) {
+          // Not sent: the control plane then offers a restart from the persisted input. Never a reason to keep the lease.
+          log(`checkpoint not sent: ${err instanceof Error ? clip(err.message, 160) : 'error'}`);
+        }
+      }
+      return await finish('failed', why('cancelled', stop ? 'stopped for a handover; agent stopped and confirmed' : 'cancelled by owner request; agent stopped and confirmed'), cost);
+    }
     if (flags.timedOut) return await finish('failed', why('attempt_timeout', 'attempt timeout reached; agent stopped and confirmed'), cost);
     if (refused !== null) return await finish('blocked', why('harness_capability_unavailable', `harness capability unavailable: ${refused}`), cost);
     // A refused or requested approval is the agent's outcome even though it was stopped before producing a result.

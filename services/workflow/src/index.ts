@@ -37,3 +37,4 @@ export { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, requestPolicyStop,
 export { cancelRequestReason } from './cancel.ts';
 export { buildTaskState, loadAttempts } from './taskstate.ts';
 export { bindingOf, loadBindings, loadKnownVersions, resolveTaskSkills } from './skills.ts';
+export { assessHandover, CLOUD_RUNNER_FRESH_SECONDS, decideHandover, openHandover, recordCheckpoint, requestHandover, successorCheckpoint, type CheckpointCheck, type CheckpointReceipt, type CheckpointRow, type HandoverAssessment, type HandoverEstimate, type HandoverFigure, type HandoverReceipt, type HandoverRefusal, type LeaseHandover } from './handover.ts';

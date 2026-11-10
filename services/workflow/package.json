@@ -18,6 +18,7 @@
     "drizzle-orm": "0.45.4"
   },
   "devDependencies": {
+    "@selarikru/protocol": "workspace:*",
     "@types/node": "24.19.2",
     "postgres": "3.4.9",
     "typescript": "5.9.3",

@@ -75,6 +75,19 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   its own transaction) only when the records' fingerprint moved. A path that holds an attempt row and wants `product_heads` is only the proposal, and nothing holds
  *   `product_heads` and wants an attempt row. So no product path takes the scheduler lock, a run row, a status row or the brain lock, and no path above takes
  *   `product_heads`.
+ * - checkpoint continuation (services/workflow/src/handover.ts, apps/control-api/src/handover.ts): the owner's request (`requestHandover`) and the owner's answer to a restart
+ *   offer (`decideHandover`) take the scheduler lock, the task's status row, the run row (`lockBudget`, the request only, to judge the successor's hold), then the
+ *   task's `checkpoints` row (insert or update), the `task_commands` insert (the stop) and the event sequence: the claim poll's order (scheduler lock, status row, run
+ *   row) with rows after it that no other path takes first. The runner's checkpoint upload (`recordCheckpoint`) takes the status row, then the `checkpoints` row, then the
+ *   event sequence; it takes no run row. The fence runs inside a publish or a lease expiry, after `settle` took the run row: status row, run row, `checkpoints` row, the
+ *   attempt row's revoke, then the event sequence (`fenceHandover`, from `confirmCancel`). A late publish by a fenced attempt takes the status row, then the `checkpoints`
+ *   row and the event sequence (`recordLatePublish`). The successor's claim writes the `checkpoints` row after its attempt row and its first events, inside the claim's
+ *   own order (`startSuccessor`): the one place the row follows the event sequence, which cannot cross the others because every writer of a task's `checkpoints` row
+ *   holds that task's status row first, so two writers of one row are serialised there before either reaches it; its setup-complete heartbeat takes the status row then the `checkpoints` row (`markSuccessorRunning`); a successor that cannot apply its
+ *   checkpoint marks the row inside its publish, after the run row (`successorRefused`). The successor's checkpoint fetch reads without a lock. So every handover path
+ *   takes the status row before the `checkpoints` row and the run row (when it takes one) before it too, no path holds a `checkpoints` row and waits for a status row,
+ *   the scheduler lock or a run row, and none takes the candidate row, the claim lock, the brain lock or `product_heads`. The verdict, re-verify and settle never touch
+ *   a running task's handover, and a replan meets the request exactly as it meets the claim poll (the scheduler lock serialises them).
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

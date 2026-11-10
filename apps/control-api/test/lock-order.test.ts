@@ -7,7 +7,7 @@ import { withTx, type Tx } from '@selarikru/persistence';
 import { lockStaleCandidate, markRunReadyForReview, type TrustedVerifier } from '@selarikru/workflow';
 import { lockForVerdict } from '../../../services/verifier/src/service.ts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { PROJECT, RUN, TENANT, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+import { PROJECT, RUN, TENANT, bearer, enrolRunner, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 let h: Harness;
@@ -142,5 +142,37 @@ describe('a deadlock on an owner route', () => {
     expect(res.status).toBe(503);
     expect(res.body.error).toEqual({ code: 'transaction_conflict', message: expect.stringMatching(/try again/) });
     await local.app.close();
+  });
+});
+
+describe('handover request lock order', () => {
+  /** A running local attempt on a run whose placement lets the request reach the run row: the policy then refuses the cloud start, after every lock was taken. */
+  async function running(): Promise<void> {
+    await t.db.execute(sql`DELETE FROM runners`);
+    await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);
+    await seedTask(t.db, specFor('T1', { baseSha: 'a'.repeat(40), allowedPaths: ['server'] }));
+    const { token } = await enrolRunner(h.app, 'local');
+    const claimed = await post(h.app, '/v1/runners/claim', {}, bearer(token));
+    expect(claimed.body.lease).toMatchObject({ taskId: 'T1' });
+  }
+  const request = () => post(h.app, `/v1/projects/${PROJECT}/tasks/T1/handover`, { mode: 'resume', idempotencyKey: `lock-${Math.random()}` });
+  const refusedAfterLocks = (res: { status: number; body: any }) => {
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error.details).toMatchObject({ reason: 'policy_denied' });
+  };
+
+  it('does not deadlock against the claim poll (scheduler lock, status row, then the run row)', async () => {
+    await running();
+    refusedAfterLocks(await race(schedulerLock, async (tx) => { await statusRow(tx, 'T1'); await runRow(tx); }, request));
+  });
+
+  it('does not deadlock against a publish or a lease expiry (status row, then the run row)', async () => {
+    await running();
+    refusedAfterLocks(await race((tx) => statusRow(tx, 'T1'), runRow, request));
+  });
+
+  it('does not deadlock against a run setting save or a run cancel (scheduler lock, run row, then status rows)', async () => {
+    await running();
+    refusedAfterLocks(await race(async (tx) => { await schedulerLock(tx); await runRow(tx); }, (tx) => statusRow(tx, 'T1'), request));
   });
 });

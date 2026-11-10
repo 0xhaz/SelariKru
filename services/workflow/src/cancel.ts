@@ -1,7 +1,8 @@
-import { isPolicyRevokedReason, transition, type TaskState, type TaskStatus } from '@selarikru/domain';
+import { isHandoverReason, isPolicyRevokedReason, transition, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { schema, type Tx } from '@selarikru/persistence';
 import { and, eq } from 'drizzle-orm';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR, type EventScope } from './events.ts';
+import { fenceHandover } from './handover.ts';
 import { setStatus, type TaskKey } from './taskstate.ts';
 
 const requested = (key: TaskKey, revision: number) =>
@@ -23,8 +24,8 @@ export async function cancelRequestReason(tx: Tx, key: TaskKey, revision: number
   return typeof reason === 'string' ? reason : null;
 }
 
-/** The outcome to close a stopped attempt with: a policy stop interrupts it, so the repair budget is kept; anything else cancels it. */
-export const stoppedOutcome = (reason: string | null): 'interrupted' | 'cancelled' => (isPolicyRevokedReason(reason) ? 'interrupted' : 'cancelled');
+/** The outcome to close a stopped attempt with: a policy stop or a handover interrupts it, so the repair budget is kept; anything else cancels it. */
+export const stoppedOutcome = (reason: string | null): 'interrupted' | 'cancelled' => (isPolicyRevokedReason(reason) || isHandoverReason(reason) ? 'interrupted' : 'cancelled');
 
 /**
  * Confirms a requested cancel once the attempt has ended: the task becomes `cancelled`, the request row is closed and
@@ -37,6 +38,8 @@ export async function confirmCancel(
   tx: Tx, key: TaskKey, state: TaskState, rowRevision: number, scope: Omit<EventScope, 'aggregateRevision'>, now: Date, attemptId: string | null, cause: Record<string, unknown>,
 ): Promise<{ readonly aggregateRevision: number; readonly status: TaskStatus }> {
   const stored = await cancelRequestReason(tx, key, state.revision);
+  // A handover stop is not a cancel either: the attempt is fenced and the task waits, ready, for its successor (handover.ts).
+  if (isHandoverReason(stored)) return fenceHandover(tx, key, state, rowRevision, scope, now, attemptId, cause, stored!);
   if (isPolicyRevokedReason(stored)) {
     const blocked = transition(state, { type: 'blocked', reason: stored! });
     const back = blocked.ok ? transition(blocked.value, { type: 'unblocked' }) : blocked;

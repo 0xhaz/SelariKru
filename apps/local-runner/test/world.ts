@@ -22,7 +22,7 @@ export interface World {
   sbx: FakeSbx;
   runtime: SbxRuntimeAdapter;
   artifacts: LocalDiskArtifactStore;
-  api: RunnerApi & { published: RunnerResult[]; heartbeats: number };
+  api: RunnerApi & { published: RunnerResult[]; heartbeats: number; checkpoints: unknown[] };
   lease: ClaimedLease;
   task: TaskSpec;
   logs: string[];
@@ -34,7 +34,13 @@ export interface WorldOptions {
   fake?: FakeOptions;
   /** What the scripted agent does inside its workspace. Returns false to leave the run open (for cancel tests). */
   agent?: (ctx: { stream: FakeStream; cwd: string; write(rel: string, body: string): Promise<void> }) => Promise<boolean | void>;
-  heartbeat?: (n: number) => Promise<{ cancelRequested: boolean }>;
+  heartbeat?: (n: number) => Promise<{ cancelRequested: boolean; handover?: { checkpointId: string; mode: 'resume' | 'restart' } | null }>;
+  /** The handover this lease continues, as the claim delivers it. Default: none. */
+  handover?: ClaimedLease['handover'];
+  /** What the checkpoint upload does. Default: succeeds. */
+  checkpoint?: (body: unknown) => Promise<void>;
+  /** What the successor's checkpoint fetch answers. Default: nothing to fetch. */
+  fetchCheckpoint?: () => Promise<unknown>;
   task?: Partial<TaskSpec>;
   /** Extra files committed in the base. */
   baseFiles?: Readonly<Record<string, string>>;
@@ -119,12 +125,14 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
     classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
   } as TaskSpec;
-  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment, context: o.context ?? null, ...(o.skills !== undefined ? { skills: o.skills } : {}) } as ClaimedLease;
+  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment, context: o.context ?? null, ...(o.skills !== undefined ? { skills: o.skills } : {}), ...(o.handover !== undefined ? { handover: o.handover } : {}) } as ClaimedLease;
 
   let hb = 0;
   const published: RunnerResult[] = [];
+  const checkpoints: unknown[] = [];
   const api = {
     published,
+    checkpoints,
     get heartbeats() {
       return hb;
     },
@@ -143,6 +151,11 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     brainManifest: vi.fn(async () => (o.brainManifest ? o.brainManifest() : undefined)),
     stackDetection: vi.fn(async () => (o.stackDetection ? o.stackDetection() : undefined)),
     skillsConfirmed: vi.fn(async () => (o.skillsConfirmed ? o.skillsConfirmed() : undefined)),
+    checkpoint: vi.fn(async (_l: LeaseRef, body: unknown) => {
+      checkpoints.push(body);
+      return o.checkpoint ? o.checkpoint(body) : undefined;
+    }),
+    fetchCheckpoint: vi.fn(async () => (o.fetchCheckpoint ? o.fetchCheckpoint() : null)),
   } as unknown as World['api'];
 
   return {

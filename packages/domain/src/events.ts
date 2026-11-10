@@ -13,6 +13,7 @@ export const EVENT_TYPES = [
   'attempt.human_intervened', 'terminal.control_ended',
   'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
   'product.recorded', 'product.proposed',
+  'handover.requested', 'checkpoint.recorded', 'checkpoint.refused', 'attempt.fenced', 'attempt.route_changed', 'attempt.publish_refused', 'handover.decided',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -94,6 +95,20 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'product.recorded': [H],
   /** A worker proposed a problem brief. Worker only, and only ever a proposal: confirming one is `product.recorded` by a person. Ids and revisions only, never the worker's words. */
   'product.proposed': [W],
+  /** The owner asked to continue a local attempt on a cloud runner (or to restart it there). Human only. Ids, the mode and the base SHA: no paths, no content. */
+  'handover.requested': [H],
+  /** The control plane checked and stored a checkpoint: its patch hash, file count, bytes and how many paths were excluded. Counts and hashes only. */
+  'checkpoint.recorded': [S],
+  /** A checkpoint could not be resumed safely: the refusal code and the restart offer (estimated cost and time). Never content. */
+  'checkpoint.refused': [S, Y],
+  /** The prior attempt is fenced: it ended, its lease is revoked and the next fence is reserved, before any successor may claim. */
+  'attempt.fenced': [S, Y],
+  /** The task moved location: a new attempt of the same revision on another runner, naming the attempt it follows. A scheduler decision. */
+  'attempt.route_changed': [S],
+  /** A fenced attempt tried to publish after the handover and was refused (stale fence). Recorded once per attempt. */
+  'attempt.publish_refused': [S],
+  /** The owner chose what to do with a restart offer: restart from the persisted input, or keep the task where policy places it. Human only. */
+  'handover.decided': [H],
 };
 
 export interface ActorNotPermitted {

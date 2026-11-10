@@ -1,4 +1,4 @@
-import { NO_HARNESS_CATALOG, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, OPEN_HANDOVER_STATES, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
@@ -384,6 +384,11 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               eq(schema.taskCommands.revision, row.currentRevision)));
             if (pending[0]) {
               // A stop the owner caused by narrowing a grant would leave the task blocked by policy. Asked to cancel now, it is a cancel: the task ends cancelled.
+              // A handover's stop, asked to cancel now, is a cancel: the task ends cancelled, and the handover is closed rather than left waiting for a successor.
+              if (isHandoverReason(pending[0].detail['reason'] as string | null)) {
+                await tx.update(schema.taskCommands).set({ detail: { ...pending[0].detail, reason: 'cancel_requested', handoverOf: pending[0].detail['reason'] } }).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.operationId, pending[0].operationId)));
+                await tx.update(schema.checkpoints).set({ state: 'closed', updatedAt: at }).where(and(eq(schema.checkpoints.tenantId, config.tenantId), eq(schema.checkpoints.projectId, row.projectId), eq(schema.checkpoints.taskId, taskId), eq(schema.checkpoints.state, 'stopping')));
+              }
               if (typeof pending[0].detail['reason'] === 'string' && pending[0].detail['reason'].startsWith('policy_revoked:')) {
                 await tx.update(schema.taskCommands).set({ detail: { ...pending[0].detail, reason: 'cancel_requested', narrowedBy: pending[0].detail['reason'] } }).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.operationId, pending[0].operationId)));
               }
@@ -411,6 +416,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           if (staleExit) await lockPartsForClaims(tx, { tenantId: config.tenantId, projectId: row.projectId }, stale!.parts.map((p) => p.taskId));
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
           await supersedePendingApprovals(tx, config.tenantId, row.projectId, taskId, at);
+          // A handover waiting for its successor or the owner's choice ends with the task.
+          await tx.update(schema.checkpoints).set({ state: 'closed', updatedAt: at }).where(and(eq(schema.checkpoints.tenantId, config.tenantId), eq(schema.checkpoints.projectId, row.projectId), eq(schema.checkpoints.taskId, taskId), inArray(schema.checkpoints.state, [...OPEN_HANDOVER_STATES])));
           // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.
           await releaseTaskClaims(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId }, row.currentRevision, at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });

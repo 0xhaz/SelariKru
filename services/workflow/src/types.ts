@@ -2,6 +2,7 @@ import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, ResolvedSkill, Result, RunnerHarnessReport } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
+import type { LeaseHandover } from './handover.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
 
@@ -80,6 +81,8 @@ export interface Lease {
   readonly controllable?: boolean;
   /** The knowledge packs resolved for this attempt at claim, by version and digest. Set at claim; absent on a lease rebuilt from a stored attempt, which reads the record. */
   readonly skills?: readonly ResolvedSkill[];
+  /** Set on a handover's successor: the checkpoint it starts from (ids and hashes), or a restart from the persisted input. Absent on any other lease. */
+  readonly handover?: LeaseHandover;
 }
 
 export interface SkippedCandidate {
@@ -112,6 +115,8 @@ export interface HeartbeatReceipt {
   readonly deadlineAt: string;
   /** The owner asked to cancel this task. A runner that sees it should stop; the lease is reaped to `cancelled` either way. */
   readonly cancelRequested: boolean;
+  /** The stop is a handover to another location: the runner sends its checkpoint (`resume`) before it acknowledges. Null for any other stop. */
+  readonly handover?: { readonly checkpointId: string; readonly mode: 'resume' | 'restart' } | null;
 }
 
 /** Usage the worker reports. Unverified: it reaches the ledger as `estimated` at best. Unknown is null, never zero. */

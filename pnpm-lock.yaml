@@ -483,6 +483,9 @@ importers:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
     devDependencies:
+      '@selarikru/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@types/node':
         specifier: 24.19.2
         version: 24.19.2

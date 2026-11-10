@@ -14,6 +14,7 @@ import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMi
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
 import { resolveTaskSkills } from './skills.ts';
+import { claimHold, startSuccessor, type CheckpointRow } from './handover.ts';
 import type { SkillResolution } from '@selarikru/domain';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
@@ -36,7 +37,7 @@ const validRunner = (r: Runner): boolean =>
   typeof r?.runnerId === 'string' && r.runnerId !== '' && typeof r.tenantId === 'string' && r.tenantId !== '' && (r.location === 'local' || r.location === 'cloud');
 
 /** Limits read from configuration. Every one is required: a missing limit denies claiming. */
-interface ClaimLimits {
+export interface ClaimLimits {
   readonly maxConcurrentTotal: number;
   readonly attemptTimeoutSeconds: number;
   readonly maxInfraRetries: number;
@@ -46,7 +47,7 @@ interface ClaimLimits {
 
 const isCount = (n: unknown, min: number): n is number => typeof n === 'number' && Number.isInteger(n) && n >= min;
 
-function resolveLimits(caps: Caps): ClaimLimits | string {
+export function resolveLimits(caps: Caps): ClaimLimits | string {
   const required = [
     ['maxConcurrentTotal', 1], ['attemptTimeoutSeconds', 1], ['maxInfraRetries', 0], ['infraRetryBackoffSeconds', 1], ['infraRetryBackoffMaxSeconds', 1],
   ] as const;
@@ -146,13 +147,13 @@ export async function claimNext(ctx: SchedulerContext, runner: Runner, caps: Cap
 
 type CandidateResult = { lease: Lease } | { reason: string };
 
-interface RunningCounts {
+export interface RunningCounts {
   readonly tenant: { local: number; cloud: number };
   readonly byRun: ReadonlyMap<string, { local: number; cloud: number }>;
 }
 
 /** Live leases per run and location, counted from attempt rows. A lease without a recorded location counts as local. */
-async function runningCounts(tx: Tx, tenantId: string): Promise<RunningCounts> {
+export async function runningCounts(tx: Tx, tenantId: string): Promise<RunningCounts> {
   const rows = await tx
     .select({ runId: schema.taskRevisions.runId, location: sql<string | null>`${schema.attempts.detail}->>'location'`, n: sql<number>`count(*)::int` })
     .from(schema.attempts)
@@ -174,13 +175,13 @@ async function runningCounts(tx: Tx, tenantId: string): Promise<RunningCounts> {
   return { tenant, byRun };
 }
 
-interface RunPlacement {
+export interface RunPlacement {
   readonly mode: PlacementMode;
   readonly cloudDestination: string | null;
 }
 
 /** The run's own validated mode wins; the deployment default is the fallback. An unknown stored mode name is an error, never a guess. */
-function runPlacement(ctx: SchedulerContext, c: Candidate): RunPlacement | null | Blocked {
+export function runPlacement(ctx: SchedulerContext, c: Pick<Candidate, 'placement'>): RunPlacement | null | Blocked {
   if (c.placement !== null && c.placement !== undefined) {
     const name = c.placement.mode;
     if (typeof name !== 'string' || !Object.hasOwn(PLACEMENT_MODES, name)) return { blocked: true, reason: 'unknown_placement_mode', transient: false };
@@ -190,7 +191,7 @@ function runPlacement(ctx: SchedulerContext, c: Candidate): RunPlacement | null 
   return ctx.placement ?? null;
 }
 
-function capacityFor(cfg: RunPlacement | null, limits: ClaimLimits, counts: RunningCounts, runId: string): Capacity {
+export function capacityFor(cfg: RunPlacement | null, limits: ClaimLimits, counts: RunningCounts, runId: string): Capacity {
   const totalRunning = counts.tenant.local + counts.tenant.cloud;
   // Without a mode the deployment is local-only: cloud is explicitly disabled (limit 0), local may use the whole total.
   if (cfg === null) return { maxConcurrentTotal: limits.maxConcurrentTotal, local: { limit: limits.maxConcurrentTotal, running: counts.tenant.local }, cloud: { limit: 0, running: counts.tenant.cloud }, totalRunning };
@@ -221,7 +222,7 @@ async function edgeRowsFor(tx: Tx, key: TaskKey, nodes: readonly { taskId: strin
  * Source labels come from stored rows, never from the task's own claim: the project label, each contract artifact's stored
  * label (matched by id and sha256; no match is unlabelled, which the policy denies), and the labels feeding from predecessors.
  */
-async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<ResolvedSources> {
+export async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<ResolvedSources> {
   const project = (await tx.select({ c: schema.projects.classification }).from(schema.projects)
     .where(and(eq(schema.projects.tenantId, key.tenantId), eq(schema.projects.projectId, key.projectId))).limit(1))[0];
   let repo = strongest(spec.classification, (project?.c ?? 'secret') as Classification);
@@ -401,6 +402,13 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (await hasOpenAttempt(tx, key)) return { reason: 'previous_attempt_active' };
   // A task the owner asked to cancel is never dispatched again.
   if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
+  // A handover holds the task: until its prior attempt is fenced, while the owner decides a restart offer, and for any runner but the location it hands to.
+  const handoverHold = await claimHold(tx, key, spec.revision, runner.location);
+  if (handoverHold.kind === 'wait') return { reason: handoverHold.reason };
+  const handover = handoverHold.kind === 'start' ? handoverHold.row : null;
+  // The owner chose this location for this task, explicitly: the role pin and the eligible-any preference give way, and every other placement rule still holds.
+  const toCloud = handover !== null && handover.target === 'cloud';
+  if (toCloud && spec.execution === 'local') return { reason: 'handover_execution_local' };
   // A path the owner took away blocks every task that needs it, visibly and at once; the block clears when the path is given back and the task is placed.
   if (pathsRevoked(spec, settings).length > 0) {
     const reason = policyRevokedReason('allowed_paths');
@@ -453,7 +461,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   const configured = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
   // Cloud the owner took away is a disabled location, exactly as a mode without cloud slots: placement says so and never moves the task elsewhere silently.
   const capacity = configured !== null && settings.cloudEligible === false ? { ...configured, cloud: { ...configured.cloud, limit: 0 } } : configured;
-  const placeWith = (approved: boolean) => place({ ...spec, classification: resolved.classification }, capacity!, ctx.policy, {
+  const placeWith = (approved: boolean) => place({ ...spec, classification: resolved.classification, ...(toCloud ? { execution: 'cloud' as const } : {}) }, toCloud ? { ...capacity!, rolePlacement: undefined } : capacity!, ctx.policy, {
     sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position), approved,
   });
   let placed = capacity === null ? (cfg as Blocked) : placeWith(false);
@@ -529,7 +537,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   }
   if (statusRow.placementBlock?.startsWith('budget:')) await clearBlock(tx, key);
 
-  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification), skills);
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification), skills, handover);
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
   const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
@@ -537,7 +545,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean, skills: SkillResolution): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean, skills: SkillResolution, handover: CheckpointRow | null): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -555,7 +563,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   await tx.insert(schema.attempts).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, revision: spec.revision, attemptNumber,
     runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
-    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable, configRevision: config?.revision ?? 0 },
+    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable, configRevision: config?.revision ?? 0, ...(handover ? { handover: { checkpointId: handover.checkpointId, mode: handover.mode, priorAttemptId: handover.priorAttemptId } } : {}) },
     modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
   });
   // What this attempt receives, by version and digest, in the claim's own transaction: provenance for the attempt and its evidence. Metadata only.
@@ -591,10 +599,12 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
       ...(placed.policy ? { policyDecision: placed.policy } : {}),
     },
   });
+  // A handover's successor: the same task revision on the location the owner chose, after the prior attempt's fence. Recorded as a route change.
+  const handed = handover ? await startSuccessor(tx, handover, scope, now, { attemptId, fence, location: runner.location, runnerId: runner.runnerId }) : null;
 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
-    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial, skills: skills.delivered,
+    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial, skills: skills.delivered, ...(handed ? { handover: handed } : {}),
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }
