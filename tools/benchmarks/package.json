@@ -1,0 +1,23 @@
+{
+  "name": "@selarikru/benchmarks",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Benchmark tooling, file-only half: manifest loader and preflight, results export and report, and the scripted publish to the web app. Reads and writes files only: it dispatches nothing, calls no model, spends nothing and touches no network.",
+  "scripts": {
+    "benchmark": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@selarikru/protocol": "workspace:*",
+    "@selarikru/view-protocol": "workspace:*",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}

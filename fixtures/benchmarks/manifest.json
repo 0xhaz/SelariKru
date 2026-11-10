@@ -1,0 +1,187 @@
+{
+  "protocolVersion": "0.1",
+  "status": "configuration_required",
+  "project": "Feedback Board",
+  "purpose": "Benchmark manifest. Reading or validating it dispatches nothing, calls no model, spends nothing and touches no network. Every null below is an unresolved field that blocks live dispatch.",
+  "cohortId": null,
+  "randomization": {
+    "seed": null,
+    "order": [],
+    "orderSha256": null,
+    "frozenAtUtc": null,
+    "freezeBeforeStart": true
+  },
+  "repository": {
+    "url": null,
+    "starterSha": null,
+    "lockfileSha256": null,
+    "contractSha256": null,
+    "verifierSha": null,
+    "verifierSha256": null
+  },
+  "environment": {
+    "harness": null,
+    "harnessVersion": null,
+    "codingModel": null,
+    "inferenceProvider": null,
+    "modelSettings": null,
+    "accountTier": null,
+    "priceReference": null,
+    "localHost": null,
+    "cloudBackend": null,
+    "imageDigest": null,
+    "verificationEnvironment": null,
+    "cpuRamLimitsVerified": false,
+    "verifierHostFrozen": false
+  },
+  "credentials": {
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "checkedBy": "presence_only_never_printed"
+  },
+  "assistant": {
+    "fixtureFile": "apps/control-web/src/features/assistant/data/brief-fixtures.json",
+    "requestedModes": [
+      "ONLY_ON_DEVICE",
+      "ONLY_IN_CLOUD"
+    ],
+    "expectedObservedSources": [
+      "ON_DEVICE",
+      "IN_CLOUD"
+    ],
+    "repetitionsPerFixture": 3,
+    "excludedWarmupsPerRoute": 2,
+    "coldStartCohort": "not_planned",
+    "sdkVersion": null,
+    "browserVersion": null,
+    "origin": null,
+    "cloudModel": null,
+    "appCheckReadiness": "unverified",
+    "fixtureIds": [
+      "brief-01",
+      "brief-02",
+      "brief-03",
+      "brief-04",
+      "brief-05",
+      "brief-06",
+      "brief-07",
+      "brief-08",
+      "brief-09",
+      "brief-10"
+    ],
+    "deviceModel": null
+  },
+  "workers": {
+    "attemptsPerRequiredMode": 5,
+    "minimumExploratoryAttemptsPerMode": 3,
+    "requiredModes": [
+      {
+        "id": "L1",
+        "localCodingSlots": 1,
+        "cloudCodingSlots": 0,
+        "implementationOrder": [
+          "backend",
+          "frontend"
+        ],
+        "availability": "supported",
+        "unavailableReason": null
+      },
+      {
+        "id": "C1",
+        "localCodingSlots": 0,
+        "cloudCodingSlots": 1,
+        "implementationOrder": [
+          "backend",
+          "frontend"
+        ],
+        "availability": "unsupported",
+        "unavailableReason": "Needs the cloud sandbox, which waits for the coupon (D3, D4)"
+      },
+      {
+        "id": "H2",
+        "localCodingSlots": 1,
+        "cloudCodingSlots": 1,
+        "backendPlacement": "local",
+        "frontendPlacement": "cloud",
+        "availability": "unsupported",
+        "unavailableReason": "Needs the cloud sandbox, which waits for the coupon (D3, D4)"
+      }
+    ],
+    "optionalModes": [
+      "L2",
+      "C2"
+    ],
+    "attemptTimeoutSeconds": 1800,
+    "repairPolicy": null,
+    "resetWorktreeDatabaseAndAgentSession": true,
+    "installationPolicy": "warm_dependency_and_image_cache_report_setup_separately",
+    "verificationPolicy": "same_trusted_checks_exact_candidate_each_attempt"
+  },
+  "proposedVariableBudgetUsd": {
+    "total": 60,
+    "codingPlanningVerificationModelsAndTools": 50,
+    "cloudRuntime": 5,
+    "assistantInference": 5,
+    "status": "proposal_not_authorized",
+    "excludes": [
+      "fixed subscriptions",
+      "shared hosting",
+      "local hardware and energy",
+      "human labor",
+      "initial setup investment"
+    ],
+    "payer": null,
+    "authorizedBy": null,
+    "authorizedAtUtc": null
+  },
+  "privacy": {
+    "fixtures": "synthetic_cloud_permitted",
+    "credentialsInResults": false,
+    "rawPrivatePromptsInHostedTelemetry": false
+  },
+  "preflight": {
+    "blockOnMissingRepositoryIdentity": true,
+    "blockOnUnresolvedRuntimeModelPolicyAndBudgets": true,
+    "blockOnUnavailableTrustedVerifier": true,
+    "unsupportedModesMustRemainVisible": true,
+    "noLiveDispatchByReadingThisManifest": true,
+    "blockOnUnfrozenLockfile": true,
+    "blockOnUnfrozenSeedAndOrder": true
+  },
+  "protocolNotes": [
+    {
+      "id": "payload-sha256",
+      "text": "assistant.payloadSha256 is the sha-256 of the logical payload: the UTF-8 system instruction followed by the prompt, which is the fixture prompt plus its allowed requirement IDs in fixed order. It is not a hash of the wire request."
+    },
+    {
+      "id": "requirement-id-narrowing",
+      "text": "Each request narrows the requirementId enum to that fixture's allowed IDs; validation keeps the unmodified shared schema and checks returned IDs against the fixture. Adopted before any cohort started."
+    },
+    {
+      "id": "record-granularity",
+      "text": "One record per trial. A replacement attempt is a new trial with its own record; failed, timed-out, cancelled and denied starts are kept, never overwritten."
+    },
+    {
+      "id": "permitted-human-action",
+      "text": "A human action the protocol permits outside control mode (resolving an approval gate the run raised, answering a blocked worker, the owner's handover review) is counted in operations.permittedHumanActions with its minutes in humanMinutes.permittedAction. It does not set humanIntervened and does not remove the trial from comparisons; the report shows the count beside the mode. Control-mode use sets humanIntervened and keeps the trial out of comparisons."
+    },
+    {
+      "id": "configuration-from-manifest",
+      "text": "The exporter fills each record's configuration from this manifest, including denied starts. Starter and candidate SHAs are full lowercase commit SHAs. Delivery times are on the server monotonic clock only."
+    },
+    {
+      "id": "lockfile-freeze",
+      "text": "repository.verifierSha256 and repository.lockfileSha256 freeze the verifier and lockfile before the cohorts (T8.5). Preflight refuses live dispatch when either differs from services/verifier/suites/feedback-board/HASHES.json, or when HASHES.json is stale against pnpm-lock.yaml."
+    }
+  ],
+  "resultTemplate": "fixtures/benchmarks/result.template.json",
+  "requirementIds": [
+    "FB-01",
+    "FB-02",
+    "FB-03",
+    "FB-04",
+    "FB-05",
+    "FB-06",
+    "FB-07",
+    "FB-08"
+  ]
+}

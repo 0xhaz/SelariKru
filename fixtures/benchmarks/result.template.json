@@ -1,0 +1,158 @@
+{
+  "protocolVersion": "0.1",
+  "dataKind": null,
+  "status": "not_run",
+  "track": null,
+  "cohortId": null,
+  "trialId": null,
+  "mode": null,
+  "blockId": null,
+  "attemptId": null,
+  "configuration": {
+    "manifestSha256": null,
+    "starterSha": null,
+    "contractSha256": null,
+    "verifierSha": null,
+    "candidateSha": null,
+    "harness": null,
+    "harnessVersion": null,
+    "codingModel": null,
+    "inferenceDestination": null,
+    "providerAccountReference": null,
+    "cacheCondition": null,
+    "localHost": null,
+    "cloudHost": null
+  },
+  "assistant": {
+    "fixtureId": null,
+    "requestedMode": null,
+    "observedInferenceSource": null,
+    "sdkVersion": null,
+    "schemaValid": null,
+    "warmup": false,
+    "payloadSha256": null,
+    "semanticReview": {
+      "reviewer": null,
+      "routeLabelHidden": null,
+      "retainedFacts": null,
+      "missingFacts": null,
+      "inventedRequirements": null
+    },
+    "providerInputTokens": null,
+    "providerOutputTokens": null,
+    "inputBytes": null,
+    "outputBytes": null
+  },
+  "timings": {
+    "clockDomain": null,
+    "startedAtUtc": null,
+    "endedAtUtc": null,
+    "firstOutputMs": null,
+    "generationCompleteMs": null,
+    "schemaValidationMs": null,
+    "endToEndVerifiedMs": null,
+    "queueMs": null,
+    "startupMs": null,
+    "implementationMs": null,
+    "integrationMs": null,
+    "verificationMs": null,
+    "initialSetupMs": null,
+    "modelDownloadMs": null
+  },
+  "resources": {
+    "localWorkerHours": null,
+    "cloudWorkerHours": null,
+    "integrationAndVerificationHours": null,
+    "workerHoursProvenance": "unavailable",
+    "workerHoursSource": null,
+    "requestedVcpus": null,
+    "requestedMemoryGib": null,
+    "peakRssMiB": null,
+    "energyKwh": null,
+    "providerUsageByRole": [],
+    "usageCoverage": "unknown",
+    "integrationAndVerificationHoursAreSubsetOfHostTotals": true
+  },
+  "cost": {
+    "currency": "USD",
+    "platformPaidActual": null,
+    "platformPaidEstimated": null,
+    "customerDirectActual": null,
+    "allocatedFixedCost": null,
+    "localHardwareEnergyCost": null,
+    "localCostProvenance": "unavailable",
+    "localCostSource": null,
+    "rateCardVersion": null,
+    "settlementStatus": "unavailable",
+    "exclusions": []
+  },
+  "humanMinutes": {
+    "initialSetup": null,
+    "scoping": null,
+    "intervention": null,
+    "correction": null,
+    "review": null,
+    "permittedAction": null,
+    "provenance": "unavailable",
+    "source": null
+  },
+  "quality": {
+    "allRequiredChecksPassed": null,
+    "criteria": [
+      {
+        "id": "FB-01",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-02",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-03",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-04",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-05",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-06",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-07",
+        "status": "not_run",
+        "evidenceReferences": []
+      },
+      {
+        "id": "FB-08",
+        "status": "not_run",
+        "evidenceReferences": []
+      }
+    ],
+    "withinDeclaredLimits": null
+  },
+  "operations": {
+    "repairCount": null,
+    "deniedActionCount": null,
+    "cleanupConfirmed": null,
+    "externalPrUrl": null,
+    "humanIntervened": null,
+    "permittedHumanActions": null
+  },
+  "failures": [],
+  "confounders": [],
+  "artifactReferences": [],
+  "resultSha256": null,
+  "measuredResultsPresent": false
+}

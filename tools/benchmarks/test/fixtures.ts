@@ -1,0 +1,117 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { freezeOrder, parseManifest, type Manifest } from '../src/manifest.ts';
+import type { RawRecord } from '../src/report.ts';
+
+/** Test data only. Every value here is synthetic; none is a measurement. */
+
+export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
+export const FIXTURE_MANIFEST_PATH = join(REPO_ROOT, 'fixtures/benchmarks/manifest.json');
+export const fixtureManifestText = (): string => readFileSync(FIXTURE_MANIFEST_PATH, 'utf8');
+
+export const STARTER = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+export const HASHES = { verifierSha256: '1'.repeat(64), lockfileSha256: '2'.repeat(64) } as const;
+export const SECRET = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
+
+/** The fixture manifest with every required field resolved, both cloud modes available, and its seed and order frozen. */
+export function resolvedManifest(over: (m: Manifest) => void = () => {}): Manifest {
+  const m = parseManifest(fixtureManifestText()).manifest;
+  m.cohortId = 'cohort-2026-11';
+  m.repository = { url: 'https://github.com/example/feedback-board', starterSha: STARTER, lockfileSha256: HASHES.lockfileSha256, contractSha256: '3'.repeat(64), verifierSha: 'feedbeef00112233445566778899aabbccddeeff', verifierSha256: HASHES.verifierSha256 };
+  m.environment = {
+    harness: 'claude-code', harnessVersion: '2.1.0', codingModel: 'claude-sonnet-5-5', inferenceProvider: 'anthropic', modelSettings: 'default', accountTier: 'tier-2', priceReference: 'rc-2026-11',
+    localHost: 'arm64-laptop', cloudBackend: 'cloud-run', imageDigest: `sha256:${'4'.repeat(64)}`, verificationEnvironment: 'verifier-image', cpuRamLimitsVerified: true, verifierHostFrozen: true,
+  };
+  m.assistant = { ...m.assistant, sdkVersion: '12.5.0', browserVersion: 'Chrome 140', origin: 'https://selarikru.web.app', cloudModel: 'gemini-2.5-flash', deviceModel: 'gemini-nano', appCheckReadiness: 'verified' };
+  m.workers = { ...m.workers, repairPolicy: 'two repairs per task revision', requiredModes: m.workers.requiredModes.map((r) => ({ ...r, availability: 'supported', unavailableReason: null })) };
+  m.proposedVariableBudgetUsd = { ...m.proposedVariableBudgetUsd, status: 'authorized', payer: 'project owner', authorizedBy: 'owner', authorizedAtUtc: '2026-11-15T09:00:00.000Z' };
+  over(m);
+  return freezeOrder(m, 'seed-7f1e', '2026-11-15T10:00:00.000Z', null);
+}
+
+const passedCriteria = (): RawRecord['quality']['criteria'] => Array.from({ length: 8 }, (_, i) => ({ id: `FB-0${i + 1}`, status: 'passed' as const, evidenceReferences: [`#/evidence?check=FB-0${i + 1}`] }));
+const notRunCriteria = (): RawRecord['quality']['criteria'] => Array.from({ length: 8 }, (_, i) => ({ id: `FB-0${i + 1}`, status: 'not_run' as const, evidenceReferences: [] }));
+
+export interface WorkerOver {
+  readonly mode: 'L1' | 'C1' | 'H2';
+  readonly block: number;
+  readonly ms?: number | null;
+  readonly status?: RawRecord['status'];
+  readonly dataKind?: RawRecord['dataKind'];
+  readonly failed?: boolean;
+  readonly actualUsd?: number | null;
+  readonly estimatedUsd?: number | null;
+  readonly clockDomain?: string;
+  readonly trialId?: string;
+  readonly humanIntervened?: boolean | null;
+  readonly permittedHumanActions?: number;
+  readonly failureDetail?: string;
+  readonly account?: string;
+}
+
+/** One raw worker record, as a runner would write it. Completed and passing unless told otherwise. */
+export function rawWorker(o: WorkerOver): RawRecord {
+  const status = o.status ?? 'completed';
+  const ran = status !== 'not_run';
+  const verified = status === 'completed';
+  const trialId = o.trialId ?? `w-b${o.block}-${o.mode}`;
+  const sha = [...`${trialId}`].map((c) => c.charCodeAt(0).toString(16)).join('').padEnd(40, '0').slice(0, 40);
+  const criteria = verified ? passedCriteria().map((c, i) => (o.failed && i === 2 ? { ...c, status: 'failed' as const } : c)) : notRunCriteria();
+  const ms = o.ms === undefined ? 900_000 + o.block * 10_000 : o.ms;
+  const actual = o.actualUsd === undefined ? 1.5 : o.actualUsd;
+  const actions = o.permittedHumanActions ?? 0;
+  return {
+    dataKind: o.dataKind ?? 'measured', status, track: 'workers', trialId, mode: o.mode, blockId: `block-${o.block}`, attemptId: `${trialId}-a1`,
+    configuration: { candidateSha: verified ? sha : null, inferenceDestination: 'cloud', providerAccountReference: o.account ?? null, cacheCondition: 'warm', localHost: o.mode === 'C1' ? null : 'arm64-laptop', cloudHost: o.mode === 'L1' ? null : 'cloud-run-x86' },
+    assistant: null,
+    timings: { clockDomain: ran ? (o.clockDomain ?? 'server-monotonic') : null, startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: verified ? ms : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
+    resources: { localWorkerHours: null, cloudWorkerHours: null, integrationAndVerificationHours: null, workerHoursProvenance: 'unavailable', workerHoursSource: null, requestedVcpus: ran ? 2 : null, requestedMemoryGib: ran ? 4 : null, peakRssMiB: null, energyKwh: null, providerUsageByRole: ran ? [{ role: 'coding', inputTokens: 100_000 + o.block, outputTokens: 8_000, cacheTokens: null, provenance: 'observed', source: 'harness' }] : [], usageCoverage: ran ? 'partial' : 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true },
+    cost: { currency: 'USD', platformPaidActual: ran ? actual : null, platformPaidEstimated: ran ? (o.estimatedUsd === undefined ? null : o.estimatedUsd) : null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, localCostProvenance: 'unavailable', localCostSource: null, rateCardVersion: ran ? 'rc-2026-11' : null, settlementStatus: ran ? 'settled' : 'unavailable', exclusions: [] },
+    humanMinutes: ran ? { initialSetup: null, scoping: null, intervention: o.humanIntervened ? 3 : 0, correction: 0, review: 2, permittedAction: actions > 0 ? actions : null, provenance: 'observed', source: 'reviewer log' } : { initialSetup: null, scoping: null, intervention: null, correction: null, review: null, permittedAction: null, provenance: 'unavailable', source: null },
+    quality: { allRequiredChecksPassed: verified ? !o.failed : null, criteria, withinDeclaredLimits: verified ? true : null },
+    operations: { repairCount: ran ? 0 : null, deniedActionCount: ran ? 0 : null, cleanupConfirmed: ran ? true : null, externalPrUrl: null, humanIntervened: ran ? (o.humanIntervened === undefined ? false : o.humanIntervened) : null, permittedHumanActions: ran ? actions : null },
+    failures: status === 'failed' || status === 'timed_out' || status === 'denied_start' ? [{ category: status, detail: o.failureDetail ?? null }] : [],
+    confounders: [],
+    artifactReferences: verified ? [`#/evidence?run=${trialId}`] : [],
+  };
+}
+
+export interface AssistantOver {
+  readonly route: 'ONLY_ON_DEVICE' | 'ONLY_IN_CLOUD';
+  readonly index: number;
+  readonly ms?: number;
+  readonly firstMs?: number | null;
+  readonly observed?: 'ON_DEVICE' | 'IN_CLOUD' | null;
+  readonly warmup?: boolean;
+  readonly status?: RawRecord['status'];
+}
+
+export function rawAssistant(o: AssistantOver): RawRecord {
+  const status = o.status ?? 'completed';
+  const ran = status !== 'not_run';
+  const device = o.route === 'ONLY_ON_DEVICE';
+  const trialId = `a-${device ? 'dev' : 'cloud'}-${o.index}${o.warmup ? '-w' : ''}`;
+  const ms = o.ms ?? 1000 + o.index * 10;
+  return {
+    dataKind: 'measured', status, track: 'assistant', trialId, mode: o.route, blockId: null, attemptId: `${trialId}-a1`,
+    configuration: { candidateSha: null, inferenceDestination: device ? 'device' : 'cloud', providerAccountReference: null, cacheCondition: 'warm', localHost: null, cloudHost: null },
+    assistant: {
+      fixtureId: `brief-${String((o.index % 10) + 1).padStart(2, '0')}`, requestedMode: o.route, observedInferenceSource: ran ? (o.observed === undefined ? (device ? 'ON_DEVICE' : 'IN_CLOUD') : o.observed) : null, sdkVersion: '12.5.0', schemaValid: ran ? true : null, warmup: o.warmup ?? false,
+      payloadSha256: '9'.repeat(63) + String(o.index % 10), semanticReview: { reviewer: null, routeLabelHidden: null, retainedFacts: null, missingFacts: null, inventedRequirements: null },
+      providerInputTokens: null, providerOutputTokens: null, inputBytes: ran ? 2048 : null, outputBytes: ran ? 512 : null,
+    },
+    timings: { clockDomain: ran ? 'browser-monotonic' : null, startedAtUtc: null, endedAtUtc: null, firstOutputMs: ran ? (o.firstMs === undefined ? null : o.firstMs) : null, generationCompleteMs: ran ? ms : null, schemaValidationMs: null, endToEndVerifiedMs: null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
+    resources: { localWorkerHours: null, cloudWorkerHours: null, integrationAndVerificationHours: null, workerHoursProvenance: 'unavailable', workerHoursSource: null, requestedVcpus: null, requestedMemoryGib: null, peakRssMiB: null, energyKwh: null, providerUsageByRole: [], usageCoverage: 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true },
+    cost: { currency: 'USD', platformPaidActual: null, platformPaidEstimated: null, customerDirectActual: null, allocatedFixedCost: null, localHardwareEnergyCost: null, localCostProvenance: 'unavailable', localCostSource: null, rateCardVersion: null, settlementStatus: 'unavailable', exclusions: [] },
+    humanMinutes: { initialSetup: null, scoping: null, intervention: null, correction: null, review: null, permittedAction: null, provenance: 'unavailable', source: null },
+    quality: { allRequiredChecksPassed: null, criteria: [], withinDeclaredLimits: null },
+    operations: { repairCount: null, deniedActionCount: null, cleanupConfirmed: null, externalPrUrl: null, humanIntervened: false, permittedHumanActions: null },
+    failures: [], confounders: [], artifactReferences: ran ? [`#/evidence?run=${trialId}`] : [],
+  };
+}
+
+/** Five paired blocks of L1 and C1, all passing. */
+export function pairedWorkers(blocks = 5): RawRecord[] {
+  return Array.from({ length: blocks }, (_, i) => [rawWorker({ mode: 'L1', block: i + 1, ms: 1_200_000 + i * 10_000 }), rawWorker({ mode: 'C1', block: i + 1, ms: 960_000 + i * 10_000 })]).flat();
+}

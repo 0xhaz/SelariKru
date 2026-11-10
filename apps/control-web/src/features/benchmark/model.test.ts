@@ -529,7 +529,7 @@ describe('the winner badge', () => {
     const dims: [string, string][] = [['starterSha', 'starter'], ['verifierSha', 'verifier'], ['harness', 'harness'], ['codingModel', 'model']];
     for (const [field, word] of dims) {
       const records = completeWorkers('measured');
-      records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, config: { [field]: 'different' } });
+      records[0] = workerRecord({ mode: 'L1', index: 0, dataKind: 'measured', ms: 1_200_000, config: { [field]: field === 'starterSha' ? 'b'.repeat(40) : 'different' } }); // a measured starter must still be a full commit SHA
       const cohort = workersOf(benchmarkFile({ records }));
       expect(comparison(cohort, 'L1-C1').verdict.kind).toBe('none');
       expect(reasonsOf(comparison(cohort, 'L1-C1'))).toContain(`Not the same ${word}`);
