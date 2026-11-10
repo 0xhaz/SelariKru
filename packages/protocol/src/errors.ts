@@ -56,6 +56,8 @@ export const ERROR_CODES = [
   'run_closed', 'runner_not_found', 'outside_plan_scope', 'resume_refused', 'no_run', 'path_not_allowed',
   /** The database aborted the transaction to break a deadlock or a serialization conflict. Nothing was recorded; the same request may be sent again. */
   'transaction_conflict',
+  /** Project Brain: no such source, revision or conflict; a source already revoked; a conflict already settled; a manifest from work whose data stays on the device. */
+  'brain_source_not_found', 'brain_source_revoked', 'brain_conflict_not_found', 'brain_conflict_resolved', 'brain_manifest_restricted',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

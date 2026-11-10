@@ -13,3 +13,4 @@ export * from './assignment.ts';
 export * from './terminal.ts';
 export * from './onboarding.ts';
 export * from './settings.ts';
+export * from './brain.ts';

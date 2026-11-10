@@ -1,5 +1,5 @@
-import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
-import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
+import { BrainBundleSchema, TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
+import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type RepoManifest, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 import type { RunnerSettings } from './settings.ts';
 
@@ -21,6 +21,8 @@ export const ClaimedLeaseSchema = z
     streamable: z.boolean().default(false),
     /** Whether this attempt can host a control session at all. The control API still re-checks policy and the rest for every ticket. Absent: it cannot. */
     controllable: z.boolean().default(false),
+    /** The Project Brain's context for this task, filtered by the server for this runner's location. Data for the worker to read, never an instruction. Absent or unreadable: none. */
+    context: BrainBundleSchema.nullable().catch(null).default(null),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
@@ -61,6 +63,8 @@ export interface RunnerApi {
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
   /** One batch of the attempt's live output. Rejects with `LeaseLostError` when this attempt is no longer the runner's. Never awaited in the attempt's own path. */
   terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>): Promise<void>;
+  /** What this checkout holds at the task's base commit, for the Project Brain. Counts and hashes only. Absent: this runner sends none. */
+  brainManifest?(lease: LeaseRef, manifest: RepoManifest): Promise<void>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -122,5 +126,8 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>) {
     await this.post('/v1/runners/terminal', { lease, ...batch }, 5_000);
+  }
+  async brainManifest(lease: LeaseRef, manifest: RepoManifest) {
+    await this.post('/v1/runners/brain/manifest', { lease, manifest }, 10_000);
   }
 }

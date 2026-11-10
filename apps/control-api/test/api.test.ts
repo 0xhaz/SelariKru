@@ -44,6 +44,12 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/events?after=0`],
   ['GET', `/v1/projects/${PROJECT}/attempts/a1/terminal`],
   ['POST', '/v1/runners/pairing-codes'],
+  ['GET', `/v1/projects/${PROJECT}/brain`],
+  ['GET', `/v1/projects/${PROJECT}/brain/sources/a1/revisions/a1`],
+  ['POST', `/v1/projects/${PROJECT}/brain/notes`],
+  ['POST', `/v1/projects/${PROJECT}/brain/sources/a1/revoke`],
+  ['POST', `/v1/projects/${PROJECT}/brain/conflicts/a1/keep`],
+  ['GET', `/v1/projects/${PROJECT}/attempts/a1/context`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],
@@ -51,6 +57,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/result'],
   ['POST', '/v1/runners/task'],
   ['POST', '/v1/runners/terminal'],
+  ['POST', '/v1/runners/brain/manifest'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 

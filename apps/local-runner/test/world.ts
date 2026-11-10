@@ -55,6 +55,10 @@ export interface WorldOptions {
   setupComplete?: () => Promise<{ deadlineAt: string }>;
   /** Null: a lease with no recorded model. */
   assignment?: RecordedAssignment | null;
+  /** The Project Brain context the claim delivered. Default: none. */
+  context?: ClaimedLease['context'];
+  /** What the manifest upload does. Default: succeeds. */
+  brainManifest?: () => Promise<void>;
 }
 
 export async function makeWorld(o: WorldOptions = {}): Promise<World> {
@@ -109,7 +113,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
     classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
   } as TaskSpec;
-  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment };
+  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment, context: o.context ?? null };
 
   let hb = 0;
   const published: RunnerResult[] = [];
@@ -130,6 +134,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     }),
     setupComplete: vi.fn(async () => (o.setupComplete ? o.setupComplete() : { deadlineAt: lease.deadlineAt })),
     terminal: vi.fn(async () => undefined),
+    brainManifest: vi.fn(async () => (o.brainManifest ? o.brainManifest() : undefined)),
   } as unknown as World['api'];
 
   return {

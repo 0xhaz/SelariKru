@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import { promisify } from 'node:util';
@@ -199,4 +200,44 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
   const ignoreItems = keep.filter((k) => /(^|\/)\.gitignore$/.test(k.path) && (k.mode === '100644' || k.mode === '100755'));
   const baseIgnores = new Map(ignoreItems.map((k) => [k.path, blobs.get(k.oid)!] as const));
   return { destDir, fileCount: written.size, excluded, skipped, baseline: await snapshotTree(destDir), baseIgnores };
+}
+
+/** The documents a repository manifest names by hash: the README, agent instructions files and top-level docs. */
+const MANIFEST_DOC = /^(?:README(?:\.[A-Za-z0-9]+)?|AGENTS\.md|CLAUDE\.md|docs\/[A-Za-z0-9_.-]+\.md)$/i;
+const MANIFEST_MAX_DOCS = 50;
+const MANIFEST_MAX_DOC_BYTES = 1024 * 1024;
+
+export interface RepoManifestRead {
+  readonly commit: string;
+  readonly fileCount: number;
+  readonly totalBytes: number;
+  readonly docs: readonly { readonly path: string; readonly bytes: number; readonly sha256: string }[];
+}
+
+/**
+ * What the Project Brain records about a checkout at one commit: how many files and bytes, and the sha256 of a few named documents. Read from git objects with
+ * `ls-tree` and `cat-file` only; nothing in the repository runs, and paths a workspace never receives (`isExcludedPath`) are not counted or named.
+ */
+export async function readRepoManifest(repoPath: string, sha: string): Promise<RepoManifestRead> {
+  if (!SHA.test(sha)) throw new BundleError('base is not a full commit id');
+  const { stdout } = await execFileP('git', ['-C', repoPath, 'ls-tree', '-r', '-l', '-z', '--full-tree', sha], { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, env: gitEnv() });
+  let fileCount = 0;
+  let totalBytes = 0;
+  const docs: { path: string; oid: string; bytes: number }[] = [];
+  for (const rec of stdout.toString('utf8').split('\0')) {
+    if (!rec) continue;
+    const tab = rec.indexOf('\t');
+    const [, type, oid, size] = rec.slice(0, tab).trim().split(/\s+/);
+    const path = rec.slice(tab + 1);
+    if (type !== 'blob' || !oid || isExcludedPath(path)) continue;
+    const bytes = Number(size);
+    fileCount += 1;
+    totalBytes += Number.isFinite(bytes) ? bytes : 0;
+    if (MANIFEST_DOC.test(path) && docs.length < MANIFEST_MAX_DOCS && Number.isFinite(bytes) && bytes <= MANIFEST_MAX_DOC_BYTES) docs.push({ path, oid, bytes });
+  }
+  const blobs = await readBlobs(repoPath, docs.map((d) => d.oid));
+  return {
+    commit: sha, fileCount, totalBytes,
+    docs: docs.sort((a, b) => (a.path < b.path ? -1 : 1)).map((d) => ({ path: d.path, bytes: d.bytes, sha256: createHash('sha256').update(blobs.get(d.oid) ?? Buffer.alloc(0)).digest('hex') })),
+  };
 }

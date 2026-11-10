@@ -8,3 +8,4 @@ export * from './runtime.ts';
 export { approvalUnavailableReason, ApprovalDestinationSchema, DESTINATION_OPERATIONS, ADVISORY_APPROVAL_OPERATIONS, LeaseGrantSchema, requiresDestination, WORKER_APPROVAL_OPERATIONS, WorkerApprovalOperationSchema, ModelSelectionSchema, RecordedAssignmentSchema, RunnerHarnessReportSchema, NO_HARNESS_CATALOG, type RunnerHarnessReport, type ApprovalDestination, type LeaseGrant, type WorkerApprovalOperation, type CatalogModel, type CatalogProvider, type HarnessCatalog, type ModelSelection, type RecordedAssignment } from '@selarikru/domain';
 export * from './control.ts';
 export * from './onboarding.ts';
+export * from './brain.ts';

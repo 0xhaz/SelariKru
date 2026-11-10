@@ -43,6 +43,10 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   `model_assignments` rows ordered by project, scope kind, scope key and revision, every one locked before the first event, then the event sequence. Two
  *   of them lock in the same order, so they wait rather than cross. They take no scheduler lock, run row or status row. The claim poll reads settings rows
  *   after the scheduler lock without locking them, so a save is either committed before the claim's reads or waits for the claim to finish.
+ * - the Project Brain (apps/control-api/src/brain.ts: a sync, an owner's note, a revocation, a settled conflict, a runner's manifest, and the context bundle built at
+ *   claim): the project's `brain_heads` row and nothing else. It is taken with no other lock held, never inside the claim's transaction (the bundle is built after the
+ *   claim committed), and while it is held only brain tables are written and every other table is only read, without a lock. It appends no event. So it takes no
+ *   scheduler lock, run row, status row or event sequence, and no path above takes it.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

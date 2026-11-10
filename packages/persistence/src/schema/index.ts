@@ -8,3 +8,4 @@ export * from './usage.ts';
 export * from './control.ts';
 export * from './onboarding.ts';
 export * from './settings.ts';
+export * from './brain.ts';

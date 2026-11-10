@@ -11,6 +11,7 @@ import { parseBody } from './routes-owner.ts';
 import { loadSpecRow, newId } from './store.ts';
 import { acknowledgeRunnerConfig, finishCancelledRuns, runnerConfigFor } from './settings.ts';
 import { attemptStreamable } from './terminal.ts';
+import { bundleForAttempt } from './brain.ts';
 
 const runnerOf = (req: FastifyRequest): Runner => {
   const p = req.principal;
@@ -118,7 +119,14 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const runnerConfig = await runnerConfigFor(db, runner.tenantId, runner.runnerId);
     if (outcome.ok) {
       const priorFailure = outcome.lease.attemptNumber > 1 ? await priorFailureOf(outcome.lease) : null;
-      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}) }, reason: null, skipped: outcome.skipped, config: runnerConfig });
+      // The Project Brain's context for this task and this runner's location. The claim is committed: a failure here sends the lease without context, never an error.
+      let context = null;
+      try {
+        context = await bundleForAttempt(db, outcome.lease, now());
+      } catch (err) {
+        app.log.warn({ err, attemptId: outcome.lease.attemptId }, 'building the context bundle failed; the lease goes without one');
+      }
+      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}), context }, reason: null, skipped: outcome.skipped, config: runnerConfig });
     }
     return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped, config: runnerConfig });
   });
