@@ -72,8 +72,8 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
   async function priorFailureOf(lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptNumber: number }): Promise<string | null> {
     const earlier = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason }).from(schema.attempts).where(and(
       eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.taskId, lease.taskId), eq(schema.attempts.revision, lease.revision), lt(schema.attempts.attemptNumber, lease.attemptNumber))).orderBy(desc(schema.attempts.attemptNumber));
-    // A sandbox that could not be set up says nothing about the worker's code, so a repair is told about the last attempt that actually ran.
-    const prior = earlier.find((a) => !a.exitReason?.startsWith(INFRASTRUCTURE_REASON_PREFIX));
+    // A sandbox that could not be set up, or a runner that went silent, says nothing about the worker's code, so a repair is told about the last attempt that actually ended on its own terms.
+    const prior = earlier.find((a) => a.exitReason !== 'lease_expired' && !a.exitReason?.startsWith(INFRASTRUCTURE_REASON_PREFIX));
     if (!prior) return null;
     const [verdict] = await db.execute(sql`SELECT payload FROM events WHERE tenant_id = ${lease.tenantId} AND project_id = ${lease.projectId} AND attempt_id = ${prior.attemptId} AND type = 'verification.failed' ORDER BY sequence DESC LIMIT 1`);
     const payload = (verdict?.['payload'] ?? null) as { summary?: unknown; failedChecks?: unknown } | null;
@@ -125,7 +125,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post('/v1/runners/heartbeat', guard, async (req, reply) => {
     const runner = runnerOf(req);
     const body = parseBody(HeartbeatRequestSchema, req.body);
-    const result = await scheduler.heartbeat(await leaseFor(runner, body.lease), body.activity);
+    const result = await scheduler.heartbeat(await leaseFor(runner, body.lease), body.activity, body.setupComplete === true ? { setupComplete: true } : {});
     if (!result.ok) throw conflict(result.error);
     return reply.code(200).send(result.value);
   });

@@ -26,6 +26,7 @@ with open(pid_path, 'w') as f: f.write(str(os.getpid()))
 pid, fd = pty.fork()
 if pid == 0:
     env = {k: v for k, v in os.environ.items() if k not in ('BASH_ENV', 'ENV', 'PROMPT_COMMAND')}
+    env['PATH'] = env.get('PATH', '') + ':' + os.path.expanduser('~/.node/bin')
     env.update(TERM='dumb', PAGER='cat', GIT_PAGER='cat', PS1='\\w \\$ \n', HISTFILE='/dev/null', HISTSIZE='0', COLUMNS='120', LINES='40')
     try:
         os.execvpe('bash', ['bash', '--noediting', '--noprofile', '--norc', '-i'], env)

@@ -51,6 +51,8 @@ export interface WorldOptions {
   onControlStream?: (stream: FakeStream, args: readonly string[]) => void;
   /** What the claim decided about hosting a control session. Default false. */
   controllable?: boolean;
+  /** What the server answers when setup is reported done. Default: the lease's own deadline. */
+  setupComplete?: () => Promise<{ deadlineAt: string }>;
   /** Null: a lease with no recorded model. */
   assignment?: RecordedAssignment | null;
 }
@@ -126,6 +128,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
       if (o.publishThrows) throw new LeaseLostError();
       published.push(r);
     }),
+    setupComplete: vi.fn(async () => (o.setupComplete ? o.setupComplete() : { deadlineAt: lease.deadlineAt })),
     terminal: vi.fn(async () => undefined),
   } as unknown as World['api'];
 

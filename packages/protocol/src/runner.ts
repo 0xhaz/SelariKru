@@ -44,7 +44,8 @@ export type TerminalLine = z.infer<typeof TerminalLineSchema>;
 export const TerminalUploadRequestSchema = z.object({ lease: LeaseRefSchema, seq: z.number().int().min(0), lines: z.array(TerminalLineSchema).max(TERMINAL_MAX_BATCH_LINES), dropped: z.number().int().min(0), ended: z.boolean() }).strict();
 export type TerminalUploadRequest = z.infer<typeof TerminalUploadRequestSchema>;
 
-export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema, activity: ToolNameSchema.optional() }).strict();
+/** `setupComplete`: the sandbox is ready and the worker is about to start. */
+export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema, activity: ToolNameSchema.optional(), setupComplete: z.literal(true).optional() }).strict();
 
 export const ResultRequestSchema = z
   .object({

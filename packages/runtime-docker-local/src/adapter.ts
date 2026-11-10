@@ -17,8 +17,8 @@ import { redactSecrets } from '@selarikru/protocol';
 import { SbxControlShell, controlShellArgs } from './control-shell.ts';
 import { assertSafeWorkspace, auditMounts } from './guards.ts';
 import { isOurSandbox, sandboxName, taskPrefix } from './names.ts';
-import type { SbxCommandRunner } from './sbx.ts';
-import { EXACT_VERSION, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT } from './toolchain.ts';
+import type { SbxCommandRunner, SbxResult } from './sbx.ts';
+import { EXACT_VERSION, NODE_TARBALL_SHA256, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT } from './toolchain.ts';
 
 export class SandboxCreateError extends Error {
   constructor(detail: string) {
@@ -71,11 +71,23 @@ interface SbxListEntry {
   workspaces: string[];
 }
 
-/** The end of a step's stderr, where the error is. Redacted: this goes to the runner's log. */
-const tail = (stderr: string): string | null => {
-  const t = redactSecrets(stderr).trim();
-  return t === '' ? null : t.slice(-240);
-};
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+const CONTROL = /[\u0000-\u0009\u000b-\u001f\u007f]/g;
+const MAX_CAUSE_CHARS = 160;
+const MAX_DETAIL_CHARS = 1500;
+
+/**
+ * What a failed step said, redacted. stderr when there is any, else stdout: `pnpm install` reports a stale lockfile on stdout with nothing on stderr. `cause` is one short line
+ * for the published reason, preferring the line that names the error, since what follows it is often advice. `detail` is the end of the output, for the runner's log.
+ */
+function stepOutput(r: SbxResult): { readonly cause: string; readonly detail: string } | null {
+  const text = redactSecrets((r.stderr.trim() !== '' ? r.stderr : r.stdout).replace(ANSI, '').replace(CONTROL, '')).trim();
+  if (text === '') return null;
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const cause = (lines.find((l) => /\bERR_[A-Z0-9_]+|\berror\b/i.test(l)) ?? lines.at(-1)!).slice(0, MAX_CAUSE_CHARS).replace(/[.:;,\s]+$/, '');
+  const tail = text.slice(-MAX_DETAIL_CHARS);
+  return { cause, detail: tail.includes(cause) ? tail : `${cause}\n${tail}` };
+}
 
 const stateOf = (status: string): SandboxState => (status === 'running' ? 'running' : status === 'stopped' ? 'stopped' : 'unknown');
 
@@ -261,7 +273,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
 
   /**
    * Installs the pinned toolchain in this sandbox, then the frozen dependencies, through `sbx exec` like everything else here. Never throws. A failed step ends the sequence; the
-   * caller's `reason` is written by this adapter and safe to publish, and the raw stderr stays in `detail`, redacted and for the runner's log only.
+   * caller's `reason` is this adapter's sentence plus one short redacted line of the step's output, and the fuller output stays in `detail`, redacted and for the runner's log only.
    */
   async provision(handle: SandboxHandle, spec: ToolchainSpec, opts: ProvisionOptions = {}): Promise<ProvisionResult> {
     if (!EXACT_VERSION.test(spec.nodeVersion) || !EXACT_VERSION.test(spec.pnpmVersion)) return { ok: false, reason: 'invalid toolchain version', detail: null };
@@ -271,7 +283,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
     let arch: string | null = null;
     const steps: readonly { readonly label: string; readonly args: readonly string[]; readonly limitMs: number; readonly failed: (code: number | null) => string; readonly done?: (stdout: string) => void }[] = [
       {
-        label: 'Node install', args: ['exec', handle.sandboxId, 'sh', '-c', PROVISION_NODE_SCRIPT, 'sh', node], limitMs: this.t.provisionNodeMs,
+        label: 'Node install', args: ['exec', handle.sandboxId, 'sh', '-c', PROVISION_NODE_SCRIPT, 'sh', node, NODE_TARBALL_SHA256[node]?.x64 ?? '', NODE_TARBALL_SHA256[node]?.arm64 ?? ''], limitMs: this.t.provisionNodeMs,
         failed: (code) => ({ 64: 'unsupported sandbox architecture', 65: `could not download Node ${node} from nodejs.org`, 66: `the Node ${node} download failed its SHA-256 check against nodejs.org's SHASUMS256.txt`, 67: `could not unpack Node ${node}` } as Record<number, string>)[code ?? -1] ?? `Node install exited ${code}`,
         done: (stdout) => { arch = /(?:x64|arm64)/.exec(stdout)?.[0] ?? null; },
       },
@@ -289,8 +301,11 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
       const timeoutMs = Math.max(1, Math.min(step.limitMs, deadlineMs - Date.now()));
       const r = await this.sbx.run(step.args, { timeoutMs, ...(opts.signal ? { signal: opts.signal } : {}) }).catch((err: unknown) => ({ code: null, stdout: '', stderr: err instanceof Error ? err.message : 'error', timedOut: false }));
       if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', detail: null };
-      if (r.timedOut) return { ok: false, reason: `${step.label} timed out`, detail: tail(r.stderr) };
-      if (r.code !== 0) return { ok: false, reason: step.failed(r.code), detail: tail(r.stderr) };
+      if (r.timedOut || r.code !== 0) {
+        const said = stepOutput(r);
+        const what = r.timedOut ? `${step.label} timed out` : step.failed(r.code);
+        return { ok: false, reason: said ? `${what}: ${said.cause}` : what, detail: said?.detail ?? null };
+      }
       step.done?.(r.stdout);
     }
     this.provisioned.add(handle.sandboxId);

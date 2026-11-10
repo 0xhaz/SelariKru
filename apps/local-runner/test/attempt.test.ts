@@ -214,8 +214,8 @@ describe('runAttempt', () => {
   it('sandbox failure never falls back to host mode', async () => {
     const { w, deps } = await setup({ fake: { failCreate: true, createLeavesOrphan: true } });
     const report = await runAttempt(deps, w.lease);
-    expect(report.outcome).toBe('failed');
-    expect(w.api.published[0]).toMatchObject({ outcome: 'failed' });
+    expect(report.outcome).toBe('infrastructure_failed');
+    expect(w.api.published[0]).toMatchObject({ outcome: 'infrastructure_failed' });
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/sandbox/i);
     // no agent ever started, on the host or anywhere else
     expect(w.sbx.streams).toHaveLength(0);
@@ -406,11 +406,75 @@ describe('toolchain provisioning', () => {
     expect(published.outcome).toBe('infrastructure_failed');
     expect(published.reason).toMatch(/^provisioning_failed: /);
     expect(published.reason).toMatch(reason);
-    expect(published.reason).not.toContain('boom');
+    expect(published.reason).toContain('boom in');
     expect(published.reportedUsage?.setupSeconds).toEqual(expect.any(Number));
     expect(w.sbx.streams).toHaveLength(0);
     expect([...w.sbx.sandboxes.keys()]).toEqual(['hq-askwell-jim']);
     expect(w.logs.join('\n')).toContain('boom in');
+  });
+
+  it('a step that said why only on stdout leaves the cause in the runner\'s log and on screen', async () => {
+    const stdout = ' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile"\n\nNote that in CI this is the default.\n';
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: { provision: (s) => (s === 'deps' ? { code: 1, stdout, stderr: '', timedOut: false } : undefined) } });
+    await runAttempt(deps, w.lease);
+    expect((w.api.published[0] as { reason: string }).reason).toContain('ERR_PNPM_OUTDATED_LOCKFILE');
+    const logged = w.logs.join('\n');
+    expect(logged).toContain('ERR_PNPM_OUTDATED_LOCKFILE');
+    expect(logged).toContain('Note that in CI');
+  });
+
+  it('the worker\'s time limit starts after setup', async () => {
+    const { w, deps } = await setup({
+      baseFiles: NODE_PROJECT,
+      task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } },
+      fake: { provision: async () => { await new Promise((r) => setTimeout(r, 170)); return undefined; } },
+      agent: async () => { await new Promise((r) => setTimeout(r, 500)); },
+    }, { timeoutScale: 0.8 });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+    expect(w.api.setupComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs inside the deadline the server gives back', async () => {
+    const { w, deps } = await setup({
+      baseFiles: NODE_PROJECT,
+      setupComplete: async () => ({ deadlineAt: new Date(Date.now() + 150).toISOString() }),
+      agent: async () => { await new Promise((r) => setTimeout(r, 2_000)); },
+    });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('failed');
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout/);
+  });
+
+  it('if the server cannot be told, the worker still runs, inside the original deadline', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { throw new Error('502'); } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
+    expect(w.logs.join('\n')).toMatch(/could not report setup/);
+  });
+
+  it('a lost lease at that moment starts no worker', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { throw new LeaseLostError(); } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('lease_lost');
+    expect(w.sbx.streams).toHaveLength(0);
+  });
+
+  it('a sandbox that cannot be created is an infrastructure failure, with its setup time', async () => {
+    const { w, deps } = await setup({ fake: { failCreate: true } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('infrastructure_failed');
+    const published = w.api.published[0] as { reason: string; reportedUsage?: { setupSeconds: number } };
+    expect(published.reason).toMatch(/^provisioning_failed: sandbox unavailable: /);
+    expect(published.reportedUsage?.setupSeconds).toEqual(expect.any(Number));
+  });
+
+  it('a host git that cannot start is an infrastructure failure, before any sandbox', async () => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT });
+    const path = process.env['PATH'];
+    process.env['PATH'] = join(w.root, 'nowhere');
+    try {
+      expect((await runAttempt(deps, w.lease)).outcome).toBe('infrastructure_failed');
+    } finally {
+      process.env['PATH'] = path;
+    }
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/^provisioning_failed: /);
+    expect(w.sbx.calls.some((c) => c[0] === 'create')).toBe(false);
   });
 
   it('secrets in the guest\'s stderr stay out of the runner\'s log', async () => {

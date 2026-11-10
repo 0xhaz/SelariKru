@@ -1020,6 +1020,20 @@ describe('controller', () => {
       expect(JSON.stringify(third.lease)).not.toContain('nodejs.org');
     });
 
+    it('a repair is not told about a lapsed lease either', async () => {
+      const h = harness();
+      const { runner, claim, fail } = await twoWorkerRun(h, 25);
+      const first = await claim();
+      await claim();
+      await fail(first.lease, 'tests in server/ failed');
+      const second = await claim();
+      const lease = { attemptId: second.lease.attemptId, fence: second.lease.fence, leaseToken: second.lease.leaseToken };
+      await post(h.app, '/v1/runners/result', { lease, result: { outcome: 'infrastructure_failed', reason: 'provisioning_failed: x' } }, bearer(runner.token));
+      await t.db.execute(sql`UPDATE attempts SET ended_at = ended_at - interval '1 hour', exit_reason = 'lease_expired' WHERE attempt_id = ${second.lease.attemptId}`);
+      const third = await claim();
+      expect(third.lease.priorFailure).toBe('tests in server/ failed');
+    });
+
     it('a repair after a failed verification carries the failed checks', async () => {
       const h = harness();
       const { v, runId, claim, fail } = await twoWorkerRun(h, 25);

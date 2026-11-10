@@ -26,7 +26,7 @@ export function createScheduler(ctx: SchedulerContext): Scheduler {
   return {
     claimNext: (r, c) => claimNext(ctx, r, c),
     tryClaim: (r, c) => tryClaim(ctx, r, c),
-    heartbeat: (l, activity) => heartbeat(ctx, l, activity),
+    heartbeat: (l, activity, opts) => heartbeat(ctx, l, activity, opts),
     publishResult: (l, r) => publishResult(ctx, l, r),
     expireLeases: (n) => expireLeases(ctx, n),
     expireApprovals: (n) => expireApprovals(ctx, n),

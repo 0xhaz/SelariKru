@@ -294,6 +294,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
 
     // Read from the base commit before any sandbox exists: a pin that cannot be read fails the same way every time, so it blocks instead of spending retries.
     const toolchain = await resolveToolchain(repo, task.baseSha);
+    if (toolchain.kind === 'read_failed') return await finish('infrastructure_failed', `provisioning_failed: ${toolchain.reason}`, null, null);
     if (toolchain.kind === 'unresolved') return await finish('blocked', `toolchain_unresolved: ${toolchain.reason}`, null, null);
     const toolchainSpec: ToolchainSpec | null = toolchain.kind === 'pinned' ? { nodeVersion: toolchain.nodeVersion, pnpmVersion: toolchain.pnpmVersion } : null;
 
@@ -304,12 +305,17 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
 
     const leaseDeadline = Date.parse(lease.deadlineAt);
-    const budgetMs = Math.min(task.limits.timeoutSeconds * 1000 * (deps.timeoutScale ?? 1), Number.isFinite(leaseDeadline) ? Math.max(0, leaseDeadline - Date.now()) : Infinity);
-    deadline = setTimeout(() => {
-      flags.timedOut = true;
-      log('attempt timeout reached; stopping the agent');
-      requestStop();
-    }, budgetMs);
+    const workLimitMs = task.limits.timeoutSeconds * 1000 * (deps.timeoutScale ?? 1);
+    const budgetMs = Math.min(workLimitMs, Number.isFinite(leaseDeadline) ? Math.max(0, leaseDeadline - Date.now()) : Infinity);
+    const armDeadline = (ms: number): void => {
+      if (deadline) clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        flags.timedOut = true;
+        log('attempt timeout reached; stopping the agent');
+        requestStop();
+      }, ms);
+    };
+    armDeadline(budgetMs);
 
     await mkdir(attemptDir, { recursive: true });
     let baseline;
@@ -329,8 +335,9 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     try {
       handle = await deps.runtime.create({ attemptId: lease.attemptId, taskId: task.taskId, workspacePath: workspace, cpus: deps.cpus, memoryMiB: deps.memoryMiB });
     } catch (err) {
-      // No host fallback, ever: the attempt fails.
-      return await finish('failed', `sandbox unavailable: ${err instanceof Error ? err.message : 'error'}`, null, null);
+      // No host fallback, ever. No worker ran either, so this is the infrastructure's failure and spends no repair.
+      markSetup();
+      return await finish('infrastructure_failed', `provisioning_failed: sandbox unavailable: ${err instanceof Error ? err.message : 'error'}`, null, null);
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
@@ -349,13 +356,27 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       // Nothing ran yet, so even the clock running out here is the setup's doing, not the worker's.
       if (flags.timedOut) return await finish('infrastructure_failed', 'provisioning_failed: the attempt timeout was reached during setup', null, null);
       if (!provisioned.ok) {
-        if (provisioned.detail !== null) log(`provisioning detail: ${provisioned.detail}`);
+        // One line each: the log clips a line, and the cause is often not on the last one. The sandbox is gone after this, so this is the only copy.
+        for (const line of (provisioned.detail ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-40)) log(`provisioning output: ${line}`);
         return await finish('infrastructure_failed', `provisioning_failed: ${provisioned.reason}`, null, null);
       }
       log(`toolchain ready: node ${provisioned.nodeVersion} pnpm ${provisioned.pnpmVersion} arch ${provisioned.arch} in ${provisioned.seconds.toFixed(1)}s`);
     }
 
-    launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(budgetMs / 1000)));
+    // The worker's time limit starts here, on both sides, so a slow install does not eat it. If the server cannot be told, its deadline has not moved, and the worker gets what is left of it.
+    let workMs = Math.max(1, budgetMs - (Date.now() - startedMs));
+    try {
+      const granted = Date.parse((await deps.api.setupComplete(ref)).deadlineAt);
+      workMs = Math.max(1, Math.min(workLimitMs, Number.isFinite(granted) ? granted - Date.now() : workMs));
+    } catch (err) {
+      if (err instanceof LeaseLostError) {
+        flags.leaseLost = true;
+        return { outcome: 'lease_lost', reason: null, changeManifest: null };
+      }
+      log(`could not report setup as complete; the original deadline stands: ${err instanceof Error ? err.message : 'error'}`);
+    }
+    armDeadline(workMs);
+    launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
     const harness = harnessEntry.create(launcher);
     let resultOk = false;
     let resultNote = 'the agent produced no result';

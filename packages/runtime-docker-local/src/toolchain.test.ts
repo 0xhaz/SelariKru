@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SbxRuntimeAdapter } from './adapter.ts';
+import { DEFAULT_TIMEOUTS, SbxRuntimeAdapter } from './adapter.ts';
 import { FakeSbx, type FakeOptions } from './fake-sbx.ts';
-import { NODE_MAJOR_PINS, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT, resolveToolchain } from './toolchain.ts';
+import { NODE_MAJOR_PINS, NODE_TARBALL_SHA256, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT, resolveToolchain } from './toolchain.ts';
 
 const execFileP = promisify(execFile);
 
@@ -41,6 +41,24 @@ describe('resolveToolchain', () => {
   it('takes an exact .nvmrc as written, with or without the leading v, and ignores a corepack hash', async () => {
     const { repo, sha } = await repoWith({ ...NODE_PROJECT, '.nvmrc': 'v24.11.0\n', 'package.json': pkg('pnpm@9.12.2+sha512.abcDEF123') });
     expect(await resolveToolchain(repo, sha)).toEqual({ kind: 'pinned', nodeVersion: '24.11.0', pnpmVersion: '9.12.2' });
+  });
+
+  it('has both architectures\' published hashes for every pinned Node', () => {
+    for (const version of Object.values(NODE_MAJOR_PINS)) {
+      expect(NODE_TARBALL_SHA256[version]?.x64).toMatch(/^[0-9a-f]{64}$/);
+      expect(NODE_TARBALL_SHA256[version]?.arm64).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
+  it('a git that cannot start is not mistaken for a repository with no toolchain', async () => {
+    const { repo, sha } = await repoWith(NODE_PROJECT);
+    const path = process.env['PATH'];
+    process.env['PATH'] = join(root, 'nowhere');
+    try {
+      expect(await resolveToolchain(repo, sha)).toMatchObject({ kind: 'read_failed', reason: expect.stringContaining('git') });
+    } finally {
+      process.env['PATH'] = path;
+    }
   });
 
   it('is nothing to do for a repository that names no Node toolchain', async () => {
@@ -91,7 +109,8 @@ describe('SbxRuntimeAdapter.provision', () => {
     expect(r).toMatchObject({ ok: true, arch: 'arm64', nodeVersion: '24.22.1', pnpmVersion: '9.12.2' });
     const [node, pnpm, deps, ...rest] = execs(sbx);
     expect(rest).toEqual([]);
-    expect(node).toEqual(['exec', handle.sandboxId, 'sh', '-c', PROVISION_NODE_SCRIPT, 'sh', '24.22.1']);
+    const pinned = NODE_TARBALL_SHA256['24.22.1']!;
+    expect(node).toEqual(['exec', handle.sandboxId, 'sh', '-c', PROVISION_NODE_SCRIPT, 'sh', '24.22.1', pinned.x64, pinned.arm64]);
     expect(pnpm).toEqual(['exec', handle.sandboxId, 'sh', '-c', PROVISION_PNPM_SCRIPT, 'sh', '24.22.1', '9.12.2']);
     expect(deps).toEqual(['exec', '-w', ws, handle.sandboxId, 'sh', '-c', PROVISION_DEPS_SCRIPT]);
     for (const script of [PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT, PROVISION_DEPS_SCRIPT]) expect(script).not.toMatch(/24\.22\.1|9\.12\.2/);
@@ -155,13 +174,62 @@ describe('SbxRuntimeAdapter.provision', () => {
     expect(execs(sbx)).toHaveLength(2);
   });
 
-  it('stderr is redacted into the detail for logs and never into the reason', async () => {
+  it('a version with no compiled-in hash passes empty ones, leaving the published list as the check', async () => {
+    const { sbx, rt, handle } = await make();
+    await rt.provision(handle, { nodeVersion: '24.11.0', pnpmVersion: '9.12.2' });
+    expect(execs(sbx)[0]!.slice(-3)).toEqual(['24.11.0', '', '']);
+  });
+
+  it('pnpm reporting its error on stdout with an empty stderr still says what went wrong', async () => {
+    const stdout = [
+      'Lockfile is up to date, resolution step is skipped',
+      '\u001b[31m ERR_PNPM_OUTDATED_LOCKFILE\u001b[39m  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with package.json',
+      '',
+      'Note that in CI environments this setting is true by default.',
+      `  Failure reason: ${'specifiers differ '.repeat(200)}`,
+    ].join('\n');
+    const { rt, handle } = await make({ provision: (s) => (s === 'deps' ? { code: 1, stdout, stderr: '', timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).toMatch(/pnpm install --frozen-lockfile failed \(exit 1\): ERR_PNPM_OUTDATED_LOCKFILE/);
+    expect(r.reason.length).toBeLessThanOrEqual(260);
+    expect(r.reason).not.toContain('\u001b');
+    expect(r.detail).toContain('ERR_PNPM_OUTDATED_LOCKFILE');
+    expect(r.detail).toContain('specifiers differ');
+  });
+
+  it.each(['node', 'pnpm', 'deps'] as const)('%s falls back to stdout when stderr is only whitespace', async (step) => {
+    const { rt, handle } = await make({ provision: (s) => (s === step ? { code: 9, stdout: 'first\nthe real cause\n', stderr: ' \n', timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).toContain('the real cause');
+    expect(r.detail).toContain('the real cause');
+  });
+
+  it('prefers stderr when there is any', async () => {
+    const { rt, handle } = await make({ provision: (s) => (s === 'pnpm' ? { code: 70, stdout: 'from stdout', stderr: 'from stderr', timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).toContain('from stderr');
+    expect(r.detail).not.toContain('from stdout');
+  });
+
+  it('a secret on stdout is redacted out of both the reason and the detail', async () => {
+    const token = 'ghp_012345678901234567890123456789012345';
+    const { rt, handle } = await make({ provision: (s) => (s === 'deps' ? { code: 1, stdout: `error: fetch failed with ${token}`, stderr: '', timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).not.toContain(token);
+    expect(r.detail).not.toContain(token);
+  });
+
+  it('stderr is redacted into both the detail and the reason', async () => {
     const leak = 'npm ERR! https://user:ghp_012345678901234567890123456789012345@registry.example/ failed';
     const { rt, handle } = await make({ provision: (s) => (s === 'pnpm' ? { code: 70, stdout: '', stderr: leak, timedOut: false } : undefined) });
     const r = await rt.provision(handle, SPEC);
     expect(r).toMatchObject({ ok: false });
     if (r.ok) throw new Error('unexpected');
-    expect(r.reason).not.toContain('ghp_');
+    expect(r.reason).not.toContain('ghp_012345678901234567890123456789012345');
     expect(r.detail).not.toContain('ghp_012345678901234567890123456789012345');
   });
 
@@ -216,7 +284,7 @@ describe('the guest scripts, in a real shell with stub tools', () => {
     await script('uname', 'echo aarch64');
     await script('curl', opts.curlFails ? 'exit 22' : `
 out=""; url=""
-while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; -*) case "$1" in --connect-timeout|--max-time) shift 2;; *) shift;; esac;; *) url="$1"; shift;; esac; done
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; -*) case "$1" in --connect-timeout|--max-time|--retry|--retry-delay|--proto|--proto-redir) shift 2;; *) shift;; esac;; *) url="$1"; shift;; esac; done
 cp "${served}/$(basename "$url")" "$out"`);
     await script('tar', `touch "${root}/unpacked"; mkdir -p "${home}/.node/bin"`);
     return { home, env: { HOME: home, PATH: `${bin}:/usr/bin:/bin:/sbin` } };
@@ -239,6 +307,34 @@ cp "${served}/$(basename "$url")" "$out"`);
     expect(r.code).toBe(66);
     expect(await unpacked()).toBe(false);
     expect(await stat(join(home, '.node')).then(() => true, () => false)).toBe(false);
+  });
+
+  it('exits 66 and unpacks nothing when the published list agrees with the tarball but the compiled-in hash does not', async () => {
+    const { env } = await stubs({ sums: sums(hash()) });
+    const r = await sh(PROVISION_NODE_SCRIPT, [VERSION, '1'.repeat(64), 'e'.repeat(64)], env);
+    expect(r.code).toBe(66);
+    expect(await unpacked()).toBe(false);
+  });
+
+  it('unpacks when the compiled-in hash for this architecture matches too', async () => {
+    const { env } = await stubs({ sums: sums(hash()) });
+    expect((await sh(PROVISION_NODE_SCRIPT, [VERSION, '1'.repeat(64), hash()], env)).code).toBe(0);
+    expect(await unpacked()).toBe(true);
+  });
+
+  it('only ever fetches over https, redirects included, and its retries fit inside the step limit', () => {
+    const calls = PROVISION_NODE_SCRIPT.split('\n').filter((l) => l.startsWith('curl '));
+    expect(calls).toHaveLength(2);
+    let worst = 0;
+    for (const c of calls) {
+      expect(c).toContain("--proto '=https'");
+      expect(c).toContain("--proto-redir '=https'");
+      const n = (flag: string) => Number(new RegExp(`${flag} (\\d+)`).exec(c)?.[1]);
+      const retries = n('--retry');
+      expect(retries).toBeGreaterThan(0);
+      worst += (retries + 1) * n('--max-time') + retries * n('--retry-delay');
+    }
+    expect(worst).toBeLessThan(DEFAULT_TIMEOUTS.provisionNodeMs / 1000);
   });
 
   it('exits 66 when SHASUMS256.txt has no line for this tarball', async () => {

@@ -253,6 +253,118 @@ describe('claim preconditions', () => {
     expect((await statusOf(t.db, 't1')).status).toBe('blocked');
   });
 
+  describe('the budget hold of a setup failure', () => {
+    const SETUP_FAILED = { outcome: 'infrastructure_failed', reason: 'provisioning_failed: x' } as const;
+    const holds = async () => (await t.db.execute(sql`SELECT state, amount_usd FROM budget_reservations ORDER BY created_at`)).map((r) => String(r['state']));
+    /** Sets the run's limit to exactly `n` of this task's holds, so one held by mistake refuses the next claim. */
+    const limitToHolds = async (n: number) => {
+      const [row] = await t.db.execute(sql`SELECT amount_usd::float AS amount FROM budget_reservations LIMIT 1`);
+      await t.db.execute(sql`UPDATE runs SET budget = ${JSON.stringify({ limitUsd: Number(row!['amount']) * n })}::jsonb`);
+    };
+
+    it('is released, so the same budget still pays for the attempt that runs', async () => {
+      await seedTask(t.db, specFor('t1', { maxAttempts: 1 }));
+      let lease = (await s.claimNext(runner('r1'), CAPS))!;
+      await limitToHolds(1);
+      for (let round = 1; round <= CAPS.maxInfraRetries; round++) {
+        await s.publishResult(lease, SETUP_FAILED);
+        clock.advance(CAPS.infraRetryBackoffMaxSeconds);
+        lease = (await s.claimNext(runner('r1'), CAPS))!;
+        expect(lease, `round ${round}`).not.toBeNull();
+      }
+      expect(await holds()).toEqual([...Array<string>(CAPS.maxInfraRetries).fill('released'), 'reserved']);
+    });
+
+    it('a repair still claims after repeated setup failures', async () => {
+      await seedTask(t.db, specFor('t1', { maxAttempts: 2 }));
+      const first = (await s.claimNext(runner('r1'), CAPS))!;
+      await limitToHolds(2);
+      await s.publishResult(first, { outcome: 'failed', reason: 'tests failed' });
+      let repair = (await s.claimNext(runner('r1'), CAPS))!;
+      for (let round = 1; round <= 2; round++) {
+        await s.publishResult(repair, SETUP_FAILED);
+        clock.advance(CAPS.infraRetryBackoffMaxSeconds);
+        repair = (await s.claimNext(runner('r1'), CAPS))!;
+        expect(repair, `round ${round}`).not.toBeNull();
+      }
+      const published = await s.publishResult(repair, { outcome: 'failed', reason: 'still failing' });
+      expect(published.ok && published.value.repair).toBe('refused');
+      expect(await holds()).toEqual(['settled', 'released', 'released', 'settled']);
+    });
+
+    it('the retry limit still holds with the hold released', async () => {
+      const caps = { ...CAPS, maxInfraRetries: 1 };
+      await seedTask(t.db, specFor('t1'));
+      let lease = (await s.claimNext(runner('r1'), caps))!;
+      await s.publishResult(lease, SETUP_FAILED);
+      clock.advance(caps.infraRetryBackoffMaxSeconds);
+      lease = (await s.claimNext(runner('r1'), caps))!;
+      await s.publishResult(lease, SETUP_FAILED);
+      clock.advance(caps.infraRetryBackoffMaxSeconds);
+      expect(await s.tryClaim(runner('r1'), caps)).toMatchObject({ ok: false, skipped: [{ reason: 'infra_retry_limit_exhausted' }] });
+    });
+
+    it('stays held when the server saw a tool start, whatever the runner says', async () => {
+      await seedTask(t.db, specFor('t1'));
+      const lease = (await s.claimNext(runner('r1'), CAPS))!;
+      await s.heartbeat(lease, 'Bash');
+      await s.publishResult(lease, SETUP_FAILED);
+      expect(await holds()).toEqual(['settled']);
+    });
+
+    it('a lapsed lease stays held: its worker may still have spent', async () => {
+      await seedTask(t.db, specFor('t1'));
+      await s.claimNext(runner('r1'), CAPS);
+      clock.advance(61);
+      await s.expireLeases(clock.now());
+      expect(await holds()).toEqual(['expired']);
+    });
+  });
+
+  describe('the attempt deadline once setup is done', () => {
+    const deadline = async () => new Date(String((await t.db.execute(sql`SELECT deadline_at FROM attempts`))[0]!['deadline_at'])).getTime();
+
+    it('restarts the attempt\'s own window from now, and says so', async () => {
+      await seedTask(t.db, specFor('t1', { timeoutSeconds: 100 }));
+      const lease = (await s.claimNext(runner('r1'), CAPS))!;
+      clock.advance(40);
+      const r = await s.heartbeat(lease, undefined, { setupComplete: true });
+      expect(r.ok && r.value.deadlineAt).toBe(new Date(clock.now().getTime() + 100_000).toISOString());
+      expect(await deadline()).toBe(clock.now().getTime() + 100_000);
+    });
+
+    it('moves once only: a runner cannot keep pushing it out', async () => {
+      await seedTask(t.db, specFor('t1', { timeoutSeconds: 100 }));
+      const lease = (await s.claimNext(runner('r1'), CAPS))!;
+      clock.advance(40);
+      await s.heartbeat(lease, undefined, { setupComplete: true });
+      const fixed = await deadline();
+      clock.advance(40);
+      await s.heartbeat(lease, undefined, { setupComplete: true });
+      expect(await deadline()).toBe(fixed);
+    });
+
+    it('does not move once a tool has started', async () => {
+      await seedTask(t.db, specFor('t1', { timeoutSeconds: 100 }));
+      const lease = (await s.claimNext(runner('r1'), CAPS))!;
+      await s.heartbeat(lease, 'Bash');
+      const before = await deadline();
+      clock.advance(10);
+      await s.heartbeat(lease, undefined, { setupComplete: true });
+      expect(await deadline()).toBe(before);
+    });
+
+    it('an ordinary heartbeat leaves it alone, and reports it', async () => {
+      await seedTask(t.db, specFor('t1', { timeoutSeconds: 100 }));
+      const lease = (await s.claimNext(runner('r1'), CAPS))!;
+      const before = await deadline();
+      clock.advance(10);
+      const r = await s.heartbeat(lease);
+      expect(r.ok && r.value.deadlineAt).toBe(new Date(before).toISOString());
+      expect(await deadline()).toBe(before);
+    });
+  });
+
   it('an unblocked task with no attempts left is refused again, not silently stuck', async () => {
     await seedTask(t.db, specFor('t1', { maxAttempts: 1 }));
     const first = (await s.claimNext(runner('r1'), CAPS))!;

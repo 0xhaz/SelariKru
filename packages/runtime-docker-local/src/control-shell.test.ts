@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { REDACTED, TerminalRedactor, type ControlShellEvent } from '@selarikru/protocol';
 import { CONTROL_HELPER, SbxControlShell, controlKillArgs, controlShellArgs } from './control-shell.ts';
@@ -138,6 +140,30 @@ describe.skipIf(!hasPython)('the guest helper on a real pty', () => {
     }
     return states;
   };
+
+  it('the shell has the toolchain last on PATH, so nothing in it can shadow a system command', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'control-home-'));
+    const child = spawn('python3', ['-I', '-c', CONTROL_HELPER, `h${process.pid}${Date.now()}`], { stdio: ['pipe', 'pipe', 'ignore'], cwd: tmpdir(), env: { HOME: home, PATH: '/usr/bin:/bin' } });
+    let output = '';
+    let held = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      held += chunk;
+      for (let i = held.indexOf('\n'); i >= 0; i = held.indexOf('\n')) {
+        const frame = JSON.parse(held.slice(0, i)) as { o?: string };
+        held = held.slice(i + 1);
+        if (frame.o !== undefined) output += Buffer.from(frame.o, 'base64').toString('utf8');
+      }
+    });
+    try {
+      await vi.waitFor(() => expect(output).toContain('$'), { timeout: 5_000 });
+      child.stdin.write(`${JSON.stringify({ i: 1, d: Buffer.from('echo "P=$PATH="\n').toString('base64') })}\n`);
+      await vi.waitFor(() => expect(output).toContain(`P=/usr/bin:/bin:${home}/.node/bin=`), { timeout: 8_000 });
+    } finally {
+      child.stdin.write('{"x":1}\n');
+      child.kill();
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it('a raw-mode program reports unknown, not echo off', async () => {
     const states = await run(`python3 -I -c 'import tty,time; tty.setraw(0); time.sleep(0.6)'`);

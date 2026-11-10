@@ -104,6 +104,8 @@ export interface HeartbeatReceipt {
   readonly fence: number;
   readonly lastHeartbeatAt: string;
   readonly expiresAt: string;
+  /** When the attempt must be finished by. */
+  readonly deadlineAt: string;
   /** The owner asked to cancel this task. A runner that sees it should stop; the lease is reaped to `cancelled` either way. */
   readonly cancelRequested: boolean;
 }
@@ -168,7 +170,8 @@ export interface ExpiredLease {
 export interface Scheduler {
   claimNext(runner: Runner, caps: Caps): Promise<Lease | null>;
   tryClaim(runner: Runner, caps: Caps): Promise<ClaimOutcome>;
-  heartbeat(lease: Lease, activity?: string): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
+  /** `setupComplete`: the sandbox is ready and the worker is about to start, so its time limit starts now. Honoured once per attempt. */
+  heartbeat(lease: Lease, activity?: string, opts?: { readonly setupComplete?: boolean }): Promise<Result<HeartbeatReceipt, LeaseConflict>>;
   publishResult(lease: Lease, result: PublishResult): Promise<Result<PublishReceipt, LeaseConflict>>;
   expireLeases(now: Date): Promise<readonly ExpiredLease[]>;
   /** Closes pending approvals past their expiry and blocks the tasks waiting on them. Returns the approval ids closed. */

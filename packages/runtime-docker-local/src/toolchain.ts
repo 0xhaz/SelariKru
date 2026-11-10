@@ -6,11 +6,23 @@ import { gitEnv } from './bundle.ts';
 const execFileP = promisify(execFile);
 
 /**
- * Which exact Node a major-only `.nvmrc` means. It is a table, not a lookup of "latest", so every attempt on a base commit gets the same bytes and a release
- * upstream cannot change a verified run. 24.22.1 is the version the platform and the Feedback Board starter are built and tested with. A bump is a deliberate edit here.
+ * Which exact Node a major-only `.nvmrc` means. It is a table, not a lookup of "latest", so a release upstream cannot change which version a base commit runs.
+ * 24.22.1 is the version the platform and the Feedback Board starter are built and tested with. A bump is a deliberate edit here and in `NODE_TARBALL_SHA256`.
  * An `.nvmrc` that already names an exact version is used as written.
  */
 export const NODE_MAJOR_PINS: Readonly<Record<string, string>> = { '24': '24.22.1' };
+
+/**
+ * The linux tarballs' SHA-256, copied from https://nodejs.org/dist/v24.22.1/SHASUMS256.txt on 2026-11-10. The published list is fetched from the same host as the tarball, so on its own
+ * it catches a corrupt or truncated download and nothing more: whoever could replace the tarball could replace the list. These values do not travel with the download, so for a version
+ * listed here a changed tarball is refused as well. A version not listed here, which only an exact `.nvmrc` can reach, has the published list alone.
+ */
+export const NODE_TARBALL_SHA256: Readonly<Record<string, { readonly x64: string; readonly arm64: string }>> = {
+  '24.22.1': {
+    x64: 'eb6728e77c576a35162c122c45ccadf224d89ff00abc8dae46cc2897c6002d7c',
+    arm64: '33c37be234ba8bee041961047b19160f4d7d0f164e8e246f78bdd10feff148b3',
+  },
+};
 
 /** The only shape a version may have by the time it reaches a command line. */
 export const EXACT_VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}$/;
@@ -21,14 +33,20 @@ const PACKAGE_MANAGER = /^pnpm@(\d{1,4}\.\d{1,4}\.\d{1,6})(?:\+[A-Za-z0-9.]+)?$/
 export type ToolchainResolution =
   | { readonly kind: 'none' }
   | ({ readonly kind: 'pinned' } & ToolchainSpec)
-  | { readonly kind: 'unresolved'; readonly reason: string };
+  | { readonly kind: 'unresolved'; readonly reason: string }
+  /** The host could not read the base commit at all. Says nothing about the repository, so it is worth another try. */
+  | { readonly kind: 'read_failed'; readonly reason: string };
+
+class BaseFileReadError extends Error {}
 
 async function readBaseFile(repo: string, sha: string, path: string): Promise<string | null> {
   try {
     const { stdout } = await execFileP('git', ['-C', repo, 'cat-file', 'blob', `${sha}:${path}`], { encoding: 'utf8', maxBuffer: 1024 * 1024, env: gitEnv() });
     return stdout;
-  } catch {
-    return null;
+  } catch (err) {
+    // A numeric code means git ran and reported the path absent. Anything else (git not found, the output limit, a signal) means nothing was learned about the file.
+    if (typeof (err as { code?: unknown }).code === 'number') return null;
+    throw new BaseFileReadError(`git could not read ${path} from the base commit`);
   }
 }
 
@@ -37,7 +55,14 @@ async function readBaseFile(repo: string, sha: string, path: string): Promise<st
  * Node toolchain has nothing to set up. One that names it badly is refused: retrying would repeat the same answer, and guessing would run something other than what it pinned.
  */
 export async function resolveToolchain(repo: string, sha: string): Promise<ToolchainResolution> {
-  const [nvmrc, pkgText, lock] = await Promise.all([readBaseFile(repo, sha, '.nvmrc'), readBaseFile(repo, sha, 'package.json'), readBaseFile(repo, sha, 'pnpm-lock.yaml')]);
+  let files: readonly [string | null, string | null, string | null];
+  try {
+    files = await Promise.all([readBaseFile(repo, sha, '.nvmrc'), readBaseFile(repo, sha, 'package.json'), readBaseFile(repo, sha, 'pnpm-lock.yaml')]);
+  } catch (err) {
+    if (err instanceof BaseFileReadError) return { kind: 'read_failed', reason: err.message };
+    throw err;
+  }
+  const [nvmrc, pkgText, lock] = files;
   let packageManager: unknown;
   if (pkgText !== null) {
     try {
@@ -71,20 +96,21 @@ export const PROVISION_NODE_SCRIPT = `# selarikru-provision:node
 set -eu
 v="$1"
 case "$(uname -m)" in
-  x86_64|amd64) a=x64 ;;
-  aarch64|arm64) a=arm64 ;;
+  x86_64|amd64) a=x64; p="\${2:-}" ;;
+  aarch64|arm64) a=arm64; p="\${3:-}" ;;
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 64 ;;
 esac
 f="node-v$v-linux-$a.tar.gz"
 u="https://nodejs.org/dist/v$v"
 t="$(mktemp -d)"
 trap 'rm -rf "$t"' EXIT
-curl -fsSL --connect-timeout 15 --max-time 240 -o "$t/$f" "$u/$f" || exit 65
-curl -fsSL --connect-timeout 15 --max-time 30 -o "$t/SHASUMS256.txt" "$u/SHASUMS256.txt" || exit 65
+curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 110 --retry 1 --retry-delay 3 -o "$t/$f" "$u/$f" || exit 65
+curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 20 --retry 2 --retry-delay 2 -o "$t/SHASUMS256.txt" "$u/SHASUMS256.txt" || exit 65
 w="$(awk -v f="$f" '$2 == f { print $1; exit }' "$t/SHASUMS256.txt")"
 [ -n "$w" ] || { echo "no checksum listed for $f" >&2; exit 66; }
 h="$(sha256sum "$t/$f" | cut -d' ' -f1)"
 [ "$h" = "$w" ] || { echo "checksum mismatch for $f" >&2; exit 66; }
+[ -z "$p" ] || [ "$h" = "$p" ] || { echo "checksum differs from the pinned value for $f" >&2; exit 66; }
 d="$HOME/.node"
 rm -rf "$d"
 mkdir -p "$d"

@@ -57,20 +57,25 @@ function checkLease(attempt: AttemptRow | undefined, statusRow: { status: string
 }
 
 /** Renews only the active, unexpired fence. Heartbeats are not events. `activity` is the tool the worker last started: a name, never its arguments. */
-export async function heartbeat(ctx: SchedulerContext, lease: Lease, activity?: string): Promise<Result<HeartbeatReceipt, LeaseConflict>> {
+export async function heartbeat(ctx: SchedulerContext, lease: Lease, activity?: string, opts: { readonly setupComplete?: boolean } = {}): Promise<Result<HeartbeatReceipt, LeaseConflict>> {
   return withTx(ctx.db, async (tx) => {
     const statusRow = await lockStatusRow(tx, lease);
     if (!statusRow) return err(conflict(lease, 'stale_fence'));
     const now = ctx.now();
-    const reason = checkLease(await loadAttempt(tx, lease), statusRow, lease, now);
+    const attempt = await loadAttempt(tx, lease);
+    const reason = checkLease(attempt, statusRow, lease, now);
     if (reason) return err(conflict(lease, reason));
     const expiresAt = leaseDeadline(now);
+    const live = attempt!;
+    // The worker's time starts when its sandbox is ready: the attempt's own window, restarted from now. Once only, and never after a tool has started, so a runner cannot keep pushing it out.
+    const rebase = opts.setupComplete === true && live.lastTool === null && live.startedAt !== null && live.detail?.['setupCompletedAt'] === undefined;
+    const deadlineAt = rebase ? new Date(now.getTime() + (live.deadlineAt!.getTime() - live.startedAt!.getTime())) : live.deadlineAt!;
     await tx
       .update(schema.attempts)
-      .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt, ...(activity !== undefined ? { lastTool: activity, lastToolAt: now } : {}) })
+      .set({ lastHeartbeatAt: now, leaseExpiresAt: expiresAt, ...(activity !== undefined ? { lastTool: activity, lastToolAt: now } : {}), ...(rebase ? { deadlineAt, detail: { ...(live.detail ?? {}), setupCompletedAt: now.toISOString() } } : {}) })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
     const cancelRequested = await hasCancelRequest(tx, lease, lease.revision);
-    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), cancelRequested });
+    return ok({ attemptId: lease.attemptId, fence: lease.fence, lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(), cancelRequested });
   });
 }
 
@@ -160,9 +165,12 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
   const runner = { kind: 'worker', id: live.runner ?? lease.runnerId } as const;
   const key: TaskKey = lease;
 
+  // A runner sends this only before it has a launcher, so no model can have run. The server's own record has to agree: a tool it saw start means something ran, and the hold stays.
+  const holdEnd = result.outcome === 'infrastructure_failed' && live.lastTool === null ? 'released' : 'settled';
+
   // An open cancel request wins over whatever the worker reports: the attempt ends, the task is cancelled.
   if (await hasCancelRequest(tx, key, lease.revision)) {
-    await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled');
+    await settle(tx, runScope, reservationIdFor(lease.attemptId), holdEnd);
     await recordAttemptUsage(tx, { scope: runScope, role: spec.role, attempt: live, now }, result);
     // History is kept: the reported head commit (the only pointer to pushed work), the worker's own reason and its cost.
     const reportedReason = result.outcome === 'completed' ? null : result.reason;
@@ -238,7 +246,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: 
     }
   }
 
-  await settle(tx, runScope, reservationIdFor(lease.attemptId), 'settled');
+  await settle(tx, runScope, reservationIdFor(lease.attemptId), holdEnd);
   await recordAttemptUsage(tx, { scope: runScope, role: spec.role, attempt: live, now }, result);
   await closeLease(tx, key, lease.attemptId, now, { outcome: attemptOutcome(state, lease.attemptId), exitReason, headSha: result.outcome === 'completed' ? result.headSha : undefined, keepClaims: result.outcome === 'completed' });
   if (result.outcome === 'completed' && result.changeManifestSha256) {

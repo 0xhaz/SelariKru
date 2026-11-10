@@ -26,6 +26,7 @@ export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
 
 const ClaimResponseSchema = z.object({ lease: ClaimedLeaseSchema.nullable(), reason: z.string().nullable().optional() }).passthrough();
 const HeartbeatResponseSchema = z.object({ cancelRequested: z.boolean() }).passthrough();
+const SetupCompleteResponseSchema = z.object({ deadlineAt: z.string() }).passthrough();
 const TaskResponseSchema = z.object({ task: TaskSpecSchema });
 
 export type RunnerResult = ResultRequest['result'];
@@ -54,6 +55,8 @@ export interface RunnerApi {
   claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]): Promise<{ lease: ClaimedLease | null; reason: string | null }>;
   task(lease: LeaseRef): Promise<TaskSpec>;
   heartbeat(lease: LeaseRef, activity?: string): Promise<{ cancelRequested: boolean }>;
+  /** The sandbox is ready and the worker is about to start. Returns the attempt's deadline, restarted from now. */
+  setupComplete(lease: LeaseRef): Promise<{ deadlineAt: string }>;
   result(lease: LeaseRef, result: RunnerResult): Promise<void>;
   /** One batch of the attempt's live output. Rejects with `LeaseLostError` when this attempt is no longer the runner's. Never awaited in the attempt's own path. */
   terminal(lease: LeaseRef, batch: Omit<TerminalUploadRequest, 'lease'>): Promise<void>;
@@ -101,6 +104,10 @@ export class HttpRunnerApi implements RunnerApi {
   async heartbeat(lease: LeaseRef, activity?: string) {
     const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', activity === undefined ? { lease } : { lease, activity }));
     return { cancelRequested: r.cancelRequested };
+  }
+  async setupComplete(lease: LeaseRef) {
+    const r = SetupCompleteResponseSchema.parse(await this.post('/v1/runners/heartbeat', { lease, setupComplete: true }));
+    return { deadlineAt: r.deadlineAt };
   }
   async result(lease: LeaseRef, result: RunnerResult) {
     await this.post('/v1/runners/result', { lease, result });

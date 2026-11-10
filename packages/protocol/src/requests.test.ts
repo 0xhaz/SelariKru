@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PlanRevisionRequestSchema, ResultRequestSchema } from './index.ts';
+import { HeartbeatRequestSchema, PlanRevisionRequestSchema, ResultRequestSchema } from './index.ts';
 
 const CANARY = 'sk_live_CANARY0123456789abcdefXYZ';
 const spec = (over: Record<string, unknown> = {}) => ({
@@ -43,6 +43,12 @@ describe('runner result fields', () => {
       expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', changeManifestSha256: bad } }).success).toBe(false);
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'failed', reason: 'x', changeManifestSha256: manifest } }).success).toBe(false);
     expect(ResultRequestSchema.safeParse({ lease, result: { outcome: 'completed', headSha: 'abc123' } }).success).toBe(false);
+  });
+
+  it('a heartbeat may say setup is complete, and nothing else about it', () => {
+    expect(HeartbeatRequestSchema.safeParse({ lease, setupComplete: true }).success).toBe(true);
+    expect(HeartbeatRequestSchema.safeParse({ lease, setupComplete: false }).success).toBe(false);
+    expect(HeartbeatRequestSchema.safeParse({ lease, setupComplete: 'yes' }).success).toBe(false);
   });
 
   it('accepts an infrastructure failure with a reason, and only with a reason', () => {

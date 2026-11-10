@@ -112,8 +112,9 @@ export async function reserve(tx: Tx, position: BudgetPosition, r: ReservationDe
 /**
  * Settles a reservation when its attempt ends. The worst-case amount stays consumed: a worker's figure goes to the usage ledger as
  * `estimated` and cannot refund the hold. Only a trusted observed cost reconciles it (`reconcileObservedCost`).
+ * `released` is the one exception and gives the amount back: the attempt ended before anything that could spend existed.
  */
-export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired'): Promise<void> {
+export async function settle(tx: Tx, scope: RunScope, reservationId: string, state: 'settled' | 'expired' | 'released'): Promise<void> {
   await lockBudget(tx, scope);
   await tx
     .update(schema.budgetReservations)
