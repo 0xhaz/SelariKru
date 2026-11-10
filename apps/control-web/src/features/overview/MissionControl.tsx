@@ -144,9 +144,20 @@ function DeliverySummary({ model, stale }: { model: DeliveryModel; stale: boolea
   );
 }
 
-function FleetPanel({ model, stale }: { model: FleetModel; stale: boolean }) {
+function FleetPanel({ model, stale, inPanel }: { model: FleetModel; stale: boolean; inPanel: boolean }) {
   const { working, waiting, idle, lost } = model.summary;
   const parts = [`${working} assigned`, `${waiting} waiting`, `${idle} idle`, ...(lost > 0 ? [`${lost} lost`] : [])];
+  // With the team panel beside the page each worker is already listed there, so this card keeps to one line rather than a second roster.
+  if (inPanel) {
+    return (
+      <Panel title="Fleet" labelId="fleet-title">
+        <p className="text-fg" data-testid="fleet-summary">
+          {model.rows.length === 0 ? <span className="text-muted">No workers have started.</span> : <>{stale ? 'Last confirmed: ' : ''}{model.rows.length} worker{model.rows.length === 1 ? '' : 's'}: {parts.join(' · ')}.</>}
+          {model.rows.length > 0 ? <span className="text-muted"> Each is listed in the Team panel.</span> : null}
+        </p>
+      </Panel>
+    );
+  }
   return (
     <Panel title="Fleet" labelId="fleet-title" aside={model.rows.length > 0 ? `${stale ? 'Last confirmed: ' : ''}${parts.join(' · ')}` : null}>
       {model.rows.length === 0 ? (
@@ -278,9 +289,11 @@ export interface MissionControlProps {
   readonly leaveDemoHref?: string | undefined;
   /** A failure while deriving the view. Thrown here so the route's error boundary, not the shell, takes it. */
   readonly failure?: unknown;
+  /** True while the team panel lists every worker beside the page, so the Fleet card keeps to a summary. */
+  readonly fleetInPanel?: boolean;
 }
 
-export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure }: MissionControlProps) {
+export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure, fleetInPanel = false }: MissionControlProps) {
   if (failure !== undefined) throw failure;
   if (!overview || !snapshot) {
     if (connection === 'unavailable' || connection === 'dead') {
@@ -334,7 +347,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
             <EvidencePanel rows={overview.evidence} simulated={overview.simulated} />
           </div>
           <div className="grid gap-4">
-            <FleetPanel model={overview.fleet} stale={stale} />
+            <FleetPanel model={overview.fleet} stale={stale} inPanel={fleetInPanel} />
             <ResourcesPanel model={overview.usage} />
           </div>
         </div>

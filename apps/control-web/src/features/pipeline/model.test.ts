@@ -452,7 +452,7 @@ describe('fixtures', () => {
     const m = buildPipeline(snapshot, nowMs, nowMs);
     const web = m.rows.find((r) => r.title.includes('contract v2'))!;
     expect(web.why.reasons.map((r) => r.cause)).toEqual(['dependency']);
-    expect(web.why.reasons[0]!.text).toBe('Waiting on Approve contract v1 (needs decision).');
+    expect(web.why.reasons[0]!.text).toBe('Waiting on Approve contract v1 (needs you).');
     expect(m.simulated).toBe(true);
     expect(m.replan?.planRevision).toBe(2);
   });

@@ -7,7 +7,7 @@ import type { AssistantPort } from '../assistant/types.ts';
 import type { ApiResult, OnboardingApi } from './api.ts';
 import { ENTRY_STEPS } from './entry.ts';
 import { BlueprintStep, ConnectionsStep, ExecutionStep, FeasibilityStep, FocusStep, GoalStep, ReadinessStep, SourceStep, StartStep, type StepProps } from './forms.tsx';
-import { EXECUTION_TEXT, INFERENCE_TEXT, Notice, ReadOnlyContext, usd } from './ui.tsx';
+import { EXECUTION_TEXT, FailureText, INFERENCE_TEXT, Notice, ReadOnlyContext, SignInContext, usd } from './ui.tsx';
 import { CONDITION_LABELS, STATE_LABELS, STEPS, furthestStep, reachableSteps, stepIndex, type StepId } from './steps.ts';
 
 export interface OnboardingViewProps {
@@ -18,8 +18,10 @@ export interface OnboardingViewProps {
   readonly hold: RestrictedDraftHold | null;
   readonly mode: 'mock' | 'live';
   readonly leaveDemoHref?: string | undefined;
-  /** Called once a setup is activated: the project now exists, so the shell can open it. */
+  /** Called when a setup is activated on this page: the project now exists, so the shell can open it. Not called for one activated earlier. */
   readonly onActivated?: ((projectId: string) => void) | undefined;
+  /** Signs the person in again, offered where a request failed for the sign-in. */
+  readonly onSignIn?: (() => void) | undefined;
 }
 
 function Stepper({ current, reach, onGo }: { current: StepId; reach: number; onGo: (s: StepId) => void }) {
@@ -74,13 +76,13 @@ function Brief({ view }: { view: View | null }) {
 
 function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock' | 'live'; onResume: (id: string) => void; onNew: () => void }) {
   const [list, setList] = useState<OnboardingList | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ code: string; message: string } | null>(null);
   useEffect(() => {
     let live = true;
     void api.list().then((r) => {
       if (!live) return;
       if (r.ok) setList(r.value);
-      else setError(r.message);
+      else setError({ code: r.code, message: r.message });
     });
     return () => { live = false; };
   }, [api]);
@@ -98,7 +100,7 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
           {ENTRY_STEPS.map((s, i) => <li key={s.label} className="flex gap-2"><span aria-hidden="true" className="w-5 shrink-0 text-right text-muted">{i + 1}</span><span><span className="font-medium">{s.label}.</span> <span className="text-muted">{s.hint}</span></span></li>)}
         </ol>
       </section>
-      {error ? <div className="mt-4"><Notice tone="danger" title="Could not load your setups">{error}</Notice></div> : null}
+      {error ? <div className="mt-4"><Notice tone="danger" title="Could not load your setups"><FailureText code={error.code} message={error.message} /></Notice></div> : null}
       {list && list.items.length > 0 ? (
         <section aria-labelledby="resume-title" className="mt-8">
           <h2 id="resume-title" className="text-base font-semibold">Pick up where you left off</h2>
@@ -120,7 +122,11 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
 }
 
 /** Onboarding wizard. The server owns state; this keeps only the step being looked at. */
-export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActivated }: OnboardingViewProps) {
+export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActivated, onSignIn }: OnboardingViewProps) {
+  return <SignInContext.Provider value={onSignIn ?? null}><Onboarding api={api} adapter={adapter} hold={hold} mode={mode} leaveDemoHref={leaveDemoHref} onActivated={onActivated} /></SignInContext.Provider>;
+}
+
+function Onboarding({ api, adapter, hold, mode, leaveDemoHref, onActivated }: OnboardingViewProps) {
   const query = useHashQuery();
   const projectId = query.get('id');
   const [creating, setCreating] = useState(false);
@@ -147,9 +153,14 @@ export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActi
 
   useEffect(() => { heading.current?.focus(); }, [step]);
 
-  // Activated is the server's word that the project exists: from then on the header names it rather than "No project selected".
-  const activatedId = view?.state === 'activated' ? view.projectId : null;
-  useEffect(() => { if (activatedId !== null) onActivated?.(activatedId); }, [activatedId, onActivated]);
+  // Activated is the server's word that the project exists. Only a change to activated seen here opens it: looking at a setup activated earlier switches nothing.
+  const seenState = useRef<{ projectId: string; state: View['state'] } | null>(null);
+  useEffect(() => {
+    if (!view) return;
+    const before = seenState.current;
+    seenState.current = { projectId: view.projectId, state: view.state };
+    if (view.state === 'activated' && before !== null && before.projectId === view.projectId && before.state !== 'activated') onActivated?.(view.projectId);
+  }, [view, onActivated]);
 
   const openProject = (id: string): void => {
     window.location.hash = `#/onboarding?id=${encodeURIComponent(id)}`;

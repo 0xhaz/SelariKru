@@ -19,6 +19,18 @@ describe('terminal target', () => {
   });
 });
 
+describe('detail on demand', () => {
+  it('builds drawer detail only for the workers asked for, and the same presence for all', () => {
+    const snapshot = snapshotOf({ tasks: [task('a'), task('b')], workers: [worker('w', { taskId: 'a' }), worker('v', { taskId: 'b' })] });
+    const all = buildTeam(snapshot, NOW, NOW);
+    const one = buildTeam(snapshot, NOW, NOW, { detailFor: ['w'] });
+    expect(row(one, 'w').detail).toEqual(row(all, 'w').detail);
+    expect(row(one, 'v').detail.task).toBeNull();
+    expect(row(one, 'v').detail.timeline).toEqual([]);
+    expect(row(one, 'v').presence).toEqual(row(all, 'v').presence);
+  });
+});
+
 describe('three separate signals', () => {
   it('reports activity, health and results independently', () => {
     const snapshot = snapshotOf({ tasks: [task('a')], workers: [worker('w', { taskId: 'a', activity: 'testing' })] });

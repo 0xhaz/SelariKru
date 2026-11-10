@@ -7,11 +7,11 @@ import { hrefFor } from '../../shell/route.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
 import { DecisionCard } from './DecisionCard.tsx';
 import { CHANGED_NOT_SENT_MESSAGE, GONE_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
+import { CHANGED_ON_SCREEN, holdActions, useChangedCards } from './useChangedCards.ts';
 import { confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionsModel } from './model.ts';
 
 type CommandAction = Extract<DecisionAction, { kind: 'command' }>;
 
-const CHANGED_ON_SCREEN = { title: 'This request changed', body: 'What is shown here changed since you last looked at it. Review it again before deciding.' };
 
 function focusById(id: string): void {
   // Focus after the commit that removes or updates the card.
@@ -60,9 +60,6 @@ export interface DecisionsViewProps {
 export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync }: DecisionsViewProps) {
   if (failure !== undefined) throw failure;
 
-  // The fingerprint a person last acknowledged per card. A change on screen is held back until they have looked again.
-  const seen = useRef(new Map<string, string>());
-  const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
   const [refused, setRefused] = useState<Readonly<Record<string, string>>>({});
   const [busy, setBusy] = useState<Readonly<Record<string, string>>>({});
   // Ids only: the dialog always reads the live card, so it can never confirm something that has changed.
@@ -72,28 +69,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   const keys = useRef(new Map<string, string>());
   const cards = model?.cards ?? null;
 
-  useEffect(() => {
-    if (!cards) return;
-    const ids = new Set(cards.map((c) => c.id));
-    const next = new Set([...changedHere].filter((id) => ids.has(id)));
-    let changed = next.size !== changedHere.size;
-    for (const c of cards) {
-      // Nothing known yet means nothing to compare: the first real reading is not a change.
-      if (c.fingerprint === null) {
-        seen.current.delete(c.id);
-        continue;
-      }
-      const was = seen.current.get(c.id);
-      if (was === undefined) seen.current.set(c.id, c.fingerprint);
-      else if (was !== c.fingerprint && !next.has(c.id)) {
-        next.add(c.id);
-        changed = true;
-      }
-    }
-    for (const id of [...seen.current.keys()]) if (!ids.has(id)) seen.current.delete(id);
-    if (changed) setChangedHere(next);
-    // Depends on the cards only; `changedHere` is read as the latest set and rewritten here.
-  }, [cards]);
+  const { changedHere, acknowledge, markChanged, forget } = useChangedCards(cards);
 
   // A deep link lands on its card, once per link.
   const hashHandled = useRef<string | null>(null);
@@ -123,17 +99,16 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     const offline = connection !== 'live';
     const message = offline ? NOT_SENT_MESSAGE : CHANGED_NOT_SENT_MESSAGE;
     setRefused((r) => ({ ...r, [liveConfirm.id]: message }));
-    if (!offline) setChangedHere((s) => new Set(s).add(liveConfirm.id));
+    if (!offline) markChanged(liveConfirm.id);
     setStatus(message);
     focusById(`feedback-${liveConfirm.id}`);
-  }, [confirming, confirmStale, liveConfirm, connection]);
+  }, [confirming, confirmStale, liveConfirm, connection, markChanged]);
 
   const review = useCallback((card: DecisionCardModel) => {
-    if (card.fingerprint !== null) seen.current.set(card.id, card.fingerprint);
-    setChangedHere((s) => { const n = new Set(s); n.delete(card.id); return n; });
+    acknowledge(card);
     setRefused((r) => { const { [card.id]: _gone, ...rest } = r; return rest; });
     focusById(`${card.id}-title`);
-  }, []);
+  }, [acknowledge]);
 
   async function dispatch(card: DecisionCardModel, action: CommandAction): Promise<void> {
     const keyId = `${card.id}:${action.id}:${card.fingerprint}`;
@@ -159,8 +134,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     if (receipt.accepted) {
       setRefused((r) => { const { [card.id]: _x, ...rest } = r; return rest; });
       // The change this card shows next is the person's own decision, so it is not held back as a surprise.
-      seen.current.delete(card.id);
-      setChangedHere((s) => { const n = new Set(s); n.delete(card.id); return n; });
+      forget(card.id);
       setStatus(outcomeMessage(card, action, command, receipt));
       onRefresh();
       focusById(nextId ? `${nextId}-title` : 'decisions-heading');
@@ -169,7 +143,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     const view = rejectionView(receipt.rejection);
     setRefused((r) => ({ ...r, [card.id]: view.text }));
     setStatus(view.text);
-    if (view.changed) setChangedHere((s) => new Set(s).add(card.id));
+    if (view.changed) markChanged(card.id);
     // The screen was wrong about something: show what is true now rather than guessing.
     onResync();
     focusById(`feedback-${card.id}`);
@@ -222,8 +196,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
         <ol className="space-y-4" aria-label="Decisions waiting">
           {model.cards.map((card) => {
             const changedOnScreen = changedHere.has(card.id);
-            const disabledByChange = changedOnScreen ? 'This request changed. Review the update above before deciding.' : null;
-            const actions = disabledByChange ? card.actions.map((a) => (a.kind === 'command' ? { ...a, disabledReason: a.disabledReason ?? disabledByChange } : a)) : card.actions;
+            const actions = holdActions(card.actions, changedOnScreen);
             const feedback = refused[card.id] ?? null;
             return (
               <li key={card.id}>

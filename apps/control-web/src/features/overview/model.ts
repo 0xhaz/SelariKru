@@ -94,7 +94,7 @@ const STATUS: Readonly<Record<TaskView['status'], { label: string; tone: Tone }>
   planned: { label: 'Planned', tone: 'neutral' },
   ready: { label: 'Queued', tone: 'neutral' },
   running: { label: 'Running', tone: 'active' },
-  awaiting_approval: { label: 'Needs decision', tone: 'warning' },
+  awaiting_approval: { label: 'Needs you', tone: 'warning' },
   blocked: { label: 'Blocked', tone: 'warning' },
   verifying: { label: 'Verifying', tone: 'active' },
   verified: { label: 'Verified; awaiting merge', tone: 'success' },
@@ -152,7 +152,7 @@ const ACTIVITY: Readonly<Record<NonNullable<WorkerView['activity']>, { label: st
   testing: { label: 'Testing', tone: 'active' },
   reviewing: { label: 'Reviewing', tone: 'active' },
   waiting_dependency: { label: 'Waiting on another task', tone: 'neutral' },
-  waiting_human: { label: 'Needs decision', tone: 'warning' },
+  waiting_human: { label: 'Needs you', tone: 'warning' },
   waiting_resource: { label: 'Waiting for capacity', tone: 'neutral' },
   blocked_policy: { label: 'Blocked by policy', tone: 'danger' },
 };

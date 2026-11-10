@@ -115,7 +115,7 @@ describe('fleet', () => {
     const { snapshot, nowMs } = await fixtureSnapshot('human-wait');
     const { fleet } = buildOverview(snapshot, nowMs, nowMs);
     expect(fleet.summary).toEqual({ working: 1, waiting: 1, idle: 0, lost: 0 });
-    expect(fleet.rows.find((r) => r.activity.label === 'Needs decision')!.activity.tone).toBe('warning');
+    expect(fleet.rows.find((r) => r.activity.label === 'Needs you')!.activity.tone).toBe('warning');
   });
 
   it('keeps execution and inference as separate fields', async () => {

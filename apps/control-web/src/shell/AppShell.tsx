@@ -132,20 +132,25 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     }
   }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   const overview = built.overview;
+  const query = useHashQuery();
+  // The open drawer lives in the hash (`?worker=`, and `&wtab=` for its tab), so it can be linked to and the view under it stays put.
+  const workerId = query.get('worker');
+  const workerTab = query.get('wtab');
   // Always built: the team panel is on every view. Same containment as the overview: a snapshot that cannot be read fails the Team route and empties the panel, not the shell.
   const builtTeam = useMemo((): { team: TeamModel | null; failure?: unknown } => {
     if (!snapshot) return { team: null };
     try {
-      return { team: buildTeam(snapshot, state.nowMs, liveness, { lastConfirmedMs: state.livenessAsOfMs, stale }) };
+      // Presence for every worker on every tick; the drawer's detail only for the Team route and the open drawer.
+      return { team: buildTeam(snapshot, state.nowMs, liveness, { lastConfirmedMs: state.livenessAsOfMs, stale, detailFor: route === 'team' ? 'all' : workerId !== null ? [workerId] : [] }) };
     } catch (failure) {
       return { team: null, failure };
     }
-  }, [snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
+  }, [route, workerId, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   const team = builtTeam.team;
   const panelStatus = useMemo((): PanelStatus => {
-    if (team) return { kind: 'ready', panel: panelOf(team), stale };
+    if (team) return { kind: 'ready', panel: panelOf(team), stale, confirmedAt };
     return connection === 'unavailable' || connection === 'dead' || builtTeam.failure !== undefined ? { kind: 'unavailable' } : { kind: 'loading' };
-  }, [team, stale, connection, builtTeam.failure]);
+  }, [team, stale, confirmedAt, connection, builtTeam.failure]);
   const panelWide = useMediaQuery(PANEL_WIDE);
   const [foldOpen, setFoldOpen] = useState(false);
   const foldId = useId();
@@ -180,10 +185,6 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     }
   }, [snapshot, state.nowMs, mode, connection]);
   const decisionCount = builtDecisions.decisions?.waiting ?? 0;
-  const query = useHashQuery();
-  // The open drawer lives in the hash (`?worker=`, and `&wtab=` for its tab), so it can be linked to and the view under it stays put.
-  const workerId = query.get('worker');
-  const workerTab = query.get('wtab');
   const opener = useRef<HTMLElement | null>(null);
   const openWorker = (id: string): void => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -262,7 +263,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           <div className="ml-auto flex shrink-0 items-center justify-end gap-x-2 sm:gap-x-3">
             {panelWide ? null : <TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
             <DemoBadge mode={mode} />
-            {attentionCount ? <a data-testid="attention-count" href={hrefFor('overview')} className={`hidden text-sm font-medium underline-offset-2 hover:underline sm:inline ${overview!.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{attentionCount}</a> : null}
+            {/* Below the side panel's width the Team toggle carries the count beside this, so this one waits for the room. */}
+            {attentionCount && panelWide ? <a data-testid="attention-count" href={hrefFor('overview')} className={`hidden text-sm font-medium underline-offset-2 hover:underline sm:inline ${overview!.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{attentionCount}</a> : null}
             <button type="button" aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} className="rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
               <span aria-hidden="true" className="sm:hidden">◐</span>
               <span className="hidden sm:inline">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
@@ -312,7 +314,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
-            <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} />
+            <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} />
           </RouteBoundary>
         ) : null}
         {route === 'team' ? (

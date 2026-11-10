@@ -50,7 +50,7 @@ function App({ account }: { account: AccountInfo }) {
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} />} />;
+  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} onSignIn={() => void signOut(auth)} />} />;
 }
 
 export default function LiveRoot() {

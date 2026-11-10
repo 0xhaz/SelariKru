@@ -152,6 +152,8 @@ export interface Presence {
   /** Time in this state; for `unknown`, how long ago it was last confirmed. */
   readonly since: string;
   readonly sinceIso: string;
+  /** What was last confirmed: the same as `state`, except under `unknown`, where it is the reading from before the session went stale. Never a current fact then. */
+  readonly confirmedState: PresenceState;
 }
 
 export interface TeamRow {
@@ -450,24 +452,29 @@ const PRESENCE_LABEL: Readonly<Record<PresenceState, string>> = { idle: 'Idle', 
  * The word is the panel's; the row's three signals still carry the detail.
  */
 function presenceOf(w: WorkerView, health: WorkerHealthDisplay, stale: boolean, activity: ActivitySignal, blockers: readonly Blocker[], lastConfirmedAt: string, nowMs: number, snapshot: ProjectViewSnapshot): Presence {
-  const at = (state: PresenceState, tone: Tone, detail: string | null, sinceIso = w.enteredStateAt, suffix = ''): Presence => ({ state, label: PRESENCE_LABEL[state], tone, detail, since: `${formatAge(nowMs - Date.parse(sinceIso))}${suffix}`, sinceIso });
+  const at = (state: PresenceState, tone: Tone, detail: string | null, sinceIso = w.enteredStateAt, suffix = ''): Presence => ({ state, label: PRESENCE_LABEL[state], tone, detail, since: `${formatAge(nowMs - Date.parse(sinceIso))}${suffix}`, sinceIso, confirmedState: state });
   if (health.state === 'disconnected' || health.state === 'failed' || w.availability === 'offline') {
     const detail = health.state === 'failed' ? (w.stateReason ? `Failed: ${explain(w.stateReason)}` : 'Failed') : health.state === 'disconnected' ? 'Connection lost' : 'Offline';
     return at('lost', 'danger', detail, lastConfirmedAt, ' ago');
   }
-  if (stale || health.state === 'unknown') return at('unknown', 'neutral', activity.reported ? `Last confirmed: ${activity.label}` : 'Nothing confirmed yet', lastConfirmedAt, ' ago');
-  if (w.activity === 'waiting_human' || w.blockedByApprovalId !== null) {
-    // The operation, never the worker's free text: the panel row is too short to keep a worker's words apart from ours.
-    const operation = w.blockedByApprovalId !== null ? (snapshot.approvals[w.blockedByApprovalId]?.operation ?? null) : null;
-    return at('needs_you', 'warning', operation ? `Decision: ${sentence(operation)}` : 'A decision is waiting');
+  const reading = (): Presence => {
+    if (w.activity === 'waiting_human' || w.blockedByApprovalId !== null) {
+      // The operation, never the worker's free text: the panel row is too short to keep a worker's words apart from ours.
+      const operation = w.blockedByApprovalId !== null ? (snapshot.approvals[w.blockedByApprovalId]?.operation ?? null) : null;
+      return at('needs_you', 'warning', operation ? `Decision: ${sentence(operation)}` : 'A decision is waiting');
+    }
+    if (w.activity === 'blocked_policy') return at('blocked', 'danger', blockers[0]?.text ?? activity.label);
+    if (w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' || blockers.length > 0) return at('blocked', 'neutral', w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' ? activity.label : blockers[0]!.text);
+    if (w.availability === 'assigned') return at('working', health.state === 'suspected_stall' ? 'warning' : 'active', health.state === 'suspected_stall' ? `${activity.label}; progress may be stalled` : activity.label);
+    return at('idle', 'neutral', null);
+  };
+  if (stale || health.state === 'unknown') {
+    return { ...at('unknown', 'neutral', activity.reported ? `Last confirmed: ${activity.label}` : 'Nothing confirmed yet', lastConfirmedAt, ' ago'), confirmedState: reading().state };
   }
-  if (w.activity === 'blocked_policy') return at('blocked', 'danger', blockers[0]?.text ?? activity.label);
-  if (w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' || blockers.length > 0) return at('blocked', 'neutral', w.activity === 'waiting_dependency' || w.activity === 'waiting_resource' ? activity.label : blockers[0]!.text);
-  if (w.availability === 'assigned') return at('working', health.state === 'suspected_stall' ? 'warning' : 'active', health.state === 'suspected_stall' ? `${activity.label}; progress may be stalled` : activity.label);
-  return at('idle', 'neutral', null);
+  return reading();
 }
 
-function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, sessionStale: boolean): TeamRow {
+function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, sessionStale: boolean, withDetail: boolean): TeamRow {
   const reading = effectiveWorkerHealth(w, nowMs, livenessAsOfMs);
   const health = workerHealthDisplay(w, reading, sessionStale);
   const stale = sessionStale || health.state === 'disconnected' || health.state === 'unknown';
@@ -500,7 +507,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
     execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, humanIntervenedAt: attempt?.humanIntervenedAt ?? null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
     blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
-    detail: {
+    detail: !withDetail ? NO_DETAIL : {
       summary: summaryOf(w, activity, health, reading.heartbeatAgeMs, lastConfirmedAt, nowMs, task),
       task: focus ? taskDetail(focus, currentTask !== undefined, attempt, snapshot) : null,
       blockers,
@@ -542,13 +549,19 @@ export interface TeamOptions {
   readonly lastConfirmedMs?: number | null;
   /** True when the session is not live, so nothing shown can be called current. */
   readonly stale?: boolean;
+  /** Whose drawer detail to build: every worker's (the default), or only these. The panel on every view needs none, and the open drawer needs one. */
+  readonly detailFor?: 'all' | readonly string[];
 }
+
+/** The detail of a worker whose drawer is not open: nothing is read for it. */
+const NO_DETAIL: WorkerDetail = { summary: '', task: null, blockers: [], timeline: [], checks: [], artifacts: [], permissions: [], sandbox: [], usage: [] };
 
 /** Everything the Team view shows, derived from one snapshot. Pure; time and liveness are parameters. */
 export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: TeamOptions = {}): TeamModel {
   const workers = Object.values(snapshot.workers);
   const sessionStale = options.stale === true;
-  const rows = sortRows(workers.map((w) => rowOf(w, snapshot, nowMs, livenessAsOfMs, sessionStale)), 'attention');
+  const detailFor = options.detailFor ?? 'all';
+  const rows = sortRows(workers.map((w) => rowOf(w, snapshot, nowMs, livenessAsOfMs, sessionStale, detailFor === 'all' || detailFor.includes(w.workerId))), 'attention');
   const counts = countFleet(workers, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const parts = [[counts.working, 'assigned'], [counts.waiting, 'waiting'], [counts.idle, 'idle'], [counts.lost, 'lost']].filter(([n]) => (n as number) > 0).map(([n, label]) => `${n} ${label as string}`);
   const stale = sessionStale || rows.some((r) => r.health.state === 'unknown');

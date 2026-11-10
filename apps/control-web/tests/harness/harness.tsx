@@ -266,7 +266,7 @@ if (sc.onboardingApi) {
   // The live root's project handling, without Firebase: the header follows an activation the same way.
   function OnboardingShell() {
     const { projectId, activate } = useActiveProject(projectFromUrl());
-    return <AppShell store={empty} mode="live" projectLabel={projectId || NO_PROJECT} assistant={null} onboarding={<OnboardingView api={api} adapter={adapter} hold={hold} mode="live" onActivated={activate} />} />;
+    return <AppShell store={empty} mode="live" projectLabel={projectId || NO_PROJECT} assistant={null} onboarding={<OnboardingView api={api} adapter={adapter} hold={hold} mode="live" onActivated={activate} onSignIn={() => window.__calls.api.push({ kind: 'sign-in' })} />} />;
   }
   root.render(<StrictMode><OnboardingShell /></StrictMode>);
 } else if (sc.liveApi) {

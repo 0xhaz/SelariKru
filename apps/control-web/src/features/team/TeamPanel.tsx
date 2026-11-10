@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from 'react';
-import { TONE_TEXT, type Tone } from '@selarikru/ui';
+import { TONE_TEXT, formatClock, type Tone } from '@selarikru/ui';
 import type { PresenceState } from './model.ts';
 import type { PanelRow, TeamPanelModel } from './panel.ts';
 
@@ -8,7 +8,7 @@ const GLYPH: Readonly<Record<PresenceState, string>> = { idle: '○', working: '
 const RAIL: Readonly<Partial<Record<Tone, string>>> = { warning: 'before:bg-warning', danger: 'before:bg-danger' };
 
 export type PanelStatus =
-  | { readonly kind: 'ready'; readonly panel: TeamPanelModel; readonly stale: boolean }
+  | { readonly kind: 'ready'; readonly panel: TeamPanelModel; readonly stale: boolean; readonly confirmedAt: string | null }
   | { readonly kind: 'loading' }
   | { readonly kind: 'unavailable' };
 
@@ -59,18 +59,28 @@ function Rows({ status, selectedId, onOpen, grid }: { status: PanelStatus; selec
   );
 }
 
+const confirmedClock = (status: Extract<PanelStatus, { kind: 'ready' }>): string => (status.confirmedAt ? ` at ${formatClock(status.confirmedAt)}` : '');
+
+/** The "needs you" count, or, while states are unknown, that it is unknown and what it was when last confirmed. A stale zero is never shown as nobody. */
+function NeedsYou({ status, testId }: { status: Extract<PanelStatus, { kind: 'ready' }>; testId: string }) {
+  const { needsYou, confirmedNeedsYou } = status.panel;
+  if (needsYou === null) {
+    return <span data-testid={testId} data-unknown="" className="text-muted">who needs you is unknown<span aria-hidden="true"> · </span><span className="sr-only">; </span>{confirmedNeedsYou} when last confirmed{confirmedClock(status)}</span>;
+  }
+  return needsYou > 0
+    ? <span data-testid={testId} className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou} need{needsYou === 1 ? 's' : ''} you</span>
+    : <span data-testid={testId} className="text-muted">nobody needs you</span>;
+}
+
 function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; testId?: string }) {
   if (status.kind !== 'ready') return <span className="text-muted">{status.kind === 'loading' ? 'loading' : 'unavailable'}</span>;
-  const { panel } = status;
-  const n = panel.rows.length;
+  const n = status.panel.rows.length;
   return (
     <>
       <span className="text-muted">{n} worker{n === 1 ? '' : 's'}</span>
       <span aria-hidden="true" className="text-muted"> · </span>
       <span className="sr-only">, </span>
-      {panel.needsYou > 0
-        ? <span data-testid={testId} className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{panel.needsYou} need{panel.needsYou === 1 ? 's' : ''} you</span>
-        : <span data-testid={testId} className="text-muted">nobody needs you</span>}
+      <NeedsYou status={status} testId={testId} />
     </>
   );
 }
@@ -81,7 +91,8 @@ export function TeamPanelSide({ status, selectedId, onOpen }: { status: PanelSta
     <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="border-r border-line bg-panel xl:sticky xl:top-[var(--header-h,6rem)] xl:h-[calc(100dvh-var(--header-h,6rem))] xl:overflow-y-auto">
       <div className="px-3 pt-4 pb-6">
         <div className="mb-3 px-1">
-          <h2 id="team-panel-title" className="text-sm font-semibold tracking-wide text-fg">Team</h2>
+          {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}
+          <p id="team-panel-title" className="text-sm font-semibold tracking-wide text-fg">Team</p>
           <p className="text-sm" data-testid="team-panel-summary"><Count status={status} /></p>
         </div>
         <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} />
@@ -102,14 +113,23 @@ export interface FoldProps {
  * as the glyph and number at phone width, with the words still read out.
  */
 export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldProps) {
-  const needsYou = status.kind === 'ready' ? status.panel.needsYou : 0;
-  const workers = status.kind === 'ready' ? status.panel.rows.length : null;
+  const ready = status.kind === 'ready' ? status : null;
+  const needsYou = ready ? ready.panel.needsYou : 0;
+  const workers = ready ? ready.panel.rows.length : null;
   const onKey = (e: KeyboardEvent<HTMLButtonElement>): void => {
     if (e.key === 'Escape' && open) {
       e.stopPropagation();
       onOpenChange(false);
     }
   };
+  let count;
+  if (ready && needsYou === null) {
+    count = <span data-testid="team-needs-you" data-unknown="" className="text-muted"><span aria-hidden="true">? </span><span className="sr-only sm:not-sr-only">needs you unknown</span><span className="sr-only">; {ready.panel.confirmedNeedsYou} when last confirmed{confirmedClock(ready)}</span></span>;
+  } else if (needsYou !== null && needsYou > 0) {
+    count = <span data-testid="team-needs-you" className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou}<span className="sr-only sm:not-sr-only"> need{needsYou === 1 ? 's' : ''} you</span></span>;
+  } else {
+    count = <span data-testid="team-needs-you" className="text-muted"><span className="sr-only sm:not-sr-only">nobody needs you</span><span aria-hidden="true" className="sm:hidden">0</span></span>;
+  }
   return (
     <button
       type="button"
@@ -119,13 +139,11 @@ export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldPro
       aria-controls={regionId}
       onClick={() => onOpenChange(!open)}
       onKeyDown={onKey}
-      className={`inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-chip border px-2 py-1 text-sm hover:border-active ${needsYou > 0 ? 'border-warning' : 'border-line-strong'}`}
+      className={`inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-chip border px-2 py-1 text-sm hover:border-active ${needsYou !== null && needsYou > 0 ? 'border-warning' : 'border-line-strong'}`}
     >
       <span className="font-semibold text-fg">Team</span>
       {workers !== null ? <span className="hidden text-muted lg:inline">{workers} worker{workers === 1 ? '' : 's'}<span aria-hidden="true"> ·</span><span className="sr-only">,</span></span> : null}
-      {needsYou > 0
-        ? <span data-testid="team-needs-you" className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou}<span className="sr-only sm:not-sr-only"> need{needsYou === 1 ? 's' : ''} you</span></span>
-        : <span data-testid="team-needs-you" className="text-muted"><span className="sr-only sm:not-sr-only">nobody needs you</span><span aria-hidden="true" className="sm:hidden">0</span></span>}
+      {count}
       <span aria-hidden="true" className="hidden text-muted sm:inline">{open ? '▴' : '▾'}</span>
     </button>
   );

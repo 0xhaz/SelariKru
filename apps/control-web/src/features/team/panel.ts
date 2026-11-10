@@ -18,7 +18,10 @@ export interface PanelRow {
 
 export interface TeamPanelModel {
   readonly rows: readonly PanelRow[];
-  readonly needsYou: number;
+  /** Null while any worker's state is unknown: a stale count could hide someone who needs you, so none is given as current. */
+  readonly needsYou: number | null;
+  /** How many needed you at the last confirmation. Shown, labelled as such, only when `needsYou` is null. */
+  readonly confirmedNeedsYou: number;
   readonly summary: string;
 }
 
@@ -31,7 +34,12 @@ export function panelOf(team: TeamModel): TeamPanelModel {
     task: r.task ? r.task.title : r.lastTask ? `Last: ${r.lastTask.title}` : 'No task',
     model: r.modelDetail ?? 'Model not recorded',
   }));
-  const needsYou = rows.filter((r) => r.state === 'needs_you').length;
-  const summary = `${rows.length} worker${rows.length === 1 ? '' : 's'}, ${needsYou === 0 ? 'nobody needs you' : `${needsYou} need${needsYou === 1 ? 's' : ''} you`}`;
-  return { rows, needsYou, summary };
+  const unknown = team.stale || rows.some((r) => r.state === 'unknown');
+  const confirmedNeedsYou = team.rows.filter((r) => r.presence.confirmedState === 'needs_you').length;
+  const needsYou = unknown ? null : confirmedNeedsYou;
+  const workers = `${rows.length} worker${rows.length === 1 ? '' : 's'}`;
+  const summary = needsYou === null
+    ? `${workers}, who needs you is unknown (${confirmedNeedsYou} when last confirmed)`
+    : `${workers}, ${needsYou === 0 ? 'nobody needs you' : `${needsYou} need${needsYou === 1 ? 's' : ''} you`}`;
+  return { rows, needsYou, confirmedNeedsYou, summary };
 }

@@ -62,6 +62,18 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
   await expect(panel(page).getByTestId('team-panel-stale')).toBeVisible();
   for (const id of ['runner_local_1', 'runner_cloud_1']) await expect(panelRow(page, id)).toHaveAttribute('data-state', 'unknown');
   await expect(panel(page)).not.toContainText('Working');
+  // The count is unknown too, never a stale "nobody", and the last confirmed count is labelled as such.
+  const staleCount = panel(page).getByTestId('team-needs-you');
+  await expect(staleCount).toHaveAttribute('data-unknown', '');
+  await expect(staleCount).toContainText('who needs you is unknown');
+  await expect(staleCount).toContainText(/1 when last confirmed at \d/);
+  await expect(panel(page)).not.toContainText('nobody needs you');
+  await shot(page, 'panel-stale-1440');
+  await page.setViewportSize({ width: 375, height: 800 });
+  await expect(page.getByTestId('team-panel-toggle').getByTestId('team-needs-you')).toHaveAttribute('data-unknown', '');
+  await expect(page.getByTestId('team-panel-toggle')).toHaveAccessibleName(/needs you unknown\s*;\s*1 when last confirmed/);
+  await shot(page, 'panel-stale-375');
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // Folded at narrow widths, and the "needs you" count stays on screen while folded.
   await page.setViewportSize({ width: 375, height: 800 });
@@ -137,33 +149,141 @@ test('stop in the drawer asks for confirmation and is disabled when not live', a
   await spied(page, { spiedFixture: 'human-wait' }, 'decisions');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
-  const stop = drawer(page).getByRole('button', { name: 'Stop and cancel this task' });
+  await expect(drawer(page).getByRole('heading', { name: 'Cancel this task' })).toBeVisible();
+  const stop = drawer(page).getByRole('button', { name: 'Cancel task' });
   await expect(stop).toBeEnabled();
   await stop.click();
-  const confirm = page.getByRole('dialog', { name: 'Stop and cancel "Empty states"?' });
+  const confirm = page.getByRole('dialog', { name: 'Cancel "Empty states"?' });
   await expect(confirm).toContainText('The running attempt is stopped and the task is cancelled for good.');
   await expect(confirm).toContainText('It is not stopped until the runner confirms.');
-  await confirm.getByRole('button', { name: 'Keep it running' }).click();
+  await confirm.getByRole('button', { name: 'Keep the task' }).click();
   await expect(confirm).toHaveCount(0);
   await expect(drawer(page)).toBeVisible();
   expect((await commands(page)).filter((c) => c.method === 'execute')).toEqual([]);
 
   await stop.click();
-  await page.getByRole('dialog', { name: /Stop and cancel/ }).getByRole('button', { name: 'Stop and cancel this task' }).click();
+  await page.getByRole('dialog', { name: /^Cancel/ }).getByRole('button', { name: 'Cancel task' }).click();
   await expect(drawer(page).getByTestId('settings-feedback')).toContainText('Cancel requested');
   const sent = (await commands(page)).filter((c) => c.method === 'execute');
   expect(sent).toHaveLength(1);
-  expect(sent[0]!.command).toMatchObject({ command: 'task.cancel', args: { taskId: expect.any(String) } });
+  expect(sent[0]!.command).toMatchObject({ command: 'task.cancel', args: { taskId: 'human-wait.ui' } });
 
   // With the connection not live, Stop is off and says why.
   await page.goto('about:blank');
   await spied(page, { spiedFixture: 'human-wait', fault: 'reconnecting' }, 'overview');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
-  await expect(drawer(page).getByRole('button', { name: 'Stop and cancel this task' })).toBeDisabled();
+  await expect(drawer(page).getByRole('button', { name: 'Cancel task' })).toBeDisabled();
   await expect(drawer(page).getByTestId('stop-disabled-reason')).toContainText(/connection/i);
-  await expect(drawer(page).getByRole('button', { name: 'Stop and cancel this task' })).toHaveAttribute('aria-describedby', /.+/);
+  await expect(drawer(page).getByRole('button', { name: 'Cancel task' })).toHaveAttribute('aria-describedby', /.+/);
 });
+
+/** Rewrites the projection's snapshot in place, as a new server snapshot would. */
+async function patchSnapshot(page: Page, patch: { task?: [string, Record<string, unknown>]; worker?: [string, Record<string, unknown>]; approvalScope?: string }): Promise<void> {
+  await page.evaluate((p) => {
+    const store = (window as unknown as { __projection: { getState(): { projection: { snapshot: Record<string, Record<string, Record<string, unknown>>> } }; setState(s: unknown): void } }).__projection;
+    const projection = store.getState().projection;
+    const snap = { ...projection.snapshot };
+    if (p.task) snap['tasks'] = { ...snap['tasks'], [p.task[0]]: { ...snap['tasks']![p.task[0]], ...p.task[1] } };
+    if (p.worker) snap['workers'] = { ...snap['workers'], [p.worker[0]]: { ...snap['workers']![p.worker[0]], ...p.worker[1] } };
+    if (p.approvalScope) {
+      const [id, a] = Object.entries(snap['approvals']!)[0]!;
+      snap['approvals'] = { ...snap['approvals'], [id]: { ...a, scopeHash: p.approvalScope } };
+    }
+    store.setState({ projection: { ...projection, snapshot: snap } });
+  }, patch);
+}
+
+async function openCancelConfirm(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await panelRow(page, 'runner_cloud_1').click();
+  await drawer(page).getByRole('tab', { name: 'Settings' }).click();
+  await drawer(page).getByRole('button', { name: 'Cancel task' }).click();
+  await expect(page.getByRole('dialog', { name: 'Cancel "Empty states"?' })).toBeVisible();
+}
+
+test('a cancel confirmation is dropped unsent when the task moves to a newer revision under it', async ({ page }) => {
+  await openCancelConfirm(page);
+  const revision = await page.evaluate(() => (window as unknown as { __projection: { getState(): { projection: { snapshot: { tasks: Record<string, { aggregateRevision: number }> } } } } }).__projection.getState().projection.snapshot.tasks['human-wait.ui']!.aggregateRevision);
+  await patchSnapshot(page, { task: ['human-wait.ui', { aggregateRevision: revision + 1 }] });
+  await expect(page.getByRole('dialog', { name: /^Cancel/ })).toHaveCount(0);
+  await expect(drawer(page).getByTestId('settings-feedback')).toContainText('Nothing was sent');
+  expect((await commands(page)).filter((c) => c.method === 'execute')).toEqual([]);
+});
+
+test('a cancel confirmation is dropped unsent when the worker moves to another task under it', async ({ page }) => {
+  await openCancelConfirm(page);
+  await patchSnapshot(page, { worker: ['runner_cloud_1', { taskId: 'human-wait.migrate' }] });
+  await expect(page.getByRole('dialog', { name: /^Cancel/ })).toHaveCount(0);
+  await expect(drawer(page).getByTestId('settings-feedback')).toContainText('Nothing was sent');
+  expect((await commands(page)).filter((c) => c.method === 'execute')).toEqual([]);
+});
+
+test('a decision that changes in the drawer is held until reviewed, as on the Decisions screen', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await panelRow(page, 'runner_local_1').click();
+  await drawer(page).getByRole('tab', { name: 'Settings' }).click();
+  const card = drawer(page).getByTestId('settings-card');
+  // The compact card carries what the full card does: what it is about, the worker's own words under their label, and why.
+  await expect(card).toContainText('A worker wants to run a migration that destroys or rewrites data.');
+  await expect(card.getByTestId('request-reason')).toHaveAttribute('data-source', 'worker');
+  await expect(card.getByTestId('request-reason')).toContainText('worker-supplied');
+  await expect(card.getByTestId('advisory')).toContainText('Recorded pause');
+  const deny = card.getByRole('button', { name: 'Deny and block task' });
+  await expect(deny).toBeEnabled();
+  await patchSnapshot(page, { approvalScope: 'moved' });
+  await expect(card.getByTestId('request-changed')).toContainText('This request changed');
+  await expect(deny).toBeDisabled();
+  await expect(card.getByTestId('disabled-reason')).toContainText('Review the update');
+  await shot(page, 'drawer-card-held-1440');
+  await card.getByRole('button', { name: 'I have reviewed the update' }).click();
+  await expect(card.getByTestId('request-changed')).toHaveCount(0);
+  await expect(deny).toBeEnabled();
+  expect((await commands(page)).filter((c) => c.method === 'execute')).toEqual([]);
+});
+
+test('with the panel beside the page, choosing another worker switches the open drawer to it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?demo&fixture=human-wait#/pipeline');
+  await panelRow(page, 'runner_local_1').click();
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
+  await expect(drawer(page).getByRole('heading', { name: 'Backend worker' })).toBeVisible();
+  await expect(panelRow(page, 'runner_local_1')).toHaveAttribute('aria-current', 'true');
+  await panelRow(page, 'runner_cloud_1').click();
+  await expect(drawer(page)).toHaveCount(1);
+  await expect(drawer(page).getByRole('heading', { name: 'Frontend worker' })).toBeVisible();
+  await expect(drawer(page).getByRole('tab', { name: 'Task' })).toBeFocused();
+  await expect(panelRow(page, 'runner_cloud_1')).toHaveAttribute('aria-current', 'true');
+  expect(new URL(page.url()).hash).toBe('#/pipeline?worker=runner_cloud_1');
+  await shot(page, 'drawer-switched-1440');
+  // Escape still closes it, and focus goes back to the worker last chosen.
+  await page.keyboard.press('Escape');
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(panelRow(page, 'runner_cloud_1')).toBeFocused();
+
+  // Narrower, the drawer covers the page and is modal.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.getByTestId('team-panel-toggle').click();
+  await panelRow(page, 'runner_local_1').click();
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'true');
+});
+
+/** Tabs through every control in the drawer once, from its first tab, and fails if focus leaves it or lands on nothing. */
+async function tabThroughDrawer(page: Page): Promise<void> {
+  const count = await page.evaluate(() => {
+    const d = document.querySelector('[data-testid="worker-drawer"]')!;
+    const tabbable = [...d.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex]')].filter((el) => el.tabIndex >= 0 && !el.hasAttribute('disabled') && el.getClientRects().length > 0);
+    tabbable[0]!.focus();
+    return tabbable.length;
+  });
+  expect(count).toBeGreaterThan(3);
+  for (let i = 0; i < count - 1; i += 1) {
+    await page.keyboard.press('Tab');
+    expect(await page.evaluate(() => { const a = document.activeElement; const d = document.querySelector('[data-testid="worker-drawer"]'); return a !== null && a !== document.body && d !== null && d.contains(a); })).toBe(true);
+  }
+}
 
 test('drawer keeps focus order and closes on Escape', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -173,17 +293,24 @@ test('drawer keeps focus order and closes on Escape', async ({ page }) => {
   await page.keyboard.press('Enter');
   const task = drawer(page).getByRole('tab', { name: 'Task' });
   await expect(task).toBeFocused();
-  // Forward from the tabs: the panel, then the drawer's own controls, never anything behind it.
+  // Forward from the tabs: the panel, then the drawer's own controls in order.
   await page.keyboard.press('Tab');
   await expect(drawer(page).getByTestId('drawer-panel')).toBeFocused();
-  for (let i = 0; i < 20; i += 1) {
-    await page.keyboard.press('Tab');
-    expect(await page.evaluate(() => { const a = document.activeElement; const d = document.querySelector('[data-testid="worker-drawer"]'); return a === document.body || (d !== null && d.contains(a)); })).toBe(true);
-  }
+  await page.keyboard.press('Shift+Tab');
+  await expect(task).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(drawer(page)).toHaveCount(0);
   await expect(opener).toBeFocused();
   expect(new URL(page.url()).hash).toBe('#/overview');
+
+  // Modal at narrower widths: focus stays inside, on a real control, the whole way round.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.getByTestId('team-panel-toggle').click();
+  await panelRow(page, 'runner_local_1').click();
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'true');
+  await tabThroughDrawer(page);
+  await page.keyboard.press('Escape');
+  await expect(drawer(page)).toHaveCount(0);
 
   // Folded: the worker is chosen from the fold, and Escape returns focus to the fold's toggle.
   await page.setViewportSize({ width: 375, height: 800 });
@@ -203,7 +330,7 @@ test('drawer keeps focus order and closes on Escape', async ({ page }) => {
   await expect(page.getByTestId('team-panel-toggle')).toBeFocused();
 });
 
-for (const [width, height] of [[1440, 900], [1024, 768], [768, 1024], [375, 812]] as const) {
+for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [768, 1024], [375, 812]] as const) {
   test(`axe at ${width}: Mission Control with the panel, and the drawer on Task, Settings and Terminal`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await page.goto('/?demo&fixture=human-wait#/overview');

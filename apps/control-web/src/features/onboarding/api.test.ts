@@ -29,6 +29,16 @@ describe('onboarding api errors', () => {
     if (!r.ok) expect(r.message).toMatch(/sign in again/i);
   });
 
+  it('an account that is not the owner is told so, not that its sign-in expired', async () => {
+    vi.stubGlobal('fetch', respond(403, { error: { code: 'not_owner', message: 'not the owner' } }));
+    const r = await createOnboardingApi({ baseUrl: 'http://api.test', getToken: async () => 't' }).list();
+    expect(r).toMatchObject({ ok: false, code: 'not_owner' });
+    if (!r.ok) {
+      expect(r.message).toMatch(/not the project owner/);
+      expect(r.message).not.toMatch(/expired/);
+    }
+  });
+
   it('a token refresh that failed for the network, and a fetch that failed, are still unreachable', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
     const down = await createOnboardingApi({ baseUrl: 'http://api.test', getToken: async () => 't' }).list();

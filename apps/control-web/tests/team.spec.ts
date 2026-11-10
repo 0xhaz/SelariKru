@@ -109,6 +109,8 @@ test('unknown inference never shows Device', async ({ page }) => {
 });
 
 test('drawer opens to Task, focus returns on close', async ({ page }) => {
+  // Modal below the side panel's width; beside the panel it is not, and team-panel.spec covers that.
+  await page.setViewportSize({ width: 1024, height: 768 });
   await openTeam(page, fixture('human-wait'));
   const opener = rowOf(page, 'runner_local_1').locator('[data-open-worker="runner_local_1"]');
   await opener.focus();

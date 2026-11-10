@@ -2,7 +2,7 @@
  * A small layered graph layout: columns from the stages, order from a barycentre sweep, and dummy points so a long edge passes between the nodes it
  * crosses instead of through them. No graph library, because the plans this draws are small and the layout has to stay deterministic and testable.
  */
-export const NODE_W = 168;
+export const NODE_W = 142;
 export const NODE_H = 156;
 const LAYER_GAP = 44;
 const ROW_GAP = 16;

@@ -55,7 +55,7 @@ test('"Why blocked?" names dependency, claim, approval, policy or budget', async
   const web = row(page, 'contract-change.web');
   await expect(web).toContainText('Waiting on Approve contract v1');
   await web.getByRole('button', { name: 'Why blocked?' }).click();
-  await expect(inspector(page).getByTestId('why-blocked').locator('[data-cause="dependency"]')).toContainText('Waiting on Approve contract v1 (needs decision)');
+  await expect(inspector(page).getByTestId('why-blocked').locator('[data-cause="dependency"]')).toContainText('Waiting on Approve contract v1 (needs you)');
 });
 
 test('a dependency wait reads as a quiet state, a failed gate does not', async ({ page }) => {
@@ -243,8 +243,8 @@ test('a graph wider than the screen says more stages follow', async ({ page }) =
   await page.setViewportSize({ width: 1024, height: 800 });
   await openPipeline(page, 'feature-delivery', 'graph');
   await expect(page.getByTestId('graph-scroll-hint')).toContainText('More stages to the right');
-  // Wide enough for the whole graph beside the team panel.
-  await page.setViewportSize({ width: 1920, height: 800 });
+  // Wide enough for the whole graph, with the team panel beside it.
+  await page.setViewportSize({ width: 1440, height: 800 });
   await expect(page.getByTestId('graph-scroll-hint')).toHaveCount(0);
 });
 

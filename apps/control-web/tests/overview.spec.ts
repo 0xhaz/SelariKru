@@ -6,6 +6,8 @@ async function open(page: Page, query = ''): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
 }
 const fixture = (id: string): string => `&fixture=${id}`;
+/** Below the width where the team panel sits beside the page, so the Fleet card lists each worker itself. */
+const FULL_FLEET = { width: 1024, height: 900 };
 const items = (page: Page) => page.getByTestId('attention-item');
 
 async function expectNoAxeViolations(page: Page): Promise<void> {
@@ -42,6 +44,7 @@ test('zero verified never looks complete: only verified segments are filled', as
 });
 
 test('heartbeat never increments verified criteria', async ({ page }) => {
+  await page.setViewportSize(FULL_FLEET); // below the team panel's width, where this card lists every worker
   await open(page, fixture('healthy-parallel-work'));
   await expect(page.getByTestId('criteria')).toHaveText('0 of 5 criteria verified');
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
@@ -87,6 +90,7 @@ test('under demo data the live assistant is not mounted and Firebase is not cont
 });
 
 test('execution and inference are separately labeled for each worker', async ({ page }) => {
+  await page.setViewportSize(FULL_FLEET); // below the team panel's width, where this card lists every worker
   await open(page, fixture('healthy-parallel-work'));
   const local = page.getByTestId('fleet-row').filter({ hasText: 'runner_local_1' });
   await expect(local).toContainText('Execution');
@@ -96,6 +100,7 @@ test('execution and inference are separately labeled for each worker', async ({ 
 });
 
 test('a runner loss shows the last confirmed time and offers inspection', async ({ page }) => {
+  await page.setViewportSize(FULL_FLEET); // below the team panel's width, where this card lists every worker
   await open(page, fixture('runner-loss'));
   await expect(items(page).first()).toHaveAttribute('data-kind', 'worker_lost');
   await expect(items(page).first()).toContainText('Inspect the attempt before relaunching anything');
@@ -111,6 +116,7 @@ test('unknown costs read as unknown, never zero', async ({ page }) => {
 });
 
 test('reconnecting keeps the last confirmed state and stops claiming health', async ({ page }) => {
+  await page.setViewportSize(FULL_FLEET); // below the team panel's width, where this card lists every worker
   await open(page, '&fault=reconnecting');
   await expect(page.getByTestId('freshness')).toContainText('Reconnecting');
   await expect(page.getByTestId('connection-banner')).toContainText('last confirmed state');
@@ -298,3 +304,21 @@ for (const failure of ['render', 'chunk']) {
     await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   });
 }
+
+test('beside the team panel the Fleet card keeps to one line, and each worker is in the panel', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, fixture('healthy-parallel-work'));
+  await expect(page.getByTestId('fleet-summary')).toContainText('2 workers: 2 assigned · 0 waiting · 0 idle.');
+  await expect(page.getByTestId('fleet-summary')).toContainText('Each is listed in the Team panel.');
+  await expect(page.getByTestId('fleet-row')).toHaveCount(0);
+  await expect(page.getByTestId('team-panel-row')).toHaveCount(2);
+});
+
+test('below the panel width the header does not repeat the count the Team toggle carries', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await open(page, fixture('human-wait'));
+  await expect(page.getByTestId('team-panel-toggle')).toContainText('1 needs you');
+  await expect(page.getByTestId('attention-count')).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByTestId('attention-count')).toBeVisible();
+});

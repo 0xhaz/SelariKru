@@ -71,6 +71,17 @@ describe('team panel model', () => {
     expect(panel.rows[2]).toMatchObject({ task: 'No task', role: 'Unassigned' });
   });
 
+  it('under a stale session the count is unknown, and the last confirmed count is kept apart from it', () => {
+    const snapshot = snapshotOf({
+      tasks: [task('b', { status: 'awaiting_approval' })],
+      workers: [worker('w2', { taskId: 'b', activity: 'waiting_human', blockedByApprovalId: 'ap' }), worker('w3', { availability: 'idle', activity: null, leaseHeld: false })],
+      approvals: [approval('ap', { taskId: 'b' })],
+    });
+    const panel = panelOf(buildTeam(snapshot, NOW, null, { stale: true, lastConfirmedMs: NOW - 5_000 }));
+    expect(panel.rows.every((r) => r.state === 'unknown')).toBe(true);
+    expect(panel).toMatchObject({ needsYou: null, confirmedNeedsYou: 1, summary: '2 workers, who needs you is unknown (1 when last confirmed)' });
+  });
+
   it('with nobody waiting, the summary says so rather than showing zero as a warning', () => {
     const panel = panelOf(buildTeam(snapshotOf({ workers: [worker('w', { availability: 'idle', activity: null, leaseHeld: false })] }), NOW, NOW));
     expect(panel).toMatchObject({ needsYou: 0, summary: '1 worker, nobody needs you' });

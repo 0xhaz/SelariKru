@@ -7,7 +7,7 @@ import { workerSettings } from '../features/team/settings.ts';
 import { WorkerDrawer, type TabId } from '../features/team/WorkerDrawer.tsx';
 import { WorkerSettings } from '../features/team/WorkerSettings.tsx';
 import type { ConnectionState } from './projection-store.ts';
-import { useMediaQuery } from './media.ts';
+import { PANEL_WIDE, useMediaQuery } from './media.ts';
 
 export interface WorkerDrawerHostProps {
   readonly workerId: string;
@@ -30,6 +30,8 @@ export interface WorkerDrawerHostProps {
 /** One worker's drawer, opened over whichever view is showing. Its Settings tab sends through the same commands and rules as the Team and Decisions screens. */
 export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, connection, mode, nowMs, onClose, onTab, onExecute, onRefresh, onResync, onOpenTerminal, onOpenTerminalControl }: WorkerDrawerHostProps) {
   const wide = useMediaQuery('(min-width: 1024px)');
+  // Beside the team panel the drawer is not modal, so another worker can be chosen with it open. Narrower, it covers the page and is.
+  const panelBeside = useMediaQuery(PANEL_WIDE);
   const row = team.rows.find((r) => r.workerId === workerId);
   const settings = useMemo(() => (row ? workerSettings(snapshot, decisions, row) : null), [snapshot, decisions, row]);
   if (!row || !settings) return null;
@@ -37,11 +39,12 @@ export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, con
   const assign = { model: team.assignments, disabledReason: live ? null : ASSIGNMENTS_OFF, onExecute, onRefresh, onResync };
   return (
     <WorkerDrawer
-      key={row.workerId}
+      key={`${row.workerId}:${panelBeside ? "beside" : "modal"}`}
       row={row}
       mode={mode}
       simulated={team.simulated}
       wide={wide}
+      modal={!panelBeside}
       nowMs={nowMs}
       onClose={onClose}
       {...(tab ? { initialTab: tab } : {})}

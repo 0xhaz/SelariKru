@@ -6,7 +6,7 @@ import type { AssistantPort } from '../assistant/types.ts';
 import type { ApiResult, InferenceChoice, OnboardingApi, OwnerCostLine } from './api.ts';
 import { AssistPanel, type AssistedGoal } from './assist.tsx';
 import type { StepId } from './steps.ts';
-import { CHECK_STATUS, CodeText, EXECUTION_TEXT, Field, INFERENCE_TEXT, Notice, StatusChip, StepFrame, inputClass, usd } from './ui.tsx';
+import { CHECK_STATUS, CodeText, EXECUTION_TEXT, FailureText, Field, INFERENCE_TEXT, Notice, StatusChip, StepFrame, inputClass, usd } from './ui.tsx';
 import { useIntentKeys } from './useKeys.ts';
 
 export interface StepProps {
@@ -31,7 +31,7 @@ export function fieldErrors(error: StepProps['error']): Map<string, string> {
   if (error.code === 'credential_in_input') for (const path of (error.details as { paths?: unknown } | undefined)?.paths as string[] ?? []) out.set(path, 'This looks like a credential. Remove it: this setup never stores credentials.');
   return out;
 }
-const Failure = ({ error }: { error: StepProps['error'] }) => (error ? <Notice tone="danger" title="That did not work">{fieldErrors(error).size > 0 ? 'Check the fields marked below.' : error.message}</Notice> : null);
+const Failure = ({ error }: { error: StepProps['error'] }) => (error ? <Notice tone="danger" title="That did not work">{fieldErrors(error).size > 0 ? 'Check the fields marked below.' : <FailureText code={error.code} message={error.message} />}</Notice> : null);
 const backTo = (onGo: StepProps['onGo'], step: StepId) => <button type="button" className={buttonQuiet} onClick={() => onGo(step)}>Back</button>;
 const lines = (text: string): string[] => text.split('\n').map((l) => l.trim()).filter(Boolean);
 

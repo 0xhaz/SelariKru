@@ -80,7 +80,7 @@ function TaskPanel({ detail, row, onSettings }: { detail: WorkerDetail; row: Tea
         </>
       ) : <Empty>No task has been assigned to this worker.</Empty>}
       <p className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3 text-sm text-muted">
-        <span>Model, stop and control mode are in Settings.</span>
+        <span>Model, cancelling and control mode are in Settings, with any decision on this task.</span>
         <button type="button" className={buttonQuiet} onClick={onSettings}>Open Settings</button>
       </p>
     </div>
@@ -200,6 +200,8 @@ export interface WorkerDrawerProps {
   readonly mode: 'mock' | 'live';
   readonly simulated: boolean;
   readonly wide: boolean;
+  /** False where the team panel is beside the page: the drawer then leaves the panel usable, so choosing another worker switches the drawer to it. */
+  readonly modal?: boolean;
   readonly nowMs: number;
   readonly onClose: () => void;
   /** The tab to open on, from a deep link. Task when absent. */
@@ -212,7 +214,7 @@ export interface WorkerDrawerProps {
   readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
 }
 
-export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl }: WorkerDrawerProps) {
+export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -225,7 +227,10 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      if (modal) dialog.showModal();
+      else dialog.show();
+    }
     tabRefs.current[initialTab]?.focus();
     return () => {
       if (dialog.open) dialog.close();
@@ -243,6 +248,14 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
     const box = dialogRef.current!.getBoundingClientRect();
     const inside = e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom;
     if (!inside) dialogRef.current!.close();
+  };
+
+  // A modal dialog closes on Escape by itself. Without a modal the browser does not, so the same key is kept here; a dialog opened inside it handles its own.
+  const onDialogKey = (e: KeyboardEvent<HTMLDialogElement>): void => {
+    if (modal || e.key !== 'Escape' || e.defaultPrevented) return;
+    if ((e.target as Element).closest('dialog') !== dialogRef.current) return;
+    e.preventDefault();
+    dialogRef.current?.close();
   };
 
   const selectTab = (id: TabId, focus: boolean): void => {
@@ -297,8 +310,10 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
       data-testid="worker-drawer"
       onClose={onDialogClose}
       onClick={onDialogClick}
+      onKeyDown={onDialogKey}
+      data-modal={modal ? 'true' : 'false'}
       style={widthStyle}
-      className="wrap-anywhere fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem]"
+      className={`wrap-anywhere fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem] ${modal ? '' : 'z-50 shadow-[-12px_0_32px_-8px_var(--color-backdrop)]'}`}
     >
         {canResize ? (
           <div
@@ -322,7 +337,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
         ) : null}
 
       <div className="flex h-full flex-col overflow-y-auto overscroll-contain">
-        <header className="border-b border-line p-4 sm:pl-6">
+        <div className="border-b border-line p-4 sm:pl-6">
           <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
             <div className="min-w-0">
               <h2 id={titleId} className="text-lg font-semibold text-fg">{roleName(row.role)} worker</h2>
@@ -344,7 +359,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
             <AxisBadges execution={row.execution} modelRoute={row.modelRoute} model={row.modelDetail} />
             <p className="text-sm text-muted" data-testid="drawer-confirmed">Last confirmed <Exact iso={row.lastConfirmedAt} /></p>
           </div>
-        </header>
+        </div>
 
         <div role="tablist" aria-label="Worker detail" className="sticky top-0 z-10 flex flex-wrap gap-0.5 border-b border-line bg-panel px-2 sm:px-4">
           {TABS.map((t, i) => (
@@ -369,7 +384,8 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
         {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person opened a shell in this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
           {tab === 'task' ? <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} /> : null}
-          {tab === 'settings' ? settings(() => selectTab('terminal', true)) : null}
+          {/* Kept mounted while another tab shows, so a retry's idempotency key, a reported outcome and an unsaved choice survive a look at another tab. */}
+          <div hidden={tab !== 'settings'}>{settings(() => selectTab('terminal', true))}</div>
           {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
           {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
@@ -380,7 +396,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, nowMs, onClose, initi
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          Inspecting is read-only. Closing this never stops the worker, and ends any control mode. Only Stop in Settings stops it, after you confirm; a model saved here applies only to its next attempt.
+          Viewing changes nothing; only the buttons in Settings act, each after you confirm what it does. Closing this never stops the worker, and ends any control mode.
         </footer>
       </div>
     </dialog>

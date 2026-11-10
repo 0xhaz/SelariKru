@@ -1,7 +1,7 @@
 import { Children, cloneElement, createContext, isValidElement, useContext, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { Chip, toneGlyph, TONE_TEXT, type Tone } from '@selarikru/ui';
 import type { ExecutionChoice, ReadinessStatus } from '@selarikru/domain';
-import type { InferenceChoice } from './api.ts';
+import { SIGN_IN_CODES, type InferenceChoice } from './api.ts';
 
 export const usd = (n: number): string => `$${n.toLocaleString('en-US', { minimumFractionDigits: n % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 })}`;
 export const inputClass = 'w-full rounded-chip border border-line-strong bg-bg px-3 py-2 text-fg placeholder:text-muted';
@@ -40,6 +40,20 @@ export function Field({ id, label, hint, children, error }: { id: string; label:
 
 /** True once the project has started: every step can be read and none can be changed. */
 export const ReadOnlyContext = createContext(false);
+
+/** Signs the person in again, where the page can: the live app passes it, demo data has none. */
+export const SignInContext = createContext<(() => void) | null>(null);
+
+/** A failure, with a way to sign in again when signing in again is what fixes it. */
+export function FailureText({ code, message }: { code: string; message: string }) {
+  const signIn = useContext(SignInContext);
+  return (
+    <>
+      {message}
+      {signIn && SIGN_IN_CODES.includes(code) ? <span className="mt-2 block"><button type="button" className="rounded-chip border border-line-strong bg-panel-2 px-3 py-1.5 text-sm font-medium text-fg hover:border-active" onClick={signIn}>Sign in again</button></span> : null}
+    </>
+  );
+}
 
 /** Server text uses backticks around commands. They become code here, so no literal backtick reaches the page. */
 export function CodeText({ text }: { text: string }) {
