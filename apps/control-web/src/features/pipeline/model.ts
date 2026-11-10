@@ -1,6 +1,6 @@
 import { formatAge, type Tone } from '@selarikru/ui';
 import { approvalStateAt, isEmptyProject, type AttemptView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
-import { atFailedGate, blockItem, buildAttention, classifyBlock, explain, isClosedTask, latestCheckOf, requestText, sentence, type AttentionItem } from '../overview/attention.ts';
+import { atFailedGate, blockItem, buildAttention, classifyBlock, explain, isClosedTask, latestCheckOf, requestText, sentence, skillWaitCode, type AttentionItem } from '../overview/attention.ts';
 import { activeRun, taskRow } from '../overview/model.ts';
 import { checksOf, readCheck } from '../team/model.ts';
 import type { LayoutInput } from './layout.ts';
@@ -307,7 +307,7 @@ function reasonFromCode(t: TaskView, code: string): BlockReason {
   else if (klass === 'wait') cause = 'capacity';
   else if (klass === 'policy') cause = 'policy';
   else if (code.startsWith('resource_conflict')) cause = 'claim';
-  else if (code.startsWith('role_not_mapped') || code.startsWith('location_disabled') || code.startsWith('no_provider_detected') || code.startsWith('unsupported_') || code.startsWith('model_not_assigned') || code.startsWith('model_not_on_runner') || code.startsWith('model_route_unknown') || code.startsWith('trial_model_not_pinned')) cause = 'placement';
+  else if (code.startsWith('skill_runner_update_required') || code.startsWith('role_not_mapped') || code.startsWith('location_disabled') || code.startsWith('no_provider_detected') || code.startsWith('unsupported_') || code.startsWith('model_not_assigned') || code.startsWith('model_not_on_runner') || code.startsWith('model_route_unknown') || code.startsWith('trial_model_not_pinned')) cause = 'placement';
   else cause = 'other';
   return { cause, label: CAUSE_LABEL[cause], text: item.detail, code, taskIds: [], unknown: false, terminal: false, canApprove: code.startsWith('approval_required:') };
 }
@@ -322,7 +322,7 @@ const HOLDABLE_BY_APPROVAL: readonly TaskView['status'][] = ['awaiting_approval'
 function whyBlocked(t: TaskView, ctx: Context, own: readonly AttentionItem[]): WhyBlocked {
   if (isClosedTask(t)) return { held: false, reasons: [] };
   const reasons: BlockReason[] = [];
-  const code = t.placementBlock ?? (t.status === 'blocked' ? t.statusReason : null);
+  const code = t.placementBlock ?? (t.status === 'blocked' ? t.statusReason : null) ?? skillWaitCode(t);
   if (code) reasons.push(reasonFromCode(t, code));
 
   if (HOLDABLE_BY_APPROVAL.includes(t.status) && !reasons.some((r) => r.cause === 'approval')) {

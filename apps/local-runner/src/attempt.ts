@@ -7,7 +7,7 @@ import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLa
 import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets, ToolNameSchema, type ApprovalDestination, type ApprovalRefusalReason, type HarnessAdapter, type LeaseGrant, type RuntimeAdapter, type SandboxHandle, type ToolchainSpec, type WorkerApprovalOperation } from '@selarikru/protocol';
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, readStackDetection, resolveToolchain, RuntimeHarnessLauncher, unlockTree, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
-import { LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
+import { ApiStatusError, LeaseLostError, leaseRef, type ClaimedLease, type RunnerApi, type RunnerResult } from './api.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
 import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
@@ -441,12 +441,23 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     // The packs are on disk and were checked: say so, with exactly what was checked. Only this makes the record read as delivered. A lost lease starts nothing; any other
     // failure leaves the record unconfirmed, which is what it then says.
+    // Up to three tries with a short backoff, stopping at once when the lease is lost, the attempt is stopping, or the server refuses for good.
     if (packs.length > 0 && deps.api.skillsConfirmed !== undefined) {
-      try {
-        await deps.api.skillsConfirmed(ref, packs.map((p) => ({ versionId: p.versionId, digest: p.digest })));
-      } catch (err) {
-        if (err instanceof LeaseLostError) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-        log(`pack delivery not confirmed to the server: ${err instanceof Error ? clip(err.message, 120) : 'error'}`);
+      const confirmed = packs.map((p) => ({ versionId: p.versionId, digest: p.digest }));
+      for (let i = 0; i < 3; i++) {
+        try {
+          await deps.api.skillsConfirmed(ref, confirmed);
+          break;
+        } catch (err) {
+          if (err instanceof LeaseLostError) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+          const last = i === 2 || aborted() || (err instanceof ApiStatusError && err.permanent);
+          if (last) {
+            log(`pack delivery not confirmed to the server: ${err instanceof Error ? clip(err.message, 120) : 'error'}`);
+            break;
+          }
+          await new Promise((res) => setTimeout(res, 200 * 2 ** i));
+          if (aborted()) break;
+        }
       }
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };

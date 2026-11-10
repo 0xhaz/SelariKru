@@ -262,6 +262,11 @@ export const TaskViewSchema = z
     activeAttemptId: Id.nullable(),
     enteredStatusAt: Iso,
     latestEvidence: EvidenceRefSchema.nullable(),
+    /**
+     * Derived when the snapshot is read, never recorded: the recent runners that could take this task are on a build that cannot deliver its knowledge packs, so it waits.
+     * Absent or empty: not waiting for that.
+     */
+    skillRunnerWait: z.array(Id).optional(),
   })
   .strict();
 export type TaskView = z.infer<typeof TaskViewSchema>;

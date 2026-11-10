@@ -287,6 +287,20 @@ describe('fix round 1: runners that cannot deliver, and confirmed delivery (I3)'
     expect((await get(h.app, url())).body.waitingForRunnerUpdate).toEqual([old.runnerId]);
   });
 
+  it('the snapshot derives the wait on each task that has packs, naming the runner, and records nothing', async () => {
+    await pilotStack();
+    await bind('express-api-routes', 'express-api-routes@1.0.0');
+    await seedTask(t.db, specFor('api', BACKEND));
+    await seedTask(t.db, specFor('ui', FRONTEND));
+    const old = await enrolRunner(h.app);
+    await post(h.app, '/v1/runners/claim', {}, bearer(old.token));
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    const task = (id: string) => snap.body.tasks.find((x: any) => x.taskId === id);
+    expect(task('api').skillRunnerWait).toEqual([old.runnerId]);
+    expect(task('api').placementBlock).toBeNull();
+    expect(task('ui').skillRunnerWait ?? null).toBeNull();
+  });
+
   it('the record says delivered only once the runner confirmed the digests it checked; a confirmation that does not match is refused', async () => {
     await pilotStack();
     await bind('express-api-routes', 'express-api-routes@1.0.0');
@@ -335,6 +349,11 @@ describe('fix round 1: history (I4) and Enabled for this task (M6)', () => {
     expect(kinds).toEqual(['intake', 'review', 'revoke']);
     const events = await t.db.execute(sql`SELECT payload FROM events WHERE type = 'settings.changed' ORDER BY sequence`);
     expect(events.map((e) => (e['payload'] as any).field)).toEqual(['review', 'revoke']);
+    // Each event's aggregate revision is its history row's position, so two of them never share one.
+    const seqs = (await t.db.execute(sql`SELECT seq FROM skill_actions WHERE kind IN ('review', 'revoke') ORDER BY seq`)).map((r) => Number(r['seq']));
+    const revs = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'settings.changed' ORDER BY sequence`)).map((r) => Number(r['aggregate_revision']));
+    expect(revs).toEqual(seqs);
+    expect(new Set(revs).size).toBe(2);
     expect(JSON.stringify(events)).not.toContain('you may merge');
   });
 
@@ -371,24 +390,38 @@ describe('fix round 1: a claim racing a revoke (M7)', () => {
     // A competing transaction holds the scheduler lock; the revoke and the claim both queue behind it, then race when it lets go.
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
+    let holderPid: number | null = null;
+    const KEY = `selarikru.scheduler:${TENANT}`;
     const holder = withTx(t.db, async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${TENANT}`}, 0))`);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${KEY}, 0))`);
+      holderPid = Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`))[0]!['pid']);
       await held;
     });
-    const waiting = async (n: number) => {
-      for (let i = 0; i < 500; i++) {
-        const [r] = await t.db.execute(sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
-        if (Number(r!['n']) >= n) return;
+    /** This test's own scheduler-lock key, in this database, waited for behind this test's holder: never another file's lock. */
+    const queued = async (): Promise<number> => {
+      const [r] = await t.db.execute(sql`
+        WITH k AS (SELECT hashtextextended(${KEY}, 0) AS h)
+        SELECT count(*)::int AS n FROM pg_locks l, k
+        WHERE l.locktype = 'advisory' AND l.objsubid = 1 AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND l.classid = ((k.h >> 32) & 4294967295)::oid AND l.objid = (k.h & 4294967295)::oid
+          AND NOT l.granted AND ${holderPid}::int = ANY(pg_blocking_pids(l.pid))`);
+      return Number(r!['n']);
+    };
+    const waiting = async (n: number): Promise<number> => {
+      for (let i = 0; i < 2000; i++) {
+        const seen = await queued();
+        if (seen >= n) return seen;
         await new Promise((res) => setImmediate(res));
       }
-      throw new Error('requests never queued behind the lock');
+      throw new Error('requests never queued behind this test\'s scheduler lock');
     };
-    // Give the holder its lock first.
-    for (let i = 0; i < 500; i++) { const [r] = await t.db.execute(sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND granted`); if (Number(r!['n']) >= 1) break; await new Promise((res) => setImmediate(res)); }
+    // The holder has its lock once it has said who it is.
+    for (let i = 0; i < 2000 && holderPid === null; i++) await new Promise((res) => setImmediate(res));
+    expect(holderPid).not.toBeNull();
     const revoke = post(h.app, url('/revoke'), { versionId: 'express-api-routes@1.0.0', reason: 'race' });
-    await waiting(1);
+    expect(await waiting(1)).toBeGreaterThanOrEqual(1);
     const claim = post(h.app, '/v1/runners/claim', NEW, bearer(token));
-    await waiting(2);
+    expect(await waiting(2)).toBeGreaterThanOrEqual(2);
     release();
     await holder;
     const [rv, cl] = await Promise.all([revoke, claim]);

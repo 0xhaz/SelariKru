@@ -5,12 +5,12 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   libraryVersion, packDigest, RUNNER_RECENT_SECONDS, parseSkillFrontmatter, scanPack, SKILL_LIBRARY, SKILL_LIMITS, skillDirOf, SkillEvaluationSchema, SkillExecutionRecordSchema, skillLibraryUrl,
-  SkillPathSchema, SkillScanReportSchema, skillStates, SkillVersionSchema, SkillVersionTextSchema, strongerLabel,
+  SkillPathSchema, SkillScanReportSchema, TaskSpecSchema, skillStates, SkillVersionSchema, SkillVersionTextSchema, strongerLabel,
   type DeliveredSkillPack, type DeliveredSkills, type PackEntry, type ResolvedSkill, type SkillBinding, type SkillFile, type SkillScanReport, type SkillVersion,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
 import { redactSecrets, SkillBindingRequestSchema, SkillConfirmRequestSchema, SkillIntakeRequestSchema, SkillReviewRequestSchema, SkillRevokeRequestSchema } from '@selarikru/protocol';
-import { bindingOf, loadKnownVersions } from '@selarikru/workflow';
+import { bindingOf, loadKnownVersions, resolveTaskSkills } from '@selarikru/workflow';
 import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
@@ -299,6 +299,29 @@ export async function boundSkillsForStack(db: Executor, tenantId: string, projec
   }).sort((a, b) => (a.name < b.name ? -1 : 1));
 }
 
+/**
+ * For the snapshot, derived on read and never recorded: the claimable tasks a bound pack applies to, when every recent runner is on a build that cannot deliver packs, with
+ * those runners' ids. Empty when nothing is bound, no recent runner lacks support, or a recent runner has it (that runner takes the task).
+ */
+export async function skillRunnerWaits(db: Executor, tenantId: string, projectId: string, tasks: readonly { taskId: string; status: string; spec: unknown }[], now: Date): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const claimable = tasks.filter((t) => t.status === 'ready' || t.status === 'planned');
+  if (claimable.length === 0) return out;
+  const bound = await db.select({ desired: schema.projectSkillBindings.desired }).from(schema.projectSkillBindings).where(and(eq(schema.projectSkillBindings.tenantId, tenantId), eq(schema.projectSkillBindings.projectId, projectId)));
+  if (!bound.some((b) => bindingOf(b.desired) !== null)) return out;
+  const recent = await db.select({ runnerId: schema.runners.runnerId, skillDelivery: schema.runners.skillDelivery }).from(schema.runners)
+    .where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt), gte(schema.runners.lastPolledAt, new Date(now.getTime() - RUNNER_RECENT_SECONDS * 1000))));
+  const old = recent.filter((r) => r.skillDelivery !== true).map((r) => r.runnerId).sort();
+  if (old.length === 0 || recent.some((r) => r.skillDelivery === true)) return out;
+  for (const t of claimable) {
+    const spec = TaskSpecSchema.safeParse(t.spec);
+    if (!spec.success) continue;
+    const r = await resolveTaskSkills(db, { tenantId, projectId }, spec.data, 'local', 'anthropic');
+    if (r.delivered.length > 0) out.set(t.taskId, old);
+  }
+  return out;
+}
+
 // ---- history ------------------------------------------------------------------------------------------------------------------------------------
 
 type ActionKind = 'intake' | 'review' | 'revoke' | 'bind' | 'unbind';
@@ -307,13 +330,13 @@ type ActionKind = 'intake' | 'review' | 'revoke' | 'bind' | 'unbind';
  * Appends one owner action to the project's history and, when the project has a run to record it against, a `settings.changed` event with the owner as actor. Ids, versions,
  * digests and bindings only: no pack text. Taken last in its transaction, after the row it records (the event sequence comes after every other lock, as everywhere).
  */
-async function recordAction(tx: Tx, a: { tenantId: string; projectId: string; kind: ActionKind; actor: string; at: Date; skillId: string; versionId: string | null; before: Record<string, unknown> | null; after: Record<string, unknown> | null; event: boolean; revision: number }): Promise<void> {
+async function recordAction(tx: Tx, a: { tenantId: string; projectId: string; kind: ActionKind; actor: string; at: Date; skillId: string; versionId: string | null; before: Record<string, unknown> | null; after: Record<string, unknown> | null; event: boolean; /** The binding revision; null: the history row's own position. */ revision: number | null }): Promise<void> {
   const [row] = await tx.insert(schema.skillActions).values({ tenantId: a.tenantId, projectId: a.projectId, kind: a.kind, actor: a.actor, at: a.at, skillId: a.skillId, versionId: a.versionId, before: a.before, after: a.after }).returning({ seq: schema.skillActions.seq });
   if (!a.event) return;
   const runId = await eventRunFor(tx, a.tenantId, a.projectId, null);
   if (runId === null) return;
   await writeEvent(tx, a.at, {
-    projectId: a.projectId, runId, taskId: runId, aggregateRevision: a.revision, type: 'settings.changed', actor: { kind: 'human', id: a.actor },
+    projectId: a.projectId, runId, taskId: runId, aggregateRevision: a.revision ?? row!.seq, type: 'settings.changed', actor: { kind: 'human', id: a.actor },
     payload: { scope: 'skill', key: a.skillId, field: a.kind, versionId: a.versionId, from: a.before, to: a.after, revision: a.revision, historySeq: row!.seq },
   });
 }
@@ -362,7 +385,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
           .onConflictDoNothing().returning({ v: schema.skillStagedVersions.versionId });
         // What can never be delivered is not kept: a blocked pack stores its metadata and scan only.
         if (inserted.length > 0 && !blocked) for (const f of files) await tx.insert(schema.skillPackFiles).values({ tenantId: config.tenantId, versionId, path: f.file.path, content: f.content });
-        if (inserted.length > 0) await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'intake', actor: uid, at, skillId: String(version['skillId']), versionId, before: null, after: { blocked, digest: String(version['digest']) }, event: false, revision: 0 });
+        if (inserted.length > 0) await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'intake', actor: uid, at, skillId: String(version['skillId']), versionId, before: null, after: { blocked, digest: String(version['digest']) }, event: false, revision: null });
       });
     }
     return reply.code(existing ? 200 : 201).send(await entryOf(db, projectId, versionId));
@@ -387,7 +410,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
       if (scan.data.findings.some((f) => f.severity === 'review') && !body.acknowledgeFindings) throw new AppError(409, 'skill_findings_unacknowledged', 'the scan raised findings for review; acknowledge them to mark this version reviewed');
       const at = now();
       await tx.update(schema.skillStagedVersions).set({ reviewedBy: uid, reviewedAt: at }).where(and(eq(schema.skillStagedVersions.tenantId, config.tenantId), eq(schema.skillStagedVersions.versionId, body.versionId)));
-      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'review', actor: uid, at, skillId: row.skillId, versionId: body.versionId, before: null, after: { reviewed: true, acknowledgedFindings: body.acknowledgeFindings }, event: true, revision: 1 });
+      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'review', actor: uid, at, skillId: row.skillId, versionId: body.versionId, before: null, after: { reviewed: true, acknowledgedFindings: body.acknowledgeFindings }, event: true, revision: null });
     });
     return entryOf(db, projectId, body.versionId);
   });
@@ -404,7 +427,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
       const reason = body.reason.replace(/\s+/g, ' ').trim();
       const done = await tx.insert(schema.skillRevocations).values({ tenantId: config.tenantId, versionId: body.versionId, reason, revokedBy: uid, revokedAt: at }).onConflictDoNothing().returning({ v: schema.skillRevocations.versionId });
       if (done.length === 0) throw new AppError(409, 'skill_already_revoked', 'this version is already revoked');
-      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'revoke', actor: uid, at, skillId: target.skillId, versionId: body.versionId, before: null, after: { revoked: true, reason }, event: true, revision: 1 });
+      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'revoke', actor: uid, at, skillId: target.skillId, versionId: body.versionId, before: null, after: { revoked: true, reason }, event: true, revision: null });
     });
     return entryOf(db, projectId, body.versionId);
   });

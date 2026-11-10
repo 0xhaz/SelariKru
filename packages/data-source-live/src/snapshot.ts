@@ -8,7 +8,7 @@ interface RawAttempt {
   startedAt: string | null; endedAt: string | null; lastHeartbeatAt: string | null; humanIntervenedAt?: string | null;
 }
 interface RawTask {
-  taskId: string; runId: string | null; revision: number; aggregateRevision: number; status: TaskView['status']; placementBlock: string | null; blockedReason: string | null;
+  taskId: string; runId: string | null; revision: number; aggregateRevision: number; status: TaskView['status']; placementBlock: string | null; blockedReason: string | null; skillRunnerWait?: string[];
   title: string | null; role: string | null; dependsOn: string[] | null; enteredStatusAt: string; latestEvidence: TaskView['latestEvidence']; attempts: RawAttempt[];
   cancel: { operationId: string; requestedAt: string; reason?: string } | null;
 }
@@ -99,7 +99,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
       };
     }
     tasks[t.taskId] = {
-      taskId: t.taskId, runId: t.runId, revision: t.revision, aggregateRevision: t.aggregateRevision, title: t.title, role: t.role, dependsOn: t.dependsOn, status: t.status, statusReason: t.blockedReason, placementBlock: t.placementBlock,
+      taskId: t.taskId, runId: t.runId, revision: t.revision, aggregateRevision: t.aggregateRevision, title: t.title, role: t.role, dependsOn: t.dependsOn, status: t.status, statusReason: t.blockedReason, placementBlock: t.placementBlock, ...(Array.isArray(t.skillRunnerWait) && t.skillRunnerWait.length > 0 ? { skillRunnerWait: t.skillRunnerWait.filter((x): x is string => typeof x === 'string') } : {}),
       cancelRequested: t.cancel ? { at: t.cancel.requestedAt, operationId: t.cancel.operationId, reason: t.cancel.reason ?? null } : null, cancelReason: null, supersededByRevision: null,
       attemptIds: started.map((a) => a.attemptId), activeAttemptId: started.find((a) => a.endedAt === null)?.attemptId ?? null, enteredStatusAt: t.enteredStatusAt, latestEvidence: t.latestEvidence,
     };

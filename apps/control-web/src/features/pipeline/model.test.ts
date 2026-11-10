@@ -479,3 +479,11 @@ describe('a snapshot shaped like the real route', () => {
     expect(buildPipeline(s, NOW, NOW).rows.find((r) => r.taskId === 'b')!.decisionId).toBe('scope:run');
   });
 });
+
+describe('waiting for a runner that can deliver knowledge packs', () => {
+  it('the task row says why it is held, naming the runner', () => {
+    const m = build(snapshotOf({ tasks: [task('api', { status: 'ready', skillRunnerWait: ['runner_old'] })] }));
+    expect(why(m, 'api').held).toBe(true);
+    expect(why(m, 'api').reasons[0]).toMatchObject({ cause: 'placement', text: 'Waiting for a runner that can deliver knowledge packs (runner_old needs an update).' });
+  });
+});

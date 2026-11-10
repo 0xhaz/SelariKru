@@ -90,6 +90,10 @@ const EXPLAIN: Readonly<Record<string, string>> = {
   execution_conflicts_with_role_pin: 'The task\'s execution setting conflicts with where its role is pinned.',
 };
 
+/** The derived wait for a runner that can deliver knowledge packs, as a code the rest of this file reads. Null: not waiting for that. */
+export const skillWaitCode = (t: TaskView): string | null => (t.skillRunnerWait && t.skillRunnerWait.length > 0 ? `${SKILL_WAIT}:${t.skillRunnerWait.join(',')}` : null);
+const SKILL_WAIT = 'skill_runner_update_required';
+
 export function explain(code: string): string {
   const bare = stripPrefix(code);
   const known = EXPLAIN[bare];
@@ -97,6 +101,12 @@ export function explain(code: string): string {
   const [head, ...rest] = bare.split(':');
   const arg = rest.join(':');
   if (head === INFRA_HEAD) return infrastructureExplanation(arg);
+  if (head === SKILL_WAIT) {
+    const ids = arg.split(',').filter(Boolean);
+    return `Waiting for a runner that can deliver knowledge packs (${ids.length > 0 ? ids.join(', ') : 'a runner'} ${ids.length > 1 ? 'need' : 'needs'} an update).`;
+  }
+  if (head === 'skill_revoked') return `A knowledge pack this task needs (${arg || 'a pack'}) was revoked, so it cannot start until the pack is unbound or replaced.`;
+  if (head === 'skill_not_reviewed' || head === 'skill_blocked' || head === 'skill_unavailable') return `A knowledge pack bound for this task (${arg || 'a pack'}) cannot be delivered, so it cannot start until the binding is fixed.`;
   if (head === 'toolchain_unresolved') return `The repository's Node toolchain could not be resolved: ${arg.trim()}.`;
   if (head === 'resource_conflict') return arg ? `Another task holds a resource this one needs (${arg}).` : 'Another task holds a resource this one needs.';
   if (head === 'no_provider_detected') return 'No runner has reported an installed harness, so no model can run.';
@@ -193,6 +203,12 @@ export const reducedScopeCovers = (run: RunView | undefined, task: Pick<TaskView
 export function blockItem(task: TaskView, code: string, hit: readonly string[], lastFailure: string | null = null): AttentionItem {
   const base = { id: `placement:${task.taskId}`, code, since: task.enteredStatusAt, affectedTaskIds: hit, owner: 'You', decisionId: decisionIdForBlock(task, code) };
   const name = titleOf(task);
+  if (code.startsWith(`${SKILL_WAIT}:`)) {
+    return make({
+      ...base, kind: 'blocked', title: `${name}: waiting for a runner update`, detail: explain(code),
+      consequence: `${whoWaits(hit)} It starts once a runner that can deliver its knowledge packs polls.`, nextAction: 'Restart the runner on the current build, or unbind the pack from this task.',
+    });
+  }
   switch (classifyBlock(code)) {
     case 'decision': {
       const denied = code === 'approval_denied';
@@ -247,7 +263,7 @@ export function buildAttention(snapshot: ProjectViewSnapshot, nowMs: number, liv
   const affected = (t: TaskView): readonly string[] => dependentsOf(snapshot, t.taskId);
 
   for (const task of live) {
-    const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null);
+    const blockCode = task.placementBlock ?? (task.status === 'blocked' ? task.statusReason : null) ?? skillWaitCode(task);
     // The expiry sweep blocks the task with this reason, and the expired approval below already says so.
     const expiredRequestShown = blockCode === 'approval_expired' && Object.values(snapshot.approvals).some((a) => a.taskId === task.taskId && approvalStateAt(a, nowMs) === 'expired');
     if (blockCode !== null && !expiredRequestShown) {

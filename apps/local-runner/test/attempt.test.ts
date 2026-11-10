@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
-import { HttpRunnerApi, LeaseLostError } from '../src/api.ts';
+import { ApiStatusError, HttpRunnerApi, LeaseLostError } from '../src/api.ts';
 import { sandboxName } from '@selarikru/runtime-docker-local';
 import { makeWorld, type World, type WorldOptions } from './world.ts';
 
@@ -886,6 +886,24 @@ describe('knowledge packs', () => {
     await runAttempt(deps, w.lease);
     expect(calledBeforeAgent).toBe(true);
     expect((w.api.skillsConfirmed as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![1]).toEqual([{ versionId: MERGE_PACK.versionId, digest: MERGE_PACK.digest }]);
+  });
+
+  it('a transient server error at confirmation is retried, and the confirmation lands', async () => {
+    let calls = 0;
+    const { w, deps } = await setup({ skills: { packs: [MERGE_PACK] }, skillsConfirmed: async () => { calls += 1; if (calls === 1) throw new ApiStatusError(503, '/v1/runners/skills/confirm'); } });
+    const report = await runAttempt(deps, w.lease);
+    expect(calls).toBe(2);
+    expect(report.outcome).toBe('completed');
+    expect(w.logs.some((l) => l.includes('not confirmed'))).toBe(false);
+  });
+
+  it('confirmation gives up after three tries and says so, and the worker still runs unconfirmed', async () => {
+    let calls = 0;
+    const { w, deps } = await setup({ skills: { packs: [MERGE_PACK] }, skillsConfirmed: async () => { calls += 1; throw new ApiStatusError(503, '/v1/runners/skills/confirm'); } });
+    const report = await runAttempt(deps, w.lease);
+    expect(calls).toBe(3);
+    expect(report.outcome).toBe('completed');
+    expect(w.logs.some((l) => l.includes('pack delivery not confirmed'))).toBe(true);
   });
 
   it('a lost lease at confirmation starts no worker', async () => {

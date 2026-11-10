@@ -13,6 +13,7 @@ import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
+import { skillRunnerWaits } from './skills.ts';
 import {
   bumpStatus, fingerprint, idempotent, loadSpecRow, newId, requireProject, requireRun, requireTaskStatus, writeEvent,
 } from './store.ts';
@@ -720,6 +721,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }))].sort();
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
+        // Derived on read, never recorded: tasks waiting for a runner that can deliver their knowledge packs.
+        const skillWaits = await skillRunnerWaits(tx, config.tenantId, projectId, statuses.map((s) => ({ taskId: s.taskId, status: s.status, spec: specOf(s.taskId, s.currentRevision)?.spec })), at);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
         const assessments = new Map<string, { notDelivered: unknown; notDeliveredHash: string; deliveredRequirementIds: readonly string[]; stopped: readonly unknown[]; stoppingTaskIds: readonly string[] } | null>();
         const evidence = new Map<string, Awaited<ReturnType<typeof loadRunEvidence>>>();
@@ -813,6 +816,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               /** When the task entered this status. Absent only for a task with no status event yet: its row was created in this state. */
               enteredStatusAt: statusEvents.find((e) => e['task_id'] === s.taskId) ? eventTime(statusEvents.find((e) => e['task_id'] === s.taskId)!) : s.updatedAt.toISOString(),
               latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === s.taskId)),
+              ...(skillWaits.has(s.taskId) ? { skillRunnerWait: skillWaits.get(s.taskId) } : {}),
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
                 attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason === null || a.streamable ? a.exitReason : restrictedStoredReason(a.exitReason),
                 /** Where this attempt's sandbox runs. Null: its runner is no longer enrolled. */

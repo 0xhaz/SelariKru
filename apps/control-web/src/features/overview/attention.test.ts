@@ -474,3 +474,16 @@ describe('a budget refusal', () => {
   });
 });
 
+
+describe('a task held back for a runner that cannot deliver knowledge packs', () => {
+  it('shows a derived hint naming the runner, in the attention queue and on the task row, with nothing recorded on the task', () => {
+    const t = task('api', { status: 'ready', title: 'API', skillRunnerWait: ['runner_old'] });
+    const items = buildAttention(snapshotOf({ tasks: [t] }), NOW, NOW);
+    const item = items.find((i) => i.affectedTaskIds.includes('api'))!;
+    expect(item.detail).toBe('Waiting for a runner that can deliver knowledge packs (runner_old needs an update).');
+    expect(item.nextAction).toMatch(/Restart the runner on the current build/);
+    expect(t.placementBlock).toBeNull();
+    expect(explain('skill_runner_update_required:runner_a,runner_b')).toBe('Waiting for a runner that can deliver knowledge packs (runner_a, runner_b need an update).');
+    expect(buildAttention(snapshotOf({ tasks: [task('ui', { status: 'ready' })] }), NOW, NOW).some((i) => i.affectedTaskIds.includes('ui'))).toBe(false);
+  });
+});
