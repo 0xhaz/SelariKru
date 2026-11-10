@@ -5,7 +5,8 @@ import { createScheduler } from '@selarikru/workflow';
 import { CLOUD_POLICY, TEST_CATALOG } from '@selarikru/workflow/test-helpers';
 import type { Policy } from '@selarikru/policy';
 import { blueprintFromAnswers } from '@selarikru/domain';
-import { refreshBrains } from '../src/brain.ts';
+import { RECORDS_READER_VERSION, recordsMark, refreshBrains } from '../src/brain.ts';
+import { BRAIN_GENERATOR } from '@selarikru/domain';
 import { bearer, enrolRunner, get, makeHarness, post, PROJECT, resetDb, RUN, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 const TENANT = 'tenant_a';
@@ -231,8 +232,8 @@ describe('Project Brain: the task context bundle at claim', () => {
       expect(ctx.omissions).toEqual(expect.arrayContaining([
         { kind: 'source', id: secretNote.body.source.sourceId, reason: 'restricted_for_destination' },
         { kind: 'source', id: `plan:${RUN}:R1`, reason: 'restricted_for_destination' },
-        { kind: 'claim', id: 'architecture:task:R1', reason: 'restricted_for_destination' },
       ]));
+      expect(JSON.stringify(ctx.omissions)).not.toContain('task:R1');
       expect(ctx.claims.map((c: any) => c.key)).toContain('criterion:FB-01');
     } finally {
       await cloud.app.close();
@@ -310,8 +311,9 @@ describe('Project Brain: fix round 1', () => {
     expect(lease.context.omissions).toEqual(expect.arrayContaining([
       { kind: 'source', id: n.body.source.sourceId, reason: 'restricted_for_destination' },
       { kind: 'source', id: `plan:${RUN}:R1`, reason: 'restricted_for_destination' },
-      { kind: 'claim', id: 'architecture:task:R1', reason: 'restricted_for_destination' },
     ]));
+    // Named by source only: the restricted claim's key is not in the bundle either.
+    expect(JSON.stringify(lease.context.omissions)).not.toContain('task:R1');
     // The restricted plan source carries its own task's label.
     expect((await get(h.app, brainUrl)).body.sources.find((s: any) => s.sourceId === `plan:${RUN}:R1`)).toMatchObject({ classification: 'restricted', allowedUse: ['local'] });
   });
@@ -412,5 +414,51 @@ describe('Project Brain: fix round 1', () => {
     } finally {
       await app.app.close();
     }
+  });
+
+  it('a claim made after a verdict and before the pass reports a lag, and says some claims may be out of date', async () => {
+    await seedPlan();
+    await withTx(t.db, async (tx) => {
+      await appendEvent(tx, { schemaVersion: 1, eventId: 'evt_lag1', projectId: PROJECT, runId: RUN, taskId: 'T1', attemptId: null, type: 'verification.failed', sequence: 0, aggregateRevision: 1, actor: { kind: 'verifier', id: 'v1' }, occurredAt: h.clock.now().toISOString(), receivedAt: h.clock.now().toISOString(), causationId: null, traceId: 't', payload: { failedChecks: ['FB-03'] } });
+    });
+    await compileNow();
+    // A new verdict lands; the claim comes before the periodic pass.
+    await withTx(t.db, async (tx) => {
+      await appendEvent(tx, { schemaVersion: 1, eventId: 'evt_lag2', projectId: PROJECT, runId: RUN, taskId: 'T1', attemptId: null, type: 'verification.passed', sequence: 0, aggregateRevision: 1, actor: { kind: 'verifier', id: 'v1' }, occurredAt: h.clock.now().toISOString(), receivedAt: h.clock.now().toISOString(), causationId: null, traceId: 't', payload: { candidateSha: 'a'.repeat(40) } });
+    });
+    const { token } = await enrolRunner(h.app);
+    const lease = (await post(h.app, '/v1/runners/claim', {}, bearer(token))).body.lease;
+    expect(lease.context).toMatchObject({ recordsPending: true });
+    expect(lease.context.indexLag).toBeGreaterThan(0);
+    expect(lease.context.claims.find((c: any) => c.key === 'verification:T1').text).toBe('Verification failed: FB-03.');
+    // After the pass, nothing is pending.
+    await compileNow();
+    const next = await enrolRunner(h.app);
+    await t.db.execute(sql`UPDATE task_status SET status = 'ready' WHERE task_id = 'T2'`);
+    const later = (await post(h.app, '/v1/runners/claim', {}, bearer(next.token))).body.lease;
+    expect(later.context).toMatchObject({ recordsPending: false, indexLag: 0 });
+  });
+
+  it('one project the pass cannot compile does not stop the others, and is logged by error name and code only', async () => {
+    await seedPlan();
+    await t.db.execute(sql`INSERT INTO projects (tenant_id, project_id, repository, default_branch, classification) VALUES (${TENANT}, 'proj_b', 'r', 'main', 'internal'), (${TENANT}, 'proj_c', 'r', 'main', 'internal')`);
+    // proj_b holds a stored source the reader cannot parse, so every sync of it throws.
+    await t.db.execute(sql`INSERT INTO brain_sources (tenant_id, project_id, source_id, revision, kind, title, standing, classification, allowed_use, provenance, derived_from, task_id, sections, content_sha256, seq, recorded_at) VALUES (${TENANT}, 'proj_b', 'note:bad', 1, 'note', 't', 'proposed', 'internal', '["local"]'::jsonb, '{}'::jsonb, '[]'::jsonb, null, '"not an array"'::jsonb, ${'a'.repeat(64)}, 1, now())`);
+    const logged: unknown[] = [];
+    const compiled = await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now, onError: (entry) => logged.push(entry) });
+    expect(compiled).toEqual([PROJECT, 'proj_c']);
+    expect(logged).toEqual([{ projectId: 'proj_b', error: 'ZodError', code: null }]);
+    expect(Object.keys(logged[0] as object).sort()).toEqual(['code', 'error', 'projectId']);
+  });
+
+  it('the records fingerprint carries the generator and records-reader versions, so a deploy that changes extraction re-reads every project', async () => {
+    await seedPlan();
+    const mark = await recordsMark(t.db, TENANT, PROJECT);
+    expect(mark.startsWith(`${BRAIN_GENERATOR.version}:${RECORDS_READER_VERSION}|`)).toBe(true);
+    await compileNow();
+    // A stored mark from an older reader no longer matches: the next pass reads the records again.
+    await t.db.execute(sql`UPDATE brain_heads SET records_mark = ${`0:0|${mark.split('|').slice(1).join('|')}`}`);
+    expect(await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now })).toEqual([]);
+    expect((await t.db.execute(sql`SELECT records_mark FROM brain_heads`))[0]!['records_mark']).toBe(mark);
   });
 });

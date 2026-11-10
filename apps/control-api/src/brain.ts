@@ -1,5 +1,5 @@
 import {
-  allowedUseFor, BlueprintContentSchema, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
+  allowedUseFor, BRAIN_GENERATOR, BlueprintContentSchema, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
   type BrainBundle, type BrainClaim, type BrainClassification, type BrainCompilation, type BrainDestination, type BrainRevocation, type BrainSection, type BrainSourceRevision, type TaskSpec,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
@@ -238,7 +238,7 @@ async function lockHead(tx: Tx, tenantId: string, projectId: string): Promise<{ 
  * project label. One small read, no lock. When it has not moved, a sync reads no records.
  */
 export async function recordsMark(db: Executor, tenantId: string, projectId: string): Promise<string> {
-  const [row] = await db.execute(sql`SELECT concat_ws('|',
+  const [row] = await db.execute(sql`SELECT concat_ws('|', ${`${BRAIN_GENERATOR.version}:${RECORDS_READER_VERSION}`}::text,
     (SELECT coalesce(max(sequence), 0) FROM events WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND type IN ('verification.passed', 'verification.failed', 'change.proposed', 'change.merged', 'plan.accepted', 'approval.granted', 'approval.denied', 'run.reduced_scope_accepted')),
     (SELECT count(*) || ':' || count(superseded_by) || ':' || coalesce(max(created_at)::text, '') FROM decisions WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT count(*) || ':' || coalesce(max(resolved_at)::text, '') FROM approvals WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND outcome IN ('granted', 'denied')),
@@ -249,6 +249,12 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
     (SELECT classification FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId})) AS mark`);
   return String(row?.['mark'] ?? '');
 }
+
+/**
+ * The version of `recordSources`, the code that reads records into sources. It is part of the records fingerprint with the generator's version, so a deploy that
+ * changes either reads every project's records again. Raise it whenever that code changes what it produces.
+ */
+export const RECORDS_READER_VERSION = '1';
 
 /** A source that could not be stored: its id and a code, never its text. */
 export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;
@@ -351,13 +357,18 @@ export async function syncBrain(db: Db, tenantId: string, projectId: string, at:
  * The periodic pass: compiles each of the tenant's projects whose records moved (a verifier's verdict, a merge the reconciler saw) without waiting for anyone to look.
  * One unlocked fingerprint read per project when nothing moved. Resolves with the projects it compiled.
  */
-export async function refreshBrains(ctx: { db: Db; tenantId: string; now: () => Date; onSkip?: SkipReport }): Promise<string[]> {
+export async function refreshBrains(ctx: { db: Db; tenantId: string; now: () => Date; onSkip?: SkipReport; onError?: (entry: { projectId: string; error: string; code: unknown }) => void }): Promise<string[]> {
   const compiled: string[] = [];
   const projects = await ctx.db.select({ projectId: schema.projects.projectId }).from(schema.projects).where(eq(schema.projects.tenantId, ctx.tenantId)).orderBy(asc(schema.projects.projectId));
   for (const { projectId } of projects) {
-    const [head] = await ctx.db.select().from(schema.brainHeads).where(where(schema.brainHeads, ctx.tenantId, projectId));
-    if (head && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(ctx.db, ctx.tenantId, projectId))) continue;
-    if (await syncBrain(ctx.db, ctx.tenantId, projectId, ctx.now(), undefined, ctx.onSkip)) compiled.push(projectId);
+    // One project that cannot be compiled never stalls the others. It is reported by error name and code only: a failed query's parameters can hold source text.
+    try {
+      const [head] = await ctx.db.select().from(schema.brainHeads).where(where(schema.brainHeads, ctx.tenantId, projectId));
+      if (head && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(ctx.db, ctx.tenantId, projectId))) continue;
+      if (await syncBrain(ctx.db, ctx.tenantId, projectId, ctx.now(), undefined, ctx.onSkip)) compiled.push(projectId);
+    } catch (err) {
+      ctx.onError?.({ projectId, error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown; cause?: { code?: unknown } } | null)?.code ?? (err as { cause?: { code?: unknown } } | null)?.cause?.code ?? null });
+    }
   }
   return compiled;
 }
@@ -387,8 +398,11 @@ export async function bundleForAttempt(db: Db, lease: { tenantId: string; projec
     classification: String(r['classification']), allowedUse: r['allowed_use'] as string[], provenance: r['provenance'] as Record<string, unknown>, derivedFrom: r['derived_from'] as unknown[],
     taskId: (r['task_id'] as string | null) ?? null, sections: r['sections'] as unknown[], contentSha256: String(r['content_sha256']), seq: Number(r['seq']), recordedAt: new Date(r['recorded_at'] as string),
   }));
+  // One cheap fingerprint read: when the records moved since the last sync (a verdict the periodic pass has not read yet), the bundle says so rather than calling
+  // its claims current.
+  const recordsPending = head?.recordsMark !== (await recordsMark(db, tenantId, projectId));
   const bundle = buildContextBundle({
-    compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: lease.location,
+    compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: lease.location, recordsPending,
     // Anything but a clear yes from the claim is treated as output that may leave the device: restricted claims are then left out.
     streamable: lease.streamable !== false,
     task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((x) => x.id)], dependsOn: s.dependencies.map((d) => d.taskId) },

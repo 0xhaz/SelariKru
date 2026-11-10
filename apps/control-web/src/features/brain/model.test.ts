@@ -86,12 +86,13 @@ describe('contextModel', () => {
     expect(m.claims[1]!.status).toBe('Disputed');
     expect(m.claims.map((c) => c.standing)).toEqual(['Proposed, not accepted', 'Accepted']);
     expect(m.omissions).toEqual([
-      { id: 'overview:note:r:1', kind: 'Claim', reason: 'Revoked source' },
+      // The restricted note's claim is not named in a cloud bundle: only its source is.
       { id: 'architecture:criterion:FB-01', kind: 'Claim', reason: 'Out of scope for this task' },
       { id: 'note:r', kind: 'Source', reason: 'Revoked source' },
     ]);
     expect(m.lag).toBe('1 source change was not compiled yet');
     expect(contextModel(null)).toBeNull();
+    expect(contextModel({ attemptId: 'a1', taskId: 'T1', destination: 'cloud', recordedAt: AT, bundle: { ...bundle, recordsPending: true, indexLag: 1 } })!.lag).toBe('Records changed after it was compiled; some claims may be out of date');
     const other = contextModel({ attemptId: 'a1', taskId: 'T1', destination: 'local', recordedAt: AT, bundle: { ...bundle, omissions: [{ kind: 'claim', id: 'x', reason: 'accepted_source_revoked' }, { kind: 'section', id: 'criteria:p@1#preamble', reason: 'not_a_claim' }] } })!;
     expect(other.omissions).toEqual([
       { id: 'x', kind: 'Claim', reason: 'Its accepted source was revoked; a proposal is not served in its place' },

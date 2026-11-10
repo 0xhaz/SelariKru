@@ -139,7 +139,8 @@ export function contextModel(ctx: AttemptContextView | null): ContextModel | nul
   const b = ctx.bundle;
   return {
     destination: ctx.destination === 'cloud' ? 'Cloud worker' : 'Local worker', recordedAt: ctx.recordedAt,
-    version: b.compilationVersion === null ? 'Nothing was compiled yet' : `Version ${b.compilationVersion}`, lag: changes(b.indexLag, true),
+    version: b.compilationVersion === null ? 'Nothing was compiled yet' : `Version ${b.compilationVersion}`,
+    lag: b.recordsPending ? 'Records changed after it was compiled; some claims may be out of date' : changes(b.indexLag, true),
     claims: b.claims.map((c) => ({ claimId: c.claimId, key: c.key, heading: c.heading, text: c.text, status: c.status === 'disputed' ? 'Disputed' : 'Current', standing: c.standing === 'accepted' ? 'Accepted' : 'Proposed, not accepted', citations: c.citations.map(cite) })),
     omissions: b.omissions.map((o) => ({ id: o.id, kind: OMITTED_KIND[o.kind] ?? o.kind, reason: OMISSION[o.reason] })),
     pinned: b.pinned.map((p) => `${p.sourceId} · revision ${p.revision}`),

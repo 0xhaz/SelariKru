@@ -374,8 +374,10 @@ export const BrainBundleSchema = z.strictObject({
   /** The source log position the compilation read, and the position the log has reached now. */
   watermark: z.number().int().min(0),
   sourceHead: z.number().int().min(0),
-  /** Changes to sources the compilation has not read yet. */
+  /** Changes the compilation has not read yet: source-log entries past its watermark, and at least 1 when the records moved since the last sync. */
   indexLag: z.number().int().min(0),
+  /** The records sources are read from (verdicts, decisions, the plan) moved since the last sync, so some claims may be out of date. */
+  recordsPending: z.boolean().default(false),
   compiledAt: z.iso.datetime().nullable(),
   /** The exact accepted source revisions the served claims rest on. */
   pinned: z.array(BrainRevisionRefSchema),
@@ -406,7 +408,9 @@ export interface BundleInput {
    * Whether the attempt's output may leave the device (the claim's `streamable`). A streamable attempt, wherever it runs, is served only what a cloud worker may see:
    * restricted and secret claims go only to a local attempt whose output stays on the device.
    */
-  readonly streamable: boolean;
+  readonly streamable?: boolean;
+  /** The records moved since the last sync (the server compares the records' fingerprint with the one the last sync stored). */
+  readonly recordsPending?: boolean;
   readonly task: BundleTask;
   readonly maxTextChars?: number;
 }
@@ -428,8 +432,8 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
   const served: BrainBundleClaim[] = [];
   const pinned = new Map<string, BrainRevisionRef>();
   const c = input.compilation;
-  // Output that may leave the device gets only what a cloud worker may see.
-  const reach: BrainDestination = input.streamable ? 'cloud' : input.destination;
+  // Output that may leave the device gets only what a cloud worker may see. Fails closed: only an explicit `false` keeps output on the device.
+  const reach: BrainDestination = input.streamable === false ? input.destination : 'cloud';
   const permitted = (classification: string, allowedUse: readonly string[]): boolean => allowedUse.includes(input.destination) && allowedUse.includes(reach) && allowedUseFor(classification).includes(reach);
   const isDead = (x: BrainRevisionRef): boolean => [...dependsOn(x, all)].some((s) => revoked.has(s));
   let used = 0;
@@ -443,6 +447,8 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
   /** Why each source's claims were left out, for sources none of whose claims were served. */
   const dropped = new Map<string, BrainOmissionReason>();
   const servedFrom = new Set<string>();
+  /** Sources that make a left-out claim restricted for this bundle. */
+  const restricting = new Set<string>();
 
   for (const page of c?.pages ?? []) {
     for (const cl of page.claims) {
@@ -450,9 +456,16 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
         omissions.push({ kind: 'claim', id: cl.claimId, reason });
         for (const x of cl.citations) if (!dropped.has(x.sourceId)) dropped.set(x.sourceId, reason);
       };
+      // Checked first: a claim this bundle may not see is named only through the sources that restrict it, never by its key, whatever else is true of it.
+      if (!permitted(cl.classification, cl.allowedUse)) {
+        for (const x of [...cl.citations, ...cl.disputedBy]) {
+          const r = all.get(refKey(x));
+          if (r && !permitted(r.classification, r.allowedUse)) restricting.add(x.sourceId);
+        }
+        continue;
+      }
       if (cl.status === 'unsupported' || deadNow(cl)) { omit(cl.standing === 'accepted' && cl.disputedBy.some((x) => !isDead(x)) ? 'accepted_source_revoked' : 'revoked'); continue; }
       if (cl.status === 'stale' || staleNow(cl) || (cl.commit !== null && cl.commit !== input.task.baseSha)) { omit('stale'); continue; }
-      if (!permitted(cl.classification, cl.allowedUse)) { omit('restricted_for_destination'); continue; }
       const crit = CRITERION_KEY.exec(cl.key);
       if ((cl.taskId !== null && !inScopeTasks.has(cl.taskId)) || (crit !== null && !criteria.has(crit[1]!))) { omit('out_of_scope'); continue; }
       const size = cl.text.length + cl.heading.length;
@@ -468,7 +481,7 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
   // Sources, by their latest revision: revoked, not for this destination at all, or every claim they state left out; then the sections that state no claim.
   for (const rev of [...latest.values()].sort((a, b) => byString(a.sourceId, b.sourceId))) {
     if (revoked.has(rev.sourceId)) { omissions.push({ kind: 'source', id: rev.sourceId, reason: 'revoked' }); continue; }
-    if (!permitted(rev.classification, rev.allowedUse)) { omissions.push({ kind: 'source', id: rev.sourceId, reason: 'restricted_for_destination' }); continue; }
+    if (!permitted(rev.classification, rev.allowedUse) || restricting.has(rev.sourceId)) { omissions.push({ kind: 'source', id: rev.sourceId, reason: 'restricted_for_destination' }); continue; }
     const why = dropped.get(rev.sourceId);
     if (why !== undefined && !servedFrom.has(rev.sourceId)) omissions.push({ kind: 'source', id: rev.sourceId, reason: why });
     for (const sec of rev.sections) if (sec.key === undefined) omissions.push({ kind: 'section', id: `${rev.sourceId}@${rev.revision}#${sec.anchor}`, reason: 'not_a_claim' });
@@ -477,7 +490,8 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
   return {
     schemaVersion: 1, destination: input.destination, taskId: input.task.taskId,
     compilationVersion: c?.version ?? null, generator: c?.generator ?? { id: BRAIN_GENERATOR.id, version: BRAIN_GENERATOR.version },
-    watermark: c?.watermark ?? 0, sourceHead: input.sourceHead, indexLag: Math.max(0, input.sourceHead - (c?.watermark ?? 0)), compiledAt: c?.generatedAt ?? null,
+    watermark: c?.watermark ?? 0, sourceHead: input.sourceHead, compiledAt: c?.generatedAt ?? null,
+    indexLag: Math.max(input.recordsPending === true ? 1 : 0, input.sourceHead - (c?.watermark ?? 0)), recordsPending: input.recordsPending === true,
     pinned: [...pinned.values()].sort((a, b) => byString(a.sourceId, b.sourceId) || a.revision - b.revision),
     claims: served, omissions,
   };
