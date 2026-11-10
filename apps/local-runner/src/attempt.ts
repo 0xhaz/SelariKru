@@ -488,6 +488,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
+    // The clock ran out while the bundle was built or a checkpoint applied: no sandbox is made, and it is the setup's failure.
+    if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
 
     try {
       handle = await deps.runtime.create({ attemptId: lease.attemptId, taskId: task.taskId, workspacePath: workspace, cpus: deps.cpus, memoryMiB: deps.memoryMiB });
@@ -498,7 +500,9 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-    if (flags.cancelled || flags.timedOut) return await finish('failed', flags.timedOut ? why('timeout_before_start', 'attempt timeout reached before the agent started') : why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
+    if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
+    // No worker has run: a clock that ran out while the sandbox was made is the setup's failure, not the worker's, so it spends no repair and its hold is released.
+    if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
 
     if (toolchainSpec !== null) {
       if (deps.runtime.provision === undefined) return await finish('infrastructure_failed', why('provisioning_failed: this runtime cannot set up a Node toolchain'), null);

@@ -566,6 +566,27 @@ describe('toolchain provisioning', () => {
       expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout was reached during setup/);
     });
 
+    it('the attempt timeout running out while the sandbox is still being created is setup\'s failure too, and starts no worker (T7.6)', async () => {
+      // Deterministic: sandbox creation does not finish until the deadline has fired, whatever the machine's load.
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } } }, { timeoutScale: 0.05 });
+      const fired = () => w.logs.some((l) => l.includes('attempt timeout reached'));
+      const runtime = new Proxy(deps.runtime, {
+        get(target, prop) {
+          if (prop === 'create') return async (...args: Parameters<typeof target.create>) => {
+            for (let i = 0; i < 500 && !fired(); i++) await new Promise((r) => setTimeout(r, 10));
+            expect(fired()).toBe(true);
+            return target.create(...args);
+          };
+          const v = Reflect.get(target, prop) as unknown;
+          return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        },
+      });
+      const report = await runAttempt({ ...deps, runtime }, w.lease);
+      expect(report.outcome).toBe('infrastructure_failed');
+      expect(w.sbx.streams).toHaveLength(0);
+      expect((w.api.published[0] as { outcome: string; reason: string })).toMatchObject({ outcome: 'infrastructure_failed', reason: expect.stringMatching(/timeout was reached during setup/) });
+    });
+
     it('a lease lost on a heartbeat starts no worker', async () => {
       let reporting = false;
       const { w, deps } = await setup({ baseFiles: NODE_PROJECT, heartbeat: async () => { if (reporting) throw new LeaseLostError(); return { cancelRequested: false }; }, setupComplete: async () => { reporting = true; return slowSetup(); } });
