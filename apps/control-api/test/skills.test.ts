@@ -8,8 +8,9 @@ import { SKILL_LIBRARY, verifyDeliveredPack } from '@selarikru/domain';
 import { skillsForLease } from '../src/skills.ts';
 import { bearer, enrolRunner, get, INTRUDER_TOKEN, makeHarness, post, PROJECT, resetDb, seedTask, setupTestDb, specFor, TENANT, type Harness, type TestDb } from './helpers.ts';
 import { packDigest } from '@selarikru/domain';
-import { withTx } from '@selarikru/persistence';
 import { execFileSync } from 'node:child_process';
+import postgres from 'postgres';
+import { TEST_DATABASE_URL } from '@selarikru/workflow/test-helpers';
 
 let t: TestDb;
 let h: Harness;
@@ -382,22 +383,43 @@ describe('fix round 1: intake reads only regular files (M3)', () => {
 });
 
 describe('fix round 1: a claim racing a revoke (M7)', () => {
+  /**
+   * The scheduler-lock key is shared by every test file using this tenant in this database (advisory locks ignore schemas), so getting it can wait on other files. Every wait
+   * here is bounded well under the test timeout, and the holder always lets go: its own connection, a server-side lock timeout, rollback in `finally`, and a terminate if it
+   * is still there. Nothing this test takes can outlive it and stall a later file's TRUNCATE.
+   */
   it('whichever commits first, a claim never starts a task with a version revoked before it', async () => {
     await pilotStack();
     await bind('express-api-routes', 'express-api-routes@1.0.0');
     await seedTask(t.db, specFor('api', BACKEND));
     const { token } = await enrolRunner(h.app);
-    // A competing transaction holds the scheduler lock; the revoke and the claim both queue behind it, then race when it lets go.
+    const KEY = `selarikru.scheduler:${TENANT}`;
+    const BOUND_MS = 5_000;
+    const holderDb = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
     let holderPid: number | null = null;
-    const KEY = `selarikru.scheduler:${TENANT}`;
-    const holder = withTx(t.db, async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${KEY}, 0))`);
-      holderPid = Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`))[0]!['pid']);
+    let locked = false;
+    const pending: Promise<unknown>[] = [];
+    const until = async <T,>(what: string, probe: () => Promise<T | null> | T | null): Promise<T> => {
+      const end = Date.now() + BOUND_MS;
+      for (;;) {
+        const v = await probe();
+        if (v !== null) return v;
+        if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+        await new Promise((res) => setTimeout(res, 5));
+      }
+    };
+    // The holder: its pid first, then the lock, which the server gives up on by itself after the bound.
+    const holder = holderDb.begin(async (tx) => {
+      holderPid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0]!['pid']);
+      await tx.unsafe(`SET LOCAL lock_timeout = '${BOUND_MS}ms'`);
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${KEY}, 0))`;
+      locked = true;
       await held;
     });
-    /** This test's own scheduler-lock key, in this database, waited for behind this test's holder: never another file's lock. */
+    holder.catch(() => undefined);
+    /** This test's key, in this database, not granted, and blocked by this test's holder: never another file's waiter. */
     const queued = async (): Promise<number> => {
       const [r] = await t.db.execute(sql`
         WITH k AS (SELECT hashtextextended(${KEY}, 0) AS h)
@@ -407,32 +429,34 @@ describe('fix round 1: a claim racing a revoke (M7)', () => {
           AND NOT l.granted AND ${holderPid}::int = ANY(pg_blocking_pids(l.pid))`);
       return Number(r!['n']);
     };
-    const waiting = async (n: number): Promise<number> => {
-      for (let i = 0; i < 2000; i++) {
-        const seen = await queued();
-        if (seen >= n) return seen;
-        await new Promise((res) => setImmediate(res));
+    try {
+      await until('the holder to take the scheduler lock', () => (locked ? true : null));
+      const revoke = post(h.app, url('/revoke'), { versionId: 'express-api-routes@1.0.0', reason: 'race' });
+      pending.push(revoke);
+      expect(await until('the revoke to queue behind the holder', async () => { const n = await queued(); return n >= 1 ? n : null; })).toBeGreaterThanOrEqual(1);
+      const claim = post(h.app, '/v1/runners/claim', NEW, bearer(token));
+      pending.push(claim);
+      expect(await until('the claim to queue behind the holder', async () => { const n = await queued(); return n >= 2 ? n : null; })).toBeGreaterThanOrEqual(2);
+      release();
+      await holder;
+      const [rv, cl] = await Promise.all([revoke, claim]);
+      expect(rv.status).toBe(200);
+      if (cl.body.lease === null) {
+        expect(cl.body.skipped).toContainEqual({ taskId: 'api', reason: 'skill_blocked:skill_revoked:express-api-routes' });
+      } else {
+        // The claim went first: it kept the version it was given, and the next claim of a matching task is refused.
+        expect(cl.body.lease.skills.packs.map((p: any) => p.versionId)).toContain('express-api-routes@1.0.0');
+        await seedTask(t.db, specFor('api2', BACKEND));
+        expect((await post(h.app, '/v1/runners/claim', NEW, bearer(token))).body.skipped).toContainEqual({ taskId: 'api2', reason: 'skill_blocked:skill_revoked:express-api-routes' });
       }
-      throw new Error('requests never queued behind this test\'s scheduler lock');
-    };
-    // The holder has its lock once it has said who it is.
-    for (let i = 0; i < 2000 && holderPid === null; i++) await new Promise((res) => setImmediate(res));
-    expect(holderPid).not.toBeNull();
-    const revoke = post(h.app, url('/revoke'), { versionId: 'express-api-routes@1.0.0', reason: 'race' });
-    expect(await waiting(1)).toBeGreaterThanOrEqual(1);
-    const claim = post(h.app, '/v1/runners/claim', NEW, bearer(token));
-    expect(await waiting(2)).toBeGreaterThanOrEqual(2);
-    release();
-    await holder;
-    const [rv, cl] = await Promise.all([revoke, claim]);
-    expect(rv.status).toBe(200);
-    if (cl.body.lease === null) {
-      expect(cl.body.skipped).toContainEqual({ taskId: 'api', reason: 'skill_blocked:skill_revoked:express-api-routes' });
-    } else {
-      // The claim went first: it kept the version it was given, and the next claim of a matching task is refused.
-      expect(cl.body.lease.skills.packs.map((p: any) => p.versionId)).toContain('express-api-routes@1.0.0');
-      await seedTask(t.db, specFor('api2', BACKEND));
-      expect((await post(h.app, '/v1/runners/claim', NEW, bearer(token))).body.skipped).toContainEqual({ taskId: 'api2', reason: 'skill_blocked:skill_revoked:express-api-routes' });
+    } finally {
+      // Always let go, on success, on a failed assertion and on a timeout: end the holder's transaction, and if its backend is somehow still there, terminate it.
+      release();
+      await Promise.race([holder.catch(() => undefined), new Promise((res) => setTimeout(res, BOUND_MS))]);
+      if (holderPid !== null) await t.db.execute(sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = ${holderPid}::int AND state <> 'idle'`).catch(() => undefined);
+      await holderDb.end({ timeout: 1 }).catch(() => undefined);
+      // The routes that queued behind it finish once it is gone: none is left holding a transaction for the next test.
+      await Promise.race([Promise.allSettled(pending), new Promise((res) => setTimeout(res, BOUND_MS))]);
     }
-  });
+  }, 25_000);
 });
