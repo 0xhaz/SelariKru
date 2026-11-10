@@ -207,17 +207,25 @@ describe('a deadlock between a run cancel and a lease path', () => {
     await claim(a.token);
     const eventsBefore = await count('events');
     let locked!: () => void; const lockedP = new Promise<void>((r) => { locked = r; });
+    let saw = false;
     // Stands in for a lease path: the status row, then the run row. Its own deadlock check waits longer, so the cancel is the one rolled back.
     const lease = t.db.transaction(async (tx) => {
       await tx.execute(sql`SET LOCAL deadlock_timeout = '10s'`);
       await tx.execute(sql`SELECT 1 FROM task_status WHERE task_id = 't1' FOR UPDATE`);
       locked();
-      await new Promise((r) => setTimeout(r, 300));
+      // Bounded wait until the cancel is queued behind this row (it then already holds the run row), never a fixed sleep: only then is taking the run row a cycle.
+      const [me] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+      for (let i = 0; i < 500 && !saw; i++) {
+        const [row] = await tx.execute(sql`SELECT count(*)::int AS n FROM pg_locks l WHERE NOT l.granted AND ${Number(me!['pid'])} = ANY(pg_blocking_pids(l.pid))`);
+        saw = Number(row!['n']) > 0;
+        if (!saw) await new Promise((r) => setTimeout(r, 10));
+      }
       await tx.execute(sql`SELECT 1 FROM runs WHERE run_id = ${RUN} FOR UPDATE`);
     });
     await lockedP;
     const res = await post(h.app, `/v1/runs/${RUN}/cancel`, { expectedPlanRevision: 0, idempotencyKey: 'dl' });
     await lease;
+    expect(saw).toBe(true);
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('transaction_conflict');
     expect(await count('events')).toBe(eventsBefore);

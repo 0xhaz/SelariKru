@@ -102,8 +102,10 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *
  * The claim poll and the event sequence (T7.5). `tryClaim` locks candidates' status rows one by one in one transaction, and a candidate it skips may still emit (a recorded
- * block or hold, a refused repair, an approval gate). Appending an event takes the project's event sequence, and a publish, a lease expiry, a cancel and the handover sweep take
- * a status row and then the sequence; so the claim defers every event it emits (`deferEvents`) and appends them, in emission order, only after its last status-row lock
+ * block or hold, a refused repair, an approval gate). Appending an event takes the project's event sequence, and three paths take a claimable task's status row and then the
+ * sequence with no scheduler lock: the owner's immediate task cancel (routes-owner.ts, the `/v1/tasks/:id/commands` cancel of a ready or planned task), an approval resolve
+ * (`/v1/approvals/:id/resolve`) and the handover sweep (`reviewHandovers`). A publish or a lease expiry never meets the claim here: it holds a running task's row, which the
+ * claim never locks, since it locks only claimable candidates; so the claim defers every event it emits (`deferEvents`) and appends them, in emission order, only after its last status-row lock
  * (`flushEvents`, when it returns). Chosen over locking every candidate's row up front, which would hold rows of tasks it never claims and change which blocks it records.
  * The claim therefore never holds the event sequence while it waits for a status row.
  *

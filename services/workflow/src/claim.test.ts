@@ -411,6 +411,7 @@ describe('claim lock order: no event sequence held while a status row is still t
     // timeout and a long deadlock timeout, so if there is a cycle Postgres aborts the claim and the test sees it.
     const other = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
     let claim: Promise<unknown> = Promise.resolve();
+    let out: unknown;
     try {
       await other.begin(async (q) => {
         await q.unsafe(`SET LOCAL search_path TO ${t.schema}`);
@@ -432,8 +433,9 @@ describe('claim lock order: no event sequence held while a status row is still t
       });
     } finally {
       await other.end();
+      // The claim is waited for either way, so it never outlives the test.
+      out = await claim;
     }
-    const out = await claim;
     expect((out as { code?: unknown } | null)?.code ?? (out as { cause?: { code?: unknown } } | null)?.cause?.code).not.toBe('40P01');
     expect(out).toMatchObject({ ok: true, lease: { taskId: 'tb' } });
     // ta's block was still recorded, once, and before tb's start.

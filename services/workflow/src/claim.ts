@@ -131,7 +131,8 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     const gates = await loadRunGates(tx, runner.tenantId, candidates.map((c) => c.runId));
     const skipped: SkippedCandidate[] = [];
     // Every event a candidate emits (a recorded block or hold, a refused repair, an approval gate, the claim itself) waits until no status row is left to lock: appending
-    // takes the project's event sequence, which a publish, a lease expiry, a cancel or the handover sweep takes after their status row. See verification.ts.
+    // takes the project's event sequence, which the owner's immediate task cancel, an approval resolve and the handover sweep take after a claimable task's status row, with
+    // no scheduler lock. (A publish or lease expiry never meets this: the claim locks only claimable candidates.) See verification.ts.
     deferEvents(tx);
     for (const c of candidates) {
       const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now, gateFor(gates, c.projectId, c.runId));

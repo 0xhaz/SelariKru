@@ -47,6 +47,9 @@ const deferred = new WeakMap<Tx, EventEnvelope[]>();
  * project's event sequence, and holding that while waiting for the next status row closes a cycle with every path that holds a status row and then appends an event.
  */
 export function deferEvents(tx: Tx): void {
+  // One queue per transaction object: it assumes the caller emits through this same `tx` and opens no savepoint (a savepoint is another object, whose emits would
+  // append at once, and whose rollback could not take back what was queued here). A second call would silently drop the first queue, so it is refused.
+  if (deferred.has(tx)) throw new Error('events are already deferred in this transaction');
   deferred.set(tx, []);
 }
 
