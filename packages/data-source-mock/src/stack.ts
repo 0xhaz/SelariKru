@@ -1,4 +1,4 @@
-import { applyStackAction, detectStack, emptyStack, NO_NATIVE, STACK_CATALOG_VERSION, type StackDocument } from '@selarikru/domain';
+import { applyStackAction, detectStack, emptyStack, NO_NATIVE, STACK_CATALOG_VERSION, withholdRestrictedDetection, type StackDocument } from '@selarikru/domain';
 import { DataSourceException, type StackActionRequestView, type StackView } from '@selarikru/view-protocol';
 import { FIXTURE_T0_MS } from './builder.ts';
 
@@ -54,7 +54,7 @@ export function createDemoStack(nowIso: (projectId: string) => string): DemoStac
       if (request.expectedRevision !== s.revision) throw refuse('The stack changed since it was read. Reload and try again.');
       const r = applyStackAction(s.document, request.action);
       if (!r.ok) throw refuse(r.message);
-      s.document = r.doc;
+      s.document = withholdRestrictedDetection(r.doc); // the same filter the server applies when it stores the stack
       s.revision += 1;
       s.updatedAt = nowIso(projectId);
       return view(projectId);
