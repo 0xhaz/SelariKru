@@ -94,7 +94,9 @@ export function validateCheckpoint(upload: Pick<CheckpointUpload, 'baseSha' | 'p
     if (diffChars > CHECKPOINT_LIMITS.maxDiffChars) return 'checkpoint_too_large';
     const post = diffPostImage(d.lines);
     if (bytes === null ? d.lines.some(([op]) => op !== '-') : Buffer.from(post, 'utf8').compare(bytes) !== 0) return 'diff_mismatch';
-    diffs[f.path] = { binary: false, lines: d.lines.map(([op, t]) => [op, t] as const), added: d.lines.filter(([op]) => op === '+').length, removed: d.lines.filter(([op]) => op === '-').length };
+    // Kept and added lines are the file, checked above and for secrets with it. A removed line is only the runner's word for the base, so it is redacted before it is kept.
+    const lines = d.lines.map(([op, t]) => [op, op === '-' ? redactSecrets(t) : t] as const);
+    diffs[f.path] = { binary: false, lines, redacted: lines.some(([, t], i) => t !== d.lines![i]![1]), added: d.lines.filter(([op]) => op === '+').length, removed: d.lines.filter(([op]) => op === '-').length };
     return null;
   };
   for (const f of upload.files) {

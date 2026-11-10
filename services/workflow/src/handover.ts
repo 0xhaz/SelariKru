@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  checkpointDigest, err, HANDOVER_STOP_PREFIX, SUCCESSOR_RETRY_LIMIT, isHandoverReason, NO_HARNESS_CATALOG, ok, OPEN_HANDOVER_STATES, TaskSpecSchema, transition,
+  checkpointDigest, err, HANDOVER_STOP_PREFIX, isPolicyRevokedReason, SUCCESSOR_RETRY_LIMIT, isHandoverReason, NO_HARNESS_CATALOG, ok, OPEN_HANDOVER_STATES, TaskSpecSchema, transition,
   type CheckpointDiff, type CheckpointExclusion, type CheckpointFile, type CheckpointRefusal, type HandoverIneligible, type HandoverMode, type HandoverState, type Result, type TaskState, type TaskSpec,
 } from '@selarikru/domain';
 import { strongest, type Classification } from '@selarikru/policy';
@@ -12,7 +12,7 @@ import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR, type EventScope } from './events.t
 import { isBlocked, place } from './placement.ts';
 import { checkFits, lockBudget, readBudget, remainingMicros, toMicros } from './reserve.ts';
 import { gateFor, loadRunGates, loadRunnerGate } from './settings.ts';
-import { lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
+import { bumpRevision, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import type { Caps, Lease, SchedulerContext } from './types.ts';
 
 /**
@@ -47,6 +47,8 @@ export interface HandoverFigure {
 export interface HandoverEstimate {
   readonly costUsd: HandoverFigure;
   readonly timeSeconds: HandoverFigure;
+  /** Held for successors that were lost, once any were. */
+  readonly spentUsd?: HandoverFigure;
 }
 
 export interface HandoverAssessment {
@@ -411,14 +413,31 @@ export const VISIBLE_HOLDS: readonly string[] = ['handover_awaiting_review', 'ha
  * A fenced handover whose placement now refuses it for good (no cloud slot, a policy denial, a classification): offered back to the owner with the reason. Called inside the
  * claim, with the status row held.
  */
-export async function placementRefused(tx: Tx, row: CheckpointRow, reason: string, scope: EventScope, now: Date): Promise<void> {
+export async function placementRefused(tx: Tx, key: TaskKey, row: CheckpointRow, reason: string, now: Date): Promise<void> {
   const code = reason.startsWith('location_disabled') || reason.startsWith('missing_limit') || reason.startsWith('classification') ? 'cloud_not_allowed' : reason.startsWith('budget:') ? 'budget_insufficient' : 'placement_blocked';
-  await offerRestart(tx, row, code, scope, now, null);
+  await offerRestart(tx, key, row, code, now, null);
 }
 
-async function offerRestart(tx: Tx, row: CheckpointRow, code: string, scope: EventScope, now: Date, attemptId: string | null): Promise<void> {
-  await setRow(tx, row, { state: 'restart_offered', refusal: code, successorAttemptId: null, successorFence: null, updatedAt: now });
-  await emit(tx, scope, now, { type: 'checkpoint.refused', attemptId, actor: SYSTEM_ACTOR, payload: { checkpointId: row.checkpointId, reason: code, restart: row.estimate } });
+/**
+ * Offers a restart to the owner: the row's state and reason, then the task's revision moved (`bumpRevision`, from the stored value) and `checkpoint.refused` at that revision.
+ * The caller holds the task's status row. `estimate` replaces the stored one when the offer follows a lost successor, whose time and hold the restart repeats.
+ */
+async function offerRestart(tx: Tx, key: TaskKey, row: CheckpointRow, code: string, now: Date, attemptId: string | null, estimate?: Record<string, unknown>): Promise<void> {
+  await setRow(tx, row, { state: 'restart_offered', refusal: code, successorAttemptId: null, successorFence: null, ...(estimate ? { estimate } : {}), updatedAt: now });
+  const aggregateRevision = await bumpRevision(tx, key);
+  await emit(tx, { projectId: key.projectId, runId: row.runId, taskId: key.taskId, aggregateRevision }, now, {
+    type: 'checkpoint.refused', attemptId, actor: SYSTEM_ACTOR, payload: { checkpointId: row.checkpointId, reason: code, restart: estimate ?? row.estimate },
+  });
+}
+
+/**
+ * A task that a held handover was waiting on has just been blocked (repairs or infrastructure retries ran out): the handover is offered to the owner with the same reason,
+ * so the task and its handover say the same thing. Called with the status row held, after the status was written.
+ */
+export async function heldTaskBlocked(tx: Tx, key: TaskKey, revision: number, reason: string, now: Date): Promise<void> {
+  const row = await openHandover(tx, key, revision);
+  if (!row || row.state !== 'fenced') return;
+  await offerRestart(tx, key, row, reason === 'infra_retry_limit_exhausted' ? 'infra_retries_exhausted' : 'successor_failed', now, null);
 }
 
 /** What the successor's lease says about its start. Ids and hashes only. */
@@ -462,23 +481,51 @@ const SUCCESSOR_REFUSALS = new Set<string>(['checkpoint_tampered', 'checkpoint_a
 export async function successorEnded(tx: Tx, key: TaskKey, attemptId: string, outcome: string, exitReason: string, now: Date): Promise<void> {
   const [row] = await tx.select().from(schema.checkpoints).where(and(rowKey(key), eq(schema.checkpoints.successorAttemptId, attemptId), inArray(schema.checkpoints.state, ['starting', 'running']))).limit(1);
   if (!row) return;
-  const [status] = await tx.select({ rowRevision: schema.taskStatus.rowRevision }).from(schema.taskStatus)
-    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
-  const scope: EventScope = { projectId: key.projectId, runId: row.runId, taskId: key.taskId, aggregateRevision: status?.rowRevision ?? 0 };
   const infra = exitReason.startsWith(INFRA_PREFIX);
-  const lost = outcome === 'interrupted' && (exitReason === 'lease_expired' || infra);
+  const code = (infra ? exitReason.slice(INFRA_PREFIX.length) : exitReason).split(':')[0]!.trim();
+  // A stop (an owner's cancel, a budget stop, a narrowed grant, another handover) ends the handover whenever it lands; so does anything after the worker started.
+  const stopped = outcome === 'cancelled' || (outcome === 'interrupted' && (isPolicyRevokedReason(exitReason) || isHandoverReason(exitReason)));
+  const vanished = outcome === 'interrupted' && (exitReason === 'lease_expired' || infra);
+  // Interrupted for any other reason is a block the attempt reported (the domain interrupts the attempt of a blocked task).
+  const blocked = outcome === 'interrupted' && !stopped && !vanished;
+  const lost = !stopped && (vanished || (row.state === 'starting' && (outcome === 'failed' || blocked)));
   if (!lost) {
     const reason = outcome === 'succeeded' || outcome === 'running' ? 'successor_completed' : outcome === 'failed' ? 'successor_failed' : 'successor_ended';
     await setRow(tx, row, { state: 'closed', closedReason: reason, content: null, diffs: null, ...(row.content !== null ? { contentDroppedAt: now, contentDroppedReason: reason } : {}), updatedAt: now });
     return;
   }
-  const code = (infra ? exitReason.slice(INFRA_PREFIX.length) : exitReason).split(':')[0]!.trim();
-  if (SUCCESSOR_REFUSALS.has(code)) return offerRestart(tx, row, code === 'checkpoint_hash_mismatch' ? 'checkpoint_tampered' : code, scope, now, attemptId);
-  if (row.state === 'running' || (row.mode === 'resume' && row.content === null)) return offerRestart(tx, row, 'successor_lost', scope, now, attemptId);
-  if (row.successorRetries >= SUCCESSOR_RETRY_LIMIT) return offerRestart(tx, row, 'successor_failed', scope, now, attemptId);
+  const estimate = await withLostSuccessor(tx, key, row, attemptId, now);
+  if (SUCCESSOR_REFUSALS.has(code)) return offerRestart(tx, key, row, code === 'checkpoint_hash_mismatch' ? 'checkpoint_tampered' : code, now, attemptId, estimate);
+  if (row.state === 'running' || (row.mode === 'resume' && row.content === null)) return offerRestart(tx, key, row, 'successor_lost', now, attemptId, estimate);
+  // Reported blocked before it started: a blocked task is not claimed again, so the owner decides now.
+  if (blocked || row.successorRetries >= SUCCESSOR_RETRY_LIMIT) return offerRestart(tx, key, row, 'successor_failed', now, attemptId, estimate);
   const fence = (row.successorFence ?? row.priorFence) + 1;
-  await setRow(tx, row, { state: 'fenced', successorRetries: row.successorRetries + 1, successorAttemptId: null, successorFence: null, nextFence: fence, updatedAt: now });
-  await emit(tx, scope, now, { type: 'attempt.fenced', attemptId, actor: SYSTEM_ACTOR, payload: { checkpointId: row.checkpointId, priorAttemptId: attemptId, priorFence: row.successorFence, nextFence: fence, cause: 'successor_lost', retry: row.successorRetries + 1 } });
+  await setRow(tx, row, { state: 'fenced', successorRetries: row.successorRetries + 1, successorAttemptId: null, successorFence: null, nextFence: fence, fencedAt: now, estimate, updatedAt: now });
+  const aggregateRevision = await bumpRevision(tx, key);
+  await emit(tx, { projectId: key.projectId, runId: row.runId, taskId: key.taskId, aggregateRevision }, now, {
+    type: 'attempt.fenced', attemptId, actor: SYSTEM_ACTOR, payload: { checkpointId: row.checkpointId, priorAttemptId: attemptId, priorFence: row.successorFence, nextFence: fence, cause: 'successor_lost', retry: row.successorRetries + 1 },
+  });
+}
+
+/**
+ * The restart estimate once a successor was lost: the time it ran added to the time a restart repeats, and what was held for it (its worst case; its real cost is not known).
+ * Both stay labelled estimated.
+ */
+async function withLostSuccessor(tx: Tx, key: TaskKey, row: CheckpointRow, attemptId: string, now: Date): Promise<Record<string, unknown>> {
+  const [a] = await tx.select({ startedAt: schema.attempts.startedAt, leaseExpiresAt: schema.attempts.leaseExpiresAt }).from(schema.attempts)
+    .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
+  const [held] = await tx.select({ amount: schema.budgetReservations.amountUsd }).from(schema.budgetReservations)
+    .where(and(eq(schema.budgetReservations.tenantId, key.tenantId), eq(schema.budgetReservations.projectId, key.projectId), eq(schema.budgetReservations.reservationId, `res_${attemptId}`), ne(schema.budgetReservations.state, 'released')));
+  const est = row.estimate as { costUsd?: HandoverFigure; timeSeconds?: HandoverFigure; spentUsd?: HandoverFigure };
+  const end = Math.min(now.getTime(), a?.leaseExpiresAt?.getTime() ?? now.getTime());
+  const ran = a?.startedAt ? Math.max(0, Math.round((end - a.startedAt.getTime()) / 1000)) : null;
+  const time = est.timeSeconds?.value ?? null;
+  const spent = (est.spentUsd?.value ?? 0) + (held?.amount !== undefined ? Number(held.amount) : 0);
+  return {
+    ...est,
+    timeSeconds: ran === null ? (est.timeSeconds ?? UNAVAILABLE('the attempts\' start times are not recorded')) : { value: (time ?? 0) + ran, provenance: 'estimated', basis: 'how long the local attempt and the lost cloud attempt(s) ran; a restart repeats that work' },
+    spentUsd: held !== undefined || est.spentUsd ? { value: Math.round(spent * 1e6) / 1e6, provenance: 'estimated', basis: 'held for the lost cloud attempt(s) at their worst case; what they really cost is not known' } : UNAVAILABLE('nothing was held for the lost cloud attempt'),
+  };
 }
 
 const INFRA_PREFIX = 'infrastructure:';
@@ -527,7 +574,7 @@ export async function decideHandover(ctx: SchedulerContext, key: TaskKey, checkp
     const drop = choice === 'release' ? null : choice === 'restart' ? 'restart_chosen' : 'declined';
     await setRow(t, row, {
       state, mode, decidedAt: now, decidedBy: by, updatedAt: now,
-      ...(choice === 'release' ? { releasedAt: now, releasedBy: by } : {}),
+      ...(choice === 'release' || choice === 'restart' ? { releasedAt: now, releasedBy: by } : {}),
       ...(drop !== null ? { content: null, diffs: null, ...(row.content !== null ? { contentDroppedAt: now, contentDroppedReason: drop } : {}) } : {}),
       ...(choice === 'decline' ? { closedReason: 'declined' } : {}),
     });
@@ -551,14 +598,15 @@ export async function decideHandover(ctx: SchedulerContext, key: TaskKey, checkp
 export async function reviewHandovers(ctx: SchedulerContext, caps: Caps, now: Date): Promise<readonly string[]> {
   const since = new Date(now.getTime() - CLOUD_RUNNER_FRESH_SECONDS * 1000);
   const due = await ctx.db.select({ tenantId: schema.checkpoints.tenantId, projectId: schema.checkpoints.projectId, taskId: schema.checkpoints.taskId, checkpointId: schema.checkpoints.checkpointId })
-    .from(schema.checkpoints).where(and(eq(schema.checkpoints.state, 'fenced'), eq(schema.checkpoints.target, 'cloud'), lte(schema.checkpoints.updatedAt, since)));
+    .from(schema.checkpoints).where(and(eq(schema.checkpoints.state, 'fenced'), eq(schema.checkpoints.target, 'cloud'), sql`greatest(${schema.checkpoints.releasedAt}, ${schema.checkpoints.fencedAt}) <= ${since.toISOString()}::timestamptz`));
   const moved: string[] = [];
   for (const d of due) {
     const done = await withTx(ctx.db, async (tx) => {
       const key: TaskKey = { tenantId: d.tenantId, projectId: d.projectId, taskId: d.taskId };
       const statusRow = await lockStatusRow(tx, key);
       const row = await loadRow(tx, key, d.checkpointId);
-      if (!statusRow || !row || row.state !== 'fenced' || row.updatedAt.getTime() > since.getTime()) return false;
+      // Keyed on when it became claimable (released, or fenced again after a lost successor), never on the last write: a late publish touches the row and must not postpone this.
+      if (!statusRow || !row || row.state !== 'fenced' || Math.max(row.releasedAt?.getTime() ?? 0, row.fencedAt?.getTime() ?? 0) > since.getTime()) return false;
       const loaded = await specOf(tx, key, row.revision);
       if (!loaded) return false;
       const [prior] = await tx.select({ provider: schema.attempts.modelProvider, model: schema.attempts.modelId }).from(schema.attempts)
@@ -574,7 +622,7 @@ export async function reviewHandovers(ctx: SchedulerContext, caps: Caps, now: Da
         : !(await cloudRunnerFor(tx, key.tenantId, prior?.provider ?? null, prior?.model ?? null, now)) ? 'no_cloud_runner'
         : null;
       if (reason === null) return false;
-      await offerRestart(tx, row, reason, { projectId: key.projectId, runId: row.runId, taskId: key.taskId, aggregateRevision: statusRow.rowRevision }, now, null);
+      await offerRestart(tx, key, row, reason, now, null);
       return true;
     });
     if (done) moved.push(d.checkpointId);

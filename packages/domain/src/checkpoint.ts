@@ -11,12 +11,17 @@ import { sha256Hex } from './sha256.ts';
 /** What one checkpoint may carry. Larger work is not resumed: the owner is offered a restart from the persisted input instead. */
 export const CHECKPOINT_LIMITS = { maxFiles: 200, maxFileBytes: 512 * 1024, maxTotalBytes: 2 * 1024 * 1024, maxExclusions: 500, maxDiffChars: 6 * 1024 * 1024, maxDiffLines: 20_000 } as const;
 
+/** What the owner is told about a review diff: what is checked, and what is only reported. */
+export const REVIEW_DIFF_NOTE = 'File contents are checked against their hashes; removed lines are as reported by your local runner.';
+
 /** One file's review diff against the base: every line of both sides, each marked kept (' '), added ('+') or removed ('-'). Null lines: binary, or too large to show. */
 export interface CheckpointDiff {
   readonly binary: boolean;
   readonly lines: readonly (readonly [' ' | '+' | '-', string])[] | null;
   readonly added: number;
   readonly removed: number;
+  /** Removed lines held secret-shaped text and were stored redacted. */
+  readonly redacted?: boolean;
 }
 
 /** The text a diff says the file becomes: its kept and added lines. */
@@ -86,7 +91,7 @@ export const CHECKPOINT_REFUSALS = [
   'checkpoint_tampered', 'checkpoint_apply_failed', 'duplicate_path', 'invalid_checkpoint',
   // A fenced handover that can no longer run where it was sent, or a successor that was lost.
   'no_cloud_runner', 'cloud_not_allowed', 'budget_insufficient', 'placement_blocked', 'successor_lost', 'successor_failed',
-  'diff_mismatch',
+  'diff_mismatch', 'infra_retries_exhausted',
 ] as const;
 export type CheckpointRefusal = (typeof CHECKPOINT_REFUSALS)[number];
 
@@ -160,10 +165,11 @@ export const HANDOVER_REASON_TEXT: Readonly<Record<string, string>> = {
   checkpoint_apply_failed: 'The cloud runner could not apply the checkpoint to the base commit.',
   duplicate_path: 'The checkpoint names the same path twice.',
   invalid_checkpoint: 'The checkpoint could not be read.',
+  infra_retries_exhausted: 'The cloud attempt kept failing to start, and the infrastructure retries ran out. The task is blocked.',
   diff_mismatch: 'A file\'s review diff does not produce the file it was sent with.',
   placement_blocked: 'The cloud placement now refuses this task for good.',
   successor_lost: 'The cloud attempt was lost after its worker started, and its copy of the checkpoint was already dropped.',
-  successor_failed: `The cloud attempt could not start ${SUCCESSOR_RETRY_LIMIT + 1} times.`,
+  successor_failed: 'The cloud attempt could not start, and was not offered again.',
 };
 
 /** Why a handover was closed or its checkpoint content dropped. Codes only. */

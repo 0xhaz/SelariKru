@@ -4,6 +4,7 @@ import { and, asc, eq, isNull, lte, isNotNull, or } from 'drizzle-orm';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR } from './events.ts';
 import { closeLease, failAttempt } from './lease.ts';
+import { heldTaskBlocked } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAbandonedAttempt } from './usage.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -105,6 +106,7 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
       const scope = { ...eventScope, aggregateRevision };
       await emit(tx, scope, now, { type: 'attempt.failed', attemptId, actor: SYSTEM_ACTOR, payload: { fence: attempt.leaseFence, reason, outcome: 'failed' } });
       await emit(tx, scope, now, { type: failure.follow.type, attemptId, actor: SCHEDULER_ACTOR, payload: { reason: failure.follow.reason } });
+      if (failure.state.status === 'blocked') await heldTaskBlocked(tx, key, attempt.revision, failure.follow.reason, now);
       return reason;
     }
 

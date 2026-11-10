@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { REVIEW_DIFF_NOTE } from '@selarikru/domain';
 import type { HandoverDiffView, HandoverRecordView, HandoverTaskView } from '@selarikru/view-protocol';
 import { buttonPrimary, buttonQuiet, Chip, Panel, TONE_TEXT } from '@selarikru/ui';
 import type { HandoverPort } from '../../shell/projection-store.ts';
@@ -114,6 +115,7 @@ function ReviewFile({ file, load }: { file: NonNullable<HandoverRecordView['patc
         <div id={id} data-testid="handover-diff">
           {error ? <p className="text-sm text-danger">{error}</p> : diff === null ? <p className="text-sm text-muted">Loading the diff</p> : (
             <>
+              <p className="text-sm text-muted" data-testid="handover-diff-note">{REVIEW_DIFF_NOTE}</p>
               {diff.redacted ? <p className="text-sm text-warning">Some lines held secret-shaped text and are shown redacted.</p> : null}
               <pre className="max-h-80 overflow-auto rounded-chip border border-line bg-panel-2 p-2 font-mono text-mono text-fg" aria-label={`Diff of ${file.path}`}>{(diff.lines ?? []).map(([op, t], i) => <div key={i} className={op === '+' ? 'text-success' : op === '-' ? 'text-danger' : 'text-muted'}><span aria-hidden="true">{op} </span><span className="sr-only">{op === '+' ? 'added: ' : op === '-' ? 'removed: ' : ''}</span>{t}</div>)}</pre>
             </>
@@ -134,7 +136,8 @@ export function HandoverRecord({ record, live, busy, onDecide, loadDiff = null }
       {record.state !== 'restart_offered' && record.state !== 'declined' && record.state !== 'closed' ? <Steps record={record} /> : null}
       {review ? (
         <div className="rounded-card border border-warning p-3" data-testid="handover-review">
-          <p className="text-fg">The local attempt is stopped and fenced. Its checkpoint was checked: review what it carries, then release it to a cloud runner. Nothing starts until you do.</p>
+          <p className="text-fg">The local attempt is stopped and fenced. Its checkpoint passed the control plane&apos;s path, size, secret and hash checks: review what it carries, then release it to a cloud runner. Nothing starts until you do.</p>
+          <p className="mt-1 text-sm text-muted" data-testid="handover-review-note">{REVIEW_DIFF_NOTE}</p>
           {record.estimate ? <p className="mt-1 text-sm text-fg">Estimated cost of the cloud attempt: {costText(record.estimate.costUsd)}.</p> : null}
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" className={buttonPrimary} disabled={off} onClick={() => onDecide('release')}>Release to a cloud runner</button>
@@ -153,7 +156,7 @@ export function HandoverRecord({ record, live, busy, onDecide, loadDiff = null }
       {record.refusal ? (
         <div className="rounded-card border border-warning p-3" data-testid="handover-refusal">
           <p className="text-fg wrap-anywhere"><span className={TONE_TEXT.warning}>Cannot resume safely.</span> {record.refusal.text}</p>
-          {record.estimate ? <p className="mt-1 text-sm text-fg" data-testid="handover-restart-cost">A restart from the persisted input repeats the work: {costText(record.estimate.costUsd)}, {timeText(record.estimate.timeSeconds)}.</p> : null}
+          {record.estimate ? <p className="mt-1 text-sm text-fg" data-testid="handover-restart-cost">A restart from the persisted input repeats the work: {costText(record.estimate.costUsd)}, {timeText(record.estimate.timeSeconds)}.{record.estimate.spentUsd && record.estimate.spentUsd.value !== null ? ` Already held for the lost cloud attempt(s): ${costText(record.estimate.spentUsd).replace(' at most', ' worst case')}.` : ''}</p> : null}
           {record.state === 'restart_offered' ? (
             <div className="mt-3 flex flex-wrap gap-2">
               <button type="button" className={buttonPrimary} disabled={off} onClick={() => onDecide('restart')}>Restart from persisted input</button>

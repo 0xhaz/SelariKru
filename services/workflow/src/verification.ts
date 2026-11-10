@@ -90,7 +90,11 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   driver's after-pass): the status row, then the run row and budget read without a lock (`readBudget`), the `checkpoints` row and the event sequence; no scheduler lock,
  *   so a claim holding the scheduler lock and waiting for that status row meets nothing this pass holds. A view's eligibility (`assessHandover`) is a plain read that locks
  *   nothing. A replan closes the replaced tasks' handovers (`closeHandovers`) after the status rows it holds and before its events; a run cancel (the route's immediate
- *   finish and `finishCancelledRuns`) and a task cancel close theirs after the status rows they hold. The successor's checkpoint fetch and the owner's diff read take no lock. So every handover path
+ *   finish and `finishCancelledRuns`) and a task cancel close theirs after the status rows they hold. The successor's checkpoint fetch and the owner's diff read take no lock.
+ *   A task blocked while a handover holds it (`refuseRepair` in the claim, a blocked publish, a timed-out attempt whose repairs ran out) offers the handover to the owner
+ *   after its own status write, on the status row it holds (`heldTaskBlocked`). Every offer moves the status row's revision itself (`bumpRevision`, an increment of the
+ *   stored value) and emits at that revision; `setStatus` increments the stored value too, so a later write in the same transaction never repeats or lowers it. None of
+ *   these takes a lock the paths above do not already hold, and the claim's mid-loop `recordBlock` emission is left exactly as it was. So every handover path
  *   takes the status row before the `checkpoints` row and the run row (when it takes one) before it too, no path holds a `checkpoints` row and waits for a status row,
  *   the scheduler lock or a run row, and none takes the candidate row, the claim lock, the brain lock or `product_heads`. The verdict, re-verify and settle never touch
  *   a running task's handover, and a replan meets the request exactly as it meets the claim poll (the scheduler lock serialises them).

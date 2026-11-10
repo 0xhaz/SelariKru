@@ -159,8 +159,9 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
     const file = ((row.files ?? []) as { path: string; status: string; size: number | null; sha256: string | null }[]).find((f) => f.path === q.path);
     if (!file) throw new AppError(404, 'no_checkpoint', 'that file is not in this checkpoint');
     if (row.diffs === null) throw new AppError(404, 'no_checkpoint', `the checkpoint's content was dropped: ${HANDOVER_CLOSE_TEXT[row.contentDroppedReason ?? ''] ?? 'it is no longer kept'}`);
-    const d = (row.diffs as Record<string, { binary?: boolean; lines?: [string, string][] | null; added?: number; removed?: number }>)[q.path];
-    let redacted = false;
+    const d = (row.diffs as Record<string, { binary?: boolean; lines?: [string, string][] | null; added?: number; removed?: number; redacted?: boolean }>)[q.path];
+    // Removed base lines were redacted when the checkpoint arrived; this pass is a second net for anything kept before that.
+    let redacted = d?.redacted === true;
     const lines = d?.lines ? d.lines.map(([op, t]) => { const r = redactSecrets(t); if (r !== t) redacted = true; return [op, r] as const; }) : null;
     return { checkpointId: row.checkpointId, path: file.path, status: file.status, size: file.size, sha256: file.sha256, binary: d?.binary === true, added: d?.added ?? null, removed: d?.removed ?? null, lines, redacted };
   });

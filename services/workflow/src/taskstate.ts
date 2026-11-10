@@ -1,6 +1,6 @@
 import { newTaskStateFromSpec, type AttemptRecord, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { schema, type Tx } from '@selarikru/persistence';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 
 export type AttemptRow = typeof schema.attempts.$inferSelect;
 
@@ -44,11 +44,26 @@ export function buildTaskState(spec: TaskSpec, status: TaskStatus, attempts: rea
   return { ...init.value, status, attempts: attempts.map(toRecord) };
 }
 
+/**
+ * Sets the status and moves the row's revision by one from what is stored, and returns it. The caller holds the row; `rowRevision` is what it read, and is also what an earlier
+ * write in the same transaction may already have moved (`bumpRevision`), so the stored value, not the read one, is the base: a revision never repeats or goes back.
+ */
 export async function setStatus(tx: Tx, key: TaskKey, rowRevision: number, status: TaskStatus, now: Date): Promise<number> {
-  const next = rowRevision + 1;
-  await tx
+  void rowRevision;
+  const [row] = await tx
     .update(schema.taskStatus)
-    .set({ status, rowRevision: next, updatedAt: now })
-    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
-  return next;
+    .set({ status, rowRevision: sql`${schema.taskStatus.rowRevision} + 1`, updatedAt: now })
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)))
+    .returning({ rowRevision: schema.taskStatus.rowRevision });
+  return row!.rowRevision;
+}
+
+/** Moves the row's revision by one without changing its status, for an event about the task that a client following snapshot and cursor must see. The caller holds the row. */
+export async function bumpRevision(tx: Tx, key: TaskKey): Promise<number> {
+  const [row] = await tx
+    .update(schema.taskStatus)
+    .set({ rowRevision: sql`${schema.taskStatus.rowRevision} + 1` })
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)))
+    .returning({ rowRevision: schema.taskStatus.rowRevision });
+  return row!.rowRevision;
 }

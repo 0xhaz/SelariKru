@@ -57,6 +57,14 @@ describe('checkpoint rules', () => {
     expect(validateCheckpoint(upload([{ ...del, diff: { binary: false, lines: [['+', 'sneak']] } }]), task)).toMatchObject({ ok: false, reason: 'diff_mismatch' });
   });
 
+  it('stores a removed base line redacted: only kept and added lines are the checked file, so the rest is the runner\'s word', () => {
+    const f = file('server/app.ts', 'b');
+    const r = validateCheckpoint(upload([{ ...f, diff: { binary: false, lines: [['-', 'token=sk_live_CANARY0123456789abcdefXYZ'], ['+', 'b']] } }]), task);
+    expect(r.ok).toBe(true);
+    expect(JSON.stringify(r)).not.toContain('CANARY');
+    expect(r.ok && r.checkpoint.diffs['server/app.ts']!.removed).toBe(1);
+  });
+
   it('refuses paths outside the allowed paths, unsafe paths, a wrong base, an empty change set and oversize work', () => {
     expect(validateCheckpoint(upload([file('src/app.ts', 'x')]), task)).toMatchObject({ ok: false, reason: 'path_outside_allowed_paths' });
     expect(validateCheckpoint(upload([file('server/../etc/passwd', 'x')]), task)).toMatchObject({ ok: false, reason: 'path_invalid' });

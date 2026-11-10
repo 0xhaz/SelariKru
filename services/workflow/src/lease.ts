@@ -6,7 +6,7 @@ import { openApproval } from './approval.ts';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { createHash } from 'node:crypto';
-import { handoverStopFor, markSuccessorRunning, recordLatePublish, successorEnded } from './handover.ts';
+import { handoverStopFor, heldTaskBlocked, markSuccessorRunning, recordLatePublish, successorEnded } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAttemptUsage } from './usage.ts';
 import { buildTaskState, lockStatusRow, loadAttempts, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -306,6 +306,8 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
   const scope: EventScope = { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId, aggregateRevision };
   await emit(tx, scope, now, { type: event.type, attemptId: lease.attemptId, actor: event.actor, payload: event.payload });
   if (follow) await emit(tx, scope, now, { type: follow.type, attemptId: lease.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: follow.reason } });
+  // A blocked task with a held handover: the handover says the same (handover.ts).
+  if (state.status === 'blocked') await heldTaskBlocked(tx, key, lease.revision, follow?.reason ?? exitReason, now);
   // A handover's successor that could not start from its checkpoint: the task waits for the owner's choice instead of retrying the same checkpoint.
 
   return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: state.status, ...(repair ? { repair } : {}) };

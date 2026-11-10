@@ -7,7 +7,8 @@ import { z } from 'zod';
  * No file content is ever part of this view: the checkpoint is shown by path, change, size and hash.
  */
 const Figure = z.object({ value: z.number().nullable(), provenance: z.enum(['estimated', 'unavailable']), basis: z.string() });
-export const HandoverEstimateSchema = z.object({ costUsd: Figure, timeSeconds: Figure });
+/** `spentUsd`: what was held for successors that were lost, once any were. */
+export const HandoverEstimateSchema = z.object({ costUsd: Figure, timeSeconds: Figure, spentUsd: Figure.optional() });
 export type HandoverEstimateView = z.infer<typeof HandoverEstimateSchema>;
 
 const Verdict = z.object({ eligible: z.boolean(), reasons: z.array(z.enum(HANDOVER_INELIGIBLE)), reasonText: z.array(z.string()) });

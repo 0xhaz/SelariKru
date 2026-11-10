@@ -14,7 +14,7 @@ import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMi
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
 import { resolveTaskSkills } from './skills.ts';
-import { claimHold, placementRefused, startSuccessor, VISIBLE_HOLDS, type CheckpointRow } from './handover.ts';
+import { claimHold, heldTaskBlocked, placementRefused, startSuccessor, VISIBLE_HOLDS, type CheckpointRow } from './handover.ts';
 import type { SkillResolution } from '@selarikru/domain';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
@@ -336,6 +336,8 @@ async function refuseRepair(tx: Tx, key: TaskKey, c: Candidate, state: TaskState
   const aggregateRevision = await setStatus(tx, key, rowRevision, refused.value.status, now);
   const scope: EventScope = { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision };
   await emit(tx, scope, now, { type: 'task.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload: { reason } });
+  // A handover holding this task now waits on nothing that can happen: the owner is asked, with the same reason the task gives.
+  await heldTaskBlocked(tx, key, state.revision, reason, now);
   return { reason };
 }
 
@@ -483,7 +485,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     // leaves the field alone, so a wait cannot make the same permanent reason write a new event.
     if (!placed.transient) await recordBlock(tx, key, c, statusRow, placed.reason, cfg !== null && !('blocked' in cfg) ? cfg.mode.id : null, now);
     // A handover the placement now refuses for good is offered back to the owner, rather than held for a start that cannot happen.
-    if (!placed.transient && handover !== null) await placementRefused(tx, handover, placed.reason, { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision: statusRow.rowRevision + 1 }, now);
+    if (!placed.transient && handover !== null) await placementRefused(tx, key, handover, placed.reason, now);
     return { reason: `placement_blocked:${placed.reason}` };
   }
   if (!isBlocked(placed)) {

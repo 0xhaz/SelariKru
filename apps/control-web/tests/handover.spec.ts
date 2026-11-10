@@ -57,6 +57,9 @@ test('continue a running local task in cloud: the confirmation says what is carr
   await expect(reviewed).toContainText('+2 −0');
   await reviewed.getByRole('button', { name: 'View diff' }).click();
   await expect(card.getByTestId('handover-diff')).toContainText('handoverDemo');
+  // What is checked and what is only reported, said where the owner reads the diff.
+  await expect(card.getByTestId('handover-review-note')).toHaveText('File contents are checked against their hashes; removed lines are as reported by your local runner.');
+  await expect(card.getByTestId('handover-diff-note')).toHaveText('File contents are checked against their hashes; removed lines are as reported by your local runner.');
   await expect(card.getByTestId('handover-exclusions')).toContainText('secret-bearing file');
   await expect(card.getByTestId('handover-review')).toContainText('(estimated, at most)');
   await expectNoAxeViolations(page);

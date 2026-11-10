@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { checkpointDigest } from '@selarikru/domain';
@@ -354,6 +355,110 @@ describe('checkpoint continuation', () => {
     } finally {
       await other.end();
     }
+  });
+
+  describe('fix round 2', () => {
+    async function released(): Promise<Lease> {
+      await cloudRunnerEnrolled();
+      const prior = await localRunning();
+      await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+      await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+      await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+      await release();
+      return prior;
+    }
+    const freshRunners = () => t.db.execute(sql`UPDATE runners SET last_seen_at = ${clock.now().toISOString()}::timestamptz, last_polled_at = ${clock.now().toISOString()}::timestamptz`);
+    const statusRevision = async () => Number((await t.db.execute(sql`SELECT row_revision FROM task_status`))[0]!['row_revision']);
+
+    it('when the infrastructure retries run out the task blocks, and the handover says the same (INFRA=1)', async () => {
+      const caps = { ...CAPS, maxInfraRetries: 1 };
+      await released();
+      for (let i = 0; i < 2; i++) {
+        const next = await s.tryClaim(runner('cloud1', 'cloud'), caps);
+        if (!next.ok) throw new Error(`${i}: ${next.reason}`);
+        clock.advance(70);
+        await s.expireLeases(clock.now());
+        clock.advance(60);
+        await freshRunners();
+      }
+      expect((await s.tryClaim(runner('cloud1', 'cloud'), caps)).ok).toBe(false);
+      expect((await statusOf(t.db, 'T1')).status).toBe('blocked');
+      expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'infra_retries_exhausted' });
+      // The event is at the status row's own revision, not a guess.
+      const refused = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'checkpoint.refused' ORDER BY sequence DESC LIMIT 1`))[0]!;
+      expect(Number(refused['aggregate_revision'])).toBe(await statusRevision());
+    });
+
+    it('a successor that fails before its worker starts is offered again, not closed and placed anywhere', async () => {
+      await released();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(next.reason);
+      expect(await s.publishResult(next.lease, { outcome: 'failed', reason: 'task_bundle_failed' })).toMatchObject({ ok: true });
+      expect(await handoverRow()).toMatchObject({ state: 'fenced', successor_retries: 1 });
+      expect((await s.tryClaim(runner('local1'), CAPS)).ok).toBe(false);
+      const again = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      expect(again).toMatchObject({ ok: true, lease: { location: 'cloud', fence: next.lease.fence + 1, handover: { mode: 'resume' } } });
+      // After its worker started, a failure is the work's own: the handover closes.
+      if (!again.ok) return;
+      await s.heartbeat(again.lease, undefined, { setupComplete: true });
+      await s.publishResult(again.lease, { outcome: 'failed', reason: 'agent_result_failed' });
+      expect(await handoverRow()).toMatchObject({ state: 'closed', closed_reason: 'successor_failed' });
+    });
+
+    it('a successor reported blocked before it started is offered to the owner at once, and the event is at the real revision', async () => {
+      await released();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(next.reason);
+      const startedAt = Number((await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'attempt.started' ORDER BY sequence DESC LIMIT 1`))[0]!['aggregate_revision']);
+      await s.publishResult(next.lease, { outcome: 'blocked', reason: 'toolchain_unresolved' });
+      expect((await statusOf(t.db, 'T1')).status).toBe('blocked');
+      expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'successor_failed' });
+      // Every event of the publish is at a revision the row really had, each one after the last: the offer moved it, then the status write moved it again.
+      const revs = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE sequence > (SELECT max(sequence) FROM events WHERE type = 'attempt.route_changed') ORDER BY sequence`)).map((r) => Number(r['aggregate_revision']));
+      expect(revs).toEqual([...revs].sort((a, b) => a - b).filter((r) => r > startedAt));
+      expect(Math.max(...revs)).toBe(await statusRevision());
+      expect(new Set(revs).size).toBe(2);
+    });
+
+    it('after a lost successor the restart estimate includes the cloud attempt\'s time and what it held, labelled estimated', async () => {
+      await released();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(next.reason);
+      await s.heartbeat(next.lease, undefined, { setupComplete: true });
+      const before = (await handoverRow())['estimate'] as { timeSeconds: { value: number } };
+      clock.advance(70);
+      await s.expireLeases(clock.now());
+      const est = (await handoverRow())['estimate'] as { timeSeconds: { value: number; provenance: string }; spentUsd: { value: number; provenance: string } };
+      expect(est.timeSeconds.provenance).toBe('estimated');
+      expect(est.timeSeconds.value).toBeGreaterThanOrEqual(before.timeSeconds.value + 60);
+      expect(est.spentUsd).toMatchObject({ provenance: 'estimated' });
+      expect(est.spentUsd.value).toBeGreaterThan(0);
+    });
+
+    it('the review sweep keys on when the handover was released, so late publishes do not postpone it', async () => {
+      const prior = await released();
+      await t.db.execute(sql`UPDATE runners SET revoked_at = now() WHERE location = 'cloud'`);
+      for (let i = 0; i < 2; i++) {
+        clock.advance(60);
+        await s.publishResult(prior, { outcome: 'completed', headSha: 'b'.repeat(40) });
+      }
+      clock.advance(10);
+      expect(await reviewHandovers(ctx, CAPS, clock.now())).toHaveLength(1);
+      expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'no_cloud_runner' });
+      const refused = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'checkpoint.refused' ORDER BY sequence DESC LIMIT 1`))[0]!;
+      expect(Number(refused['aggregate_revision'])).toBe(await statusRevision());
+    });
+
+    it('migration 0031 closes starting and running rows whose successor attempt has ended', async () => {
+      await released();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(next.reason);
+      // A successor that ended under code that left its row open.
+      await t.db.execute(sql`UPDATE attempts SET ended_at = now(), outcome = 'failed' WHERE attempt_id = ${next.lease.attemptId}`);
+      const file0031 = readFileSync(new URL('../../../packages/persistence/migrations/0031_close_ended_successors.sql', import.meta.url), 'utf8');
+      for (const stmt of file0031.split('--> statement-breakpoint').map((x) => x.trim()).filter(Boolean)) await t.db.execute(sql.raw(stmt));
+      expect(await handoverRow()).toMatchObject({ state: 'closed', closed_reason: 'successor_ended', content: null });
+    });
   });
 
   describe('races, with the task row held on a connection of its own', () => {
