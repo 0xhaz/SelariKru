@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect } from 'react';
+import { useStore } from 'zustand';
+import { createStore } from 'zustand/vanilla';
 import type { DecisionAction, DecisionCardModel } from './model.ts';
 
 /** The notice on a card whose content changed while it was on screen. */
@@ -11,6 +13,63 @@ export function holdActions(actions: readonly DecisionAction[], held: boolean): 
   return held ? actions.map((a) => (a.kind === 'command' ? { ...a, disabledReason: a.disabledReason ?? DISABLED_BY_CHANGE } : a)) : actions;
 }
 
+export interface ChangedCardsState {
+  /** The fingerprint a person last acknowledged, by card id. */
+  readonly seen: Readonly<Record<string, string>>;
+  /** Cards whose content changed since the person last looked, held until acknowledged. */
+  readonly held: ReadonlySet<string>;
+  /** Reads cards as shown now: a first reading is remembered, a different one holds the card. Cards not shown are left as they were. */
+  readonly observe: (cards: readonly DecisionCardModel[]) => void;
+  readonly acknowledge: (card: DecisionCardModel) => void;
+  readonly markChanged: (cardId: string) => void;
+  readonly forget: (cardId: string) => void;
+}
+
+/**
+ * One record per page of what the person has looked at, shared by every view that shows a card: a card held in the drawer is held on the Decisions screen, and
+ * following "See the full card" keeps the hold. A view shows only some cards, so nothing here is dropped because a view does not show it.
+ */
+export function createChangedCardsStore() {
+  return createStore<ChangedCardsState>()((set, get) => ({
+    seen: {},
+    held: new Set(),
+    observe: (cards) => {
+      const { seen, held } = get();
+      let nextSeen: Record<string, string> | null = null;
+      let nextHeld: Set<string> | null = null;
+      for (const c of cards) {
+        // Nothing known yet means nothing to compare: the first real reading is not a change.
+        if (c.fingerprint === null) {
+          if (c.id in seen) { nextSeen ??= { ...seen }; delete nextSeen[c.id]; }
+          continue;
+        }
+        const was = seen[c.id];
+        if (was === undefined) { nextSeen ??= { ...seen }; nextSeen[c.id] = c.fingerprint; }
+        else if (was !== c.fingerprint && !held.has(c.id)) { nextHeld ??= new Set(held); nextHeld.add(c.id); }
+      }
+      if (nextSeen || nextHeld) set({ ...(nextSeen ? { seen: nextSeen } : {}), ...(nextHeld ? { held: nextHeld } : {}) });
+    },
+    acknowledge: (card) => {
+      const { seen, held } = get();
+      const nextHeld = new Set(held);
+      nextHeld.delete(card.id);
+      set({ seen: card.fingerprint !== null ? { ...seen, [card.id]: card.fingerprint } : seen, held: nextHeld });
+    },
+    markChanged: (cardId) => { const { held } = get(); if (!held.has(cardId)) set({ held: new Set(held).add(cardId) }); },
+    forget: (cardId) => {
+      const { seen, held } = get();
+      const nextSeen = { ...seen };
+      delete nextSeen[cardId];
+      const nextHeld = new Set(held);
+      nextHeld.delete(cardId);
+      set({ seen: nextSeen, held: nextHeld });
+    },
+  }));
+}
+
+/** The page's one record. */
+export const changedCards = createChangedCardsStore();
+
 export interface ChangedCards {
   /** Cards whose content changed since the person last looked. Their commands are held until `acknowledge`. */
   readonly changedHere: ReadonlySet<string>;
@@ -22,45 +81,12 @@ export interface ChangedCards {
   readonly forget: (cardId: string) => void;
 }
 
-/**
- * Tracks the fingerprint a person last acknowledged per card, so a change on screen is held back until they have looked again. Shared by the Decisions screen and the
- * worker drawer, so a card held in one is held by the same rule in the other.
- */
-export function useChangedCards(cards: readonly DecisionCardModel[] | null): ChangedCards {
-  const seen = useRef(new Map<string, string>());
-  const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
-
+/** Reads and updates the page's shared record for the cards a view shows, so the Decisions screen and the worker drawer hold a changed card by the same rule. */
+export function useChangedCards(cards: readonly DecisionCardModel[] | null, store = changedCards): ChangedCards {
+  const held = useStore(store, (s) => s.held);
   useEffect(() => {
-    if (!cards) return;
-    const ids = new Set(cards.map((c) => c.id));
-    const next = new Set([...changedHere].filter((id) => ids.has(id)));
-    let changed = next.size !== changedHere.size;
-    for (const c of cards) {
-      // Nothing known yet means nothing to compare: the first real reading is not a change.
-      if (c.fingerprint === null) {
-        seen.current.delete(c.id);
-        continue;
-      }
-      const was = seen.current.get(c.id);
-      if (was === undefined) seen.current.set(c.id, c.fingerprint);
-      else if (was !== c.fingerprint && !next.has(c.id)) {
-        next.add(c.id);
-        changed = true;
-      }
-    }
-    for (const id of [...seen.current.keys()]) if (!ids.has(id)) seen.current.delete(id);
-    if (changed) setChangedHere(next);
-    // Depends on the cards only; `changedHere` is read as the latest set and rewritten here.
-  }, [cards]);
-
-  const acknowledge = useCallback((card: DecisionCardModel) => {
-    if (card.fingerprint !== null) seen.current.set(card.id, card.fingerprint);
-    setChangedHere((s) => { const n = new Set(s); n.delete(card.id); return n; });
-  }, []);
-  const markChanged = useCallback((cardId: string) => setChangedHere((s) => (s.has(cardId) ? s : new Set(s).add(cardId))), []);
-  const forget = useCallback((cardId: string) => {
-    seen.current.delete(cardId);
-    setChangedHere((s) => { if (!s.has(cardId)) return s; const n = new Set(s); n.delete(cardId); return n; });
-  }, []);
-  return { changedHere, acknowledge, markChanged, forget };
+    if (cards) store.getState().observe(cards);
+  }, [cards, store]);
+  const { acknowledge, markChanged, forget } = store.getState();
+  return { changedHere: held, acknowledge, markChanged, forget };
 }

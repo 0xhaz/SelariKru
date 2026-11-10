@@ -24,7 +24,7 @@ export interface OnboardingApi {
   reviewAssist(input: { envelope: { operation: string; status: string; data: unknown }; restricted?: boolean; projectId?: string; observed?: { source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN'; requestedMode: InferenceChoice | null } }): Promise<ApiResult<AssistReviewResponse>>;
 }
 
-const SIGN_IN_AGAIN = 'Your sign-in has expired. Sign in again to continue; answers already saved are kept.';
+const SIGN_IN_AGAIN = 'Your sign-in has expired, so this was not saved. Sign in again to continue.';
 const NOT_OWNER = 'This account is not the project owner, so it cannot set up projects here. Sign in with the owner account.';
 /** Refusals a fresh sign-in can fix, so the screen offers one. */
 export const SIGN_IN_CODES: readonly string[] = ['unauthenticated', 'invalid_token', 'not_owner'];

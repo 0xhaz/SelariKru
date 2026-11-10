@@ -39,7 +39,7 @@ export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, con
   const assign = { model: team.assignments, disabledReason: live ? null : ASSIGNMENTS_OFF, onExecute, onRefresh, onResync };
   return (
     <WorkerDrawer
-      key={`${row.workerId}:${panelBeside ? "beside" : "modal"}`}
+      key={row.workerId}
       row={row}
       mode={mode}
       simulated={team.simulated}

@@ -65,8 +65,8 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
   // The count is unknown too, never a stale "nobody", and the last confirmed count is labelled as such.
   const staleCount = panel(page).getByTestId('team-needs-you');
   await expect(staleCount).toHaveAttribute('data-unknown', '');
-  await expect(staleCount).toContainText('who needs you is unknown');
-  await expect(staleCount).toContainText(/1 when last confirmed at \d/);
+  await expect(staleCount.locator('[aria-hidden="true"]')).toHaveText(/^Needs you: unknown \(1 at \d/);
+  await expect(staleCount.locator('.sr-only')).toContainText(/Who needs you is unknown while the connection is not live; 1 needed you when last confirmed at \d/);
   await expect(panel(page)).not.toContainText('nobody needs you');
   await shot(page, 'panel-stale-1440');
   await page.setViewportSize({ width: 375, height: 800 });
@@ -268,6 +268,78 @@ test('with the panel beside the page, choosing another worker switches the open 
   await page.getByTestId('team-panel-toggle').click();
   await panelRow(page, 'runner_local_1').click();
   await expect(drawer(page)).toHaveAttribute('data-modal', 'true');
+});
+
+for (const [width, height] of [[1440, 900], [1280, 800]] as const) {
+  test(`beside the panel at ${width}, keyboard focus never lands on anything under the drawer, and Escape closes it from the panel`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto('/?demo&fixture=human-wait#/overview');
+    await panelRow(page, 'runner_local_1').click();
+    await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
+    // The drawer starts below the header, so no header control is under it.
+    const top = await drawer(page).evaluate((d) => d.getBoundingClientRect().top);
+    const headerBottom = await page.locator('header').first().evaluate((h) => h.getBoundingClientRect().bottom);
+    expect(top).toBeGreaterThanOrEqual(headerBottom - 1);
+    const covered = (): Promise<string | null> => page.evaluate(() => {
+      const d = document.querySelector('[data-testid="worker-drawer"]')!;
+      const a = document.activeElement;
+      if (!(a instanceof HTMLElement) || a === document.body || d.contains(a)) return null;
+      const r = a.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return hit !== null && d.contains(hit) ? `${a.tagName} ${a.textContent?.trim().slice(0, 40)}` : null;
+    });
+    for (const key of ['Tab', 'Shift+Tab']) {
+      for (let i = 0; i < 45; i += 1) {
+        await page.keyboard.press(key);
+        expect(await covered(), `${key} ${i}`).toBeNull();
+      }
+    }
+    // The page under the drawer is inert; the panel and the nav are not.
+    expect(await page.getByTestId('page-content').evaluate((el) => (el as HTMLElement).inert)).toBe(true);
+    await panelRow(page, 'runner_cloud_1').focus();
+    await expect(panelRow(page, 'runner_cloud_1')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(drawer(page)).toHaveCount(0);
+    expect(await page.getByTestId('page-content').evaluate((el) => (el as HTMLElement).inert)).toBe(false);
+  });
+}
+
+test('crossing the panel width with the drawer open keeps what is in Settings', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?demo&fixture=healthy-parallel-work#/overview');
+  await panelRow(page, 'runner_local_1').click();
+  await drawer(page).getByRole('tab', { name: 'Settings' }).click();
+  const model = drawer(page).getByRole('region', { name: 'Model for this task' }).getByLabel('Model for Feedback API');
+  await model.selectOption('claude-haiku-5-5');
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'true');
+  await expect(model).toHaveValue('claude-haiku-5-5');
+  await expect(drawer(page).getByRole('tab', { name: 'Settings' })).toHaveAttribute('aria-selected', 'true');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
+  await expect(model).toHaveValue('claude-haiku-5-5');
+});
+
+test('a card held in the drawer stays held on the Decisions screen through its link', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await panelRow(page, 'runner_local_1').click();
+  await drawer(page).getByRole('tab', { name: 'Settings' }).click();
+  await patchSnapshot(page, { approvalScope: 'moved' });
+  const card = drawer(page).getByTestId('settings-card');
+  await expect(card.getByTestId('request-changed')).toBeVisible();
+  await card.getByRole('link', { name: 'See the full card in Decisions' }).click();
+  await expect(drawer(page)).toHaveCount(0);
+  const full = page.getByTestId('decision-card').first();
+  await expect(full.getByTestId('request-changed')).toContainText('This request changed');
+  await expect(full.getByRole('button', { name: 'Deny and block task' })).toBeDisabled();
+  await full.getByRole('button', { name: 'I have reviewed the update' }).click();
+  await expect(full.getByRole('button', { name: 'Deny and block task' })).toBeEnabled();
+  // Reviewed there, it is released in the drawer too.
+  await panelRow(page, 'runner_local_1').click();
+  await drawer(page).getByRole('tab', { name: 'Settings' }).click();
+  await expect(drawer(page).getByTestId('settings-card').getByTestId('request-changed')).toHaveCount(0);
 });
 
 /** Tabs through every control in the drawer once, from its first tab, and fails if focus leaves it or lands on nothing. */

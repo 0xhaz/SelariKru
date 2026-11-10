@@ -148,7 +148,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   }, [route, workerId, snapshot, state.nowMs, liveness, state.livenessAsOfMs, stale]);
   const team = builtTeam.team;
   const panelStatus = useMemo((): PanelStatus => {
-    if (team) return { kind: 'ready', panel: panelOf(team), stale, confirmedAt };
+    if (team) return { kind: 'ready', panel: panelOf(team, stale), stale, confirmedAt };
     return connection === 'unavailable' || connection === 'dead' || builtTeam.failure !== undefined ? { kind: 'unavailable' } : { kind: 'loading' };
   }, [team, stale, confirmedAt, connection, builtTeam.failure]);
   const panelWide = useMediaQuery(PANEL_WIDE);
@@ -186,11 +186,14 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   }, [snapshot, state.nowMs, mode, connection]);
   const decisionCount = builtDecisions.decisions?.waiting ?? 0;
   const opener = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const openWorker = (id: string): void => {
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     replaceHashQuery({ wtab: null, worker: id });
   };
   const focusAfterDrawer = (id: string | null): void => {
+    // The page under a non-modal drawer is inert until the next render; focus is moving back into it now.
+    if (contentRef.current) contentRef.current.inert = false;
     // Back to what opened it, or the same worker elsewhere on the page, or the folded panel's toggle, so focus is never stranded.
     const sameWorker = id !== null ? document.querySelector<HTMLElement>(`[data-panel-worker="${CSS.escape(id)}"], [data-open-worker="${CSS.escape(id)}"]`) : null;
     const target = [opener.current, sameWorker, document.querySelector<HTMLElement>('[data-team-toggle]')].find((el) => el?.isConnected && el.offsetParent !== null);
@@ -204,12 +207,22 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     replaceHashQuery({ wtab: null, worker: null });
     focusAfterDrawer(id);
   };
+  // Beside the panel the drawer is not modal, so the page under it is made inert while it is open: keyboard focus cannot land on what the drawer covers. The header,
+  // the nav and the team panel stay live, so another worker can still be chosen.
+  const drawerBeside = panelWide && workerId !== null && team !== null && team.rows.some((r) => r.workerId === workerId);
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    el.inert = drawerBeside;
+    return () => { el.inert = false; };
+  }, [drawerBeside]);
   // A worker that is not in the snapshot, from a stale link or a project change, closes the drawer and focus lands on the page.
   const workerMissing = workerId !== null && team !== null && !team.rows.some((r) => r.workerId === workerId);
   useEffect(() => {
     if (!workerMissing) return;
     replaceHashQuery({ wtab: null, worker: null });
     opener.current = null;
+    if (contentRef.current) contentRef.current.inert = false;
     document.getElementById('main')?.focus();
   }, [workerMissing]);
   const evidenceRun = route === 'evidence' ? query.get('run') : null;
@@ -310,7 +323,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
       <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''}`}>
       {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} /> : null}
-      <div className="min-w-0">
+      <div ref={contentRef} className="min-w-0" data-testid="page-content">
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>

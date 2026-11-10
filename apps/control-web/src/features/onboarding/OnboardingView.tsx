@@ -7,7 +7,7 @@ import type { AssistantPort } from '../assistant/types.ts';
 import type { ApiResult, OnboardingApi } from './api.ts';
 import { ENTRY_STEPS } from './entry.ts';
 import { BlueprintStep, ConnectionsStep, ExecutionStep, FeasibilityStep, FocusStep, GoalStep, ReadinessStep, SourceStep, StartStep, type StepProps } from './forms.tsx';
-import { EXECUTION_TEXT, FailureText, INFERENCE_TEXT, Notice, ReadOnlyContext, SignInContext, usd } from './ui.tsx';
+import { EXECUTION_TEXT, FailureText, INFERENCE_TEXT, Notice, ReadOnlyContext, SignInContext, usd, type SignInAgain } from './ui.tsx';
 import { CONDITION_LABELS, STATE_LABELS, STEPS, furthestStep, reachableSteps, stepIndex, type StepId } from './steps.ts';
 
 export interface OnboardingViewProps {
@@ -20,8 +20,8 @@ export interface OnboardingViewProps {
   readonly leaveDemoHref?: string | undefined;
   /** Called when a setup is activated on this page: the project now exists, so the shell can open it. Not called for one activated earlier. */
   readonly onActivated?: ((projectId: string) => void) | undefined;
-  /** Signs the person in again, offered where a request failed for the sign-in. */
-  readonly onSignIn?: (() => void) | undefined;
+  /** Signs the same account in again in place, offered where a request failed for the sign-in. */
+  readonly signInAgain?: SignInAgain | undefined;
 }
 
 function Stepper({ current, reach, onGo }: { current: StepId; reach: number; onGo: (s: StepId) => void }) {
@@ -122,8 +122,8 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
 }
 
 /** Onboarding wizard. The server owns state; this keeps only the step being looked at. */
-export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActivated, onSignIn }: OnboardingViewProps) {
-  return <SignInContext.Provider value={onSignIn ?? null}><Onboarding api={api} adapter={adapter} hold={hold} mode={mode} leaveDemoHref={leaveDemoHref} onActivated={onActivated} /></SignInContext.Provider>;
+export function OnboardingView({ api, adapter, hold, mode, leaveDemoHref, onActivated, signInAgain }: OnboardingViewProps) {
+  return <SignInContext.Provider value={signInAgain ?? null}><Onboarding api={api} adapter={adapter} hold={hold} mode={mode} leaveDemoHref={leaveDemoHref} onActivated={onActivated} /></SignInContext.Provider>;
 }
 
 function Onboarding({ api, adapter, hold, mode, leaveDemoHref, onActivated }: OnboardingViewProps) {

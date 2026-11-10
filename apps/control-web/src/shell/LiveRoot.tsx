@@ -1,6 +1,6 @@
 import { lazy, useEffect, useMemo, useState } from 'react';
 import { createLiveDataSource } from '@selarikru/data-source-live';
-import { signOut } from 'firebase/auth';
+import { EmailAuthProvider, reauthenticateWithCredential, signOut } from 'firebase/auth';
 import { RestrictedDraftHold, type InferenceMode } from '@selarikru/inference-firebase-web';
 import { AuthGate } from '../auth/AuthGate.tsx';
 import { OnboardingView } from '../features/onboarding/OnboardingView.tsx';
@@ -17,6 +17,22 @@ const AssistantPanel = lazy(() => import('../features/assistant/AssistantPanel.t
 const every: Scheduler = (fn, ms) => {
   const id = window.setInterval(fn, ms);
   return () => window.clearInterval(id);
+};
+
+/** Re-authenticates the signed-in owner in place: the same account, so the app is not remounted and nothing typed is lost. */
+const signInAgain = {
+  get email() { return auth.currentUser?.email ?? null; },
+  async reauthenticate(password: string): Promise<boolean> {
+    const user = auth.currentUser;
+    if (!user?.email) return false;
+    try {
+      await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
+      await user.getIdToken(true);
+      return true;
+    } catch {
+      return false;
+    }
+  },
 };
 
 function App({ account }: { account: AccountInfo }) {
@@ -50,7 +66,7 @@ function App({ account }: { account: AccountInfo }) {
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} onSignIn={() => void signOut(auth)} />} />;
+  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
 }
 
 export default function LiveRoot() {

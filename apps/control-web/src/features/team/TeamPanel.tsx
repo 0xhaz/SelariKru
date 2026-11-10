@@ -61,15 +61,22 @@ function Rows({ status, selectedId, onOpen, grid }: { status: PanelStatus; selec
 
 const confirmedClock = (status: Extract<PanelStatus, { kind: 'ready' }>): string => (status.confirmedAt ? ` at ${formatClock(status.confirmedAt)}` : '');
 
-/** The "needs you" count, or, while states are unknown, that it is unknown and what it was when last confirmed. A stale zero is never shown as nobody. */
+/** The "needs you" count, or, while the session is stale, that it is unknown and what it was when last confirmed. A stale zero is never shown as nobody. */
 function NeedsYou({ status, testId }: { status: Extract<PanelStatus, { kind: 'ready' }>; testId: string }) {
-  const { needsYou, confirmedNeedsYou } = status.panel;
+  const { needsYou, confirmedNeedsYou, unknown } = status.panel;
   if (needsYou === null) {
-    return <span data-testid={testId} data-unknown="" className="text-muted">who needs you is unknown<span aria-hidden="true"> · </span><span className="sr-only">; </span>{confirmedNeedsYou} when last confirmed{confirmedClock(status)}</span>;
+    const at = status.confirmedAt ? ` at ${formatClock(status.confirmedAt)}` : '';
+    return (
+      <span data-testid={testId} data-unknown="">
+        <span aria-hidden="true" className="text-muted">Needs you: unknown ({confirmedNeedsYou}{at})</span>
+        <span className="sr-only">Who needs you is unknown while the connection is not live; {confirmedNeedsYou} needed you when last confirmed{at}.</span>
+      </span>
+    );
   }
+  const others = unknown > 0 ? <span className="text-muted" data-testid="team-unknown"><span aria-hidden="true"> · </span><span className="sr-only">; </span>{unknown} unknown</span> : null;
   return needsYou > 0
-    ? <span data-testid={testId} className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou} need{needsYou === 1 ? 's' : ''} you</span>
-    : <span data-testid={testId} className="text-muted">nobody needs you</span>;
+    ? <span data-testid={testId}><span className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou} need{needsYou === 1 ? 's' : ''} you</span>{others}</span>
+    : <span data-testid={testId}><span className="text-muted">nobody needs you</span>{others}</span>;
 }
 
 function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; testId?: string }) {

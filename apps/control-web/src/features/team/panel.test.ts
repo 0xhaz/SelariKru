@@ -62,7 +62,7 @@ describe('team panel model', () => {
       ],
       approvals: [approval('ap', { taskId: 'b' })],
     });
-    const panel = panelOf(buildTeam(snapshot, NOW, NOW));
+    const panel = panelOf(buildTeam(snapshot, NOW, NOW), false);
     expect(panel.needsYou).toBe(1);
     expect(panel.summary).toBe('3 workers, 1 needs you');
     expect(panel.rows.map((r) => r.workerId)).toEqual(['w2', 'w1', 'w3']);
@@ -77,19 +77,33 @@ describe('team panel model', () => {
       workers: [worker('w2', { taskId: 'b', activity: 'waiting_human', blockedByApprovalId: 'ap' }), worker('w3', { availability: 'idle', activity: null, leaseHeld: false })],
       approvals: [approval('ap', { taskId: 'b' })],
     });
-    const panel = panelOf(buildTeam(snapshot, NOW, null, { stale: true, lastConfirmedMs: NOW - 5_000 }));
+    const panel = panelOf(buildTeam(snapshot, NOW, null, { stale: true, lastConfirmedMs: NOW - 5_000 }), true);
     expect(panel.rows.every((r) => r.state === 'unknown')).toBe(true);
-    expect(panel).toMatchObject({ needsYou: null, confirmedNeedsYou: 1, summary: '2 workers, who needs you is unknown (1 when last confirmed)' });
+    expect(panel).toMatchObject({ needsYou: null, unknown: 0, confirmedNeedsYou: 1, summary: '2 workers, who needs you is unknown (1 when last confirmed)' });
+  });
+
+  it('a worker the server reports as unknown makes only its own row unknown; the rest are counted as current', () => {
+    const snapshot = snapshotOf({
+      tasks: [task('b', { status: 'awaiting_approval' }), task('c')],
+      workers: [worker('w2', { taskId: 'b', activity: 'waiting_human', blockedByApprovalId: 'ap', leaseHeld: false }), worker('u', { taskId: 'c', lastHeartbeatAt: iso(5) })],
+      approvals: [approval('ap', { taskId: 'b' })],
+    });
+    // Liveness that has not refreshed recently leaves a lease holder's health unknown, with the session itself still live. A worker holding no lease is unaffected.
+    const team = buildTeam(snapshot, NOW, NOW - 120_000);
+    const u = team.rows.find((r) => r.workerId === 'u')!;
+    expect(u.presence.state).toBe('unknown');
+    const panel = panelOf(team, false);
+    expect(panel).toMatchObject({ needsYou: 1, unknown: 1, summary: '2 workers, 1 needs you, 1 unknown' });
   });
 
   it('with nobody waiting, the summary says so rather than showing zero as a warning', () => {
-    const panel = panelOf(buildTeam(snapshotOf({ workers: [worker('w', { availability: 'idle', activity: null, leaseHeld: false })] }), NOW, NOW));
+    const panel = panelOf(buildTeam(snapshotOf({ workers: [worker('w', { availability: 'idle', activity: null, leaseHeld: false })] }), NOW, NOW), false);
     expect(panel).toMatchObject({ needsYou: 0, summary: '1 worker, nobody needs you' });
   });
 
   it('an idle worker names its last task as last, not current', () => {
     const snapshot = snapshotOf({ tasks: [task('a', { status: 'verified', title: 'Add table', activeAttemptId: null })], workers: [worker('w', { availability: 'idle', activity: null, leaseHeld: false })] });
     (snapshot as { attempts: Record<string, unknown> }).attempts['x'] = { attemptId: 'x', taskId: 'a', number: 1, fence: 1, outcome: 'succeeded', exitReason: null, runnerId: 'w', startedAt: iso(100), endedAt: iso(80), lastHeartbeatAt: null, assignment: null };
-    expect(panelOf(buildTeam(snapshot, NOW, NOW)).rows[0]).toMatchObject({ task: 'Last: Add table' });
+    expect(panelOf(buildTeam(snapshot, NOW, NOW), false).rows[0]).toMatchObject({ task: 'Last: Add table' });
   });
 });

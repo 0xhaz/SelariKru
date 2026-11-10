@@ -18,8 +18,10 @@ export interface PanelRow {
 
 export interface TeamPanelModel {
   readonly rows: readonly PanelRow[];
-  /** Null while any worker's state is unknown: a stale count could hide someone who needs you, so none is given as current. */
+  /** Null while the session is stale: every state is then the last confirmed, and a stale count could hide someone who needs you, so none is given as current. */
   readonly needsYou: number | null;
+  /** Workers the server itself reports as unknown while the session is live. Only they are uncounted; the count covers the rest. */
+  readonly unknown: number;
   /** How many needed you at the last confirmation. Shown, labelled as such, only when `needsYou` is null. */
   readonly confirmedNeedsYou: number;
   readonly summary: string;
@@ -28,18 +30,19 @@ export interface TeamPanelModel {
 const roleName = (role: string | null): string => (role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Unassigned');
 
 /** The always-on roster, read from the Team model so the panel and the Team view can never disagree. Rows keep the Team view's attention order. */
-export function panelOf(team: TeamModel): TeamPanelModel {
+export function panelOf(team: TeamModel, sessionStale: boolean): TeamPanelModel {
   const rows = team.rows.map((r): PanelRow => ({
     workerId: r.workerId, role: roleName(r.role), state: r.presence.state, label: r.presence.label, tone: r.presence.tone, detail: r.presence.detail, since: r.presence.since, sinceIso: r.presence.sinceIso,
     task: r.task ? r.task.title : r.lastTask ? `Last: ${r.lastTask.title}` : 'No task',
     model: r.modelDetail ?? 'Model not recorded',
   }));
-  const unknown = team.stale || rows.some((r) => r.state === 'unknown');
   const confirmedNeedsYou = team.rows.filter((r) => r.presence.confirmedState === 'needs_you').length;
-  const needsYou = unknown ? null : confirmedNeedsYou;
+  const unknown = sessionStale ? 0 : rows.filter((r) => r.state === 'unknown').length;
+  const needsYou = sessionStale ? null : rows.filter((r) => r.state === 'needs_you').length;
   const workers = `${rows.length} worker${rows.length === 1 ? '' : 's'}`;
-  const summary = needsYou === null
+  const counted = needsYou === null ? null : needsYou === 0 ? 'nobody needs you' : `${needsYou} need${needsYou === 1 ? 's' : ''} you`;
+  const summary = counted === null
     ? `${workers}, who needs you is unknown (${confirmedNeedsYou} when last confirmed)`
-    : `${workers}, ${needsYou === 0 ? 'nobody needs you' : `${needsYou} need${needsYou === 1 ? 's' : ''} you`}`;
-  return { rows, needsYou, confirmedNeedsYou, summary };
+    : `${workers}, ${counted}${unknown > 0 ? `, ${unknown} unknown` : ''}`;
+  return { rows, needsYou, unknown, confirmedNeedsYou, summary };
 }

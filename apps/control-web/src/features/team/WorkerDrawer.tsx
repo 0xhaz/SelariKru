@@ -223,6 +223,8 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
   const [width, setWidth] = useState(() => clampWidth(720));
   const [maximized, setMaximized] = useState(false);
   const dragging = useRef(false);
+  // How the dialog is open now. Crossing the panel's width re-opens it the other way in place, so nothing inside is remounted.
+  const shownAs = useRef<boolean | null>(null);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -230,6 +232,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
     if (!dialog.open) {
       if (modal) dialog.showModal();
       else dialog.show();
+      shownAs.current = modal;
     }
     tabRefs.current[initialTab]?.focus();
     return () => {
@@ -250,13 +253,31 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
     if (!inside) dialogRef.current!.close();
   };
 
-  // A modal dialog closes on Escape by itself. Without a modal the browser does not, so the same key is kept here; a dialog opened inside it handles its own.
-  const onDialogKey = (e: KeyboardEvent<HTMLDialogElement>): void => {
-    if (modal || e.key !== 'Escape' || e.defaultPrevented) return;
-    if ((e.target as Element).closest('dialog') !== dialogRef.current) return;
-    e.preventDefault();
-    dialogRef.current?.close();
-  };
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || !dialog.open || shownAs.current === null || shownAs.current === modal) return;
+    const focused = document.activeElement;
+    // The close event this queues arrives with the dialog open again, so it is not read as the person closing it.
+    dialog.close();
+    if (modal) dialog.showModal();
+    else dialog.show();
+    shownAs.current = modal;
+    if (focused instanceof HTMLElement && dialog.contains(focused)) focused.focus();
+  }, [modal]);
+
+  // A modal dialog closes on Escape by itself. Beside the panel it is not modal, so Escape is heard from anywhere on the page, as the modal one is, unless a dialog
+  // opened over it (a confirmation) is taking that key for itself.
+  useEffect(() => {
+    if (modal) return;
+    const onKey = (e: globalThis.KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (document.querySelector('dialog:modal') !== null) return;
+      e.preventDefault();
+      dialogRef.current?.close();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [modal]);
 
   const selectTab = (id: TabId, focus: boolean): void => {
     setTab(id);
@@ -310,10 +331,10 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
       data-testid="worker-drawer"
       onClose={onDialogClose}
       onClick={onDialogClick}
-      onKeyDown={onDialogKey}
       data-modal={modal ? 'true' : 'false'}
       style={widthStyle}
-      className={`wrap-anywhere fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem] ${modal ? '' : 'z-50 shadow-[-12px_0_32px_-8px_var(--color-backdrop)]'}`}
+      // Beside the panel it starts below the header, so no header control is ever under it.
+      className={`wrap-anywhere fixed right-0 left-auto m-0 max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem] ${modal ? 'inset-y-0 h-dvh' : 'top-[var(--header-h,6rem)] bottom-0 z-50 h-[calc(100dvh-var(--header-h,6rem))] shadow-[-12px_0_32px_-8px_var(--color-backdrop)]'}`}
     >
         {canResize ? (
           <div

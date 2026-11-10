@@ -1,4 +1,4 @@
-import { Children, cloneElement, createContext, isValidElement, useContext, type ReactElement, type ReactNode, type RefObject } from 'react';
+import { Children, cloneElement, createContext, isValidElement, useContext, useId, useState, type FormEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import { Chip, toneGlyph, TONE_TEXT, type Tone } from '@selarikru/ui';
 import type { ExecutionChoice, ReadinessStatus } from '@selarikru/domain';
 import { SIGN_IN_CODES, type InferenceChoice } from './api.ts';
@@ -41,16 +41,55 @@ export function Field({ id, label, hint, children, error }: { id: string; label:
 /** True once the project has started: every step can be read and none can be changed. */
 export const ReadOnlyContext = createContext(false);
 
-/** Signs the person in again, where the page can: the live app passes it, demo data has none. */
-export const SignInContext = createContext<(() => void) | null>(null);
+/**
+ * Signs the same account in again without leaving the page, so nothing typed here is lost: the live app passes it, demo data and tests without a sign-in have none.
+ * It re-authenticates the signed-in account; a different account is a different session and is reached through Sign out instead.
+ */
+export interface SignInAgain {
+  readonly email: string | null;
+  readonly reauthenticate: (password: string) => Promise<boolean>;
+}
+export const SignInContext = createContext<SignInAgain | null>(null);
 
-/** A failure, with a way to sign in again when signing in again is what fixes it. */
+/** Codes a fresh sign-in of the same account fixes. `not_owner` is not one: that needs a different account. */
+const REAUTH_CODES: readonly string[] = SIGN_IN_CODES.filter((c) => c !== 'not_owner');
+
+function SignInAgainForm({ signIn }: { signIn: SignInAgain }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<'ok' | 'failed' | null>(null);
+  const id = useId();
+  if (result === 'ok') return <span role="status" className="mt-2 block text-fg" data-testid="signed-in-again">Signed in again. Try that step again; nothing on this page was lost.</span>;
+  if (!open) return <span className="mt-2 block"><button type="button" className="rounded-chip border border-line-strong bg-panel-2 px-3 py-1.5 text-sm font-medium text-fg hover:border-active" onClick={() => setOpen(true)}>Sign in again</button></span>;
+  const submit = async (e: FormEvent<HTMLFormElement>): Promise<void> => {
+    e.preventDefault();
+    const password = String(new FormData(e.currentTarget).get('password') ?? '');
+    setBusy(true);
+    setResult(null);
+    const ok = await signIn.reauthenticate(password);
+    setBusy(false);
+    setResult(ok ? 'ok' : 'failed');
+  };
+  return (
+    <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => void submit(e)}>
+      <span className="block w-full text-sm text-muted">Signing in again here keeps everything on this page, including what you have typed and not saved.</span>
+      <span className="min-w-0 flex-1 basis-48">
+        <label htmlFor={`${id}-password`} className="mb-1 block text-sm text-fg">Password{signIn.email ? ` for ${signIn.email}` : ''}</label>
+        <input id={`${id}-password`} name="password" type="password" autoComplete="current-password" required className="w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-fg" />
+      </span>
+      <button type="submit" disabled={busy} className="rounded-chip bg-active px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-50">{busy ? 'Signing in' : 'Sign in'}</button>
+      {result === 'failed' ? <span role="status" className="block w-full text-sm text-danger">The sign-in did not work. Check the password and try again.</span> : null}
+    </form>
+  );
+}
+
+/** A failure, with a way to sign in again in place when that is what fixes it. */
 export function FailureText({ code, message }: { code: string; message: string }) {
   const signIn = useContext(SignInContext);
   return (
     <>
       {message}
-      {signIn && SIGN_IN_CODES.includes(code) ? <span className="mt-2 block"><button type="button" className="rounded-chip border border-line-strong bg-panel-2 px-3 py-1.5 text-sm font-medium text-fg hover:border-active" onClick={signIn}>Sign in again</button></span> : null}
+      {signIn && REAUTH_CODES.includes(code) ? <SignInAgainForm signIn={signIn} /> : null}
     </>
   );
 }

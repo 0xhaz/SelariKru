@@ -263,10 +263,12 @@ if (sc.onboardingApi) {
   const o = sc.onboardingApi;
   const api = createOnboardingApi({ baseUrl: o.baseUrl, getToken: async () => o.token ?? 'test-token' });
   const empty = createProjectionStore({ source: null, projectId: '', clock: { nowMs: () => Date.now() }, every: () => () => undefined });
+  // Stands in for Firebase re-authentication: 'right' is the password.
+  const signInAgain = { email: 'owner@example.test', reauthenticate: async (password: string) => { window.__calls.api.push({ kind: 'sign-in' }); return password === 'right'; } };
   // The live root's project handling, without Firebase: the header follows an activation the same way.
   function OnboardingShell() {
     const { projectId, activate } = useActiveProject(projectFromUrl());
-    return <AppShell store={empty} mode="live" projectLabel={projectId || NO_PROJECT} assistant={null} onboarding={<OnboardingView api={api} adapter={adapter} hold={hold} mode="live" onActivated={activate} onSignIn={() => window.__calls.api.push({ kind: 'sign-in' })} />} />;
+    return <AppShell store={empty} mode="live" projectLabel={projectId || NO_PROJECT} assistant={null} onboarding={<OnboardingView api={api} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
   }
   root.render(<StrictMode><OnboardingShell /></StrictMode>);
 } else if (sc.liveApi) {

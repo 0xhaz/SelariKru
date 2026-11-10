@@ -230,7 +230,23 @@ test.describe('behaviour', () => {
     await expect(page.getByText('Your sign-in has expired')).toBeVisible();
     await expect(page.getByText(/Could not reach/)).toHaveCount(0);
     await page.getByRole('button', { name: 'Sign in again' }).click();
-    expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-in'))).toHaveLength(1);
+    await expect(page.getByText('keeps everything on this page')).toBeVisible();
+    await page.getByLabel('Password for owner@example.test').fill('wrong');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByText('The sign-in did not work. Check the password')).toBeVisible();
+    await page.getByLabel('Password for owner@example.test').fill('right');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByTestId('signed-in-again')).toContainText('nothing on this page was lost');
+    await expect(page.getByRole('heading', { name: 'Confirm the first run' })).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-in'))).toHaveLength(2);
+  });
+
+  test('an account that is not the owner is told so, and is not offered a sign-in that cannot help', async ({ page }) => {
+    await open(page, ready, '#/onboarding?id=proj_1');
+    await page.route('**/mockapi/v1/onboarding/proj_1/activate', (route) => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'not_owner', message: 'not the owner' } }) }));
+    await page.getByRole('button', { name: 'Start first run' }).click();
+    await expect(page.getByText('This account is not the project owner')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Sign in again' })).toHaveCount(0);
   });
 
   test('a hint and an error are tied to their control', async ({ page }) => {
