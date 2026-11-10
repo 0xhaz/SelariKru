@@ -4,19 +4,20 @@ import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  libraryVersion, packDigest, parseSkillFrontmatter, scanPack, SKILL_LIBRARY, SKILL_LIMITS, skillDirOf, SkillEvaluationSchema, SkillExecutionRecordSchema, skillLibraryUrl,
+  libraryVersion, packDigest, RUNNER_RECENT_SECONDS, parseSkillFrontmatter, scanPack, SKILL_LIBRARY, SKILL_LIMITS, skillDirOf, SkillEvaluationSchema, SkillExecutionRecordSchema, skillLibraryUrl,
   SkillPathSchema, SkillScanReportSchema, skillStates, SkillVersionSchema, SkillVersionTextSchema, strongerLabel,
   type DeliveredSkillPack, type DeliveredSkills, type PackEntry, type ResolvedSkill, type SkillBinding, type SkillFile, type SkillScanReport, type SkillVersion,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
-import { redactSecrets, SkillBindingRequestSchema, SkillIntakeRequestSchema, SkillReviewRequestSchema, SkillRevokeRequestSchema } from '@selarikru/protocol';
+import { redactSecrets, SkillBindingRequestSchema, SkillConfirmRequestSchema, SkillIntakeRequestSchema, SkillReviewRequestSchema, SkillRevokeRequestSchema } from '@selarikru/protocol';
 import { bindingOf, loadKnownVersions } from '@selarikru/workflow';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
-import { requireProject } from './store.ts';
+import { requireProject, writeEvent } from './store.ts';
+import { eventRunFor } from './settings.ts';
 
 /**
  * The skill library's owner surface and delivery (docs/skill-candidates.md §5 and §7). First-party packs are code and files in this repository, published reviewed.
@@ -53,10 +54,12 @@ async function libraryContent(v: SkillVersion): Promise<{ path: string; content:
  * The packs a claimed attempt receives, with their content: exactly the ones the claim recorded, in order. A restricted or secret pack never goes to a cloud worker; a pack
  * whose content cannot be found is sent with what was found, and the runner's digest check refuses it.
  */
-export async function skillsForLease(db: Executor, lease: { tenantId: string; location: 'local' | 'cloud'; skills?: readonly ResolvedSkill[] | undefined }): Promise<DeliveredSkills> {
+export async function skillsForLease(db: Executor, lease: { tenantId: string; location: 'local' | 'cloud'; assignment?: { readonly route: string } | undefined; skills?: readonly ResolvedSkill[] | undefined }): Promise<DeliveredSkills> {
   const packs: DeliveredSkillPack[] = [];
+  // A cloud runner, or a model that runs in the cloud, is a cloud destination. An attempt with no recorded model is treated as cloud-bound.
+  const cloud = lease.location === 'cloud' || lease.assignment?.route !== 'device';
   for (const r of lease.skills ?? []) {
-    if (lease.location === 'cloud' && (r.classification === 'restricted' || r.classification === 'secret')) continue;
+    if (cloud && (r.classification === 'restricted' || r.classification === 'secret')) continue;
     const lib = libraryVersion(r.versionId);
     const files = lib && r.origin === 'first_party' ? await libraryContent(lib)
       : (await db.select({ path: schema.skillPackFiles.path, content: schema.skillPackFiles.content }).from(schema.skillPackFiles)
@@ -80,38 +83,68 @@ export async function readPackDirectory(root: string): Promise<PackEntry[]> {
   const out: PackEntry[] = [];
   const decoder = new TextDecoder('utf-8', { fatal: true });
   const walk = async (rel: string, depth: number): Promise<void> => {
-    const items = (await readdir(rel === '' ? root : join(root, rel), { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1));
+    const dir = rel === '' ? root : join(root, rel);
+    // Checked again right before reading: a directory swapped for a link since it was listed is never followed.
+    const here = await lstat(dir).catch(() => null);
+    if (!here || !here.isDirectory()) { out.push({ path: rel || '.', kind: here?.isSymbolicLink() ? 'symlink' : 'special', bytes: 0, executable: false, text: null }); return; }
+    const items = (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1));
     for (const d of items) {
       if (IGNORED.has(d.name)) continue;
       const path = rel === '' ? d.name : `${rel}/${d.name}`;
       if (out.length >= SKILL_LIMITS.maxIntakeEntries) { out.push({ path, kind: 'file', bytes: 0, executable: false, text: null, unread: 'limit' }); return; }
-      if (d.isSymbolicLink()) { out.push({ path, kind: 'symlink', bytes: 0, executable: false, text: null }); continue; }
-      if (d.isDirectory()) {
+      const abs = join(root, path);
+      const ent = await lstat(abs).catch(() => null);
+      if (!ent) { out.push({ path, kind: 'file', bytes: 0, executable: false, text: null, unread: 'unreadable' }); continue; }
+      if (ent.isSymbolicLink()) { out.push({ path, kind: 'symlink', bytes: 0, executable: false, text: null }); continue; }
+      if (ent.isDirectory()) {
         out.push({ path, kind: 'directory', bytes: 0, executable: false, text: null });
         if (depth + 1 >= SKILL_LIMITS.maxIntakeDepth) out.push({ path: `${path}/`, kind: 'file', bytes: 0, executable: false, text: null, unread: 'depth' });
         else await walk(path, depth + 1);
         continue;
       }
-      if (!d.isFile()) { out.push({ path, kind: 'special', bytes: 0, executable: false, text: null }); continue; }
-      const abs = join(root, path);
-      const fst = await lstat(abs);
-      const executable = (fst.mode & 0o111) !== 0;
-      if (fst.size > SKILL_LIMITS.maxFileBytes) { out.push({ path, kind: 'file', bytes: fst.size, executable, text: null, unread: 'too_large' }); continue; }
-      let bytes: Buffer;
-      try {
-        const fh = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-        try { bytes = await fh.readFile(); } finally { await fh.close(); }
-      } catch {
-        out.push({ path, kind: 'file', bytes: fst.size, executable, text: null, unread: 'unreadable' });
-        continue;
-      }
+      if (!ent.isFile()) { out.push({ path, kind: 'special', bytes: 0, executable: false, text: null }); continue; }
+      const read = await readBounded(abs);
+      if (read.kind === 'special') { out.push({ path, kind: 'special', bytes: 0, executable: false, text: null }); continue; }
+      if (read.kind === 'unreadable') { out.push({ path, kind: 'file', bytes: ent.size, executable: (ent.mode & 0o111) !== 0, text: null, unread: 'unreadable' }); continue; }
+      const executable = (read.mode & 0o111) !== 0;
+      if (read.bytes.length > SKILL_LIMITS.maxFileBytes) { out.push({ path, kind: 'file', bytes: read.size, executable, text: null, unread: 'too_large' }); continue; }
       let text: string | null = null;
-      try { text = bytes.includes(0) ? null : decoder.decode(bytes); } catch { text = null; }
-      out.push({ path, kind: 'file', bytes: bytes.length, executable, text, ...(text === null ? { unread: 'binary' as const } : {}), ...(SkillPathSchema.safeParse(path).success ? {} : { unread: 'unsafe_path' as const }) });
+      try { text = read.bytes.includes(0) ? null : decoder.decode(read.bytes); } catch { text = null; }
+      out.push({ path, kind: 'file', bytes: read.bytes.length, executable, text, ...(text === null ? { unread: 'binary' as const } : {}), ...(SkillPathSchema.safeParse(path).success ? {} : { unread: 'unsafe_path' as const }) });
     }
   };
   await walk('', 0);
   return out;
+}
+
+/**
+ * Opens without following a link and without blocking (a FIFO or device opened by mistake cannot hang the request), checks the open descriptor is a regular file, and reads
+ * at most one byte past the file limit: enough to know it is too large, never the whole of a huge file.
+ */
+async function readBounded(abs: string): Promise<{ kind: 'file'; bytes: Buffer; size: number; mode: number } | { kind: 'special' } | { kind: 'unreadable' }> {
+  let fh;
+  try {
+    fh = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return { kind: 'special' };
+    const cap = SKILL_LIMITS.maxFileBytes + 1;
+    const buf = Buffer.alloc(cap);
+    let n = 0;
+    while (n < cap) {
+      const { bytesRead } = await fh.read(buf, n, cap - n, n);
+      if (bytesRead === 0) break;
+      n += bytesRead;
+    }
+    return { kind: 'file', bytes: buf.subarray(0, n), size: st.size, mode: st.mode };
+  } catch {
+    return { kind: 'unreadable' };
+  } finally {
+    await fh.close();
+  }
 }
 
 const slug = (s: string): string => s.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'pack';
@@ -132,7 +165,8 @@ export function stagedVersion(entries: readonly PackEntry[], scan: SkillScanRepo
     origin: 'third_party', scope: 'project',
     license: { spdx: fm?.license ? clean(fm.license, 80) : null, file: license && SkillPathSchema.safeParse(license.path).success ? license.path : null },
     source: { kind: 'local_directory', path: redactSecrets(meta.path).slice(0, 1024), importedAt: meta.at.toISOString(), importedBy: meta.by.slice(0, 200) },
-    digest, files: files.map((f) => f.file).slice(0, SKILL_LIMITS.maxFiles),
+    // Exactly the files the digest covers, never cut: a pack too large to deliver is blocked by the scan instead.
+    digest, files: files.map((f) => f.file),
     // A staged pack declares no triggers we trust: the binding's roles and paths are what narrow it.
     triggers: { entries: [], roles: [], paths: [], actions: [] },
     labels: { frameworks: [], roles: [], focus: [] },
@@ -174,8 +208,11 @@ async function catalogView(db: Executor, tenantId: string, projectId: string): P
   const staged = await db.select().from(schema.skillStagedVersions).where(and(eq(schema.skillStagedVersions.tenantId, tenantId), eq(schema.skillStagedVersions.projectId, projectId))).orderBy(schema.skillStagedVersions.stagedAt);
   const evals = (await db.select().from(schema.skillEvaluations).where(and(eq(schema.skillEvaluations.tenantId, tenantId), eq(schema.skillEvaluations.projectId, projectId))))
     .flatMap((e) => { const p = SkillEvaluationSchema.safeParse(e.record); return p.success ? [p.data] : []; });
-  // Enabled for this task: what each task's latest attempt received.
-  const records = await db.select().from(schema.skillExecutionRecords).where(and(eq(schema.skillExecutionRecords.tenantId, tenantId), eq(schema.skillExecutionRecords.projectId, projectId))).orderBy(desc(schema.skillExecutionRecords.recordedAt));
+  // Enabled for this task: what each task's running attempt received.
+  // Only attempts still running: an ended attempt no longer has the pack enabled.
+  const records = await db.select({ taskId: schema.skillExecutionRecords.taskId, attemptId: schema.skillExecutionRecords.attemptId, record: schema.skillExecutionRecords.record }).from(schema.skillExecutionRecords)
+    .innerJoin(schema.attempts, and(eq(schema.attempts.tenantId, schema.skillExecutionRecords.tenantId), eq(schema.attempts.projectId, schema.skillExecutionRecords.projectId), eq(schema.attempts.attemptId, schema.skillExecutionRecords.attemptId)))
+    .where(and(eq(schema.skillExecutionRecords.tenantId, tenantId), eq(schema.skillExecutionRecords.projectId, projectId), isNull(schema.attempts.endedAt))).orderBy(desc(schema.skillExecutionRecords.recordedAt));
   const latest = new Map<string, { attemptId: string; versionIds: string[] }>();
   for (const r of records) {
     if (latest.has(r.taskId)) continue;
@@ -228,12 +265,23 @@ const bindingRow = (r: typeof schema.projectSkillBindings.$inferSelect): Binding
   state: r.effectiveRevision >= r.desiredRevision ? 'applied' : 'applying', updatedBy: r.updatedBy, updatedAt: r.updatedAt.toISOString(),
 });
 
-export async function loadSkillsView(db: Executor, tenantId: string, projectId: string) {
+export async function loadSkillsView(db: Executor, tenantId: string, projectId: string, now: Date) {
   const bindings = await db.select().from(schema.projectSkillBindings).where(and(eq(schema.projectSkillBindings.tenantId, tenantId), eq(schema.projectSkillBindings.projectId, projectId))).orderBy(schema.projectSkillBindings.skillId);
   const roles = await db.execute(sql`SELECT DISTINCT r.spec ->> 'role' AS role FROM task_status s JOIN task_revisions r ON r.tenant_id = s.tenant_id AND r.project_id = s.project_id AND r.task_id = s.task_id AND r.revision = s.current_revision
     WHERE s.tenant_id = ${tenantId} AND s.project_id = ${projectId} ORDER BY 1`);
+  const [stackRow] = await db.select({ document: schema.projectStacks.document }).from(schema.projectStacks).where(and(eq(schema.projectStacks.tenantId, tenantId), eq(schema.projectStacks.projectId, projectId)));
+  const components = ((stackRow?.document as { components?: { path?: unknown }[] } | undefined)?.components ?? []).map((c) => c.path).filter((p): p is string => typeof p === 'string' && p !== '.');
+  const history = await db.select().from(schema.skillActions).where(and(eq(schema.skillActions.tenantId, tenantId), eq(schema.skillActions.projectId, projectId))).orderBy(asc(schema.skillActions.seq));
+  const bound = bindings.some((b) => bindingOf(b.desired) !== null);
+  const waiting = bound ? await db.select({ runnerId: schema.runners.runnerId, skillDelivery: schema.runners.skillDelivery }).from(schema.runners)
+    .where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt), gte(schema.runners.lastPolledAt, new Date(now.getTime() - RUNNER_RECENT_SECONDS * 1000)))) : [];
   return {
     projectId, catalog: await catalogView(db, tenantId, projectId),
+    /** Component paths from the stack, offered as binding scopes. */
+    paths: [...new Set(components)].sort(),
+    /** Recent runners on a build that cannot deliver packs: while a pack is bound, they get no task it applies to. */
+    waitingForRunnerUpdate: waiting.filter((r) => r.skillDelivery !== true).map((r) => r.runnerId).sort(),
+    history: history.map((h) => ({ kind: h.kind, actor: h.actor, at: h.at.toISOString(), skillId: h.skillId, versionId: h.versionId, before: h.before ?? null, after: h.after ?? null })),
     // Bindings removed by the owner stay as rows (their revision keeps counting) but bind nothing.
     bindings: bindings.map(bindingRow).filter((b) => b.desired !== null || b.desiredRevision > 0),
     roles: roles.map((r) => r['role']).filter((r): r is string => typeof r === 'string'),
@@ -249,6 +297,25 @@ export async function boundSkillsForStack(db: Executor, tenantId: string, projec
     const k = b ? known.get(b.versionId) : undefined;
     return k && k.reviewed && !k.revoked && !k.blocked ? [{ name: k.version.name, version: k.version.version, entries: [...k.version.triggers.entries] }] : [];
   }).sort((a, b) => (a.name < b.name ? -1 : 1));
+}
+
+// ---- history ------------------------------------------------------------------------------------------------------------------------------------
+
+type ActionKind = 'intake' | 'review' | 'revoke' | 'bind' | 'unbind';
+
+/**
+ * Appends one owner action to the project's history and, when the project has a run to record it against, a `settings.changed` event with the owner as actor. Ids, versions,
+ * digests and bindings only: no pack text. Taken last in its transaction, after the row it records (the event sequence comes after every other lock, as everywhere).
+ */
+async function recordAction(tx: Tx, a: { tenantId: string; projectId: string; kind: ActionKind; actor: string; at: Date; skillId: string; versionId: string | null; before: Record<string, unknown> | null; after: Record<string, unknown> | null; event: boolean; revision: number }): Promise<void> {
+  const [row] = await tx.insert(schema.skillActions).values({ tenantId: a.tenantId, projectId: a.projectId, kind: a.kind, actor: a.actor, at: a.at, skillId: a.skillId, versionId: a.versionId, before: a.before, after: a.after }).returning({ seq: schema.skillActions.seq });
+  if (!a.event) return;
+  const runId = await eventRunFor(tx, a.tenantId, a.projectId, null);
+  if (runId === null) return;
+  await writeEvent(tx, a.at, {
+    projectId: a.projectId, runId, taskId: runId, aggregateRevision: a.revision, type: 'settings.changed', actor: { kind: 'human', id: a.actor },
+    payload: { scope: 'skill', key: a.skillId, field: a.kind, versionId: a.versionId, from: a.before, to: a.after, revision: a.revision, historySeq: row!.seq },
+  });
 }
 
 // ---- routes ---------------------------------------------------------------------------------------------------------------------------------
@@ -270,7 +337,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
 
   app.get('/v1/projects/:id/skills', auth, async (req) => {
     const { projectId } = await projectOf(req);
-    return loadSkillsView(db, config.tenantId, projectId);
+    return loadSkillsView(db, config.tenantId, projectId, now());
   });
 
   app.post('/v1/projects/:id/skills/intake', auth, async (req, reply) => {
@@ -295,6 +362,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
           .onConflictDoNothing().returning({ v: schema.skillStagedVersions.versionId });
         // What can never be delivered is not kept: a blocked pack stores its metadata and scan only.
         if (inserted.length > 0 && !blocked) for (const f of files) await tx.insert(schema.skillPackFiles).values({ tenantId: config.tenantId, versionId, path: f.file.path, content: f.content });
+        if (inserted.length > 0) await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'intake', actor: uid, at, skillId: String(version['skillId']), versionId, before: null, after: { blocked, digest: String(version['digest']) }, event: false, revision: 0 });
       });
     }
     return reply.code(existing ? 200 : 201).send(await entryOf(db, projectId, versionId));
@@ -317,7 +385,9 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
       const scan = SkillScanReportSchema.safeParse(row.scan);
       if (!scan.success) throw new AppError(409, 'skill_not_reviewable', 'the scan report cannot be read, so the version cannot be reviewed');
       if (scan.data.findings.some((f) => f.severity === 'review') && !body.acknowledgeFindings) throw new AppError(409, 'skill_findings_unacknowledged', 'the scan raised findings for review; acknowledge them to mark this version reviewed');
-      await tx.update(schema.skillStagedVersions).set({ reviewedBy: uid, reviewedAt: now() }).where(and(eq(schema.skillStagedVersions.tenantId, config.tenantId), eq(schema.skillStagedVersions.versionId, body.versionId)));
+      const at = now();
+      await tx.update(schema.skillStagedVersions).set({ reviewedBy: uid, reviewedAt: at }).where(and(eq(schema.skillStagedVersions.tenantId, config.tenantId), eq(schema.skillStagedVersions.versionId, body.versionId)));
+      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'review', actor: uid, at, skillId: row.skillId, versionId: body.versionId, before: null, after: { reviewed: true, acknowledgedFindings: body.acknowledgeFindings }, event: true, revision: 1 });
     });
     return entryOf(db, projectId, body.versionId);
   });
@@ -326,12 +396,15 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
     const { projectId, uid } = await projectOf(req);
     const body = parseBody(SkillRevokeRequestSchema, req.body);
     if (redactSecrets(body.reason) !== body.reason) throw new AppError(400, 'credential_in_input', 'the reason contains something shaped like a secret; nothing was recorded');
-    await entryOf(db, projectId, body.versionId);
+    const target = await entryOf(db, projectId, body.versionId);
     await withTx(db, async (tx) => {
       // The scheduler lock first: a claim in flight finishes before this revoke, and every claim after it reads it.
       await schedulerLock(tx, config.tenantId);
-      const done = await tx.insert(schema.skillRevocations).values({ tenantId: config.tenantId, versionId: body.versionId, reason: body.reason.replace(/\s+/g, ' ').trim(), revokedBy: uid, revokedAt: now() }).onConflictDoNothing().returning({ v: schema.skillRevocations.versionId });
+      const at = now();
+      const reason = body.reason.replace(/\s+/g, ' ').trim();
+      const done = await tx.insert(schema.skillRevocations).values({ tenantId: config.tenantId, versionId: body.versionId, reason, revokedBy: uid, revokedAt: at }).onConflictDoNothing().returning({ v: schema.skillRevocations.versionId });
       if (done.length === 0) throw new AppError(409, 'skill_already_revoked', 'this version is already revoked');
+      await recordAction(tx, { tenantId: config.tenantId, projectId, kind: 'revoke', actor: uid, at, skillId: target.skillId, versionId: body.versionId, before: null, after: { revoked: true, reason }, event: true, revision: 1 });
     });
     return entryOf(db, projectId, body.versionId);
   });
@@ -357,12 +430,19 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
         }
         if (known.revoked) throw new AppError(409, 'skill_revoked', 'a revoked version cannot be bound');
         if (!known.reviewed || known.blocked) throw new AppError(409, 'skill_not_reviewed', 'only a reviewed version can be bound');
+        // A third-party pack declares no triggers we trust: its binding must say which roles or paths it serves, or it would reach every task.
+        if (known.version.origin === 'third_party' && body.binding.roles.length === 0 && body.binding.paths.length === 0) throw new AppError(422, 'skill_binding_unscoped', 'a third-party pack must be bound to at least one role or path');
       }
       const desired = body.binding ?? { removed: true };
       const revision = current + 1;
       const values = { field: 'binding', desired, desiredRevision: revision, effective: desired, effectiveRevision: revision, enforcer: 'server', configRevision: null, updatedBy: uid, updatedAt: at, appliedAt: at };
       await tx.insert(schema.projectSkillBindings).values({ tenantId: config.tenantId, projectId, skillId: body.skillId, ...values })
         .onConflictDoUpdate({ target: [schema.projectSkillBindings.tenantId, schema.projectSkillBindings.projectId, schema.projectSkillBindings.skillId], set: values });
+      const before = row ? bindingOf(row.desired) : null;
+      await recordAction(tx, {
+        tenantId: config.tenantId, projectId, kind: body.binding === null ? 'unbind' : 'bind', actor: uid, at, skillId: body.skillId, versionId: body.binding?.versionId ?? before?.versionId ?? null,
+        before: before as Record<string, unknown> | null, after: body.binding as Record<string, unknown> | null, event: true, revision,
+      });
       const [saved] = await tx.select().from(schema.projectSkillBindings).where(where);
       return bindingRow(saved!);
     });
@@ -373,12 +453,32 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
     const { projectId } = await projectOf(req);
     const attemptId = (req.params as { attemptId: string }).attemptId;
     const [row] = await db.select().from(schema.skillExecutionRecords).where(and(eq(schema.skillExecutionRecords.tenantId, config.tenantId), eq(schema.skillExecutionRecords.projectId, projectId), eq(schema.skillExecutionRecords.attemptId, attemptId)));
-    if (!row) return { attemptId, record: null, revoked: [] };
+    if (!row) return { attemptId, record: null, revoked: [], confirmedAt: null };
     const p = SkillExecutionRecordSchema.safeParse(row.record);
     const record = p.success ? p.data : null;
     const ids = record?.delivered.map((d) => d.versionId) ?? [];
     const revoked = ids.length === 0 ? [] : (await db.select({ v: schema.skillRevocations.versionId }).from(schema.skillRevocations).where(eq(schema.skillRevocations.tenantId, config.tenantId))).map((r) => r.v).filter((v) => ids.includes(v)).sort();
-    return { attemptId, record, revoked };
+    return { attemptId, record, revoked, confirmedAt: row.confirmedAt?.toISOString() ?? null };
+  });
+
+  /**
+   * The runner's confirmation that it materialized exactly the packs the claim recorded, each checked against its digest, before the worker started. Only then does anything
+   * say the packs were delivered. A list that differs from the record is refused: the runner holding the lease cannot confirm something it was not given.
+   */
+  app.post('/v1/runners/skills/confirm', { onRequest: [ctx.runner] }, async (req) => {
+    const p = req.principal;
+    if (p?.kind !== 'runner') throw new AppError(403, 'wrong_principal_type', 'runner credentials required');
+    const body = parseBody(SkillConfirmRequestSchema, req.body);
+    const stale = new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: body.lease.attemptId, fence: body.lease.fence });
+    const [a] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, p.tenantId), eq(schema.attempts.attemptId, body.lease.attemptId)));
+    if (!a || a.runner !== p.runnerId || a.leaseFence !== body.lease.fence || a.leaseToken !== body.lease.leaseToken || a.endedAt !== null) throw stale;
+    const where = and(eq(schema.skillExecutionRecords.tenantId, p.tenantId), eq(schema.skillExecutionRecords.projectId, a.projectId), eq(schema.skillExecutionRecords.attemptId, a.attemptId));
+    const [row] = await db.select().from(schema.skillExecutionRecords).where(where);
+    const parsed = row ? SkillExecutionRecordSchema.safeParse(row.record) : null;
+    const key = (xs: readonly { versionId: string; digest: string }[]) => JSON.stringify(xs.map((x) => [x.versionId, x.digest]).sort());
+    if (!parsed?.success || key(parsed.data.delivered) !== key(body.packs)) throw new AppError(409, 'skill_confirmation_mismatch', 'the confirmed packs are not the ones recorded for this attempt');
+    await db.update(schema.skillExecutionRecords).set({ confirmedAt: now(), confirmed: body.packs.map((x) => ({ versionId: x.versionId, digest: x.digest })) }).where(and(where, isNull(schema.skillExecutionRecords.confirmedAt)));
+    return { confirmed: true };
   });
 }
 

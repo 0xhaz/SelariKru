@@ -24,14 +24,16 @@ export function AttemptSkillsPanel({ attemptId, port }: { attemptId: string | nu
           : !m ? <p className="text-muted">No pack record exists for this attempt.</p>
             : (
               <>
-                <p className="text-sm text-muted">Enabled for this task at claim, mounted read-only and checked against these digests before the worker started. Reference text only: they granted nothing.</p>
+                <p className="text-sm text-muted" data-testid="drawer-skills-delivery">{m.confirmed
+                  ? 'Delivered: the runner mounted these read-only and confirmed each digest before the worker started. Reference text only: they granted nothing.'
+                  : 'Resolved for this task at claim. The runner has not confirmed delivery, so nothing says the worker received them.'}</p>
                 {m.packs.length === 0 ? <p className="text-muted" data-testid="drawer-skills-none">No pack matched this task.</p> : (
                   <ul className="space-y-2">
                     {m.packs.map((p) => (
                       <li key={p.versionId} data-testid="drawer-skill" data-version={p.versionId} className="rounded-chip border border-line p-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="font-medium text-fg wrap-anywhere">{p.title}</span>
-                          <span className="flex flex-wrap gap-1.5"><Chip tone="active">Enabled for this task</Chip>{p.revoked ? <Chip tone="danger">Revoked since: this attempt keeps its pinned version</Chip> : null}</span>
+                          <span className="flex flex-wrap gap-1.5">{m.confirmed ? <Chip tone="active">Enabled for this task</Chip> : <Chip tone="warning">Delivery not confirmed</Chip>}{p.revoked ? <Chip tone="danger">Revoked since: this attempt keeps its pinned version</Chip> : null}</span>
                         </div>
                         <p className="break-all font-mono text-mono text-muted">sha256 {p.digest}</p>
                         <p className="break-all font-mono text-mono text-muted">{p.dir}</p>

@@ -1,6 +1,6 @@
 import { SKILL_STATE_LABELS, type SkillStateId } from '@selarikru/domain';
 import type { Tone } from '@selarikru/ui';
-import type { AttemptSkillsView, SkillBindingView, SkillCatalogEntryView, SkillsView } from '@selarikru/view-protocol';
+import type { AttemptSkillsView, SkillActionEntryView, SkillBindingView, SkillCatalogEntryView, SkillsView } from '@selarikru/view-protocol';
 
 /** Presentation of the skill library. Every state is its own chip with its own words; nothing is collapsed into one badge or read as tested without an evaluation. */
 
@@ -35,6 +35,8 @@ export interface PackRow {
   readonly canReview: boolean;
   readonly canBind: boolean;
   readonly canRevoke: boolean;
+  /** A third-party pack binds only to named roles or paths: its own triggers are not trusted. */
+  readonly needsScope: boolean;
 }
 
 const list = (xs: readonly string[], none = 'any'): string => (xs.length === 0 ? none : xs.join(', '));
@@ -78,6 +80,7 @@ export function packRow(e: SkillCatalogEntryView, bindings: readonly SkillBindin
     canReview: e.origin === 'third_party' && has('available'),
     canBind: (has('reviewed')) && !b.bound,
     canRevoke: !has('revoked') && !has('blocked'),
+    needsScope: e.origin === 'third_party',
   };
 }
 
@@ -86,11 +89,24 @@ export const bindingOf = (v: SkillsView, skillId: string): SkillBindingView | un
 
 export interface AttemptPackRow { readonly versionId: string; readonly title: string; readonly digest: string; readonly dir: string; readonly revoked: boolean }
 
+const ACTION_VERB: Readonly<Record<SkillActionEntryView['kind'], string>> = { intake: 'Staged', review: 'Marked reviewed', revoke: 'Revoked', bind: 'Bound', unbind: 'Unbound' };
+
+/** The library's history, newest first, one sentence each. */
+export function historyRows(v: SkillsView): { key: string; at: string; text: string }[] {
+  return v.history.map((h, i) => {
+    const after = h.after as { roles?: string[]; paths?: string[]; reason?: string } | null;
+    const scope = h.kind === 'bind' && after ? [after.roles?.length ? `roles ${after.roles.join(', ')}` : '', after.paths?.length ? `paths ${after.paths.join(', ')}` : ''].filter(Boolean).join('; ') : '';
+    const was = h.kind === 'unbind' && h.before ? ` (was ${String((h.before as { versionId?: unknown }).versionId)})` : '';
+    return { key: `${i}`, at: h.at, text: `${ACTION_VERB[h.kind]} ${h.versionId ?? h.skillId}${scope ? `, only for ${scope}` : ''}${was}${h.kind === 'revoke' && after?.reason ? `: ${after.reason}` : ''} · by ${h.actor}` };
+  }).reverse();
+}
+
 /** The drawer's list: what this attempt received at claim, with the digest it was checked against, and which have been revoked since. */
-export function attemptPackRows(v: AttemptSkillsView | null): { readonly packs: readonly AttemptPackRow[]; readonly omitted: readonly { key: string; text: string }[] } | null {
+export function attemptPackRows(v: AttemptSkillsView | null): { readonly confirmed: boolean; readonly packs: readonly AttemptPackRow[]; readonly omitted: readonly { key: string; text: string }[] } | null {
   if (!v || !v.record) return null;
   const revoked = new Set(v.revoked);
   return {
+    confirmed: v.confirmedAt !== null,
     packs: v.record.delivered.map((d) => ({ versionId: d.versionId, title: `${d.name} ${d.version}`, digest: d.digest, dir: d.dir, revoked: revoked.has(d.versionId) })),
     omitted: v.record.omitted.map((o) => ({ key: `${o.skillId}:${o.reason}`, text: `${o.versionId}: ${o.reason.replace(/_/g, ' ').replace(':', ' · ')}` })),
   };

@@ -20,12 +20,13 @@ describe('the PR body', () => {
 
 describe('the PR body: knowledge packs', () => {
   it('lists each attempt\'s delivered packs by version and digest, and says they granted nothing', () => {
-    const body = buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', packs: [{ versionId: 'express-api-routes@1.0.0', digest: 'd'.repeat(64) }] }] });
+    const body = buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', confirmed: true, packs: [{ versionId: 'express-api-routes@1.0.0', digest: 'd'.repeat(64) }] }, { attemptId: 'a2', taskId: 't2', confirmed: false, packs: [{ versionId: 'express-api-routes@1.0.0', digest: 'd'.repeat(64) }] }] });
     expect(body).toContain('## Knowledge packs');
-    expect(body).toContain('- Attempt `a1` (task `t1`): `express-api-routes@1.0.0` sha256 `' + 'd'.repeat(64) + '`');
+    expect(body).toContain('- Attempt `a1` (task `t1`), delivered and confirmed by the runner: `express-api-routes@1.0.0` sha256 `' + 'd'.repeat(64) + '`');
+    expect(body).toContain('- Attempt `a2` (task `t2`), resolved at claim but delivery not confirmed by the runner: `express-api-routes@1.0.0`');
     expect(body).toContain('granted no tool, path or approval');
   });
   it('is absent when no attempt received a pack', () => {
-    expect(buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', packs: [] }] })).not.toContain('Knowledge packs');
+    expect(buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', confirmed: false, packs: [] }] })).not.toContain('Knowledge packs');
   });
 });

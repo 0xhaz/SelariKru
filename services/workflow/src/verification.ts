@@ -55,7 +55,9 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   its transaction committed, by a Brain compile through the same `onSend` hook (its own transaction on the brain lock, as above); the Brain reads the stack row
  *   without a lock. A detection compiles nothing. So no stack path takes the scheduler lock, a run row, a status row, the event sequence or the brain lock.
  * - the skill library (apps/control-api/src/skills.ts): an owner's review, revoke and binding save each take the scheduler lock first, then only their own row (the staged
- *   version, the revocation, the project's binding row for that skill), and write nothing else: no status row, no event, no Brain lock. The claim poll resolves packs after
+ *   version, the revocation, the project's binding row for that skill), then append to `skill_actions` (insert only) and, when the project has a run, the event sequence
+ *   last (`settings.changed`). No status row and no Brain lock. An intake inserts its version, files and history row with no other lock and appends no event. A runner's
+ *   delivery confirmation updates only its attempt's `skill_execution_records` row, with no other lock. The claim poll resolves packs after
  *   its scheduler lock, reading the stack, binding, staged-version and revocation rows without locking them, so a revoke or an unbind holds for every claim after its save
  *   commits; a refused pack is recorded through the claim's own `placement.blocked` on the status row it already holds, and the attempt's `skill_execution_records` row is
  *   inserted with its attempt row. An intake takes no lock (it inserts a version nothing can use until it is reviewed). Delivering pack content after a claim commits

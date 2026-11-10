@@ -41,17 +41,38 @@ export const SkillBindingViewSchema = z.object({
 });
 export type SkillBindingView = z.infer<typeof SkillBindingViewSchema>;
 
+export const SkillActionEntryViewSchema = z.object({
+  kind: z.enum(['intake', 'review', 'revoke', 'bind', 'unbind']),
+  actor: z.string(),
+  at: z.string(),
+  skillId: z.string(),
+  versionId: z.string().nullable(),
+  before: z.record(z.string(), z.unknown()).nullable(),
+  after: z.record(z.string(), z.unknown()).nullable(),
+});
+export type SkillActionEntryView = z.infer<typeof SkillActionEntryViewSchema>;
+
 export const SkillsViewSchema = z.object({
   projectId: z.string(),
   catalog: z.array(SkillCatalogEntryViewSchema),
   bindings: z.array(SkillBindingViewSchema),
   /** The roles of the project's current tasks, offered as binding constraints. */
   roles: z.array(z.string()),
+  /** Component paths from the stack, offered as binding constraints. */
+  paths: z.array(z.string()).default([]),
+  /** Recent runners on a build that cannot deliver packs. While a pack is bound they get no task it applies to. */
+  waitingForRunnerUpdate: z.array(z.string()).default([]),
+  /** Every owner action on the library, oldest first. Never rewritten. */
+  history: z.array(SkillActionEntryViewSchema).default([]),
 });
 export type SkillsView = z.infer<typeof SkillsViewSchema>;
 
 /** What one attempt received at claim, and which of those versions were revoked since: it keeps them, and the screen says so. */
-export const AttemptSkillsViewSchema = z.object({ attemptId: z.string(), record: SkillExecutionRecordSchema.nullable(), revoked: z.array(z.string()) });
+export const AttemptSkillsViewSchema = z.object({
+  attemptId: z.string(), record: SkillExecutionRecordSchema.nullable(), revoked: z.array(z.string()),
+  /** When the runner confirmed, after its own digest check, that it materialized exactly these packs. Null: resolved at claim, delivery not confirmed. */
+  confirmedAt: z.string().nullable().default(null),
+});
 export type AttemptSkillsView = z.infer<typeof AttemptSkillsViewSchema>;
 
 /** An owner's skill action. None installs, fetches or runs anything; an intake reads a local directory and scans it. */

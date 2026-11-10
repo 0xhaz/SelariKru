@@ -186,6 +186,12 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
 
   for (const [rel, body] of [...Object.entries(input.taskFiles ?? {}), ...Object.entries(input.readOnlyFiles ?? {})]) {
     safeRel(rel);
+    // Every ancestor must be a real directory or absent: a link in the base (say `.claude -> src`) would put these files somewhere else.
+    const segs = rel.split('/');
+    for (let i = 1; i < segs.length; i++) {
+      const anc = await lstat(join(destDir, ...segs.slice(0, i))).catch(() => null);
+      if (anc !== null && !anc.isDirectory()) throw new BundleError(`task file ${JSON.stringify(rel)} would be written through ${JSON.stringify(segs.slice(0, i).join('/'))}, which is not a directory`);
+    }
     if (isExcludedPath(rel)) throw new BundleError(`task file ${JSON.stringify(rel)} names excluded material`);
     const target = join(destDir, rel);
     const st = await lstat(target).catch(() => null);

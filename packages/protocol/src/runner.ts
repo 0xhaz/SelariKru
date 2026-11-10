@@ -33,6 +33,8 @@ export const ClaimRequestSchema = z.object({
   projects: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, 'expected a project id')).max(500).optional(),
   /** The runner config revision this runner has applied, and the slots it runs. Absent: it acknowledges nothing (an older runner). */
   config: RunnerConfigAckSchema.optional(),
+  /** What this build of the runner can do. `skills`: it materializes knowledge packs read-only, checks their digests and confirms them. Absent: an older runner. */
+  capabilities: z.object({ skills: z.boolean().optional() }).strict().optional(),
 }).strict();
 
 /** The name of the tool a worker last started. A name and nothing else: no arguments, paths or output can fit, and a credential-shaped one is refused. */

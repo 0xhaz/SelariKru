@@ -4,7 +4,7 @@ import type { SkillsView } from '@selarikru/view-protocol';
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import type { ConnectionState, SkillsPort } from '../../shell/projection-store.ts';
 import { inputClass } from '../onboarding/ui.tsx';
-import { bindingOf, packRows, type PackRow } from './model.ts';
+import { bindingOf, historyRows, packRows, type PackRow } from './model.ts';
 import { useSkills } from './useSkills.ts';
 
 export interface SkillsSettingsProps {
@@ -32,6 +32,8 @@ function Intake({ live, onStage }: { live: boolean; onStage: (path: string) => v
 function PackCard({ row, view, live, act }: { row: PackRow; view: SkillsView; live: boolean; act: (a: Parameters<ReturnType<typeof useSkills>['act']>[0], done: string) => void }) {
   const [ack, setAck] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
+  const [paths, setPaths] = useState<string[]>([]);
+  const scoped = roles.length > 0 || paths.length > 0;
   const [reason, setReason] = useState('');
   const id = useId();
   const binding = bindingOf(view, row.skillId);
@@ -79,14 +81,21 @@ function PackCard({ row, view, live, act }: { row: PackRow; view: SkillsView; li
           </div>
         ) : null}
         {row.canBind ? (
-          <fieldset className="space-y-1">
-            <legend className="text-sm text-muted">Bind to this project{view.roles.length > 0 ? ', optionally only for these roles' : ''}</legend>
+          <fieldset className="space-y-1" {...(row.needsScope ? { "aria-describedby": `${id}-scope` } : {})}>
+            <legend className="text-sm text-muted">Bind to this project{row.needsScope ? ', for these roles or paths' : ', optionally only for these roles or paths'}</legend>
+            {row.needsScope ? <p id={`${id}-scope`} className="text-sm text-muted">A third-party pack declares no trigger we trust, so choose at least one role or path it serves.</p> : null}
             {view.roles.length > 0 ? (
-              <span className="flex flex-wrap gap-3">
-                {view.roles.map((r) => <label key={r} className="flex items-center gap-1.5 text-sm text-fg"><input type="checkbox" checked={roles.includes(r)} onChange={(e) => setRoles((xs) => (e.target.checked ? [...xs, r] : xs.filter((x) => x !== r)))} />{r}</label>)}
+              <span className="flex flex-wrap gap-3"><span className="text-sm text-muted">Roles:</span>
+                {view.roles.map((r) => <label key={r} className="flex items-center gap-1.5 text-sm text-fg"><input type="checkbox" checked={roles.includes(r)} onChange={(e) => setRoles((xs) => (e.target.checked ? [...xs, r] : xs.filter((x) => x !== r)))} />{r}<span className="sr-only"> role for {row.title}</span></label>)}
               </span>
             ) : null}
-            <button type="button" className={buttonQuiet} disabled={!live} onClick={() => act({ kind: 'bind', skillId: row.skillId, expectedRevision: expected, binding: { versionId: row.versionId, roles, paths: [] } }, `Bound ${row.title}. In force now: the next claim of a matching task receives it, read-only.`)}>Bind {row.title}</button>
+            {view.paths.length > 0 ? (
+              <span className="flex flex-wrap gap-3"><span className="text-sm text-muted">Paths:</span>
+                {view.paths.map((p) => <label key={p} className="flex items-center gap-1.5 font-mono text-mono text-fg"><input type="checkbox" checked={paths.includes(p)} onChange={(e) => setPaths((xs) => (e.target.checked ? [...xs, p] : xs.filter((x) => x !== p)))} />{p}<span className="sr-only"> path for {row.title}</span></label>)}
+              </span>
+            ) : null}
+            {row.needsScope && view.roles.length === 0 && view.paths.length === 0 ? <p className="text-sm text-warning">No roles or component paths exist yet to scope it to. Add a component under Stack, or plan tasks first.</p> : null}
+            <button type="button" className={buttonQuiet} disabled={!live || (row.needsScope && !scoped)} onClick={() => act({ kind: 'bind', skillId: row.skillId, expectedRevision: expected, binding: { versionId: row.versionId, roles, paths } }, `Bound ${row.title}. In force now: the next claim of a matching task receives it, read-only.`)}>Bind {row.title}</button>
           </fieldset>
         ) : null}
         {row.bound ? (
@@ -129,6 +138,9 @@ export function SkillsSettings({ port, connection, mode }: SkillsSettingsProps) 
       <p role="status" aria-live="polite" data-testid="skills-notice" className="text-sm text-fg">{notice}</p>
       {skills.error ? <p role="alert" className="text-danger">{skills.error} <button type="button" className={buttonQuiet} onClick={skills.reload}>Read again</button></p> : null}
       {skills.loading && !view ? <p role="status" className="text-muted">Loading the skill library</p> : null}
+      {view && view.waitingForRunnerUpdate.length > 0 ? (
+        <p role="alert" data-testid="skills-waiting" className="text-warning">Waiting for runner update: {view.waitingForRunnerUpdate.join(', ')}. This build cannot deliver knowledge packs, so it gets no task a bound pack applies to until it is updated.</p>
+      ) : null}
       {view ? (
         <>
           <Panel title="Curated library" labelId="skills-library" aside={`${firstParty.length} packs`}>
@@ -137,6 +149,13 @@ export function SkillsSettings({ port, connection, mode }: SkillsSettingsProps) 
           <Panel title="Staged third-party packs" labelId="skills-staged" aside={`${thirdParty.length} staged`}>
             <Intake live={live} onStage={(path) => act({ kind: 'intake', path }, 'Staged the pack and scanned it. It is Available or Blocked, and does nothing until a version is reviewed and bound.')} />
             {thirdParty.length === 0 ? <p className="mt-3 text-muted">Nothing staged.</p> : <ul className="mt-3 space-y-3">{thirdParty.map((r) => <PackCard key={r.versionId} row={r} view={view} live={live} act={act} />)}</ul>}
+          </Panel>
+          <Panel title="History" labelId="skills-history" aside={`${view.history.length} action${view.history.length === 1 ? '' : 's'}`}>
+            {view.history.length === 0 ? <p className="text-muted">No action yet.</p> : (
+              <ol className="space-y-1 text-sm" data-testid="skills-history">
+                {historyRows(view).map((h) => <li key={h.key} data-testid="skills-history-row" className="wrap-anywhere text-fg"><time className="text-muted" dateTime={h.at}>{h.at}</time> {h.text}</li>)}
+              </ol>
+            )}
           </Panel>
         </>
       ) : null}

@@ -69,6 +69,8 @@ export interface RunnerApi {
   brainManifest?(lease: LeaseRef, manifest: RepoManifest): Promise<void>;
   /** What static detection found in this checkout at the task's base commit: proposals for the owner to confirm. Absent: this runner sends none. */
   stackDetection?(lease: LeaseRef, detection: StackDetectionReport): Promise<void>;
+  /** After its own digest check, before the worker starts: the packs this runner materialized, by version and digest. Absent: the server never learns they were delivered. */
+  skillsConfirmed?(lease: LeaseRef, packs: readonly { versionId: string; digest: string }[]): Promise<void>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -106,7 +108,8 @@ export class HttpRunnerApi implements RunnerApi {
   }
 
   async claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]) {
-    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', { ...(harnesses === undefined ? {} : { harnesses }), ...(projects === undefined ? {} : { projects }), ...this.ack() }));
+    // This build materializes knowledge packs read-only and confirms their digests, so the server may give it tasks that have packs.
+    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', { ...(harnesses === undefined ? {} : { harnesses }), ...(projects === undefined ? {} : { projects }), ...this.ack(), capabilities: { skills: true } }));
     this.settings?.apply(r.config);
     return { lease: r.lease, reason: r.reason ?? null };
   }
@@ -133,6 +136,9 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async brainManifest(lease: LeaseRef, manifest: RepoManifest) {
     await this.post('/v1/runners/brain/manifest', { lease, manifest }, 10_000);
+  }
+  async skillsConfirmed(lease: LeaseRef, packs: readonly { versionId: string; digest: string }[]) {
+    await this.post('/v1/runners/skills/confirm', { lease, packs }, 10_000);
   }
   async stackDetection(lease: LeaseRef, detection: StackDetectionReport) {
     await this.post('/v1/runners/stack/detection', { lease, detection }, 10_000);

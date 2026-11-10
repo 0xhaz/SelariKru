@@ -31,6 +31,7 @@ interface State {
   readonly bindings: Map<string, Binding>;
   readonly revoked: Map<string, { by: string; at: string; reason: string }>;
   readonly records: Map<string, SkillExecutionRecord>;
+  readonly history: SkillsView['history'];
 }
 
 function stagedOf(files: Readonly<Record<string, string>>, path: string, at: string): Staged {
@@ -61,7 +62,7 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
   const states = new Map<string, State>();
   const stateOf = (projectId: string): State => {
     let s = states.get(projectId);
-    if (!s) { s = { staged: new Map(), bindings: new Map(), revoked: new Map(), records: new Map() }; states.set(projectId, s); }
+    if (!s) { s = { staged: new Map(), bindings: new Map(), revoked: new Map(), records: new Map(), history: [] }; states.set(projectId, s); }
     return s;
   };
   const known = (s: State): Map<string, KnownVersion> => {
@@ -94,6 +95,10 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
       ],
       bindings: [...s.bindings.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([skillId, b]) => ({ skillId, desired: b.desired, effective: b.desired, desiredRevision: b.revision, effectiveRevision: b.revision, state: 'applied' as const, updatedBy: 'demo owner', updatedAt: b.updatedAt })),
       roles,
+      paths: [...new Set(deps.stackOf(projectId).components.map((c) => c.path).filter((p) => p !== '.'))].sort(),
+      // The demo's simulated runner delivers packs.
+      waitingForRunnerUpdate: [],
+      history: [...s.history],
     };
   };
 
@@ -107,7 +112,10 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
         case 'intake': {
           if (!a.path.startsWith('/')) throw refuse('The intake path must be an absolute local directory.');
           const staged = stagedOf(/unsafe|setup/i.test(a.path) ? BLOCKED_FILES : FIXTURE_FILES, a.path, at);
-          if (!s.staged.has(staged.version.versionId)) s.staged.set(staged.version.versionId, staged);
+          if (!s.staged.has(staged.version.versionId)) {
+            s.staged.set(staged.version.versionId, staged);
+            s.history.push({ kind: 'intake', actor: 'demo owner', at, skillId: staged.version.skillId, versionId: staged.version.versionId, before: null, after: { blocked: staged.blocked, digest: staged.version.digest } });
+          }
           break;
         }
         case 'review': {
@@ -118,12 +126,14 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
           if (s.revoked.has(a.versionId)) throw refuse('This version is revoked.');
           if (x.scan.findings.some((f) => f.severity === 'review') && !a.acknowledgeFindings) throw refuse('Acknowledge the scan findings to mark this version reviewed.');
           x.reviewed = { by: 'demo owner', at };
+          s.history.push({ kind: 'review', actor: 'demo owner', at, skillId: x.version.skillId, versionId: a.versionId, before: null, after: { reviewed: true, acknowledgedFindings: a.acknowledgeFindings } });
           break;
         }
         case 'revoke': {
           if (!k.has(a.versionId)) throw refuse('No such pack version.');
           if (s.revoked.has(a.versionId)) throw refuse('This version is already revoked.');
           s.revoked.set(a.versionId, { by: 'demo owner', at, reason: a.reason });
+          s.history.push({ kind: 'revoke', actor: 'demo owner', at, skillId: k.get(a.versionId)!.version.skillId, versionId: a.versionId, before: null, after: { revoked: true, reason: a.reason } });
           break;
         }
         case 'bind': {
@@ -134,8 +144,10 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
             if (!v || v.version.skillId !== a.skillId) throw refuse('No such pack version for this skill.');
             if (v.revoked) throw refuse('A revoked version cannot be bound.');
             if (!v.reviewed || v.blocked) throw refuse('Only a reviewed version can be bound.');
+            if (v.version.origin === 'third_party' && a.binding.roles.length === 0 && a.binding.paths.length === 0) throw refuse('A third-party pack must be bound to at least one role or path.');
           }
           s.bindings.set(a.skillId, { desired: a.binding, revision: (b?.revision ?? 0) + 1, updatedAt: at });
+          s.history.push({ kind: a.binding ? 'bind' : 'unbind', actor: 'demo owner', at, skillId: a.skillId, versionId: a.binding?.versionId ?? b?.desired?.versionId ?? null, before: (b?.desired ?? null) as Record<string, unknown> | null, after: a.binding as Record<string, unknown> | null });
           break;
         }
       }
@@ -145,17 +157,18 @@ export function createDemoSkills(deps: { nowIso: (projectId: string) => string; 
       const s = stateOf(projectId);
       const kept = s.records.get(attemptId);
       const revokedOf = (r: SkillExecutionRecord) => r.delivered.map((d) => d.versionId).filter((v) => s.revoked.has(v)).sort();
-      if (kept) return { attemptId, record: kept, revoked: revokedOf(kept) };
+      if (kept) return { attemptId, record: kept, revoked: revokedOf(kept), confirmedAt: kept.recordedAt };
       const snap = deps.snapshotOf(projectId);
       const attempt = snap.attempts[attemptId];
       const task = attempt ? snap.tasks[attempt.taskId] : undefined;
-      if (!attempt || !task) return { attemptId, record: null, revoked: [] };
+      if (!attempt || !task) return { attemptId, record: null, revoked: [], confirmedAt: null };
       const role = task.role ?? '';
       const paths = (PILOT_ROLE_PATHS as Readonly<Record<string, readonly string[]>>)[role] ?? [];
       const r = resolveSkills({ task: { role, allowedPaths: paths, acceptanceCheckIds: [] }, stack: deps.stackOf(projectId), bindings: bindings(s), versions: known(s), destination: 'local', tools: WORKER_TOOLS, harness: 'claude-code' });
       const record: SkillExecutionRecord = { attemptId, taskId: task.taskId, revision: task.revision, destination: 'local', harness: 'claude-code', delivered: r.delivered, omitted: r.omitted, context: r.context, recordedAt: deps.nowIso(projectId) };
       if (record.delivered.length > 0) s.records.set(attemptId, record);
-      return { attemptId, record, revoked: [] };
+      // The demo's simulated runner checks and confirms what it was given at once.
+      return { attemptId, record, revoked: [], confirmedAt: record.delivered.length > 0 ? record.recordedAt : null };
     },
     forStack(projectId) {
       const s = stateOf(projectId);

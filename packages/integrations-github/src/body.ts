@@ -25,7 +25,7 @@ export interface ReviewPackage {
   /** Attempts of this run a person opened a shell in, in the order they happened. A verifier pass does not clear this. */
   readonly humanIntervention?: readonly { readonly attemptId: string; readonly taskId: string; readonly at: string }[];
   /** The knowledge packs each attempt of this run received, by version and digest, from the attempt's execution record. */
-  readonly skills?: readonly { readonly attemptId: string; readonly taskId: string; readonly packs: readonly { readonly versionId: string; readonly digest: string }[] }[];
+  readonly skills?: readonly { readonly attemptId: string; readonly taskId: string; readonly confirmed: boolean; readonly packs: readonly { readonly versionId: string; readonly digest: string }[] }[];
   /** Present after the owner accepted a budget stop: what the run does not deliver. */
   readonly notDelivered?: { readonly tasks: readonly { readonly taskId: string; readonly status: string; readonly budgetStopped: boolean }[]; readonly requirementIds: readonly string[]; readonly acceptanceCheckIds: readonly string[] };
 }
@@ -66,8 +66,8 @@ export function buildPrBody(p: ReviewPackage): string {
   }
   const withPacks = (p.skills ?? []).filter((s) => s.packs.length > 0);
   if (withPacks.length > 0) {
-    lines.push('', '## Knowledge packs', '', 'Reviewed, pinned packs delivered read-only to these attempts, as recorded at claim. They are reference text: they granted no tool, path or approval, and the checks above are the verifier\'s, not a pack\'s.', '');
-    for (const s of withPacks) lines.push(`- Attempt \`${cell(s.attemptId)}\` (task \`${cell(s.taskId)}\`): ${s.packs.map((k) => `\`${cell(k.versionId)}\` sha256 \`${cell(k.digest)}\``).join(', ')}`);
+    lines.push('', '## Knowledge packs', '', 'Reviewed, pinned packs resolved for these attempts at claim. Only those the runner confirmed, after checking each digest, were delivered read-only. They are reference text: they granted no tool, path or approval, and the checks above are the verifier\'s, not a pack\'s.', '');
+    for (const s of withPacks) lines.push(`- Attempt \`${cell(s.attemptId)}\` (task \`${cell(s.taskId)}\`), ${s.confirmed ? 'delivered and confirmed by the runner' : 'resolved at claim but delivery not confirmed by the runner'}: ${s.packs.map((k) => `\`${cell(k.versionId)}\` sha256 \`${cell(k.digest)}\``).join(', ')}`);
   }
   if (p.notDelivered) {
     const n = p.notDelivered;

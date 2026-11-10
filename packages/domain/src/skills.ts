@@ -242,7 +242,7 @@ export interface PackEntry {
   readonly unread?: 'too_large' | 'binary' | 'unreadable' | 'depth' | 'limit' | 'unsafe_path';
 }
 
-export const SKILL_FINDING_KINDS = ['script', 'hook', 'egress', 'credential', 'policy_conflict', 'install_instruction'] as const;
+export const SKILL_FINDING_KINDS = ['script', 'hook', 'egress', 'credential', 'policy_conflict', 'install_instruction', 'pack_too_large', 'runs_pack_file', 'unknown_file_type'] as const;
 export const SKILL_POLICY_CATEGORIES = ['merge', 'push', 'deploy', 'secrets', 'approvals', 'retries', 'data_export', 'browsing'] as const;
 export type SkillPolicyCategory = (typeof SKILL_POLICY_CATEGORIES)[number];
 
@@ -288,6 +288,12 @@ const CREDENTIAL = /\b(?:api[ _-]?keys?|access[ _-]?tokens?|auth[ _-]?tokens?|se
 const URL_HOST = /\bhttps?:\/\/([a-z0-9.-]+\.[a-z]{2,})(?=[:/?#\s'")\]`]|$)/gi;
 const FETCH_HOST = /\b(?:curl|wget)\s+(?:-{1,2}\S+\s+)*(?!https?:)([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})\b/gi;
 
+/** An instruction to run something, a file of the pack included: a shell, an interpreter, or `./path`. Nothing in a pack is ever run, so a reviewer should see it. */
+const RUNS = /\b(?:ba|z|k)?sh\s+[^\s|;&]*[./][^\s|;&]*|\b(?:node|deno|bun|python3?|ruby|perl|php)\s+[^\s|;&-][^\s|;&]*\.[a-z]{1,4}\b|\brun\s+\.{1,2}\/\S+|(?:^|\s)\.\/[A-Za-z0-9_.-]+(?:\s|$)/i;
+/** Text files a pack may carry as references. Anything else, or no extension, is shown for review: a named licence or readme file is plain text. */
+const TEXT_EXT = /\.(?:md|markdown|mdx|txt|text|rst|adoc|json|jsonc|yaml|yml|toml|csv|tsv|xml|html|htm|css|svg|ini|cfg|conf)$/i;
+const TEXT_NAMES = /^(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CONTRIBUTING)(?:\.[A-Za-z]+)?$/;
+
 const reportPath = (p: string): string => p.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\uFEFF]/g, '?').slice(0, 200) || '?';
 
 export interface ScanOptions {
@@ -326,6 +332,9 @@ export function scanPack(entries: readonly PackEntry[], opts: ScanOptions = {}):
       || ((base === 'settings.json' || base === 'settings.local.json') && /"hooks"\s*:/.test(e.text ?? ''))
       || (base === 'package.json' && packageRunsScripts(e.text));
     if (hook) add({ kind: 'hook', severity: 'blocking', path: e.path, line: null, category: null, detail: base === '.mcp.json' ? 'Declares MCP servers, which start processes.' : 'Declares a hook or an install script, which would run commands.' });
+    if (!SCRIPT_EXT.test(base) && !e.executable && e.text?.startsWith('#!') !== true && !TEXT_EXT.test(base) && !TEXT_NAMES.test(base)) {
+      add({ kind: 'unknown_file_type', severity: 'review', path: e.path, line: null, category: null, detail: 'A file of no known text type. Packs carry instructions and references; check what this is for.' });
+    }
     if (e.text === null) continue;
     if (e.path === 'SKILL.md' && parseSkillFrontmatter(e.text)?.keys.includes('hooks') === true) add({ kind: 'hook', severity: 'blocking', path: e.path, line: null, category: null, detail: 'The header declares hooks, which would run commands.' });
     const seen = new Set<string>();
@@ -335,6 +344,7 @@ export function scanPack(entries: readonly PackEntry[], opts: ScanOptions = {}):
       const once = (key: string, f: () => void) => { if (!seen.has(key)) { seen.add(key); f(); } };
       if (opts.secretShaped?.(line) === true) once(`secret:${at}`, () => add({ kind: 'credential', severity: 'blocking', path: e.path, line: at, category: null, detail: 'Holds a value shaped like a credential. It is not repeated here.' }));
       for (const [category, re, detail] of POLICY) if (re.test(line)) once(`policy:${category}`, () => add({ kind: 'policy_conflict', severity: 'review', path: e.path, line: at, category, detail }));
+      if (RUNS.test(line)) once('runs', () => add({ kind: 'runs_pack_file', severity: 'review', path: e.path, line: at, category: null, detail: 'Tells the worker to run a file or program. Nothing in a pack is run for it, and the worker runs only what its task needs.' }));
       if (INSTALL.test(line)) once('install', () => add({ kind: 'install_instruction', severity: 'review', path: e.path, line: at, category: null, detail: 'Gives an install instruction. Nothing in a pack is ever run; installs follow the repository lockfile.' }));
       if (CREDENTIAL.test(line)) once('credential', () => add({ kind: 'credential', severity: 'review', path: e.path, line: at, category: null, detail: 'Mentions credentials. A pack carries none and grants access to none.' }));
       for (const re of [URL_HOST, FETCH_HOST]) {
@@ -347,6 +357,10 @@ export function scanPack(entries: readonly PackEntry[], opts: ScanOptions = {}):
         }
       }
     });
+  }
+  // A pack too large to deliver is never staged as deliverable, and its file list is never cut to fit: the digest covers every file or the pack is blocked.
+  if (files > SKILL_LIMITS.maxFiles || bytes > SKILL_LIMITS.maxPackBytes) {
+    findings.push({ kind: 'pack_too_large', severity: 'blocking', path: '.', line: null, category: null, detail: `${files} files and ${bytes} bytes. A pack holds at most ${SKILL_LIMITS.maxFiles} files and ${SKILL_LIMITS.maxPackBytes} bytes.` });
   }
   const skill = entries.find((e) => e.path === 'SKILL.md' && e.kind === 'file');
   if (!skill) incomplete.push({ path: 'SKILL.md', reason: 'no_skill_md' });
@@ -482,6 +496,8 @@ export interface SkillResolution {
   /** A relevant binding whose version cannot start new work. The claim is refused, visibly, rather than run without it. */
   readonly refused: { skillId: string; versionId: string; reason: 'skill_revoked' | 'skill_not_reviewed' | 'skill_blocked' | 'skill_unavailable' }[];
   readonly context: { entries: string[]; actions: SkillAction[] };
+  /** Where the delivered content goes: cloud when the runner or the model is in the cloud. */
+  readonly destination: 'local' | 'cloud';
 }
 
 const overlaps = (prefixes: readonly string[], paths: readonly string[]): boolean =>
@@ -525,6 +541,8 @@ export function resolveSkills(input: SkillResolveInput): SkillResolution {
     const known = input.versions.get(binding.versionId);
     if (!known || known.version.skillId !== skillId) { refused.push({ skillId, versionId: binding.versionId, reason: 'skill_unavailable' }); continue; }
     const v = known.version;
+    // A third-party pack declares no triggers we trust, so its binding must name the roles or paths it serves; an unscoped one would reach every task.
+    if (v.origin === 'third_party' && binding.roles.length === 0 && binding.paths.length === 0) { skip('binding_unscoped'); continue; }
     const t = v.triggers;
     if (t.entries.length > 0 && !t.entries.some((e) => entries.includes(e))) { skip('not_relevant:stack'); continue; }
     if (t.roles.length > 0 && !t.roles.includes(input.task.role)) { skip('not_relevant:role'); continue; }
@@ -540,7 +558,7 @@ export function resolveSkills(input: SkillResolveInput): SkillResolution {
     if (delivered.length >= SKILL_LIMITS.maxPacksPerAttempt) { skip('limit'); continue; }
     delivered.push({ skillId, versionId: v.versionId, name: v.name, version: v.version, digest: v.digest, origin: v.origin, scope: v.scope, classification: v.classification, dir: skillDirOf(skillId) });
   }
-  return { delivered, omitted, refused, context: { entries, actions } };
+  return { delivered, omitted, refused, context: { entries, actions }, destination: input.destination };
 }
 
 // ---- delivery ----------------------------------------------------------------------------------------------------------------------------

@@ -3,7 +3,10 @@ import { applyStackAction, emptyStack, SKILL_LIBRARY, STACK_CATALOG_VERSION, typ
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import type { Scheduler } from './index.ts';
-import { CAPS, PROJECT, TENANT, capsWith, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
+import { CAPS, PROJECT, TENANT, capsWith, makeScheduler, resetDb, runner as plainRunner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
+
+/** A runner that says it can deliver packs. */
+const runner = (id: string) => ({ ...plainRunner(id), skillDelivery: true });
 
 let t: TestDb;
 let clock: TestClock;
@@ -90,8 +93,35 @@ describe('skills at claim', () => {
     await setStack(pilotStack());
     const v = { ...SKILL_LIBRARY[0]!, versionId: 'tp-local@1.0.0+abcdefabcdef', skillId: 'tp-local', origin: 'third_party', scope: 'project', triggers: { entries: [], roles: [], paths: [], actions: [] } };
     await t.db.insert(schema.skillStagedVersions).values({ tenantId: TENANT, projectId: PROJECT, versionId: v.versionId, skillId: v.skillId, version: v as unknown as Record<string, unknown>, scan: {}, blocked: false, stagedBy: 'o', stagedAt: clock.now() });
-    await bind(v.skillId, v.versionId);
+    await bind(v.skillId, v.versionId, { roles: ['backend'] });
     await seedTask(t.db, specFor('api', BACKEND));
     expect((await s.tryClaim(runner('r1'), CAPS)).skipped).toContainEqual({ taskId: 'api', reason: 'skill_blocked:skill_not_reviewed:tp-local' });
+  });
+});
+
+describe('fix round 1: runners that cannot deliver packs, and where pack content may go', () => {
+  it('a runner that has not said it delivers packs gets no task that has packs, but still gets one that has none, and nothing is blocked for it', async () => {
+    await setStack(pilotStack());
+    await bind('express-api-routes', 'express-api-routes@1.0.0');
+    await seedTask(t.db, specFor('api', BACKEND));
+    await seedTask(t.db, specFor('ui', { ...FRONTEND, acceptanceCheckIds: [] }));
+    const old = await s.tryClaim(plainRunner('old'), capsWith(2));
+    expect(old).toMatchObject({ ok: true, lease: { taskId: 'ui', skills: [] } });
+    expect(old.skipped).toContainEqual({ taskId: 'api', reason: 'skill_runner_update_required' });
+    const [row] = await t.db.execute(sql`SELECT placement_block FROM task_status WHERE task_id = 'api'`);
+    expect(row!['placement_block']).toBeNull();
+    expect(await s.tryClaim(runner('new'), capsWith(2))).toMatchObject({ ok: true, lease: { taskId: 'api' } });
+  });
+
+  it('a restricted pack is cloud-bound when the model runs in the cloud, whatever the runner\'s location', async () => {
+    await setStack(pilotStack());
+    const v = { ...SKILL_LIBRARY.find((x) => x.skillId === 'vitest-testing-practices')!, versionId: 'tp-private@1.0.0+abcdefabcdef', skillId: 'tp-private', origin: 'third_party', scope: 'project', classification: 'restricted', triggers: { entries: [], roles: [], paths: [], actions: [] } };
+    await t.db.insert(schema.skillStagedVersions).values({ tenantId: TENANT, projectId: PROJECT, versionId: v.versionId, skillId: v.skillId, version: v as unknown as Record<string, unknown>, scan: {}, blocked: false, stagedBy: 'o', stagedAt: clock.now(), reviewedBy: 'o', reviewedAt: clock.now() });
+    await bind(v.skillId, v.versionId, { roles: ['backend'] });
+    await seedTask(t.db, specFor('api', BACKEND));
+    const lease = (await s.claimNext(runner('r1'), CAPS))!;
+    expect(lease.location).toBe('local');
+    expect(lease.skills).toEqual([]);
+    expect((await recordOf(lease.attemptId))!.omitted).toContainEqual({ skillId: 'tp-private', versionId: v.versionId, reason: 'content_device_only' });
   });
 });

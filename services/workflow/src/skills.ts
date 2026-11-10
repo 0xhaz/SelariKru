@@ -44,7 +44,7 @@ export async function loadBindings(db: Executor, tenantId: string, projectId: st
 /** What this task's attempt would receive on a worker at `destination` running `provider`'s harness. */
 export async function resolveTaskSkills(db: Executor, key: { tenantId: string; projectId: string }, spec: Pick<TaskSpec, 'role' | 'allowedPaths' | 'acceptanceCheckIds'>, destination: 'local' | 'cloud', provider: string): Promise<SkillResolution> {
   const bindings = await loadBindings(db, key.tenantId, key.projectId);
-  if (bindings.length === 0) return { delivered: [], omitted: [], refused: [], context: { entries: [], actions: [] } };
+  if (bindings.length === 0) return { delivered: [], omitted: [], refused: [], context: { entries: [], actions: [] }, destination };
   const [stackRow] = await db.select({ document: schema.projectStacks.document }).from(schema.projectStacks).where(and(eq(schema.projectStacks.tenantId, key.tenantId), eq(schema.projectStacks.projectId, key.projectId)));
   const stack = stackRow ? StackDocumentSchema.safeParse(stackRow.document) : null;
   return resolveSkills({

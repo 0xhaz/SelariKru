@@ -44,8 +44,14 @@ test('review a staged pack, bind it, and see it with its digest in the worker dr
   await review.click();
   await expect(staged.getByTestId('skill-states')).toHaveAttribute('data-states', 'reviewed');
   await expect(notice(page)).toContainText('Marked team-review-notes 0.3.0 reviewed');
-  await staged.getByRole('button', { name: 'Bind team-review-notes 0.3.0' }).click();
-  await expect(staged.getByTestId('skill-binding')).toContainText('Bound at revision 1');
+  // A third-party pack needs a role or a path before it can be bound.
+  const bindStaged = staged.getByRole('button', { name: 'Bind team-review-notes 0.3.0' });
+  await expect(bindStaged).toBeDisabled();
+  for (const box of await staged.getByRole('checkbox', { name: /role for team-review-notes/ }).all()) await box.check();
+  await bindStaged.click();
+  await expect(staged.getByTestId('skill-binding')).toContainText('Bound at revision 1, only for roles');
+  await expect(page.getByTestId('skills-history-row').first()).toContainText('Bound tp-team-review-notes@0.3.0');
+  await expect(page.getByTestId('skills-history-row')).toHaveCount(3);
   await expect(notice(page)).toContainText('In force now');
 
   // The worker drawer: the attempt's packs, each with the digest it was checked against.
@@ -55,6 +61,7 @@ test('review a staged pack, bind it, and see it with its digest in the worker dr
   const pack = drawer.locator('[data-testid="drawer-skill"][data-version^="tp-team-review-notes@0.3.0+"]');
   await expect(pack).toBeVisible();
   await expect(pack).toContainText('Enabled for this task');
+  await expect(drawer.getByTestId('drawer-skills-delivery')).toContainText('confirmed each digest');
   await expect(pack).toContainText(/sha256 [0-9a-f]{64}/);
   await expect(pack).toContainText('.claude/skills/tp-team-review-notes');
 

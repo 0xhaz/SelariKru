@@ -439,13 +439,17 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   }
   // Knowledge packs: the bound, reviewed, unrevoked versions whose triggers match this task, within what policy grants. A relevant pack that cannot start new work (revoked,
   // unreviewed, blocked or unknown) refuses the claim visibly, before placement can clear a block, rather than starting the task without it.
-  const skills = await resolveTaskSkills(tx, key, spec, runner.location, assigned.assignment.provider);
+  // Where pack content would go: a cloud runner, or a model that runs in the cloud, is a cloud destination whatever the runner's location.
+  const contentDestination = runner.location === 'cloud' || assigned.assignment.route !== 'device' ? 'cloud' : 'local';
+  const skills = await resolveTaskSkills(tx, key, spec, contentDestination, assigned.assignment.provider);
   const refusedSkill = skills.refused[0];
   if (refusedSkill !== undefined) {
     const reason = `${refusedSkill.reason}:${refusedSkill.skillId}`;
     await recordBlock(tx, key, c, statusRow, reason, null, now);
     return { reason: `skill_blocked:${reason}` };
   }
+  // A runner that cannot deliver packs would start the task without them. This is a fact about the poller, not the task, so nothing is recorded: a runner that can still takes it.
+  if (skills.delivered.length > 0 && runner.skillDelivery !== true) return { reason: 'skill_runner_update_required' };
   const configured = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
   // Cloud the owner took away is a disabled location, exactly as a mode without cloud slots: placement says so and never moves the task elsewhere silently.
   const capacity = configured !== null && settings.cloudEligible === false ? { ...configured, cloud: { ...configured.cloud, limit: 0 } } : configured;
@@ -557,7 +561,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   // What this attempt receives, by version and digest, in the claim's own transaction: provenance for the attempt and its evidence. Metadata only.
   await tx.insert(schema.skillExecutionRecords).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, recordedAt: now,
-    record: { attemptId, taskId: key.taskId, revision: spec.revision, destination: runner.location, harness: harnessForProvider(assignment.provider), delivered: skills.delivered, omitted: skills.omitted, context: skills.context, recordedAt: now.toISOString() },
+    record: { attemptId, taskId: key.taskId, revision: spec.revision, destination: skills.destination, harness: harnessForProvider(assignment.provider), delivered: skills.delivered, omitted: skills.omitted, context: skills.context, recordedAt: now.toISOString() },
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();
   for (const claim of spec.resourceClaims) {

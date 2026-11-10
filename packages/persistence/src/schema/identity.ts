@@ -1,4 +1,4 @@
-import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text, unique } from 'drizzle-orm/pg-core';
+import { boolean, check, foreignKey, integer, jsonb, pgTable, primaryKey, text, unique } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { projects } from './projects.ts';
@@ -37,6 +37,8 @@ export const runners = pgTable(
     harnessReport: jsonb('harness_report').$type<{ provider: string; harnessVersion: string | null; models: string[] }[]>(),
     /** Project ids this runner says it has a source checkout for. Ids only, never paths. Null: it has not said. */
     configuredProjects: jsonb('configured_projects').$type<string[]>(),
+    /** The runner said it materializes knowledge packs and confirms their digests. Null: it never said, so it gets no task that has packs. */
+    skillDelivery: boolean('skill_delivery'),
     /** When this runner last reached the control plane, from any authenticated runner call. Null: not since this column existed. */
     lastSeenAt: tstz('last_seen_at'),
     /** When this runner last made an authenticated call (a claim poll, heartbeat or result). Null: never, so a runner only just enrolled. Settings wait only on runners with one. */

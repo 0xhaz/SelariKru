@@ -16,7 +16,7 @@ function source(answer: (url: string, method: string) => Response) {
 describe('the live skill library', () => {
   it('reads the library, sends each action to its route, and reads the library again', async () => {
     const { calls, ds } = source((url, method) => new Response(JSON.stringify(method === 'GET' && url.endsWith('/skills') ? VIEW : {})));
-    expect(await ds.getSkills!('p')).toEqual(VIEW);
+    expect(await ds.getSkills!('p')).toEqual({ ...VIEW, paths: [], waitingForRunnerUpdate: [], history: [] });
     await ds.skillAction!('p', { kind: 'intake', path: '/packs/style' });
     await ds.skillAction!('p', { kind: 'review', versionId: 'tp-x@1.0.0', acknowledgeFindings: true });
     await ds.skillAction!('p', { kind: 'revoke', versionId: 'tp-x@1.0.0', reason: 'wrong' });
@@ -32,7 +32,7 @@ describe('the live skill library', () => {
 
   it('reads an attempt record, and passes a refusal on as typed', async () => {
     const att = { attemptId: 'a 1', record: null, revoked: [] };
-    expect(await source(() => new Response(JSON.stringify(att))).ds.getAttemptSkills!('p', 'a 1')).toEqual(att);
+    expect(await source(() => new Response(JSON.stringify(att))).ds.getAttemptSkills!('p', 'a 1')).toEqual({ ...att, confirmedAt: null });
     const refused = source(() => new Response(JSON.stringify({ error: { code: 'skill_not_reviewed', message: 'no' } }), { status: 409 }));
     await expect(refused.ds.skillAction!('p', { kind: 'bind', skillId: 'x', expectedRevision: 0, binding: null })).rejects.toBeInstanceOf(DataSourceException);
   });

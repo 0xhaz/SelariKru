@@ -12,6 +12,8 @@ export interface Runner {
   readonly location: RunnerLocation;
   /** What this runner reports it can launch. Absent or empty: it can launch nothing, so no claim can start. */
   readonly harnesses?: readonly RunnerHarnessReport[] | undefined;
+  /** The runner said it materializes knowledge packs and confirms their digests. Absent: an older runner, which gets no task that has packs. */
+  readonly skillDelivery?: boolean | undefined;
 }
 
 /** Limits supplied by configuration. A missing limit denies claiming; it is never unlimited. */

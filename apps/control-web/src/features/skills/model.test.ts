@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SKILL_LIBRARY } from '@selarikru/domain';
 import type { SkillCatalogEntryView } from '@selarikru/view-protocol';
-import { attemptPackRows, packRow } from './model.ts';
+import { attemptPackRows, historyRows, packRow } from './model.ts';
 
 const v = SKILL_LIBRARY[0]!;
 const entry = (over: Partial<SkillCatalogEntryView> = {}): SkillCatalogEntryView => ({
@@ -29,9 +29,20 @@ describe('pack rows', () => {
 describe('attempt pack rows', () => {
   it('lists what was delivered with its digest, and marks a version revoked since', () => {
     const d = { skillId: v.skillId, versionId: v.versionId, name: v.name, version: v.version, digest: v.digest, origin: 'first_party' as const, scope: 'platform' as const, classification: 'public' as const, dir: `.claude/skills/${v.skillId}` };
-    const m = attemptPackRows({ attemptId: 'a', revoked: [v.versionId], record: { attemptId: 'a', taskId: 't', revision: 1, destination: 'local', harness: 'claude-code', delivered: [d], omitted: [{ skillId: 'x', versionId: 'x@1', reason: 'not_relevant:role' }], context: { entries: [], actions: [] }, recordedAt: '2026-11-10T00:00:00.000Z' } })!;
+    const m = attemptPackRows({ attemptId: 'a', revoked: [v.versionId], confirmedAt: null, record: { attemptId: 'a', taskId: 't', revision: 1, destination: 'local', harness: 'claude-code', delivered: [d], omitted: [{ skillId: 'x', versionId: 'x@1', reason: 'not_relevant:role' }], context: { entries: [], actions: [] }, recordedAt: '2026-11-10T00:00:00.000Z' } })!;
     expect(m.packs).toEqual([{ versionId: v.versionId, title: `${v.name} ${v.version}`, digest: v.digest, dir: d.dir, revoked: true }]);
     expect(m.omitted[0]!.text).toBe('x@1: not relevant · role');
-    expect(attemptPackRows({ attemptId: 'a', record: null, revoked: [] })).toBeNull();
+    expect(m.confirmed).toBe(false);
+    expect(attemptPackRows({ attemptId: 'a', record: null, revoked: [], confirmedAt: null })).toBeNull();
+  });
+});
+
+describe('history rows', () => {
+  it('says who did what, newest first, with the scope of a binding and what an unbind removed', () => {
+    const rows = historyRows({ projectId: 'p', catalog: [], bindings: [], roles: [], paths: [], waitingForRunnerUpdate: [], history: [
+      { kind: 'bind', actor: 'ann', at: '1', skillId: 'tp-x', versionId: 'tp-x@1', before: null, after: { versionId: 'tp-x@1', roles: ['backend'], paths: [] } },
+      { kind: 'unbind', actor: 'bob', at: '2', skillId: 'tp-x', versionId: 'tp-x@1', before: { versionId: 'tp-x@1' }, after: null },
+    ] });
+    expect(rows.map((r) => r.text)).toEqual(['Unbound tp-x@1 (was tp-x@1) · by bob', 'Bound tp-x@1, only for roles backend · by ann']);
   });
 });

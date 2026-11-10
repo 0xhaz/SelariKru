@@ -22,11 +22,16 @@ describe('the demo skill library', () => {
     await expect(ds.skillAction!(projectId, { kind: 'bind', skillId: pack.skillId, expectedRevision: 0, binding: { versionId: pack.versionId, roles: [], paths: [] } })).rejects.toThrow(/reviewed/);
     await expect(ds.skillAction!(projectId, { kind: 'review', versionId: pack.versionId, acknowledgeFindings: false })).rejects.toThrow(/Acknowledge/);
     await ds.skillAction!(projectId, { kind: 'review', versionId: pack.versionId, acknowledgeFindings: true });
-    await ds.skillAction!(projectId, { kind: 'bind', skillId: pack.skillId, expectedRevision: 0, binding: { versionId: pack.versionId, roles: [], paths: [] } });
+    await expect(ds.skillAction!(projectId, { kind: 'bind', skillId: pack.skillId, expectedRevision: 0, binding: { versionId: pack.versionId, roles: [], paths: [] } })).rejects.toThrow(/at least one role or path/);
     const snap = await ds.getSnapshot(projectId);
-    const attemptId = Object.values(snap.attempts).find((a) => a.outcome === 'running')!.attemptId;
+    const running = Object.values(snap.attempts).find((a) => a.outcome === 'running')!;
+    const attemptId = running.attemptId;
+    const role = snap.tasks[running.taskId]!.role!;
+    await ds.skillAction!(projectId, { kind: 'bind', skillId: pack.skillId, expectedRevision: 0, binding: { versionId: pack.versionId, roles: [role], paths: [] } });
+    expect((await ds.getSkills!(projectId)).history.map((h) => h.kind)).toEqual(['intake', 'review', 'bind']);
     const att = AttemptSkillsViewSchema.parse(await ds.getAttemptSkills!(projectId, attemptId));
     expect(att.record!.delivered.map((d) => d.versionId)).toEqual([pack.versionId]);
+    expect(att.confirmedAt).toEqual(expect.any(String));
     // Revoked afterwards: the attempt keeps it and is marked.
     await ds.skillAction!(projectId, { kind: 'revoke', versionId: pack.versionId, reason: 'demo' });
     expect((await ds.getAttemptSkills!(projectId, attemptId)).revoked).toEqual([pack.versionId]);

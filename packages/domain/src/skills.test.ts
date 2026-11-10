@@ -76,7 +76,7 @@ describe('first-party library', () => {
       const report = scanPack(entries);
       expect(report.status, v.versionId).toBe('complete');
       expect(report.blocked, v.versionId).toBe(false);
-      expect(report.findings.filter((x) => x.kind === 'policy_conflict' || x.severity === 'blocking'), v.versionId).toEqual([]);
+      expect(report.findings, v.versionId).toEqual([]);
     }
   });
 });
@@ -222,7 +222,7 @@ describe('resolveSkills', () => {
     const h = resolveSkills(input({ harness: 'other-harness' }));
     expect(h.delivered).toEqual([]);
     expect(h.omitted.every((o) => o.reason === 'harness_unsupported' || o.reason.startsWith('not_relevant'))).toBe(true);
-    expect(Object.keys(resolveSkills(input()))).toEqual(['delivered', 'omitted', 'refused', 'context']);
+    expect(Object.keys(resolveSkills(input()))).toEqual(['delivered', 'omitted', 'refused', 'context', 'destination']);
   });
 
   it('a restricted pack reaches a local worker only; a cloud destination gets metadata only (an omission)', () => {
@@ -253,5 +253,42 @@ describe('stack readiness: the skills axis', () => {
     const axis = readinessOf(item('express'), { skills }).find((a) => a.axis === 'skills')!;
     expect(axis).toMatchObject({ state: 'reviewed', label: 'Reviewed: express-api-routes 1.0.0' });
     expect(readinessOf(item('react'), { skills }).find((a) => a.axis === 'skills')!.state).toBe('none_reviewed');
+  });
+});
+
+describe('fix round 1: scan limits, run instructions, unknown file types', () => {
+  it('more files than a pack may hold, or more bytes, is a blocking pack_too_large finding', () => {
+    const many = [file('SKILL.md', '---\nname: x\ndescription: y\n---\n'), ...Array.from({ length: 45 }, (_, i) => file(`references/r${i}.md`, 'ok\n'))];
+    const r = scanPack(many);
+    expect(r.blocked).toBe(true);
+    expect(r.findings).toContainEqual(expect.objectContaining({ kind: 'pack_too_large', severity: 'blocking' }));
+    const big = scanPack([file('SKILL.md', '---\nname: x\ndescription: y\n---\n'), ...Array.from({ length: 5 }, (_, i) => file(`references/r${i}.md`, 'a'.repeat(60_000)))]);
+    expect(big.findings.some((f) => f.kind === 'pack_too_large')).toBe(true);
+    expect(big.blocked).toBe(true);
+  });
+
+  it('an instruction to run a file, and a file of no known text type, are findings for review', () => {
+    const r = scanPack([
+      file('SKILL.md', '---\nname: x\ndescription: y\n---\nFirst run ./tool to prepare.\nThen bash scripts/setup.sh and node helpers/x.mjs.\n'),
+      file('notes', 'plain words'),
+      file('data.bin2', 'more words'),
+    ]);
+    expect(r.findings.filter((f) => f.kind === 'runs_pack_file').map((f) => f.line)).toEqual([5]);
+    expect(r.findings.filter((f) => f.kind === 'unknown_file_type').map((f) => f.path).sort()).toEqual(['data.bin2', 'notes']);
+    expect(r.findings.filter((f) => f.kind === 'runs_pack_file' || f.kind === 'unknown_file_type').every((f) => f.severity === 'review')).toBe(true);
+    expect(r.blocked).toBe(false);
+  });
+});
+
+describe('fix round 1: a third-party pack needs a scoped binding', () => {
+  it('an unscoped third-party binding delivers nothing; a scoped one only to matching tasks; first-party packs keep their own triggers', () => {
+    const tp: SkillVersion = { ...lib('vitest-testing-practices'), versionId: 'tp-x@1.0.0+abcdefabcdef', skillId: 'tp-x', origin: 'third_party', scope: 'project', triggers: { entries: [], roles: [], paths: [], actions: [] } };
+    const unscoped = resolveSkills(input({ bindings: [{ skillId: 'tp-x', binding: { versionId: tp.versionId, roles: [], paths: [] } }], versions: known([tp]) }));
+    expect(unscoped.delivered).toEqual([]);
+    expect(unscoped.omitted[0]!.reason).toBe('binding_unscoped');
+    const scoped = (task: SkillResolveInput['task']) => resolveSkills(input({ task, bindings: [{ skillId: 'tp-x', binding: { versionId: tp.versionId, roles: [], paths: ['server'] } }], versions: known([tp]) })).delivered.map((d) => d.skillId);
+    expect(scoped({ role: 'backend', allowedPaths: ['server'], acceptanceCheckIds: [] })).toEqual(['tp-x']);
+    expect(scoped({ role: 'frontend', allowedPaths: ['src'], acceptanceCheckIds: [] })).toEqual([]);
+    expect(resolveSkills(input()).delivered.length).toBe(3);
   });
 });

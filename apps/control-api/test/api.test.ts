@@ -67,6 +67,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/terminal'],
   ['POST', '/v1/runners/brain/manifest'],
   ['POST', '/v1/runners/stack/detection'],
+  ['POST', '/v1/runners/skills/confirm'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 

@@ -57,6 +57,8 @@ export interface WorldOptions {
   assignment?: RecordedAssignment | null;
   /** The Project Brain context the claim delivered. Default: none. */
   context?: ClaimedLease['context'];
+  /** What the pack confirmation does. Default: succeeds. */
+  skillsConfirmed?: () => Promise<void>;
   /** The knowledge packs the claim delivered, as the wire carries them. Default: absent. */
   skills?: unknown;
   /** What the manifest upload does. Default: succeeds. */
@@ -140,6 +142,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     terminal: vi.fn(async () => undefined),
     brainManifest: vi.fn(async () => (o.brainManifest ? o.brainManifest() : undefined)),
     stackDetection: vi.fn(async () => (o.stackDetection ? o.stackDetection() : undefined)),
+    skillsConfirmed: vi.fn(async () => (o.skillsConfirmed ? o.skillsConfirmed() : undefined)),
   } as unknown as World['api'];
 
   return {

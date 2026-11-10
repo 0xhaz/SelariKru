@@ -104,7 +104,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const runner = runnerOf(req);
     const body = parseBody(ClaimRequestSchema, req.body);
     const where = and(eq(schema.runners.tenantId, runner.tenantId), eq(schema.runners.runnerId, runner.runnerId));
-    const storedRow = (await db.select({ report: schema.runners.harnessReport, projects: schema.runners.configuredProjects }).from(schema.runners).where(where))[0];
+    const storedRow = (await db.select({ report: schema.runners.harnessReport, projects: schema.runners.configuredProjects, skillDelivery: schema.runners.skillDelivery }).from(schema.runners).where(where))[0];
     const stored = storedRow?.report ?? null;
     // Claims arrive at poll rate; an unchanged report writes nothing.
     if (body.harnesses !== undefined && (stored === null || reportKey(stored) !== reportKey(body.harnesses))) await db.update(schema.runners).set({ harnessReport: body.harnesses }).where(where);
@@ -112,10 +112,13 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       const next = [...new Set(body.projects)].sort();
       if (JSON.stringify(storedRow?.projects ?? null) !== JSON.stringify(next)) await db.update(schema.runners).set({ configuredProjects: next }).where(where);
     }
+    // Whether this build materializes knowledge packs and confirms them. Recorded so the library can name a runner that is waiting for an update.
+    const skillDelivery = body.capabilities?.skills === true;
+    if ((storedRow?.skillDelivery ?? null) !== skillDelivery) await db.update(schema.runners).set({ skillDelivery }).where(where);
     const harnesses = body.harnesses ?? stored ?? [];
     // The acknowledgement first, in its own transaction: what it puts in force is recorded whether or not this poll gets work.
     if (body.config !== undefined) await acknowledge(runner, body.config);
-    const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
+    const outcome = await scheduler.tryClaim({ ...runner, harnesses, skillDelivery }, config.caps);
     // Sent with every answer, so a runner learns a change on its next poll whether or not it got work.
     const runnerConfig = await runnerConfigFor(db, runner.tenantId, runner.runnerId);
     if (outcome.ok) {

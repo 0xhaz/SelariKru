@@ -122,7 +122,7 @@ function contextSection(ctx: BrainBundle): string[] {
   ];
 }
 
-/** A delivered pack as TASK.md names it: where it is mounted and the digest it was checked against. Its text is never copied here. */
+/** A delivered pack as TASK.md names it: by its id (never a name the pack chose), where it is mounted and the digest it was checked against. Its text is never copied here. */
 export interface TaskSkill {
   readonly name: string;
   readonly version: string;
@@ -408,7 +408,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       const before = manifestSent;
       manifestSent = Promise.all([before, sent]);
     }
-    const taskFile = renderTaskFile(task, { signalPath, grants, context: lease.context ?? null, skills: packs.map((p) => ({ name: p.name, version: p.version, dir: p.dir, digest: p.digest })), ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
+    const taskFile = renderTaskFile(task, { signalPath, grants, context: lease.context ?? null, skills: packs.map((p) => ({ name: p.skillId, version: p.version, dir: p.dir, digest: p.digest })), ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
       return await finish('blocked', why('secret_in_task_text', 'task text contains a secret-shaped value; it was not sent to the agent'), null);
     }
@@ -430,12 +430,24 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let baseline;
     let baseIgnores;
     try {
-      const b = await buildTaskBundle({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs });
+      // The repository's own skills directory never ships: a pack reaches a worker only by review, binding and digest. Recorded as an omission.
+      const b = await buildTaskBundle({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs, extraExclude: [SKILL_WORKSPACE_ROOT] });
+      const ownSkills = b.excluded.filter((p) => p.startsWith(`${SKILL_WORKSPACE_ROOT}/`)).length;
       baseline = b.baseline;
       baseIgnores = b.baseIgnores;
-      log(`bundle ready: ${b.fileCount} files, ${b.excluded.length} excluded`);
+      log(`bundle ready: ${b.fileCount} files, ${b.excluded.length} excluded${ownSkills > 0 ? ` (${ownSkills} under ${SKILL_WORKSPACE_ROOT} from the repository, not shipped)` : ''}`);
     } catch (err) {
       return await finish('failed', why('task_bundle_failed', `could not build the task bundle: ${err instanceof Error ? err.message : 'error'}`), null);
+    }
+    // The packs are on disk and were checked: say so, with exactly what was checked. Only this makes the record read as delivered. A lost lease starts nothing; any other
+    // failure leaves the record unconfirmed, which is what it then says.
+    if (packs.length > 0 && deps.api.skillsConfirmed !== undefined) {
+      try {
+        await deps.api.skillsConfirmed(ref, packs.map((p) => ({ versionId: p.versionId, digest: p.digest })));
+      } catch (err) {
+        if (err instanceof LeaseLostError) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+        log(`pack delivery not confirmed to the server: ${err instanceof Error ? clip(err.message, 120) : 'error'}`);
+      }
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };

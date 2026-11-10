@@ -1,4 +1,4 @@
-import { boolean, foreignKey, jsonb, pgTable, primaryKey, text, check } from 'drizzle-orm/pg-core';
+import { boolean, foreignKey, jsonb, pgTable, primaryKey, serial, text, check } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { scope, tstz } from './common.ts';
 import { projects } from './projects.ts';
@@ -72,6 +72,32 @@ export const skillEvaluations = pgTable(
 /** What one attempt received (a `SkillExecutionRecord`), written in its claim's transaction. Metadata only: ids, versions and digests. */
 export const skillExecutionRecords = pgTable(
   'skill_execution_records',
-  { ...scope(), attemptId: text('attempt_id').notNull(), taskId: text('task_id').notNull(), record: jsonb('record').$type<Record<string, unknown>>().notNull(), recordedAt: tstz('recorded_at').notNull() },
+  {
+    ...scope(), attemptId: text('attempt_id').notNull(), taskId: text('task_id').notNull(), record: jsonb('record').$type<Record<string, unknown>>().notNull(), recordedAt: tstz('recorded_at').notNull(),
+    /** When the runner reported, after its own digest check, that it materialized exactly the recorded packs. Null: not confirmed, so nothing says they were delivered. */
+    confirmedAt: tstz('confirmed_at'),
+    /** The version ids and digests the runner confirmed. */
+    confirmed: jsonb('confirmed').$type<{ versionId: string; digest: string }[]>(),
+  },
   (t) => [primaryKey({ columns: [t.tenantId, t.projectId, t.attemptId] })],
+);
+
+/** Append-only history of every owner action on the library: intake, review, revoke, bind and unbind, with who, when, the version and the binding before and after. Never updated. */
+export const skillActions = pgTable(
+  'skill_actions',
+  {
+    ...scope(),
+    seq: serial('seq').notNull(),
+    kind: text('kind').notNull(),
+    actor: text('actor').notNull(),
+    at: tstz('at').notNull(),
+    skillId: text('skill_id').notNull(),
+    versionId: text('version_id'),
+    before: jsonb('before').$type<Record<string, unknown>>(),
+    after: jsonb('after').$type<Record<string, unknown>>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.seq] }),
+    check('skill_actions_kind', sql`kind IN ('intake', 'review', 'revoke', 'bind', 'unbind')`),
+  ],
 );

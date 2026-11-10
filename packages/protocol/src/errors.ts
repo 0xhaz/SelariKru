@@ -65,7 +65,7 @@ export const ERROR_CODES = [
   /** Skill library: no such pack or version; a blocked pack cannot be reviewed; review findings not acknowledged; already reviewed or revoked; a binding to a version
    * that is not reviewed or is revoked; an intake path that cannot be read as a pack, or whose content is already staged elsewhere. */
   'skill_not_found', 'skill_version_not_found', 'skill_not_reviewable', 'skill_findings_unacknowledged', 'skill_already_reviewed', 'skill_already_revoked',
-  'skill_not_reviewed', 'skill_revoked', 'skill_intake_failed', 'skill_already_staged',
+  'skill_not_reviewed', 'skill_revoked', 'skill_intake_failed', 'skill_already_staged', 'skill_binding_unscoped', 'skill_confirmation_mismatch',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);
