@@ -124,7 +124,8 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       try {
         context = await bundleForAttempt(db, outcome.lease, now());
       } catch (err) {
-        app.log.warn({ err, attemptId: outcome.lease.attemptId }, 'building the context bundle failed; the lease goes without one');
+        // The error's name and code only: a failed query's parameters can hold source text, which does not belong in a log.
+        app.log.warn({ error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown } | null)?.code ?? null, attemptId: outcome.lease.attemptId }, 'building the context bundle failed; the lease goes without one');
       }
       return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}), context }, reason: null, skipped: outcome.skipped, config: runnerConfig });
     }

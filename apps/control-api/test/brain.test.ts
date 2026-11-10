@@ -124,6 +124,18 @@ describe('Project Brain: the task context bundle at claim', () => {
     expect((await get(h.app, `/v1/projects/${PROJECT}/attempts/nope/context`)).status).toBe(404);
   });
 
+  it('a context bundle that cannot be built never fails the claim: the lease goes without one', async () => {
+    await seedPlan();
+    await t.db.execute(sql`ALTER TABLE brain_bundles RENAME TO brain_bundles_away`);
+    try {
+      const { token } = await enrolRunner(h.app);
+      const lease = await claimAs(token);
+      expect(lease).toMatchObject({ taskId: 'T1', context: null });
+    } finally {
+      await t.db.execute(sql`ALTER TABLE brain_bundles_away RENAME TO brain_bundles`);
+    }
+  });
+
   it('revoking a source blocks serving the claims that rest on it and the next bundle lists them as omissions; history stays', async () => {
     await seedPlan();
     await t.db.execute(sql`UPDATE task_status SET status = 'ready' WHERE task_id = 'T2'`);

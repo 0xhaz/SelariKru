@@ -308,6 +308,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     return send({ outcome: 'approval_requested', reason, operation: request.operation, ...(request.destination ? { destination: request.destination } : {}), ...costed(cost) }, request.reason, null);
   };
 
+  let manifestSent: Promise<unknown> = Promise.resolve();
   try {
     let task: TaskSpec;
     try {
@@ -347,10 +348,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
 
     const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
     // The repository manifest for the Project Brain: read with git at the base, never by running anything here. Only for work whose data may leave this machine,
-    // and never awaited on the attempt's path to a result: a failure is logged and changes nothing.
+    // and not awaited on the attempt's path to a result (only before cleanup, so nothing outlives the attempt): a failure is logged and changes nothing.
     if (!restricted && deps.api.brainManifest !== undefined) {
       const api = deps.api;
-      void readRepoManifest(repo, task.baseSha).then((m) => api.brainManifest?.(ref, { commit: m.commit, fileCount: m.fileCount, totalBytes: m.totalBytes, docs: [...m.docs] })).catch((err: unknown) => log(`repository manifest not sent: ${err instanceof Error ? clip(err.message, 120) : 'error'}`));
+      manifestSent = readRepoManifest(repo, task.baseSha).then((m) => api.brainManifest?.(ref, { commit: m.commit, fileCount: m.fileCount, totalBytes: m.totalBytes, docs: [...m.docs] })).catch((err: unknown) => log(`repository manifest not sent: ${err instanceof Error ? clip(err.message, 120) : 'error'}`));
     }
     const taskFile = renderTaskFile(task, { signalPath, grants, context: lease.context ?? null, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
@@ -601,6 +602,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     return await finishCompleted(cost, manifest);
   } finally {
+    await manifestSent;
     await control?.shutdown();
     feed?.abort();
     clearInterval(beat);

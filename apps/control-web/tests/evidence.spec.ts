@@ -124,6 +124,8 @@ function wire(): Promise<Wire> {
       req.on('close', () => streams.delete(res));
       return;
     }
+    // This wire serves no Project Brain: the Decisions screen asks for one and is told there is none.
+    if (req.url?.includes('/brain')) { res.writeHead(404, { ...cors, 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { code: 'not_found', message: 'no such route' } })); return; }
     res.writeHead(200, { ...cors, 'content-type': 'application/json' });
     approval.granted += 1;
     res.end(JSON.stringify({ approvalId: 'a1', outcome: 'granted', taskStatus: 'ready' }));
