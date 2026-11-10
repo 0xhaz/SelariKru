@@ -400,6 +400,8 @@ describe('checkpoint continuation', () => {
       clock.advance(31);
       await s.expireLeases(clock.now());
       expect(await handoverRow()).toMatchObject({ state: 'fenced', successor_retries: 1 });
+      // No worker ran on the successor, so its hold is released, not kept at worst case.
+      expect((await t.db.execute(sql`SELECT state FROM budget_reservations WHERE reservation_id = ${`res_${next.lease.attemptId}`}`))[0]).toMatchObject({ state: 'released' });
       await freshRunners();
       clock.advance(CAPS.infraRetryBackoffSeconds);
       expect(await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).toMatchObject({ ok: true, lease: { fence: next.lease.fence + 1, handover: { mode: 'resume' } } });

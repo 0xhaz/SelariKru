@@ -21,6 +21,7 @@ export const RESTRICTED_REASONS = {
   infrastructure_failed: [
     'provisioning_failed', 'provisioning_failed: sandbox unavailable', 'provisioning_failed: the toolchain pin could not be read', 'provisioning_failed: a setup step failed',
     'provisioning_failed: the attempt timeout was reached during setup', 'provisioning_failed: this runtime cannot set up a Node toolchain',
+    'provisioning_failed: setup could not be confirmed',
   ],
 } as const satisfies Record<string, readonly string[]>;
 

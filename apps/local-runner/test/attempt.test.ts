@@ -526,10 +526,23 @@ describe('toolchain provisioning', () => {
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout/);
   });
 
-  it('if the server cannot be told, the worker still runs, inside the original deadline', async () => {
-    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { throw new Error('502'); } });
+  it('if the server never acknowledges setup, no worker starts: it is the setup\'s failure (T7.6)', async () => {
+    let calls = 0;
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { calls += 1; throw new Error('502'); } });
+    const report = await runAttempt(deps, w.lease);
+    expect(report.outcome).toBe('infrastructure_failed');
+    expect(w.sbx.streams).toHaveLength(0);
+    // Retried a bounded number of times before giving up.
+    expect(calls).toBeGreaterThan(1);
+    expect(calls).toBeLessThanOrEqual(4);
+    expect((w.api.published[0] as { reason: string }).reason).toMatch(/setup could not be confirmed/);
+  });
+
+  it('a setup acknowledgement that fails once and then lands starts the worker', async () => {
+    let calls = 0;
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { calls += 1; if (calls === 1) throw new Error('502'); return { deadlineAt: new Date(Date.now() + 3_600_000).toISOString() }; } });
     expect((await runAttempt(deps, w.lease)).outcome).toBe('completed');
-    expect(w.logs.join('\n')).toMatch(/could not report setup/);
+    expect(calls).toBe(2);
   });
 
   it('a lost lease at that moment starts no worker', async () => {

@@ -201,6 +201,10 @@ export function renderTaskFile(task: TaskSpec, opts: { readonly signalPath?: str
   ].join('\n');
 }
 
+/** How many times the setup-complete call is tried, and the first backoff between tries (doubling). */
+const SETUP_ACK_TRIES = 3;
+const SETUP_ACK_BACKOFF_MS = 200;
+
 /** The worker's tools: the same list the server resolves packs against, so no pack can assume a tool this runner does not launch with. */
 export const DEFAULT_TOOLS = WORKER_TOOLS;
 
@@ -529,17 +533,25 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       log(`toolchain ready: node ${provisioned.nodeVersion} pnpm ${provisioned.pnpmVersion} arch ${provisioned.arch} in ${provisioned.seconds.toFixed(1)}s`);
     }
 
-    // The worker's time limit starts here, on both sides, so a slow install does not eat it. If the server cannot be told, its deadline has not moved, and the worker gets what is left of it.
+    // The worker's time limit starts here, on both sides, so a slow install does not eat it. No worker starts unless the server acknowledged this: its record that setup
+    // completed is the server's only sign that a worker may have run (and spent), so an unacknowledged start would let a silent worker pass for a setup failure. The call is
+    // retried a few times with a short backoff while the deadline holds; still unacknowledged, the attempt ends as the setup's failure and no worker is launched.
     let workMs = Math.max(1, budgetMs - (Date.now() - startedMs));
-    try {
-      const granted = Date.parse((await deps.api.setupComplete(ref)).deadlineAt);
-      workMs = Math.max(1, Math.min(workLimitMs, Number.isFinite(granted) ? granted - Date.now() : workMs));
-    } catch (err) {
-      if (err instanceof LeaseLostError) {
-        flags.leaseLost = true;
-        return { outcome: 'lease_lost', reason: null, changeManifest: null };
+    let acknowledged = false;
+    for (let i = 0; i < SETUP_ACK_TRIES && !acknowledged && !aborted(); i++) {
+      try {
+        const granted = Date.parse((await deps.api.setupComplete(ref)).deadlineAt);
+        workMs = Math.max(1, Math.min(workLimitMs, Number.isFinite(granted) ? granted - Date.now() : workMs));
+        acknowledged = true;
+      } catch (err) {
+        if (err instanceof LeaseLostError) {
+          flags.leaseLost = true;
+          return { outcome: 'lease_lost', reason: null, changeManifest: null };
+        }
+        log(`could not report setup as complete (${i + 1}/${SETUP_ACK_TRIES}): ${err instanceof Error ? err.message : 'error'}`);
+        if (err instanceof ApiStatusError && err.permanent) break;
+        if (i < SETUP_ACK_TRIES - 1) await new Promise((r) => setTimeout(r, SETUP_ACK_BACKOFF_MS * 2 ** i));
       }
-      log(`could not report setup as complete; the original deadline stands: ${err instanceof Error ? err.message : 'error'}`);
     }
     // The heartbeat kept running while the server answered: a shutdown, a lost lease or an owner's cancel that arrived meanwhile must not start a worker.
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
@@ -547,6 +559,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
     // Nothing ran yet, so a clock that ran out while the server answered is the setup's, not the worker's.
     if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
+    if (!acknowledged) return await finish('infrastructure_failed', why('provisioning_failed: setup could not be confirmed', 'provisioning_failed: setup could not be confirmed with the control plane, so no worker was started'), null);
     armDeadline(workMs);
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
     const harness = harnessEntry.create(launcher);
