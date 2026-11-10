@@ -243,8 +243,9 @@ test('a graph wider than the screen says more stages follow', async ({ page }) =
   await page.setViewportSize({ width: 1024, height: 800 });
   await openPipeline(page, 'feature-delivery', 'graph');
   await expect(page.getByTestId('graph-scroll-hint')).toContainText('More stages to the right');
-  // Wide enough for the whole graph, with the team panel beside it.
+  // Wide enough for the whole graph once the Mission Control drawer is maximised over the office.
   await page.setViewportSize({ width: 1440, height: 800 });
+  await page.getByRole('button', { name: 'Maximize' }).click();
   await expect(page.getByTestId('graph-scroll-hint')).toHaveCount(0);
 });
 
@@ -294,7 +295,6 @@ test('axe finds no violations in the table, graph, inspector, narrow layout and 
   await expect(inspector(page)).toBeVisible();
   await expectNoAxeViolations(page);
   await inspector(page).getByRole('button', { name: 'Close' }).click();
-  await page.getByRole('button', { name: 'Dark theme' }).click();
   await expectNoAxeViolations(page);
   await page.setViewportSize({ width: 375, height: 800 });
   await expect(page.getByTestId('pipeline-cards')).toBeVisible();

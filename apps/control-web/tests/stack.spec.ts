@@ -1,6 +1,9 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
+/** A confirmation inside Settings. Settings is itself a dialog (the modal over the office), so it is left out. */
+const confirmDialog = (page: Page) => page.getByRole('dialog').filter({ hasNot: page.getByTestId('settings-page') });
+
 const ORIGIN = 'http://127.0.0.1:5174';
 
 /** Presses Tab until `target` has focus, and checks it draws a real focus ring. Never clicks: anything this cannot reach is not reachable by keyboard. */
@@ -146,7 +149,7 @@ test('keyboard: moving off a category with selections asks first, and Escape kee
   await tabTo(page, payments.getByRole('radio', { name: 'None · not used' }));
   await page.keyboard.press('ArrowLeft');
   await expect(payments).toHaveAttribute('data-state', 'not_decided');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(confirmDialog(page)).toHaveCount(0);
 });
 
 test('keyboard: the active result is scrolled into view as the arrow keys move through a long list', async ({ page }) => {

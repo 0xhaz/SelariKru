@@ -73,6 +73,7 @@ test('Demo data badge persists in mock mode', async ({ page }) => {
   await expect(badge).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await expect(badge).toBeInViewport();
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(badge).toBeVisible();
 });
@@ -83,6 +84,7 @@ test('under demo data the live assistant is not mounted and Firebase is not cont
     if (!r.url().startsWith('http://127.0.0.1:5174/') && !r.url().startsWith('data:')) external.push(r.url());
   });
   await open(page);
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate draft' })).toHaveCount(0);
@@ -137,9 +139,10 @@ test('a view that fails to render is contained: shell and badge stay, and the ot
   await page.goto('/?demo&fault=corrupt#/overview');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toBeVisible();
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
-  await page.getByRole('link', { name: 'Overview' }).click();
+  await page.getByRole('link', { name: /^Mission Control/ }).click();
 });
 
 test('a failed Overview recovers once the failure clears', async ({ page }) => {
@@ -153,6 +156,7 @@ test('a failed Overview recovers once the failure clears', async ({ page }) => {
 test('changing route moves focus to the main content, and first load does not', async ({ page }) => {
   await open(page);
   await expect(page.locator('#main')).not.toBeFocused();
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(page.locator('#main')).toBeFocused();
 });
@@ -246,11 +250,10 @@ for (const fault of ['reconnecting', 'unavailable', 'dead']) {
   });
 }
 
-test('axe pass: light theme', async ({ page }) => {
+test('axe pass: the one theme', async ({ page }) => {
   await open(page, fixture('policy-block'));
-  // Light is the default since T5.12, so the toggle goes to dark; the light theme is covered by every other axe pass.
-  await page.getByRole('button', { name: 'Dark theme' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  // One theme since T5.12 round 2 (the reference's cream and ink): there is no toggle, and the page reports the theme in use.
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expectNoAxeViolations(page);
 });
 
@@ -273,6 +276,7 @@ test('with no live source the shell is honest and the assistant still works', as
   await expect(page.getByRole('link', { name: 'Open the Assistant' })).toBeVisible();
   await expectNoAxeViolations(page);
 
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(page.getByRole('heading', { name: 'Assistant', level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Generate draft' }).click();
@@ -280,17 +284,17 @@ test('with no live source the shell is honest and the assistant still works', as
   await expect(output.getByTestId('output-list')).toBeVisible();
 
   // Moving between tabs does not discard the draft.
-  await page.getByRole('link', { name: 'Overview' }).click();
+  await page.getByRole('link', { name: /^Mission Control/ }).click();
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.getByTestId('top-bar-more').click();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
   await expect(output.getByTestId('output-list')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 
-  // Axe on the assistant inside the shell, in both themes.
+  // Axe on the assistant inside the shell.
   await expectNoAxeViolations(page);
-  // Light is the default since T5.12, so the toggle goes to dark; the light theme is covered by every other axe pass.
-  await page.getByRole('button', { name: 'Dark theme' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  // One theme since T5.12 round 2 (the reference's cream and ink): there is no toggle, and the page reports the theme in use.
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await expectNoAxeViolations(page);
 });
 
@@ -300,9 +304,10 @@ for (const failure of ['render', 'chunk']) {
       (window as unknown as { __scenario: unknown }).__scenario = { shell: true, assistantFails: f };
     }, failure);
     await page.goto('/tests/harness/index.html');
-    await page.getByRole('link', { name: 'Assistant' }).first().click();
+    await page.getByTestId('top-bar-more').click();
+  await page.getByRole('link', { name: 'Assistant' }).first().click();
     await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
-    await page.getByRole('link', { name: 'Overview' }).click();
+    await page.getByRole('link', { name: /^Mission Control/ }).click();
     await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   });
 }

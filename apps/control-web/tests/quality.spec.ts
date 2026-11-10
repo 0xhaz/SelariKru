@@ -123,7 +123,7 @@ test.describe('keyboard only', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue' }; });
     await page.goto('/tests/harness/index.html#/overview');
-    await press(page, page.getByRole('navigation').getByRole('link', { name: /^Decisions/ }));
+    await press(page, page.getByRole('navigation', { name: 'Mission Control' }).getByRole('link', { name: /^Decisions/ }));
     await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
     const first = page.getByTestId('decision-card').first();
     const deny = first.getByRole('button', { name: 'Deny and block task' });
@@ -189,7 +189,8 @@ async function contrastFailures(page: Page): Promise<{ violations: string[]; inc
 }
 
 test.describe('contrast as painted', () => {
-  for (const theme of ['dark', 'light'] as const) {
+  // One theme since T5.12 round 2: the reference's cream and ink. The loops stay so a second theme would be measured the same way.
+  for (const theme of ['light'] as const) {
     for (const fixture of FIXTURES) {
       test(`${theme}: every view with ${fixture}`, async ({ page }) => {
         test.setTimeout(90_000);
@@ -224,7 +225,8 @@ const moving = (page: Page) => page.evaluate(() => [...document.querySelectorAll
   return out;
 }));
 
-for (const theme of ['dark', 'light'] as const) {
+// One theme since T5.12 round 2: the reference's cream and ink. The loops stay so a second theme would be measured the same way.
+  for (const theme of ['light'] as const) {
   test(`${theme}: contrast in the worker drawer, on the paused page beside it, and in a confirm dialog`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript((t) => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; window.localStorage.setItem('selarikru.theme', t); }, theme);
@@ -272,7 +274,8 @@ test.describe('reduced motion', () => {
 
 test.describe('390 px', () => {
   for (const [route, fixture] of [['office', 'human-wait'], ['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop'], ['brain', 'healthy-parallel-work'], ['settings', 'healthy-parallel-work'], ['settings?section=skills', 'healthy-parallel-work'], ['product', 'merge-flow']] as const) {
-    for (const theme of ['dark', 'light'] as const) {
+    // One theme since T5.12 round 2: the reference's cream and ink. The loops stay so a second theme would be measured the same way.
+  for (const theme of ['light'] as const) {
       test(`${route} with ${fixture} in ${theme}: no sideways scroll, nothing cut off, targets big enough, axe clean`, async ({ page }) => {
         await page.setViewportSize({ width: 390, height: 844 });
         await page.addInitScript(([f, t]) => {
@@ -354,7 +357,8 @@ const measured = (page: Page, selector: string) => page.evaluate((sel) => {
   });
 }, selector);
 
-for (const theme of ['dark', 'light'] as const) {
+// One theme since T5.12 round 2: the reference's cream and ink. The loops stay so a second theme would be measured the same way.
+  for (const theme of ['light'] as const) {
   test(`${theme}: the team panel rows and timestamps axe cannot measure meet AA`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     for (const [fixture, route] of [['human-wait', 'overview'], ['human-wait', 'pipeline'], ['human-wait', 'decisions'], ['budget-stop', 'decisions']] as const) {

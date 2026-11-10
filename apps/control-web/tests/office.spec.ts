@@ -20,13 +20,21 @@ test('the office is the default screen: a labelled picture of the team, with its
   await spied(page);
   await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toBeVisible();
   await expect(page).toHaveTitle('Office · SelariKru');
-  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Office' })).toHaveAttribute('aria-current', 'page');
+  // No drawer is open: the office is the whole screen, with the top bar, the team cards and the activity feed floating over it.
+  await expect(page.getByTestId('view-drawer')).toHaveCount(0);
   await expect(page.getByRole('img', { name: /^Office for .*: 2 workers\. 1 needs you, 1 working\./ })).toBeVisible();
   await expect(page.getByTestId('office-summary')).toContainText('1 needs you, 1 working');
-  // Each colour in the key carries its word.
-  await expect(page.getByTestId('office-legend')).toContainText('Needs you');
-  await expect(page.getByTestId('office-legend')).toContainText('Working');
+  // Each robot's colour has its word beside it, on the worker's card.
+  await expect(page.locator('[data-testid="team-panel-row"][data-state="needs_you"]')).toContainText('Needs you');
+  await expect(page.locator('[data-testid="team-panel-row"][data-state="working"]')).toContainText('Working');
   await expect(page.getByTestId('activity-item').first()).toBeVisible();
+  // The reference's floating layout: the top bar and the team column sit over the office, not beside it.
+  const bar = (await page.getByTestId('top-bar').boundingBox())!;
+  expect([Math.round(bar.x), Math.round(bar.y), Math.round(bar.height)]).toEqual([16, 10, 50]);
+  const team = (await page.getByTestId('team-panel').boundingBox())!;
+  expect([Math.round(team.x), Math.round(team.y), Math.round(team.width)]).toEqual([16, 74, 280]);
+  const feed = (await page.getByTestId('activity-feed').boundingBox())!;
+  expect([Math.round(feed.width), Math.round(feed.height)]).toEqual([280, 220]);
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
 });
@@ -46,6 +54,8 @@ test('1 to 9 open the worker at that place in the team panel; Escape closes it',
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page);
   const first = await page.getByTestId('team-panel-row').first().getAttribute('data-panel-worker');
+  // Ready once the office has drawn its first world: the shell's key handling is in place before that.
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: { world: unknown } }).__selarikruOffice?.world))).toBe(true);
   await page.keyboard.press('1');
   await expect(drawer(page)).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`worker=${first}`));
@@ -71,7 +81,8 @@ test('+ and - zoom the office, and only on the office', async ({ page }) => {
   await expect.poll(() => zoom(page)).toBe(before);
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await expect.poll(() => zoom(page)).toBeGreaterThan(before);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Pipeline' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /^Mission Control/ }).click();
+  await page.getByRole('navigation', { name: 'Mission Control' }).getByRole('link', { name: 'Pipeline' }).click();
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
   const onPipeline = await zoom(page);
   await page.keyboard.press('-');
@@ -96,7 +107,7 @@ test('Escape on the page goes back to the office; on a control it does nothing',
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page, 'human-wait', '#/overview');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Pipeline' }).focus();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Team' }).focus();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   await page.locator('#main').focus();
@@ -104,31 +115,69 @@ test('Escape on the page goes back to the office; on a control it does nothing',
   await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toBeVisible();
 });
 
-// Every screen that existed before T5.12 opens from the top bar in a drawer over the office, and the drawer's Office link goes back.
+// Every screen that existed before T5.12 opens from the top bar over the office, and ✕ goes back to it.
 const SCREENS = [
-  ['Overview', 'overview', 'Mission Control'], ['Pipeline', 'pipeline', 'Pipeline'], ['Decisions', 'decisions', 'Decisions'], ['Team', 'team', 'Team'],
-  ['Evidence and PR', 'evidence', 'Evidence'], ['Product', 'product', 'Product'], ['Brain', 'brain', 'Project Brain'], ['Benchmark', 'benchmark', 'Benchmark'],
-  ['Assistant', 'assistant', 'The assistant is off in demo mode'], ['Settings', 'settings', 'Settings'],
+  ['Mission Control', 'overview', 'Mission Control', false], ['Team', 'team', 'Team', false], ['Evidence and PR', 'evidence', 'Evidence', false], ['Settings', 'settings', 'Settings', false],
+  ['Product', 'product', 'Product', true], ['Brain', 'brain', 'Project Brain', true], ['Benchmark', 'benchmark', 'Benchmark', true],
+  ['Assistant', 'assistant', 'The assistant is off in demo mode', true], ['New project', 'onboarding', null, true],
 ] as const;
 
-test('every screen opens from the top bar in a drawer over the office, and Office goes back', async ({ page }) => {
+test('every screen opens from the top bar over the office, which stays in view, and ✕ goes back to it', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page);
   const nav = page.getByRole('navigation', { name: 'Primary' });
-  for (const [link, route, heading] of SCREENS) {
-    // A count can follow the name (Decisions, 1 waiting).
+  for (const [link, route, heading, inMore] of SCREENS) {
+    if (inMore) await nav.getByRole('button', { name: /^More/ }).click();
+    // A count can follow the name (Mission Control, 1 decision waiting).
     await nav.getByRole('link', { name: new RegExp(`^${link}`) }).click();
     await expect(page.getByTestId('view-drawer')).toHaveAttribute('data-view', route);
-    await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
+    if (heading) await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
     await expect(page.locator('#main')).toBeFocused();
-    // The office is behind the drawer, hidden from assistive technology there.
+    // The office is still drawn behind, and hidden from assistive technology while a drawer is in front.
+    await expect(page.getByTestId('office-canvas')).toBeVisible();
     await expect(page.getByRole('img', { name: /^Office for/ })).toHaveCount(0);
+    if (route === 'settings') {
+      // Settings is the centred modal; everything else is inert while it is open.
+      await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveAttribute('aria-modal', 'true');
+      expect(await page.getByTestId('top-bar').evaluate((el) => el.closest('[inert]') !== null)).toBe(true);
+    } else {
+      // A side drawer: the team cards stay usable beside it.
+      await expect(page.getByTestId('team-panel')).toBeVisible();
+    }
+    await page.getByTestId('view-drawer-close').click();
+    await expect(page.getByTestId('view-drawer')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toHaveCount(1);
   }
-  await nav.getByRole('link', { name: 'New project', exact: true }).click();
-  await expect(page.getByTestId('view-drawer')).toHaveAttribute('data-view', 'onboarding');
-  await page.getByTestId('view-drawer-close').click();
-  await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toBeVisible();
-  await expect(page.getByTestId('view-drawer')).toHaveCount(0);
+});
+
+test('Mission Control is one drawer with Overview, Pipeline and Decisions as its tabs', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, 'decision-queue', '#/overview');
+  const tabs = page.getByRole('navigation', { name: 'Mission Control' });
+  await expect(tabs.getByRole('link', { name: 'Overview' })).toHaveAttribute('aria-current', 'page');
+  await tabs.getByRole('link', { name: 'Pipeline' }).click();
+  await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
+  await tabs.getByRole('link', { name: /^Decisions/ }).click();
+  await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /^Mission Control/ })).toHaveAttribute('aria-current', 'page');
+});
+
+test('the side drawer can be maximised and resized, and keeps its width in this browser', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, 'human-wait', '#/team');
+  const d = page.getByTestId('view-drawer');
+  const before = (await d.boundingBox())!;
+  await page.getByRole('button', { name: 'Maximize' }).click();
+  await expect.poll(async () => (await d.boundingBox())!.x).toBe(16);
+  await page.getByRole('button', { name: 'Restore size' }).click();
+  await expect.poll(async () => Math.round((await d.boundingBox())!.width)).toBe(Math.round(before.width));
+  const handle = (await page.getByTestId('drawer-resize').boundingBox())!;
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 + 200, handle.y + handle.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => Math.round((await d.boundingBox())!.width)).toBe(Math.round(before.width) - 200);
+  expect(Number(await page.evaluate(() => localStorage.getItem('selarikru.drawerWidth')))).toBe(Math.round(before.width) - 200);
 });
 
 test('the action items entry in the top bar opens the attention queue', async ({ page }) => {
@@ -157,7 +206,7 @@ test.describe('settings tabs', () => {
     await tabs.getByRole('link', { name: 'Knowledge and skills' }).click();
     await expect(page.getByRole('heading', { level: 2, name: 'Knowledge and skills' })).toBeVisible();
     await tabs.getByRole('link', { name: 'Workflow', exact: true }).click();
-    await expect(page.getByRole('main')).toContainText('Human merge on GitHub. Agents never merge.');
+    await expect(page.locator('#main')).toContainText('Human merge on GitHub. Agents never merge.');
     await tabs.getByRole('link', { name: 'Stack', exact: true }).click();
     await expect(page.getByRole('heading', { level: 2, name: 'Stack' })).toBeVisible();
     await tabs.getByRole('link', { name: 'MCP', exact: true }).click();

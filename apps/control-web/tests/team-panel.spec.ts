@@ -398,8 +398,10 @@ test('the page beside an open drawer is dimmed and says why it does not respond'
   const area = (await content.boundingBox())!;
   expect(hint.x).toBeGreaterThanOrEqual(area.x);
   expect(hint.y).toBeGreaterThanOrEqual(area.y);
-  await page.evaluate(() => window.scrollTo(0, 600));
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  // The screen scrolls inside its drawer (T5.12): scroll it there.
+  const scroller = page.getByTestId('view-drawer').locator('.scroll-thin').first();
+  await scroller.evaluate((el) => { el.scrollTop = 600; });
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   await expect(page.getByTestId('page-paused-hint')).toBeInViewport();
   await page.keyboard.press('Escape');
   await expect(content).not.toHaveAttribute('data-paused', 'true');

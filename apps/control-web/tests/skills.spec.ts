@@ -54,7 +54,8 @@ test('review a staged pack, bind it, and see it with its digest in the worker dr
   await expect(page.getByTestId('skills-history-row')).toHaveCount(3);
   await expect(notice(page)).toContainText('In force now');
 
-  // The worker drawer: the attempt's packs, each with the digest it was checked against.
+  // The worker drawer: the attempt's packs, each with the digest it was checked against. Settings is modal, so it is closed first.
+  await page.getByRole('link', { name: 'Close settings' }).click();
   await page.locator('[data-testid="team-panel-row"]').first().click();
   const drawer = page.getByTestId('worker-drawer');
   await drawer.getByRole('tab', { name: 'Context' }).click();

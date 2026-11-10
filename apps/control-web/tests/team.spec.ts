@@ -235,6 +235,8 @@ test('spend is labelled as the task\'s, not the worker\'s own', async ({ page })
 test('selecting text in a row does not open the drawer, and a plain click still does', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openTeam(page, fixture('healthy-parallel-work'));
+  // The fleet table needs the room: the drawer is maximised over the office.
+  await page.getByRole('button', { name: 'Maximize' }).click();
   const text = rowOf(page, 'runner_local_1').getByText('Feedback API');
   const box = (await text.boundingBox())!;
   await page.mouse.move(box.x + 1, box.y + box.height / 2);
