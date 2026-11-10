@@ -104,7 +104,7 @@ f="node-v$v-linux-$a.tar.gz"
 u="https://nodejs.org/dist/v$v"
 t="$(mktemp -d)"
 trap 'rm -rf "$t"' EXIT
-curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 110 --retry 1 --retry-delay 3 -o "$t/$f" "$u/$f" || exit 65
+curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 420 --retry 1 --retry-delay 3 -o "$t/$f" "$u/$f" || exit 65
 curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 20 --retry 2 --retry-delay 2 -o "$t/SHASUMS256.txt" "$u/SHASUMS256.txt" || exit 65
 w="$(awk -v f="$f" '$2 == f { print $1; exit }' "$t/SHASUMS256.txt")"
 [ -n "$w" ] || { echo "no checksum listed for $f" >&2; exit 66; }

@@ -358,7 +358,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       if (!provisioned.ok) {
         // One line each: the log clips a line, and the cause is often not on the last one. The sandbox is gone after this, so this is the only copy.
         for (const line of (provisioned.detail ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-40)) log(`provisioning output: ${line}`);
-        return await finish('infrastructure_failed', `provisioning_failed: ${provisioned.reason}`, null, null);
+        // Restricted output stays on this machine: the published reason then carries the runtime's sentence and no line the guest printed.
+        return await finish('infrastructure_failed', `provisioning_failed: ${lease.streamable === true ? provisioned.reason : provisioned.summary}`, null, null);
       }
       log(`toolchain ready: node ${provisioned.nodeVersion} pnpm ${provisioned.pnpmVersion} arch ${provisioned.arch} in ${provisioned.seconds.toFixed(1)}s`);
     }
@@ -375,6 +376,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       }
       log(`could not report setup as complete; the original deadline stands: ${err instanceof Error ? err.message : 'error'}`);
     }
+    // The heartbeat kept running while the server answered: a shutdown, a lost lease or an owner's cancel that arrived meanwhile must not start a worker.
+    if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
+    if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+    if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
     armDeadline(workMs);
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
     const harness = harnessEntry.create(launcher);

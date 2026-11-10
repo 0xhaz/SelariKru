@@ -60,10 +60,13 @@ export interface ProvisionOptions {
   readonly timeoutMs?: number;
 }
 
-/** `reason` is the runtime's sentence plus one short redacted line of guest output, and is safe to publish. `detail` is the end of the guest's output, redacted, for the runner's log only. */
+/**
+ * `reason` is the runtime's sentence plus one short redacted line of guest output, and is safe to publish for work that may leave the machine. `summary` is the runtime's sentence
+ * alone, with nothing the guest printed: what a restricted attempt publishes. `detail` is the end of the guest's output, redacted, for the runner's log only.
+ */
 export type ProvisionResult =
   | { readonly ok: true; readonly arch: string; readonly nodeVersion: string; readonly pnpmVersion: string; readonly seconds: number }
-  | { readonly ok: false; readonly reason: string; readonly detail: string | null };
+  | { readonly ok: false; readonly reason: string; readonly summary: string; readonly detail: string | null };
 
 export interface AttemptExit {
   readonly code: number | null;

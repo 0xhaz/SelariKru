@@ -413,6 +413,15 @@ describe('toolchain provisioning', () => {
     expect(w.logs.join('\n')).toContain('boom in');
   });
 
+  it.each(['node', 'pnpm', 'deps'] as const)('a restricted attempt publishes no guest output line when %s fails, and keeps it in the runner\'s own log', async (step) => {
+    const { w, deps } = await setup({ baseFiles: NODE_PROJECT, streamable: false, fake: { provision: (s: string) => (s === step ? { code: 1, stdout: 'error: restricted words on stdout', stderr: 'ERR_RESTRICTED restricted words on stderr', timedOut: false } : undefined) } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('infrastructure_failed');
+    const reason = (w.api.published[0] as { reason: string }).reason;
+    expect(reason).toMatch(/^provisioning_failed: .*(failed|exit)/);
+    expect(reason).not.toMatch(/restricted words|ERR_RESTRICTED/);
+    expect(w.logs.join('\n')).toContain('restricted words on stderr');
+  });
+
   it('a step that said why only on stdout leaves the cause in the runner\'s log and on screen', async () => {
     const stdout = ' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile"\n\nNote that in CI this is the default.\n';
     const { w, deps } = await setup({ baseFiles: NODE_PROJECT, fake: { provision: (s) => (s === 'deps' ? { code: 1, stdout, stderr: '', timedOut: false } : undefined) } });
@@ -454,6 +463,36 @@ describe('toolchain provisioning', () => {
     const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { throw new LeaseLostError(); } });
     expect((await runAttempt(deps, w.lease)).outcome).toBe('lease_lost');
     expect(w.sbx.streams).toHaveLength(0);
+  });
+
+  describe('while setup is being reported done', () => {
+    /** Answers only after the heartbeat has had time to run, as a slow control plane would. */
+    const slowSetup = async () => { await new Promise((r) => setTimeout(r, 120)); return { deadlineAt: new Date(Date.now() + 3_600_000).toISOString() }; };
+
+    it('an owner cancel starts no worker', async () => {
+      let reporting = false;
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, heartbeat: async () => ({ cancelRequested: reporting }), setupComplete: async () => { reporting = true; return slowSetup(); } });
+      const report = await runAttempt(deps, w.lease);
+      expect(w.sbx.streams).toHaveLength(0);
+      expect(report.outcome).toBe('failed');
+      expect((w.api.published[0] as { reason: string }).reason).toMatch(/cancelled by owner request before the agent started/);
+    });
+
+    it('a runner shutdown starts no worker and publishes nothing', async () => {
+      const ctl = new AbortController();
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, setupComplete: async () => { ctl.abort(); return slowSetup(); } }, { signal: ctl.signal });
+      expect((await runAttempt(deps, w.lease)).outcome).toBe('aborted');
+      expect(w.sbx.streams).toHaveLength(0);
+      expect(w.api.published).toHaveLength(0);
+    });
+
+    it('a lease lost on a heartbeat starts no worker', async () => {
+      let reporting = false;
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, heartbeat: async () => { if (reporting) throw new LeaseLostError(); return { cancelRequested: false }; }, setupComplete: async () => { reporting = true; return slowSetup(); } });
+      expect((await runAttempt(deps, w.lease)).outcome).toBe('lease_lost');
+      expect(w.sbx.streams).toHaveLength(0);
+      expect(w.api.published).toHaveLength(0);
+    });
   });
 
   it('a sandbox that cannot be created is an infrastructure failure, with its setup time', async () => {

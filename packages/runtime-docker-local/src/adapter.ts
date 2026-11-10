@@ -37,13 +37,16 @@ export interface RuntimeTimeouts {
   readonly lsMs: number;
   readonly createMs: number;
   readonly rmMs: number;
-  /** Downloading, checking and unpacking Node (`curl`'s own limits fit inside this). */
+  /**
+   * Downloading, checking and unpacking Node (`curl`'s own limits fit inside this). The ~58.3 MB tarball gets `--max-time 420` per try, so a link holding ~150 KB/s (389 s) still
+   * finishes in one; two tries (843 s) and the checksum list (64 s at worst) fit in 960 s.
+   */
   readonly provisionNodeMs: number;
   readonly provisionPnpmMs: number;
   readonly provisionDepsMs: number;
 }
 
-export const DEFAULT_TIMEOUTS: RuntimeTimeouts = { signalMs: 5_000, graceMs: 10_000, stopMs: 30_000, lsMs: 10_000, createMs: 600_000, rmMs: 60_000, provisionNodeMs: 300_000, provisionPnpmMs: 180_000, provisionDepsMs: 480_000 };
+export const DEFAULT_TIMEOUTS: RuntimeTimeouts = { signalMs: 5_000, graceMs: 10_000, stopMs: 30_000, lsMs: 10_000, createMs: 600_000, rmMs: 60_000, provisionNodeMs: 960_000, provisionPnpmMs: 180_000, provisionDepsMs: 480_000 };
 
 export interface SbxRuntimeOptions {
   readonly home: string;
@@ -77,15 +80,22 @@ const MAX_CAUSE_CHARS = 160;
 const MAX_DETAIL_CHARS = 1500;
 
 /**
- * What a failed step said, redacted. stderr when there is any, else stdout: `pnpm install` reports a stale lockfile on stdout with nothing on stderr. `cause` is one short line
- * for the published reason, preferring the line that names the error, since what follows it is often advice. `detail` is the end of the output, for the runner's log.
+ * What a failed step said, redacted. `cause` is one short line for the published reason: the first line naming an error (`ERR_...` or `error`), looked for in stderr and then in
+ * stdout, since `pnpm install` reports a stale lockfile on stdout while stderr may hold only deprecation warnings, and what follows the error line is often advice. With no such
+ * line, the last line of stderr, else of stdout. `detail` is the end of both streams, for the runner's log.
  */
 function stepOutput(r: SbxResult): { readonly cause: string; readonly detail: string } | null {
-  const text = redactSecrets((r.stderr.trim() !== '' ? r.stderr : r.stdout).replace(ANSI, '').replace(CONTROL, '')).trim();
-  if (text === '') return null;
-  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-  const cause = (lines.find((l) => /\bERR_[A-Z0-9_]+|\berror\b/i.test(l)) ?? lines.at(-1)!).slice(0, MAX_CAUSE_CHARS).replace(/[.:;,\s]+$/, '');
-  const tail = text.slice(-MAX_DETAIL_CHARS);
+  const clean = (s: string) => redactSecrets(s.replace(ANSI, '').replace(CONTROL, '')).trim();
+  const err = clean(r.stderr);
+  const out = clean(r.stdout);
+  const linesOf = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean);
+  const named = (lines: readonly string[]) => lines.find((l) => /\bERR_[A-Z0-9_]+|\berror\b/i.test(l));
+  const errLines = linesOf(err);
+  const outLines = linesOf(out);
+  const line = named(errLines) ?? named(outLines) ?? errLines.at(-1) ?? outLines.at(-1);
+  if (line === undefined) return null;
+  const cause = line.slice(0, MAX_CAUSE_CHARS).replace(/[.:;,\s]+$/, '');
+  const tail = [out, err].filter((s) => s !== '').join('\n').slice(-MAX_DETAIL_CHARS);
   return { cause, detail: tail.includes(cause) ? tail : `${cause}\n${tail}` };
 }
 
@@ -276,7 +286,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
    * caller's `reason` is this adapter's sentence plus one short redacted line of the step's output, and the fuller output stays in `detail`, redacted and for the runner's log only.
    */
   async provision(handle: SandboxHandle, spec: ToolchainSpec, opts: ProvisionOptions = {}): Promise<ProvisionResult> {
-    if (!EXACT_VERSION.test(spec.nodeVersion) || !EXACT_VERSION.test(spec.pnpmVersion)) return { ok: false, reason: 'invalid toolchain version', detail: null };
+    if (!EXACT_VERSION.test(spec.nodeVersion) || !EXACT_VERSION.test(spec.pnpmVersion)) return { ok: false, reason: 'invalid toolchain version', summary: 'invalid toolchain version', detail: null };
     const { nodeVersion: node, pnpmVersion: pnpm } = spec;
     const startedMs = Date.now();
     const deadlineMs = opts.timeoutMs !== undefined ? startedMs + opts.timeoutMs : Infinity;
@@ -297,14 +307,14 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
       },
     ];
     for (const step of steps) {
-      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', detail: null };
+      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', summary: 'provisioning stopped', detail: null };
       const timeoutMs = Math.max(1, Math.min(step.limitMs, deadlineMs - Date.now()));
       const r = await this.sbx.run(step.args, { timeoutMs, ...(opts.signal ? { signal: opts.signal } : {}) }).catch((err: unknown) => ({ code: null, stdout: '', stderr: err instanceof Error ? err.message : 'error', timedOut: false }));
-      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', detail: null };
+      if (opts.signal?.aborted) return { ok: false, reason: 'provisioning stopped', summary: 'provisioning stopped', detail: null };
       if (r.timedOut || r.code !== 0) {
         const said = stepOutput(r);
         const what = r.timedOut ? `${step.label} timed out` : step.failed(r.code);
-        return { ok: false, reason: said ? `${what}: ${said.cause}` : what, detail: said?.detail ?? null };
+        return { ok: false, reason: said ? `${what}: ${said.cause}` : what, summary: what, detail: said?.detail ?? null };
       }
       step.done?.(r.stdout);
     }

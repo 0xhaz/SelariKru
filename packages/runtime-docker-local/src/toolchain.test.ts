@@ -206,12 +206,29 @@ describe('SbxRuntimeAdapter.provision', () => {
     expect(r.detail).toContain('the real cause');
   });
 
-  it('prefers stderr when there is any', async () => {
+  it('with no line naming an error, the last stderr line is the cause', async () => {
     const { rt, handle } = await make({ provision: (s) => (s === 'pnpm' ? { code: 70, stdout: 'from stdout', stderr: 'from stderr', timedOut: false } : undefined) });
     const r = await rt.provision(handle, SPEC);
     if (r.ok) throw new Error('unexpected');
     expect(r.reason).toContain('from stderr');
-    expect(r.detail).not.toContain('from stdout');
+  });
+
+  it('an error line on stdout wins over stderr that holds only warnings, and the detail keeps both', async () => {
+    const stdout = 'Progress: resolved 200\n ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile"\nNote that in CI this is the default.';
+    const stderr = ' WARN  deprecated inflight@1.0.6\n WARN  1 deprecated subdependencies found';
+    const { rt, handle } = await make({ provision: (s) => (s === 'deps' ? { code: 1, stdout, stderr, timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).toMatch(/failed \(exit 1\): ERR_PNPM_OUTDATED_LOCKFILE/);
+    expect(r.detail).toContain('ERR_PNPM_OUTDATED_LOCKFILE');
+    expect(r.detail).toContain('deprecated subdependencies');
+  });
+
+  it('an error line on stderr still wins over one on stdout', async () => {
+    const { rt, handle } = await make({ provision: (s) => (s === 'pnpm' ? { code: 70, stdout: 'error: from stdout', stderr: 'npm error code E404', timedOut: false } : undefined) });
+    const r = await rt.provision(handle, SPEC);
+    if (r.ok) throw new Error('unexpected');
+    expect(r.reason).toContain('npm error code E404');
   });
 
   it('a secret on stdout is redacted out of both the reason and the detail', async () => {
@@ -335,6 +352,16 @@ cp "${served}/$(basename "$url")" "$out"`);
       worst += (retries + 1) * n('--max-time') + retries * n('--retry-delay');
     }
     expect(worst).toBeLessThan(DEFAULT_TIMEOUTS.provisionNodeMs / 1000);
+  });
+
+  it('a slow link (150 KB/s) still fetches the tarball in one try, and both tries fit the step', () => {
+    // node-v24.22.1-linux-x64.tar.gz, the larger of the two, is 58,290,700 bytes (Content-Length on nodejs.org, 2026-11-10).
+    const TARBALL_BYTES = 58_290_700;
+    const tarball = PROVISION_NODE_SCRIPT.split('\n').find((l) => l.startsWith('curl ') && l.includes('$f"'))!;
+    const maxTime = Number(/--max-time (\d+)/.exec(tarball)![1]);
+    expect(maxTime - 15).toBeGreaterThan(TARBALL_BYTES / 150_000);
+    expect(Number(/--retry (\d+)/.exec(tarball)![1])).toBe(1);
+    expect(2 * maxTime + 3).toBeLessThan(DEFAULT_TIMEOUTS.provisionNodeMs / 1000);
   });
 
   it('exits 66 when SHASUMS256.txt has no line for this tarball', async () => {
