@@ -419,7 +419,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">
-          <span className="mb-1 block" data-testid="drawer-keys"><kbd className={KBD}>Esc</kbd> closes · <kbd className={KBD}><span aria-hidden="true">←</span><span className="sr-only">Left arrow</span></kbd> <kbd className={KBD}><span aria-hidden="true">→</span><span className="sr-only">Right arrow</span></kbd> switch tabs</span>
+          <span className="mb-1 block" data-testid="drawer-keys"><kbd className={KBD}>Esc</kbd> closes this. On the tabs, <kbd className={KBD}><span aria-hidden="true">←</span><span className="sr-only">Left arrow</span></kbd> and <kbd className={KBD}><span aria-hidden="true">→</span><span className="sr-only">Right arrow</span></kbd> switch tabs; <kbd className={KBD}>Home</kbd> and <kbd className={KBD}>End</kbd> go to the first and last.</span>
           Viewing changes nothing; only the buttons in Settings act, each after you confirm what it does. Closing this never stops the worker, and ends any control mode.
         </footer>
       </div>

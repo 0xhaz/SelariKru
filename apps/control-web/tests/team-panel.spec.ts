@@ -350,6 +350,22 @@ test('the folded toggle never says nobody needs you while the team is unavailabl
   await expect(toggle).not.toContainText(/\b0\b/);
 });
 
+test('the folded toggle says loading, never nobody, until the first snapshot arrives', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await spied(page, { spiedFixture: 'human-wait', holdSnapshot: true }, 'pipeline');
+  const toggle = page.getByTestId('team-panel-toggle');
+  const count = toggle.getByTestId('team-needs-you');
+  await expect(count).toHaveAttribute('data-status', 'loading');
+  await expect(count.locator('[aria-hidden="true"]')).toHaveText('?');
+  await expect(toggle).toHaveAccessibleName(/^Team\s*loading$/);
+  await expect(toggle).not.toContainText('nobody needs you');
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(count).toContainText('loading');
+  await page.evaluate(() => window.__releaseSnapshot!());
+  await expect(count).not.toHaveAttribute('data-status');
+  await expect(count).toContainText('needs you');
+});
+
 test('the page beside an open drawer is dimmed and says why it does not respond', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/?demo&fixture=human-wait#/overview');

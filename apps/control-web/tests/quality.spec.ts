@@ -19,14 +19,18 @@ async function tabTo(page: Page, target: Locator, max = 80): Promise<void> {
   throw new Error(`not reachable with Tab: ${String(target)}`);
 }
 
-/** The focused element draws a visible ring (WCAG 2.4.7): an outline or a box shadow that is not transparent. */
+/**
+ * The focused element draws a real focus indicator (WCAG 2.4.7): it matches `:focus-visible` and has a solid outline at least 2 px wide in an opaque color. The app draws
+ * focus with an outline everywhere; an ordinary box shadow, such as a card's or the drawer's, is not a focus indicator and does not count.
+ */
 async function expectVisibleFocus(page: Page): Promise<void> {
   const ring = await page.evaluate(() => {
     const el = document.activeElement as HTMLElement;
     const s = getComputedStyle(el);
-    return { tag: el.tagName, outline: s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) > 0 && s.outlineColor !== 'rgba(0, 0, 0, 0)', shadow: s.boxShadow !== 'none' };
+    const alpha = (c: string) => { const m = c.match(/[\d.]+/g); return m && m.length === 4 ? Number(m[3]) : 1; };
+    return { tag: `${el.tagName} ${(el.textContent ?? '').trim().slice(0, 30)}`, visible: el.matches(':focus-visible'), outline: s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2 && alpha(s.outlineColor) === 1 };
   });
-  expect(ring.outline || ring.shadow, `focus ring on ${ring.tag}`).toBe(true);
+  expect(ring.visible && ring.outline, `focus ring on ${ring.tag}`).toBe(true);
 }
 
 async function press(page: Page, target: Locator, key = 'Enter'): Promise<void> {
@@ -161,8 +165,13 @@ test.describe('keyboard only', () => {
     const next = drawer.getByRole('tab', { selected: true });
     await expect(next).toBeFocused();
     await expect(next).not.toHaveAccessibleName('Task');
+    await page.keyboard.press('End');
+    await expect(drawer.getByRole('tab').last()).toBeFocused();
+    await expect(drawer.getByRole('tab').last()).toHaveAttribute('aria-selected', 'true');
+    await page.keyboard.press('Home');
+    await expect(drawer.getByRole('tab', { name: 'Task' })).toBeFocused();
     // The keys are shown where they work (design section 11: show shortcuts in the UI).
-    await expect(drawer.getByTestId('drawer-keys')).toHaveText(/Esc closes.*←.*→.*tabs/);
+    await expect(drawer.getByTestId('drawer-keys')).toHaveText(/^Esc closes this\. On the tabs, ←.*and →.* switch tabs; Home and End go to the first and last\.$/);
     await page.keyboard.press('Escape');
     await expect(drawer).toHaveCount(0);
     await expect(row).toBeFocused();
@@ -181,7 +190,7 @@ async function contrastFailures(page: Page): Promise<{ violations: string[]; inc
 test.describe('contrast as painted', () => {
   for (const theme of ['dark', 'light'] as const) {
     for (const fixture of FIXTURES) {
-      test(`${theme}: every view with ${fixture}, and the drawer and dialog over them`, async ({ page }) => {
+      test(`${theme}: every view with ${fixture}`, async ({ page }) => {
         test.setTimeout(90_000);
         await page.setViewportSize({ width: 1440, height: 900 });
         await page.addInitScript(([f, t]) => {
@@ -196,24 +205,6 @@ test.describe('contrast as painted', () => {
           const r = await contrastFailures(page);
           expect(r.violations, `${route}`).toEqual([]);
           incomplete.push(...r.incomplete.map((x) => `${route}: ${x}`));
-        }
-        // The drawer beside the panel, and the paused hint on the scrim.
-        const row = page.locator('[data-testid="team-panel-row"]').first();
-        if (await row.count()) {
-          await page.goto('/tests/harness/index.html#/overview');
-          await row.click();
-          for (const tab of ['Task', 'Settings', 'Terminal']) {
-            await page.getByTestId('worker-drawer').getByRole('tab', { name: tab }).click();
-            expect((await contrastFailures(page)).violations, `drawer ${tab}`).toEqual([]);
-          }
-        }
-        // A confirmation dialog over Decisions, where the fixture has one to confirm.
-        await page.goto('/tests/harness/index.html#/decisions');
-        const deny = page.getByTestId('decision-card').getByRole('button', { name: 'Deny and block task' }).first();
-        if (await deny.count()) {
-          await deny.click();
-          await expect(page.getByRole('dialog')).toBeVisible();
-          expect((await contrastFailures(page)).violations, 'confirm dialog').toEqual([]);
         }
         test.info().annotations.push({ type: 'incomplete', description: String(incomplete.length) });
       });
@@ -231,6 +222,25 @@ const moving = (page: Page) => page.evaluate(() => [...document.querySelectorAll
   if (s.scrollBehavior === 'smooth') out.push(`${el.tagName} smooth scroll`);
   return out;
 }));
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`${theme}: contrast in the worker drawer, on the paused page beside it, and in a confirm dialog`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.addInitScript((t) => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; window.localStorage.setItem('selarikru.theme', t); }, theme);
+    await page.goto('/tests/harness/index.html#/overview');
+    await page.locator('[data-testid="team-panel-row"][data-panel-worker="runner_local_1"]').click();
+    await expect(page.getByTestId('page-paused-hint')).toBeVisible();
+    for (const tab of ['Task', 'Settings', 'Terminal']) {
+      await page.getByTestId('worker-drawer').getByRole('tab', { name: tab }).click();
+      expect((await contrastFailures(page)).violations, `drawer ${tab}`).toEqual([]);
+    }
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue' }; });
+    await page.goto('/tests/harness/index.html#/decisions');
+    await page.getByTestId('decision-card').first().getByRole('button', { name: 'Deny and block task' }).click();
+    await expect(page.getByRole('dialog')).toBeVisible();
+    expect((await contrastFailures(page)).violations, 'confirm dialog').toEqual([]);
+  });
+}
 
 test.describe('reduced motion', () => {
   test('with reduce, nothing on any view transitions or animates', async ({ page }) => {

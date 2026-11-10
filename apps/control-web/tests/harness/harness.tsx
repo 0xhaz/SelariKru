@@ -65,6 +65,8 @@ interface Scenario {
   onboardingApi?: { baseUrl: string; token?: string; /** 'federated' stands for an account with no password. */ signIn?: 'federated' };
   /** Reports the fixture as observed live data, so real links are shown. */
   observed?: boolean;
+  /** The first snapshot load waits until the test calls `window.__releaseSnapshot`, holding the shell in its loading state. */
+  holdSnapshot?: boolean;
 }
 
 declare global {
@@ -73,6 +75,7 @@ declare global {
     __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[] };
     __spiedSource?: EngineeringDataSource;
     __allowFailureLoads?: () => void;
+    __releaseSnapshot?: () => void;
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
     __store: typeof useAssistantStore;
@@ -198,10 +201,14 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
   const session = (await loadDemoSession(sc.fault ?? null))!;
   let refuseFailureLoads = sc.refuseFailureLoads === true;
   window.__allowFailureLoads = () => { refuseFailureLoads = false; };
+  let release: () => void = () => undefined;
+  const held = sc.holdSnapshot ? new Promise<void>((r) => { release = r; }) : Promise.resolve();
+  window.__releaseSnapshot = () => release();
   const project = session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!;
   const source: EngineeringDataSource = {
     ...session.source,
     getSnapshot: async (projectId) => {
+      await held;
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
       if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch && !sc.workerPatch) return base;
