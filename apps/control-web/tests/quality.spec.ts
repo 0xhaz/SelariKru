@@ -178,7 +178,8 @@ test.describe('keyboard only', () => {
   });
 });
 
-const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'settings', 'settings?section=skills'] as const;
+// The office (T5.12) is the default screen; every other route opens in a drawer over it.
+const ROUTES = ['office', 'overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'settings', 'settings?section=skills'] as const;
 const FIXTURES = ['human-wait', 'decision-queue', 'failed-ci', 'runner-loss', 'budget-stop', 'merge-flow'] as const;
 
 async function contrastFailures(page: Page): Promise<{ violations: string[]; incomplete: string[] }> {
@@ -270,7 +271,7 @@ test.describe('reduced motion', () => {
 });
 
 test.describe('390 px', () => {
-  for (const [route, fixture] of [['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop'], ['brain', 'healthy-parallel-work'], ['settings', 'healthy-parallel-work'], ['settings?section=skills', 'healthy-parallel-work'], ['product', 'merge-flow']] as const) {
+  for (const [route, fixture] of [['office', 'human-wait'], ['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop'], ['brain', 'healthy-parallel-work'], ['settings', 'healthy-parallel-work'], ['settings?section=skills', 'healthy-parallel-work'], ['product', 'merge-flow']] as const) {
     for (const theme of ['dark', 'light'] as const) {
       test(`${route} with ${fixture} in ${theme}: no sideways scroll, nothing cut off, targets big enough, axe clean`, async ({ page }) => {
         await page.setViewportSize({ width: 390, height: 844 });
