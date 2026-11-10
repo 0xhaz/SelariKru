@@ -284,3 +284,47 @@ describe('repair require_approval', () => {
   });
 });
 
+
+describe('a restricted attempt: the server keeps the agent\'s words out whatever the runner sends', () => {
+  const WORDS = 'drop the patients table holding RESTRICTED-CANARY rows';
+  const restrict = (lease: Lease) => t.db.execute(sql`UPDATE attempts SET detail = detail || '{"terminalStreamable": false}'::jsonb WHERE attempt_id = ${lease.attemptId}`);
+  const leaked = async () => JSON.stringify([
+    ...(await t.db.execute(sql`SELECT * FROM approvals`)),
+    ...(await t.db.execute(sql`SELECT exit_reason FROM attempts`)),
+    ...(await t.db.execute(sql`SELECT payload FROM events`)),
+  ]).includes('RESTRICTED-CANARY');
+
+  it('an approval request is recorded with a fixed sentence naming the operation', async () => {
+    const lease = await claimOne();
+    await restrict(lease);
+    await request(lease, 'destructive_data_migration', WORDS);
+    expect((await statusOf(t.db, 't1')).status).toBe('awaiting_approval');
+    expect(await leaked()).toBe(false);
+    const [row] = await approvals();
+    expect(String((row!['detail'] as { reason: string }).reason)).toMatch(/destructive_data_migration.*restricted/);
+  });
+
+  it('a request that cannot take effect or that policy denies is blocked without the words too', async () => {
+    const a = await claimOne('t_net');
+    await restrict(a);
+    await request(a, 'new_domain', WORDS, { destination: { kind: 'network_host', host: 'docs.example.com' } });
+    const b = await claimOne('t_deny');
+    await restrict(b);
+    await request(b, undefined, WORDS);
+    expect(await leaked()).toBe(false);
+  });
+
+  it('a diff reason with paths is cut to the count', async () => {
+    const lease = await claimOne();
+    await restrict(lease);
+    await s.publishResult(lease, { outcome: 'failed', reason: 'diff outside allowedPaths: 1 path(s): secret/RESTRICTED-CANARY.md (outside)' } as PublishResult);
+    expect(await leaked()).toBe(false);
+    expect(String((await t.db.execute(sql`SELECT exit_reason FROM attempts`))[0]!['exit_reason'])).toMatch(/^diff outside allowedPaths: 1 path\(s\); the paths stay on the device/);
+  });
+
+  it('a streamable attempt keeps the agent\'s words', async () => {
+    const lease = await claimOne();
+    await request(lease, 'destructive_data_migration', WORDS);
+    expect(await leaked()).toBe(true);
+  });
+});

@@ -28,6 +28,24 @@ export function approvalUnavailableReason(operation: string): 'egress_enforcemen
   return operation === 'scope_change' || operation === 'broader_scope' ? 'scope_grant_unavailable' : null;
 }
 
+/**
+ * The reason a restricted attempt publishes for an approval request: the operation and destination, which are structured and checked, and none of the agent's own words.
+ * Restricted output stays on the device, and those words are output. The runner keeps them in its own log; the server writes this sentence for a restricted attempt whatever
+ * a runner sent.
+ */
+export function restrictedApprovalReason(operation: string | undefined, destination: { readonly host: string } | null | undefined): string {
+  return `The worker asked for ${operation ?? 'an unnamed operation'}${destination ? ` to reach ${destination.host}` : ''}. Its own words stay on the device because this work is restricted.`;
+}
+
+/** The completion gate's reason for a restricted attempt: how many paths broke the rule, not which. The paths are names the agent chose. */
+export const restrictedDiffReason = (count: number): string => `diff outside allowedPaths: ${count} path(s); the paths stay on the device because this work is restricted`;
+
+/** Reads the count back out of a runner's completion-gate reason, so the server can reduce one a runner sent with paths in it. Null for any other reason. */
+export function diffViolationCount(reason: string): number | null {
+  const m = /^diff outside allowedPaths: (\d+) path\(s\)/.exec(reason);
+  return m ? Number(m[1]) : null;
+}
+
 /** A DNS name with an alphabetic last label: no raw IP addresses, schemes, ports, paths or wildcards. */
 const NETWORK_HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 

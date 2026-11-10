@@ -1,4 +1,4 @@
-import { approvalUnavailableReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
+import { approvalUnavailableReason, diffViolationCount, restrictedApprovalReason, restrictedDiffReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -144,13 +144,29 @@ export async function publishResult(ctx: SchedulerContext, lease: Lease, result:
   });
 }
 
-async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, result: PublishResult, statusRow: { status: string; currentRevision: number; rowRevision: number }): Promise<PublishReceipt> {
+/**
+ * What a restricted attempt may put in the record. Restricted output stays on the device, and an approval's reason and the paths of a diff outside `allowedPaths` are the
+ * agent's own words. A conforming runner already sends fixed text for both; this holds for one that does not. Every other reason a runner sends is its own sentence.
+ */
+function withoutAgentWords(result: PublishResult): PublishResult {
+  if (result.outcome === 'approval_requested') return { ...result, reason: restrictedApprovalReason(result.operation, result.destination) };
+  if (result.outcome === 'failed' || result.outcome === 'blocked') {
+    const count = diffViolationCount(result.reason);
+    if (count !== null) return { ...result, reason: restrictedDiffReason(count) };
+  }
+  return result;
+}
+
+async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: PublishResult, statusRow: { status: string; currentRevision: number; rowRevision: number }): Promise<PublishReceipt> {
   const now = ctx.now();
   const attempts = await loadAttempts(tx, lease, lease.revision);
   const attempt = attempts.find((a) => a.attemptId === lease.attemptId);
   const reason = checkLease(attempt, statusRow, lease, now);
   if (reason) throw new FencedPublish(conflict(lease, reason));
   const live = attempt!;
+  // Decided at claim from every source's label and stored with the attempt; the runner's word is not asked. A row without it is treated as restricted.
+  const restricted = (live.detail as { terminalStreamable?: unknown } | null)?.terminalStreamable !== true;
+  const result = restricted ? withoutAgentWords(sent) : sent;
 
   const revisions = await tx
     .select({ spec: schema.taskRevisions.spec })

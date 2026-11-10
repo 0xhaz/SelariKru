@@ -130,6 +130,33 @@ describe('the approval signal file', () => {
   });
 });
 
+describe('a restricted attempt keeps the agent\'s words on this machine', () => {
+  const WORDS = 'drop the patients table holding RESTRICTED-CANARY rows';
+  const signal = (cwd: string) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 's1', name: 'Write', input: { file_path: join(cwd, '.selarikru/approval-request.json'), content: JSON.stringify({ operation: 'destructive_data_migration', reason: WORDS }) } }] } });
+
+  it.each([[false, false], [true, true]] as const)('streamable %s: the published approval reason carries the agent\'s words: %s', async (streamable, carries) => {
+    const { w, deps } = await setup({ streamable, agent: async ({ stream, cwd }) => { stream.push(`${signal(cwd)}\n`); return false; } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('approval_requested');
+    const sent = w.api.published[0] as { reason: string; operation: string };
+    expect(sent.operation).toBe('destructive_data_migration');
+    if (carries) expect(sent.reason).toBe(WORDS);
+    else {
+      expect(sent.reason).not.toContain('RESTRICTED-CANARY');
+      expect(sent.reason).toMatch(/destructive_data_migration/);
+      expect(w.logs.join('\n')).toContain('RESTRICTED-CANARY');
+    }
+  });
+
+  it('a diff outside allowedPaths is reported by count only, with the paths in the runner\'s log', async () => {
+    const { w, deps } = await setup({ streamable: false, agent: async ({ write }) => { await write('src/ok.ts', 'ok'); await write('secret-plans/RESTRICTED-CANARY.md', 'x'); } });
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('failed');
+    const reason = (w.api.published[0] as { reason: string }).reason;
+    expect(reason).toMatch(/^diff outside allowedPaths: 1 path\(s\)/);
+    expect(reason).not.toContain('RESTRICTED-CANARY');
+    expect(w.logs.join('\n')).toContain('RESTRICTED-CANARY');
+  });
+});
+
 describe('MCP and tool restriction', () => {
   it('launches the agent with an empty strict MCP config and the explicit tool list', async () => {
     const { w, deps } = await setup({});
@@ -484,6 +511,13 @@ describe('toolchain provisioning', () => {
       expect((await runAttempt(deps, w.lease)).outcome).toBe('aborted');
       expect(w.sbx.streams).toHaveLength(0);
       expect(w.api.published).toHaveLength(0);
+    });
+
+    it('the attempt timeout running out starts no worker, and is setup\'s failure', async () => {
+      const { w, deps } = await setup({ baseFiles: NODE_PROJECT, task: { limits: { maxAttempts: 3, timeoutSeconds: 1, maxCostUsd: 1 } }, setupComplete: async () => { await new Promise((r) => setTimeout(r, 400)); return { deadlineAt: new Date(Date.now() + 3_600_000).toISOString() }; } }, { timeoutScale: 0.2 });
+      expect((await runAttempt(deps, w.lease)).outcome).toBe('infrastructure_failed');
+      expect(w.sbx.streams).toHaveLength(0);
+      expect((w.api.published[0] as { reason: string }).reason).toMatch(/timeout was reached during setup/);
     });
 
     it('a lease lost on a heartbeat starts no worker', async () => {

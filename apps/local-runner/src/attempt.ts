@@ -1,4 +1,4 @@
-import { PILOT_ROLE_PATHS } from '@selarikru/domain';
+import { PILOT_ROLE_PATHS, restrictedApprovalReason, restrictedDiffReason } from '@selarikru/domain';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
@@ -380,6 +380,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
     if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
+    // Nothing ran yet, so a clock that ran out while the server answered is the setup's, not the worker's.
+    if (flags.timedOut) return await finish('infrastructure_failed', 'provisioning_failed: the attempt timeout was reached during setup', null, null);
     armDeadline(workMs);
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
     const harness = harnessEntry.create(launcher);
@@ -449,8 +451,10 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
               approvalUnavailable = unavailable;
               log(`agent asked for ${ev.operation}, which cannot take effect: ${unavailable}`);
             } else {
-              approvalRequest = { operation: ev.operation, destination: ev.destination, reason: ev.reason };
-              log(`agent requested approval: ${ev.operation}`);
+              // Restricted work publishes a fixed sentence; the agent's words stay in this log, on this machine.
+              const restricted = lease.streamable !== true;
+              approvalRequest = { operation: ev.operation, destination: ev.destination, reason: restricted ? restrictedApprovalReason(ev.operation, ev.destination) : ev.reason };
+              log(`agent requested approval: ${ev.operation}${restricted ? ` (restricted; its reason stays here: ${redactSecrets(ev.reason)})` : ''}`);
             }
             requestStop();
           }
@@ -534,6 +538,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     if (!check.ok) {
       const shown = check.violations.slice(0, 5).map((v) => `${v.path} (${v.reason})`).join(', ');
+      if (lease.streamable !== true) {
+        // The paths are names the agent chose: restricted work reports how many, and the names stay in this log.
+        log(`diff outside allowedPaths: ${redactSecrets(shown)}`);
+        return await finish('failed', restrictedDiffReason(check.violations.length), cost, null);
+      }
       return await finish('failed', `diff outside allowedPaths: ${check.violations.length} path(s): ${shown}`, cost, null);
     }
     let manifest: string;
