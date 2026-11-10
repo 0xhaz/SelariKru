@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Chip, EmptyState, Panel, Timestamp, formatAge } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
@@ -51,13 +51,15 @@ export interface DecisionsViewProps {
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
   readonly onResync: () => void;
+  /** The Project Brain's open conflicts, shown below the queue. */
+  readonly brain?: ReactNode;
 }
 
 /**
  * The queue of things only a person can decide. Inspecting never resolves anything: a command is sent only by pressing a button that names its outcome, and
  * a button is on only while the session is live and the card still matches what the person last looked at.
  */
-export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync }: DecisionsViewProps) {
+export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync, brain }: DecisionsViewProps) {
   if (failure !== undefined) throw failure;
 
   const [refused, setRefused] = useState<Readonly<Record<string, string>>>({});
@@ -215,6 +217,8 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
           })}
         </ol>
       )}
+
+      {brain ?? null}
 
       {model.history.length > 0 ? (
         <div className="mt-6">

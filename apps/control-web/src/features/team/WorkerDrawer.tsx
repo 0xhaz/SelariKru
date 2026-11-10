@@ -11,7 +11,7 @@ import { TerminalPanel } from './TerminalPanel.tsx';
 const KBD = 'rounded-chip border border-line-strong px-1 font-mono text-mono text-fg';
 const TABS = [
   { id: 'task', label: 'Task' }, { id: 'settings', label: 'Settings' }, { id: 'terminal', label: 'Terminal' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
-  { id: 'permissions', label: 'Permissions' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
+  { id: 'permissions', label: 'Permissions' }, { id: 'context', label: 'Context' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
 ] as const;
 export type TabId = (typeof TABS)[number]['id'];
 export const isTabId = (v: string | null): v is TabId => TABS.some((t) => t.id === v);
@@ -214,9 +214,11 @@ export interface WorkerDrawerProps {
   readonly settings: (openTerminal: () => void) => ReactNode;
   readonly onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>;
   readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
+  /** The Context tab's content: the Project Brain bundle the attempt received. Absent: the tab says none is connected. */
+  readonly context?: ReactNode;
 }
 
-export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl }: WorkerDrawerProps) {
+export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -414,6 +416,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
           {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
           {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} onOpenControl={onOpenTerminalControl} humanIntervenedAt={row.humanIntervenedAt} /> : null}
           {tab === 'permissions' ? <PermissionsPanel detail={detail} /> : null}
+          {tab === 'context' ? (context ?? <Empty>The Project Brain is not connected here.</Empty>) : null}
           {tab === 'sandbox' ? <Facts facts={[...detail.sandbox]} /> : null}
           {tab === 'usage' ? <UsagePanel detail={detail} /> : null}
         </div>

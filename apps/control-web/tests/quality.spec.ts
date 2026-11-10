@@ -178,7 +178,7 @@ test.describe('keyboard only', () => {
   });
 });
 
-const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'benchmark'] as const;
+const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'brain', 'benchmark'] as const;
 const FIXTURES = ['human-wait', 'decision-queue', 'failed-ci', 'runner-loss', 'budget-stop', 'merge-flow'] as const;
 
 async function contrastFailures(page: Page): Promise<{ violations: string[]; incomplete: string[] }> {
@@ -270,7 +270,7 @@ test.describe('reduced motion', () => {
 });
 
 test.describe('390 px', () => {
-  for (const [route, fixture] of [['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop']] as const) {
+  for (const [route, fixture] of [['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop'], ['brain', 'healthy-parallel-work']] as const) {
     for (const theme of ['dark', 'light'] as const) {
       test(`${route} with ${fixture} in ${theme}: no sideways scroll, nothing cut off, targets big enough, axe clean`, async ({ page }) => {
         await page.setViewportSize({ width: 390, height: 844 });

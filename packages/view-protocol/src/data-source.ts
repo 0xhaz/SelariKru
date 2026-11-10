@@ -1,6 +1,7 @@
 import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, TerminalChannel, TerminalControlChannel } from './commands.ts';
 import type { ProjectViewEvent } from './events.ts';
 import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
+import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainView } from './brain.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -27,6 +28,14 @@ export interface EngineeringDataSource {
   openTerminal(session: AuthorizedTerminalRequest): Promise<TerminalChannel>;
   /** Control mode on one attempt: a single-use ticket and a separate connection. Additive: `execute` cannot carry a ticket, because a receipt is not a secret. Absent: this source offers no control mode. */
   openTerminalControl?(session: AuthorizedTerminalRequest): TerminalControlChannel;
+  /** The Project Brain: derived pages, the source library, revocations and conflicts. Read on demand. Absent: this source has no Brain. */
+  getBrain?(projectId: string): Promise<BrainView>;
+  /** One stored source revision, opened from a citation. */
+  getBrainSource?(projectId: string, sourceId: string, revision: number): Promise<BrainSourceRevisionView>;
+  /** The context bundle an attempt received at claim. Null when none was recorded. */
+  getAttemptContext?(projectId: string, attemptId: string): Promise<AttemptContextView | null>;
+  /** Revoke a source or keep an accepted value. Answers with the Brain as it is afterwards. */
+  brainAction?(projectId: string, action: BrainAction): Promise<BrainView>;
   disconnect(): void;
 }
 

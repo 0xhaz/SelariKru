@@ -8,3 +8,4 @@ export * from './selectors.ts';
 export * from './commands.ts';
 export * from './data-source.ts';
 export * from './session.ts';
+export * from './brain.ts';

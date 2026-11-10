@@ -1,10 +1,14 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
+  AttemptContextViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 import { openLiveControl, type WebSocketFactory } from './control.ts';
 import { openLiveTerminal } from './terminal.ts';
+
+/** Marks a 404 that a caller reads as nothing recorded. Never leaves this module. */
+const NOT_RECORDED = Symbol('not recorded');
 
 export interface LiveDataSourceOptions {
   readonly baseUrl: string;
@@ -155,6 +159,24 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       return doFetch(`${base}${path}`, { ...init, cache: 'no-store', headers: { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` } });
     });
 
+  /** A GET (or, with a body, a POST) read through a schema. `missingIsNull`: a 404 rejects with `NOT_RECORDED` for the caller to turn into null. */
+  async function readJson<T>(path: string, parser: { parse(v: unknown): T }, what: string, missingIsNull = false, body?: unknown): Promise<T> {
+    assertOpen();
+    let res: Response;
+    try {
+      res = await request(path, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (e) {
+      throw fail(fromThrown(e));
+    }
+    if (missingIsNull && res.status === 404) throw NOT_RECORDED;
+    if (!res.ok) throw fail(toDataSourceError(await readWireError(res)));
+    try {
+      return parser.parse(await res.json());
+    } catch {
+      throw fail({ code: 'invalid_event', message: `the server sent ${what} this build cannot read`, retryable: false });
+    }
+  }
+
   return {
     mode: 'live',
 
@@ -191,6 +213,24 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       } catch {
         throw fail({ code: 'invalid_event', message: 'the server sent failure details this build cannot read', retryable: false });
       }
+    },
+
+    getBrain: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/brain`, BrainViewSchema, 'the Project Brain'),
+    getBrainSource: (projectId, sourceId, revision) =>
+      readJson(`/v1/projects/${encodeURIComponent(projectId)}/brain/sources/${encodeURIComponent(sourceId)}/revisions/${encodeURIComponent(String(revision))}`, BrainSourceRevisionViewSchema, 'a source revision'),
+    async getAttemptContext(projectId, attemptId) {
+      try {
+        return await readJson(`/v1/projects/${encodeURIComponent(projectId)}/attempts/${encodeURIComponent(attemptId)}/context`, AttemptContextViewSchema, 'a context bundle', true);
+      } catch (e) {
+        if (e === NOT_RECORDED) return null;
+        throw e;
+      }
+    },
+    brainAction(projectId, action) {
+      const base = `/v1/projects/${encodeURIComponent(projectId)}/brain`;
+      return action.kind === 'revoke'
+        ? readJson(`${base}/sources/${encodeURIComponent(action.sourceId)}/revoke`, BrainViewSchema, 'the Project Brain', false, { reason: action.reason })
+        : readJson(`${base}/conflicts/${encodeURIComponent(action.conflictId)}/keep`, BrainViewSchema, 'the Project Brain', false, {});
     },
 
     subscribe(projectId, afterCursor, onEvent, onError) {

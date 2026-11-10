@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'benchmark', 'assistant', 'onboarding'] as const;
+export const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'brain', 'benchmark', 'assistant', 'onboarding'] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */

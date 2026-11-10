@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -36,6 +36,16 @@ export interface ProjectionStoreState {
   openTerminal(request: AuthorizedTerminalRequest): Promise<TerminalChannel>;
   /** Opens control mode on one attempt. Absent when the source has none. */
   readonly openTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
+  /** The Project Brain. Null when the source has none. */
+  readonly brain: BrainPort | null;
+}
+
+/** Reads of the Project Brain, and its two actions. An action refuses to send while the session is not live, as a command does. */
+export interface BrainPort {
+  load(): Promise<BrainView>;
+  source(sourceId: string, revision: number): Promise<BrainSourceRevisionView>;
+  context(attemptId: string): Promise<AttemptContextView | null>;
+  act(action: BrainAction): Promise<BrainView>;
 }
 
 export type ProjectionStore = StoreApi<ProjectionStoreState>;
@@ -130,6 +140,15 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         return source.openTerminal(request);
       },
       openTerminalControl: source?.openTerminalControl ? (request) => source.openTerminalControl!(request) : undefined,
+      brain: source?.getBrain && source.getBrainSource && source.getAttemptContext && source.brainAction ? {
+        load: () => source.getBrain!(projectId),
+        source: (sourceId, revision) => source.getBrainSource!(projectId, sourceId, revision),
+        context: (attemptId) => source.getAttemptContext!(projectId, attemptId),
+        act: async (action) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.brainAction!(projectId, action);
+        },
+      } : null,
     };
   });
 }

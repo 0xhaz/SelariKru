@@ -10,6 +10,7 @@ import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
+import { createDemoBrain } from './brain.ts';
 
 interface Subscriber {
   cursor: number;
@@ -585,6 +586,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
   }
 
+  // Simulated sources compiled by the same domain code the server runs. Reads touch no network.
+  const brain = createDemoBrain((id) => snapshotOf(project(id)), (id) => new Date(timeOf(project(id))).toISOString());
+
   return {
     mode: 'mock',
     clock,
@@ -598,6 +602,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     async getSnapshot(projectId) {
       return snapshotOf(project(projectId));
     },
+
+    getBrain: (projectId) => brain.get(project(projectId).fixture.projectId),
+    getBrainSource: (projectId, sourceId, revision) => brain.source(project(projectId).fixture.projectId, sourceId, revision),
+    getAttemptContext: (projectId, attemptId) => brain.context(project(projectId).fixture.projectId, attemptId),
+    brainAction: (projectId, action) => brain.act(project(projectId).fixture.projectId, action),
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);
