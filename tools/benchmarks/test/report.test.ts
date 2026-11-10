@@ -2,13 +2,14 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BenchmarkFileSchema, BenchmarkRecordTemplateSchema } from '@selarikru/view-protocol';
 import { describe, expect, it } from 'vitest';
-import { ExportError, buildReport, exportResults, renderReport, type RawRecord } from '../src/report.ts';
-import { REPO_ROOT, SECRET, STARTER, pairedWorkers, rawAssistant, rawWorker, resolvedManifest } from './fixtures.ts';
+import { manifestSha256, NO_STARTS, type Manifest, type StartRecords } from '../src/manifest.ts';
+import { ExportError, ReportError, buildReport, exportResults, renderReport, type RawRecord } from '../src/report.ts';
+import { REPO_ROOT, SECRET, STARTER, pairedWorkers, rawAssistant, rawWorker, resolvedManifest, started } from './fixtures.ts';
 
-const MANIFEST_SHA = 'e'.repeat(64);
+type Cohort = { manifest: Manifest; starts: StartRecords };
 const AT = '2026-11-20T10:00:00.000Z';
-const exported = (records: RawRecord[], manifest = resolvedManifest()) => exportResults({ manifest, manifestSha256: MANIFEST_SHA, records, generatedAtUtc: AT });
-const report = (records: RawRecord[], manifest = resolvedManifest()) => buildReport(exported(records, manifest), manifest);
+const exported = (records: RawRecord[], c: Cohort = started()) => exportResults({ manifest: c.manifest, starts: c.starts, records, generatedAtUtc: AT });
+const report = (records: RawRecord[], c: Cohort = started()) => buildReport(exported(records, c), c.manifest);
 const median = (xs: number[]): number => { const s = [...xs].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2; };
 
 /** Every object key path in a JSON value. Arrays are leaves: their element shapes are the schema's business, not the template's. */
@@ -32,10 +33,12 @@ describe('T8.4 export', () => {
   });
 
   it('fills every record configuration from the manifest, including denied starts', () => {
-    const manifest = resolvedManifest();
-    const file = exported([rawWorker({ mode: 'L1', block: 1, status: 'denied_start' }), rawWorker({ mode: 'L1', block: 2, status: 'not_run' }), rawAssistant({ route: 'ONLY_ON_DEVICE', index: 0 })], manifest);
+    const c = started();
+    const manifest = c.manifest;
+    const records = [rawWorker({ mode: 'L1', block: 1, status: 'denied_start' }), rawWorker({ mode: 'L1', block: 2, status: 'not_run' }), rawAssistant({ route: 'ONLY_ON_DEVICE', index: 0 })];
+    const file = exported(records, c);
     for (const r of file.records) {
-      expect(r.configuration).toMatchObject({ manifestSha256: MANIFEST_SHA, starterSha: STARTER, contractSha256: manifest.repository.contractSha256, verifierSha: manifest.repository.verifierSha, harness: 'claude-code', harnessVersion: '2.1.0' });
+      expect(r.configuration).toMatchObject({ manifestSha256: manifestSha256(manifest), starterSha: STARTER, contractSha256: manifest.repository.contractSha256, verifierSha: manifest.repository.verifierSha, harness: 'claude-code', harnessVersion: '2.1.0' });
       expect(r.cohortId).toBe(`cohort-2026-11-${r.track}`);
       expect(r.resultSha256).toMatch(/^[0-9a-f]{64}$/);
     }
@@ -56,8 +59,32 @@ describe('T8.4 export', () => {
   });
 
   it('refuses to export measured records before the manifest is resolved', () => {
-    expect(() => exported(pairedWorkers(1), resolvedManifest((m) => { m.repository.starterSha = null; }))).toThrow(ExportError);
-    expect(() => exported(pairedWorkers(1), resolvedManifest((m) => { m.cohortId = null; }))).toThrow(/cohortId/);
+    expect(() => exported(pairedWorkers(1), started(resolvedManifest((m) => { m.repository.starterSha = null; })))).toThrow(ExportError);
+    expect(() => exported(pairedWorkers(1), started(resolvedManifest((m) => { m.cohortId = null; })))).toThrow(/cohortId/);
+  });
+
+  it('exports measured records only for a started track, under the manifest it started with', () => {
+    const c = started();
+    // No start for the track: refused. Simulated records need no start.
+    expect(() => exported(pairedWorkers(1), { manifest: resolvedManifest(), starts: NO_STARTS })).toThrow(/cohort_not_started/);
+    expect(exported(pairedWorkers(1).map((r) => ({ ...r, dataKind: 'simulated' as const })), { manifest: resolvedManifest(), starts: NO_STARTS }).records).toHaveLength(2);
+    // Changed after start: refused with the same reason preflight gives.
+    const changed = structuredClone(c.manifest);
+    changed.environment.codingModel = 'some-other-model';
+    expect(() => exported(pairedWorkers(1), { manifest: changed, starts: c.starts })).toThrow(/manifest_changed_after_start/);
+    // The assistant track not having started blocks only its own records.
+    const workersOnly = { manifest: { ...c.manifest, starts: { ...c.manifest.starts, assistant: null } }, starts: { ...c.starts, assistant: null } };
+    expect(exported(pairedWorkers(1), workersOnly).records).toHaveLength(2);
+    expect(() => exported([rawAssistant({ route: 'ONLY_IN_CLOUD', index: 0 })], workersOnly)).toThrow(/cohort_not_started/);
+  });
+
+  it('refuses a record outside the frozen order, or a slot attempt given twice', () => {
+    expect(() => exported([rawWorker({ mode: 'L1', block: 6 })])).toThrow(/workers\/block-6\/L1 is not in the frozen order/);
+    expect(() => exported([{ ...rawWorker({ mode: 'L1', block: 1 }), slotId: 'workers/block-1/C1' }])).toThrow(/does not match/);
+    expect(() => exported([{ ...rawWorker({ mode: 'L1', block: 1 }), slotId: null, slotAttempt: null }])).toThrow(/needs its slot/);
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1 }), rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-again' })])).toThrow(/attempt 1 twice/);
+    const warm = rawAssistant({ route: 'ONLY_IN_CLOUD', index: 0, warmup: true });
+    expect(() => exported([{ ...warm, assistant: { ...warm.assistant!, warmup: false } }])).toThrow(/does not match/);
   });
 
   it('refuses a raw record carrying a summary, or a mode the manifest does not plan', () => {
@@ -74,10 +101,12 @@ describe('T8.4 report', () => {
     const l1Ms = records.filter((x) => x.mode === 'L1').map((x) => x.timings.endToEndVerifiedMs!);
     expect(l1.deliveryTime).toMatchObject({ n: 5, median: median(l1Ms), min: Math.min(...l1Ms), max: Math.max(...l1Ms), provenance: 'observed' });
     // A failing attempt's time is not in the passing median, and nothing the input claims as a summary is used.
-    const withFail = [...records, rawWorker({ mode: 'L1', block: 6, ms: 60_000, failed: true })];
-    expect(report(withFail).workers.modes.find((m) => m.mode === 'L1')!.deliveryTime.median).toBe(median(l1Ms));
+    const four = records.filter((x) => x.blockId !== 'block-5');
+    const withFail = [...four, rawWorker({ mode: 'L1', block: 5, ms: 60_000, failed: true })];
+    const fourMs = four.filter((x) => x.mode === 'L1').map((x) => x.timings.endToEndVerifiedMs!);
+    expect(report(withFail).workers.modes.find((m) => m.mode === 'L1')!.deliveryTime.median).toBe(median(fourMs));
     // Simulated and fixture records are never measurements: they are counted aside and change no figure.
-    const withSim = [...records, rawWorker({ mode: 'L1', block: 7, ms: 1, dataKind: 'simulated' })];
+    const withSim = [...records, rawWorker({ mode: 'L1', block: 1, ms: 1, dataKind: 'simulated', trialId: 'sim-b1-L1' })];
     const sim = report(withSim);
     expect(sim.workers.modes.find((m) => m.mode === 'L1')!.deliveryTime.median).toBe(median(l1Ms));
     expect(sim.excluded).toEqual({ simulated: 1, fixture: 0 });
@@ -103,12 +132,69 @@ describe('T8.4 report', () => {
   });
 
   it('every attempt is accounted for, and none is dropped', () => {
-    const records = [rawWorker({ mode: 'L1', block: 1 }), rawWorker({ mode: 'L1', block: 2, status: 'failed' }), rawWorker({ mode: 'L1', block: 3, status: 'timed_out' }), rawWorker({ mode: 'L1', block: 4, status: 'cancelled' }), rawWorker({ mode: 'L1', block: 5, status: 'not_run' }), rawWorker({ mode: 'L1', block: 6, status: 'denied_start' })];
+    const records = [
+      rawWorker({ mode: 'L1', block: 1 }), rawWorker({ mode: 'L1', block: 2, status: 'failed' }), rawWorker({ mode: 'L1', block: 3, status: 'timed_out' }),
+      rawWorker({ mode: 'L1', block: 4, status: 'cancelled' }), rawWorker({ mode: 'L1', block: 5, status: 'denied_start' }),
+      rawWorker({ mode: 'L1', block: 5, status: 'not_run', trialId: 'w-b5-L1-r2', slotAttempt: 2 }),
+    ];
     const l1 = report(records).workers.modes.find((m) => m.mode === 'L1')!;
-    expect(l1.attempts).toEqual({ planned: 5, recorded: 6, passed: 1, completedFailing: 0, failed: 1, timedOut: 1, cancelled: 1, deniedStart: 1, abandoned: 0, notRun: 1, missing: 0 });
+    // Each slot counts once by its last attempt; the earlier attempt is superseded, and the totals add up to the records.
+    expect(l1.attempts).toEqual({ planned: 5, recorded: 6, superseded: 1, passed: 1, completedFailing: 0, failed: 1, timedOut: 1, cancelled: 1, deniedStart: 0, abandoned: 0, notRun: 1, missing: 0 });
+    expect(l1.superseded).toEqual([{ trialId: 'w-b5-L1', slotId: 'workers/block-5/L1', slotAttempt: 1, status: 'denied_start' }]);
     const c1 = report([rawWorker({ mode: 'C1', block: 1 })]).workers.modes.find((m) => m.mode === 'C1')!;
     expect(c1.attempts).toMatchObject({ planned: 5, recorded: 1, missing: 4 });
     expect(renderReport(report([rawWorker({ mode: 'C1', block: 1 })]))).toMatch(/C1.*4 planned attempts have no record/);
+  });
+
+  it('reconciles against the frozen order: a replacement represents its slot whatever the file order', () => {
+    const base = pairedWorkers(3).map((r) => (r.trialId === 'w-b1-L1' ? { ...r, slotAttempt: 2 } : r));
+    const original = rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-orig', failed: true, slotAttempt: 1 });
+    const first = report([original, ...base]);
+    const last = report([...base, original]);
+    for (const r of [first, last]) {
+      const c = r.workers.comparisons.find((x) => x.id === 'L1-C1')!;
+      expect(c).toMatchObject({ validPairs: 3, exploratory: false });
+      const l1 = r.workers.modes.find((m) => m.mode === 'L1')!;
+      expect(l1.superseded.map((s) => s.trialId)).toEqual(['w-b1-L1-orig']);
+      expect(l1.attempts).toMatchObject({ recorded: 4, superseded: 1, passed: 3, completedFailing: 0 });
+      // The superseded attempt's time is not in the median; its spend is in the total.
+      expect(l1.deliveryTime.n).toBe(3);
+      expect(l1.spend.value).toBe(6);
+    }
+    expect(JSON.stringify(first)).toBe(JSON.stringify(last));
+    // The other way round, a failing replacement represents the slot and the pair is excluded.
+    const failedReplacement = pairedWorkers(3).concat(rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-r2', failed: true, slotAttempt: 2 }));
+    const c = report(failedReplacement).workers.comparisons.find((x) => x.id === 'L1-C1')!;
+    expect(c).toMatchObject({ validPairs: 2, exploratory: true, headlineRatio: null });
+    expect(c.excludedPairs).toEqual([{ blockId: 'block-1', reason: 'L1 did not pass' }, { blockId: 'block-4', reason: 'L1 has no record' }, { blockId: 'block-5', reason: 'L1 has no record' }]);
+  });
+
+  it('a slot with no record is missing, by slot, even when a replacement makes the count look full', () => {
+    const l1 = [1, 2, 3, 4].map((b) => rawWorker({ mode: 'L1', block: b })).concat(rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-replacement', slotAttempt: 2 }));
+    const mode = report(l1).workers.modes.find((m) => m.mode === 'L1')!;
+    expect(mode.attempts).toMatchObject({ planned: 5, recorded: 5, superseded: 1, missing: 1 });
+    expect(mode.missingSlots).toEqual(['workers/block-5/L1']);
+    expect(renderReport(report(l1))).toMatch(/L1.*1 planned attempts have no record \(workers\/block-5\/L1\)/);
+  });
+
+  it('runs the same checks on a results file as export does, in the report and on publish', () => {
+    const c = started();
+    const wrongClock = structuredClone(exported(pairedWorkers(3), c));
+    wrongClock.records[0]!.timings.clockDomain = 'host-wall';
+    expect(() => buildReport(wrongClock, c.manifest)).toThrow(ReportError);
+    expect(() => buildReport(wrongClock, c.manifest)).toThrow(/server-monotonic/);
+    const dup = structuredClone(exported(pairedWorkers(3), c));
+    dup.records[2] = { ...dup.records[2]!, trialId: dup.records[0]!.trialId };
+    expect(() => buildReport(dup, c.manifest)).toThrow(/one record per trial/);
+    const shortSha = structuredClone(exported(pairedWorkers(1), c));
+    shortSha.records[0]!.configuration.candidateSha = 'ABCDEF1';
+    expect(() => buildReport(shortSha, c.manifest)).toThrow(/commit SHA/);
+    // The schema checks candidate SHAs on measured records only; the shared checks hold every record to it.
+    const sim = rawWorker({ mode: 'L1', block: 1, dataKind: 'simulated' });
+    expect(() => exported([{ ...sim, configuration: { ...sim.configuration, candidateSha: 'ABCDEF1' } }])).toThrow(/candidateSha is not a full lowercase commit SHA/);
+    // A file exported under another manifest is refused against this one.
+    const other = started(resolvedManifest((m) => { m.environment.codingModel = 'another-model'; }));
+    expect(() => buildReport(exported(pairedWorkers(1), other), c.manifest)).toThrow(/manifest/);
   });
 
   it('fewer than 3 valid pairs → exploratory, no headline ratio', () => {
@@ -119,13 +205,34 @@ describe('T8.4 report', () => {
     const mixed = [...pairedWorkers(3), rawWorker({ mode: 'L1', block: 4 }), rawWorker({ mode: 'C1', block: 4, status: 'timed_out' })];
     const c = report(mixed).workers.comparisons.find((x) => x.id === 'L1-C1')!;
     expect(c.validPairs).toBe(3);
-    expect(c.excludedPairs).toEqual([{ blockId: 'block-4', reason: 'C1 did not pass' }]);
+    // Planned blocks with no records are listed too, never silently dropped.
+    expect(c.excludedPairs).toEqual([{ blockId: 'block-4', reason: 'C1 did not pass' }, { blockId: 'block-5', reason: 'L1 has no record' }]);
     expect(c.exploratory).toBe(false);
     expect(c.headlineRatio).toBeCloseTo(median([0, 1, 2].map((i) => (1_200_000 + i * 10_000) / (960_000 + i * 10_000))), 6);
     expect(c.completion).toEqual({ a: { passed: 4, of: 4 }, b: { passed: 3, of: 4 } });
     // A trial that used control mode, or did not record it, is not a valid pair member.
     const controlled = [...pairedWorkers(3).map((r) => (r.mode === 'L1' && r.blockId === 'block-1' ? { ...r, operations: { ...r.operations, humanIntervened: true }, humanMinutes: { ...r.humanMinutes, intervention: 2 } } : r))];
     expect(report(controlled).workers.comparisons.find((x) => x.id === 'L1-C1')).toMatchObject({ validPairs: 2, exploratory: true, headlineRatio: null });
+  });
+
+  it('unknowns stay unknown: human minutes, and unrecorded permitted actions keep a trial out of pairs', () => {
+    // rawWorker records review minutes but leaves setup and scoping unrecorded: the total is unavailable, never a partial sum.
+    const l1 = report(pairedWorkers(3)).workers.modes.find((m) => m.mode === 'L1')!;
+    expect(l1.humanMinutes).toEqual({ value: null, provenance: 'unavailable', knownSubtotal: 6 });
+    const full = pairedWorkers(3).map((r) => ({ ...r, humanMinutes: { ...r.humanMinutes, initialSetup: 0, scoping: 1, permittedAction: 0 } }));
+    expect(report(full).workers.modes.find((m) => m.mode === 'L1')!.humanMinutes).toEqual({ value: 9, provenance: 'observed', knownSubtotal: 9 });
+    const unrecorded = pairedWorkers(3).map((r) => (r.trialId === 'w-b2-C1' ? { ...r, operations: { ...r.operations, permittedHumanActions: null } } : r));
+    const c = report(unrecorded).workers.comparisons.find((x) => x.id === 'L1-C1')!;
+    expect(c).toMatchObject({ validPairs: 2, exploratory: true, headlineRatio: null });
+    expect(c.excludedPairs.filter((p) => p.reason !== 'L1 has no record')).toEqual([{ blockId: 'block-2', reason: 'C1 did not record permitted human actions' }]);
+  });
+
+  it('shows permitted human actions per pair and lists a difference within a pair as a confounder', () => {
+    const records = pairedWorkers(3).map((r) => (r.trialId === 'w-b1-L1' ? rawWorker({ mode: 'L1', block: 1, permittedHumanActions: 2, ms: r.timings.endToEndVerifiedMs }) : r));
+    const c = report(records).workers.comparisons.find((x) => x.id === 'L1-C1')!;
+    expect(c.pairs.map((p) => [p.blockId, p.permittedActions])).toEqual([['block-1', { a: 2, b: 0 }], ['block-2', { a: 0, b: 0 }], ['block-3', { a: 0, b: 0 }], ['block-4', { a: null, b: null }], ['block-5', { a: null, b: null }]]);
+    expect(c.confounders).toEqual(['block-1: L1 had 2 permitted human actions outside control mode, C1 had 0.']);
+    expect(renderReport(report(records))).toMatch(/L1-C1.*Confounders: block-1: L1 had 2 permitted human actions outside control mode, C1 had 0\./);
   });
 
   it('cost per delivered change unavailable when spend unknown', () => {

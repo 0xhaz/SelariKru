@@ -85,6 +85,21 @@ describe('the benchmark result template and schema', () => {
     expect(accepted([{ ...withAction, operations: { ...withAction.operations, permittedHumanActions: null } }])).toBe(false);
   });
 
+  it('a measured record carries exactly one hash: the local export hash or, once published, the hash of the redacted record', () => {
+    const r = measuredWorker();
+    expect(accepted([{ ...r, resultSha256: null, publishedSha256: 'a'.repeat(64) }])).toBe(true);
+    expect(accepted([{ ...r, resultSha256: null, publishedSha256: null }])).toBe(false);
+    expect(accepted([{ ...r, resultSha256: 'f'.repeat(64), publishedSha256: 'a'.repeat(64) }])).toBe(false);
+    expect(accepted([{ ...r, publishedSha256: 'A'.repeat(64), resultSha256: null }])).toBe(false);
+  });
+
+  it('a slot attempt is a positive whole number and comes with its slot', () => {
+    const r = measuredWorker();
+    expect(accepted([{ ...r, slotId: 'workers/block-1/L1', slotAttempt: 2 }])).toBe(true);
+    expect(accepted([{ ...r, slotId: 'workers/block-1/L1', slotAttempt: 0 }])).toBe(false);
+    expect(accepted([{ ...r, slotId: null, slotAttempt: 1 }])).toBe(false);
+  });
+
   it('a measured assistant request that ran carries its payload hash', () => {
     expect(accepted([measuredAssistant()])).toBe(true);
     const r = measuredAssistant();

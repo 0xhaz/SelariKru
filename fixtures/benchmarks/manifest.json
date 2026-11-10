@@ -147,6 +147,10 @@
     "blockOnUnfrozenLockfile": true,
     "blockOnUnfrozenSeedAndOrder": true
   },
+  "starts": {
+    "workers": null,
+    "assistant": null
+  },
   "protocolNotes": [
     {
       "id": "payload-sha256",
@@ -158,7 +162,7 @@
     },
     {
       "id": "record-granularity",
-      "text": "One record per trial. A replacement attempt is a new trial with its own record; failed, timed-out, cancelled and denied starts are kept, never overwritten."
+      "text": "One record per trial. Every trial fills one slot of the frozen randomization.order and records slotId and slotAttempt. A replacement is a new trial in the same slot with the next slotAttempt; the highest attempt represents the slot. Earlier attempts are superseded: kept, counted and shown, but left out of medians and pairs. A slot with no record is missing."
     },
     {
       "id": "permitted-human-action",
@@ -166,11 +170,27 @@
     },
     {
       "id": "configuration-from-manifest",
-      "text": "The exporter fills each record's configuration from this manifest, including denied starts. Starter and candidate SHAs are full lowercase commit SHAs. Delivery times are on the server monotonic clock only."
+      "text": "The exporter fills each record's configuration from this manifest, including denied starts, and only from the manifest a track started under: its hash must equal the start's. Starter and candidate SHAs are full lowercase commit SHAs. Delivery times are on the server monotonic clock only."
     },
     {
       "id": "lockfile-freeze",
-      "text": "repository.verifierSha256 and repository.lockfileSha256 freeze the verifier and lockfile before the cohorts (T8.5). Preflight refuses live dispatch when either differs from services/verifier/suites/feedback-board/HASHES.json, or when HASHES.json is stale against pnpm-lock.yaml."
+      "text": "repository.verifierSha256 and repository.lockfileSha256 freeze the verifier and lockfile before the cohorts run. Preflight recomputes both from the verifier's files and pnpm-lock.yaml with the verifier's own hashing, and refuses live dispatch when either differs from the frozen value, or when services/verifier/suites/feedback-board/HASHES.json is stale."
+    },
+    {
+      "id": "manifest-hash",
+      "text": "manifestSha256 is the sha-256 of this manifest's canonical JSON (sorted keys) with starts left out, so stamping a start does not change it. Records, starts and preflight all refer to the manifest by this hash."
+    },
+    {
+      "id": "starts",
+      "text": "record-start runs only on a passing preflight for its track. It writes the cohort-start file for the track (the preregistration record, kept in the repository) and stamps the same start time and manifest hash under starts. After either exists, freeze is refused, and preflight and export refuse a manifest whose hash differs from the start's (manifest_changed_after_start) or whose stamp and file disagree (start_record_mismatch)."
+    },
+    {
+      "id": "published-hash",
+      "text": "The local export carries resultSha256, the hash of the unredacted record. The published copy drops it and carries publishedSha256, the hash of the redacted record with both hash fields left out, so a guessed host or account cannot be confirmed from the published file."
+    },
+    {
+      "id": "unknown-stays-unknown",
+      "text": "Human minutes are unavailable unless every category is recorded. A trial whose control-mode use or permitted human actions are not recorded is left out of pairs. Permitted human actions are shown per pair, and a difference within a pair is listed as a confounder."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",

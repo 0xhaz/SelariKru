@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { deriveOrder, freezeOrder, ManifestError, orderSha256, parseManifest, recordStart, type Manifest } from '../src/manifest.ts';
+import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, type Manifest } from '../src/manifest.ts';
 import { formatPreflight, preflight, type PreflightInput } from '../src/preflight.ts';
-import { HASHES, fixtureManifestText, resolvedManifest, SECRET } from './fixtures.ts';
+import { HASHES, fixtureManifestText, resolvedManifest, SECRET, started } from './fixtures.ts';
 import { watchNetwork } from './network.ts';
 
 const KEY_ENV = { ANTHROPIC_API_KEY: SECRET };
 
 function input(manifest: Manifest, over: Partial<PreflightInput> = {}): PreflightInput {
-  return { manifest, env: KEY_ENV, verifierHashes: HASHES, lockfileSha256Now: HASHES.lockfileSha256, start: null, ...over };
+  return { manifest, env: KEY_ENV, verifier: { recorded: HASHES, recomputed: HASHES }, starts: NO_STARTS, ...over };
 }
 
 describe('T8.1 manifest loader and preflight', () => {
@@ -72,6 +72,11 @@ describe('T8.1 manifest loader and preflight', () => {
     const noPayer = preflight(input(resolvedManifest((m) => { m.proposedVariableBudgetUsd.payer = null; })));
     expect(noPayer.liveDispatch.workers.blockers).toContain('unresolved: proposedVariableBudgetUsd.payer');
     expect(noPayer.checks.find((c) => c.id === 'budget_authority')?.status).toBe('block');
+    // Authorized with no time of authorization is not authorized.
+    const undated = preflight(input(resolvedManifest((m) => { m.proposedVariableBudgetUsd.authorizedAtUtc = null; })));
+    expect(undated.liveDispatch.workers.allowed).toBe(false);
+    expect(undated.liveDispatch.workers.blockers).toEqual(expect.arrayContaining(['budget_not_authorized', 'unresolved: proposedVariableBudgetUsd.authorizedAtUtc']));
+    expect(undated.liveDispatch.assistant.blockers).toContain('budget_not_authorized');
   });
 
   it('checks the API key (D6) by presence only and never prints it', () => {
@@ -87,20 +92,29 @@ describe('T8.1 manifest loader and preflight', () => {
     }
   });
 
-  it('refuses a live cohort when the verifier or lockfile differ from the frozen values', () => {
-    const moved = preflight(input(resolvedManifest(), { verifierHashes: { ...HASHES, verifierSha256: '7'.repeat(64) } }));
+  it('refuses a live cohort when the verifier or lockfile, recomputed from their files, differ from the frozen values', () => {
+    // What the files hash to now decides, not what HASHES.json says.
+    const moved = preflight(input(resolvedManifest(), { verifier: { recorded: HASHES, recomputed: { ...HASHES, verifierSha256: '7'.repeat(64) } } }));
     expect(moved.liveDispatch.workers.blockers).toContain('verifier_not_frozen');
     expect(moved.liveDispatch.assistant.blockers).toContain('verifier_not_frozen');
-    const stale = preflight(input(resolvedManifest(), { lockfileSha256Now: '8'.repeat(64) }));
-    expect(stale.liveDispatch.workers.blockers).toContain('lockfile_not_frozen');
-    const unknown = preflight(input(resolvedManifest(), { verifierHashes: null }));
-    expect(unknown.liveDispatch.workers.blockers).toContain('verifier_not_frozen');
+    const lock = preflight(input(resolvedManifest(), { verifier: { recorded: HASHES, recomputed: { ...HASHES, lockfileSha256: '8'.repeat(64) } } }));
+    expect(lock.liveDispatch.workers.blockers).toContain('lockfile_not_frozen');
+    const unknown = preflight(input(resolvedManifest(), { verifier: { recorded: HASHES, recomputed: null } }));
+    expect(unknown.liveDispatch.workers.blockers).toEqual(expect.arrayContaining(['verifier_not_frozen', 'lockfile_not_frozen']));
     expect(unknown.checks.find((c) => c.id === 'lockfile_frozen')?.status).toBe('block');
+    // HASHES.json agreeing with the manifest is not enough when the files have moved; and a stale HASHES.json blocks on its own.
+    const trusted = preflight(input(resolvedManifest(), { verifier: { recorded: HASHES, recomputed: { verifierSha256: '5'.repeat(64), lockfileSha256: '6'.repeat(64) } } }));
+    expect(trusted.liveDispatch.workers.blockers).toEqual(expect.arrayContaining(['verifier_not_frozen', 'lockfile_not_frozen', 'verifier_hashes_stale']));
+    const stale = preflight(input(resolvedManifest(), { verifier: { recorded: { ...HASHES, verifierSha256: '7'.repeat(64) }, recomputed: HASHES } }));
+    expect(stale.liveDispatch.workers.blockers).toEqual(['verifier_hashes_stale']);
+    expect(preflight(input(resolvedManifest(), { verifier: { recorded: null, recomputed: HASHES } })).liveDispatch.workers.blockers).toEqual(['verifier_hashes_stale']);
   });
 
   it('the verifier host must be frozen before workers dispatch', () => {
     const r = preflight(input(resolvedManifest((m) => { m.environment.verifierHostFrozen = false; })));
     expect(r.liveDispatch.workers.blockers).toContain('unresolved: environment.verifierHostFrozen');
+    expect(r.liveDispatch.workers.blockers).toContain('verifier_host_not_frozen');
+    expect(r.liveDispatch.assistant.blockers).not.toContain('verifier_host_not_frozen');
     expect(r.checks.find((c) => c.id === 'verifier_host')?.status).toBe('block');
   });
 
@@ -126,18 +140,44 @@ describe('T8.1 manifest loader and preflight', () => {
     edited.randomization.order = [...edited.randomization.order].reverse();
     expect(preflight(input(edited)).liveDispatch.workers.blockers).toContain('seed_and_order_not_frozen');
 
-    // Start can only be recorded on a frozen manifest.
-    expect(() => recordStart(unseeded, 'e'.repeat(64), '2026-11-16T09:00:00.000Z')).toThrow(/frozen/);
-    const start = recordStart(m, 'e'.repeat(64), '2026-11-16T09:00:00.000Z');
-    expect(start).toMatchObject({ seed: 'seed-7f1e', orderSha256: m.randomization.orderSha256, startedAtUtc: '2026-11-16T09:00:00.000Z' });
+    // Start can only be recorded on a frozen manifest, and stamps the manifest as well as returning the start file.
+    expect(() => recordStart(unseeded, 'workers', '2026-11-16T09:00:00.000Z')).toThrow(/frozen/);
+    const { start, manifest: stamped } = recordStart(m, 'workers', '2026-11-16T09:00:00.000Z');
+    expect(start).toMatchObject({ track: 'workers', seed: 'seed-7f1e', orderSha256: m.randomization.orderSha256, manifestSha256: manifestSha256(m), startedAtUtc: '2026-11-16T09:00:00.000Z' });
+    expect(stamped.starts.workers).toEqual({ startedAtUtc: '2026-11-16T09:00:00.000Z', manifestSha256: manifestSha256(m) });
+    // Stamping does not change the hash the start refers to.
+    expect(manifestSha256(stamped)).toBe(manifestSha256(m));
+    expect(() => recordStart(stamped, 'workers', '2026-11-16T10:00:00.000Z')).toThrow(/already started/);
 
-    // After start, re-freezing is refused, and a manifest whose seed or order moved is blocked.
-    expect(() => freezeOrder(m, 'seed-other', '2026-11-16T10:00:00.000Z', start)).toThrow(/after start/);
-    expect(preflight(input(m, { start })).liveDispatch.workers.allowed).toBe(true);
-    const reseeded = freezeOrder(m, 'seed-other', '2026-11-16T10:00:00.000Z', null);
-    const r = preflight(input(reseeded, { start }));
-    expect(r.liveDispatch.workers.blockers).toContain('seed_or_order_changed_after_start');
-    expect(r.liveDispatch.assistant.blockers).toContain('seed_or_order_changed_after_start');
+    // After start, re-freezing is refused, by the file or by the manifest's own stamp alone.
+    expect(() => freezeOrder(m, 'seed-other', '2026-11-16T10:00:00.000Z', { ...NO_STARTS, workers: start })).toThrow(/after start/);
+    expect(() => freezeOrder(stamped, 'seed-other', '2026-11-16T10:00:00.000Z')).toThrow(/after start/);
+    const starts = { ...NO_STARTS, workers: start };
+    expect(preflight(input(stamped, { starts })).liveDispatch.workers.allowed).toBe(true);
+    // A manifest re-frozen behind the stamp's back is blocked.
+    const reseeded = freezeOrder(m, 'seed-other', '2026-11-16T10:00:00.000Z');
+    const r = preflight(input({ ...reseeded, starts: stamped.starts }, { starts }));
+    expect(r.liveDispatch.workers.blockers).toEqual(expect.arrayContaining(['seed_or_order_changed_after_start', 'manifest_changed_after_start']));
+  });
+
+  it('blocks a manifest changed in any way after start, and a start whose stamp and file disagree', () => {
+    const { manifest, starts } = started();
+    expect(preflight(input(manifest, { starts })).liveDispatch.workers).toEqual({ allowed: true, blockers: [] });
+    const changed = structuredClone(manifest);
+    changed.environment.codingModel = 'some-other-model';
+    changed.proposedVariableBudgetUsd.total = 600;
+    changed.proposedVariableBudgetUsd.codingPlanningVerificationModelsAndTools = 590;
+    const r = preflight(input(changed, { starts }));
+    expect(r.liveDispatch.workers.blockers).toContain('manifest_changed_after_start');
+    expect(r.liveDispatch.assistant.blockers).toContain('manifest_changed_after_start');
+    // The stamp alone is enough to catch a change, with no file present.
+    expect(preflight(input(changed, { starts: NO_STARTS })).liveDispatch.workers.blockers).toEqual(expect.arrayContaining(['manifest_changed_after_start', 'start_record_mismatch']));
+    // A file with no stamp, or a stamp and a file that disagree, is a mismatch.
+    const unstamped = { ...manifest, starts: { workers: null, assistant: null } };
+    expect(preflight(input(unstamped, { starts })).liveDispatch.workers.blockers).toContain('start_record_mismatch');
+    const other = { ...starts, workers: { ...starts.workers!, startedAtUtc: '2026-11-17T00:00:00.000Z' } };
+    expect(preflight(input(manifest, { starts: other })).liveDispatch.workers.blockers).toContain('start_record_mismatch');
+    expect(preflight(input(manifest, { starts: other })).liveDispatch.assistant.allowed).toBe(true);
   });
 
   it('unsupported modes remain visible', () => {

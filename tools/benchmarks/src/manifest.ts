@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { COMMIT_SHA } from '@selarikru/view-protocol';
+import { canonicalSha256, sha256 } from './canonical.ts';
 
 /**
  * The benchmark manifest (fixtures/benchmarks/manifest.json): protocol, cohort plan and every value that must be pinned
@@ -10,7 +11,10 @@ import { COMMIT_SHA } from '@selarikru/view-protocol';
  *
  * Protocol notes recorded in the manifest itself (`protocolNotes`): the payload hash definition, per-request
  * requirement-ID narrowing, one record per trial, how a permitted human action outside control mode is recorded,
- * configuration filled from the manifest, and the lockfile freeze.
+ * configuration filled from the manifest, the lockfile freeze, slots and replacements, the published hash, and starts.
+ *
+ * The manifest's hash (`manifestSha256`) is over its canonical content with `starts` left out, so stamping a start into
+ * the manifest does not change the hash that the start, and every record of the cohort, refers to.
  */
 
 const text = z.string().min(1);
@@ -33,6 +37,8 @@ const RequiredModeSchema = z.strictObject({
   availability: z.enum(['supported', 'unsupported']),
   unavailableReason: nullableText,
 }).refine((m) => (m.availability === 'unsupported') === (m.unavailableReason !== null), { message: 'an unsupported mode states why, and only an unsupported mode does' });
+
+const StartStampSchema = z.strictObject({ startedAtUtc: isoUtc, manifestSha256: sha256Hex });
 
 export const ManifestSchema = z.strictObject({
   protocolVersion: z.literal('0.1'),
@@ -128,6 +134,8 @@ export const ManifestSchema = z.strictObject({
     blockOnUnfrozenLockfile: z.literal(true),
     blockOnUnfrozenSeedAndOrder: z.literal(true),
   }),
+  /** When each track started, stamped by `record-start` alongside the cohort-start file. Once set, the seed and order cannot be re-frozen. */
+  starts: z.strictObject({ workers: StartStampSchema.nullable(), assistant: StartStampSchema.nullable() }),
   protocolNotes: z.array(z.strictObject({ id: text, text })),
   resultTemplate: text,
   requirementIds: z.array(z.string().regex(/^FB-0[1-8]$/)).length(8),
@@ -136,7 +144,8 @@ export const ManifestSchema = z.strictObject({
   if (new Set(ids).size !== ids.length) ctx.addIssue({ code: 'custom', path: ['workers', 'requiredModes'], message: 'a mode appears twice' });
   if (m.workers.optionalModes.some((o) => ids.includes(o))) ctx.addIssue({ code: 'custom', path: ['workers', 'optionalModes'], message: 'a mode is both required and optional' });
   const budget = m.proposedVariableBudgetUsd;
-  if (budget.codingPlanningVerificationModelsAndTools + budget.cloudRuntime + budget.assistantInference > budget.total) ctx.addIssue({ code: 'custom', path: ['proposedVariableBudgetUsd'], message: 'the parts exceed the total' });
+  const parts = budget.codingPlanningVerificationModelsAndTools + budget.cloudRuntime + budget.assistantInference;
+  if (parts > budget.total) ctx.addIssue({ code: 'custom', path: ['proposedVariableBudgetUsd'], message: 'the parts exceed the total' });
 });
 
 export type Manifest = z.infer<typeof ManifestSchema>;
@@ -148,9 +157,17 @@ export class ManifestError extends Error {
   }
 }
 
-export const sha256 = (data: string | Buffer): string => createHash('sha256').update(data).digest('hex');
+export { sha256 };
 
-/** Parses manifest text. The hash is over the exact bytes read, so it names this file and no other. */
+export type Track = 'workers' | 'assistant';
+export const TRACKS: readonly Track[] = ['workers', 'assistant'];
+
+/** The manifest's content hash, leaving out `starts`. Every record and every start refers to the manifest by this. */
+export function manifestSha256(manifest: Manifest): string {
+  const { starts: _starts, ...content } = manifest;
+  return canonicalSha256(content);
+}
+
 export function parseManifest(source: string): { manifest: Manifest; sha256: string } {
   let raw: unknown;
   try {
@@ -160,7 +177,7 @@ export function parseManifest(source: string): { manifest: Manifest; sha256: str
   }
   const parsed = ManifestSchema.safeParse(raw);
   if (!parsed.success) throw new ManifestError(parsed.error.issues.map((i) => `${i.path.join('.') || 'manifest'}: ${i.message}`));
-  return { manifest: parsed.data, sha256: sha256(source) };
+  return { manifest: parsed.data, sha256: manifestSha256(parsed.data) };
 }
 
 export function readManifest(path: string): { manifest: Manifest; sha256: string } {
@@ -182,24 +199,48 @@ function shuffled<T>(items: readonly T[], draw: () => number): T[] {
   return out;
 }
 
+const range = (n: number): number[] => Array.from({ length: n }, (_, i) => i + 1);
+
 /**
- * The predeclared order every planned trial runs in. Workers run in paired blocks, each block a shuffle of every
- * required mode, unsupported ones included so the order does not change when a mode becomes available. The assistant
- * runs its excluded warm-ups first, interleaved, then every measured request across both routes in one shuffle.
+ * The predeclared order every planned trial runs in. Each entry is a slot. Workers run in paired blocks, each block a
+ * shuffle of every required mode, unsupported ones included so the order does not change when a mode becomes
+ * available. The assistant runs its excluded warm-ups first, interleaved, then every measured request across both
+ * routes in one shuffle.
  */
 export function deriveOrder(manifest: Manifest, seed: string): string[] {
   const draw = drawer(seed);
   const modes = manifest.workers.requiredModes.map((m) => m.id);
-  const workers = Array.from({ length: manifest.workers.attemptsPerRequiredMode }, (_, b) => shuffled(modes, draw).map((mode) => `workers/block-${b + 1}/${mode}`)).flat();
+  const workers = range(manifest.workers.attemptsPerRequiredMode)
+    .flatMap((b) => shuffled(modes, draw).map((mode) => `workers/block-${b}/${mode}`));
   const a = manifest.assistant;
-  const warmups = shuffled(ASSISTANT_ROUTES.flatMap((route) => Array.from({ length: a.excludedWarmupsPerRoute }, (_, k) => `assistant/warmup/${route}/${k + 1}`)), draw);
-  const measured = shuffled(ASSISTANT_ROUTES.flatMap((route) => a.fixtureIds.flatMap((fixture) => Array.from({ length: a.repetitionsPerFixture }, (_, r) => `assistant/${route}/${fixture}/rep-${r + 1}`))), draw);
-  return [...workers, ...warmups, ...measured];
+  const warmupSlots = ASSISTANT_ROUTES.flatMap((route) => range(a.excludedWarmupsPerRoute).map((k) => `assistant/warmup/${route}/${k}`));
+  const measuredSlots = ASSISTANT_ROUTES.flatMap((route) =>
+    a.fixtureIds.flatMap((fixture) => range(a.repetitionsPerFixture).map((r) => `assistant/${route}/${fixture}/rep-${r}`)));
+  return [...workers, ...shuffled(warmupSlots, draw), ...shuffled(measuredSlots, draw)];
+}
+
+export type Slot =
+  | { readonly track: 'workers'; readonly id: string; readonly block: string; readonly mode: string }
+  | { readonly track: 'assistant'; readonly id: string; readonly warmup: false; readonly mode: string; readonly fixtureId: string }
+  | { readonly track: 'assistant'; readonly id: string; readonly warmup: true; readonly mode: string };
+
+/** Reads a frozen order entry. Null for anything that is not a slot this protocol plans. */
+export function parseSlot(id: string): Slot | null {
+  let m = /^workers\/(block-\d+)\/([A-Z0-9]+)$/.exec(id);
+  if (m) return { track: 'workers', id, block: m[1]!, mode: m[2]! };
+  m = /^assistant\/warmup\/([A-Z_]+)\/\d+$/.exec(id);
+  if (m) return { track: 'assistant', id, warmup: true, mode: m[1]! };
+  m = /^assistant\/([A-Z_]+)\/([^/]+)\/rep-\d+$/.exec(id);
+  if (m) return { track: 'assistant', id, warmup: false, mode: m[1]!, fixtureId: m[2]! };
+  return null;
 }
 
 export const orderSha256 = (order: readonly string[]): string => sha256(order.map((e) => `${e}\n`).join(''));
 
-/** The seed and order are frozen when both are recorded, the order is exactly the one the seed derives, and its hash and freeze time are recorded. */
+/**
+ * The seed and order are frozen when both are recorded, the order is exactly the one the seed derives, and its hash
+ * and freeze time are recorded.
+ */
 export function isFrozen(manifest: Manifest): boolean {
   const r = manifest.randomization;
   if (r.seed === null || r.order.length === 0 || r.orderSha256 === null || r.frozenAtUtc === null) return false;
@@ -207,7 +248,9 @@ export function isFrozen(manifest: Manifest): boolean {
   return derived.length === r.order.length && derived.every((e, i) => e === r.order[i]) && orderSha256(r.order) === r.orderSha256;
 }
 
+/** The cohort-start file: the preregistration record a track is bound to. */
 export const StartRecordSchema = z.strictObject({
+  track: z.enum(['workers', 'assistant']),
   cohortId: nullableText,
   seed: text,
   orderSha256: sha256Hex,
@@ -215,6 +258,8 @@ export const StartRecordSchema = z.strictObject({
   startedAtUtc: isoUtc,
 });
 export type StartRecord = z.infer<typeof StartRecordSchema>;
+export type StartRecords = Readonly<Record<Track, StartRecord | null>>;
+export const NO_STARTS: StartRecords = { workers: null, assistant: null };
 
 export class FrozenError extends Error {
   constructor(message: string) {
@@ -223,17 +268,49 @@ export class FrozenError extends Error {
   }
 }
 
-/** Records the seed and the order it derives. Refused once a cohort has started: the order is part of the experiment. */
-export function freezeOrder(manifest: Manifest, seed: string, frozenAtUtc: string, start: StartRecord | null): Manifest {
-  if (start !== null) throw new FrozenError(`the seed and order cannot change after start (started ${start.startedAtUtc})`);
+const startedTracks = (manifest: Manifest, files: StartRecords): Track[] =>
+  TRACKS.filter((t) => manifest.starts[t] !== null || files[t] !== null);
+
+/**
+ * Records the seed and the order it derives. Refused once any track has started, whether the manifest says so or a
+ * cohort-start file does: the order is part of the experiment.
+ */
+export function freezeOrder(manifest: Manifest, seed: string, frozenAtUtc: string, files: StartRecords = NO_STARTS): Manifest {
+  const started = startedTracks(manifest, files);
+  if (started.length > 0) throw new FrozenError(`the seed and order cannot change after start (${started.join(' and ')} started)`);
   if (seed.trim() === '') throw new FrozenError('a seed is required');
   if (!isoUtc.safeParse(frozenAtUtc).success) throw new FrozenError('the freeze time must be an ISO timestamp');
   const order = deriveOrder(manifest, seed);
   return { ...manifest, randomization: { ...manifest.randomization, seed, order, orderSha256: orderSha256(order), frozenAtUtc } };
 }
 
-/** What a runner writes before its first trial: the frozen seed and order it is bound to. Refused on an unfrozen manifest. */
-export function recordStart(manifest: Manifest, manifestSha256: string, startedAtUtc: string): StartRecord {
+/**
+ * What a runner writes before a track's first trial: the cohort-start file, and the same start stamped into the
+ * manifest. Refused on an unfrozen manifest or a track already started. The caller must have a passing preflight for
+ * the track first; the CLI does.
+ */
+export function recordStart(manifest: Manifest, track: Track, startedAtUtc: string): { start: StartRecord; manifest: Manifest } {
   if (!isFrozen(manifest)) throw new FrozenError('the seed and order must be frozen before start');
-  return StartRecordSchema.parse({ cohortId: manifest.cohortId, seed: manifest.randomization.seed, orderSha256: manifest.randomization.orderSha256, manifestSha256, startedAtUtc });
+  if (manifest.starts[track] !== null) throw new FrozenError(`${track} already started at ${manifest.starts[track]!.startedAtUtc}`);
+  const hash = manifestSha256(manifest);
+  const start = StartRecordSchema.parse({
+    track, cohortId: manifest.cohortId, seed: manifest.randomization.seed, orderSha256: manifest.randomization.orderSha256, manifestSha256: hash, startedAtUtc,
+  });
+  return { start, manifest: { ...manifest, starts: { ...manifest.starts, [track]: { startedAtUtc, manifestSha256: hash } } } };
+}
+
+/**
+ * Why a track's start does not hold for this manifest. Empty when the track has not started (neither the manifest
+ * nor a file says so) or when its start matches: the stamp and the file agree, and the manifest's content, seed and
+ * order are the ones the track started under.
+ */
+export function startIssues(manifest: Manifest, track: Track, file: StartRecord | null): string[] {
+  const stamp = manifest.starts[track];
+  if (stamp === null && file === null) return [];
+  const issues: string[] = [];
+  const agree = stamp !== null && file !== null && file.track === track && stamp.startedAtUtc === file.startedAtUtc && stamp.manifestSha256 === file.manifestSha256;
+  if (!agree) issues.push('start_record_mismatch');
+  if ((stamp ?? file)!.manifestSha256 !== manifestSha256(manifest)) issues.push('manifest_changed_after_start');
+  if (file !== null && (file.seed !== manifest.randomization.seed || file.orderSha256 !== manifest.randomization.orderSha256)) issues.push('seed_or_order_changed_after_start');
+  return issues;
 }

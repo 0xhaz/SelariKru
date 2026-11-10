@@ -1,31 +1,37 @@
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { redactSecrets } from '@selarikru/protocol';
-import { FrozenError, ManifestError, StartRecordSchema, freezeOrder, readManifest, recordStart, type StartRecord } from './manifest.ts';
-import { formatPreflight, preflight } from './preflight.ts';
+import { verifierHashes } from '@selarikru/verifier/hashing';
+import { FrozenError, ManifestError, StartRecordSchema, TRACKS, freezeOrder, readManifest, recordStart, type Manifest, type StartRecord, type StartRecords, type Track } from './manifest.ts';
+import { formatPreflight, preflight, type PreflightReport, type VerifierHashPair } from './preflight.ts';
 import { PUBLIC_RESULTS_PATH, PublishError, preparePublish, writePublished } from './publish.ts';
-import { ExportError, buildReport, exportResults, renderReport } from './report.ts';
+import { ExportError, ReportError, buildReport, exportResults, renderReport } from './report.ts';
 
 /**
  * `pnpm --filter ./tools/benchmarks benchmark <command>`. Every command reads and writes files only: none dispatches a
  * run, calls a model, spends or opens a connection.
  *
- *   preflight     [--manifest p] [--hashes p] [--lockfile p] [--start p]   checklist; exit 1 when a track is blocked
- *   freeze        --seed s [--manifest p] [--start p]                       record the seed and its order; refused after start
- *   record-start  [--manifest p] [--start p]                                record the frozen seed and order a cohort is bound to
- *   report        --records p [--manifest p] [--out p]                      export raw records and print the report
- *   publish       --results p [--out p]                                     validate, redact, stamp and write for the web panel
+ *   preflight     [--manifest p] [--verifier p] [--repo p] [--starts dir]         checklist; exit 1 when a track is blocked
+ *   freeze        --seed s [--manifest p] [--starts dir]                          record the seed and its order; refused after any start
+ *   record-start  --track workers|assistant [--manifest p] [--verifier p] [--repo p] [--starts dir]
+ *                 on a passing preflight for the track, write its cohort-start file and stamp the manifest
+ *   report        --records p [--manifest p] [--starts dir] [--out p]             export raw records and print the report
+ *   publish       --results p [--manifest p] [--out p]                            validate, redact, stamp and write for the web panel
+ *
+ * `--verifier` is the verifier package (default services/verifier) and `--repo` the directory holding pnpm-lock.yaml;
+ * preflight recomputes their hashes with the verifier's own hashing. Start files are `cohort-start-<track>.json` in
+ * `--starts`, by default the manifest's directory.
  */
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const DEFAULTS = {
   manifest: join(REPO_ROOT, 'fixtures/benchmarks/manifest.json'),
-  hashes: join(REPO_ROOT, 'services/verifier/suites/feedback-board/HASHES.json'),
-  lockfile: join(REPO_ROOT, 'pnpm-lock.yaml'),
+  verifier: join(REPO_ROOT, 'services/verifier'),
+  repo: REPO_ROOT,
   publicOut: join(REPO_ROOT, PUBLIC_RESULTS_PATH),
 };
+const HASHES_PATH = 'suites/feedback-board/HASHES.json';
 
 export interface Io {
   readonly out: (s: string) => void;
@@ -36,105 +42,154 @@ export interface Io {
   readonly cwd?: string;
 }
 
-const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish [--manifest p] [--hashes p] [--lockfile p] [--start p] [--seed s] [--records p] [--results p] [--out p]';
-const FLAGS = new Set(['manifest', 'hashes', 'lockfile', 'start', 'seed', 'records', 'results', 'out']);
+const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish [--manifest p] [--verifier p] [--repo p] [--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p]';
+const FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out']);
+const PATH_FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'records', 'results', 'out']);
 
 class UsageError extends Error {}
+class BlockedError extends Error {}
 
-function parseArgs(argv: readonly string[]): { command: string | undefined; flags: Map<string, string> } {
+function parseArgs(argv: readonly string[], at: (p: string) => string): { command: string | undefined; flags: Map<string, string> } {
   const [command, ...rest] = argv;
   const flags = new Map<string, string>();
   for (let i = 0; i < rest.length; i += 2) {
-    const name = rest[i]!.replace(/^--/, '');
+    const arg = rest[i]!;
+    const name = arg.replace(/^--/, '');
     const value = rest[i + 1];
-    if (!rest[i]!.startsWith('--') || !FLAGS.has(name) || value === undefined) throw new UsageError(`unexpected argument ${rest[i]}`);
-    flags.set(name, value);
+    if (!arg.startsWith('--') || !FLAGS.has(name) || value === undefined) throw new UsageError(`unexpected argument ${arg}`);
+    flags.set(name, PATH_FLAGS.has(name) ? at(value) : value);
   }
   return { command, flags };
 }
 
-const sha256File = (path: string): string | null => { try { return createHash('sha256').update(readFileSync(path)).digest('hex'); } catch { return null; } };
-
-function readHashes(path: string): { verifierSha256: string; lockfileSha256: string } | null {
+function readRecorded(verifierRoot: string): VerifierHashPair | null {
   try {
-    const h = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    const h = JSON.parse(readFileSync(join(verifierRoot, HASHES_PATH), 'utf8')) as Record<string, unknown>;
     return typeof h.verifierSha256 === 'string' && typeof h.lockfileSha256 === 'string' ? { verifierSha256: h.verifierSha256, lockfileSha256: h.lockfileSha256 } : null;
   } catch {
     return null;
   }
 }
 
-function readStart(path: string): StartRecord | null {
-  if (!existsSync(path)) return null;
-  return StartRecordSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
+/** The verifier's own hashing over its files and the lockfile, as its `hashes --check` does. */
+function recompute(verifierRoot: string, repoRoot: string): VerifierHashPair | null {
+  try {
+    const h = verifierHashes(verifierRoot, repoRoot);
+    return { verifierSha256: h.verifierSha256, lockfileSha256: h.lockfileSha256 };
+  } catch {
+    return null;
+  }
+}
+
+const startPath = (dir: string, track: Track): string => join(dir, `cohort-start-${track}.json`);
+
+function readStarts(dir: string): StartRecords {
+  const read = (t: Track): StartRecord | null => {
+    const p = startPath(dir, t);
+    return existsSync(p) ? StartRecordSchema.parse(JSON.parse(readFileSync(p, 'utf8'))) : null;
+  };
+  return { workers: read('workers'), assistant: read('assistant') };
 }
 
 const readJson = (path: string): unknown => JSON.parse(readFileSync(path, 'utf8'));
+const writeJson = (path: string, value: unknown): void => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+
+interface Context {
+  readonly flags: Map<string, string>;
+  readonly io: Io;
+  readonly manifestPath: string;
+  readonly startsDir: string;
+}
+
+function required(flags: Map<string, string>, name: string): string {
+  const v = flags.get(name);
+  if (v === undefined) throw new UsageError(`--${name} is required`);
+  return v;
+}
+
+function runPreflight(ctx: Context, manifest: Manifest): PreflightReport {
+  const verifierRoot = ctx.flags.get('verifier') ?? DEFAULTS.verifier;
+  const repoRoot = ctx.flags.get('repo') ?? DEFAULTS.repo;
+  return preflight({
+    manifest, env: ctx.io.env, starts: readStarts(ctx.startsDir),
+    verifier: { recorded: readRecorded(verifierRoot), recomputed: recompute(verifierRoot, repoRoot) },
+  });
+}
+
+const COMMANDS: Readonly<Record<string, (ctx: Context) => number>> = {
+  preflight(ctx) {
+    const report = runPreflight(ctx, readManifest(ctx.manifestPath).manifest);
+    ctx.io.out(formatPreflight(report));
+    return report.liveDispatch.workers.allowed && report.liveDispatch.assistant.allowed ? 0 : 1;
+  },
+  freeze(ctx) {
+    const seed = required(ctx.flags, 'seed');
+    const { manifest } = readManifest(ctx.manifestPath);
+    const frozen = freezeOrder(manifest, seed, ctx.io.now(), readStarts(ctx.startsDir));
+    writeJson(ctx.manifestPath, frozen);
+    ctx.io.out(`Froze seed and ${frozen.randomization.order.length} slots; order sha256 ${frozen.randomization.orderSha256}.`);
+    return 0;
+  },
+  'record-start'(ctx) {
+    const track = required(ctx.flags, 'track');
+    if (!(TRACKS as readonly string[]).includes(track)) throw new UsageError(`--track must be one of ${TRACKS.join(', ')}`);
+    const t = track as Track;
+    const path = startPath(ctx.startsDir, t);
+    if (existsSync(path)) throw new FrozenError(`${t} already has a start recorded at ${path}`);
+    const { manifest } = readManifest(ctx.manifestPath);
+    const decision = runPreflight(ctx, manifest).liveDispatch[t];
+    if (!decision.allowed) throw new BlockedError(`preflight blocks ${t}, so it cannot start: ${decision.blockers.join(', ')}`);
+    const { start, manifest: stamped } = recordStart(manifest, t, ctx.io.now());
+    writeJson(path, start);
+    writeJson(ctx.manifestPath, stamped);
+    ctx.io.out(`Recorded the ${t} start at ${start.startedAtUtc}; the seed, order and manifest are now fixed for it.`);
+    return 0;
+  },
+  report(ctx) {
+    const records = readJson(required(ctx.flags, 'records'));
+    if (!Array.isArray(records)) throw new ExportError(['the records file must be a JSON array of trial records']);
+    const { manifest } = readManifest(ctx.manifestPath);
+    const file = exportResults({ manifest, starts: readStarts(ctx.startsDir), records, generatedAtUtc: ctx.io.now() });
+    const out = ctx.flags.get('out');
+    if (out !== undefined) writeJson(out, file);
+    ctx.io.out(renderReport(buildReport(file, manifest)));
+    return 0;
+  },
+  publish(ctx) {
+    const out = ctx.flags.get('out') ?? DEFAULTS.publicOut;
+    const { manifest } = readManifest(ctx.manifestPath);
+    const file = preparePublish(readJson(required(ctx.flags, 'results')), ctx.io.now(), manifest);
+    writePublished(file, out);
+    ctx.io.out(`Published ${file.records.length} records to ${out}, generated ${file.generatedAtUtc}.`);
+    return 0;
+  },
+};
+
+const KNOWN_ERRORS = [ManifestError, ExportError, ReportError, PublishError, FrozenError, BlockedError, SyntaxError];
 
 export async function main(argv: readonly string[], io: Io): Promise<number> {
   const at = (p: string): string => (isAbsolute(p) ? p : resolve(io.cwd ?? process.cwd(), p));
   try {
-    const { command, flags } = parseArgs(argv);
-    const flag = (name: string, fallback?: string): string => {
-      const v = flags.get(name) ?? fallback;
-      if (v === undefined) throw new UsageError(`--${name} is required`);
-      return flags.has(name) ? at(v) : v;
-    };
-    const manifestPath = flag('manifest', DEFAULTS.manifest);
-    const startPath = flag('start', join(dirname(manifestPath), 'cohort-start.json'));
-
-    switch (command) {
-      case 'preflight': {
-        const { manifest } = readManifest(manifestPath);
-        const report = preflight({ manifest, env: io.env, verifierHashes: readHashes(flag('hashes', DEFAULTS.hashes)), lockfileSha256Now: sha256File(flag('lockfile', DEFAULTS.lockfile)), start: readStart(startPath) });
-        io.out(formatPreflight(report));
-        return report.liveDispatch.workers.allowed && report.liveDispatch.assistant.allowed ? 0 : 1;
-      }
-      case 'freeze': {
-        const seed = flags.get('seed');
-        if (seed === undefined) throw new UsageError('--seed is required');
-        const { manifest } = readManifest(manifestPath);
-        const frozen = freezeOrder(manifest, seed, io.now(), readStart(startPath));
-        writeFileSync(manifestPath, `${JSON.stringify(frozen, null, 2)}\n`);
-        io.out(`Froze seed and ${frozen.randomization.order.length} trials; order sha256 ${frozen.randomization.orderSha256}.`);
-        return 0;
-      }
-      case 'record-start': {
-        if (existsSync(startPath)) throw new FrozenError(`a start is already recorded at ${startPath}`);
-        const { manifest, sha256 } = readManifest(manifestPath);
-        const start = recordStart(manifest, sha256, io.now());
-        writeFileSync(startPath, `${JSON.stringify(start, null, 2)}\n`);
-        io.out(`Recorded start at ${start.startedAtUtc}; the seed and order are now fixed for this cohort.`);
-        return 0;
-      }
-      case 'report': {
-        const records = readJson(flag('records'));
-        if (!Array.isArray(records)) throw new ExportError(['the records file must be a JSON array of trial records']);
-        const { manifest, sha256 } = readManifest(manifestPath);
-        const file = exportResults({ manifest, manifestSha256: sha256, records, generatedAtUtc: io.now() });
-        if (flags.has('out')) writeFileSync(flag('out'), `${JSON.stringify(file, null, 2)}\n`);
-        io.out(renderReport(buildReport(file, manifest)));
-        return 0;
-      }
-      case 'publish': {
-        const out = flag('out', DEFAULTS.publicOut);
-        const file = preparePublish(readJson(flag('results')), io.now());
-        writePublished(file, out);
-        io.out(`Published ${file.records.length} records to ${out}, generated ${file.generatedAtUtc}.`);
-        return 0;
-      }
-      default:
-        throw new UsageError(command === undefined ? 'a command is required' : `unknown command ${command}`);
-    }
+    const { command, flags } = parseArgs(argv, at);
+    const run = command === undefined ? undefined : COMMANDS[command];
+    if (run === undefined) throw new UsageError(command === undefined ? 'a command is required' : `unknown command ${command}`);
+    const manifestPath = flags.get('manifest') ?? DEFAULTS.manifest;
+    return run({ flags, io, manifestPath, startsDir: flags.get('starts') ?? dirname(manifestPath) });
   } catch (e) {
-    if (e instanceof UsageError) { io.err(`${e.message}\n${USAGE}`); return 2; }
-    const known = e instanceof ManifestError || e instanceof ExportError || e instanceof PublishError || e instanceof FrozenError || e instanceof SyntaxError;
-    io.err(redactSecrets(known ? e.message : `unexpected error: ${e instanceof Error ? e.message : String(e)}`));
+    if (e instanceof UsageError) {
+      io.err(`${e.message}\n${USAGE}`);
+      return 2;
+    }
+    const known = KNOWN_ERRORS.some((k) => e instanceof k);
+    io.err(redactSecrets(known ? (e as Error).message : `unexpected error: ${e instanceof Error ? e.message : String(e)}`));
     return 1;
   }
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const io: Io = { out: (s) => process.stdout.write(`${s}\n`), err: (s) => process.stderr.write(`${s}\n`), env: process.env, now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd() };
+  const io: Io = {
+    out: (s) => process.stdout.write(`${s}\n`), err: (s) => process.stderr.write(`${s}\n`), env: process.env,
+    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(),
+  };
   main(process.argv.slice(2), io).then((code) => { process.exitCode = code; });
 }

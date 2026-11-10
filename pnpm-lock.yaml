@@ -642,6 +642,9 @@ importers:
       '@selarikru/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@selarikru/verifier':
+        specifier: workspace:*
+        version: link:../../services/verifier
       '@selarikru/view-protocol':
         specifier: workspace:*
         version: link:../../packages/view-protocol

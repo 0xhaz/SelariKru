@@ -56,7 +56,7 @@ export function workerRecord(o: WorkerOver): BenchmarkRecord {
   const quality = !ran ? blankQuality : status === 'completed' ? (o.failedCriteria ? failedQuality(o.failedCriteria) : passedQuality()) : blankQuality;
   return {
     protocolVersion: '0.1', dataKind, status, track: 'workers', cohortId: o.cohortId ?? 'cohort-workers', trialId: `t-${o.mode}-${o.index}`, mode: o.mode, blockId: `block-${o.index}`,
-    attemptId: `${o.mode.toLowerCase()}-${o.index}-${dataKind}`, configuration: { ...baseConfig, candidateSha: ran ? `${CANDIDATE_PREFIX[o.mode]}${String(o.index).padStart(2, '0')}`.padEnd(40, 'c') : null, ...o.config },
+    attemptId: `${o.mode.toLowerCase()}-${o.index}-${dataKind}`, slotId: null, slotAttempt: null, configuration: { ...baseConfig, candidateSha: ran ? `${CANDIDATE_PREFIX[o.mode]}${String(o.index).padStart(2, '0')}`.padEnd(40, 'c') : null, ...o.config },
     assistant: null,
     timings: { clockDomain: 'server-monotonic', startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: ran ? (o.ms === undefined ? 900_000 : o.ms) : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
     resources: {
@@ -72,6 +72,7 @@ export function workerRecord(o: WorkerOver): BenchmarkRecord {
     confounders: [...(o.confounders ?? [])],
     artifactReferences: ran ? [`#/evidence?run=${o.mode}-${o.index}`] : [],
     resultSha256: ran ? hashOf(`${o.mode}${o.index}${dataKind}${o.cohortId ?? ''}`) : null,
+    publishedSha256: null,
     measuredResultsPresent: measured,
   };
 }
@@ -97,7 +98,7 @@ export function assistantRecord(o: AssistantOver): BenchmarkRecord {
   const observed = o.observed === undefined ? (device ? 'ON_DEVICE' : 'IN_CLOUD') : o.observed;
   return {
     protocolVersion: '0.1', dataKind, status, track: 'assistant', cohortId: o.cohortId ?? 'cohort-assistant', trialId: `b-${o.index}`, mode: o.route, blockId: null,
-    attemptId: `${device ? 'dev' : 'cloud'}-${o.index}-${dataKind}${o.warmup ? '-w' : ''}`, configuration: { ...baseConfig, cacheCondition: 'warm', codingModel: device ? 'gemini-nano' : 'gemini-2.5-flash', inferenceDestination: device ? 'device' : 'cloud', candidateSha: null },
+    attemptId: `${device ? 'dev' : 'cloud'}-${o.index}-${dataKind}${o.warmup ? '-w' : ''}`, slotId: null, slotAttempt: null, configuration: { ...baseConfig, cacheCondition: 'warm', codingModel: device ? 'gemini-nano' : 'gemini-2.5-flash', inferenceDestination: device ? 'device' : 'cloud', candidateSha: null },
     assistant: {
       fixtureId: `brief-${o.index % 10}`, requestedMode: o.route, observedInferenceSource: ran ? observed : null, sdkVersion: '13.1.0', schemaValid: ran ? (o.schemaValid === undefined ? true : o.schemaValid) : null, warmup: o.warmup ?? false, payloadSha256: ran ? hashOf(`payload-${o.index % 10}`) : null,
       semanticReview: { reviewer: null, routeLabelHidden: ran ? true : null, retainedFacts: ran ? 6 : null, missingFacts: ran ? 0 : null, inventedRequirements: ran ? 0 : null },
@@ -113,6 +114,7 @@ export function assistantRecord(o: AssistantOver): BenchmarkRecord {
     confounders: [],
     artifactReferences: ran ? [`#/evidence?run=assistant-${o.index}`] : [],
     resultSha256: ran ? hashOf(`${device ? 'd' : 'k'}${o.index}${dataKind}${o.warmup ? 'w' : ''}${o.cohortId ?? ''}`) : null,
+    publishedSha256: null,
     measuredResultsPresent: dataKind === 'measured' && ran,
   };
 }

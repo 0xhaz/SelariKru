@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Protected, independent verifier for the Feedback Board acceptance contract (FB-01..FB-08)",
+  "exports": { "./hashing": "./src/hashing.ts" },
   "engines": { "node": ">=24 <25", "pnpm": ">=9.12.2 <10" },
   "scripts": {
     "verify": "tsx src/run.ts",

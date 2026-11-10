@@ -8,6 +8,8 @@
   "mode": null,
   "blockId": null,
   "attemptId": null,
+  "slotId": null,
+  "slotAttempt": null,
   "configuration": {
     "manifestSha256": null,
     "starterSha": null,
@@ -154,5 +156,6 @@
   "confounders": [],
   "artifactReferences": [],
   "resultSha256": null,
+  "publishedSha256": null,
   "measuredResultsPresent": false
 }

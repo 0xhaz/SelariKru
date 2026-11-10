@@ -98,6 +98,13 @@ const RecordSchema = z.strictObject({
   mode: z.string().min(1),
   blockId: nullableText,
   attemptId: z.string().min(1),
+  /**
+   * Added to the template: the frozen order entry this trial fills (for example `workers/block-1/L1`). A replacement
+   * attempt is a new trial in the same slot with the next `slotAttempt`; the highest attempt represents the slot and
+   * earlier ones are superseded. Null only on records that are not reconciled against a manifest (simulated panel data).
+   */
+  slotId: nullableText,
+  slotAttempt: z.number().int().positive().nullable(),
   configuration: ConfigurationSchema,
   assistant: AssistantSchema.nullable(),
   timings: z.strictObject({
@@ -181,7 +188,13 @@ const RecordSchema = z.strictObject({
   confounders: z.array(z.string()),
   artifactReferences: z.array(z.string()),
   /** Added to the template (plan section 5, "hash/tag every result"): sha-256 of the raw record. */
-  resultSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  resultSha256: z.string().regex(SHA256).nullable(),
+  /**
+   * Added to the template: sha-256 of the record as published, after redaction. The publish step removes `resultSha256`
+   * (a hash of the unredacted record, which a short dictionary of hosts or accounts could confirm) and sets this
+   * instead, so a measured record carries exactly one of the two.
+   */
+  publishedSha256: z.string().regex(SHA256).nullable(),
   measuredResultsPresent: z.boolean(),
 });
 
@@ -306,13 +319,15 @@ export const BenchmarkFileSchema = z.strictObject({
       if (timings.clockDomain === null && (verified || containsNumber(timings))) refuse('a measured attempt with timings needs its clock domain');
       if (verified && record.artifactReferences.length === 0) refuse('an attempt that reached verification needs an artifact reference');
       if (!record.artifactReferences.every(isEvidenceReference)) refuse('artifact references must start #/ or https://');
-      if (record.resultSha256 === null) refuse('a measured attempt needs its result hash');
+      if ((record.resultSha256 === null) === (record.publishedSha256 === null)) refuse('a measured attempt needs exactly one of its result hash and its published hash');
       if (record.quality.criteria.some((c) => c.status === 'passed' && (c.evidenceReferences.length === 0 || !c.evidenceReferences.every(isEvidenceReference)))) refuse('a passing criterion needs evidence references starting #/ or https://');
     }
-    if (record.resultSha256 !== null) {
-      if (resultHashes.has(record.resultSha256)) refuse('a result hash is used by another attempt');
-      resultHashes.add(record.resultSha256);
+    for (const hash of [record.resultSha256, record.publishedSha256]) {
+      if (hash === null) continue;
+      if (resultHashes.has(hash)) refuse('a result hash is used by another attempt');
+      resultHashes.add(hash);
     }
+    if ((record.slotId === null) !== (record.slotAttempt === null)) refuse('a slot attempt comes with its slot, and a slot with its attempt');
 
     const minutes = (humanMinutes.intervention ?? 0) + (humanMinutes.correction ?? 0);
     if (record.operations.humanIntervened === false && minutes > 0) refuse('humanIntervened is false but intervention or correction minutes are recorded');

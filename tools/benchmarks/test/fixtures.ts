@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { freezeOrder, parseManifest, type Manifest } from '../src/manifest.ts';
+import { verifierHashes } from '@selarikru/verifier/hashing';
+import { freezeOrder, parseManifest, recordStart, type Manifest, type StartRecords } from '../src/manifest.ts';
 import type { RawRecord } from '../src/report.ts';
 
 /** Test data only. Every value here is synthetic; none is a measurement. */
@@ -27,7 +28,35 @@ export function resolvedManifest(over: (m: Manifest) => void = () => {}): Manife
   m.workers = { ...m.workers, repairPolicy: 'two repairs per task revision', requiredModes: m.workers.requiredModes.map((r) => ({ ...r, availability: 'supported', unavailableReason: null })) };
   m.proposedVariableBudgetUsd = { ...m.proposedVariableBudgetUsd, status: 'authorized', payer: 'project owner', authorizedBy: 'owner', authorizedAtUtc: '2026-11-15T09:00:00.000Z' };
   over(m);
-  return freezeOrder(m, 'seed-7f1e', '2026-11-15T10:00:00.000Z', null);
+  return freezeOrder(m, 'seed-7f1e', '2026-11-15T10:00:00.000Z');
+}
+
+/** Both tracks started: the stamped manifest and the two cohort-start files. */
+export function started(manifest: Manifest = resolvedManifest()): { manifest: Manifest; starts: StartRecords } {
+  const w = recordStart(manifest, 'workers', '2026-11-16T09:00:00.000Z');
+  const a = recordStart(w.manifest, 'assistant', '2026-11-16T09:05:00.000Z');
+  return { manifest: a.manifest, starts: { workers: w.start, assistant: a.start } };
+}
+
+/**
+ * A minimal verifier package and repository root on disk, shaped as the verifier's hashing expects, with HASHES.json
+ * written from the verifier's own hashing. Returns the paths and the hashes.
+ */
+export function verifierTree(dir: string): { verifierRoot: string; repoRoot: string; hashes: { verifierSha256: string; lockfileSha256: string } } {
+  const repoRoot = join(dir, 'repo');
+  const verifierRoot = join(repoRoot, 'services/verifier');
+  const suite = join(verifierRoot, 'suites/feedback-board');
+  mkdirSync(suite, { recursive: true });
+  mkdirSync(join(verifierRoot, 'src'), { recursive: true });
+  writeFileSync(join(suite, 'manifest.json'), '{"suite":"fixture"}');
+  writeFileSync(join(suite, 'checks.spec.ts'), '// fixture suite');
+  writeFileSync(join(verifierRoot, 'src/run.ts'), '// fixture runner');
+  writeFileSync(join(verifierRoot, 'Dockerfile'), 'FROM scratch');
+  writeFileSync(join(verifierRoot, 'package.json'), '{"name":"fixture-verifier"}');
+  writeFileSync(join(repoRoot, 'pnpm-lock.yaml'), 'lockfileVersion: fixture');
+  const h = verifierHashes(verifierRoot, repoRoot);
+  writeFileSync(join(suite, 'HASHES.json'), JSON.stringify(h));
+  return { verifierRoot, repoRoot, hashes: { verifierSha256: h.verifierSha256, lockfileSha256: h.lockfileSha256 } };
 }
 
 const passedCriteria = (): RawRecord['quality']['criteria'] => Array.from({ length: 8 }, (_, i) => ({ id: `FB-0${i + 1}`, status: 'passed' as const, evidenceReferences: [`#/evidence?check=FB-0${i + 1}`] }));
@@ -48,6 +77,7 @@ export interface WorkerOver {
   readonly permittedHumanActions?: number;
   readonly failureDetail?: string;
   readonly account?: string;
+  readonly slotAttempt?: number;
 }
 
 /** One raw worker record, as a runner would write it. Completed and passing unless told otherwise. */
@@ -63,6 +93,7 @@ export function rawWorker(o: WorkerOver): RawRecord {
   const actions = o.permittedHumanActions ?? 0;
   return {
     dataKind: o.dataKind ?? 'measured', status, track: 'workers', trialId, mode: o.mode, blockId: `block-${o.block}`, attemptId: `${trialId}-a1`,
+    slotId: `workers/block-${o.block}/${o.mode}`, slotAttempt: o.slotAttempt ?? 1,
     configuration: { candidateSha: verified ? sha : null, inferenceDestination: 'cloud', providerAccountReference: o.account ?? null, cacheCondition: 'warm', localHost: o.mode === 'C1' ? null : 'arm64-laptop', cloudHost: o.mode === 'L1' ? null : 'cloud-run-x86' },
     assistant: null,
     timings: { clockDomain: ran ? (o.clockDomain ?? 'server-monotonic') : null, startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: verified ? ms : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
@@ -93,11 +124,13 @@ export function rawAssistant(o: AssistantOver): RawRecord {
   const device = o.route === 'ONLY_ON_DEVICE';
   const trialId = `a-${device ? 'dev' : 'cloud'}-${o.index}${o.warmup ? '-w' : ''}`;
   const ms = o.ms ?? 1000 + o.index * 10;
+  const fixtureId = `brief-${String((o.index % 10) + 1).padStart(2, '0')}`;
+  const slotId = o.warmup ? `assistant/warmup/${o.route}/${(o.index % 2) + 1}` : `assistant/${o.route}/${fixtureId}/rep-${Math.floor(o.index / 10) + 1}`;
   return {
-    dataKind: 'measured', status, track: 'assistant', trialId, mode: o.route, blockId: null, attemptId: `${trialId}-a1`,
+    dataKind: 'measured', status, track: 'assistant', trialId, mode: o.route, blockId: null, attemptId: `${trialId}-a1`, slotId, slotAttempt: 1,
     configuration: { candidateSha: null, inferenceDestination: device ? 'device' : 'cloud', providerAccountReference: null, cacheCondition: 'warm', localHost: null, cloudHost: null },
     assistant: {
-      fixtureId: `brief-${String((o.index % 10) + 1).padStart(2, '0')}`, requestedMode: o.route, observedInferenceSource: ran ? (o.observed === undefined ? (device ? 'ON_DEVICE' : 'IN_CLOUD') : o.observed) : null, sdkVersion: '12.5.0', schemaValid: ran ? true : null, warmup: o.warmup ?? false,
+      fixtureId, requestedMode: o.route, observedInferenceSource: ran ? (o.observed === undefined ? (device ? 'ON_DEVICE' : 'IN_CLOUD') : o.observed) : null, sdkVersion: '12.5.0', schemaValid: ran ? true : null, warmup: o.warmup ?? false,
       payloadSha256: '9'.repeat(63) + String(o.index % 10), semanticReview: { reviewer: null, routeLabelHidden: null, retainedFacts: null, missingFacts: null, inventedRequirements: null },
       providerInputTokens: null, providerOutputTokens: null, inputBytes: ran ? 2048 : null, outputBytes: ran ? 512 : null,
     },
