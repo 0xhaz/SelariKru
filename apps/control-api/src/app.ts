@@ -213,7 +213,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (!row) throw new AppError(401, 'invalid_token', 'token is not valid');
     // The freshness signal: every authenticated runner call counts as seen. Claims arrive at poll rate, so an update is written at most once per interval.
     const seenAt = deps.now();
-    await db.update(schema.runners).set({ lastSeenAt: seenAt }).where(and(eq(schema.runners.tenantId, row.tenantId), eq(schema.runners.runnerId, row.runnerId), or(isNull(schema.runners.lastSeenAt), lt(schema.runners.lastSeenAt, new Date(seenAt.getTime() - RUNNER_SEEN_WRITE_MS)))));
+    // `lastPolledAt` moves with it, but only here: enrolment sets `lastSeenAt` and not this, so a runner that has never called counts for nothing settings wait on.
+    const due = new Date(seenAt.getTime() - RUNNER_SEEN_WRITE_MS);
+    await db.update(schema.runners).set({ lastSeenAt: seenAt, lastPolledAt: seenAt }).where(and(eq(schema.runners.tenantId, row.tenantId), eq(schema.runners.runnerId, row.runnerId), or(isNull(schema.runners.lastSeenAt), lt(schema.runners.lastSeenAt, due), isNull(schema.runners.lastPolledAt), lt(schema.runners.lastPolledAt, due))));
     req.principal = { kind: 'runner', runnerId: row.runnerId, tenantId: row.tenantId, location: row.location === 'cloud' ? 'cloud' : 'local' };
   };
 

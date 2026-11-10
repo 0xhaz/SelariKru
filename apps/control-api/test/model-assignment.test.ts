@@ -86,6 +86,8 @@ describe('POST /v1/projects/:id/model-assignments', () => {
     const { token, runnerId } = await enrolRunner(h.app);
     const version = async () => String((await t.db.execute(sql`SELECT xmin::text AS v FROM runners WHERE runner_id = ${runnerId}`))[0]!['v']);
     const claim = (harnesses: unknown) => post(h.app, '/v1/runners/claim', { harnesses }, bearer(token));
+    // The first authenticated call records that the runner has polled; what is measured below is the report.
+    await claim(TEST_RUNNER_REPORT);
     const start = await version();
     // Same content in another order: jsonb and the wire disagree about key order, and that is not a change.
     expect((await claim(TEST_RUNNER_REPORT.map((r) => ({ models: [...r.models].reverse(), harnessVersion: r.harnessVersion, provider: r.provider })))).status).toBe(200);

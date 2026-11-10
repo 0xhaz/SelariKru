@@ -45,10 +45,13 @@ export async function currentConfigRevision(db: Executor, tenantId: string): Pro
   return row?.revision ?? 0;
 }
 
-/** Runners seen recently: the ones whose acknowledgement a project-wide change waits for. One that went quiet cannot claim, so it is not waited on. */
+/**
+ * Runners that called recently: the ones whose acknowledgement a project-wide change waits for. One that went quiet cannot claim, so it is not waited on;
+ * one only just enrolled has never called (`last_polled_at` is null), so it is not waited on either until its first poll.
+ */
 async function recentRunners(db: Executor, tenantId: string, now: Date) {
   return db.select({ runnerId: schema.runners.runnerId, ack: schema.runners.configAckRevision }).from(schema.runners)
-    .where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt), gte(schema.runners.lastSeenAt, new Date(now.getTime() - RUNNER_RECENT_SECONDS * 1000))));
+    .where(and(eq(schema.runners.tenantId, tenantId), isNull(schema.runners.revokedAt), gte(schema.runners.lastPolledAt, new Date(now.getTime() - RUNNER_RECENT_SECONDS * 1000))));
 }
 
 type Row = { desired: unknown; desiredRevision: number; effective: unknown; effectiveRevision: number };
@@ -196,7 +199,14 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
     });
     // A budget lowered below what is already committed stops running work through the existing budget stop, in its own transactions. It runs after every
     // accepted budget save, a replay included, so a retry still stops work a lost first pass did not; the stop itself acts only past the limit and only once.
-    if (body.change.field === 'budget_limit_usd') await stopForExhaustedBudget(schedulerCtx(), { tenantId: config.tenantId, projectId, runId: body.key });
+    // The save is committed whatever happens here: a failed stop is logged, and a retry of the same save runs it again.
+    if (body.change.field === 'budget_limit_usd') {
+      try {
+        await stopForExhaustedBudget(schedulerCtx(), { tenantId: config.tenantId, projectId, runId: body.key });
+      } catch (err) {
+        app.log.warn({ err, runId: body.key }, 'stopping work after a lower budget failed; retrying the save runs it again');
+      }
+    }
     for (const attemptId of stopped) ctx.control.endForAttempt(attemptId, 'attempt_fenced');
     return reply.code(200).send(result);
   });
@@ -261,6 +271,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         const tasks = (await lockedRunTasks(tx, config.tenantId, run.projectId, runId, true)).filter((t) => ACTIVE_TASK.includes(t.status));
         const stoppingTasks: string[] = [];
         const cancelled: string[] = [];
+        const skipped: { taskId: string; reason: string }[] = [];
         for (const t of tasks) {
           const key = { tenantId: config.tenantId, projectId: run.projectId, taskId: t.taskId };
           const scope = { projectId: run.projectId, runId, taskId: t.taskId };
@@ -276,8 +287,9 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
             stoppingTasks.push(t.taskId);
             continue;
           }
-          await closeTask(tx, key, scope, t, uid, operationId, at);
-          cancelled.push(t.taskId);
+          const why = await closeTask(tx, key, scope, t, uid, operationId, at);
+          if (why === null) cancelled.push(t.taskId);
+          else skipped.push({ taskId: t.taskId, reason: why });
         }
         // A grant nobody used would release work that is no longer wanted: it expires now. The record of who granted it stays.
         const revoked = await tx.update(schema.approvals).set({ expiresAt: at }).where(and(
@@ -286,12 +298,12 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         await tx.update(schema.approvals).set({ outcome: 'superseded', resolvedAt: at }).where(and(eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.projectId, run.projectId), eq(schema.approvals.runId, runId), eq(schema.approvals.outcome, 'pending')));
         await tx.update(schema.runs).set({ cancelRequestedAt: at, cancelRequestedBy: uid }).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, run.projectId), eq(schema.runs.runId, runId)));
         const revokedGrants = revoked.map((r) => r.approvalId).sort();
-        await writeEvent(tx, at, { projectId: run.projectId, runId, taskId: runId, aggregateRevision: run.planRevision ?? 0, type: 'run.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, stopping: stoppingTasks, cancelled, revokedGrants } });
+        await writeEvent(tx, at, { projectId: run.projectId, runId, taskId: runId, aggregateRevision: run.planRevision ?? 0, type: 'run.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, stopping: stoppingTasks, cancelled, revokedGrants, ...(skipped.length > 0 ? { skipped } : {}) } });
         if (stoppingTasks.length === 0) {
           await markCancelled(tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, run.planRevision ?? 0, operationId, at);
-          return { operationId, state: 'applied' as const, stopping: stoppingTasks, cancelled, revokedGrants };
+          return { operationId, state: 'applied' as const, stopping: stoppingTasks, cancelled, revokedGrants, skipped };
         }
-        return { operationId, state: 'cancel_requested' as const, stopping: stoppingTasks, cancelled, revokedGrants };
+        return { operationId, state: 'cancel_requested' as const, stopping: stoppingTasks, cancelled, revokedGrants, skipped };
       });
     });
     for (const attemptId of stopping) ctx.control.endForAttempt(attemptId, 'attempt_fenced');
@@ -302,11 +314,14 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
 const resumeRefused = (reason: string): AppError => new AppError(409, 'resume_refused', 'Scheduling stays paused: the run cannot take work until this is resolved.', { reason });
 
 /** Cancels a task that holds no live attempt: its status, its open requests and its claims, with the owner named. Status row and claim lock already held. */
-async function closeTask(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, scope: { projectId: string; runId: string; taskId: string }, t: { status: string; revision: number; rowRevision: number; spec: TaskSpec | null }, by: string, operationId: string, at: Date): Promise<void> {
+async function closeTask(tx: Tx, key: { tenantId: string; projectId: string; taskId: string }, scope: { projectId: string; runId: string; taskId: string }, t: { status: string; revision: number; rowRevision: number; spec: TaskSpec | null }, by: string, operationId: string, at: Date): Promise<string | null> {
   // Through the domain's own transition, from the locked status: a status this cannot leave fails here rather than being overwritten.
-  const state = t.spec ? buildTaskState(t.spec, t.status as TaskStatus, await loadAttempts(tx, key, t.revision)) : null;
-  const moved = state ? transition(state, { type: 'cancel' }) : null;
-  if (!moved?.ok) throw new Error(`task ${key.taskId} cannot be cancelled from ${t.status}`);
+  // A task that cannot be is skipped with a reason the server writes, so one bad row never stops the rest of the run from being cancelled.
+  if (!t.spec) return 'spec_unreadable';
+  const state = buildTaskState(t.spec, t.status as TaskStatus, await loadAttempts(tx, key, t.revision));
+  if (!state) return 'spec_unreadable';
+  const moved = transition(state, { type: 'cancel' });
+  if (!moved.ok) return `cancel_not_allowed:${t.status}`;
   const rev = await bumpStatus(tx, key, t.rowRevision, moved.value.status, at);
   await tx.update(schema.approvals).set({ outcome: 'superseded', resolvedAt: at }).where(and(eq(schema.approvals.tenantId, key.tenantId), eq(schema.approvals.projectId, key.projectId), eq(schema.approvals.taskId, key.taskId), eq(schema.approvals.outcome, 'pending')));
   await releaseTaskClaims(tx, key, t.revision, at);
@@ -314,14 +329,15 @@ async function closeTask(tx: Tx, key: { tenantId: string; projectId: string; tas
   await tx.insert(schema.taskCommands).values({ ...key, operationId: newId('op'), revision: t.revision, command: 'cancel', state: 'applied', requestedBy: by, requestedAt: at, detail: { reason: 'run_cancelled' } });
   const actor = by === SYSTEM_ACTOR.id ? SYSTEM_ACTOR : { kind: 'human' as const, id: by };
   await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor, payload: { operationId, reason: 'cancel_requested', runCancelled: true } });
+  return null;
 }
 
-async function markCancelled(tx: Tx, scope: { tenantId: string; projectId: string; runId: string }, revision: number, operationId: string | null, at: Date): Promise<void> {
+async function markCancelled(tx: Tx, scope: { tenantId: string; projectId: string; runId: string }, revision: number, operationId: string | null, at: Date, skipped: readonly { taskId: string; reason: string }[] = []): Promise<void> {
   await tx.update(schema.runs).set({ lifecycle: 'cancelled' }).where(and(eq(schema.runs.tenantId, scope.tenantId), eq(schema.runs.projectId, scope.projectId), eq(schema.runs.runId, scope.runId)));
   // A hold whose attempt is gone is released; one an ended attempt settled stays, because that spend may have happened.
   await tx.execute(sql`UPDATE budget_reservations b SET state = 'released' WHERE b.tenant_id = ${scope.tenantId} AND b.project_id = ${scope.projectId} AND b.run_id = ${scope.runId} AND b.state = 'reserved'
     AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.tenant_id = b.tenant_id AND a.project_id = b.project_id AND 'res_' || a.attempt_id = b.reservation_id AND a.ended_at IS NULL)`);
-  await writeEvent(tx, at, { projectId: scope.projectId, runId: scope.runId, taskId: scope.runId, aggregateRevision: revision, type: 'run.cancelled', actor: SYSTEM_ACTOR, payload: { ...(operationId ? { operationId } : {}), lifecycle: 'cancelled' } });
+  await writeEvent(tx, at, { projectId: scope.projectId, runId: scope.runId, taskId: scope.runId, aggregateRevision: revision, type: 'run.cancelled', actor: SYSTEM_ACTOR, payload: { ...(operationId ? { operationId } : {}), lifecycle: 'cancelled', ...(skipped.length > 0 ? { skipped } : {}) } });
 }
 
 /**
@@ -344,8 +360,12 @@ export async function finishCancelledRuns(deps: { db: Db; tenantId: string; now:
       if (open.length > 0) return false;
       const at = deps.now();
       const left = (await lockedRunTasks(tx, deps.tenantId, p.projectId, p.runId, true)).filter((t) => ACTIVE_TASK.includes(t.status));
-      for (const t of left) await closeTask(tx, { tenantId: deps.tenantId, projectId: p.projectId, taskId: t.taskId }, { projectId: p.projectId, runId: p.runId, taskId: t.taskId }, t, SYSTEM_ACTOR.id, newId('op'), at);
-      await markCancelled(tx, { tenantId: deps.tenantId, projectId: p.projectId, runId: p.runId }, run.planRevision ?? 0, null, at);
+      const skipped: { taskId: string; reason: string }[] = [];
+      for (const t of left) {
+        const why = await closeTask(tx, { tenantId: deps.tenantId, projectId: p.projectId, taskId: t.taskId }, { projectId: p.projectId, runId: p.runId, taskId: t.taskId }, t, SYSTEM_ACTOR.id, newId('op'), at);
+        if (why !== null) skipped.push({ taskId: t.taskId, reason: why });
+      }
+      await markCancelled(tx, { tenantId: deps.tenantId, projectId: p.projectId, runId: p.runId }, run.planRevision ?? 0, null, at, skipped);
       return true;
     });
     if (finished) done.push(p.runId);
@@ -358,7 +378,7 @@ async function setBlock(tx: Tx, key: { tenantId: string; projectId: string; task
   const moved = await tx.update(schema.taskStatus).set({ placementBlock: reason, rowRevision: rowRevision + 1 })
     .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId), eq(schema.taskStatus.rowRevision, rowRevision)))
     .returning({ rowRevision: schema.taskStatus.rowRevision });
-  if (moved.length === 0) throw new Error(`task ${key.taskId}: status revision ${rowRevision} is no longer current`);
+  if (moved.length === 0) throw staleRevision(rowRevision, `task ${key.taskId}`);
   return rowRevision + 1;
 }
 

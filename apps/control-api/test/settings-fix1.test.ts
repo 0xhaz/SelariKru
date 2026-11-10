@@ -58,9 +58,9 @@ describe('I1: a runner that falls out of the recent window no longer holds a cha
     const { a, revision } = await twoRunnersPaused();
     h.clock.advance(61);
     // A keeps polling (seen again), B stays quiet.
-    await t.db.execute(sql`UPDATE runners SET last_seen_at = ${h.clock.now().toISOString()}::timestamptz WHERE runner_id = ${a.runnerId}`);
+    await t.db.execute(sql`UPDATE runners SET last_seen_at = ${h.clock.now().toISOString()}::timestamptz, last_polled_at = ${h.clock.now().toISOString()}::timestamptz WHERE runner_id = ${a.runnerId}`);
     h.clock.advance(60);
-    await t.db.execute(sql`UPDATE runners SET last_seen_at = ${h.clock.now().toISOString()}::timestamptz WHERE runner_id = ${a.runnerId}`);
+    await t.db.execute(sql`UPDATE runners SET last_seen_at = ${h.clock.now().toISOString()}::timestamptz, last_polled_at = ${h.clock.now().toISOString()}::timestamptz WHERE runner_id = ${a.runnerId}`);
     await settlePendingSettings({ db: t.db, tenantId: 'tenant_a', now: h.clock.now });
     expect((await settingOf(RUN, 'paused')).state).toBe('applied');
     void revision;
@@ -72,9 +72,10 @@ describe('M7: a recent runner on a build that never acknowledges', () => {
     const a = await enrolRunner(h.app);
     const old = await enrolRunner(h.app);
     await claim(a.token, { revision: 0, slots: 2 });
+    // It polls, so it counts as recent, but never acknowledges.
+    await claim(old.token);
     const saved = await save(RUN, { scope: 'run', field: 'paused', value: true });
     await claim(a.token, { revision: saved.body.configRevision, slots: 2 });
-    await claim(old.token);
     expect(await settingOf(RUN, 'paused')).toMatchObject({ state: 'waiting_for_runner_update', waitingOn: [old.runnerId], effective: null });
     const m = await post(h.app, `/v1/projects/${PROJECT}/model-assignments`, { scope: 'role', key: 'backend', selection: { provider: 'anthropic', model: 'claude-opus-5-5' }, expectedRevision: 0, idempotencyKey: 'm' });
     expect(m.status).toBe(200);
@@ -112,7 +113,7 @@ describe('I2: run cancel reads every task after it holds its row', () => {
 
   it('a status write at a revision that is no longer current fails loudly', async () => {
     await seedTask(t.db, specFor('t1'));
-    await expect(withTx(t.db, (tx) => bumpStatus(tx, { tenantId: 'tenant_a', projectId: PROJECT, taskId: 't1' }, 41, 'cancelled', h.clock.now()))).rejects.toThrow(/revision/);
+    await expect(withTx(t.db, (tx) => bumpStatus(tx, { tenantId: 'tenant_a', projectId: PROJECT, taskId: 't1' }, 41, 'cancelled', h.clock.now()))).rejects.toMatchObject({ status: 409, code: 'stale_revision' });
     expect((await t.db.execute(sql`SELECT status FROM task_status WHERE task_id = 't1'`))[0]!['status']).toBe('ready');
   });
 });

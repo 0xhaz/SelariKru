@@ -51,7 +51,7 @@ export async function bumpStatus(tx: Tx, key: { tenantId: string; projectId: str
     .set({ status, rowRevision: next, updatedAt: now })
     .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId), eq(schema.taskStatus.rowRevision, rowRevision)))
     .returning({ rowRevision: schema.taskStatus.rowRevision });
-  if (moved.length === 0) throw new Error(`task ${key.taskId}: status revision ${rowRevision} is no longer current`);
+  if (moved.length === 0) throw new AppError(409, 'stale_revision', `task ${key.taskId} has changed; reload and retry`, { taskId: key.taskId, expectedRevision: rowRevision });
   return next;
 }
 
