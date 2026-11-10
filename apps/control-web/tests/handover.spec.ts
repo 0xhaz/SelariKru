@@ -43,6 +43,28 @@ test('continue a running local task in cloud: the confirmation says what is carr
   await page.getByTestId('handover-confirm').getByRole('button', { name: 'Continue in cloud' }).click();
   await expect(api.getByTestId('handover-state')).toContainText('Stopping local attempt');
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
+  // The prior attempt is fenced and its checkpoint waits for review: nothing starts on its own.
+  await expect(api.getByTestId('handover-state')).toContainText('Checkpoint ready for review');
+  await page.getByRole('button', { name: 'Advance 10 s' }).click();
+  await expect(api.getByTestId('handover-state')).toContainText('Checkpoint ready for review');
+
+  // The review is on Decisions: the files with their size, hash and change, a diff on request, what was not carried, and the estimated cost.
+  await page.getByRole('link', { name: 'Decisions' }).first().click();
+  const card = page.getByTestId('handover-decision').filter({ has: page.getByTestId('handover-review') });
+  await expect(card).toHaveCount(1);
+  const reviewed = card.getByTestId('handover-review-file');
+  await expect(reviewed).toHaveCount(1);
+  await expect(reviewed).toContainText('+2 −0');
+  await reviewed.getByRole('button', { name: 'View diff' }).click();
+  await expect(card.getByTestId('handover-diff')).toContainText('handoverDemo');
+  await expect(card.getByTestId('handover-exclusions')).toContainText('secret-bearing file');
+  await expect(card.getByTestId('handover-review')).toContainText('(estimated, at most)');
+  await expectNoAxeViolations(page);
+  await card.getByRole('button', { name: 'Release to a cloud runner' }).click();
+  await expect(page.getByTestId('handover-decision')).toHaveCount(0);
+  await page.getByRole('link', { name: 'Pipeline' }).first().click();
+  await expect(api.getByTestId('handover-state')).toContainText('Fenced');
+  await page.getByRole('button', { name: 'Advance 10 s' }).click();
   await expect(api.getByTestId('handover-state')).toContainText('Running');
   // No request left this page for a runtime or provider: demo data only.
   expect(requests.filter((u) => !u.startsWith('http://127.0.0.1:5174'))).toEqual([]);

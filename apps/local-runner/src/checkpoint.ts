@@ -1,4 +1,6 @@
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { CHECKPOINT_LIMITS, checkpointDigest, insideAllowedPaths, secretFileReason, type CheckpointExclusion, type ExclusionReason } from '@selarikru/domain';
@@ -21,8 +23,62 @@ export interface BuiltCheckpoint {
   readonly exclusions: readonly CheckpointExclusion[];
 }
 
+/** A file's bytes at the base commit, or null when the base has none. Read with git from the runner's checkout, never from the workspace. */
+export type ReadBase = (path: string) => Promise<Buffer | null>;
+
+const MAX_DIFF_CHARS = 256 * 1024;
+const MAX_LCS_CELLS = 4_000_000;
+const asText = (b: Buffer): string | null => {
+  if (b.includes(0)) return null;
+  const t = b.toString('utf8');
+  return Buffer.from(t, 'utf8').equals(b) ? t : null;
+};
+
+/**
+ * Every line of both sides, each kept, added or removed: a common prefix and suffix, and between them the longest common subsequence while it is small enough to compute, else
+ * the whole middle replaced. Not always the shortest diff, always a true one: its kept and added lines are the file, which the control plane checks.
+ */
+export function lineDiff(before: string | null, after: string | null): [' ' | '+' | '-', string][] {
+  const a = before === null ? [] : before.split('\n');
+  const b = after === null ? [] : after.split('\n');
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let q = 0;
+  while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+  const am = a.slice(p, a.length - q);
+  const bm = b.slice(p, b.length - q);
+  const mid: [' ' | '+' | '-', string][] = [];
+  if (am.length * bm.length <= MAX_LCS_CELLS && am.length > 0 && bm.length > 0) {
+    const n = am.length, m = bm.length;
+    const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i]![j] = am[i] === bm[j] ? L[i + 1]![j + 1]! + 1 : Math.max(L[i + 1]![j]!, L[i]![j + 1]!);
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (am[i] === bm[j]) { mid.push([' ', am[i]!]); i++; j++; }
+      else if (L[i + 1]![j]! >= L[i]![j + 1]!) mid.push(['-', am[i++]!]);
+      else mid.push(['+', bm[j++]!]);
+    }
+    while (i < n) mid.push(['-', am[i++]!]);
+    while (j < m) mid.push(['+', bm[j++]!]);
+  } else {
+    for (const l of am) mid.push(['-', l]);
+    for (const l of bm) mid.push(['+', l]);
+  }
+  return [...a.slice(0, p).map((l) => [' ', l] as [' ', string]), ...mid, ...a.slice(a.length - q).map((l) => [' ', l] as [' ', string])];
+}
+
+async function reviewDiff(readBase: ReadBase | undefined, path: string, after: Buffer | null): Promise<CheckpointFileWire['diff']> {
+  if (readBase === undefined) return null;
+  const base = await readBase(path).catch(() => null);
+  const before = base === null ? null : asText(base);
+  const now = after === null ? null : asText(after);
+  if ((base !== null && before === null) || (after !== null && now === null)) return { binary: true, lines: null };
+  if ((before?.length ?? 0) + (now?.length ?? 0) > MAX_DIFF_CHARS) return { binary: false, lines: null };
+  return { binary: false, lines: lineDiff(before, now) };
+}
+
 /** Builds the checkpoint from the workspace and the change set the gate computed. `reserved` are workspace roots that are never the worker's work (signals, packs). */
-export async function buildCheckpoint(workspace: string, changes: readonly FileChange[], task: { readonly baseSha: string; readonly allowedPaths: readonly string[] }, reserved: readonly string[]): Promise<BuiltCheckpoint> {
+export async function buildCheckpoint(workspace: string, changes: readonly FileChange[], task: { readonly baseSha: string; readonly allowedPaths: readonly string[] }, reserved: readonly string[], readBase?: ReadBase): Promise<BuiltCheckpoint> {
   const files: CheckpointFileWire[] = [];
   const exclusions: CheckpointExclusion[] = [];
   const exclude = (path: string, reason: ExclusionReason) => exclusions.push({ path, reason });
@@ -32,7 +88,7 @@ export async function buildCheckpoint(workspace: string, changes: readonly FileC
     if (reserved.some((r) => c.path === r || c.path.startsWith(`${r}/`))) { exclude(c.path, 'reserved_path'); continue; }
     if (secretFileReason(c.path) !== null) { exclude(c.path, 'secret_file_name'); continue; }
     if (!plainPath(c.path) || !insideAllowedPaths(c.path, task.allowedPaths)) { exclude(c.path, 'outside_allowed_paths'); continue; }
-    if (c.status === 'deleted') { files.push({ path: c.path, status: 'deleted', sha256: null, size: null, executable: false, content: null }); continue; }
+    if (c.status === 'deleted') { files.push({ path: c.path, status: 'deleted', sha256: null, size: null, executable: false, content: null, diff: await reviewDiff(readBase, c.path, null) }); continue; }
     if (c.kind !== 'file') { exclude(c.path, 'not_a_regular_file'); continue; }
     const abs = join(workspace, c.path);
     // The bytes must still be the ones the gate hashed: a file that changed since is a failure, never sent.
@@ -41,7 +97,7 @@ export async function buildCheckpoint(workspace: string, changes: readonly FileC
     if (bytes.length > CHECKPOINT_LIMITS.maxFileBytes) { exclude(c.path, 'too_large'); continue; }
     if (secretContent(bytes)) { exclude(c.path, 'secret_content'); continue; }
     const executable = ((await lstat(abs)).mode & 0o111) !== 0;
-    files.push({ path: c.path, status: c.status, sha256: c.sha256, size: bytes.length, executable, content: Buffer.from(bytes).toString('base64') });
+    files.push({ path: c.path, status: c.status, sha256: c.sha256, size: bytes.length, executable, content: Buffer.from(bytes).toString('base64'), diff: await reviewDiff(readBase, c.path, bytes) });
   }
   const patchSha256 = checkpointDigest(task.baseSha, files.map((f) => ({ path: f.path, status: f.status, sha256: f.sha256, executable: f.executable })));
   return { body: { baseSha: task.baseSha, patchSha256, files, exclusions }, exclusions };
@@ -93,3 +149,15 @@ export async function applyCheckpoint(workspace: string, fetched: FetchedCheckpo
   }
   return { ok: true, files: decoded.length };
 }
+
+const execFileP = promisify(execFile);
+
+/** Reads files at the base commit from the runner's own checkout with git, isolated from this machine's git configuration. */
+export const gitBaseReader = (repo: string, baseSha: string): ReadBase => async (path) => {
+  try {
+    const r = await execFileP('git', ['-C', repo, 'cat-file', 'blob', `${baseSha}:${path}`], { encoding: 'buffer', maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } });
+    return r.stdout as Buffer;
+  } catch {
+    return null;
+  }
+};

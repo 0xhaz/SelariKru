@@ -84,7 +84,13 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   row and the event sequence (`recordLatePublish`). The successor's claim writes the `checkpoints` row after its attempt row and its first events, inside the claim's
  *   own order (`startSuccessor`): the one place the row follows the event sequence, which cannot cross the others because every writer of a task's `checkpoints` row
  *   holds that task's status row first, so two writers of one row are serialised there before either reaches it; its setup-complete heartbeat takes the status row then the `checkpoints` row (`markSuccessorRunning`); a successor that cannot apply its
- *   checkpoint marks the row inside its publish, after the run row (`successorRefused`). The successor's checkpoint fetch reads without a lock. So every handover path
+ *   checkpoint, or is lost (lease expiry, a setup failure), or ends any other way, moves the row inside `closeLease`, after the run row, in its publish or its expiry
+ *   (`successorEnded`: offered again at a new fence, offered to the owner, or closed). The owner's release, restart or decline (`decideHandover`): scheduler lock, the
+ *   status row, the `checkpoints` row, the status row's placement block, then the event sequence. The periodic review of fenced rows (`reviewHandovers`, in the expiry
+ *   driver's after-pass): the status row, then the run row and budget read without a lock (`readBudget`), the `checkpoints` row and the event sequence; no scheduler lock,
+ *   so a claim holding the scheduler lock and waiting for that status row meets nothing this pass holds. A view's eligibility (`assessHandover`) is a plain read that locks
+ *   nothing. A replan closes the replaced tasks' handovers (`closeHandovers`) after the status rows it holds and before its events; a run cancel (the route's immediate
+ *   finish and `finishCancelledRuns`) and a task cancel close theirs after the status rows they hold. The successor's checkpoint fetch and the owner's diff read take no lock. So every handover path
  *   takes the status row before the `checkpoints` row and the run row (when it takes one) before it too, no path holds a `checkpoints` row and waits for a status row,
  *   the scheduler lock or a run row, and none takes the candidate row, the claim lock, the brain lock or `product_heads`. The verdict, re-verify and settle never touch
  *   a running task's handover, and a replan meets the request exactly as it meets the claim poll (the scheduler lock serialises them).

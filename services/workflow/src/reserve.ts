@@ -43,11 +43,20 @@ const readLimit = (budget: Record<string, unknown>): number | null => {
  * reservation counts, including settled and expired ones. A missing limit reads as null, never as unlimited.
  */
 export async function lockBudget(tx: Tx, scope: RunScope): Promise<BudgetPosition> {
-  const runs = await tx
+  return budgetPosition(tx, scope, true);
+}
+
+/** The same position read without the run row's lock: for a view or a sweep that only judges, and never reserves. */
+export async function readBudget(tx: Tx, scope: RunScope): Promise<BudgetPosition> {
+  return budgetPosition(tx, scope, false);
+}
+
+async function budgetPosition(tx: Tx, scope: RunScope, lock: boolean): Promise<BudgetPosition> {
+  const q = tx
     .select({ budget: schema.runs.budget })
     .from(schema.runs)
-    .where(and(eq(schema.runs.tenantId, scope.tenantId), eq(schema.runs.projectId, scope.projectId), eq(schema.runs.runId, scope.runId)))
-    .for('update');
+    .where(and(eq(schema.runs.tenantId, scope.tenantId), eq(schema.runs.projectId, scope.projectId), eq(schema.runs.runId, scope.runId)));
+  const runs = await (lock ? q.for('update') : q);
   const limitMicros = runs[0] ? readLimit(runs[0].budget) : null;
   const rows = await tx
     .select({ amountUsd: schema.budgetReservations.amountUsd })

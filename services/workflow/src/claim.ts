@@ -14,7 +14,7 @@ import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMi
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
 import { resolveTaskSkills } from './skills.ts';
-import { claimHold, startSuccessor, type CheckpointRow } from './handover.ts';
+import { claimHold, placementRefused, startSuccessor, VISIBLE_HOLDS, type CheckpointRow } from './handover.ts';
 import type { SkillResolution } from '@selarikru/domain';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
@@ -404,7 +404,11 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
   // A handover holds the task: until its prior attempt is fenced, while the owner decides a restart offer, and for any runner but the location it hands to.
   const handoverHold = await claimHold(tx, key, spec.revision, runner.location);
-  if (handoverHold.kind === 'wait') return { reason: handoverHold.reason };
+  if (handoverHold.kind === 'wait') {
+    // Said on the task, once per reason, so a runner the hold skipped is never silent: the row and the attention queue read it.
+    if (VISIBLE_HOLDS.includes(handoverHold.reason)) await recordBlock(tx, key, c, statusRow, handoverHold.reason, null, now);
+    return { reason: handoverHold.reason };
+  }
   const handover = handoverHold.kind === 'start' ? handoverHold.row : null;
   // The owner chose this location for this task, explicitly: the role pin and the eligible-any preference give way, and every other placement rule still holds.
   const toCloud = handover !== null && handover.target === 'cloud';
@@ -478,6 +482,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     // A permanent block is recorded once per reason so the owner can see why the task never starts. A transient one is silent and
     // leaves the field alone, so a wait cannot make the same permanent reason write a new event.
     if (!placed.transient) await recordBlock(tx, key, c, statusRow, placed.reason, cfg !== null && !('blocked' in cfg) ? cfg.mode.id : null, now);
+    // A handover the placement now refuses for good is offered back to the owner, rather than held for a start that cannot happen.
+    if (!placed.transient && handover !== null) await placementRefused(tx, handover, placed.reason, { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision: statusRow.rowRevision + 1 }, now);
     return { reason: `placement_blocked:${placed.reason}` };
   }
   if (!isBlocked(placed)) {

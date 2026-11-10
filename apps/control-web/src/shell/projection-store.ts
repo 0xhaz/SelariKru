@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductActionResult, type ProductView, type HandoverAction, type HandoversView } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductActionResult, type ProductView, type HandoverAction, type HandoverDiffView, type HandoversView } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -52,6 +52,8 @@ export interface ProjectionStoreState {
 export interface HandoverPort {
   load(): Promise<HandoversView>;
   act(action: HandoverAction): Promise<HandoversView>;
+  /** One file's review diff of a checkpoint waiting for the owner. Absent when the source has none. */
+  diff?(taskId: string, checkpointId: string, path: string): Promise<HandoverDiffView>;
 }
 
 /** Reads and writes of the product-learning records. A write refuses to send while the session is not live, as a command does. */
@@ -199,6 +201,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
       } : null,
       handover: source?.getHandovers && source.handoverAction ? {
         load: () => source.getHandovers!(projectId),
+        ...(source.getHandoverDiff ? { diff: (taskId: string, checkpointId: string, path: string) => source.getHandoverDiff!(projectId, taskId, checkpointId, path) } : {}),
         act: async (action) => {
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.handoverAction!(projectId, action);

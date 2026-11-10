@@ -9,7 +9,18 @@ import { sha256Hex } from './sha256.ts';
  */
 
 /** What one checkpoint may carry. Larger work is not resumed: the owner is offered a restart from the persisted input instead. */
-export const CHECKPOINT_LIMITS = { maxFiles: 200, maxFileBytes: 512 * 1024, maxTotalBytes: 2 * 1024 * 1024, maxExclusions: 500 } as const;
+export const CHECKPOINT_LIMITS = { maxFiles: 200, maxFileBytes: 512 * 1024, maxTotalBytes: 2 * 1024 * 1024, maxExclusions: 500, maxDiffChars: 6 * 1024 * 1024, maxDiffLines: 20_000 } as const;
+
+/** One file's review diff against the base: every line of both sides, each marked kept (' '), added ('+') or removed ('-'). Null lines: binary, or too large to show. */
+export interface CheckpointDiff {
+  readonly binary: boolean;
+  readonly lines: readonly (readonly [' ' | '+' | '-', string])[] | null;
+  readonly added: number;
+  readonly removed: number;
+}
+
+/** The text a diff says the file becomes: its kept and added lines. */
+export const diffPostImage = (lines: readonly (readonly [string, string])[]): string => lines.filter(([op]) => op !== '-').map(([, t]) => t).join('\n');
 
 /** Why a path was left out of a checkpoint. Path and reason only: an excluded file's content never leaves the machine. */
 export const EXCLUSION_REASONS = ['secret_file_name', 'secret_content', 'outside_allowed_paths', 'not_a_regular_file', 'reserved_path', 'too_large'] as const;
@@ -73,18 +84,25 @@ export const CHECKPOINT_REFUSALS = [
   'no_checkpoint', 'empty_checkpoint', 'base_mismatch', 'too_many_files', 'file_too_large', 'checkpoint_too_large', 'path_invalid', 'path_outside_allowed_paths',
   'secret_file_included', 'secret_content_included', 'file_hash_mismatch', 'patch_hash_mismatch', 'required_file_excluded', 'not_a_regular_file', 'restricted_work',
   'checkpoint_tampered', 'checkpoint_apply_failed', 'duplicate_path', 'invalid_checkpoint',
+  // A fenced handover that can no longer run where it was sent, or a successor that was lost.
+  'no_cloud_runner', 'cloud_not_allowed', 'budget_insufficient', 'placement_blocked', 'successor_lost', 'successor_failed',
+  'diff_mismatch',
 ] as const;
 export type CheckpointRefusal = (typeof CHECKPOINT_REFUSALS)[number];
 
 /**
- * Where a handover stands. `stopping`: the owner asked, the prior attempt was told to stop and checkpoint. `fenced`: the prior attempt ended, its lease is revoked and the next
- * fence is reserved; a cloud runner may now claim. `starting`: a cloud attempt holds the lease and is setting up. `running`: its worker started. `restart_offered`: a safe resume
- * is not possible, and a restart from the persisted input waits for the owner. `declined`: the owner kept the task where policy places it. `closed`: superseded or cancelled.
+ * Where a handover stands. `stopping`: the owner asked, the prior attempt was told to stop and checkpoint. `awaiting_review`: the prior attempt ended (its lease is revoked and the
+ * next fence reserved) and its checked checkpoint waits for the owner's review. `fenced`: released (or a restart chosen); a runner at the target location may now claim.
+ * `starting`: a successor holds the lease and is setting up. `running`: its worker started. `restart_offered`: a safe resume is not possible, and a restart from the persisted input
+ * waits for the owner. `declined`: the owner kept the task where policy places it. `closed`: superseded, cancelled, or the successor ended.
  */
-export const HANDOVER_STATES = ['stopping', 'fenced', 'starting', 'running', 'restart_offered', 'declined', 'closed'] as const;
+export const HANDOVER_STATES = ['stopping', 'awaiting_review', 'fenced', 'starting', 'running', 'restart_offered', 'declined', 'closed'] as const;
 export type HandoverState = (typeof HANDOVER_STATES)[number];
-/** States that hold the task: a claim honours the handover while one of these stands. */
-export const OPEN_HANDOVER_STATES: readonly HandoverState[] = ['stopping', 'fenced', 'restart_offered'];
+/** States that hold the task: a claim honours the handover while one of these stands, and only one per task may stand at a time. */
+export const OPEN_HANDOVER_STATES: readonly HandoverState[] = ['stopping', 'awaiting_review', 'fenced', 'starting', 'running', 'restart_offered'];
+
+/** How many times a lost successor (lease expiry or a failed setup) is offered again to the target location before the owner is asked instead. */
+export const SUCCESSOR_RETRY_LIMIT = 2;
 
 /** `resume`: from the base SHA with the checkpoint applied. `restart`: from the persisted input only (the base SHA and the task), the prior attempt's work not carried. */
 export type HandoverMode = 'resume' | 'restart';
@@ -103,6 +121,7 @@ export type HandoverIneligible = (typeof HANDOVER_INELIGIBLE)[number];
 /** Owner-facing words for each state. "Cloud runner" is an enrolled runner whose location is cloud. */
 export const HANDOVER_STATE_LABEL: Readonly<Record<HandoverState, string>> = {
   stopping: 'Stopping local attempt',
+  awaiting_review: 'Checkpoint ready for review',
   fenced: 'Fenced',
   starting: 'Cloud attempt starting',
   running: 'Running',
@@ -141,4 +160,22 @@ export const HANDOVER_REASON_TEXT: Readonly<Record<string, string>> = {
   checkpoint_apply_failed: 'The cloud runner could not apply the checkpoint to the base commit.',
   duplicate_path: 'The checkpoint names the same path twice.',
   invalid_checkpoint: 'The checkpoint could not be read.',
+  diff_mismatch: 'A file\'s review diff does not produce the file it was sent with.',
+  placement_blocked: 'The cloud placement now refuses this task for good.',
+  successor_lost: 'The cloud attempt was lost after its worker started, and its copy of the checkpoint was already dropped.',
+  successor_failed: `The cloud attempt could not start ${SUCCESSOR_RETRY_LIMIT + 1} times.`,
+};
+
+/** Why a handover was closed or its checkpoint content dropped. Codes only. */
+export const HANDOVER_CLOSE_TEXT: Readonly<Record<string, string>> = {
+  replanned: 'The plan moved the task to a new revision.',
+  run_cancelled: 'The run was cancelled.',
+  task_cancelled: 'The task was cancelled.',
+  stale_revision: 'The task is on another revision now.',
+  declined: 'The owner kept the task where policy places it.',
+  restart_chosen: 'The owner chose a restart from the persisted input.',
+  successor_running: 'The cloud attempt has its own copy now.',
+  successor_completed: 'The cloud attempt completed.',
+  successor_failed: 'The cloud attempt failed.',
+  successor_ended: 'The cloud attempt ended.',
 };

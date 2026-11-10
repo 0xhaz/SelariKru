@@ -1,11 +1,11 @@
-import { NO_HARNESS_CATALOG, OPEN_HANDOVER_STATES, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, closeHandovers, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -306,6 +306,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       const leaving = [...existing].filter(([taskId, row]) => isStalePart(stale, taskId, row.status, row.currentRevision)).map(([taskId]) => taskId);
       // Pending approvals for a replaced task revision are void; they can no longer be resolved.
       for (const taskId of existing.keys()) await supersedePendingApprovals(tx, config.tenantId, projectId, taskId, at);
+      // A handover of a replaced task revision holds nothing now: it is closed, with why, after the status rows this path already holds.
+      if (existing.size > 0) await closeHandovers(tx, { tenantId: config.tenantId, projectId, taskIds: [...existing.keys()] }, 'replanned', at);
       for (const t of tasks) {
         await tx.insert(schema.taskRevisions).values({ tenantId: config.tenantId, projectId, runId: run.runId, taskId: t.taskId, revision: t.revision, boardId: t.boardId, spec: t });
       }
@@ -387,7 +389,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               // A handover's stop, asked to cancel now, is a cancel: the task ends cancelled, and the handover is closed rather than left waiting for a successor.
               if (isHandoverReason(pending[0].detail['reason'] as string | null)) {
                 await tx.update(schema.taskCommands).set({ detail: { ...pending[0].detail, reason: 'cancel_requested', handoverOf: pending[0].detail['reason'] } }).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.operationId, pending[0].operationId)));
-                await tx.update(schema.checkpoints).set({ state: 'closed', updatedAt: at }).where(and(eq(schema.checkpoints.tenantId, config.tenantId), eq(schema.checkpoints.projectId, row.projectId), eq(schema.checkpoints.taskId, taskId), eq(schema.checkpoints.state, 'stopping')));
+                await closeHandovers(tx, { tenantId: config.tenantId, projectId: row.projectId, taskIds: [taskId] }, 'task_cancelled', at);
               }
               if (typeof pending[0].detail['reason'] === 'string' && pending[0].detail['reason'].startsWith('policy_revoked:')) {
                 await tx.update(schema.taskCommands).set({ detail: { ...pending[0].detail, reason: 'cancel_requested', narrowedBy: pending[0].detail['reason'] } }).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.operationId, pending[0].operationId)));
@@ -417,7 +419,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           const rev = await bumpStatus(tx, key, row.rowRevision, 'cancelled', at);
           await supersedePendingApprovals(tx, config.tenantId, row.projectId, taskId, at);
           // A handover waiting for its successor or the owner's choice ends with the task.
-          await tx.update(schema.checkpoints).set({ state: 'closed', updatedAt: at }).where(and(eq(schema.checkpoints.tenantId, config.tenantId), eq(schema.checkpoints.projectId, row.projectId), eq(schema.checkpoints.taskId, taskId), inArray(schema.checkpoints.state, [...OPEN_HANDOVER_STATES])));
+          await closeHandovers(tx, { tenantId: config.tenantId, projectId: row.projectId, taskIds: [taskId] }, 'task_cancelled', at);
           // A verifying task still holds the claims of its completed attempt; cancelling is the verification's end.
           await releaseTaskClaims(tx, { tenantId: config.tenantId, projectId: row.projectId, taskId }, row.currentRevision, at);
           await writeEvent(tx, at, { ...scope, aggregateRevision: rev, type: 'task.cancelled', actor: { kind: 'human', id: uid }, payload: { operationId } });

@@ -5,7 +5,7 @@ import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainVie
 import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
-import type { HandoverAction, HandoversView } from './handover.ts';
+import type { HandoverAction, HandoverDiffView, HandoversView } from './handover.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -58,6 +58,8 @@ export interface EngineeringDataSource {
   getHandovers?(projectId: string): Promise<HandoversView>;
   /** Ask to continue a task in cloud (or restart it from its persisted input), or answer a restart offer. Answers with the handovers afterwards. */
   handoverAction?(projectId: string, action: HandoverAction): Promise<HandoversView>;
+  /** One file's review diff of a checkpoint waiting for the owner. Owner only; redacted. */
+  getHandoverDiff?(projectId: string, taskId: string, checkpointId: string, path: string): Promise<HandoverDiffView>;
   disconnect(): void;
 }
 

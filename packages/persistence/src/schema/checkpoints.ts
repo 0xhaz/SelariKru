@@ -34,8 +34,19 @@ export const checkpoints = pgTable(
     files: jsonb('files').$type<Record<string, unknown>[]>(),
     /** Path and reason per excluded file. No content, ever. */
     exclusions: jsonb('exclusions').$type<Record<string, unknown>[]>(),
-    /** base64 bytes by path, for the successor only. Never read by a view. */
+    /** base64 bytes by path, for the successor only. Never read by a view. Dropped (with when and why) once the successor has its own copy, has ended, or the owner declined. */
     content: jsonb('content').$type<Record<string, string>>(),
+    /** Per-file line diffs against the base, for the owner's review only, checked against the content they claim to produce. Dropped with the content. */
+    diffs: jsonb('diffs').$type<Record<string, unknown>>(),
+    contentDroppedAt: tstz('content_dropped_at'),
+    contentDroppedReason: text('content_dropped_reason'),
+    /** The owner's release of a reviewed checkpoint to the target location. */
+    releasedAt: tstz('released_at'),
+    releasedBy: text('released_by'),
+    /** Times a lost successor was offered again to the target location. */
+    successorRetries: integer('successor_retries').notNull().default(0),
+    /** Why the row was closed: a code from HANDOVER_CLOSE_TEXT. */
+    closedReason: text('closed_reason'),
     /** Why a resume is not possible, when it is not: a code from CHECKPOINT_REFUSALS. */
     refusal: text('refusal'),
     /** The restart offer: estimated cost and time, each labelled `estimated`. */
@@ -58,9 +69,9 @@ export const checkpoints = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.checkpointId] }),
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     // One open handover per task: a second request waits for the first to end.
-    uniqueIndex('checkpoints_one_open').on(t.tenantId, t.projectId, t.taskId).where(sql`${t.state} IN ('stopping', 'fenced', 'restart_offered')`),
+    uniqueIndex('checkpoints_one_open').on(t.tenantId, t.projectId, t.taskId).where(sql`${t.state} IN ('stopping', 'awaiting_review', 'fenced', 'starting', 'running', 'restart_offered')`),
     check('checkpoints_mode', sql`${t.mode} IN ('resume', 'restart')`),
-    check('checkpoints_state', sql`${t.state} IN ('stopping', 'fenced', 'starting', 'running', 'restart_offered', 'declined', 'closed')`),
+    check('checkpoints_state', sql`${t.state} IN ('stopping', 'awaiting_review', 'fenced', 'starting', 'running', 'restart_offered', 'declined', 'closed')`),
     check('checkpoints_target', sql`${t.target} IN ('cloud', 'local')`),
   ],
 );

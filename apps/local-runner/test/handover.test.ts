@@ -69,6 +69,17 @@ describe('the prior attempt of a handover', () => {
     expect(JSON.stringify(body)).not.toContain(SECRET);
   });
 
+  it('sends each file\'s review diff against the base, which produces the file it is sent with', async () => {
+    const { w, deps } = await setup({
+      agent: async ({ write }) => { await write('src/app.ts', 'export const a = 2;\n'); await write('src/new.ts', 'n\n'); wrote = true; return false; },
+      heartbeat: stopWhenWritten,
+    });
+    await runAttempt(deps, w.lease);
+    const body = w.api.checkpoints[0] as { files: { path: string; diff: { binary: boolean; lines: [string, string][] } }[] };
+    expect(body.files.find((f) => f.path === 'src/app.ts')!.diff).toEqual({ binary: false, lines: [['-', 'export const a = 1;'], ['+', 'export const a = 2;'], [' ', '']] });
+    expect(body.files.find((f) => f.path === 'src/new.ts')!.diff).toEqual({ binary: false, lines: [['+', 'n'], ['+', '']] });
+  });
+
   it('restricted work never sends a checkpoint', async () => {
     const { w, deps } = await setup({
       streamable: false,

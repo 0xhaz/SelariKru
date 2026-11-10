@@ -88,6 +88,10 @@ const EXPLAIN: Readonly<Record<string, string>> = {
   'configured_require_approval:start_cloud_worker': 'Starting a cloud worker needs your approval.',
   infra_retry_limit_exhausted: 'The retries for infrastructure failures ran out, so no further attempt will start.',
   execution_conflicts_with_role_pin: 'The task\'s execution setting conflicts with where its role is pinned.',
+  handover_held_for_cloud: 'Held for a cloud runner: you handed this task to cloud, so a local runner does not take it. Keep it local from its handover to release it.',
+  handover_held_for_local: 'Held for a local runner: its restart was placed on a local runner.',
+  handover_awaiting_review: 'Its checkpoint is ready for your review. No runner takes it until you release it or keep it local.',
+  handover_decision_pending: 'Resuming it safely was not possible. A restart from the persisted input waits for your decision.',
 };
 
 /** The derived wait for a runner that can deliver knowledge packs, as a code the rest of this file reads. Null: not waiting for that. */
@@ -156,7 +160,8 @@ export function classifyBlock(code: string): BlockClass {
   if (code.startsWith('approval_required:') || code === 'approval_denied') return 'decision';
   const bare = stripPrefix(code);
   if (bare === 'repair_budget_exhausted' || bare === 'repair_limit_exhausted') return 'repair';
-  if (bare === 'concurrency_limit_reached' || bare === 'no_free_slot') return 'wait';
+  if (bare === 'concurrency_limit_reached' || bare === 'no_free_slot' || bare === 'handover_held_for_cloud' || bare === 'handover_held_for_local') return 'wait';
+  if (bare === 'handover_awaiting_review' || bare === 'handover_decision_pending') return 'decision';
   if (bare.startsWith('budget:') || bare.startsWith('missing_budget') || bare.startsWith('missing_limit:')) return 'budget';
   if (bare.startsWith('policy_revoked:')) return 'policy';
   if (code.startsWith('policy_denied:') || code === 'classification_not_cloud_eligible' || bare.startsWith('model_not_allowed') || bare.startsWith(RESTRICTED_MODEL)) return 'policy';

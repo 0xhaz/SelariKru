@@ -1,6 +1,6 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
+  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
@@ -268,6 +268,8 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       // Every action answers with the handovers as they are afterwards.
       return readJson(`/v1/projects/${encodeURIComponent(projectId)}/handovers`, HandoversViewSchema, 'the handovers');
     },
+
+    getHandoverDiff: (projectId, taskId, checkpointId, path) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/handover/diff?checkpointId=${encodeURIComponent(checkpointId)}&path=${encodeURIComponent(path)}`, HandoverDiffViewSchema, 'a review diff'),
 
     getStack: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings'),
     stackAction: (projectId, req) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings', false, { expectedRevision: req.expectedRevision, action: req.action }),

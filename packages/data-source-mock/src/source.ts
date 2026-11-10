@@ -632,6 +632,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     productAction: (projectId, action) => product.act(project(projectId).fixture.projectId, action),
     getHandovers: (projectId) => handover.get(project(projectId).fixture.projectId),
     handoverAction: (projectId, action) => handover.act(project(projectId).fixture.projectId, action),
+    getHandoverDiff: (projectId, taskId, checkpointId, path) => handover.diff(project(projectId).fixture.projectId, taskId, checkpointId, path),
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);

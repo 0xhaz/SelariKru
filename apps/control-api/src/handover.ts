@@ -1,6 +1,6 @@
-import { HANDOVER_REASON_TEXT, HANDOVER_STATE_LABEL, type HandoverState } from '@selarikru/domain';
+import { OPEN_HANDOVER_STATES, HANDOVER_CLOSE_TEXT, HANDOVER_REASON_TEXT, HANDOVER_STATE_LABEL, type HandoverState } from '@selarikru/domain';
 import { schema, withTx, type Executor } from '@selarikru/persistence';
-import { CheckpointFetchSchema, CheckpointUploadSchema, HandoverDecisionSchema, HandoverRequestSchema, validateCheckpoint } from '@selarikru/protocol';
+import { CheckpointFetchSchema, CheckpointUploadSchema, HandoverDecisionSchema, HandoverDiffQuerySchema, HandoverRequestSchema, LeaseRefSchema, redactSecrets, validateCheckpoint } from '@selarikru/protocol';
 import { assessHandover, decideHandover, recordCheckpoint, requestHandover, successorCheckpoint, type CheckpointRow, type HandoverAssessment, type Lease, type Runner } from '@selarikru/workflow';
 import { and, desc, eq } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -33,16 +33,29 @@ const iso = (d: Date | null): string | null => d?.toISOString() ?? null;
 /** A handover row as a person may see it: by path, change, size and hash. The stored bytes never leave this function. */
 export function recordView(r: CheckpointRow) {
   const files = (r.files ?? []) as { path: string; status: 'added' | 'modified' | 'deleted'; size: number | null; sha256: string | null }[];
+  const diffs = (r.diffs ?? {}) as Record<string, { binary?: boolean; lines?: unknown[] | null; added?: number; removed?: number }>;
+  const statOf = (path: string) => {
+    const d = diffs[path];
+    return { added: d?.lines ? (d.added ?? 0) : null, removed: d?.lines ? (d.removed ?? 0) : null, hasDiff: r.diffs !== null && Array.isArray(d?.lines), binary: d?.binary === true };
+  };
+  const shown = files.map((f) => ({ path: f.path, status: f.status, size: f.size, sha256: f.sha256, ...statOf(f.path) }));
   return {
     checkpointId: r.checkpointId, taskId: r.taskId, revision: r.revision, runId: r.runId, mode: r.mode, state: r.state, stateLabel: HANDOVER_STATE_LABEL[r.state as HandoverState] ?? r.state,
     target: r.target, priorAttemptId: r.priorAttemptId, priorFence: r.priorFence, nextFence: r.nextFence, successorAttemptId: r.successorAttemptId, successorFence: r.successorFence,
     baseSha: r.baseSha,
-    patch: r.patchSha256 !== null && r.mode === 'resume' ? { sha256: r.patchSha256, fileCount: r.fileCount ?? files.length, totalBytes: r.totalBytes ?? 0, files: files.map((f) => ({ path: f.path, status: f.status, size: f.size, sha256: f.sha256 })) } : null,
+    patch: r.patchSha256 !== null && r.mode === 'resume' ? {
+      sha256: r.patchSha256, fileCount: r.fileCount ?? files.length, totalBytes: r.totalBytes ?? 0, files: shown,
+      // Lines added and removed across the files that have a line diff. Null when none has one (binary, too large, or dropped).
+      stat: shown.some((f) => f.added !== null) ? { added: shown.reduce((n, f) => n + (f.added ?? 0), 0), removed: shown.reduce((n, f) => n + (f.removed ?? 0), 0) } : null,
+    } : null,
     exclusions: ((r.exclusions ?? []) as { path: string; reason: string }[]).map((x) => ({ path: x.path, reason: x.reason })),
     // Why a resume was not possible stays on the record after the owner answered: it is the history of this handover.
     refusal: r.refusal !== null && r.state !== 'stopping' ? { code: r.refusal, text: text(r.refusal) } : null,
     estimate: Object.keys(r.estimate).length > 0 ? r.estimate : null,
     latePublishes: r.latePublishes, requestedAt: r.requestedAt.toISOString(), fencedAt: iso(r.fencedAt), updatedAt: r.updatedAt.toISOString(),
+    releasedAt: iso(r.releasedAt), releasedBy: r.releasedBy, successorRetries: r.successorRetries,
+    contentDropped: r.contentDroppedAt !== null ? { at: r.contentDroppedAt.toISOString(), reason: r.contentDroppedReason ?? 'unknown', text: HANDOVER_CLOSE_TEXT[r.contentDroppedReason ?? ''] ?? r.contentDroppedReason ?? '' } : null,
+    closed: r.state === 'closed' || r.state === 'declined' ? { reason: r.closedReason ?? 'unknown', text: HANDOVER_CLOSE_TEXT[r.closedReason ?? ''] ?? r.closedReason ?? '' } : null,
   };
 }
 
@@ -88,7 +101,7 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
       .where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.status, 'running')));
     const records = await rowsOf(db, tenantId, projectId);
     // Every running task, and every task with a handover still in hand.
-    const ids = [...new Set([...running.map((r) => r.taskId), ...records.filter((r) => ['stopping', 'fenced', 'starting', 'restart_offered'].includes(r.state)).map((r) => r.taskId)])].sort();
+    const ids = [...new Set([...running.map((r) => r.taskId), ...records.filter((r) => (OPEN_HANDOVER_STATES as readonly string[]).includes(r.state)).map((r) => r.taskId)])].sort();
     const tasks = [];
     for (const taskId of ids) tasks.push(taskView(await assessHandover(sched, { tenantId, projectId, taskId }, config.caps), records.find((r) => r.taskId === taskId)));
     return { projectId, observedAt: now().toISOString(), notice: HANDOVER_NOTICE, tasks, records: records.map(recordView) };
@@ -132,6 +145,26 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
     }));
   });
 
+  /**
+   * One file's review diff, for the owner deciding a release. Owner only. Never for restricted work (whose checkpoint is refused before it exists), and every line passes the
+   * secret detector before it is shown: a base line removed by the change can hold what the checked post-image may not.
+   */
+  app.get('/v1/projects/:id/tasks/:taskId/handover/diff', auth, async (req) => {
+    const { projectId, taskId } = await ownerOf(req);
+    const q = parseBody(HandoverDiffQuerySchema, req.query);
+    const [row] = await db.select().from(schema.checkpoints).where(and(eq(schema.checkpoints.tenantId, tenantId), eq(schema.checkpoints.projectId, projectId), eq(schema.checkpoints.taskId, taskId!), eq(schema.checkpoints.checkpointId, q.checkpointId)));
+    if (!row) throw new AppError(404, 'handover_not_found', 'no such handover');
+    const [prior] = await db.select({ detail: schema.attempts.detail }).from(schema.attempts).where(and(eq(schema.attempts.tenantId, tenantId), eq(schema.attempts.projectId, projectId), eq(schema.attempts.attemptId, row.priorAttemptId)));
+    if ((prior?.detail as { terminalStreamable?: unknown } | undefined)?.terminalStreamable !== true) throw new AppError(403, 'checkpoint_restricted', 'restricted work has no checkpoint to show');
+    const file = ((row.files ?? []) as { path: string; status: string; size: number | null; sha256: string | null }[]).find((f) => f.path === q.path);
+    if (!file) throw new AppError(404, 'no_checkpoint', 'that file is not in this checkpoint');
+    if (row.diffs === null) throw new AppError(404, 'no_checkpoint', `the checkpoint's content was dropped: ${HANDOVER_CLOSE_TEXT[row.contentDroppedReason ?? ''] ?? 'it is no longer kept'}`);
+    const d = (row.diffs as Record<string, { binary?: boolean; lines?: [string, string][] | null; added?: number; removed?: number }>)[q.path];
+    let redacted = false;
+    const lines = d?.lines ? d.lines.map(([op, t]) => { const r = redactSecrets(t); if (r !== t) redacted = true; return [op, r] as const; }) : null;
+    return { checkpointId: row.checkpointId, path: file.path, status: file.status, size: file.size, sha256: file.sha256, binary: d?.binary === true, added: d?.added ?? null, removed: d?.removed ?? null, lines, redacted };
+  });
+
   // ---- runner side ----------------------------------------------------------------------------------------------------------------
   const runnerOf = (req: FastifyRequest): Runner => {
     const p = req.principal;
@@ -154,16 +187,19 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
     return { lease, streamable: (a.detail as { terminalStreamable?: unknown }).terminalStreamable === true };
   }
 
-  app.post('/v1/runners/checkpoint', { onRequest: [ctx.runner], bodyLimit: 4 * 1024 * 1024 }, async (req) => {
+  app.post('/v1/runners/checkpoint', { onRequest: [ctx.runner], bodyLimit: 16 * 1024 * 1024 }, async (req) => {
     const runner = runnerOf(req);
-    const body = parseBody(CheckpointUploadSchema, req.body);
-    const { lease, streamable } = await leaseOf(runner, body.lease);
-    // Restricted output stays on the device: refused before anything in the body is read or kept. The workflow checks the stored label again under its lock.
-    if (!streamable) {
-      const r = await recordCheckpoint(sched, lease, () => ({ ok: false, reason: 'restricted_work' }));
-      if (!r.ok && r.error.reason === 'stale_fence') throw stale(body.lease);
+    // Only the lease is read first. Restricted output stays on the device, so the attempt is checked before the rest of the body is parsed: a restricted attempt's files are
+    // never validated, kept or logged, whatever they hold. The workflow checks the stored label, and the sources' labels now, again under its lock.
+    const ref = parseBody(LeaseRefSchema, (req.body as { lease?: unknown } | null)?.lease);
+    const first = await leaseOf(runner, ref);
+    if (!first.streamable) {
+      const r = await recordCheckpoint(sched, first.lease, () => ({ ok: false, reason: 'restricted_work' }));
+      if (!r.ok && r.error.reason === 'stale_fence') throw stale(ref);
       throw new AppError(403, 'checkpoint_restricted', 'a checkpoint of restricted work is never accepted: it stays on the device');
     }
+    const body = parseBody(CheckpointUploadSchema, req.body);
+    const { lease } = first;
     const r = await recordCheckpoint(sched, lease, (task) => validateCheckpoint(body, task));
     if (!r.ok) {
       if (r.error.reason === 'stale_fence') throw stale(body.lease);

@@ -75,15 +75,37 @@ describe('continue in cloud', () => {
     const beat = await post(h.app, '/v1/runners/heartbeat', { lease: prior }, bearer(local.token));
     expect(beat.body).toMatchObject({ cancelRequested: true, handover: { mode: 'resume', checkpointId: asked.body.checkpointId } });
 
-    const sent = await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [file('server/app.ts', 'export const a = 2;\n')], [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes.md', reason: 'outside_allowed_paths' }]), bearer(local.token));
+    const changed = { ...file('server/app.ts', 'export const a = 2;\n'), diff: { binary: false, lines: [['-', 'export const a = 1; // token=sk_live_CANARY0123456789abcdefXYZ'], ['+', 'export const a = 2;'], ['+', '']] as [string, string][] } };
+    const sent = await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [changed], [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes.md', reason: 'outside_allowed_paths' }]), bearer(local.token));
     expect(sent.status).toBe(200);
     expect(sent.body).toMatchObject({ accepted: true, fileCount: 1, excluded: 2 });
     // The checkpoint is not the acknowledgement: still nothing to claim.
     expect((await claim(cloud.token)).lease).toBeNull();
     expect((await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token))).status).toBe(200);
 
-    // A local runner never takes it now; the cloud runner does, at the next fence.
+    // Fenced, and waiting for the owner's review: no runner may claim before the release.
+    const review = await get(h.app, url());
+    expect(review.body.current).toMatchObject({ state: 'awaiting_review', stateLabel: 'Checkpoint ready for review', exclusions: [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes.md', reason: 'outside_allowed_paths' }] });
+    expect(review.body.current.patch).toMatchObject({ fileCount: 1, stat: { added: 2, removed: 1 }, files: [{ path: 'server/app.ts', status: 'modified', size: 20, added: 2, removed: 1, hasDiff: true }] });
+    expect(review.body.current.estimate.costUsd).toMatchObject({ provenance: 'estimated' });
+    expect((await claim(cloud.token)).lease).toBeNull();
     expect((await claim(local.token)).lease).toBeNull();
+    // The owner opens the file's diff; a base line that held a secret is shown redacted.
+    const id = review.body.current.checkpointId;
+    const diff = await get(h.app, `${url()}/diff?checkpointId=${id}&path=server/app.ts`);
+    expect(diff.body).toMatchObject({ path: 'server/app.ts', added: 2, removed: 1, redacted: true });
+    expect(JSON.stringify(diff.body)).not.toContain('CANARY');
+    // Only the owner releases: a runner's credential is refused, and nothing moved.
+    const byRunner = await post(h.app, `${url()}/decision`, { checkpointId: id, choice: 'release', idempotencyKey: 'r0' }, bearer(cloud.token));
+    expect(byRunner.status).toBeGreaterThanOrEqual(401);
+    expect(byRunner.status).toBeLessThanOrEqual(403);
+    expect((await get(h.app, url())).body.current.state).toBe('awaiting_review');
+    expect((await post(h.app, `${url()}/decision`, { checkpointId: id, choice: 'release', idempotencyKey: 'r1' })).body).toMatchObject({ state: 'fenced' });
+
+    // A local runner never takes it now, and the task says why; the cloud runner does, at the next fence.
+    expect((await claim(local.token)).lease).toBeNull();
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.body.tasks.find((x: any) => x.taskId === 'T1').placementBlock).toBe('handover_held_for_cloud');
     const next = await claim(cloud.token);
     expect(next.lease).toMatchObject({ taskId: 'T1', location: 'cloud', fence: prior.fence + 1, handover: { mode: 'resume', priorAttemptId: prior.attemptId, baseSha: BASE, fileCount: 1 } });
     const successor = refOf(next.lease);
@@ -111,8 +133,11 @@ describe('continue in cloud', () => {
     const running = await get(h.app, url());
     expect(running.body.current).toMatchObject({ state: 'running', stateLabel: 'Running', latePublishes: 1, exclusions: [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes.md', reason: 'outside_allowed_paths' }] });
     expect(running.body.current.patch).toMatchObject({ fileCount: 1, files: [{ path: 'server/app.ts', status: 'modified' }] });
+    // The successor has its own copy now: the stored one is gone, and the record says so.
+    expect(running.body.current.contentDropped).toMatchObject({ reason: 'successor_running' });
+    expect((await get(h.app, `${url()}/diff?checkpointId=${id}&path=server/app.ts`)).status).toBe(404);
     // No file content anywhere in the view or the event log.
-    const b64 = Buffer.from('export const a = 2;\n').toString('base64');
+    const b64 = changed.content;
     expect(JSON.stringify(running.body)).not.toContain(b64);
     expect(JSON.stringify(await events())).not.toContain(b64);
 
@@ -183,6 +208,7 @@ describe('continue in cloud', () => {
     // A good checkpoint sent after the refusal replaces it.
     expect((await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [file('server/app.ts', 'good')]), bearer(local.token))).status).toBe(200);
     await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token));
+    await post(h.app, `${url()}/decision`, { checkpointId: (await get(h.app, url())).body.current.checkpointId, choice: 'release', idempotencyKey: 'r1' });
     const next = await claim(cloud.token);
     await t.db.execute(sql`UPDATE checkpoints SET content = jsonb_build_object('server/app.ts', ${Buffer.from('evil').toString('base64')}::text)`);
     const fetched = await post(h.app, '/v1/runners/checkpoint/fetch', { lease: refOf(next.lease) }, bearer(cloud.token));
@@ -199,5 +225,87 @@ describe('continue in cloud', () => {
     const refused = await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k2' });
     expect(refused.body.error).toMatchObject({ code: 'handover_refused', details: { reason: 'no_cloud_runner' } });
     expect((await get(h.app, url('nope'))).status).toBe(404);
+  });
+
+  it('a replan while a restart is offered closes that handover, and the next one on the new revision is accepted (case A)', async () => {
+    const prior = await localRunning();
+    expect((await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k1' })).status).toBe(202);
+    await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token));
+    const offered = (await get(h.app, url())).body.current;
+    expect(offered.state).toBe('restart_offered');
+    await t.db.execute(sql`UPDATE runs SET plan_revision = 1`);
+    const replanned = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 1, tasks: [specFor('T1', { revision: 2, baseSha: BASE, allowedPaths: ['server'] })] });
+    expect(replanned.status, JSON.stringify(replanned.body)).toBe(201);
+    expect((await t.db.execute(sql`SELECT state, closed_reason FROM checkpoints`))[0]).toMatchObject({ state: 'closed', closed_reason: 'replanned' });
+    // An answer to the old offer changes nothing true now: refused.
+    expect((await post(h.app, `${url()}/decision`, { checkpointId: offered.checkpointId, choice: 'restart', idempotencyKey: 'd1' })).status).toBe(409);
+    const again = await claim(local.token);
+    expect(again.lease).toMatchObject({ revision: 2 });
+    h.clock.advance(1);
+    const second = await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k2' });
+    expect(second.status, JSON.stringify(second.body)).toBe(202);
+    const list = await get(h.app, `/v1/projects/${PROJECT}/handovers`);
+    expect(list.body.records.map((r: any) => [r.revision, r.state])).toEqual([[2, 'stopping'], [1, 'closed']]);
+    expect(list.body.records[1].closed).toMatchObject({ reason: 'replanned' });
+  });
+
+  it('a run cancel while a handover is fenced closes it with the run', async () => {
+    const prior = await localRunning();
+    await post(h.app, url(), { mode: 'restart', idempotencyKey: 'k1' });
+    await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token));
+    expect((await get(h.app, url())).body.current.state).toBe('fenced');
+    const cancelled = await post(h.app, `/v1/runs/${RUN}/cancel`, { expectedPlanRevision: 0, idempotencyKey: 'c1' });
+    expect(cancelled.status, JSON.stringify(cancelled.body)).toBeLessThan(300);
+    expect((await t.db.execute(sql`SELECT state, closed_reason FROM checkpoints`))[0]).toMatchObject({ state: 'closed', closed_reason: 'run_cancelled' });
+    expect((await claim(cloud.token)).lease).toBeNull();
+  });
+
+  it('a restricted attempt is refused before its body is read, whatever the body holds', async () => {
+    await t.db.insert(schema.modelAssignments).values({ tenantId: TENANT, projectId: PROJECT, scopeKind: 'role', scopeKey: 'backend', revision: 1, provider: 'test-device', model: 'device-1', updatedBy: 'test' });
+    const prior = await localRunning({ classification: 'restricted' });
+    // A body that would not even parse: the refusal comes first, so nothing in it is validated or kept.
+    const sent = await post(h.app, '/v1/runners/checkpoint', { lease: prior, files: 'not a list', home: '/Users/me' }, bearer(local.token));
+    expect(sent.status).toBe(403);
+    expect(sent.body.error.code).toBe('checkpoint_restricted');
+  });
+
+  it('an earlier applied record for the prior attempt\'s own candidate does not make the successor\'s ready', async () => {
+    const prior = await localRunning();
+    await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k1' });
+    const PRIOR_SHA = 'b'.repeat(40);
+    await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [file('server/app.ts', 'x')]), bearer(local.token));
+    // The prior attempt acknowledges with a commit of its own: the stop wins, and that commit is only history.
+    await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'completed', headSha: PRIOR_SHA, changeManifestSha256: 'f'.repeat(64) } }, bearer(local.token));
+    await t.db.execute(sql`INSERT INTO check_runs (tenant_id, project_id, check_run_id, task_id, revision, attempt_id, check_id, check_version, candidate_sha, result) VALUES (${TENANT}, ${PROJECT}, 'chk_old', 'T1', 1, ${prior.attemptId}, 'FB-01', 'v1', ${PRIOR_SHA}, 'passed')`).catch(() => undefined);
+    await t.db.execute(sql`INSERT INTO artifacts (tenant_id, project_id, artifact_id, run_id, type, sha256, source_revision, classification, locator) VALUES (${TENANT}, ${PROJECT}, 'rec_prior', ${RUN}, 'verification_record', ${'9'.repeat(64)}, ${PRIOR_SHA}, 'internal', ${JSON.stringify({ recordId: 'rec_prior', candidateSha: PRIOR_SHA, applied: true, checkRunIds: ['chk_old'] })}::jsonb)`);
+    await post(h.app, `${url()}/decision`, { checkpointId: (await get(h.app, url())).body.current.checkpointId, choice: 'release', idempotencyKey: 'r1' });
+    const next = await claim(cloud.token);
+    // Even a successor that reports the very same commit is verified again: its task goes to verifying, not verified, and the run is not ready.
+    expect((await post(h.app, '/v1/runners/result', { lease: refOf(next.lease), result: { outcome: 'completed', headSha: PRIOR_SHA, changeManifestSha256: 'e'.repeat(64) } }, bearer(cloud.token))).status).toBe(200);
+    expect((await t.db.execute(sql`SELECT status FROM task_status WHERE task_id = 'T1'`))[0]!['status']).toBe('verifying');
+    expect((await t.db.execute(sql`SELECT lifecycle FROM runs`))[0]!['lifecycle']).not.toBe('ready_for_review');
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM events WHERE type IN ('verification.passed', 'task.verified')`))[0]!['n'])).toBe(0);
+  });
+
+  it('a pull request opened before the handover is not duplicated after it, and reads out of date', async () => {
+    // The run already had a reviewable change for its earlier work, and T1 was added by a later plan.
+    await seedTask(t.db, specFor('T0', { baseSha: BASE, allowedPaths: ['tests/backend'] }), 'verified');
+    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, parts, status) VALUES (${TENANT}, ${PROJECT}, 'cand_1', ${RUN}, 'main', ${'c'.repeat(40)}, ${BASE}, ${JSON.stringify([{ taskId: 'T0', revision: 1 }])}::jsonb, 'assembled')`);
+    await t.db.execute(sql`INSERT INTO change_requests (tenant_id, project_id, run_id, repository, candidate_sha, branch, base_ref, pr_number, url, status) VALUES (${TENANT}, ${PROJECT}, ${RUN}, 'r', ${'c'.repeat(40)}, 'selarikru/run_a', 'main', 7, 'https://github.com/o/r/pull/7', 'open')`);
+    const prior = await localRunning();
+    const before = (await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.changeRequests;
+    expect(before).toHaveLength(1);
+    expect(before[0].outOfDate).toMatchObject({ reason: 'superseded' });
+    await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k1' });
+    await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [file('server/app.ts', 'x')]), bearer(local.token));
+    await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token));
+    await post(h.app, `${url()}/decision`, { checkpointId: (await get(h.app, url())).body.current.checkpointId, choice: 'release', idempotencyKey: 'r1' });
+    const next = await claim(cloud.token);
+    await post(h.app, '/v1/runners/result', { lease: refOf(next.lease), result: { outcome: 'completed', headSha: 'e'.repeat(40), changeManifestSha256: 'e'.repeat(64) } }, bearer(cloud.token));
+    // Still one pull request for the run, the same one, and it must not be merged as it stands.
+    const after = (await get(h.app, `/v1/projects/${PROJECT}/snapshot`)).body.changeRequests;
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ prNumber: 7, candidateSha: 'c'.repeat(40) });
+    expect(after[0].outOfDate).toMatchObject({ reason: 'superseded' });
   });
 });

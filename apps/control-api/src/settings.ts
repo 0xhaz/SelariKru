@@ -6,7 +6,7 @@ import {
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { RunCancelRequestSchema, SettingRequestSchema } from '@selarikru/protocol';
-import { buildTaskState, loadAttempts, lockBudget, lockPartsForClaims, PLACEMENT_MODES, releaseTaskClaims, remainingBudgetMicros, requestPolicyStop, stopForExhaustedBudget, type SchedulerContext } from '@selarikru/workflow';
+import { buildTaskState, closeHandovers, loadAttempts, lockBudget, lockPartsForClaims, PLACEMENT_MODES, releaseTaskClaims, remainingBudgetMicros, requestPolicyStop, stopForExhaustedBudget, type SchedulerContext } from '@selarikru/workflow';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
@@ -300,6 +300,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         const revokedGrants = revoked.map((r) => r.approvalId).sort();
         await writeEvent(tx, at, { projectId: run.projectId, runId, taskId: runId, aggregateRevision: run.planRevision ?? 0, type: 'run.cancel_requested', actor: { kind: 'human', id: uid }, payload: { operationId, stopping: stoppingTasks, cancelled, revokedGrants, ...(skipped.length > 0 ? { skipped } : {}) } });
         if (stoppingTasks.length === 0) {
+          await closeHandovers(tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, 'run_cancelled', at);
           await markCancelled(tx, { tenantId: config.tenantId, projectId: run.projectId, runId }, run.planRevision ?? 0, operationId, at);
           return { operationId, state: 'applied' as const, stopping: stoppingTasks, cancelled, revokedGrants, skipped };
         }
@@ -365,6 +366,8 @@ export async function finishCancelledRuns(deps: { db: Db; tenantId: string; now:
         const why = await closeTask(tx, { tenantId: deps.tenantId, projectId: p.projectId, taskId: t.taskId }, { projectId: p.projectId, runId: p.runId, taskId: t.taskId }, t, SYSTEM_ACTOR.id, newId('op'), at);
         if (why !== null) skipped.push({ taskId: t.taskId, reason: why });
       }
+      // The run's handovers end with it: closed, with why, after the status rows `lockedRunTasks` took.
+      await closeHandovers(tx, { tenantId: deps.tenantId, projectId: p.projectId, runId: p.runId }, 'run_cancelled', at);
       await markCancelled(tx, { tenantId: deps.tenantId, projectId: p.projectId, runId: p.runId }, run.planRevision ?? 0, null, at, skipped);
       return true;
     });

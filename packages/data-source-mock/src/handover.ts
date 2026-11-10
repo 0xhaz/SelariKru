@@ -1,5 +1,5 @@
-import { checkpointDigest, HANDOVER_REASON_TEXT, HANDOVER_STATE_LABEL, sha256Hex, type CheckpointRefusal, type HandoverIneligible, type HandoverState } from '@selarikru/domain';
-import { DataSourceException, type HandoverAction, type HandoverRecordView, type HandoversView, type HandoverTaskView, type ProjectViewSnapshot } from '@selarikru/view-protocol';
+import { checkpointDigest, HANDOVER_CLOSE_TEXT, HANDOVER_REASON_TEXT, HANDOVER_STATE_LABEL, OPEN_HANDOVER_STATES, sha256Hex, type CheckpointRefusal, type HandoverIneligible, type HandoverState } from '@selarikru/domain';
+import { DataSourceException, type HandoverAction, type HandoverDiffView, type HandoverRecordView, type HandoversView, type HandoverTaskView, type ProjectViewSnapshot } from '@selarikru/view-protocol';
 
 /**
  * Checkpoint continuation on demo data. The same rules as the server, played out on the demo clock: a request stops the local attempt, the fence follows its acknowledgement,
@@ -10,6 +10,7 @@ import { DataSourceException, type HandoverAction, type HandoverRecordView, type
 const DEMO_BASE = 'c'.repeat(40);
 const CLOUD_RUNNER = 'runner_cloud_1';
 const LOCAL_RUNNER = 'runner_local_1';
+const OWNER = 'demo-operator';
 /** When each step happens after the request, on the demo clock. */
 export const DEMO_HANDOVER_STEPS = { fencedMs: 2_000, startingMs: 4_000, runningMs: 6_000 } as const;
 
@@ -41,7 +42,7 @@ interface DemoRecord {
   requestedAtMs: number;
   /** Set when the demo checkpoint cannot be resumed: the frontend demo task carries a secret file inside its paths. */
   refusal: CheckpointRefusal | null;
-  decision: { choice: 'restart' | 'decline'; atMs: number } | null;
+  decision: { choice: 'release' | 'restart' | 'decline'; atMs: number } | null;
   successorAttemptId: string;
   files: { path: string; status: 'added' | 'modified'; size: number; sha256: string }[];
   exclusions: { path: string; reason: 'secret_file_name' | 'outside_allowed_paths' }[];
@@ -56,6 +57,7 @@ const estimate = (elapsedSeconds: number | null) => ({
 export interface DemoHandover {
   get(projectId: string): Promise<HandoversView>;
   act(projectId: string, action: HandoverAction): Promise<HandoversView>;
+  diff(projectId: string, taskId: string, checkpointId: string, path: string): Promise<HandoverDiffView>;
 }
 
 export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
@@ -67,27 +69,35 @@ export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
     return l;
   };
 
+  /** As on the server: stopping, then (a checked checkpoint) waiting for review, or (a restart) fenced, or a restart offer; the owner's answer moves it on. */
   function stateOf(r: DemoRecord, now: number): HandoverState {
     if (now < r.requestedAtMs + DEMO_HANDOVER_STEPS.fencedMs) return 'stopping';
-    if (r.refusal !== null && r.decision === null) return 'restart_offered';
-    if (r.decision?.choice === 'decline') return 'declined';
-    const startAt = r.decision ? r.decision.atMs + (DEMO_HANDOVER_STEPS.startingMs - DEMO_HANDOVER_STEPS.fencedMs) : r.requestedAtMs + DEMO_HANDOVER_STEPS.startingMs;
+    if (r.decision === null) return r.refusal !== null ? 'restart_offered' : r.mode === 'resume' ? 'awaiting_review' : now < r.requestedAtMs + DEMO_HANDOVER_STEPS.startingMs ? 'fenced' : now < r.requestedAtMs + DEMO_HANDOVER_STEPS.runningMs ? 'starting' : 'running';
+    if (r.decision.choice === 'decline') return 'declined';
+    const startAt = r.decision.atMs + (DEMO_HANDOVER_STEPS.startingMs - DEMO_HANDOVER_STEPS.fencedMs);
     if (now < startAt) return 'fenced';
     return now < startAt + (DEMO_HANDOVER_STEPS.runningMs - DEMO_HANDOVER_STEPS.startingMs) ? 'starting' : 'running';
   }
 
   function recordView(r: DemoRecord, now: number): HandoverRecordView {
     const state = stateOf(r, now);
-    const resumed = r.mode === 'resume' && r.decision === null;
+    const resumed = r.mode === 'resume' && r.decision?.choice !== 'restart' && r.decision?.choice !== 'decline';
+    const dropped = state === 'running' ? 'successor_running' : r.decision?.choice === 'decline' ? 'declined' : r.decision?.choice === 'restart' ? 'restart_chosen' : null;
     return {
       checkpointId: r.checkpointId, taskId: r.taskId, revision: r.revision, runId: r.runId, mode: r.decision?.choice === 'restart' ? 'restart' : r.mode, state, stateLabel: HANDOVER_STATE_LABEL[state],
       target: 'cloud', priorAttemptId: r.priorAttemptId, priorFence: r.priorFence, nextFence: state === 'stopping' ? null : r.priorFence + 1,
       successorAttemptId: state === 'starting' || state === 'running' ? r.successorAttemptId : null, successorFence: state === 'starting' || state === 'running' ? r.priorFence + 1 : null,
       baseSha: DEMO_BASE,
-      patch: resumed && r.refusal === null && state !== 'stopping' ? { sha256: checkpointDigest(DEMO_BASE, r.files.map((f) => ({ ...f, executable: false }))), fileCount: r.files.length, totalBytes: r.files.reduce((n, f) => n + f.size, 0), files: r.files } : null,
+      patch: resumed && r.refusal === null && state !== 'stopping' ? {
+        sha256: checkpointDigest(DEMO_BASE, r.files.map((f) => ({ ...f, executable: false }))), fileCount: r.files.length, totalBytes: r.files.reduce((n, f) => n + f.size, 0),
+        files: r.files.map((f) => ({ ...f, added: dropped ? null : 2, removed: dropped ? null : 0, hasDiff: dropped === null, binary: false })), stat: dropped ? null : { added: 2 * r.files.length, removed: 0 },
+      } : null,
       exclusions: state === 'stopping' ? [] : r.exclusions, refusal: state !== 'stopping' && r.refusal ? { code: r.refusal, text: HANDOVER_REASON_TEXT[r.refusal] ?? r.refusal } : null,
       estimate: estimate(null), latePublishes: 0, requestedAt: new Date(r.requestedAtMs).toISOString(),
       fencedAt: state === 'stopping' ? null : new Date(r.requestedAtMs + DEMO_HANDOVER_STEPS.fencedMs).toISOString(), updatedAt: new Date(now).toISOString(),
+      releasedAt: r.decision?.choice === 'release' ? new Date(r.decision.atMs).toISOString() : null, releasedBy: r.decision?.choice === 'release' ? OWNER : null, successorRetries: 0,
+      contentDropped: dropped && r.mode === 'resume' ? { at: new Date(now).toISOString(), reason: dropped, text: HANDOVER_CLOSE_TEXT[dropped] ?? dropped } : null,
+      closed: state === 'declined' ? { reason: 'declined', text: HANDOVER_CLOSE_TEXT['declined']! } : null,
     };
   }
 
@@ -100,7 +110,7 @@ export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
       const attempt = t.activeAttemptId ? snap.attempts[t.activeAttemptId] : undefined;
       if (t.status !== 'running' && current === null) continue;
       const worker = attempt ? Object.values(snap.workers).find((w) => w.attemptId === attempt.attemptId) : undefined;
-      const open = current !== null && ['stopping', 'fenced', 'restart_offered'].includes(stateOf(current, now));
+      const open = current !== null && (OPEN_HANDOVER_STATES as readonly string[]).includes(stateOf(current, now)) && !(stateOf(current, now) === 'running' && t.status !== 'running');
       const reasons: HandoverIneligible[] = [];
       // As on the server: a handover in hand says so first, whatever the task's status is while it waits.
       if (open) reasons.push('handover_open');
@@ -136,6 +146,12 @@ export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
     async get(projectId) {
       return view(projectId);
     },
+    async diff(projectId, taskId, checkpointId, path) {
+      const r = listOf(projectId).find((x) => x.checkpointId === checkpointId && x.taskId === taskId);
+      const f = r?.files.find((x) => x.path === path);
+      if (!r || !f || stateOf(r, d.nowMs(projectId)) !== 'awaiting_review') throw refuse('That file\'s diff is not kept: the checkpoint is not waiting for review.');
+      return { checkpointId, path, status: f.status, size: f.size, sha256: f.sha256, binary: false, added: 2, removed: 0, lines: [['+', `export const handoverDemo = '${taskId}';`], ['+', '']], redacted: false };
+    },
     async act(projectId, action) {
       const replay = keys.get(`${projectId}:${action.kind}:${action.idempotencyKey}`);
       if (replay !== undefined) return view(projectId);
@@ -166,16 +182,18 @@ export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
         d.emit(projectId, r.taskId, 'attempt.fenced', { checkpointId: r.checkpointId, priorAttemptId: r.priorAttemptId, priorFence: r.priorFence, nextFence: r.priorFence + 1, cause: 'acknowledged' }, { delayMs: fenceAt, attemptId: r.priorAttemptId, revisionStep: 2 });
         d.emit(projectId, r.taskId, 'task.ready', { reason: 'handover' }, { delayMs: fenceAt, attemptId: r.priorAttemptId, revisionStep: 2 });
         if (required) d.emit(projectId, r.taskId, 'checkpoint.refused', { checkpointId: r.checkpointId, reason: 'required_file_excluded' }, { delayMs: fenceAt, attemptId: r.priorAttemptId, revisionStep: 2 });
-        else scheduleSuccessor(projectId, r, DEMO_HANDOVER_STEPS.startingMs, 3);
+        else if (r.mode === 'restart') scheduleSuccessor(projectId, r, DEMO_HANDOVER_STEPS.startingMs, 3);
         return view(projectId);
       }
       const r = listOf(projectId).find((x) => x.checkpointId === action.checkpointId && x.taskId === action.taskId);
-      if (!r || stateOf(r, now) !== 'restart_offered') throw refuse('There is no restart offer to answer for this task.');
+      const allowed: Readonly<Record<string, readonly HandoverState[]>> = { release: ['awaiting_review'], restart: ['awaiting_review', 'restart_offered'], decline: ['awaiting_review', 'fenced', 'restart_offered'] };
+      if (!r || !(allowed[action.choice] ?? []).includes(stateOf(r, now))) throw refuse(action.choice === 'release' ? 'There is no checkpoint waiting for your review on this task.' : 'There is nothing to answer for this task.');
       r.decision = { choice: action.choice, atMs: now };
       keys.set(`${projectId}:${action.kind}:${action.idempotencyKey}`, r.checkpointId);
       d.emit(projectId, r.taskId, 'handover.decided', { checkpointId: r.checkpointId, choice: action.choice, target: 'cloud' }, { revisionStep: 1 });
       // A restart starts in cloud from the persisted input; kept where it is, a local runner takes it as policy places it.
-      scheduleSuccessor(projectId, r, DEMO_HANDOVER_STEPS.startingMs - DEMO_HANDOVER_STEPS.fencedMs, 2, action.choice === 'restart' ? 'cloud' : 'local');
+      // A release or a restart starts in cloud; kept where it is, a local runner takes it as policy places it.
+      scheduleSuccessor(projectId, r, DEMO_HANDOVER_STEPS.startingMs - DEMO_HANDOVER_STEPS.fencedMs, 2, action.choice === 'decline' ? 'local' : 'cloud');
       return view(projectId);
     },
   };

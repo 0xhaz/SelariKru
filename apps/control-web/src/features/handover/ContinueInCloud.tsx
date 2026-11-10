@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { HandoverRecordView, HandoverTaskView } from '@selarikru/view-protocol';
+import type { HandoverDiffView, HandoverRecordView, HandoverTaskView } from '@selarikru/view-protocol';
 import { buttonPrimary, buttonQuiet, Chip, Panel, TONE_TEXT } from '@selarikru/ui';
 import type { HandoverPort } from '../../shell/projection-store.ts';
 import { costText, HANDOVER_STEPS, inHand, shortSha, stateTone, stepIndex, summarize, timeText } from './model.ts';
@@ -88,20 +88,76 @@ function Steps({ record }: { record: HandoverRecordView }) {
   );
 }
 
-/** One handover's record: where it is, what was carried and left out, and, for a restart offer, the owner's two choices. */
-export function HandoverRecord({ record, live, busy, onDecide }: { record: HandoverRecordView; live: boolean; busy: boolean; onDecide: (choice: 'restart' | 'decline') => void }) {
+type Choice = 'release' | 'restart' | 'decline';
+type DiffLoader = (path: string) => Promise<HandoverDiffView>;
+
+/** One file of a checkpoint under review, with its diff opened on request. The lines come redacted from the server, and render as text only. */
+function ReviewFile({ file, load }: { file: NonNullable<HandoverRecordView['patch']>['files'][number]; load: DiffLoader | null }) {
+  const [diff, setDiff] = useState<HandoverDiffView | null>(null);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const id = useId();
+  const toggle = () => {
+    setOpen((o) => !o);
+    if (diff === null && load) load(file.path).then(setDiff, () => setError('The diff could not be read.'));
+  };
+  const stat = file.added !== null ? `+${file.added} −${file.removed ?? 0}` : file.binary ? 'binary' : 'no line diff';
+  return (
+    <li className="space-y-1" data-testid="handover-review-file" data-path={file.path}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        <span className="break-all font-mono text-mono text-fg">{file.path}</span>
+        <span className="text-muted">{file.status}, {file.size ?? 0} bytes, {stat}</span>
+        <span className="break-all font-mono text-mono text-muted">{file.sha256 ? file.sha256.slice(0, 12) : 'deleted'}</span>
+        {file.hasDiff && load ? <button type="button" className="rounded-chip text-sm font-medium text-active underline underline-offset-2" aria-expanded={open} aria-controls={id} onClick={toggle}>{open ? 'Hide diff' : 'View diff'}</button> : null}
+      </div>
+      {open ? (
+        <div id={id} data-testid="handover-diff">
+          {error ? <p className="text-sm text-danger">{error}</p> : diff === null ? <p className="text-sm text-muted">Loading the diff</p> : (
+            <>
+              {diff.redacted ? <p className="text-sm text-warning">Some lines held secret-shaped text and are shown redacted.</p> : null}
+              <pre className="max-h-80 overflow-auto rounded-chip border border-line bg-panel-2 p-2 font-mono text-mono text-fg" aria-label={`Diff of ${file.path}`}>{(diff.lines ?? []).map(([op, t], i) => <div key={i} className={op === '+' ? 'text-success' : op === '-' ? 'text-danger' : 'text-muted'}><span aria-hidden="true">{op} </span><span className="sr-only">{op === '+' ? 'added: ' : op === '-' ? 'removed: ' : ''}</span>{t}</div>)}</pre>
+            </>
+          )}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+/** One handover's record: where it is, what was carried and left out, and the owner's choices where the state takes one. */
+export function HandoverRecord({ record, live, busy, onDecide, loadDiff = null }: { record: HandoverRecordView; live: boolean; busy: boolean; onDecide: (choice: Choice) => void; loadDiff?: DiffLoader | null }) {
+  const off = !live || busy;
+  const review = record.state === 'awaiting_review';
   return (
     <div className="space-y-3" data-testid="handover-record" data-state={record.state}>
       <div className="flex flex-wrap items-center gap-2"><Chip tone={stateTone(record.state)} testId="handover-state">{record.stateLabel}</Chip><span className="text-sm text-muted">{record.mode === 'restart' ? 'Restart from persisted input' : 'Resume from checkpoint'}, to a {record.target} runner</span></div>
       {record.state !== 'restart_offered' && record.state !== 'declined' && record.state !== 'closed' ? <Steps record={record} /> : null}
+      {review ? (
+        <div className="rounded-card border border-warning p-3" data-testid="handover-review">
+          <p className="text-fg">The local attempt is stopped and fenced. Its checkpoint was checked: review what it carries, then release it to a cloud runner. Nothing starts until you do.</p>
+          {record.estimate ? <p className="mt-1 text-sm text-fg">Estimated cost of the cloud attempt: {costText(record.estimate.costUsd)}.</p> : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" className={buttonPrimary} disabled={off} onClick={() => onDecide('release')}>Release to a cloud runner</button>
+            <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('restart')}>Restart from persisted input</button>
+            <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('decline')}>Keep it local</button>
+            {!live ? <p className="w-full text-sm text-muted">Not available while the connection is not live.</p> : null}
+          </div>
+        </div>
+      ) : null}
+      {record.state === 'fenced' && record.target === 'cloud' ? (
+        <div className="flex flex-wrap items-center gap-2" data-testid="handover-fenced">
+          <p className="text-sm text-fg">Held for a cloud runner. A local runner does not take it while it is.</p>
+          <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('decline')}>Keep it local</button>
+        </div>
+      ) : null}
       {record.refusal ? (
         <div className="rounded-card border border-warning p-3" data-testid="handover-refusal">
           <p className="text-fg wrap-anywhere"><span className={TONE_TEXT.warning}>Cannot resume safely.</span> {record.refusal.text}</p>
           {record.estimate ? <p className="mt-1 text-sm text-fg" data-testid="handover-restart-cost">A restart from the persisted input repeats the work: {costText(record.estimate.costUsd)}, {timeText(record.estimate.timeSeconds)}.</p> : null}
           {record.state === 'restart_offered' ? (
             <div className="mt-3 flex flex-wrap gap-2">
-              <button type="button" className={buttonPrimary} disabled={!live || busy} onClick={() => onDecide('restart')}>Restart from persisted input</button>
-              <button type="button" className={buttonQuiet} disabled={!live || busy} onClick={() => onDecide('decline')}>Keep it where it is</button>
+              <button type="button" className={buttonPrimary} disabled={off} onClick={() => onDecide('restart')}>Restart from persisted input</button>
+              <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('decline')}>Keep it local</button>
               {!live ? <p className="w-full text-sm text-muted">Not available while the connection is not live.</p> : null}
             </div>
           ) : null}
@@ -112,10 +168,10 @@ export function HandoverRecord({ record, live, busy, onDecide }: { record: Hando
         <div><dt className="font-medium text-muted">Fence</dt><dd className="m-0 text-fg">Prior attempt fence {record.priorFence}{record.nextFence !== null ? `; the next attempt starts at fence ${record.nextFence} or later` : '; not fenced yet'}</dd></div>
         {record.patch ? (
           <div className="sm:col-span-2" data-testid="handover-patch">
-            <dt className="font-medium text-muted">Checkpoint carried</dt>
+            <dt className="font-medium text-muted">{review ? 'Checkpoint to review' : 'Checkpoint carried'}</dt>
             <dd className="m-0 text-fg">
-              {record.patch.fileCount} file(s), {record.patch.totalBytes} bytes, patch <span className="break-all font-mono text-mono">{record.patch.sha256}</span>
-              <ul className="mt-1 space-y-0.5">{record.patch.files.map((f) => <li key={f.path} className="break-all font-mono text-mono">{f.status} {f.path}</li>)}</ul>
+              {record.patch.fileCount} file(s), {record.patch.totalBytes} bytes{record.patch.stat ? `, +${record.patch.stat.added} −${record.patch.stat.removed} lines` : ''}, patch <span className="break-all font-mono text-mono">{record.patch.sha256}</span>
+              <ul className="mt-1 space-y-1">{record.patch.files.map((f) => <ReviewFile key={f.path} file={f} load={review ? loadDiff : null} />)}</ul>
             </dd>
           </div>
         ) : null}
@@ -125,6 +181,8 @@ export function HandoverRecord({ record, live, busy, onDecide }: { record: Hando
             <dd className="m-0"><ul className="space-y-0.5">{record.exclusions.map((x) => <li key={x.path} className="text-fg"><span className="break-all font-mono text-mono">{x.path}</span> <span className="text-muted">({EXCLUSION_WORDS[x.reason] ?? x.reason})</span></li>)}</ul></dd>
           </div>
         ) : null}
+        {record.contentDropped ? <div className="sm:col-span-2 text-muted" data-testid="handover-dropped">The stored checkpoint was discarded: {record.contentDropped.text}</div> : null}
+        {record.successorRetries > 0 ? <div className="sm:col-span-2 text-fg">A cloud attempt was lost during setup and offered again {record.successorRetries} time(s).</div> : null}
         {record.latePublishes > 0 ? <div className="sm:col-span-2 text-fg" data-testid="handover-late">The stopped attempt tried to publish {record.latePublishes} time(s) after the handover. Each was refused.</div> : null}
       </dl>
     </div>
@@ -140,14 +198,14 @@ export function TaskHandover({ task, title, state, live, compact = false }: { ta
     setConfirm(null);
     await state.act({ kind: 'request', taskId: task.taskId, mode, idempotencyKey: newKey() });
   };
-  const decide = (choice: 'restart' | 'decline') => {
+  const decide = (choice: Choice) => {
     if (!task.current) return;
     void state.act({ kind: 'decide', taskId: task.taskId, checkpointId: task.current.checkpointId, choice, idempotencyKey: newKey() });
   };
   if (task.current && inHand(task)) {
     return compact
       ? <div data-testid="handover-row" data-task-id={task.taskId}><Chip tone={s.tone} testId="handover-state">{s.label}</Chip></div>
-      : <HandoverRecord record={task.current} live={live} busy={state.busy} onDecide={decide} />;
+      : <HandoverRecord record={task.current} live={live} busy={state.busy} onDecide={decide} loadDiff={state.diff ? (path) => state.diff!(task.taskId, task.current!.checkpointId, path) : null} />;
   }
   if (task.status !== 'running') return null;
   const blocked = !live ? 'Not available while the connection is not live.' : s.why;
@@ -182,16 +240,17 @@ export function DrawerHandover({ port, taskId, title, refreshKey, live }: { port
 /** On Decisions: restart offers waiting for the owner, and every continuation that could not resume, with its reason. */
 export function HandoverDecisions({ port, refreshKey, live, titleOf }: { port: HandoverPort | null; refreshKey: string; live: boolean; titleOf: (taskId: string) => string | null }) {
   const state = useHandovers(port, refreshKey);
-  const refused = (state.view?.records ?? []).filter((r) => r.refusal !== null || r.state === 'restart_offered');
+  // Waiting for the owner (a review, a restart offer), or a continuation that could not resume.
+  const refused = (state.view?.records ?? []).filter((r) => r.refusal !== null || r.state === 'restart_offered' || r.state === 'awaiting_review');
   if (refused.length === 0) return null;
-  const offers = refused.filter((r) => r.state === 'restart_offered').length;
+  const offers = refused.filter((r) => r.state === 'restart_offered' || r.state === 'awaiting_review').length;
   return (
-    <Panel title="Continuations that could not resume" labelId="handover-refusals" aside={offers > 0 ? `${offers} waiting for you` : `${refused.length} recorded`}>
+    <Panel title="Continue in cloud: reviews and refusals" labelId="handover-refusals" aside={offers > 0 ? `${offers} waiting for you` : `${refused.length} recorded`}>
       <ul className="space-y-3">
         {refused.map((r) => (
-          <li key={r.checkpointId} data-testid="handover-decision" className={`rounded-card border p-4 ${r.state === 'restart_offered' ? 'border-warning' : 'border-line'}`}>
+          <li key={r.checkpointId} data-testid="handover-decision" data-state={r.state} className={`rounded-card border p-4 ${r.state === 'restart_offered' || r.state === 'awaiting_review' ? 'border-warning' : 'border-line'}`}>
             <h3 className="mb-2 font-medium text-fg wrap-anywhere">{titleOf(r.taskId) ?? r.taskId}</h3>
-            <HandoverRecord record={r} live={live} busy={state.busy} onDecide={(choice) => void state.act({ kind: 'decide', taskId: r.taskId, checkpointId: r.checkpointId, choice, idempotencyKey: newKey() })} />
+            <HandoverRecord record={r} live={live} busy={state.busy} onDecide={(choice) => void state.act({ kind: 'decide', taskId: r.taskId, checkpointId: r.checkpointId, choice, idempotencyKey: newKey() })} loadDiff={state.diff ? (path) => state.diff!(r.taskId, r.checkpointId, path) : null} />
           </li>
         ))}
       </ul>

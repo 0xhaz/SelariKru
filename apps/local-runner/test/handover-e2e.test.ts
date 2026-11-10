@@ -1,7 +1,8 @@
 /**
  * Checkpoint continuation end to end with real sockets: the real control API on a throwaway schema, and two real runner enrolments, one `local` and one `cloud`, each
  * running the runner's own attempt code over HTTP against the fake sandbox runtime. No cloud adapter is mocked: the cloud runner is the same binary's code with a cloud
- * enrolment. Hosted cloud infrastructure (and the release gate on it) is T7.3.
+ * enrolment, and drives its own poll loop (`RunnerLoop`). It runs in this process: a separate runner process would need the fake sandbox runtime injected into the binary,
+ * which `main.ts` does not offer. Hosted cloud infrastructure (and the release gate on it) is T7.3.
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -13,6 +14,7 @@ import { createScheduler } from '@selarikru/workflow';
 import { CLOUD_POLICY, TEST_CATALOG, testClock } from '@selarikru/workflow/test-helpers';
 import { HttpRunnerApi, LeaseLostError } from '../src/api.ts';
 import { runAttempt, type AttemptDeps } from '../src/attempt.ts';
+import { RunnerLoop } from '../src/loop.ts';
 import { makeWorld, type World } from './world.ts';
 
 /** The cloud test policy with the API's own operations. Typed through the scheduler's context: this package does not depend on the policy package. */
@@ -83,11 +85,32 @@ describe('continue in cloud, two real runner enrolments', () => {
 
       const priorReport = await prior;
       expect(priorReport.outcome).toBe('failed');
-      const second = await cloudApi.claim();
-      expect(second.lease).toMatchObject({ taskId: 'T1', fence: first.lease!.fence + 1, handover: { mode: 'resume', priorAttemptId: first.lease!.attemptId } });
-      const report = await runAttempt(deps(cloudApi), second.lease!);
-      expect(report.outcome).toBe('completed');
+      // The checkpoint waits for the owner's review, with its line diff; nothing may claim before the release.
+      const owner = { authorization: `Bearer ${OWNER_TOKEN}` };
+      const review = (await app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/tasks/T1/handover`, headers: owner })).json() as { current: { state: string; checkpointId: string; patch: { files: { path: string; added: number }[] } } };
+      expect(review.current).toMatchObject({ state: 'awaiting_review', patch: { files: [{ path: 'src/feature.ts', added: 2 }] } });
+      expect((await cloudApi.claim()).lease).toBeNull();
+      const released = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/handover/decision`, headers: owner, payload: { checkpointId: review.current.checkpointId, choice: 'release', idempotencyKey: 'e2e-r' } });
+      expect(released.statusCode).toBe(200);
+
+      // The cloud runner takes it through its own poll loop, as the runner process does, and runs it to completion.
+      const reports: string[] = [];
+      const stop = new AbortController();
+      const loop = new RunnerLoop({ api: cloudApi, runtime: w.runtime, attempt: deps(cloudApi), pollMs: 20, log: (l) => { reports.push(l); w!.logs.push(l); } });
+      const running = loop.run(stop.signal);
+      try {
+        await until(async () => (await t.db.execute(sql`SELECT status FROM task_status WHERE task_id = 'T1'`))[0]!['status'] === 'verifying', 20_000);
+      } finally {
+        stop.abort();
+        await running;
+      }
       expect(carried).toBe('export const feature = 1;\n');
+      const [succ] = await t.db.execute(sql`SELECT attempt_id, lease_fence, detail FROM attempts WHERE attempt_id <> ${first.lease!.attemptId} ORDER BY attempt_number DESC LIMIT 1`);
+      const second = { lease: { attemptId: String(succ!['attempt_id']) } };
+      expect(Number(succ!['lease_fence'])).toBe(first.lease!.fence + 1);
+      expect((succ!['detail'] as { location?: string }).location).toBe('cloud');
+      const manifestSha = (succ!['detail'] as { changeManifestSha256?: string }).changeManifestSha256!;
+      const report = { changeManifest: manifestSha };
 
       // The combined candidate: the carried file and the cloud worker's own, never the secret file.
       const manifest = JSON.parse(Buffer.from((await w.artifacts.get(report.changeManifest!))!).toString()) as { changes: { path: string }[] };
@@ -102,7 +125,8 @@ describe('continue in cloud, two real runner enrolments', () => {
       expect(fenced.seq).toBeLessThan(started.seq);
       await expect(localApi.result({ attemptId: first.lease!.attemptId, fence: first.lease!.fence, leaseToken: first.lease!.leaseToken }, { outcome: 'completed', headSha: 'c'.repeat(40) })).rejects.toBeInstanceOf(LeaseLostError);
       const [row] = await t.db.execute(sql`SELECT state, exclusions, late_publishes FROM checkpoints`);
-      expect(row).toMatchObject({ state: 'running', exclusions: [{ path: '.env', reason: 'secret_file_name' }], late_publishes: 1 });
+      // The successor completed: the handover closed, its stored copy dropped, and the one late publish recorded.
+      expect(row).toMatchObject({ state: 'closed', exclusions: [{ path: '.env', reason: 'secret_file_name' }], late_publishes: 1 });
       const everything = JSON.stringify([log, row, w.logs, await t.db.execute(sql`SELECT payload FROM events`)]);
       expect(everything).not.toContain(SECRET);
     } finally {

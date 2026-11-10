@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { CHECKPOINT_LIMITS, checkpointDigest, EXCLUSION_REASONS, insideAllowedPaths, secretFileReason, type CheckpointExclusion, type CheckpointFile, type CheckpointRefusal } from '@selarikru/domain';
+import { CHECKPOINT_LIMITS, checkpointDigest, diffPostImage, EXCLUSION_REASONS, insideAllowedPaths, secretFileReason, type CheckpointDiff, type CheckpointExclusion, type CheckpointFile, type CheckpointRefusal } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 import { LeaseRefSchema } from './runner.ts';
@@ -16,6 +16,8 @@ export const CheckpointFileWireSchema = z.object({
   executable: z.boolean(),
   /** The file's bytes after the change, base64. Null for a deletion. */
   content: z.string().max(Math.ceil((CHECKPOINT_LIMITS.maxFileBytes * 4) / 3) + 8).nullable(),
+  /** The owner's review diff against the base, every line of both sides. Null or absent: binary, or too large to show. Checked against `content` before it is kept. */
+  diff: z.object({ binary: z.boolean(), lines: z.array(z.tuple([z.enum([' ', '+', '-']), z.string().max(CHECKPOINT_LIMITS.maxFileBytes)])).max(CHECKPOINT_LIMITS.maxDiffLines).nullable() }).strict().nullable().optional(),
 }).strict();
 export type CheckpointFileWire = z.infer<typeof CheckpointFileWireSchema>;
 
@@ -43,6 +45,8 @@ export interface CheckpointContent {
   readonly files: readonly CheckpointFile[];
   /** base64 by path, for every file that is not a deletion. */
   readonly content: Readonly<Record<string, string>>;
+  /** The review diff by path, checked against the content. A file with none shows no lines. */
+  readonly diffs: Readonly<Record<string, CheckpointDiff>>;
 }
 
 export type CheckpointValidation =
@@ -70,14 +74,29 @@ export function validateCheckpoint(upload: Pick<CheckpointUpload, 'baseSha' | 'p
     if (!plainPath(x.path)) return { ok: false, reason: 'path_invalid' };
     // A path is stored and shown: one shaped like a credential is refused, as anywhere else a name is recorded.
     if (redactSecrets(x.path) !== x.path) return { ok: false, reason: 'secret_content_included' };
-    if (x.reason !== 'outside_allowed_paths' && insideAllowedPaths(x.path, task.allowedPaths)) return { ok: false, reason: x.reason === 'too_large' ? 'file_too_large' : 'required_file_excluded', path: x.path };
+    // Any exclusion inside the allowed paths is part of the task's work, whatever label the runner gave it: the work cannot be carried whole.
+    if (insideAllowedPaths(x.path, task.allowedPaths)) return { ok: false, reason: x.reason === 'too_large' ? 'file_too_large' : 'required_file_excluded', path: x.path };
   }
   if (upload.files.length === 0) return { ok: false, reason: 'empty_checkpoint' };
   if (upload.files.length > CHECKPOINT_LIMITS.maxFiles) return { ok: false, reason: 'too_many_files' };
   const seen = new Set<string>();
   const files: CheckpointFile[] = [];
   const content: Record<string, string> = {};
+  const diffs: Record<string, CheckpointDiff> = {};
   let total = 0;
+  let diffChars = 0;
+  /** A diff is display only, but it must say what the file becomes: its kept and added lines are the file. A deletion's diff adds nothing. */
+  const takeDiff = (f: CheckpointFileWire, bytes: Buffer | null): CheckpointRefusal | null => {
+    const d = f.diff;
+    if (!d) return null;
+    if (d.lines === null) { diffs[f.path] = { binary: d.binary, lines: null, added: 0, removed: 0 }; return null; }
+    diffChars += d.lines.reduce((n, [, t]) => n + t.length + 1, 0);
+    if (diffChars > CHECKPOINT_LIMITS.maxDiffChars) return 'checkpoint_too_large';
+    const post = diffPostImage(d.lines);
+    if (bytes === null ? d.lines.some(([op]) => op !== '-') : Buffer.from(post, 'utf8').compare(bytes) !== 0) return 'diff_mismatch';
+    diffs[f.path] = { binary: false, lines: d.lines.map(([op, t]) => [op, t] as const), added: d.lines.filter(([op]) => op === '+').length, removed: d.lines.filter(([op]) => op === '-').length };
+    return null;
+  };
   for (const f of upload.files) {
     if (!plainPath(f.path)) return { ok: false, reason: 'path_invalid', path: f.path };
     if (redactSecrets(f.path) !== f.path) return { ok: false, reason: 'secret_content_included' };
@@ -87,6 +106,8 @@ export function validateCheckpoint(upload: Pick<CheckpointUpload, 'baseSha' | 'p
     if (secretFileReason(f.path) !== null) return { ok: false, reason: 'secret_file_included', path: f.path };
     if (f.status === 'deleted') {
       if (f.sha256 !== null || f.content !== null) return { ok: false, reason: 'invalid_checkpoint', path: f.path };
+      const bad = takeDiff(f, null);
+      if (bad) return { ok: false, reason: bad, path: f.path };
       files.push({ path: f.path, status: 'deleted', sha256: null, size: null, executable: false });
       continue;
     }
@@ -97,16 +118,18 @@ export function validateCheckpoint(upload: Pick<CheckpointUpload, 'baseSha' | 'p
     if (total > CHECKPOINT_LIMITS.maxTotalBytes) return { ok: false, reason: 'checkpoint_too_large' };
     if (sha256(bytes) !== f.sha256 || (f.size !== null && f.size !== bytes.length)) return { ok: false, reason: 'file_hash_mismatch', path: f.path };
     if (secretContent(bytes)) return { ok: false, reason: 'secret_content_included', path: f.path };
+    const bad = takeDiff(f, bytes);
+    if (bad) return { ok: false, reason: bad, path: f.path };
     files.push({ path: f.path, status: f.status, sha256: f.sha256, size: bytes.length, executable: f.executable });
     content[f.path] = f.content;
   }
   if (checkpointDigest(upload.baseSha, files) !== upload.patchSha256) return { ok: false, reason: 'patch_hash_mismatch' };
   const exclusions = upload.exclusions.map((x) => ({ path: x.path, reason: x.reason }));
-  return { ok: true, checkpoint: { baseSha: upload.baseSha, patchSha256: upload.patchSha256, files, content }, exclusions, totalBytes: total };
+  return { ok: true, checkpoint: { baseSha: upload.baseSha, patchSha256: upload.patchSha256, files, content, diffs }, exclusions, totalBytes: total };
 }
 
 /** The same hashes, checked on stored content before it is served or applied: a row changed after it was checked is refused, never trusted. */
-export function verifyCheckpointContent(c: CheckpointContent): { readonly ok: true } | { readonly ok: false; readonly reason: 'checkpoint_tampered'; readonly path?: string } {
+export function verifyCheckpointContent(c: Omit<CheckpointContent, 'diffs'>): { readonly ok: true } | { readonly ok: false; readonly reason: 'checkpoint_tampered'; readonly path?: string } {
   for (const f of c.files) {
     if (f.status === 'deleted') continue;
     const b64 = c.content[f.path];
@@ -119,5 +142,7 @@ export function verifyCheckpointContent(c: CheckpointContent): { readonly ok: tr
 const Key = z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/, 'expected an idempotency key');
 /** The owner asks to continue a task in cloud (`resume`), or to restart it from its persisted input (`restart`). */
 export const HandoverRequestSchema = z.strictObject({ mode: z.enum(['resume', 'restart']), idempotencyKey: Key });
-/** The owner's answer to a restart offer. */
-export const HandoverDecisionSchema = z.strictObject({ checkpointId: z.string().min(1).max(100), choice: z.enum(['restart', 'decline']), idempotencyKey: Key });
+/** The owner's answer: release a reviewed checkpoint, restart from the persisted input, or keep the task where it is. */
+export const HandoverDecisionSchema = z.strictObject({ checkpointId: z.string().min(1).max(100), choice: z.enum(['release', 'restart', 'decline']), idempotencyKey: Key });
+/** Which file's review diff the owner opens. */
+export const HandoverDiffQuerySchema = z.strictObject({ checkpointId: z.string().min(1).max(100), path: z.string().min(1).max(512) });

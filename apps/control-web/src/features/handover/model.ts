@@ -4,6 +4,7 @@ import type { Tone } from '@selarikru/ui';
 /** The handover's path, in order, as the owner reads it. A restart offer and a decline are off this path and say so in words. */
 export const HANDOVER_STEPS = [
   { state: 'stopping', label: 'Stopping local attempt' },
+  { state: 'awaiting_review', label: 'Checkpoint ready for review' },
   { state: 'fenced', label: 'Fenced' },
   { state: 'starting', label: 'Cloud attempt starting' },
   { state: 'running', label: 'Running' },
@@ -15,7 +16,7 @@ export const stepIndex = (state: HandoverRecordView['state']): number => HANDOVE
 export const TRANSITIONAL: readonly HandoverRecordView['state'][] = ['stopping', 'fenced', 'starting'];
 
 export function stateTone(state: HandoverRecordView['state']): Tone {
-  if (state === 'restart_offered') return 'warning';
+  if (state === 'restart_offered' || state === 'awaiting_review') return 'warning';
   if (state === 'running') return 'success';
   if (state === 'declined' || state === 'closed') return 'neutral';
   return 'active';

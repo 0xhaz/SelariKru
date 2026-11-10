@@ -26,11 +26,19 @@ describe('the demo handover', () => {
     v = await ds.handoverAction!(projectId, { kind: 'request', taskId: 'unknown-costs.api', mode: 'resume', idempotencyKey: 'k1' });
     expect(v.tasks.find((t) => t.taskId === 'unknown-costs.api')!.current).toMatchObject({ state: 'stopping', stateLabel: 'Stopping local attempt' });
     clock.advance(2_500);
-    expect((await ds.getHandovers!(projectId)).tasks.find((t) => t.taskId === 'unknown-costs.api')!.current).toMatchObject({ state: 'fenced', exclusions: [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes/scratch.md', reason: 'outside_allowed_paths' }] });
+    const review = (await ds.getHandovers!(projectId)).tasks.find((t) => t.taskId === 'unknown-costs.api')!.current!;
+    expect(review).toMatchObject({ state: 'awaiting_review', exclusions: [{ path: '.env', reason: 'secret_file_name' }, { path: 'notes/scratch.md', reason: 'outside_allowed_paths' }] });
+    expect(review.patch!.files[0]).toMatchObject({ hasDiff: true, added: 2 });
+    expect((await ds.getHandoverDiff!(projectId, 'unknown-costs.api', review.checkpointId, review.patch!.files[0]!.path)).lines!.length).toBeGreaterThan(0);
+    // Nothing starts until the owner releases it.
+    clock.advance(10_000);
+    expect((await ds.getHandovers!(projectId)).records[0]!.state).toBe('awaiting_review');
+    await ds.handoverAction!(projectId, { kind: 'decide', taskId: 'unknown-costs.api', checkpointId: review.checkpointId, choice: 'release', idempotencyKey: 'r1' });
+    expect((await ds.getHandovers!(projectId)).records[0]!.state).toBe('fenced');
     clock.advance(2_000);
     expect((await ds.getHandovers!(projectId)).tasks.find((t) => t.taskId === 'unknown-costs.api')!.current!.state).toBe('starting');
     clock.advance(2_000);
-    expect((await ds.getHandovers!(projectId)).records[0]!.state).toBe('running');
+    expect((await ds.getHandovers!(projectId)).records[0]!).toMatchObject({ state: 'running', contentDropped: { reason: 'successor_running' } });
 
     const types = events.map((e) => e.type);
     expect(types.indexOf('attempt.fenced')).toBeLessThan(types.indexOf('attempt.started'));

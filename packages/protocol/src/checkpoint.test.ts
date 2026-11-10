@@ -42,6 +42,21 @@ describe('checkpoint rules', () => {
     expect(validateCheckpoint(upload([file('server/app.ts', 'x')], [{ path: 'server/.env.local', reason: 'secret_file_name' }]), task)).toMatchObject({ ok: false, reason: 'required_file_excluded', path: 'server/.env.local' });
   });
 
+  it('refuses an exclusion labelled outside the allowed paths that is inside them (case C)', () => {
+    expect(validateCheckpoint(upload([file('server/a.ts', 'x')], [{ path: 'server/needed.ts', reason: 'outside_allowed_paths' }]), task)).toMatchObject({ ok: false, reason: 'required_file_excluded', path: 'server/needed.ts' });
+  });
+
+  it('keeps a review diff only when its kept and added lines are the file, with its stat', () => {
+    const f = file('server/app.ts', 'a\nb2\nc');
+    const ok = validateCheckpoint(upload([{ ...f, diff: { binary: false, lines: [[' ', 'a'], ['-', 'b'], ['+', 'b2'], [' ', 'c']] } }]), task);
+    expect(ok.ok && ok.checkpoint.diffs['server/app.ts']).toMatchObject({ added: 1, removed: 1, binary: false });
+    // A diff that shows something other than what is applied is refused: the owner reviews exactly what the successor gets.
+    expect(validateCheckpoint(upload([{ ...f, diff: { binary: false, lines: [[' ', 'a'], ['+', 'harmless'], [' ', 'c']] } }]), task)).toMatchObject({ ok: false, reason: 'diff_mismatch' });
+    const del = { path: 'server/old.ts', status: 'deleted' as const, sha256: null, size: null, executable: false, content: null };
+    expect(validateCheckpoint(upload([{ ...del, diff: { binary: false, lines: [['-', 'gone']] } }]), task).ok).toBe(true);
+    expect(validateCheckpoint(upload([{ ...del, diff: { binary: false, lines: [['+', 'sneak']] } }]), task)).toMatchObject({ ok: false, reason: 'diff_mismatch' });
+  });
+
   it('refuses paths outside the allowed paths, unsafe paths, a wrong base, an empty change set and oversize work', () => {
     expect(validateCheckpoint(upload([file('src/app.ts', 'x')]), task)).toMatchObject({ ok: false, reason: 'path_outside_allowed_paths' });
     expect(validateCheckpoint(upload([file('server/../etc/passwd', 'x')]), task)).toMatchObject({ ok: false, reason: 'path_invalid' });

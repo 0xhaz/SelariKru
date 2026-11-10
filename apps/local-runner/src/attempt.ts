@@ -8,7 +8,7 @@ import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets,
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, readStackDetection, resolveToolchain, RuntimeHarnessLauncher, unlockTree, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { ApiStatusError, FetchedCheckpointSchema, LeaseLostError, leaseRef, type ClaimedLease, type HandoverStop, type RunnerApi, type RunnerResult } from './api.ts';
-import { applyCheckpoint, buildCheckpoint } from './checkpoint.ts';
+import { applyCheckpoint, buildCheckpoint, gitBaseReader } from './checkpoint.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
 import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
@@ -668,7 +668,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       if (stop?.mode === 'resume' && !restricted && deps.api.checkpoint !== undefined) {
         try {
           const changes = await (deps.computeChanges ?? computeChanges)(baseline, workspace, baseIgnores);
-          const built = await buildCheckpoint(workspace, changes, task, [RESERVED_DIR, SKILL_WORKSPACE_ROOT]);
+          const built = await buildCheckpoint(workspace, changes, task, [RESERVED_DIR, SKILL_WORKSPACE_ROOT], gitBaseReader(repo, task.baseSha));
           await deps.api.checkpoint(ref, built.body);
           log(`checkpoint sent for ${stop.checkpointId}: ${built.body.files.length} file(s), ${built.exclusions.length} excluded, patch ${built.body.patchSha256}`);
         } catch (err) {

@@ -1,11 +1,12 @@
 import { approvalUnavailableReason, isHandoverReason, restrictedApproval, restrictedReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { openApproval } from './approval.ts';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
-import { handoverStopFor, markSuccessorRunning, recordLatePublish, successorRefused } from './handover.ts';
+import { createHash } from 'node:crypto';
+import { handoverStopFor, markSuccessorRunning, recordLatePublish, successorEnded } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAttemptUsage } from './usage.ts';
 import { buildTaskState, lockStatusRow, loadAttempts, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
@@ -25,6 +26,9 @@ export function leaseHealth(lastHeartbeatAt: string, now: Date): LeaseHealth {
   if (silent >= LEASE_EXPIRY_SECONDS * 1000) return 'expired';
   return silent >= LEASE_SUSPECT_SECONDS * 1000 ? 'suspect' : 'healthy';
 }
+
+/** What a publish said, as a digest: a resent acknowledgement is recognised by it. Never stored with the token. */
+const publishDigest = (r: PublishResult): string => createHash('sha256').update(JSON.stringify(r)).digest('hex');
 
 /** Thrown inside a `recordOperation` savepoint so that a fenced publish writes no receipt at all. */
 class FencedPublish extends Error {
@@ -90,6 +94,8 @@ export async function closeLease(tx: Tx, key: TaskKey, attemptId: string, now: D
     .update(schema.attempts)
     .set({ endedAt: now, outcome: close.outcome, exitReason: close.exitReason, ...(close.headSha ? { headSha: close.headSha } : {}) })
     .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
+  // A handover's successor that ended: the handover is offered again, offered to the owner, or closed (handover.ts).
+  await successorEnded(tx, key, attemptId, close.outcome, close.exitReason, now);
   // A completed attempt moves to `verifying` and keeps its exclusive claims: verification releases them (applyVerification).
   if (close.keepClaims) return;
   await tx
@@ -139,6 +145,12 @@ export async function publishResult(ctx: SchedulerContext, lease: Lease, result:
     }
     // An attempt fenced by a handover publishes nothing more, not even a replay of its acknowledgement: refused as stale, and recorded.
     if (held.endedAt !== null && isHandoverReason(held.exitReason)) {
+      // Except the acknowledgement itself, sent again (a retry after a lost answer): that is the same publish, and gets the same receipt. It is not a late publish.
+      if ((held.detail as { ackDigest?: unknown } | null)?.ackDigest === publishDigest(result)) {
+        const replay = await tx.execute(sql`SELECT receipt FROM operation_receipts WHERE tenant_id = ${lease.tenantId} AND project_id = ${lease.projectId} AND operation_key = ${`publish:${lease.attemptId}:${lease.fence}`}`);
+        const receipt = replay[0]?.['receipt'] as PublishReceipt | null | undefined;
+        if (receipt) return ok(receipt);
+      }
       await recordLatePublish(tx, lease, held, lease.fence, ctx.now());
       return err(conflict(lease, 'stale_fence'));
     }
@@ -214,7 +226,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
       outcome, exitReason: outcome === 'interrupted' ? stopReason! : reportedReason ?? 'completed', headSha: result.outcome === 'completed' ? result.headSha : undefined,
     });
     await tx.update(schema.attempts)
-      .set({ detail: { ...(live.detail ?? {}), cancelRequested: true, reportedOutcome: result.outcome, reportedReason, reportedCostUsd: result.reportedCostUsd ?? null } })
+      .set({ detail: { ...(live.detail ?? {}), cancelRequested: true, reportedOutcome: result.outcome, reportedReason, reportedCostUsd: result.reportedCostUsd ?? null, ackDigest: publishDigest(sent) } })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
     const confirmed = await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, lease.attemptId, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
     return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: confirmed.status };
@@ -295,7 +307,6 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
   await emit(tx, scope, now, { type: event.type, attemptId: lease.attemptId, actor: event.actor, payload: event.payload });
   if (follow) await emit(tx, scope, now, { type: follow.type, attemptId: lease.attemptId, actor: SCHEDULER_ACTOR, payload: { reason: follow.reason } });
   // A handover's successor that could not start from its checkpoint: the task waits for the owner's choice instead of retrying the same checkpoint.
-  if (result.outcome === 'infrastructure_failed' && (live.detail as { handover?: unknown } | null)?.handover !== undefined) await successorRefused(tx, key, live, result.reason, scope, now);
 
   return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: state.status, ...(repair ? { repair } : {}) };
 }

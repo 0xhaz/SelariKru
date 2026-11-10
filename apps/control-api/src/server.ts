@@ -6,7 +6,7 @@ import { declaredHarnessCatalog } from '@selarikru/harness-claude';
 import { createGhCliPort, reconcileRun, startReconciler, type GitHubPort } from '@selarikru/integrations-github';
 import { createDb, type Db } from '@selarikru/persistence';
 import { loadDefaultPolicy, loadPolicyFile } from '@selarikru/policy/load';
-import { createScheduler, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
+import { createScheduler, reviewHandovers, type RecordBytes, type TrustedVerifier } from '@selarikru/workflow';
 import { buildApp } from './app.ts';
 import { createGitProbes, ghRepoAccess, type ReadinessProbes } from './onboarding-readiness.ts';
 import { loadPlanConfigFile } from './proposals.ts';
@@ -219,6 +219,8 @@ export async function startServer(options: {
       const failures: unknown[] = [];
       try { await finishCancelledRuns({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
       try { await settlePendingSettings({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
+      // A handover released to a cloud runner that can no longer run there (no runner seen, cloud taken away, budget short) is offered back to the owner.
+      try { await reviewHandovers({ db, now, policy, catalog }, config.caps, now()); } catch (e) { failures.push(e); }
       // The Project Brain: compiles a project whose records moved (a verifier's verdict, a merge) without waiting for anyone to look. Brain lock only.
       try { await refreshBrains({ db, tenantId: config.tenantId, now, onError: (entry) => app.log.warn(entry, 'compiling a project\'s Brain failed; the next pass retries') }); } catch (e) { failures.push(e); }
       if (failures.length > 0) throw new AggregateError(failures, 'settings pass failed');

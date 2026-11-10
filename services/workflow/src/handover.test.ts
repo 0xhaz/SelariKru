@@ -2,11 +2,13 @@ import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { checkpointDigest } from '@selarikru/domain';
-import { schema } from '@selarikru/persistence';
+import { schema, withTx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { validateCheckpoint } from '@selarikru/protocol';
-import { assessHandover, createScheduler, decideHandover, recordCheckpoint, requestHandover, successorCheckpoint, type Lease, type Scheduler, type SchedulerContext } from './index.ts';
-import { CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, TEST_CATALOG, TEST_RUNNER_REPORT, countRows, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
+import postgres from 'postgres';
+import { SUCCESSOR_RETRY_LIMIT } from '@selarikru/domain';
+import { assessHandover, CLOUD_RUNNER_FRESH_SECONDS, createScheduler, decideHandover, recordCheckpoint, requestHandover, reviewHandovers, successorCheckpoint, type Lease, type Scheduler, type SchedulerContext } from './index.ts';
+import { CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, TEST_DATABASE_URL, TEST_CATALOG, TEST_RUNNER_REPORT, countRows, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
 
 const BASE = 'a'.repeat(40);
 const key = { tenantId: TENANT, projectId: PROJECT, taskId: 'T1' };
@@ -50,7 +52,9 @@ async function localRunning(over: Parameters<typeof specFor>[1] = {}): Promise<L
 const checkpoint = (lease: Lease, u: ReturnType<typeof upload>) => recordCheckpoint(ctx, lease, (task) => validateCheckpoint(u, task));
 
 const events = async () => (await t.db.execute(sql`SELECT sequence, type, attempt_id, payload FROM events ORDER BY sequence`)).map((r) => ({ seq: Number(r['sequence']), type: String(r['type']), attemptId: r['attempt_id'] as string | null, payload: r['payload'] as Record<string, unknown> }));
-const handoverRow = async () => (await t.db.execute(sql`SELECT * FROM checkpoints`))[0]!;
+const handoverRow = async () => (await t.db.execute(sql`SELECT * FROM checkpoints ORDER BY requested_at DESC, checkpoint_id DESC`))[0]!;
+/** The owner's release of a reviewed checkpoint: only this lets a successor claim. */
+const release = async () => decideHandover(ctx, key, String((await handoverRow())['checkpoint_id']), 'release', 'owner');
 
 describe('checkpoint continuation', () => {
   it('assesses eligibility from placement, data, budget and an enrolled cloud runner', async () => {
@@ -114,10 +118,16 @@ describe('checkpoint continuation', () => {
     expect((await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).ok).toBe(false);
     const ack = await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
     expect(ack).toMatchObject({ ok: true, value: { taskStatus: 'ready' } });
-    expect((await handoverRow())['state']).toBe('fenced');
+    // The prior attempt is fenced, and its checked checkpoint waits for the owner's review: no runner may claim until it is released.
+    expect((await handoverRow())['state']).toBe('awaiting_review');
+    expect((await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).ok).toBe(false);
+    expect(await release()).toMatchObject({ ok: true, value: { state: 'fenced' } });
+    expect((await handoverRow())['released_by']).toBe('owner');
 
-    // A local runner never takes a task handed to cloud.
+    // A local runner never takes a task handed to cloud, and says why on the task.
     expect((await s.tryClaim(runner('local1'), CAPS)).ok).toBe(false);
+    expect((await statusOf(t.db, 'T1')).status).toBe('ready');
+    expect((await t.db.execute(sql`SELECT placement_block FROM task_status`))[0]!['placement_block']).toBe('handover_held_for_cloud');
     const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
     if (!next.ok) throw new Error(`no successor: ${next.reason} ${JSON.stringify(next.skipped)}`);
     expect(next.lease).toMatchObject({ location: 'cloud', revision: prior.revision, fence: prior.fence + 1, handover: { mode: 'resume', priorAttemptId: prior.attemptId, baseSha: BASE, patchSha256: row['patch_sha256'] } });
@@ -136,9 +146,13 @@ describe('checkpoint continuation', () => {
     const content = await successorCheckpoint(ctx, next.lease);
     expect(content).toMatchObject({ ok: true, value: { baseSha: BASE, files: [{ path: 'server/app.ts' }] } });
 
-    // The successor's worker started: the handover reads Running.
+    // The successor's worker started: the handover reads Running, and the stored copy of the checkpoint is dropped, with why.
     await s.heartbeat(next.lease, undefined, { setupComplete: true });
-    expect((await handoverRow())['state']).toBe('running');
+    expect(await handoverRow()).toMatchObject({ state: 'running', content: null, diffs: null, content_dropped_reason: 'successor_running' });
+    expect((await t.db.execute(sql`SELECT placement_block FROM task_status`))[0]!['placement_block']).toBeNull();
+    // The successor ends: the handover closes and holds nothing.
+    await s.publishResult(next.lease, { outcome: 'completed', headSha: 'e'.repeat(40) });
+    expect(await handoverRow()).toMatchObject({ state: 'closed', closed_reason: 'successor_completed' });
   });
 
   it('refuses and records a late publish from the fenced attempt, and opens no approval for it', async () => {
@@ -146,7 +160,11 @@ describe('checkpoint continuation', () => {
     const prior = await localRunning();
     await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
     await checkpoint(prior, upload([file('server/app.ts', 'x\n')]));
-    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    const ack = { outcome: 'failed' as const, reason: 'handover' };
+    const first = await s.publishResult(prior, ack);
+    // A replay of the prior attempt's own acknowledgement is that acknowledgement again, not a late publish.
+    expect(await s.publishResult(prior, ack)).toEqual(first);
+    await release();
     const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
     expect(next.ok).toBe(true);
     // The prior attempt keeps trying to publish after the handover.
@@ -203,6 +221,7 @@ describe('checkpoint continuation', () => {
     await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
     await checkpoint(prior, upload([file('server/app.ts', 'good\n')]));
     await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    await release();
     const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
     if (!next.ok) throw new Error(next.reason);
     await t.db.execute(sql`UPDATE checkpoints SET content = jsonb_build_object('server/app.ts', ${Buffer.from('evil\n').toString('base64')}::text)`);
@@ -218,5 +237,203 @@ describe('checkpoint continuation', () => {
     expect(await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS })).toMatchObject({ ok: false, error: { reason: 'handover_open' } });
     expect((await assessHandover(ctx, key, CAPS)).resume.reasons).toContain('handover_open');
     void RUN;
+  });
+
+  it('a fenced handover that can no longer run in cloud is offered back to the owner, and keeping it local releases the hold (case B)', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    await release();
+    // The only cloud runner is revoked: nothing can take the task, so the sweep says so once the grace has passed.
+    await t.db.execute(sql`UPDATE runners SET revoked_at = now() WHERE location = 'cloud'`);
+    expect(await reviewHandovers(ctx, CAPS, clock.now())).toEqual([]);
+    clock.advance(CLOUD_RUNNER_FRESH_SECONDS + 1);
+    expect(await reviewHandovers(ctx, CAPS, clock.now())).toEqual([String((await handoverRow())['checkpoint_id'])]);
+    expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'no_cloud_runner' });
+    expect((await events()).filter((e) => e.type === 'checkpoint.refused').at(-1)!.payload).toMatchObject({ reason: 'no_cloud_runner' });
+    // The owner keeps it local: the hold is released, the checkpoint discarded with why, and a local runner takes it from the persisted base input.
+    expect(await decideHandover(ctx, key, String((await handoverRow())['checkpoint_id']), 'decline', 'owner')).toMatchObject({ ok: true, value: { state: 'declined' } });
+    expect(await handoverRow()).toMatchObject({ content: null, content_dropped_reason: 'declined' });
+    const local = await s.tryClaim(runner('local1'), CAPS);
+    expect(local).toMatchObject({ ok: true, lease: { location: 'local' } });
+    expect(local.ok && local.lease.handover).toBeUndefined();
+  });
+
+  it('the owner may keep it local while it is fenced or waiting for review', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    expect((await handoverRow())['state']).toBe('awaiting_review');
+    expect(await decideHandover(ctx, key, String((await handoverRow())['checkpoint_id']), 'decline', 'owner')).toMatchObject({ ok: true, value: { state: 'declined' } });
+    expect(await s.tryClaim(runner('local1'), CAPS)).toMatchObject({ ok: true, lease: { location: 'local' } });
+  });
+
+  it('a successor lost during setup is offered again to a cloud runner at a new fence, never to a local one, and after the retries the owner decides', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    await release();
+    let fence = prior.fence;
+    for (let i = 0; i <= SUCCESSOR_RETRY_LIMIT; i++) {
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(`no successor ${i}: ${next.reason} ${JSON.stringify(next.skipped)}`);
+      expect(next.lease.fence).toBe(fence + 1);
+      expect(next.lease.handover).toMatchObject({ mode: 'resume' });
+      fence = next.lease.fence;
+      clock.advance(120);
+      await s.expireLeases(clock.now());
+      await t.db.execute(sql`UPDATE runners SET last_seen_at = ${clock.now().toISOString()}::timestamptz, last_polled_at = ${clock.now().toISOString()}::timestamptz`);
+      // Never a local claim from the base without the owner deciding.
+      clock.advance(60);
+      expect((await s.tryClaim(runner('local1'), CAPS)).ok).toBe(false);
+      if (i < SUCCESSOR_RETRY_LIMIT) expect(await handoverRow()).toMatchObject({ state: 'fenced', successor_retries: i + 1 });
+    }
+    expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'successor_failed' });
+    expect((await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).ok).toBe(false);
+  });
+
+  it('a successor lost after its worker started cannot be resumed again: its copy was dropped, so the owner is asked', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    await release();
+    const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+    if (!next.ok) throw new Error(next.reason);
+    await s.heartbeat(next.lease, undefined, { setupComplete: true });
+    clock.advance(120);
+    await s.expireLeases(clock.now());
+    expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'successor_lost' });
+  });
+
+  it('a reclassification to restricted after the request refuses the checkpoint and stores nothing', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await t.db.execute(sql`UPDATE projects SET classification = 'restricted'`);
+    expect(await checkpoint(prior, upload([file('server/a.ts', 'x')]))).toMatchObject({ ok: false, error: { reason: 'restricted_work' } });
+    expect(await handoverRow()).toMatchObject({ content: null, files: null, patch_sha256: null, refusal: 'restricted_work' });
+  });
+
+  it('a stale row on an earlier revision never blocks a new handover, and an answer to it is refused', async () => {
+    await cloudRunnerEnrolled();
+    const prior = await localRunning();
+    await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+    await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+    const stale = String((await handoverRow())['checkpoint_id']);
+    // A revision move that left the row open (a path that predates the close on replan).
+    await seedTask(t.db, specFor('T1', { revision: 2, baseSha: BASE, allowedPaths: ['server'] })).catch(() => undefined);
+    await t.db.execute(sql`UPDATE task_status SET current_revision = 2, status = 'ready'`);
+    expect(await decideHandover(ctx, key, stale, 'restart', 'owner')).toMatchObject({ ok: false, error: { status: 409 } });
+    const again = await s.tryClaim(runner('local1'), CAPS);
+    if (!again.ok) throw new Error(`${again.reason} ${JSON.stringify(again.skipped)}`);
+    expect(await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS })).toMatchObject({ ok: true });
+    expect((await t.db.execute(sql`SELECT state, closed_reason FROM checkpoints WHERE checkpoint_id = ${stale}`))[0]).toMatchObject({ state: 'closed', closed_reason: 'stale_revision' });
+  });
+
+  it('reads eligibility without locking the run row', async () => {
+    await cloudRunnerEnrolled();
+    await localRunning();
+    const other = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
+    try {
+      await other.begin(async (q) => {
+        await q.unsafe(`SET LOCAL search_path TO ${t.schema}`);
+        await q.unsafe(`SET LOCAL lock_timeout = '5s'`);
+        await q.unsafe(`SELECT 1 FROM runs FOR UPDATE`);
+        // With the run row held elsewhere, a read that took it would wait for this transaction; this one answers first.
+        const answered = await Promise.race([assessHandover(ctx, key, CAPS).then(() => 'answered'), new Promise((r) => setTimeout(() => r('waited'), 2_000))]);
+        expect(answered).toBe('answered');
+      });
+    } finally {
+      await other.end();
+    }
+  });
+
+  describe('races, with the task row held on a connection of its own', () => {
+    /**
+     * Holds the task's status row on its own connection (with a lock timeout), starts `racers`, waits (bounded) until `n` of them are queued behind it, then releases it by
+     * ending its transaction, always, and returns what the racers did.
+     */
+    async function heldWhile<T>(n: number, racers: () => Promise<T>[]): Promise<PromiseSettledResult<T>[]> {
+      // The pool opens connections as it needs them; it is warmed first, so each racer has one waiting rather than queueing behind another in this process.
+      await Promise.all([0, 1, 2, 3].map(() => withTx(t.db, (tx) => tx.execute(sql`SELECT pg_sleep(0.05)`))));
+      const other = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
+      let started: Promise<T>[] = [];
+      try {
+        await other.begin(async (q) => {
+          await q.unsafe(`SET LOCAL search_path TO ${t.schema}`);
+          await q.unsafe(`SET LOCAL lock_timeout = '10s'`);
+          await q.unsafe(`SELECT 1 FROM task_status WHERE task_id = 'T1' FOR UPDATE`);
+          const [me] = await q.unsafe(`SELECT pg_backend_pid() AS pid`);
+          started = racers();
+          for (let i = 0; i < 500; i++) {
+            // Every backend waiting on this one, directly or behind another waiter for the same row.
+            const [row] = await q.unsafe(`WITH RECURSIVE w(pid) AS (SELECT pid FROM pg_stat_activity WHERE ${Number(me!['pid'])} = ANY(pg_blocking_pids(pid)) UNION SELECT a.pid FROM pg_stat_activity a JOIN w ON w.pid = ANY(pg_blocking_pids(a.pid))) SELECT count(*)::int AS n FROM w`);
+            if (Number(row!['n']) >= n) return;
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          throw new Error('the racers never queued behind the held row');
+        });
+      } finally {
+        await other.end();
+        // Released either way, and the racers are waited for either way, so none outlives the test.
+        await Promise.allSettled(started);
+      }
+      return Promise.allSettled(started);
+    }
+
+    it('the fence and a late publish: one is the acknowledgement, the other is refused and counted, and the fence happens once', async () => {
+      await cloudRunnerEnrolled();
+      const prior = await localRunning();
+      await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+      await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+      const out = await heldWhile(2, () => [s.publishResult(prior, { outcome: 'failed', reason: 'handover' }), s.publishResult(prior, { outcome: 'completed', headSha: 'b'.repeat(40) })]);
+      const values = out.map((o) => (o.status === 'fulfilled' ? o.value : null));
+      expect(values.filter((v) => v?.ok)).toHaveLength(1);
+      expect(values.filter((v) => v && !v.ok && v.error.reason === 'stale_fence')).toHaveLength(1);
+      expect(await handoverRow()).toMatchObject({ state: 'awaiting_review', late_publishes: 1 });
+      expect((await events()).filter((e) => e.type === 'attempt.fenced')).toHaveLength(1);
+    });
+
+    it('a successor claim and the prior attempt\'s lease expiry: no successor is granted before the fence', async () => {
+      await cloudRunnerEnrolled();
+      const prior = await localRunning();
+      await requestHandover(ctx, key, { mode: 'restart', requestedBy: 'owner', caps: CAPS });
+      clock.advance(61);
+      // The expiry queues behind the held row; the claim, which cannot see a running task as claimable, answers at once with nothing.
+      const out = await heldWhile(1, () => [s.expireLeases(clock.now()) as Promise<unknown>, s.tryClaim(runner('cloud1', 'cloud'), CAPS) as Promise<unknown>]);
+      expect(out[1]).toMatchObject({ status: 'fulfilled', value: { ok: false } });
+      expect(out.every((o) => o.status === 'fulfilled')).toBe(true);
+      // Whichever went first, the order in the log holds: a successor starts only after the fence.
+      if (!(await countRows(t.db, 'attempts', `attempt_id <> '${prior.attemptId}'`))) expect((await s.tryClaim(runner('cloud1', 'cloud'), CAPS)).ok).toBe(true);
+      const log = await events();
+      const fenced = log.find((e) => e.type === 'attempt.fenced')!;
+      const started = log.filter((e) => e.type === 'attempt.started' && e.attemptId !== prior.attemptId);
+      expect(started).toHaveLength(1);
+      expect(fenced.seq).toBeLessThan(started[0]!.seq);
+    });
+
+    it('a successor that cannot apply its checkpoint, and the owner keeping it local at the same moment: the end state is one of the two, never both', async () => {
+      await cloudRunnerEnrolled();
+      const prior = await localRunning();
+      await requestHandover(ctx, key, { mode: 'resume', requestedBy: 'owner', caps: CAPS });
+      await checkpoint(prior, upload([file('server/a.ts', 'x')]));
+      await s.publishResult(prior, { outcome: 'failed', reason: 'handover' });
+      await release();
+      const next = await s.tryClaim(runner('cloud1', 'cloud'), CAPS);
+      if (!next.ok) throw new Error(next.reason);
+      const id = String((await handoverRow())['checkpoint_id']);
+      const out = await heldWhile(2, () => [s.publishResult(next.lease, { outcome: 'infrastructure_failed', reason: 'checkpoint_apply_failed: conflict' }) as Promise<unknown>, decideHandover(ctx, key, id, 'decline', 'owner') as Promise<unknown>]);
+      expect(out.every((o) => o.status === 'fulfilled')).toBe(true);
+      expect(['restart_offered', 'declined']).toContain(String((await handoverRow())['state']));
+      expect(await countRows(t.db, 'checkpoints', `state IN ('stopping', 'awaiting_review', 'fenced', 'starting', 'running', 'restart_offered')`)).toBeLessThanOrEqual(1);
+    });
   });
 });

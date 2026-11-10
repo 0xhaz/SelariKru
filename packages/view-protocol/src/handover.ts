@@ -31,7 +31,12 @@ export const HandoverRecordViewSchema = z.object({
     sha256: z.string(),
     fileCount: z.number().int(),
     totalBytes: z.number().int(),
-    files: z.array(z.object({ path: z.string(), status: z.enum(['added', 'modified', 'deleted']), size: z.number().int().nullable(), sha256: z.string().nullable() })),
+    files: z.array(z.object({
+      path: z.string(), status: z.enum(['added', 'modified', 'deleted']), size: z.number().int().nullable(), sha256: z.string().nullable(),
+      /** Lines added and removed, from the checked review diff. Null: no line diff (binary, too large, or the content was dropped). */
+      added: z.number().int().nullable().default(null), removed: z.number().int().nullable().default(null), hasDiff: z.boolean().default(false), binary: z.boolean().default(false),
+    })),
+    stat: z.object({ added: z.number().int(), removed: z.number().int() }).nullable().default(null),
   }).nullable(),
   exclusions: z.array(z.object({ path: z.string(), reason: z.enum(EXCLUSION_REASONS) })),
   refusal: z.object({ code: z.enum(CHECKPOINT_REFUSALS), text: z.string() }).nullable(),
@@ -40,6 +45,13 @@ export const HandoverRecordViewSchema = z.object({
   requestedAt: z.string(),
   fencedAt: z.string().nullable(),
   updatedAt: z.string(),
+  releasedAt: z.string().nullable().default(null),
+  releasedBy: z.string().nullable().default(null),
+  successorRetries: z.number().int().min(0).default(0),
+  /** The stored checkpoint content was dropped: when and why. */
+  contentDropped: z.object({ at: z.string(), reason: z.string(), text: z.string() }).nullable().default(null),
+  /** Why the handover was closed or declined. */
+  closed: z.object({ reason: z.string(), text: z.string() }).nullable().default(null),
 });
 export type HandoverRecordView = z.infer<typeof HandoverRecordViewSchema>;
 
@@ -71,6 +83,13 @@ export type HandoversView = z.infer<typeof HandoversViewSchema>;
 
 export const HandoverActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('request'), taskId: z.string(), mode: z.enum(['resume', 'restart']), idempotencyKey: z.string().min(1) }),
-  z.object({ kind: z.literal('decide'), taskId: z.string(), checkpointId: z.string(), choice: z.enum(['restart', 'decline']), idempotencyKey: z.string().min(1) }),
+  z.object({ kind: z.literal('decide'), taskId: z.string(), checkpointId: z.string(), choice: z.enum(['release', 'restart', 'decline']), idempotencyKey: z.string().min(1) }),
 ]);
+
+/** One file's review diff, as the owner reads it. Owner only, every line through the secret detector; `redacted` says whether any line was changed by it. */
+export const HandoverDiffViewSchema = z.object({
+  checkpointId: z.string(), path: z.string(), status: z.string(), size: z.number().int().nullable(), sha256: z.string().nullable(), binary: z.boolean(),
+  added: z.number().int().nullable(), removed: z.number().int().nullable(), lines: z.array(z.tuple([z.enum([' ', '+', '-']), z.string()])).nullable(), redacted: z.boolean(),
+});
+export type HandoverDiffView = z.infer<typeof HandoverDiffViewSchema>;
 export type HandoverAction = z.infer<typeof HandoverActionSchema>;

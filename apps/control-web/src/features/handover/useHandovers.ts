@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { HandoverAction, HandoversView } from '@selarikru/view-protocol';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { HandoverAction, HandoverDiffView, HandoversView } from '@selarikru/view-protocol';
 import type { HandoverPort } from '../../shell/projection-store.ts';
 import { TRANSITIONAL } from './model.ts';
 
@@ -8,6 +8,8 @@ export interface HandoverState {
   readonly error: string | null;
   readonly busy: boolean;
   act(action: HandoverAction): Promise<boolean>;
+  /** One file's review diff. Null when the source has none. */
+  readonly diff: ((taskId: string, checkpointId: string, path: string) => Promise<HandoverDiffView>) | null;
 }
 
 /** While a handover moves on its own (stopping, fenced, starting), it is read again this often; otherwise only when the projection moved or after an action. */
@@ -54,5 +56,6 @@ export function useHandovers(port: HandoverPort | null, refreshKey: string): Han
       if (alive.current) setBusy(false);
     }
   }, [port]);
-  return { view, error, busy, act };
+  const diff = useMemo(() => (port?.diff ? (taskId: string, checkpointId: string, path: string) => port.diff!(taskId, checkpointId, path) : null), [port]);
+  return { view, error, busy, act, diff };
 }
