@@ -12,6 +12,7 @@ export const EVENT_TYPES = [
   'candidate.assembled', 'candidate.failed',
   'attempt.human_intervened', 'terminal.control_ended',
   'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
+  'product.recorded', 'product.proposed',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -89,6 +90,10 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'run.cancelled': [S, Y],
   /** A placement block cleared because the owner gave a grant back. The scheduler records it; who asked is in the payload. */
   'placement.cleared': [S],
+  /** The owner wrote a product-learning record (a brief saved or confirmed, an outcome plan, a release note, an outcome review). Human only. Ids, kinds and revisions only: no record text. */
+  'product.recorded': [H],
+  /** A worker proposed a problem brief. Worker only, and only ever a proposal: confirming one is `product.recorded` by a person. Ids and revisions only, never the worker's words. */
+  'product.proposed': [W],
 };
 
 export interface ActorNotPermitted {

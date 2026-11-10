@@ -58,6 +58,11 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/skills/revoke`],
   ['POST', `/v1/projects/${PROJECT}/skills/bindings`],
   ['GET', `/v1/projects/${PROJECT}/skills/attempts/a1`],
+  ['GET', `/v1/projects/${PROJECT}/product`],
+  ['POST', `/v1/projects/${PROJECT}/product/brief`],
+  ['POST', `/v1/projects/${PROJECT}/product/outcome-plans`],
+  ['POST', `/v1/projects/${PROJECT}/product/releases`],
+  ['POST', `/v1/projects/${PROJECT}/product/outcome-reviews`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],
@@ -68,6 +73,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/brain/manifest'],
   ['POST', '/v1/runners/stack/detection'],
   ['POST', '/v1/runners/skills/confirm'],
+  ['POST', '/v1/runners/product/brief-proposal'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 

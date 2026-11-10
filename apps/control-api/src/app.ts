@@ -19,6 +19,7 @@ import { registerSettingsRoutes } from './settings.ts';
 import { registerBrainRoutes } from './brain.ts';
 import { registerStackRoutes } from './stack.ts';
 import { registerSkillRoutes } from './skills.ts';
+import { registerProductRoutes } from './product.ts';
 import { registerEventStream } from './sse.ts';
 import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
@@ -241,6 +242,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerBrainRoutes(app, ctx);
   registerStackRoutes(app, ctx);
   registerSkillRoutes(app, ctx);
+  registerProductRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
   registerControlRoutes(app, ctx);

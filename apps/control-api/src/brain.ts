@@ -1,5 +1,5 @@
 import {
-  allowedUseFor, BRAIN_GENERATOR, BlueprintContentSchema, stackBrainSources, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
+  allowedUseFor, BRAIN_GENERATOR, BlueprintContentSchema, productBrainSources, stackBrainSources, BrainCompilationSchema, BrainSourceRevisionSchema, buildContextBundle, canonicalJson, cleanSourceText, compileBrain, strongerLabel, TaskSpecSchema,
   type BrainBundle, type BrainClaim, type BrainClassification, type BrainCompilation, type BrainDestination, type BrainRevocation, type BrainSection, type BrainSourceRevision, type TaskSpec,
 } from '@selarikru/domain';
 import { schema, withTx, type Db, type Executor, type Tx } from '@selarikru/persistence';
@@ -10,6 +10,7 @@ import type { AppContext } from './app.ts';
 import { sha256Hex } from './auth.ts';
 import { AppError, invalidRequest } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
+import { loadProductRecords } from './product.ts';
 import { loadStack } from './stack.ts';
 import { loadSpecRow, newId, requireProject } from './store.ts';
 
@@ -207,6 +208,14 @@ export async function recordSources(db: Executor, tenantId: string, projectId: s
       sections: st.sections.map((x) => sec(x.anchor, x.heading, x.text, x.key)),
     }));
   }
+  // Product-learning records: a confirmed brief (a proposal states nothing), outcome plans, release notes and outcome reviews. Each keeps the label it took from what it cites.
+  for (const pr of productBrainSources(await loadProductRecords(db, tenantId, projectId))) {
+    out.push(draft({
+      sourceId: pr.sourceId, kind: 'product', title: text(pr.title, 200) || 'Product record', standing: pr.standing, classification: label(projectLabel, pr.classification), taskId: null,
+      provenance: { origin: 'product', ref: pr.ref.slice(0, 200), recordedBy: pr.recordedBy.slice(0, 200) || SYSTEM },
+      sections: pr.sections.map((x) => sec(x.anchor, x.heading, x.text, x.key)),
+    }));
+  }
   return out;
 }
 
@@ -246,8 +255,8 @@ async function lockHead(tx: Tx, tenantId: string, projectId: string): Promise<{ 
 }
 
 /**
- * A fingerprint of every record `recordSources` reads: the latest relevant event, decisions, resolved approvals, task revisions, runs, the accepted blueprint and the
- * project label. One small read, no lock. When it has not moved, a sync reads no records.
+ * A fingerprint of every record `recordSources` reads: the latest relevant event, decisions, resolved approvals, task revisions, runs, the accepted blueprint, the
+ * stack, the product records and the project label. One small read, no lock. When it has not moved, a sync reads no records.
  */
 export async function recordsMark(db: Executor, tenantId: string, projectId: string): Promise<string> {
   const [row] = await db.execute(sql`SELECT concat_ws('|', ${`${BRAIN_GENERATOR.version}:${RECORDS_READER_VERSION}`}::text,
@@ -259,6 +268,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
     (SELECT count(*) || ':' || coalesce(max(plan_revision), 0) FROM runs WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT coalesce(max(accepted_blueprint_version), 0) FROM project_onboardings WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT coalesce(max(revision), 0) FROM project_stacks WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
+    (SELECT coalesce(max(seq), 0) FROM product_records WHERE tenant_id = ${tenantId} AND project_id = ${projectId}),
     (SELECT classification FROM projects WHERE tenant_id = ${tenantId} AND project_id = ${projectId})) AS mark`);
   return String(row?.['mark'] ?? '');
 }
@@ -267,7 +277,7 @@ export async function recordsMark(db: Executor, tenantId: string, projectId: str
  * The version of `recordSources`, the code that reads records into sources. It is part of the records fingerprint with the generator's version, so a deploy that
  * changes either reads every project's records again. Raise it whenever that code changes what it produces.
  */
-export const RECORDS_READER_VERSION = '4';
+export const RECORDS_READER_VERSION = '5';
 
 /** A source that could not be stored: its id and a code, never its text. */
 export type SkipReport = (skip: { readonly sourceId: string; readonly code: 'brain_source_invalid' }) => void;
@@ -465,7 +475,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
   const sync = (projectId: string, change?: Parameters<typeof syncBrain>[4]) => syncBrain(db, config.tenantId, projectId, now(), change, onSkip);
 
   // Compile on change: after an owner write that changes what sources are read from (a plan accepted, an approval resolved, reduced scope accepted, a reclassification
-  // decided, a project activated), just before the answer is sent. It runs outside that write's transaction and takes only the brain lock. A failure is logged; the next
+  // decided, a stack saved, a product record written, a project activated), just before the answer is sent. It runs outside that write's transaction and takes only the brain lock. A failure is logged; the next
   // periodic pass or owner read compiles it.
   const project = async (url: string, id: string): Promise<string | null> => {
     if (url.startsWith('/v1/projects/') || url.startsWith('/v1/onboarding/')) return id;
@@ -473,7 +483,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     if (url.startsWith('/v1/approvals/')) return (await db.select({ p: schema.approvals.projectId }).from(schema.approvals).where(and(eq(schema.approvals.tenantId, config.tenantId), eq(schema.approvals.approvalId, id))))[0]?.p ?? null;
     return null;
   };
-  const CHANGES = /^\/v1\/(?:runs\/[^/]+\/(?:plan-revisions|accept-reduced-scope)|approvals\/[^/]+\/resolve|projects\/[^/]+\/(?:draft-reclassifications|stack)|onboarding\/[^/]+\/activate)$/;
+  const CHANGES = /^\/v1\/(?:runs\/[^/]+\/(?:plan-revisions|accept-reduced-scope)|approvals\/[^/]+\/resolve|projects\/[^/]+\/(?:draft-reclassifications|stack|product\/(?:brief|outcome-plans|releases|outcome-reviews))|onboarding\/[^/]+\/activate)$/;
   // Before the answer is sent: the write has committed by then, and a caller that reads the Brain next sees the compile. Its failure never changes the answer.
   app.addHook('onSend', async (req, reply, payload) => {
     if (req.method !== 'POST' || reply.statusCode >= 300 || req.principal?.kind !== 'owner' || !CHANGES.test(req.routeOptions.url ?? '')) return payload;

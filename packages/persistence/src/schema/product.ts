@@ -1,0 +1,51 @@
+import { sql } from 'drizzle-orm';
+import { check, foreignKey, integer, jsonb, pgTable, primaryKey, text, uniqueIndex } from 'drizzle-orm/pg-core';
+import { scope, tstz } from './common.ts';
+import { projects } from './projects.ts';
+
+/**
+ * Product-learning records (docs/product-engineer-alignment.md §4): a problem brief, outcome plans, manual release notes and manual outcome reviews. Each row is one immutable
+ * revision (a trigger refuses update and delete); an edit is a new revision. The head row is the project's product lock and its log position.
+ */
+export const productHeads = pgTable(
+  'product_heads',
+  {
+    ...scope(),
+    /** The last position written to the product log. */
+    lastSeq: integer('last_seq').notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+  ],
+);
+
+export const productRecords = pgTable(
+  'product_records',
+  {
+    ...scope(),
+    recordId: text('record_id').notNull(),
+    revision: integer('revision').notNull(),
+    kind: text('kind').notNull(),
+    status: text('status').notNull(),
+    classification: text('classification').notNull(),
+    content: jsonb('content').$type<Record<string, unknown>>().notNull(),
+    proposedByKind: text('proposed_by_kind').notNull(),
+    proposedBy: text('proposed_by').notNull(),
+    /** Set only on a revision a person confirmed. */
+    confirmedBy: text('confirmed_by'),
+    seq: integer('seq').notNull(),
+    recordedAt: tstz('recorded_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.recordId, t.revision] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+    uniqueIndex('product_records_seq').on(t.tenantId, t.projectId, t.seq),
+    check('product_records_kind', sql`${t.kind} IN ('problem_brief', 'outcome_plan', 'release_note', 'outcome_review')`),
+    check('product_records_status', sql`${t.status} IN ('proposed', 'confirmed', 'recorded')`),
+    check('product_records_classification', sql`${t.classification} IN ('public', 'internal', 'restricted', 'secret')`),
+    check('product_records_proposer', sql`${t.proposedByKind} IN ('human', 'worker')`),
+    // Only a person confirms: a confirmed revision names who did, and a worker's revision is only ever a proposal.
+    check('product_records_confirmed', sql`(${t.status} = 'confirmed') = (${t.confirmedBy} IS NOT NULL) AND (${t.proposedByKind} = 'human' OR ${t.status} = 'proposed')`),
+  ],
+);

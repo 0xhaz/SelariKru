@@ -66,6 +66,9 @@ export const ERROR_CODES = [
    * that is not reviewed or is revoked; an intake path that cannot be read as a pack, or whose content is already staged elsewhere. */
   'skill_not_found', 'skill_version_not_found', 'skill_not_reviewable', 'skill_findings_unacknowledged', 'skill_already_reviewed', 'skill_already_revoked',
   'skill_not_reviewed', 'skill_revoked', 'skill_intake_failed', 'skill_already_staged', 'skill_binding_unscoped', 'skill_confirmation_mismatch',
+  /** Product records: no such record; a citation that does not resolve to a stored Brain revision and anchor; a requirement this project does not have; a release note for a run
+   * no person merged; product history needs a run to record its events against; a proposal from work whose data stays on the device. */
+  'product_record_not_found', 'product_citation_invalid', 'product_requirement_unknown', 'product_not_merged', 'product_needs_run', 'product_proposal_restricted',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

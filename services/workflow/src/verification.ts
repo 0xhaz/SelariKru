@@ -62,6 +62,13 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   commits; a refused pack is recorded through the claim's own `placement.blocked` on the status row it already holds, and the attempt's `skill_execution_records` row is
  *   inserted with its attempt row. An intake takes no lock (it inserts a version nothing can use until it is reviewed). Delivering pack content after a claim commits
  *   reads only.
+ * - product-learning records (apps/control-api/src/product.ts): an owner's brief, outcome plan, release note or outcome review, and a worker's proposed brief, each take
+ *   the project's `product_heads` row first, with no other lock held, insert one immutable `product_records` revision, then append to the event sequence last
+ *   (`product.recorded` by the owner, `product.proposed` by the worker). The plan, candidates, verification records, pull requests and Brain revisions they consult are
+ *   read without a lock, and nothing here writes a task, a run, a status row or a plan proposal: a review's follow-up is stored with the review as a proposal. An owner's
+ *   write is followed, after its transaction committed, by a Brain compile through the same `onSend` hook; the Brain reads `product_records` without a lock, and the
+ *   product view's read compiles in its own transaction before it reads. So no product path takes the scheduler lock, a run row, a status row or the brain lock, and no
+ *   path above takes `product_heads`.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

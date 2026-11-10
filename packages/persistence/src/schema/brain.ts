@@ -49,7 +49,7 @@ export const brainSources = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.sourceId, t.revision] }),
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     uniqueIndex('brain_sources_seq').on(t.tenantId, t.projectId, t.seq),
-    check('brain_sources_kind', sql`${t.kind} IN ('brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note', 'stack')`),
+    check('brain_sources_kind', sql`${t.kind} IN ('brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note', 'stack', 'product')`),
     check('brain_sources_standing', sql`${t.standing} IN ('accepted', 'proposed')`),
     check('brain_sources_classification', sql`${t.classification} IN ('public', 'internal', 'restricted', 'secret')`),
   ],

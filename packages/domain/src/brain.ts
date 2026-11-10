@@ -18,7 +18,8 @@ import { sanitizeTerminalText } from './terminal.ts';
 
 export const BRAIN_GENERATOR = { id: 'selarikru.brain.structured', version: '1' } as const;
 
-export const BRAIN_SOURCE_KINDS = ['brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note', 'stack'] as const;
+/** `product`: an owner's product-learning record (a confirmed problem brief, an outcome plan, a release note, an outcome review). */
+export const BRAIN_SOURCE_KINDS = ['brief', 'criteria', 'plan', 'decision', 'verification', 'repo_manifest', 'note', 'stack', 'product'] as const;
 export const BrainSourceKindSchema = z.enum(BRAIN_SOURCE_KINDS);
 export type BrainSourceKind = z.infer<typeof BrainSourceKindSchema>;
 
@@ -184,7 +185,7 @@ const refKey = (r: { sourceId: string; revision: number }): string => `${r.sourc
 const citationOrder = (a: BrainCitation, b: BrainCitation): number => byString(a.sourceId, b.sourceId) || a.revision - b.revision || byString(a.anchor, b.anchor);
 
 const PAGE_OF_KIND: Readonly<Record<BrainSourceKind, BrainPageId>> = {
-  brief: 'overview', note: 'overview', criteria: 'architecture', plan: 'architecture', repo_manifest: 'architecture', stack: 'architecture', decision: 'decisions', verification: 'decisions',
+  brief: 'overview', note: 'overview', product: 'overview', criteria: 'architecture', plan: 'architecture', repo_manifest: 'architecture', stack: 'architecture', decision: 'decisions', verification: 'decisions',
 };
 
 export interface CompileInput {

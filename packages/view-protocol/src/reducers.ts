@@ -400,14 +400,15 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.
-      const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled' = e.type;
+      const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled' | 'product.recorded' | 'product.proposed' = e.type;
       void _run;
       return null;
     }
   }
 }
 
-const RUN_LEVEL_TYPES: readonly EventType[] = ['run.created', 'plan.accepted', 'run.reverted', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
+/** Product records are read on demand (the Product view), not from the snapshot: their events only advance the cursor. */
+const RUN_LEVEL_TYPES: readonly EventType[] = ['run.created', 'plan.accepted', 'run.reverted', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'product.recorded', 'product.proposed'];
 
 function project(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected {
   // Run-level events, and events addressed to the run id (integration), are handled before any task lookup.

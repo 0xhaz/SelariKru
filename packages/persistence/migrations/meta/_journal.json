@@ -183,6 +183,13 @@
       "when": 1794315070699,
       "tag": "0025_skills_delivery_history",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794318043747,
+      "tag": "0026_product",
+      "breakpoints": true
     }
   ]
 }
