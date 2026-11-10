@@ -325,7 +325,12 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''} ${drawerBeside ? 'cursor-default' : ''}`}>
       {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} /> : null}
       <div ref={contentRef} className={`relative min-w-0 ${drawerBeside ? 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:bg-bg/60 after:content-[\'\']' : ''}`} data-testid="page-content" data-paused={drawerBeside ? 'true' : undefined}>
-      {drawerBeside ? <p data-testid="page-paused-hint" className="relative z-20 max-w-[24rem] px-4 pt-3 text-sm text-fg sm:px-6">The page is paused while a worker is open. Close the worker to use the page.</p> : null}
+      {/* On the scrim, out of the flow, so pausing moves nothing on the page; sticky under the header, so it stays in view however far the page is scrolled. */}
+      {drawerBeside ? (
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <p data-testid="page-paused-hint" className="sticky top-[calc(var(--header-h,6rem)+0.75rem)] mx-4 mt-3 max-w-[24rem] rounded-chip border border-line bg-panel px-3 py-2 text-sm text-fg shadow-sm sm:mx-6">The page is paused while a worker is open. Close the worker to use the page.</p>
+        </div>
+      ) : null}
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>

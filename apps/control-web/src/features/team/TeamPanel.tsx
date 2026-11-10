@@ -125,7 +125,7 @@ export interface FoldProps {
  */
 export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldProps) {
   const ready = status.kind === 'ready' ? status : null;
-  const needsYou = ready ? ready.panel.needsYou : 0;
+  const needsYou = ready ? ready.panel.needsYou : null;
   const workers = ready ? ready.panel.rows.length : null;
   const unknown = ready ? ready.panel.unknown : 0;
   const unknownBit = unknown > 0 && ready
@@ -138,11 +138,15 @@ export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldPro
     }
   };
   let count;
-  if (ready && needsYou === null) {
+  if (!ready) {
+    // No team yet, or none to be had: say which, never a zero. Loading or unavailable is not nobody.
+    const word = status.kind === 'loading' ? 'loading' : 'unavailable';
+    count = <span data-testid="team-needs-you" data-status={status.kind} className="text-muted"><span aria-hidden="true" className="sm:hidden">?</span><span className="sr-only sm:not-sr-only">{word}</span></span>;
+  } else if (needsYou === null) {
     count = <span data-testid="team-needs-you" data-unknown="" className="text-muted"><span aria-hidden="true">? </span><span className="sr-only sm:not-sr-only">needs you unknown</span><span className="sr-only">; {ready.panel.confirmedNeedsYou} when last confirmed{confirmedClock(ready)}</span></span>;
   } else if (needsYou !== null && needsYou > 0) {
     count = <span data-testid="team-needs-you" className="font-semibold text-warning"><span aria-hidden="true">▲ </span>{needsYou}<span className="sr-only sm:not-sr-only"> need{needsYou === 1 ? 's' : ''} you</span>{unknownBit}</span>;
-  } else if (ready && unknown > 0) {
+  } else if (unknown > 0) {
     // Zero confirmed is not nobody while a row is unknown: the glyph and number at phone width, the words from sm up.
     count = <span data-testid="team-needs-you" data-has-unknown="" className="text-muted"><span aria-hidden="true" className="sm:hidden">? {unknown}</span><span className="sr-only sm:not-sr-only">{unknownText(unknown, ready.panel.unknownLastNeedsYou)}</span></span>;
   } else {

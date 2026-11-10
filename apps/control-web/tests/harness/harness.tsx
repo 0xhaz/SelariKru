@@ -270,7 +270,7 @@ if (sc.onboardingApi) {
     email: 'owner@example.test',
     canUsePassword: o.signIn !== 'federated',
     signOut: () => { window.__calls.api.push({ kind: 'sign-out' }); },
-    reauthenticate: async (password: string) => { window.__calls.api.push({ kind: 'sign-in' }); return password === 'right' ? 'ok' as const : password === 'limit' ? 'too_many' as const : 'failed' as const; },
+    reauthenticate: async (password: string) => { window.__calls.api.push({ kind: 'sign-in' }); return password === 'right' ? 'ok' as const : password === 'limit' ? 'too_many' as const : password === 'offline' ? 'unreachable' as const : 'failed' as const; },
   };
   // The live root's project handling, without Firebase: the header follows an activation the same way.
   function OnboardingShell() {

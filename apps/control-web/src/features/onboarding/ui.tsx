@@ -2,7 +2,7 @@ import { Children, cloneElement, createContext, isValidElement, useContext, useI
 import { Chip, toneGlyph, TONE_TEXT, type Tone } from '@selarikru/ui';
 import type { ExecutionChoice, ReadinessStatus } from '@selarikru/domain';
 import { SIGN_IN_CODES, type InferenceChoice } from './api.ts';
-import type { ReauthOutcome } from './reauth.ts';
+import { REAUTH_MESSAGE, type ReauthOutcome } from './reauth.ts';
 
 export const usd = (n: number): string => `$${n.toLocaleString('en-US', { minimumFractionDigits: n % 1 === 0 ? 0 : 2, maximumFractionDigits: 2 })}`;
 export const inputClass = 'w-full rounded-chip border border-line-strong bg-bg px-3 py-2 text-fg placeholder:text-muted';
@@ -91,8 +91,7 @@ function SignInAgainForm({ signIn }: { signIn: SignInAgain }) {
         <input id={`${id}-password`} name="password" type="password" autoComplete="current-password" required className="w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-fg" />
       </span>
       <button type="submit" disabled={busy} className="rounded-chip bg-active px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-50">{busy ? 'Signing in' : 'Sign in'}</button>
-      {result === 'failed' ? <span role="status" className="block w-full text-sm text-danger">The sign-in did not work. Check the password and try again.</span> : null}
-      {result === 'too_many' ? <span role="status" className="block w-full text-sm text-danger">Too many sign-in attempts. Wait a few minutes, then try again.</span> : null}
+      {result !== null ? <span role="status" className="block w-full text-sm text-danger" data-testid="reauth-result">{REAUTH_MESSAGE[result]}</span> : null}
     </form>
   );
 }

@@ -235,11 +235,15 @@ test.describe('behaviour', () => {
     await page.getByLabel('Password for owner@example.test').fill('wrong');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByText('The sign-in did not work. Check the password')).toBeVisible();
+    // An unreachable sign-in service is not a wrong password.
+    await page.getByLabel('Password for owner@example.test').fill('offline');
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByTestId('reauth-result')).toHaveText('Could not reach the sign-in service; try again.');
     await page.getByLabel('Password for owner@example.test').fill('right');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByTestId('signed-in-again')).toContainText('nothing on this page was lost');
     await expect(page.getByRole('heading', { name: 'Confirm the first run' })).toBeVisible();
-    expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-in'))).toHaveLength(2);
+    expect(await page.evaluate(() => (window as unknown as { __calls: { api: { kind: string }[] } }).__calls.api.filter((c) => c.kind === 'sign-in'))).toHaveLength(3);
   });
 
   test('too many attempts is said as such, not as a wrong password', async ({ page }) => {

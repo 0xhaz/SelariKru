@@ -334,6 +334,22 @@ for (const [width, height] of [[1440, 900], [1280, 800]] as const) {
   });
 }
 
+test('the folded toggle never says nobody needs you while the team is unavailable', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto('/?demo&fixture=human-wait&fault=unavailable#/pipeline');
+  const toggle = page.getByTestId('team-panel-toggle');
+  await expect(toggle).toBeVisible();
+  const count = toggle.getByTestId('team-needs-you');
+  await expect(count).toHaveAttribute('data-status', 'unavailable');
+  await expect(toggle).not.toContainText('nobody needs you');
+  await expect(count.locator('[aria-hidden="true"]')).toHaveText('?');
+  await expect(toggle).toHaveAccessibleName(/^Team\s*unavailable$/);
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(count).toBeVisible();
+  await expect(count).toContainText('unavailable');
+  await expect(toggle).not.toContainText(/\b0\b/);
+});
+
 test('the page beside an open drawer is dimmed and says why it does not respond', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/?demo&fixture=human-wait#/overview');
@@ -353,6 +369,22 @@ test('the page beside an open drawer is dimmed and says why it does not respond'
   expect(cursor).toBe('default');
   await shot(page, 'drawer-paused-page-1440');
   await expect(page.getByTestId('page-paused-hint')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(content).not.toHaveAttribute('data-paused', 'true');
+
+  // The hint sits on the scrim: opening the drawer moves nothing on the page under it, even scrolled.
+  const main = page.locator('#main');
+  const before = (await main.boundingBox())!;
+  await panelRow(page, 'runner_local_1').click();
+  await expect(page.getByTestId('page-paused-hint')).toBeVisible();
+  expect((await main.boundingBox())!.y).toBe(before.y);
+  const hint = (await page.getByTestId('page-paused-hint').boundingBox())!;
+  const area = (await content.boundingBox())!;
+  expect(hint.x).toBeGreaterThanOrEqual(area.x);
+  expect(hint.y).toBeGreaterThanOrEqual(area.y);
+  await page.evaluate(() => window.scrollTo(0, 600));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect(page.getByTestId('page-paused-hint')).toBeInViewport();
   await page.keyboard.press('Escape');
   await expect(content).not.toHaveAttribute('data-paused', 'true');
   await expect(page.getByTestId('page-paused-hint')).toHaveCount(0);
