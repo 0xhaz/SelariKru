@@ -1,4 +1,5 @@
 import type { ChangeRequestView, ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
+import { verifiedState } from '../features/evidence/model.ts';
 import { currentRun } from '../features/settings/model.ts';
 import type { TeamModel, TeamRow } from '../features/team/model.ts';
 import { agentPalette, stateStyle, type RobotState } from '../theme/tokens.ts';
@@ -50,13 +51,17 @@ export interface OfficeWorld {
   readonly summary: string;
 }
 
+/** Only a recorded merge is a merge. `merged_sha_mismatch` merged a commit that is not the verified one, and a stale PR's merge commit is not this run's. */
+export const isRecordedMerge = (c: ChangeRequestView): boolean => c.status === 'merged';
+
 function prVerification(snapshot: ProjectViewSnapshot, c: ChangeRequestView): OfficeParcel['verification'] {
-  if (c.outOfDate || c.status === 'stale_candidate') return 'out_of_date';
+  if (c.outOfDate || c.status === 'stale_candidate' || c.status === 'merged_sha_mismatch') return 'out_of_date';
   const run = snapshot.runs[c.runId];
-  const candidate = run?.evidence?.candidate ?? null;
-  const criteria = run?.criteria ?? null;
-  const verified = candidate !== null && criteria !== null && candidate.sha === c.candidateSha && candidate.live && candidate.recordValid && criteria.total > 0 && criteria.verified === criteria.total;
-  return verified ? 'verified' : 'unverified';
+  if (!run) return 'unverified';
+  // Evidence's own rule (verified, or verified at reduced scope), and the pull request must hold the candidate that rule judged.
+  const candidate = run.evidence?.candidate ?? null;
+  const established = verifiedState(run, run.evidence).established;
+  return established && (candidate === null || candidate.sha === c.candidateSha) ? 'verified' : 'unverified';
 }
 
 const DONE = new Set<TaskView['status']>(['verified', 'merged']);
@@ -108,7 +113,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     });
 
   const parcels = snapshot.changeRequests.map((c): OfficeParcel => {
-    const merged = c.status === 'merged' || c.mergeCommitSha !== null;
+    const merged = isRecordedMerge(c);
     return { num: c.prNumber, authorId: null, verification: prVerification(snapshot, c), merged, closed: !merged && c.status === 'closed' };
   });
   const verifying = Object.values(snapshot.tasks).some((t) => t.status === 'verifying');

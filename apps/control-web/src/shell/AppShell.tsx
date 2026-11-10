@@ -233,7 +233,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     if (previousRoute.current === route) return;
     const from = previousRoute.current;
     previousRoute.current = route;
-    if (from === 'settings' && route !== 'settings') {
+    // Closing Settings back to the office gives focus back to its opener. A link from Settings to another screen is an ordinary route change: that screen's #main.
+    if (from === 'settings' && route === 'office') {
       // The top bar was inert under the modal; it is live again before focus goes back.
       if (chromeRef.current) chromeRef.current.inert = false;
       const opener = settingsOpener.current;

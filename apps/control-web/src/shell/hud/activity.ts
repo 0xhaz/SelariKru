@@ -1,5 +1,6 @@
 import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
 import type { Tone } from '@selarikru/ui';
+import { isRecordedMerge } from '../../office/model.ts';
 
 /**
  * The activity feed: the latest things the snapshot itself records, each with the time it carries. It is read from the current snapshot,
@@ -27,6 +28,12 @@ const STATUS: Readonly<Record<TaskView['status'], { word: string; glyph: string;
   superseded: { word: 'superseded', glyph: '–', tone: 'neutral' },
 };
 
+/** Pull request states that are not what they look like: only `merged` is a recorded merge. Same words as Evidence. */
+const PR_STATUS: Readonly<Record<string, string>> = {
+  merged_sha_mismatch: 'merged a commit that is not the verified one; no merge is recorded',
+  stale_candidate: "no longer holds the run's candidate",
+};
+
 const OUTCOME: Readonly<Record<string, string>> = { succeeded: 'finished', failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted' };
 
 export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): readonly ActivityItem[] {
@@ -46,8 +53,10 @@ export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): re
   }
   for (const c of snapshot.changeRequests) {
     if (!c.observedAt) continue;
-    const merged = c.status === 'merged' || c.mergeCommitSha !== null;
-    items.push({ id: `pr:${c.prNumber}`, at: c.observedAt, glyph: merged ? '⇢' : '⇡', tone: merged ? 'success' : 'active', text: merged ? `Pull request #${c.prNumber} was merged` : `Pull request #${c.prNumber} is ${c.status}` });
+    const merged = isRecordedMerge(c);
+    const said = PR_STATUS[c.status];
+    const tone = merged ? 'success' : said ? 'warning' : 'active';
+    items.push({ id: `pr:${c.prNumber}`, at: c.observedAt, glyph: merged ? '⇢' : said ? '!' : '⇡', tone, text: `Pull request #${c.prNumber} ${merged ? 'was merged' : said ?? `is ${c.status}`}` });
   }
   return items.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, limit);
 }

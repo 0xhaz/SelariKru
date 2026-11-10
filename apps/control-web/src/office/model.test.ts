@@ -3,6 +3,7 @@ import type { ChangeRequestView } from '@selarikru/view-protocol';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task, worker } from '../features/overview/testing.ts';
 import { buildTeam } from '../features/team/model.ts';
 import { buildOfficeWorld, robotState } from './model.ts';
+import { buildEvidence } from '../features/evidence/model.ts';
 
 const rowOf = (snapshot: ReturnType<typeof snapshotOf>, id: string, opts: Parameters<typeof buildTeam>[3] = {}, liveness: number | null = NOW) =>
   buildTeam(snapshot, NOW, liveness, opts).rows.find((r) => r.workerId === id)!;
@@ -87,11 +88,11 @@ describe('the office world', () => {
     expect(world.verifying).toBe(true);
   });
 
-  it('a pull request is verified only when its own candidate is live, its record stands and every approved criterion passed', () => {
+  it('a pull request is verified only by Evidence\'s rule (live candidate, a record that stands, every approved criterion passed) and only when it holds that candidate', () => {
     const candidate = { sha: 'abc', status: 'verified', live: true, baseSha: 'b', treeSha: null, target: 't', recordedAt: iso(20), recordId: 'r', recordValid: true, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] };
     const withRun = (over: { criteria?: { verified: number; total: number }; candidate?: Partial<typeof candidate>; outOfDate?: boolean }) => {
       const s = snapshot();
-      s.runs['run'] = { ...s.runs['run']!, criteria: over.criteria ?? { verified: 2, total: 2 }, evidence: { candidate: { ...candidate, ...over.candidate }, criteria: [] } };
+      s.runs['run'] = { ...s.runs['run']!, criteria: over.criteria ?? { verified: 2, total: 2 }, evidence: { candidate: { ...candidate, ...over.candidate }, criteria: ['FB-1', 'FB-2'].map((id) => ({ criterionId: id, description: null, state: 'passed' as const, verified: true, taskIds: [], check: null, candidateSha: 'abc' })) } };
       if (over.outOfDate) s.changeRequests = [{ ...s.changeRequests[0]!, outOfDate: { reason: 'main_moved', at: iso(5), rebuiltSha: null, rebuild: 'building' } }];
       return buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').parcels[0]!.verification;
     };
@@ -102,6 +103,29 @@ describe('the office world', () => {
     expect(withRun({ candidate: { live: false } })).toBe('unverified');
     expect(withRun({ candidate: { recordValid: false } })).toBe('unverified');
     expect(withRun({ outOfDate: true })).toBe('out_of_date');
+  });
+
+  it('verified at reduced scope is verified, by the same rule Evidence uses', () => {
+    const s = snapshot();
+    const candidate = { sha: 'abc', status: 'verified', live: true, baseSha: 'b', treeSha: null, target: 't', recordedAt: iso(20), recordId: 'r', recordValid: true, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] };
+    const crit = (id: string, state: 'passed' | 'not_delivered') => ({ criterionId: id, description: null, state, verified: state === 'passed', taskIds: [], check: null, candidateSha: 'abc' });
+    s.runs['run'] = {
+      ...s.runs['run']!, criteria: { verified: 1, total: 2 }, evidence: { candidate, criteria: [crit('FB-1', 'passed'), crit('FB-2', 'not_delivered')] },
+      reducedScope: { acceptedAt: iso(30), acceptedBy: 'owner', notDelivered: { requirementIds: ['FB-2'] } } as never,
+    };
+    expect(buildEvidence(s, 'run')!.states[0]).toMatchObject({ value: 'Verified at reduced scope', established: true });
+    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').parcels[0]!.verification).toBe('verified');
+  });
+
+  it('only a recorded merge is merged: a merge of the wrong commit, or a stale pull request with a merge commit, is not', () => {
+    const merged = (status: string, mergeCommitSha: string | null) => {
+      const s = snapshot();
+      s.changeRequests = [{ ...s.changeRequests[0]!, status, mergeCommitSha }];
+      return buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').parcels[0]!;
+    };
+    expect(merged('merged', 'm1').merged).toBe(true);
+    expect(merged('merged_sha_mismatch', 'm1')).toMatchObject({ merged: false, verification: 'out_of_date' });
+    expect(merged('stale_candidate', 'm1')).toMatchObject({ merged: false, verification: 'out_of_date' });
   });
 
   it('says what it shows in words, for the canvas label', () => {

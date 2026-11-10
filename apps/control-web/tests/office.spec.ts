@@ -269,6 +269,22 @@ test.describe('closing Settings', () => {
     });
   }
 
+  test('a link from Settings to another screen moves focus to that screen\'s main region, not back to the opener', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Settings' }).click();
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+    for (const [link, view] of [['Open the Team screen', 'team'], ['Product brief and roadmap', 'product']] as const) {
+      if (view === 'product') {
+        await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Settings' }).click();
+        await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Project' }).click();
+      }
+      await page.getByRole('link', { name: link }).click();
+      await expect(page.getByTestId('view-drawer')).toHaveAttribute('data-view', view);
+      await expect(page.locator('#main')).toBeFocused();
+    }
+  });
+
   test('a control inside Settings keeps its own Escape, and Settings stays open', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work', '#/settings?section=stack');

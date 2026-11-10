@@ -84,7 +84,8 @@ const evidenceHref = (runId: string, query: Record<string, string>): string => `
 export const checkHref = (runId: string, checkRunId: string): string => evidenceHref(runId, { check: checkRunId });
 export const candidateHref = (runId: string, sha: string): string => evidenceHref(runId, { candidate: sha });
 
-function verifiedState(run: RunView, evidence: RunEvidenceView | null): DeliveryState {
+/** The run's Verified state. Shared with the office's PR board, so both say verified on exactly the same record. */
+export function verifiedState(run: RunView, evidence: RunEvidenceView | null): DeliveryState {
   const base = { key: 'verified' as const, title: 'Verified', link: null };
   if (!run.criteria || !evidence) return { ...base, value: 'Not connected', tone: 'neutral', detail: 'No per-criterion evidence for this run: its tasks name no criteria, or it is older than the report window. Tasks are not counted in their place.', established: false };
   const { verified, total } = run.criteria;

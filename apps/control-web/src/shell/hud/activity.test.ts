@@ -23,6 +23,17 @@ describe('the activity feed', () => {
     expect(recentActivity(s, 7)[0]).toMatchObject({ text: 'Approval granted for Add table', at: iso(50) });
   });
 
+  it('describes a pull request as merged only when the merge was recorded', () => {
+    const cr = { runId: 'run', prNumber: 9, url: 'u', status: 'merged_sha_mismatch', candidateSha: 'c', baseRef: 'main', observedHeadSha: null, mergeCommitSha: 'm', observedAt: iso(10), outOfDate: null };
+    const s = snapshotOf({});
+    s.changeRequests = [cr];
+    expect(recentActivity(s, 7)[0]).toMatchObject({ text: 'Pull request #9 merged a commit that is not the verified one; no merge is recorded' });
+    s.changeRequests = [{ ...cr, status: 'stale_candidate' }];
+    expect(recentActivity(s, 7)[0]!.text).toBe("Pull request #9 no longer holds the run's candidate");
+    s.changeRequests = [{ ...cr, status: 'merged' }];
+    expect(recentActivity(s, 7)[0]!.text).toBe('Pull request #9 was merged');
+  });
+
   it('says nothing when nothing was recorded', () => {
     expect(recentActivity(snapshotOf({}), 7)).toEqual([]);
   });
