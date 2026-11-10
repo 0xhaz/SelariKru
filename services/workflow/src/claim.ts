@@ -1,3 +1,4 @@
+import { asClaimReason, type ClaimReason } from './claim-reasons.ts';
 import { randomUUID } from 'node:crypto';
 import { harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
@@ -47,7 +48,7 @@ export interface ClaimLimits {
 
 const isCount = (n: unknown, min: number): n is number => typeof n === 'number' && Number.isInteger(n) && n >= min;
 
-export function resolveLimits(caps: Caps): ClaimLimits | string {
+export function resolveLimits(caps: Caps): ClaimLimits | `missing_limit:${string}` {
   const required = [
     ['maxConcurrentTotal', 1], ['attemptTimeoutSeconds', 1], ['maxInfraRetries', 0], ['infraRetryBackoffSeconds', 1], ['infraRetryBackoffMaxSeconds', 1],
   ] as const;
@@ -153,7 +154,7 @@ export async function claimNext(ctx: SchedulerContext, runner: Runner, caps: Cap
   return outcome.ok ? outcome.lease : null;
 }
 
-type CandidateResult = { lease: Lease } | { reason: string };
+type CandidateResult = { lease: Lease } | { reason: ClaimReason };
 
 export interface RunningCounts {
   readonly tenant: { local: number; cloud: number };
@@ -346,7 +347,7 @@ async function refuseRepair(tx: Tx, key: TaskKey, c: Candidate, state: TaskState
   await emit(tx, scope, now, { type: 'task.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload: { reason } });
   // A handover holding this task now waits on nothing that can happen: the owner is asked, with the same reason the task gives.
   await heldTaskBlocked(tx, key, state.revision, reason, now);
-  return { reason };
+  return { reason: asClaimReason(reason) };
 }
 
 async function clearBlock(tx: Tx, key: TaskKey): Promise<void> {
@@ -386,7 +387,7 @@ async function requestGate(ctx: SchedulerContext, tx: Tx, key: TaskKey, c: Candi
   const moved = transition(state, { type: 'approval_requested' });
   if (!moved.ok) return { reason: 'illegal_transition' };
   const opened = await openApproval(ctx, tx, key, c.runId, spec.revision, gate, now);
-  if (!opened.approval) return { reason: opened.decision.reason };
+  if (!opened.approval) return { reason: asClaimReason(opened.decision.reason) };
   if (row.placementBlock !== null) await clearBlock(tx, key);
   const aggregateRevision = await setStatus(tx, key, row.rowRevision, moved.value.status, now);
   const scope: EventScope = { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision };
@@ -419,7 +420,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (handoverHold.kind === 'wait') {
     // Said on the task, once per reason, so a runner the hold skipped is never silent: the row and the attention queue read it.
     if (VISIBLE_HOLDS.includes(handoverHold.reason)) await recordBlock(tx, key, c, statusRow, handoverHold.reason, null, now);
-    return { reason: handoverHold.reason };
+    return { reason: asClaimReason(handoverHold.reason) };
   }
   const handover = handoverHold.kind === 'start' ? handoverHold.row : null;
   // The owner chose this location for this task, explicitly: the role pin and the eligible-any preference give way, and every other placement rule still holds.
@@ -541,7 +542,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
       // Budget denials are transient, so the task stays ready. Any other denial stops this repair.
       if (decision.reason.startsWith('budget:')) {
         await recordBlock(tx, key, c, statusRow, decision.reason, null, now);
-        return { reason: decision.reason };
+        return { reason: asClaimReason(decision.reason) };
       }
       return refuseRepair(tx, key, c, state, statusRow.rowRevision, decision.reason, now);
     }
@@ -551,7 +552,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (!fits.ok) {
     // Holds are never handed back, so this will not clear by itself: the owner has to see it. Recorded once per reason, not per poll.
     await recordBlock(tx, key, c, statusRow, fits.reason, null, now);
-    return { reason: fits.reason };
+    return { reason: asClaimReason(fits.reason) };
   }
   if (statusRow.placementBlock?.startsWith('budget:')) await clearBlock(tx, key);
 

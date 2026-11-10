@@ -1,3 +1,4 @@
+import type { ClaimReason } from './claim-reasons.ts';
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, ResolvedSkill, Result, RunnerHarnessReport } from '@selarikru/domain';
@@ -87,12 +88,13 @@ export interface Lease {
 
 export interface SkippedCandidate {
   readonly taskId: string;
-  readonly reason: string;
+  /** One of `ClaimReason` (claim-reasons.ts), which also says whether it clears by itself. */
+  readonly reason: ClaimReason;
 }
 
 export type ClaimOutcome =
   | { readonly ok: true; readonly lease: Lease; readonly skipped: readonly SkippedCandidate[] }
-  | { readonly ok: false; readonly reason: string; readonly skipped: readonly SkippedCandidate[] };
+  | { readonly ok: false; readonly reason: ClaimReason; readonly skipped: readonly SkippedCandidate[] };
 
 export type LeaseConflictReason = 'stale_fence' | 'lease_expired' | 'attempt_timeout';
 

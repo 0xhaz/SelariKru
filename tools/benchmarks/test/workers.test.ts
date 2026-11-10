@@ -282,10 +282,30 @@ describe('T8.3 worker runner', () => {
 
   it('m2: a refusal is transient or not by its per-candidate reason', () => {
     expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'infra_retry_backoff' }] })).toEqual({ transient: true, reason: 'infra_retry_backoff' });
-    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'budget_exhausted' }] })).toEqual({ transient: true, reason: 'budget_exhausted' });
+    // Round 3: from the shared workflow table. Budget refusals are named and not transient; reservation_not_settled is.
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'budget:exceeds_limit' }] })).toEqual({ transient: false, reason: 'budget:exceeds_limit' });
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'reservation_not_settled' }] })).toEqual({ transient: true, reason: 'reservation_not_settled' });
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'placement_blocked:no_free_slot' }] })).toEqual({ transient: true, reason: 'placement_blocked:no_free_slot' });
     expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'resource_conflict' }, { taskId: 'u', reason: 'model_not_offered' }] })).toEqual({ transient: false, reason: 'model_not_offered' });
     expect(refusalOf({ lease: null, reason: 'concurrency_limit_reached', skipped: [] })).toEqual({ transient: true, reason: 'concurrency_limit_reached' });
     expect(refusalOf({ lease: null, reason: 'runner_disabled', skipped: [] })).toEqual({ transient: false, reason: 'runner_disabled' });
     expect(refusalOf({ lease: { attemptId: 'a' }, reason: null })).toBeNull();
   });
+
+  it('round 3: a deadline reached with no attempt started is a replaceable denied start, naming the last refusal even when every refusal was transient', async () => {
+    // Every claim is answered with a transient per-candidate refusal until the deadline.
+    const transientOnly = (f: typeof fetch): typeof fetch => (async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(input instanceof Request ? input.url : String(input)).pathname === '/v1/runners/claim') {
+        return new Response(JSON.stringify({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't_backend', reason: 'resource_conflict' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return f(input, init);
+    }) as typeof fetch;
+    const e = { ...env({ timeScale: 1 / 900 }), wrapRunnerFetch: transientOnly };
+    const { records } = await runWorkerCohort({ manifest: manifestFor(1), env: e, live: null });
+    const [r] = workers(records, 'L1');
+    expect(r!.status).toBe('denied_start');
+    expect(r!.failures).toContainEqual({ category: 'start_denied', detail: 'resource_conflict' });
+    expect(r!.failures.map((f) => f.category)).not.toContain('attempt_deadline');
+    expect(plannedTrials(manifestFor(1), 'workers', records).filter((p) => p.slot.mode === 'L1').map((p) => p.slotAttempt)).toEqual([2]);
+  }, 60_000);
 });

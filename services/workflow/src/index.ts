@@ -6,6 +6,7 @@ import { retryTask } from './retry.ts';
 import type { Scheduler, SchedulerContext } from './types.ts';
 
 export * from './types.ts';
+export { asClaimReason, classifyClaimReason, CLAIM_REASONS, type ClaimReason, type ClaimReasonCode } from './claim-reasons.ts';
 export { claimNext, tryClaim } from './claim.ts';
 export { holdMultiplier, modelOverRunBudget, planCapMicros, roleAttemptShares, sizeCapMicros, assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunnerReports, resolveAssignment, routeRefusal, validateSelection, worstCaseHold, type ResolvedAssignment, type SelectionVerdict, type WorstCaseHold } from './assignment.ts';
 export { INFRASTRUCTURE_REASON_PREFIX, heartbeat, publishResult, leaseHealth, leaseDeadline, LEASE_EXPIRY_SECONDS, LEASE_SUSPECT_SECONDS, HEARTBEAT_INTERVAL_SECONDS, type LeaseHealth } from './lease.ts';

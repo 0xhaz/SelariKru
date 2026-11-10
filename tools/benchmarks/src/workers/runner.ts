@@ -8,6 +8,7 @@ import type { HarnessCatalog, RunnerHarnessReport } from '@selarikru/protocol';
 import { redactSecrets } from '@selarikru/protocol';
 import { sql } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
+import { classifyClaimReason } from '@selarikru/workflow';
 import { allCriteriaPassed, FEEDBACK_CRITERIA } from '@selarikru/view-protocol';
 import type { VerifierRunner } from '../../../../services/verifier/src/service.ts';
 import { monotonicDateClock, performanceClock, type Monotonic } from '../clock.ts';
@@ -81,6 +82,8 @@ export interface WorkerEnvironment {
   readonly startWindowMs?: number;
   /** I4: reads the worker agent's state for a trial's scope, before and after it. Absent (the dry run): not checked. */
   readonly agentState?: (scope: string) => Promise<AgentState>;
+  /** Tests only: wraps the runner's HTTP client (for example to answer claims with scripted refusals). */
+  readonly wrapRunnerFetch?: (f: typeof fetch) => typeof fetch;
 }
 
 /** What `agentState` reports. Names only; never a credential or account detail. */
@@ -224,25 +227,20 @@ type Ending = 'delivered' | 'failed' | 'timed_out' | 'cancelled' | 'denied';
 /** I1: what the runner's claims answered before the trial's first start. Only non-transient refusals count. */
 interface ClaimWatch { nonTransient: number; lastReason: string | null; leased: boolean }
 
-/** Per-candidate refusals that clear by themselves: backoff, another attempt still closing, a conflict, budget headroom, a race. */
-const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set([
-  'infra_retry_backoff', 'previous_attempt_active', 'status_changed', 'stale_status', 'resource_conflict', 'dependencies_unsatisfied', 'illegal_transition',
-  'concurrency_limit_reached', 'runner_slots_full', 'run_paused',
-]);
-const isTransient = (reason: string): boolean => TRANSIENT_REFUSALS.has(reason) || /budget/.test(reason);
-
 /**
  * m2: reads one claim answer. Null when it leased. Otherwise the refusal that matters: the first non-transient per-candidate reason, else the
  * first transient one, else the summary reason, which is used only when no candidate was considered.
  */
 export function refusalOf(body: { lease: unknown; reason?: string | null; skipped?: readonly { taskId: string; reason: string }[] }): { transient: boolean; reason: string } | null {
   if (body.lease) return null;
+  // The table is the workflow's own (claim-reasons.ts): a reason it does not know is treated as not clearing by itself.
+  const transient = (r: string): boolean => classifyClaimReason(r).transient;
   const reasons = (body.skipped ?? []).map((s) => s.reason);
-  const hard = reasons.find((r) => !isTransient(r));
+  const hard = reasons.find((r) => !transient(r));
   if (hard !== undefined) return { transient: false, reason: hard };
   if (reasons.length > 0) return { transient: true, reason: reasons[0]! };
   const summary = body.reason ?? 'unknown';
-  return { transient: isTransient(summary), reason: summary };
+  return { transient: transient(summary), reason: summary };
 }
 
 /** Watches the claim answers on the runner's own HTTP client: the per-candidate reasons the client itself does not keep. */
@@ -366,7 +364,7 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
     failures.push({ category: 'plan_refused', detail: String(accepted.body?.error?.code ?? accepted.status) });
   } else {
     stack.startDrivers();
-    const api = new HttpRunnerApi(stack.apiBase, runnerToken, watchClaims(stack.fetch, watch));
+    const api = new HttpRunnerApi(stack.apiBase, runnerToken, watchClaims(env.wrapRunnerFetch ? env.wrapRunnerFetch(stack.fetch) : stack.fetch, watch));
     const runner = new RunnerLoop({
       api, runtime: runtime!, pollMs: env.pollMs, slots: 1, log: (l) => log(l), projects: [stack.projectId],
       harnessReport: async () => env.runnerReport,
@@ -405,7 +403,7 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
     confounders.push(`${evidence.unreportedAttempts} attempt(s) reported no cost; the budget was charged their worst-case hold`);
   }
   const withState = { ...base, configuration: { ...base.configuration, credentialPath: credentialPathOf(m, stateBefore), agentState: env.agentState ? `before: ${describeState(stateBefore)}; after: ${describeState(stateAfter)}` : null } };
-  const record = toRecord({ base: withState, evidence, ending, failures, confounders, initialSetupMs, cleanupConfirmed, deadlineMs, repairAttempts: env.policy.limits?.repairAttempts ?? 2, now });
+  const record = toRecord({ base: withState, evidence, ending, failures, confounders, lastRefusal: watch.lastReason, initialSetupMs, cleanupConfirmed, deadlineMs, repairAttempts: env.policy.limits?.repairAttempts ?? 2, now });
   return { record, spentUsd: evidence === null ? null : evidence.spendBoundUsd };
 }
 
@@ -468,6 +466,8 @@ function keepEvidence(dir: string, trialId: string, repo: string, starterSha: st
 }
 
 interface RecordInput {
+  /** The last claim refusal seen before any start (I1), for a deadline reached with nothing started. */
+  readonly lastRefusal: string | null;
   readonly base: Omit<RawRecord, 'status' | 'timings' | 'resources' | 'cost' | 'humanMinutes' | 'quality' | 'operations' | 'failures' | 'confounders' | 'artifactReferences'>;
   readonly evidence: TrialEvidence | null;
   readonly ending: Ending;
@@ -484,7 +484,10 @@ function toRecord(r: RecordInput): RawRecord {
   const e = r.evidence;
   const failures = [...r.failures];
   let status: RawRecord['status'];
-  if (r.ending === 'timed_out') { status = 'timed_out'; failures.push({ category: 'attempt_deadline', detail: `the ${r.deadlineMs / 1000} s deadline from coordinator acceptance ran out` }); }
+  const neverStarted = e !== null && e.attempts.every((a) => a.startedAt === null);
+  // I1 ruling: a deadline reached with no attempt ever started is a start that was denied (replaceable), whatever the refusals were.
+  if (r.ending === 'timed_out' && neverStarted) { status = 'denied_start'; failures.push({ category: 'start_denied', detail: r.lastRefusal ?? 'no attempt started before the deadline' }); }
+  else if (r.ending === 'timed_out') { status = 'timed_out'; failures.push({ category: 'attempt_deadline', detail: `the ${r.deadlineMs / 1000} s deadline from coordinator acceptance ran out` }); }
   else if (r.ending === 'cancelled') { status = 'cancelled'; failures.push({ category: 'operator_cancelled', detail: null }); }
   else if (r.ending === 'denied') status = 'denied_start';
   else if (e?.verdict) status = 'completed';

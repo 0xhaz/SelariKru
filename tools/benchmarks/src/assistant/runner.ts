@@ -32,6 +32,8 @@ export interface SetupLedgerEntry {
   readonly modelDownloadMs: number | null;
   readonly errorCode: string | null;
   readonly clockDomain: string;
+  /** True once a later entry for the same setup call replaces this one (a timeout followed by the call's late result): sum only entries that are not superseded. */
+  superseded: boolean;
 }
 
 /** Output text per trial, for the route-blinded human review. Synthetic fixtures only; never published. */
@@ -119,6 +121,8 @@ async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResu
   const emit = (r: RawRecord) => { records.push(r); o.onRecord?.(r); };
   /** I2 and N1: routes whose request or setup never settled after timing out. Their remaining slots are not run; any later sample may overlap that call. */
   const stalled = new Set<BenchRoute>();
+  /** Settled setups per route that were not ready. */
+  const setupFailures = new Map<BenchRoute, number>();
   let transportFailed = false;
 
   for (const trial of trials) {
@@ -136,10 +140,22 @@ async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResu
       // Setup before a route's first request, timed apart and ledgered, never on a record.
       let setup = ready.get(route);
       if (setup === undefined) {
+        const ledger = (r: BenchSetupResult): SetupLedgerEntry => {
+          const entry = { route, at: wallNow().toISOString(), availability: r.availability, outcome: r.outcome, modelDownloadMs: r.downloadMs, errorCode: r.errorCode, clockDomain: r.clockDomain, superseded: false };
+          setupLedger.push(entry);
+          return entry;
+        };
+        /** A settled setup that is not ready gets one more bounded try on a later slot (it can no longer overlap anything); the second one is final. */
+        const settle = (r: BenchSetupResult): void => {
+          if (r.outcome === 'ready') { ready.set(route, r); return; }
+          const failures = (setupFailures.get(route) ?? 0) + 1;
+          setupFailures.set(route, failures);
+          if (failures >= 2) ready.set(route, r);
+        };
         const call = o.adapter.setup(route);
         const done = await transport(call, setupTimeoutMs).catch((e: unknown) => { if (e instanceof RequestTimeout) return null; throw e; });
         if (done === null) {
-          setupLedger.push({ route, at: wallNow().toISOString(), availability: 'unknown', outcome: 'failed', modelDownloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' });
+          const timedOut = ledger({ route, availability: 'unknown', outcome: 'failed', downloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' });
           emit({ ...base, status: 'denied_start', failures: [{ category: 'route_unavailable', detail: `${route} setup did not finish within ${setupTimeoutMs} ms` }], confounders: overlapNote });
           // N1: never start setup again while this one may still be running (a download keeps going in the page). Wait for it, bounded.
           const late = await Promise.race([
@@ -148,15 +164,16 @@ async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResu
           ]);
           if (late === 'pending') stalled.add(route);
           else {
-            setupLedger.push({ route, at: wallNow().toISOString(), availability: late.availability, outcome: late.outcome, modelDownloadMs: late.downloadMs, errorCode: late.errorCode, clockDomain: late.clockDomain });
-            // Its result stands for the route from here on: setup is not run a second time.
-            ready.set(route, late);
+            ledger(late);
+            timedOut.superseded = true;
+            // A ready result stands for the route from here on, so setup is not run again; any other is settled and may be retried once.
+            settle(late);
           }
           continue;
         }
         setup = done;
-        setupLedger.push({ route, at: wallNow().toISOString(), availability: setup.availability, outcome: setup.outcome, modelDownloadMs: setup.downloadMs, errorCode: setup.errorCode, clockDomain: setup.clockDomain });
-        if (setup.outcome === 'ready') ready.set(route, setup);
+        ledger(setup);
+        settle(setup);
       }
       if (setup.outcome !== 'ready') {
         // The route cannot serve: nothing is sent, so nothing can fall back. A denied start may be retried in its slot later.

@@ -395,7 +395,7 @@ describe('T8.2 assistant runner', () => {
     for (const r of dev.slice(1)) expect(r).toMatchObject({ status: 'not_run', failures: [{ category: 'route_stalled' }] });
     const firstDevice = stalled.records.indexOf(dev[0]!);
     for (const r of stalled.records.slice(firstDevice + 1).filter((x) => x.mode === 'ONLY_IN_CLOUD')) expect(r.confounders.join(' ')).toMatch(/overlapped_in_flight_call/);
-    expect(stalled.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => e.errorCode)).toEqual(['setup_timeout']);
+    expect(stalled.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => [e.errorCode, e.superseded])).toEqual([['setup_timeout', false]]);
     // A download that outlives the bound but settles within the wait: its result is kept and setup is not run again.
     const late = await run(150);
     expect(late.setups).toBe(1);
@@ -403,6 +403,22 @@ describe('T8.2 assistant runner', () => {
     const lateDev = late.records.filter((r) => r.mode === 'ONLY_ON_DEVICE');
     expect(lateDev[0]!.status).toBe('denied_start');
     expect(lateDev.slice(1).every((r) => r.status === 'completed' && r.confounders.length === 0)).toBe(true);
-    expect(late.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => [e.errorCode, e.outcome])).toEqual([['setup_timeout', 'failed'], [null, 'ready']]);
+    // The timeout entry is superseded by the late one, so a download sum counts only one of them.
+    expect(late.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => [e.errorCode, e.outcome, e.superseded])).toEqual([['setup_timeout', 'failed', true], [null, 'ready', false]]);
+    // Round 3: a late result that is not ready is not cached: setup gets one more bounded try once the first has settled, and is then final.
+    let tries = 0;
+    const { adapter: inner } = bench();
+    const failing: RouteAdapter = {
+      ...inner,
+      async setup(route) {
+        if (route === 'ONLY_IN_CLOUD') return inner.setup(route);
+        tries += 1;
+        await new Promise((r) => setTimeout(r, tries === 1 ? 150 : 0));
+        return { route, availability: 'unavailable', outcome: 'unavailable', downloadMs: null, errorCode: null, clockDomain: 'browser-monotonic' };
+      },
+    };
+    const failed = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter: failing, live: c.live, requestTimeoutMs: 100, setupTimeoutMs: 100 });
+    expect(tries).toBe(2);
+    expect(failed.records.filter((r) => r.mode === 'ONLY_ON_DEVICE').every((r) => r.status === 'denied_start')).toBe(true);
   });
 });
