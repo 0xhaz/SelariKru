@@ -11,6 +11,7 @@ import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, typ
 import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 import { createDemoBrain } from './brain.ts';
+import { createDemoStack } from './stack.ts';
 
 interface Subscriber {
   cursor: number;
@@ -588,6 +589,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   // Simulated sources compiled by the same domain code the server runs. Reads touch no network.
   const brain = createDemoBrain((id) => snapshotOf(project(id)), (id) => new Date(timeOf(project(id))).toISOString());
+  const stack = createDemoStack((id) => new Date(timeOf(project(id))).toISOString());
 
   return {
     mode: 'mock',
@@ -607,6 +609,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     getBrainSource: (projectId, sourceId, revision) => brain.source(project(projectId).fixture.projectId, sourceId, revision),
     getAttemptContext: (projectId, attemptId) => brain.context(project(projectId).fixture.projectId, attemptId),
     brainAction: (projectId, action) => brain.act(project(projectId).fixture.projectId, action),
+    getStack: (projectId) => stack.get(project(projectId).fixture.projectId),
+    stackAction: (projectId, request) => stack.act(project(projectId).fixture.projectId, request),
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);

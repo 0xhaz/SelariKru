@@ -4,6 +4,7 @@ import { TONE_TEXT, buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } 
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
+import { SettingsPage } from '../features/settings/SettingsPage.tsx';
 import { autonomyModel } from '../features/settings/model.ts';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
 import { TeamView } from '../features/team/TeamView.tsx';
@@ -56,10 +57,11 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Brain', route: 'brain' },
   { label: 'Benchmark', route: 'benchmark' },
   { label: 'Assistant', route: 'assistant' },
+  { label: 'Settings', route: 'settings' },
   { label: 'New project', route: 'onboarding' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', onboarding: 'New project' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -385,6 +387,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         {route === 'benchmark' ? (
           <RouteBoundary resetKey="benchmark">
             <BenchmarkView mode={mode} />
+          </RouteBoundary>
+        ) : null}
+        {route === 'settings' ? (
+          <RouteBoundary resetKey="settings">
+            <SettingsPage stack={state.stack} connection={connection} mode={mode} />
           </RouteBoundary>
         ) : null}
         {route === 'onboarding' ? (

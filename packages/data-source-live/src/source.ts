@@ -1,6 +1,6 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  AttemptContextViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema,
+  AttemptContextViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
@@ -232,6 +232,9 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
         ? readJson(`${base}/sources/${encodeURIComponent(action.sourceId)}/revoke`, BrainViewSchema, 'the Project Brain', false, { reason: action.reason })
         : readJson(`${base}/conflicts/${encodeURIComponent(action.conflictId)}/keep`, BrainViewSchema, 'the Project Brain', false, {});
     },
+
+    getStack: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings'),
+    stackAction: (projectId, req) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings', false, { expectedRevision: req.expectedRevision, action: req.action }),
 
     subscribe(projectId, afterCursor, onEvent, onError) {
       if (closed) {

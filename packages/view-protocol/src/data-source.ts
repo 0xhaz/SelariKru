@@ -2,6 +2,7 @@ import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, 
 import type { ProjectViewEvent } from './events.ts';
 import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
 import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainView } from './brain.ts';
+import type { StackActionRequestView, StackView } from './stack.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -36,6 +37,10 @@ export interface EngineeringDataSource {
   getAttemptContext?(projectId: string, attemptId: string): Promise<AttemptContextView | null>;
   /** Revoke a source or keep an accepted value. Answers with the Brain as it is afterwards. */
   brainAction?(projectId: string, action: BrainAction): Promise<BrainView>;
+  /** The project's stack settings. Read on demand. Absent: this source has no stack settings. */
+  getStack?(projectId: string): Promise<StackView>;
+  /** One stack change against the revision last read. Metadata only: it never authenticates, installs, requests or runs anything. Answers with the stack afterwards. */
+  stackAction?(projectId: string, request: StackActionRequestView): Promise<StackView>;
   disconnect(): void;
 }
 

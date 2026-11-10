@@ -558,7 +558,7 @@ export function targetGates(targets: readonly StackTarget[], opts: { webChecks: 
       const name = target === 'web' ? 'Web' : 'Server';
       return opts.webChecks === 'passed'
         ? { target, state: 'passed', label: `${name} checks passed`, explanation: `The ${name.toLowerCase()} checks passed. They say nothing about other targets.` }
-        : { target, state: 'not_run', label: `${name} checks not run`, explanation: `No ${name.toLowerCase()} check has run for this component.` };
+        : { target, state: 'not_run', label: `${name} checks not linked`, explanation: `No ${name.toLowerCase()} verification result is linked to this component yet.` };
     }
     if (target === 'ios') {
       return opts.native.ios

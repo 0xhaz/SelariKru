@@ -54,7 +54,7 @@ const STATUS: Readonly<Record<BrainClaimStatus, { label: string; tone: Tone; det
   unsupported: { label: 'Unsupported', tone: 'danger', detail: 'Every source behind it was revoked. Not served to workers.' },
 };
 const LABEL: Readonly<Record<string, string>> = { public: 'Public', internal: 'Internal', restricted: 'Restricted', secret: 'Secret' };
-const KIND: Readonly<Record<string, string>> = { brief: 'Brief', criteria: 'Criteria', plan: 'Plan', decision: 'Decision', verification: 'Verification', repo_manifest: 'Repository manifest', note: 'Note' };
+const KIND: Readonly<Record<string, string>> = { brief: 'Brief', criteria: 'Criteria', plan: 'Plan', decision: 'Decision', verification: 'Verification', repo_manifest: 'Repository manifest', note: 'Note', stack: 'Stack settings' };
 const labelOf = (c: string): string => LABEL[c] ?? 'Unknown label';
 const isRestricted = (c: string): boolean => c !== 'public' && c !== 'internal';
 
