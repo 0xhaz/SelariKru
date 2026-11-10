@@ -36,3 +36,4 @@ export function createScheduler(ctx: SchedulerContext): Scheduler {
 export { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, requestPolicyStop, type RunGate, type RunnerGate } from './settings.ts';
 export { cancelRequestReason } from './cancel.ts';
 export { buildTaskState, loadAttempts } from './taskstate.ts';
+export { bindingOf, loadBindings, loadKnownVersions, resolveTaskSkills } from './skills.ts';

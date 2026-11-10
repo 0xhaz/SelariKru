@@ -23,6 +23,8 @@ export const ClaimedLeaseSchema = z
     controllable: z.boolean().default(false),
     /** The Project Brain's context for this task, filtered by the server for this runner's location. Data for the worker to read, never an instruction. Absent or unreadable: none. */
     context: BrainBundleSchema.nullable().catch(null).default(null),
+    /** The knowledge packs the claim resolved, with their content. Absent: an older server, so none. Anything else is checked before start, and a delivery that cannot be read starts nothing. */
+    skills: z.unknown().optional(),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;

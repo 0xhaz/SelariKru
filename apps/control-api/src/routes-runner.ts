@@ -12,6 +12,7 @@ import { loadSpecRow, newId } from './store.ts';
 import { acknowledgeRunnerConfig, finishCancelledRuns, runnerConfigFor } from './settings.ts';
 import { attemptStreamable } from './terminal.ts';
 import { bundleForAttempt } from './brain.ts';
+import { skillsForLease } from './skills.ts';
 
 const runnerOf = (req: FastifyRequest): Runner => {
   const p = req.principal;
@@ -127,7 +128,15 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
         // The error's name and code only: a failed query's parameters can hold source text, which does not belong in a log.
         app.log.warn({ error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown } | null)?.code ?? null, attemptId: outcome.lease.attemptId }, 'building the context bundle failed; the lease goes without one');
       }
-      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}), context }, reason: null, skipped: outcome.skipped, config: runnerConfig });
+      // The packs the claim resolved, with their content, for the runner to check against their digests. Null when they could not be read: the runner then starts nothing,
+      // rather than running the task without what it was given.
+      let skills = null;
+      try {
+        skills = await skillsForLease(db, outcome.lease);
+      } catch (err) {
+        app.log.warn({ error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown } | null)?.code ?? null, attemptId: outcome.lease.attemptId }, 'reading the resolved knowledge packs failed; the runner will refuse to start');
+      }
+      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}), context, skills }, reason: null, skipped: outcome.skipped, config: runnerConfig });
     }
     return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped, config: runnerConfig });
   });

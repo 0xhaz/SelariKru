@@ -25,6 +25,8 @@ export interface ItemRow {
   readonly gates: readonly TargetGate[];
   /** For a service: the separate, scoped disconnect action. Disabled until a connector exists. */
   readonly disconnect: { readonly enabled: false; readonly explanation: string } | null;
+  /** The Skills axis in one phrase: the reviewed bindings whose triggers name this entry, or No reviewed skills. */
+  readonly skills: string;
 }
 
 export interface CategoryRow {
@@ -38,11 +40,14 @@ export interface CategoryRow {
 
 const DISCONNECT = 'No connector exists for this entry yet, so there is nothing to disconnect. Removing the selection only changes your stack record: it deletes no provider data and revokes no credential.';
 
-export function itemRow(item: StackItem, native: NativeCapabilities = NO_NATIVE, targets: readonly StackTarget[] = []): ItemRow {
-  const readiness = readinessOf(item, { targets });
+export type BoundSkills = StackView['skills'];
+
+export function itemRow(item: StackItem, native: NativeCapabilities = NO_NATIVE, targets: readonly StackTarget[] = [], skills: BoundSkills = []): ItemRow {
+  const readiness = readinessOf(item, { targets, skills });
+  const skillsLabel = readiness.find((a) => a.axis === 'skills')!.label;
   const axes = readiness.map((a) => ({ name: READINESS_AXIS_LABELS[a.axis], label: a.label, detail: a.explanation }));
   if (item.kind === 'custom') {
-    return { key: stackItemKey(item), label: item.label, version: null, origin: item.canonicalSource ? `Custom · source ${item.canonicalSource}` : 'Custom', custom: true, summary: 'Custom · not reviewed', axes, gates: [], disconnect: null };
+    return { key: stackItemKey(item), label: item.label, version: null, origin: item.canonicalSource ? `Custom · source ${item.canonicalSource}` : 'Custom', custom: true, summary: 'Custom · not reviewed', axes, gates: [], disconnect: null, skills: 'No reviewed skills' };
   }
   const e = stackEntry(item.entryId);
   const service = e !== undefined && sectionOf(e) === 'services';
@@ -56,6 +61,7 @@ export function itemRow(item: StackItem, native: NativeCapabilities = NO_NATIVE,
     axes,
     gates: native2.length > 0 ? targetGates((e?.targets ?? []) as StackTarget[], { webChecks: 'not_run', native }) : [],
     disconnect: service ? { enabled: false, explanation: DISCONNECT } : null,
+    skills: skillsLabel,
   };
 }
 
@@ -65,10 +71,10 @@ const STATE_EXPLANATION = {
   selected: 'Recorded as your stack. Selecting does not authenticate, install, request or change the repository.',
 } as const;
 
-export function categoryRows(component: StackComponent, section: StackSection, native: NativeCapabilities = NO_NATIVE): CategoryRow[] {
+export function categoryRows(component: StackComponent, section: StackSection, native: NativeCapabilities = NO_NATIVE, skills: BoundSkills = []): CategoryRow[] {
   return STACK_CATEGORIES.filter((c) => c.section === section).map((c) => {
     const s = component.categories[c.id];
-    const items = s.state === 'selected' ? s.items.map((i) => itemRow(i, native, component.targets)) : [];
+    const items = s.state === 'selected' ? s.items.map((i) => itemRow(i, native, component.targets, skills)) : [];
     return {
       id: c.id, label: c.label, state: s.state, items, explanation: STATE_EXPLANATION[s.state],
       stateLabel: s.state === 'none' ? 'None · not used' : s.state === 'not_decided' ? 'Not decided' : `Selected (${items.length})`,

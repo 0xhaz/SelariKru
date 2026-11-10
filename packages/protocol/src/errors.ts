@@ -62,6 +62,10 @@ export const ERROR_CODES = [
    * settled detection; a limit; a detection from work whose data stays on the device. */
   'stack_revision_conflict', 'stack_component_not_found', 'stack_item_not_found', 'stack_detection_not_found', 'stack_entry_unknown', 'stack_entry_wrong_category',
   'stack_item_exists', 'stack_detection_settled', 'stack_limit', 'stack_detection_restricted', 'stack_unreadable', 'classification_downgrade',
+  /** Skill library: no such pack or version; a blocked pack cannot be reviewed; review findings not acknowledged; already reviewed or revoked; a binding to a version
+   * that is not reviewed or is revoked; an intake path that cannot be read as a pack, or whose content is already staged elsewhere. */
+  'skill_not_found', 'skill_version_not_found', 'skill_not_reviewable', 'skill_findings_unacknowledged', 'skill_already_reviewed', 'skill_already_revoked',
+  'skill_not_reviewed', 'skill_revoked', 'skill_intake_failed', 'skill_already_staged',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

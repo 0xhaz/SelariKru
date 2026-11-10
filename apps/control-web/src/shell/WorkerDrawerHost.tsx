@@ -7,7 +7,8 @@ import { workerSettings } from '../features/team/settings.ts';
 import { WorkerDrawer, type TabId } from '../features/team/WorkerDrawer.tsx';
 import { WorkerSettings } from '../features/team/WorkerSettings.tsx';
 import { workerControls } from '../features/settings/model.ts';
-import type { BrainPort, ConnectionState } from './projection-store.ts';
+import type { BrainPort, ConnectionState, SkillsPort } from './projection-store.ts';
+import { AttemptSkillsPanel } from '../features/skills/AttemptSkillsPanel.tsx';
 import { ContextPanel } from '../features/brain/ContextPanel.tsx';
 import { PANEL_WIDE, useMediaQuery } from './media.ts';
 
@@ -28,10 +29,11 @@ export interface WorkerDrawerHostProps {
   readonly onOpenTerminal: (request: AuthorizedTerminalRequest) => Promise<TerminalChannel>;
   readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
   readonly brain?: BrainPort | null;
+  readonly skills?: SkillsPort | null;
 }
 
 /** One worker's drawer, opened over whichever view is showing. Its Settings tab sends through the same commands and rules as the Team and Decisions screens. */
-export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, connection, mode, nowMs, onClose, onTab, onExecute, onRefresh, onResync, onOpenTerminal, onOpenTerminalControl, brain = null }: WorkerDrawerHostProps) {
+export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, connection, mode, nowMs, onClose, onTab, onExecute, onRefresh, onResync, onOpenTerminal, onOpenTerminalControl, brain = null, skills = null }: WorkerDrawerHostProps) {
   const wide = useMediaQuery('(min-width: 1024px)');
   // Beside the team panel the drawer is not modal, so another worker can be chosen with it open. Narrower, it covers the page and is.
   const panelBeside = useMediaQuery(PANEL_WIDE);
@@ -57,7 +59,7 @@ export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, con
       settings={(openTerminal) => <WorkerSettings row={row} settings={settings} assign={assign} live={live} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} onTerminal={openTerminal} controls={controls} />}
       onOpenTerminal={onOpenTerminal}
       onOpenTerminalControl={onOpenTerminalControl}
-      context={<ContextPanel attemptId={row.terminalTarget?.attemptId ?? null} port={brain} />}
+      context={<div className="space-y-4"><AttemptSkillsPanel attemptId={row.terminalTarget?.attemptId ?? null} port={skills} /><ContextPanel attemptId={row.terminalTarget?.attemptId ?? null} port={brain} /></div>}
     />
   );
 }

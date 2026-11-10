@@ -1,6 +1,6 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  AttemptContextViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, StackViewSchema,
+  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
@@ -232,6 +232,18 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
         ? readJson(`${base}/sources/${encodeURIComponent(action.sourceId)}/revoke`, BrainViewSchema, 'the Project Brain', false, { reason: action.reason })
         : readJson(`${base}/conflicts/${encodeURIComponent(action.conflictId)}/keep`, BrainViewSchema, 'the Project Brain', false, {});
     },
+
+    getSkills: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/skills`, SkillsViewSchema, 'the skill library'),
+    async skillAction(projectId, action) {
+      const base = `/v1/projects/${encodeURIComponent(projectId)}/skills`;
+      const any = { parse: (v: unknown) => v };
+      if (action.kind === 'intake') await readJson(`${base}/intake`, any, 'a staged pack', false, { path: action.path });
+      else if (action.kind === 'review') await readJson(`${base}/review`, any, 'a reviewed pack', false, { versionId: action.versionId, acknowledgeFindings: action.acknowledgeFindings });
+      else if (action.kind === 'revoke') await readJson(`${base}/revoke`, any, 'a revoked pack', false, { versionId: action.versionId, reason: action.reason });
+      else await readJson(`${base}/bindings`, any, 'a binding', false, { skillId: action.skillId, expectedRevision: action.expectedRevision, binding: action.binding });
+      return readJson(base, SkillsViewSchema, 'the skill library');
+    },
+    getAttemptSkills: (projectId, attemptId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/skills/attempts/${encodeURIComponent(attemptId)}`, AttemptSkillsViewSchema, 'an attempt\'s knowledge packs'),
 
     getStack: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings'),
     stackAction: (projectId, req) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings', false, { expectedRevision: req.expectedRevision, action: req.action }),

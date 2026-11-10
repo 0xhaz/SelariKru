@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -40,6 +40,15 @@ export interface ProjectionStoreState {
   readonly brain: BrainPort | null;
   /** The project's stack settings. Null when the source has none. */
   readonly stack: StackPort | null;
+  /** The project's skill library. Null when the source has none. */
+  readonly skills: SkillsPort | null;
+}
+
+/** Reads and writes of the skill library. An action refuses to send while the session is not live, as a command does. */
+export interface SkillsPort {
+  load(): Promise<SkillsView>;
+  act(action: SkillActionView): Promise<SkillsView>;
+  attempt(attemptId: string): Promise<AttemptSkillsView>;
 }
 
 /** Reads and writes of the stack settings. A write refuses to send while the session is not live, as a command does. */
@@ -155,6 +164,14 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         act: async (action) => {
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.brainAction!(projectId, action);
+        },
+      } : null,
+      skills: source?.getSkills && source.skillAction && source.getAttemptSkills ? {
+        load: () => source.getSkills!(projectId),
+        attempt: (attemptId) => source.getAttemptSkills!(projectId, attemptId),
+        act: async (action) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.skillAction!(projectId, action);
         },
       } : null,
       stack: source?.getStack && source.stackAction ? {

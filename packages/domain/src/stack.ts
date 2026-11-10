@@ -491,7 +491,7 @@ export type ReadinessAxisId = (typeof READINESS_AXES)[number];
 export const READINESS_AXIS_LABELS: Readonly<Record<ReadinessAxisId, string>> = {
   knowledge: 'Profile knowledge', skills: 'Skills', connector: 'Connector', auth: 'Authentication', tested: 'Tested execution',
 };
-export type ReadinessState = 'not_linked' | 'none_reviewed' | 'not_applicable' | 'none_available' | 'unverified' | 'not_connected' | 'not_tested' | 'tested' | 'unknown';
+export type ReadinessState = 'not_linked' | 'none_reviewed' | 'reviewed' | 'not_applicable' | 'none_available' | 'unverified' | 'not_connected' | 'not_tested' | 'tested' | 'unknown';
 
 export interface ReadinessAxis {
   readonly axis: ReadinessAxisId;
@@ -523,6 +523,8 @@ export interface ReadinessContext {
   readonly targets?: readonly StackTarget[];
   /** What is known about a connection. Discovery (an MCP listing, say) is not an authenticated, scoped connection. */
   readonly connection?: { readonly discovered: boolean };
+  /** The project's bound, reviewed and unrevoked knowledge packs, with the stack entries their triggers name. Absent or empty: none. */
+  readonly skills?: readonly { readonly name: string; readonly version: string; readonly entries: readonly string[] }[];
 }
 
 const ranText = (evidence: readonly PilotEvidence[]): string => evidence.map((x) => `${x.version} on ${x.targets.join(' and ')}`).join(', ');
@@ -550,6 +552,16 @@ function testedAxis(e: StackEntry, item: Extract<StackItem, { kind: 'catalog' }>
   };
 }
 
+/** The skills axis: the reviewed, pinned bindings whose triggers name this entry. Being bound is not being delivered: the resolver still matches each task. */
+function skillsAxis(entryId: string, ctx: ReadinessContext): ReadinessAxis {
+  const bound = (ctx.skills ?? []).filter((s) => s.entries.includes(entryId));
+  if (bound.length === 0) return { axis: 'skills', state: 'none_reviewed', label: 'No reviewed skills', explanation: 'Skills appear here only once a reviewed, pinned binding exists. None does yet.' };
+  return {
+    axis: 'skills', state: 'reviewed', label: `Reviewed: ${bound.map((s) => `${s.name} ${s.version}`).join(', ')}`,
+    explanation: 'Bound to this project at a pinned, reviewed version. A task receives a pack only when its own paths, role and actions match the pack, and the pack grants nothing.',
+  };
+}
+
 /**
  * The readiness of one selection, axis by axis. Never one badge. Every axis that nothing has checked says so: no reviewed knowledge or skills exist yet, no connector
  * exists (discovery alone never makes one usable), selecting creates no credential, and tested means only that the pilot suite ran this version for this target.
@@ -568,7 +580,7 @@ export function readinessOf(item: StackItem, ctx: ReadinessContext = {}): Readin
       : { axis: 'connector', state: 'none_available', label: 'No connector', explanation: 'No connector, MCP server or API connection exists for this entry. Setting one up will be a separate action.' };
   return [
     { axis: 'knowledge', state: 'not_linked', label: 'Not linked', explanation: 'No version-matched documentation is linked to this entry yet, so a worker gets only what you recorded here.' },
-    { axis: 'skills', state: 'none_reviewed', label: 'No reviewed skills', explanation: 'Skills appear here only once a reviewed, pinned binding exists. None does yet.' },
+    skillsAxis(e.id, ctx),
     connector,
     service
       ? { axis: 'auth', state: 'not_connected', label: 'Not connected', explanation: 'Selecting records your stack only. It creates no credential, makes no request and grants no access.' }

@@ -16,7 +16,7 @@ function source(answer: (url: string) => Response) {
 describe('the live stack settings', () => {
   it('reads the stack and posts an action with the revision it was read at, to the control API only', async () => {
     const { calls, ds } = source(() => new Response(JSON.stringify(STACK)));
-    expect(await ds.getStack!('p 1')).toEqual(STACK);
+    expect(await ds.getStack!('p 1')).toEqual({ ...STACK, skills: [] });
     await ds.stackAction!('p 1', { expectedRevision: 0, action: { kind: 'category.set', path: '.', category: 'payments', state: 'none' } });
     expect(calls).toEqual([
       { url: 'http://x/v1/projects/p%201/stack', method: 'GET', body: undefined },

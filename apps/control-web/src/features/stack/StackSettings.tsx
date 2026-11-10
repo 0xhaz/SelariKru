@@ -90,7 +90,7 @@ function Category({ row, component, live, onAct }: { row: CategoryRow; component
                 <p className="min-w-0 wrap-anywhere text-fg"><span className="font-medium">{i.label}</span>{i.version ? <span className="font-mono text-mono text-muted"> {i.version}</span> : null}</p>
                 <button type="button" className={buttonQuiet} disabled={!live} onClick={() => onAct({ kind: 'item.remove', path: component.path, category: row.id, key: i.key }, `Removed ${i.label} from ${row.label} for ${component.path}. No provider data was deleted and no credential was revoked.`)}>Remove<span className="sr-only"> {i.label} from {row.label}</span></button>
               </div>
-              <p className="text-sm text-muted">{i.origin} · {i.summary} · <span>No reviewed skills</span></p>
+              <p className="text-sm text-muted">{i.origin} · {i.summary} · <span>{i.skills}</span></p>
               <Readiness item={i} />
             </li>
           ))}
@@ -132,8 +132,8 @@ function CustomEntry({ section, component, live, onAct }: { section: StackSectio
   );
 }
 
-function SectionPanel({ section, component, live, native, onAct }: { section: StackSection; component: StackComponent; live: boolean; native: StackView['native']; onAct: (a: StackAction, done: string) => void }) {
-  const rows = useMemo(() => categoryRows(component, section, native), [component, section, native]);
+function SectionPanel({ section, component, live, native, skills, onAct }: { section: StackSection; component: StackComponent; live: boolean; native: StackView['native']; skills: StackView['skills']; onAct: (a: StackAction, done: string) => void }) {
+  const rows = useMemo(() => categoryRows(component, section, native, skills), [component, section, native, skills]);
   const toggle = (o: SearchOption): void => {
     if (o.selected) onAct({ kind: 'item.remove', path: component.path, category: o.category, key: o.entryId }, `Removed ${o.label} from ${o.categoryLabel} for ${component.path}. No provider data was deleted.`);
     else onAct({ kind: 'item.add', path: component.path, category: o.category, item: { kind: 'catalog', entryId: o.entryId } }, `Added ${o.label} to ${o.categoryLabel} for ${component.path}. Recorded only: nothing was connected, installed or run.`);
@@ -303,8 +303,8 @@ export function StackSettings({ port, connection, mode }: StackSettingsProps) {
 
           {component ? (
             <>
-              <SectionPanel section="frameworks" component={component} live={live} native={view.native} onAct={act} />
-              <SectionPanel section="services" component={component} live={live} native={view.native} onAct={act} />
+              <SectionPanel section="frameworks" component={component} live={live} native={view.native} skills={view.skills} onAct={act} />
+              <SectionPanel section="services" component={component} live={live} native={view.native} skills={view.skills} onAct={act} />
             </>
           ) : null}
           {removing !== null ? (

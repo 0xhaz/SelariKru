@@ -104,6 +104,12 @@ export interface BuildBundleInput {
   readonly destDir: string;
   /** Task files, written next to the source. They may not replace source files or name excluded paths. */
   readonly taskFiles?: Readonly<Record<string, string>>;
+  /**
+   * Files the worker may read and never change, such as knowledge packs: written like task files, then, after the base commit, made read-only (0444) with the directories
+   * in `readOnlyDirs` (0555), so a write by the worker fails. The completion gate still refuses any change to them.
+   */
+  readonly readOnlyFiles?: Readonly<Record<string, string>>;
+  readonly readOnlyDirs?: readonly string[];
   /** Further exclusions (path prefixes). They can never exclude `contract/runtime.md`. */
   readonly extraExclude?: readonly string[];
 }
@@ -178,7 +184,7 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
     written.add(item.path);
   }
 
-  for (const [rel, body] of Object.entries(input.taskFiles ?? {})) {
+  for (const [rel, body] of [...Object.entries(input.taskFiles ?? {}), ...Object.entries(input.readOnlyFiles ?? {})]) {
     safeRel(rel);
     if (isExcludedPath(rel)) throw new BundleError(`task file ${JSON.stringify(rel)} names excluded material`);
     const target = join(destDir, rel);
@@ -196,6 +202,12 @@ export async function buildTaskBundle(input: BuildBundleInput): Promise<TaskBund
   await git('init', '-q', '--template=');
   await git('add', '-A');
   await git('commit', '-q', '--no-verify', '--allow-empty', '-m', 'task base');
+
+  for (const rel of Object.keys(input.readOnlyFiles ?? {})) await chmod(join(destDir, rel), 0o444);
+  for (const rel of input.readOnlyDirs ?? []) {
+    safeRel(rel);
+    await chmod(join(destDir, rel), 0o555);
+  }
 
   // Taken from the commit, before any agent runs, and only from regular files: the workspace's own copies never decide what the gate ignores.
   const ignoreItems = keep.filter((k) => /(^|\/)\.gitignore$/.test(k.path) && (k.mode === '100644' || k.mode === '100755'));
@@ -241,4 +253,16 @@ export async function readRepoManifest(repoPath: string, sha: string): Promise<R
     commit: sha, fileCount, totalBytes,
     docs: docs.sort((a, b) => (a.path < b.path ? -1 : 1)).map((d) => ({ path: d.path, bytes: d.bytes, sha256: createHash('sha256').update(blobs.get(d.oid) ?? Buffer.alloc(0)).digest('hex') })),
   };
+}
+
+/** Gives write permission back to a tree made read-only for a worker, so the attempt directory can be removed. Follows no symlink; a missing tree is fine. */
+export async function unlockTree(root: string): Promise<void> {
+  const st = await lstat(root).catch(() => null);
+  if (!st || !st.isDirectory()) return;
+  await chmod(root, 0o755);
+  for (const e of await readdir(root, { withFileTypes: true })) {
+    const p = join(root, e.name);
+    if (e.isDirectory()) await unlockTree(p);
+    else if (e.isFile()) await chmod(p, 0o644);
+  }
 }

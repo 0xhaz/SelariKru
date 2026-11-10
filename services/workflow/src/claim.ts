@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
+import { harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
@@ -13,6 +13,8 @@ import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type 
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
+import { resolveTaskSkills } from './skills.ts';
+import type { SkillResolution } from '@selarikru/domain';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
 /** Allowlist: unknown lifecycle values do not dispatch. */
@@ -435,6 +437,15 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     await recordBlock(tx, key, c, statusRow, refusedRoute, null, now);
     return { reason: `model_blocked:${refusedRoute}` };
   }
+  // Knowledge packs: the bound, reviewed, unrevoked versions whose triggers match this task, within what policy grants. A relevant pack that cannot start new work (revoked,
+  // unreviewed, blocked or unknown) refuses the claim visibly, before placement can clear a block, rather than starting the task without it.
+  const skills = await resolveTaskSkills(tx, key, spec, runner.location, assigned.assignment.provider);
+  const refusedSkill = skills.refused[0];
+  if (refusedSkill !== undefined) {
+    const reason = `${refusedSkill.reason}:${refusedSkill.skillId}`;
+    await recordBlock(tx, key, c, statusRow, reason, null, now);
+    return { reason: `skill_blocked:${reason}` };
+  }
   const configured = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
   // Cloud the owner took away is a disabled location, exactly as a mode without cloud slots: placement says so and never moves the task elsewhere silently.
   const capacity = configured !== null && settings.cloudEligible === false ? { ...configured, cloud: { ...configured.cloud, limit: 0 } } : configured;
@@ -514,7 +525,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   }
   if (statusRow.placementBlock?.startsWith('budget:')) await clearBlock(tx, key);
 
-  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification));
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification), skills);
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
   const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
@@ -522,7 +533,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean, skills: SkillResolution): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -542,6 +553,11 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
     runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
     baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable, configRevision: config?.revision ?? 0 },
     modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
+  });
+  // What this attempt receives, by version and digest, in the claim's own transaction: provenance for the attempt and its evidence. Metadata only.
+  await tx.insert(schema.skillExecutionRecords).values({
+    tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, recordedAt: now,
+    record: { attemptId, taskId: key.taskId, revision: spec.revision, destination: runner.location, harness: harnessForProvider(assignment.provider), delivered: skills.delivered, omitted: skills.omitted, context: skills.context, recordedAt: now.toISOString() },
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();
   for (const claim of spec.resourceClaims) {
@@ -574,7 +590,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
-    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial,
+    attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial, skills: skills.delivered,
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

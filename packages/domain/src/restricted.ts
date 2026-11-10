@@ -11,12 +11,12 @@ import { ApprovalDestinationSchema, diffViolationCount, restrictedApprovalReason
 export const RESTRICTED_REASONS = {
   failed: [
     'worker_failed', 'task_bundle_failed', 'cancelled_before_start', 'timeout_before_start', 'agent_stop_unconfirmed', 'unexpected_mcp_server', 'cancelled', 'attempt_timeout',
-    'agent_result_failed', 'agent_exit_failed', 'diff_failed', 'reserved_path_changed', 'completion_gate_error', 'diff_outside_allowed_paths', 'change_set_store_failed',
+    'agent_result_failed', 'agent_exit_failed', 'diff_failed', 'reserved_path_changed', 'completion_gate_error', 'diff_outside_allowed_paths', 'change_set_store_failed', 'skill_pack_changed',
   ],
   blocked: [
     'worker_blocked', 'cloud_execution_required', 'no_local_repository', 'allowed_paths_invalid', 'base_not_full_commit', 'egress_enforcement_unavailable', 'scope_grant_unavailable',
     'no_model_recorded', 'unsupported_provider', 'unsupported_model', 'toolchain_unresolved', 'secret_in_task_text', 'model_mismatch', 'model_unverified',
-    'harness_capability_unavailable', 'approval_signal_refused',
+    'harness_capability_unavailable', 'approval_signal_refused', 'skill_delivery_invalid', 'skill_digest_mismatch',
   ],
   infrastructure_failed: [
     'provisioning_failed', 'provisioning_failed: sandbox unavailable', 'provisioning_failed: the toolchain pin could not be read', 'provisioning_failed: a setup step failed',

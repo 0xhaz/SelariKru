@@ -3,7 +3,7 @@ import { applyStackAction, emptyStack, type StackAction, type StackDocument } fr
 import type { StackView } from '@selarikru/view-protocol';
 import { categoryRows, componentRows, detectionRows, searchOptions } from './model.ts';
 
-const view = (document: StackDocument): StackView => ({ projectId: 'p', revision: 3, detectionRevision: 0, unreadable: false, catalogVersion: 'v', document, updatedBy: null, updatedAt: null, native: { ios: false, android: false } });
+const view = (document: StackDocument): StackView => ({ projectId: 'p', revision: 3, detectionRevision: 0, unreadable: false, catalogVersion: 'v', document, updatedBy: null, updatedAt: null, native: { ios: false, android: false }, skills: [] });
 function doc(...actions: StackAction[]): StackDocument {
   let d = emptyStack();
   for (const a of actions) {
@@ -103,5 +103,14 @@ describe('stack settings model', () => {
     expect(rows.commands[0]).toMatchObject({ command: 'pnpm run build', status: 'Proposed · needs review · not in effect' });
     expect(rows.skipped[0]).toBe('apps/x/package.json: a symlink, not followed');
     expect(rows.commit).toBe('cccccccccccc');
+  });
+});
+
+describe('the Skills axis', () => {
+  it('names a reviewed binding whose triggers name the entry, and No reviewed skills otherwise', () => {
+    const d = doc({ kind: 'component.upsert', path: '.', name: 'App', targets: ['server'] }, { kind: 'item.add', path: '.', category: 'frameworks', item: { kind: 'catalog', entryId: 'express' } }, { kind: 'item.add', path: '.', category: 'frameworks', item: { kind: 'catalog', entryId: 'react' } });
+    const skills = [{ name: 'Express routes and tests', version: '1.0.0', entries: ['express'] }];
+    const items = categoryRows(d.components[0]!, 'frameworks', undefined, skills).flatMap((r) => r.items);
+    expect(Object.fromEntries(items.map((i) => [i.label, i.skills]))).toEqual({ Express: 'Reviewed: Express routes and tests 1.0.0', React: 'No reviewed skills' });
   });
 });

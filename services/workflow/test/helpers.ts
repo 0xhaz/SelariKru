@@ -38,7 +38,7 @@ export async function setupTestDb(max = 25): Promise<TestDb> {
 }
 
 export async function resetDb(db: Db, budget: Record<string, unknown> = { limitUsd: 1000 }): Promise<void> {
-  await db.execute(sql`TRUNCATE model_assignments, run_settings, runner_settings, runner_config, projects, project_sequences, runs, task_revisions, task_status, dependencies, attempts, resource_claims, budget_reservations, artifacts, check_runs, approvals, decisions, knowledge_nodes, knowledge_edges, events, outbox, consumer_cursors, integration_deliveries, operation_receipts CASCADE`);
+  await db.execute(sql`TRUNCATE project_skill_bindings, skill_staged_versions, skill_pack_files, skill_revocations, skill_evaluations, skill_execution_records, model_assignments, run_settings, runner_settings, runner_config, projects, project_sequences, runs, task_revisions, task_status, dependencies, attempts, resource_claims, budget_reservations, artifacts, check_runs, approvals, decisions, knowledge_nodes, knowledge_edges, events, outbox, consumer_cursors, integration_deliveries, operation_receipts CASCADE`);
   await db.insert(schema.projects).values({ tenantId: TENANT, projectId: PROJECT, repository: 'r', defaultBranch: 'main', classification: 'internal' });
   await db.insert(schema.runs).values({ tenantId: TENANT, projectId: PROJECT, runId: RUN, lifecycle: 'running', budget });
 }

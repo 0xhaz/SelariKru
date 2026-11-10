@@ -1,6 +1,6 @@
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, Result, RunnerHarnessReport } from '@selarikru/domain';
+import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, ResolvedSkill, Result, RunnerHarnessReport } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
 
 export type RunnerLocation = 'local' | 'cloud';
@@ -76,6 +76,8 @@ export interface Lease {
   readonly streamable?: boolean;
   /** Whether this attempt can host a control session: streamable and not a benchmark trial. The control API re-checks both, and policy, for every ticket. Absent: it cannot. */
   readonly controllable?: boolean;
+  /** The knowledge packs resolved for this attempt at claim, by version and digest. Set at claim; absent on a lease rebuilt from a stored attempt, which reads the record. */
+  readonly skills?: readonly ResolvedSkill[];
 }
 
 export interface SkippedCandidate {

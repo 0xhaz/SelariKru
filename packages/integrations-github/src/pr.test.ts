@@ -125,6 +125,15 @@ describe('openReviewablePr', () => {
     expect(body).not.toContain('att_other_run');
   });
 
+  it('lists the knowledge packs each attempt of this run received, by version and digest, from the execution records', async () => {
+    const attempt = (attemptId: string, taskId: string) => ({ tenantId: TENANT, projectId: PROJECT, attemptId, taskId, revision: 1, attemptNumber: 1 });
+    await tdb.db.insert(schema.attempts).values([attempt('att_packs', 'task_a')]);
+    const delivered = [{ skillId: 'express-api-routes', versionId: 'express-api-routes@1.0.0', name: 'Express routes and tests', version: '1.0.0', digest: 'e'.repeat(64), origin: 'first_party', scope: 'platform', classification: 'public', dir: '.claude/skills/express-api-routes' }];
+    await tdb.db.insert(schema.skillExecutionRecords).values({ tenantId: TENANT, projectId: PROJECT, attemptId: 'att_packs', taskId: 'task_a', recordedAt: T0, record: { attemptId: 'att_packs', taskId: 'task_a', revision: 1, destination: 'local', harness: 'claude-code', delivered, omitted: [], context: { entries: [], actions: [] }, recordedAt: T0.toISOString() } });
+    await openReviewablePr(run, deps());
+    expect(gh.prs[0]!.body).toContain('- Attempt `att_packs` (task `task_a`): `express-api-routes@1.0.0` sha256 `' + 'e'.repeat(64) + '`');
+  });
+
   it('prints no approvals section when none were granted', async () => {
     await openReviewablePr(run, deps());
     expect(gh.prs[0]!.body).not.toContain('Approvals granted');

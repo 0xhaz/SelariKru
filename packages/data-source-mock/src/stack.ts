@@ -33,10 +33,12 @@ const refuse = (message: string): DataSourceException => new DataSourceException
 
 export interface DemoStack {
   get(projectId: string): Promise<StackView>;
+  /** The stack as it stands, for the demo skill library's resolver. */
+  document(projectId: string): StackDocument;
   act(projectId: string, request: StackActionRequestView): Promise<StackView>;
 }
 
-export function createDemoStack(nowIso: (projectId: string) => string): DemoStack {
+export function createDemoStack(nowIso: (projectId: string) => string, skillsFor: (projectId: string) => StackView['skills'] = () => []): DemoStack {
   const states = new Map<string, { revision: number; document: StackDocument; updatedAt: string | null }>();
   const stateOf = (projectId: string) => {
     let s = states.get(projectId);
@@ -45,10 +47,11 @@ export function createDemoStack(nowIso: (projectId: string) => string): DemoStac
   };
   const view = (projectId: string): StackView => {
     const s = stateOf(projectId);
-    return { projectId, revision: s.revision, detectionRevision: 1, unreadable: false, catalogVersion: STACK_CATALOG_VERSION, document: structuredClone(s.document), updatedBy: s.updatedAt ? 'demo owner' : null, updatedAt: s.updatedAt, native: NO_NATIVE };
+    return { projectId, revision: s.revision, detectionRevision: 1, unreadable: false, catalogVersion: STACK_CATALOG_VERSION, document: structuredClone(s.document), updatedBy: s.updatedAt ? 'demo owner' : null, updatedAt: s.updatedAt, native: NO_NATIVE, skills: skillsFor(projectId) };
   };
   return {
     async get(projectId) { return view(projectId); },
+    document: (projectId) => stateOf(projectId).document,
     async act(projectId, request) {
       const s = stateOf(projectId);
       if (request.expectedRevision !== s.revision) throw refuse('The stack changed since it was read. Reload and try again.');

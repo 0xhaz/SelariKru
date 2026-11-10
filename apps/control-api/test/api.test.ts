@@ -52,6 +52,12 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/stack`],
   ['POST', `/v1/projects/${PROJECT}/stack`],
   ['GET', `/v1/projects/${PROJECT}/attempts/a1/context`],
+  ['GET', `/v1/projects/${PROJECT}/skills`],
+  ['POST', `/v1/projects/${PROJECT}/skills/intake`],
+  ['POST', `/v1/projects/${PROJECT}/skills/review`],
+  ['POST', `/v1/projects/${PROJECT}/skills/revoke`],
+  ['POST', `/v1/projects/${PROJECT}/skills/bindings`],
+  ['GET', `/v1/projects/${PROJECT}/skills/attempts/a1`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],

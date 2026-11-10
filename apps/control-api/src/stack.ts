@@ -10,6 +10,7 @@ import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
 import { requireProject } from './store.ts';
+import { boundSkillsForStack } from './skills.ts';
 
 /**
  * Stack settings (docs/framework-tool-catalog.md §3, design.md §10 Stack). Per project and per component path, every category is explicitly Not decided, None, or a list
@@ -63,10 +64,12 @@ async function writeStack(tx: Tx, tenantId: string, projectId: string, change: {
     .where(and(eq(schema.projectStacks.tenantId, tenantId), eq(schema.projectStacks.projectId, projectId)));
 }
 
-const view = (projectId: string, s: StackRow) => ({
+const view = (projectId: string, s: StackRow, skills: Awaited<ReturnType<typeof boundSkillsForStack>>) => ({
   projectId, revision: s.revision, detectionRevision: s.detectionRevision, unreadable: s.unreadable, catalogVersion: STACK_CATALOG_VERSION, document: s.document, updatedBy: s.updatedBy, updatedAt: s.updatedAt,
   /** What runners report they can build natively. None reports a native toolchain in this build, so iOS and Android gates stay incomplete. */
   native: NO_NATIVE,
+  /** The reviewed, pinned knowledge packs bound to this project and the entries their triggers name, for each entry's Skills axis. */
+  skills,
 });
 
 /** Every free text an owner action carries, so a credential pasted into one is refused before anything is stored. */
@@ -93,7 +96,7 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
 
   app.get('/v1/projects/:id/stack', auth, async (req) => {
     const { projectId } = await projectOf(req);
-    return view(projectId, await loadStack(db, config.tenantId, projectId));
+    return view(projectId, await loadStack(db, config.tenantId, projectId), await boundSkillsForStack(db, config.tenantId, projectId));
   });
 
   // One owner change. The Brain compiles after it commits (the `onSend` hook in brain.ts lists this route).
@@ -112,7 +115,7 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
       await writeStack(tx, config.tenantId, projectId, { revision: current.revision + 1, by: uid, at }, r.doc);
       return { ...current, revision: current.revision + 1, document: withholdRestrictedDetection(r.doc), updatedBy: uid, updatedAt: at.toISOString() };
     });
-    return view(projectId, after);
+    return view(projectId, after, await boundSkillsForStack(db, config.tenantId, projectId));
   });
 
   // A runner's static detection of its own checkout at the task's base commit, for the attempt it holds. Work whose data stays on the device does not send one.

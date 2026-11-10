@@ -8,7 +8,7 @@ import { scope, tstz } from './common.ts';
  * advances a runner-acknowledged field through its config acknowledgement. `config_revision` is the runner config revision that carries a runner-acknowledged change.
  * Values are closed shapes (a boolean, a number, plan paths), never free text.
  */
-const settingColumns = () => ({
+export const settingColumns = () => ({
   field: text('field').notNull(),
   desired: jsonb('desired').$type<unknown>().notNull(),
   desiredRevision: integer('desired_revision').notNull(),

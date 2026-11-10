@@ -169,6 +169,13 @@
       "when": 1794310134315,
       "tag": "0023_stack_detection_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794312733021,
+      "tag": "0024_skills",
+      "breakpoints": true
     }
   ]
 }

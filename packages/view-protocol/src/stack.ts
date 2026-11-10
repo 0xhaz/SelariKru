@@ -16,6 +16,8 @@ export const StackViewSchema = z.object({
   updatedAt: z.string().nullable(),
   /** What runners report they can build natively. */
   native: z.object({ ios: z.boolean(), android: z.boolean() }).strict(),
+  /** Reviewed, pinned knowledge packs bound to the project, with the stack entries their triggers name. Absent from an older server: none. */
+  skills: z.array(z.object({ name: z.string(), version: z.string(), entries: z.array(z.string()) }).strict()).default([]),
 }).strict();
 export type StackView = z.infer<typeof StackViewSchema>;
 

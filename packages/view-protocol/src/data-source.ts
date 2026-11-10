@@ -3,6 +3,7 @@ import type { ProjectViewEvent } from './events.ts';
 import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
 import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainView } from './brain.ts';
 import type { StackActionRequestView, StackView } from './stack.ts';
+import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -41,6 +42,12 @@ export interface EngineeringDataSource {
   getStack?(projectId: string): Promise<StackView>;
   /** One stack change against the revision last read. Metadata only: it never authenticates, installs, requests or runs anything. Answers with the stack afterwards. */
   stackAction?(projectId: string, request: StackActionRequestView): Promise<StackView>;
+  /** The skill library for this project. Read on demand. Absent: this source has no skill library. */
+  getSkills?(projectId: string): Promise<SkillsView>;
+  /** One owner skill action. Answers with the library as it is afterwards. */
+  skillAction?(projectId: string, action: SkillActionView): Promise<SkillsView>;
+  /** The packs one attempt received at claim, by version and digest. */
+  getAttemptSkills?(projectId: string, attemptId: string): Promise<AttemptSkillsView>;
   disconnect(): void;
 }
 

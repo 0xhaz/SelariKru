@@ -391,7 +391,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : null}
         {route === 'settings' ? (
           <RouteBoundary resetKey="settings">
-            <SettingsPage stack={state.stack} connection={connection} mode={mode} />
+            <SettingsPage stack={state.stack} skills={state.skills} connection={connection} mode={mode} />
           </RouteBoundary>
         ) : null}
         {route === 'onboarding' ? (
@@ -413,7 +413,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         <WorkerDrawerHost
           workerId={workerId} tab={isTabId(workerTab) ? workerTab : undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
           onClose={closeWorker} onTab={(t: TabId) => replaceHashQuery({ wtab: t === 'task' ? null : t })}
-          onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} brain={state.brain}
+          onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} brain={state.brain} skills={state.skills}
         />
       ) : null}
     </div>

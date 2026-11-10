@@ -17,3 +17,15 @@ describe('the PR body', () => {
     expect(buildPrBody(pkg)).not.toContain('Human intervention');
   });
 });
+
+describe('the PR body: knowledge packs', () => {
+  it('lists each attempt\'s delivered packs by version and digest, and says they granted nothing', () => {
+    const body = buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', packs: [{ versionId: 'express-api-routes@1.0.0', digest: 'd'.repeat(64) }] }] });
+    expect(body).toContain('## Knowledge packs');
+    expect(body).toContain('- Attempt `a1` (task `t1`): `express-api-routes@1.0.0` sha256 `' + 'd'.repeat(64) + '`');
+    expect(body).toContain('granted no tool, path or approval');
+  });
+  it('is absent when no attempt received a pack', () => {
+    expect(buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', packs: [] }] })).not.toContain('Knowledge packs');
+  });
+});

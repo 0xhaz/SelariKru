@@ -12,6 +12,7 @@ import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 import { createDemoBrain } from './brain.ts';
 import { createDemoStack } from './stack.ts';
+import { createDemoSkills } from './skills.ts';
 
 interface Subscriber {
   cursor: number;
@@ -589,7 +590,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   // Simulated sources compiled by the same domain code the server runs. Reads touch no network.
   const brain = createDemoBrain((id) => snapshotOf(project(id)), (id) => new Date(timeOf(project(id))).toISOString());
-  const stack = createDemoStack((id) => new Date(timeOf(project(id))).toISOString());
+  // The skill library and the stack read each other: the resolver needs the stack, and the stack's Skills axis names the reviewed bindings.
+  const skills = createDemoSkills({ nowIso: (id) => new Date(timeOf(project(id))).toISOString(), snapshotOf: (id) => snapshotOf(project(id)), stackOf: (id) => stack.document(id) });
+  const stack = createDemoStack((id) => new Date(timeOf(project(id))).toISOString(), (id) => skills.forStack(id));
 
   return {
     mode: 'mock',
@@ -611,6 +614,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     brainAction: (projectId, action) => brain.act(project(projectId).fixture.projectId, action),
     getStack: (projectId) => stack.get(project(projectId).fixture.projectId),
     stackAction: (projectId, request) => stack.act(project(projectId).fixture.projectId, request),
+    getSkills: (projectId) => skills.get(project(projectId).fixture.projectId),
+    skillAction: (projectId, action) => skills.act(project(projectId).fixture.projectId, action),
+    getAttemptSkills: (projectId, attemptId) => skills.attempt(project(projectId).fixture.projectId, attemptId),
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);

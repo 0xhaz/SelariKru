@@ -10,3 +10,4 @@ export * from './onboarding.ts';
 export * from './settings.ts';
 export * from './brain.ts';
 export * from './stack.ts';
+export * from './skills.ts';
