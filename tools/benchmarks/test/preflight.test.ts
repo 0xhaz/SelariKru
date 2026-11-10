@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, repairStart, type Manifest } from '../src/manifest.ts';
-import { claudeCliLoginProbe } from '../src/cli-login.ts';
+import { claudeCliLoginProbe, probeEnv } from '../src/cli-login.ts';
 import { sbxAgentState, sbxAnthropicSecret } from '../src/workers/agent-state.ts';
 import { sandboxName } from '@selarikru/runtime-docker-local';
 import { formatPreflight, preflight, type PreflightInput } from '../src/preflight.ts';
@@ -316,5 +316,12 @@ describe('T8.1 manifest loader and preflight', () => {
     expect(text).toMatch(/download the on-device model in that profile/);
     // I4: the isolation note says what is actually true about agent state.
     expect(m.protocolNotes.find((n) => n.id === 'worker-trial-isolation')?.text).toMatch(/sbx global anthropic service secret/);
+  });
+});
+
+describe('the claude login probe environment', () => {
+  it('passes USER and LOGNAME (the CLI finds its keychain entry by user name) and nothing else', () => {
+    const env = probeEnv({ PATH: '/bin', HOME: '/h', USER: 'u', ANTHROPIC_API_KEY: 'sk-ant-api03-never', GITHUB_TOKEN: 'ghp_never' });
+    expect(env).toEqual({ PATH: '/bin', HOME: '/h', USER: 'u', LOGNAME: 'u' });
   });
 });
