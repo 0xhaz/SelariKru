@@ -14,7 +14,7 @@ export { APPROVAL_TTL_SECONDS, expireApprovals, openApproval, type ApprovalGate,
 export { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, type AcceptedReducedScope, type NotDeliveredTask, type ReducedScope, type RunScopeAssessment } from './reduced-scope.ts';
 export * from './placement.ts';
 export { retryTask } from './retry.ts';
-export { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, isReverifiableBlock, markRunReadyForReview, lockPartsForClaims, releaseTaskClaims, lockBeforeRunRow, lockStaleCandidate, reopenBlockedVerification, reverifyRun, reopenStaleVerification, retireStaleCandidate, REVERIFY_LIMIT, type ReverifyOutcome, type StaleCandidate, type VerificationApplication, type VerificationVerdict } from './verification.ts';
+export { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, isReverifiableBlock, leaveReviewForPlan, markRunReadyForReview, lockPartsForClaims, releaseTaskClaims, lockBeforeRunRow, lockStaleCandidate, reopenBlockedVerification, reverifyRun, reopenStaleVerification, retireStaleCandidate, REVERIFY_LIMIT, type ReverifyOutcome, type StaleCandidate, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
 export { formatMicros, toMicros } from './reserve.ts';
 export { loadRunEvidence, type RunEvidence } from './evidence.ts';

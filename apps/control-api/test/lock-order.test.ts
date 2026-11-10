@@ -90,6 +90,8 @@ describe('replan lock order', () => {
     await seedTask(t.db, specFor('t1'), 'ready');
     const res = await race(async (tx) => { await schedulerLock(tx); await statusRow(tx, 't1'); }, runRow, () => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('t1', { revision: 2 })] }));
     expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // A run that was not in review has nothing to leave.
+    expect(await t.db.execute(sql`SELECT 1 FROM events WHERE type = 'run.reverted'`)).toHaveLength(0);
   });
 });
 
@@ -113,6 +115,9 @@ describe('a verdict against a replan of the same run', () => {
     );
     expect(ready).toBe(true);
     expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // The replan landed on a run in review and gave it unfinished work: it is out of review again.
+    expect((await t.db.execute(sql`SELECT lifecycle FROM runs WHERE run_id = ${RUN}`))[0]!['lifecycle']).toBe('running');
+    expect(await t.db.execute(sql`SELECT 1 FROM events WHERE type = 'run.reverted'`)).toHaveLength(1);
   });
 });
 

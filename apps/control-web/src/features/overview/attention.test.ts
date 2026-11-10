@@ -297,6 +297,12 @@ describe('attention queue', () => {
       expect(review.nextAction).toMatch(/reduced scope/i);
     });
 
+    it('a run whose plan gained unfinished work is not offered for review', () => {
+      const s = snapshotOf({ tasks: [task('a', { status: 'verified' }), task('b', { status: 'planned' })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
+      expect(buildAttention(s, NOW, NOW).find((i) => i.id === 'review:run')).toBeUndefined();
+    });
+
     it('a fully verified run still says so', () => {
       const s = snapshotOf({ tasks: [task('a', { status: 'verified' })] });
       s.runs['run'] = { ...s.runs['run']!, lifecycle: 'ready_for_review' };
@@ -416,6 +422,12 @@ describe('a sandbox setup failure', () => {
     expect(text).toContain('could not download Node 24.22.1 from nodejs.org');
     expect(text).toMatch(/not the worker/i);
     expect(text).toMatch(/does not use a repair/i);
+  });
+
+  it('a restricted attempt\'s bare category does not repeat the code as its cause', () => {
+    const text = explain('infrastructure:provisioning_failed');
+    expect(text).not.toMatch(/provisioning_failed/);
+    expect(text).toMatch(/could not be set up: no reason was reported/);
   });
 
   it('says what stopped retrying once the infrastructure retries run out, and sends nobody to the repair path', () => {

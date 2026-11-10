@@ -2,7 +2,7 @@ import { outOfDateCopy } from '../out-of-date.ts';
 import { ADVISORY_APPROVAL_OPERATIONS, WORKER_APPROVAL_OPERATIONS, approvalUnavailableReason } from '@selarikru/domain';
 import { approvalStateAt, isBudgetStopped, isEmptyProject, isReverifiableReason, verifiedCounts, type ApprovalHistoryEntry, type ApprovalView, type AuthorizedViewCommand, type ChangeRequestView, type ProjectViewSnapshot, type RunView, type TaskView } from '@selarikru/view-protocol';
 import { formatAge, type Tone } from '@selarikru/ui';
-import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, hasStaleRecord, isClosedRun, isClosedTask, recordNoLongerValid, reducedScopeCovers, sentence } from '../overview/attention.ts';
+import { blockItem, classifyBlock, decisionIdForBlock, dependentsOf, explain, hasStaleRecord, isClosedRun, isClosedTask, presentableAsReady, reducedScopeCovers, sentence } from '../overview/attention.ts';
 import { hrefFor } from '../../shell/route.ts';
 import type { ConnectionState } from '../../shell/projection-store.ts';
 
@@ -396,7 +396,7 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
       note: mismatch ? 'Check what was merged on GitHub. SelariKru cannot change a merge.' : null,
       facts: [{ label: 'Status', value: mismatch ? 'Merged commit is not the verified commit' : 'Candidate is stale' }, { label: 'Verified candidate', value: short(cr.candidateSha), mono: true }, { label: 'GitHub head', value: cr.observedHeadSha ? short(cr.observedHeadSha) : 'Not reported', mono: true }, { label: 'Merge commit', value: cr.mergeCommitSha ? short(cr.mergeCommitSha) : 'Not reported', mono: true }],
       details: [{ label: 'Verified candidate', value: cr.candidateSha }, { label: 'GitHub head', value: cr.observedHeadSha ?? 'None' }, { label: 'Merge commit', value: cr.mergeCommitSha ?? 'None' }, { label: 'Provider status', value: cr.status }, { label: 'Base ref', value: cr.baseRef }],
-      actions: [prLink(cr, options.mode, simulated), ...(!mismatch && run.lifecycle === 'ready_for_review' && !recordNoLongerValid(run) ? [openPrAction(run, paused, uncovered)] : [])], since: cr.observedAt ?? snapshot.meta.observedAt,
+      actions: [prLink(cr, options.mode, simulated), ...(!mismatch && presentableAsReady(snapshot, run) ? [openPrAction(run, paused, uncovered)] : [])], since: cr.observedAt ?? snapshot.meta.observedAt,
       fingerprint: ['recon', cr.status, cr.observedHeadSha, cr.mergeCommitSha, cr.candidateSha].join('|'),
     }];
   }
@@ -423,7 +423,7 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
     }];
   }
   // A record that no longer stands is not ready, whatever the lifecycle says: the re-verify card speaks for this run instead.
-  if (run.lifecycle !== 'ready_for_review' || recordNoLongerValid(run)) return [];
+  if (!presentableAsReady(snapshot, run)) return [];
   if (cr && cr.status === 'open') {
     return [{
       ...base, id: `review:${run.runId}`, kind: 'merge_review', chip: 'Merge readiness', tone: 'success', title: `Pull request #${cr.prNumber} is ready for your review`,

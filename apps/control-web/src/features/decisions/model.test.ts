@@ -302,6 +302,15 @@ describe('merge readiness', () => {
     return s;
   };
 
+  it('a run whose plan gained unfinished work offers no pull request, even if its lifecycle has not caught up yet', () => {
+    for (const status of ['planned', 'ready', 'running', 'blocked'] as const) {
+      const tasks = [task('a', { status: 'verified' }), task('b', { status })];
+      expect(build(ready(null, tasks)).cards.filter((c) => c.kind === 'merge_review'), status).toEqual([]);
+      expect(build(ready({}, tasks)).cards.filter((c) => c.kind === 'merge_review'), status).toEqual([]);
+      expect(JSON.stringify(build(ready({ status: 'stale_candidate' }, tasks)).cards)).not.toContain('run.open_pull_request');
+    }
+  });
+
   it('merge card links to GitHub and offers no merge action', () => {
     const card = build(ready({})).cards[0]!;
     expect(card.kind).toBe('merge_review');

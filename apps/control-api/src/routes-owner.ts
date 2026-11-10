@@ -5,7 +5,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -303,7 +303,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       }
       if (stale !== null && leaving.length > 0) await retireStaleCandidate({ now }, tx, runScope, stale, leaving, 'owner_replanned_stale_record');
       const planRevision = current + 1;
-      // Accepting the first plan is what starts a run: `planning` becomes `running`, the state readiness and the PR gate require. Any later plan keeps the run's current lifecycle.
+      // Accepting the first plan is what starts a run: `planning` becomes `running`, the state readiness and the PR gate require. A later plan keeps the run's lifecycle,
+      // except that a run in review leaves it: every task this plan names is `planned` now, unfinished work the review never saw.
       await tx.update(schema.runs).set({ planRevision, lifecycle: sql`CASE WHEN lifecycle = 'planning' THEN 'running' ELSE lifecycle END` })
         .where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run.runId)));
       // The API accepts the plan; the actor is the control plane acting for the authenticated owner, who is named in the payload.
@@ -311,6 +312,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         projectId, runId: run.runId, taskId: run.runId, aggregateRevision: planRevision, type: 'plan.accepted', actor: SYSTEM_ACTOR,
         payload: { planRevision, taskIds: tasks.map((t) => t.taskId), acceptedFor: uid },
       });
+      await leaveReviewForPlan(tx, at, runScope, SYSTEM_ACTOR, planRevision, tasks.map((t) => t.taskId));
       return { planRevision, taskIds: tasks.map((t) => t.taskId) };
     };
 

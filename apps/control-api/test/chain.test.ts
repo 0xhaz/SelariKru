@@ -520,6 +520,19 @@ describe('run orchestration chain', () => {
       };
       const replanOf = async (runId: string, taskId: string) => post(evApp, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 1, tasks: [{ ...task(runId, taskId), revision: 2 }] });
 
+      it('a replan that adds work to a ready run takes it out of review, and no pull request can be opened on it', async () => {
+        const { runId } = await verifiedRun('t_ready_add');
+        const res = await post(evApp, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 1, tasks: [task(runId, 't_ready_more')] });
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+        expect(await lifecycle(runId)).toBe('running');
+        expect(await t.db.execute(sql`SELECT actor_kind, payload FROM events WHERE type = 'run.reverted' AND run_id = ${runId}`)).toMatchObject([{ actor_kind: 'system', payload: { reason: 'owner_replanned', taskIds: ['t_ready_more'] } }]);
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).body.error.details).toMatchObject({ reason: 'run_not_ready' });
+        const snap = (await evApp.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json() as { runs: { runId: string; lifecycle: string }[] };
+        expect(snap.runs.find((r) => r.runId === runId)?.lifecycle).toBe('running');
+        // The verified task keeps its record; only the run's readiness went.
+        expect(await taskStatus('t_ready_add')).toBe('verified');
+      });
+
       it('leaves a valid record alone: no re-verify, no cancel, no replan', async () => {
         const { runId, sha } = await verifiedRun('t_valid');
         const valid = await reverify(runId, 'b1');

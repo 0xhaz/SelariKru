@@ -57,8 +57,8 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'task.superseded': [S, Y],
   /** A verified task went back to `verifying` (or `blocked`) because the evidence for it was invalidated. */
   'task.reopened': [I],
-  /** A run left `ready_for_review` because its evidence was invalidated. */
-  'run.reverted': [I, S],
+  /** A run left `ready_for_review` because its evidence was invalidated, or because an accepted plan gave it unfinished work (the control plane, for the owner). */
+  'run.reverted': [I, S, Y],
   'task.blocked': [S, Y],
   'attempt.started': [W, S],
   'attempt.heartbeat': [W],

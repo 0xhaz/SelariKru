@@ -28,7 +28,8 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *
  * Who follows it. The verifier's verdict (`lockForVerdict` in services/verifier): candidate, run row, its parts' status rows, this lock, event sequence. An owner re-verify:
  * candidate, scheduler lock, run row, status rows, this lock (`lockBeforeRunRow`, `reverifyRun`). An owner replan: candidate if stale, scheduler lock, run row, the named tasks'
- * status rows. A cancel: candidate if stale, the task's status row, this lock; it takes no run row.
+ * status rows, then the event sequence; a run in review leaves it there, on the run row it already holds (`leaveReviewForPlan`). A cancel: candidate and scheduler lock if
+ * stale, the task's status row, this lock; only a stale exit takes the run row, last (below).
  *
  * Paths that still disagree, all at the run row, and how the loser of each recovers:
  * - The claim poll (`tryClaim`) takes the scheduler lock, a claimable task's status row, then the run row (`lockBudget`). Replan and re-verify hold the scheduler lock before
@@ -42,6 +43,19 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *     - a publish gets the same 503 on the runner route, and the runner retries it up to three times before letting the lease lapse to expiry;
  *     - lease expiry and the verifier are background loops: the pass that lost logs the error and the next tick does the work again, with no 503 anywhere. A verdict that loses
  *       releases its claim on the candidate, which stays assembled with its parts verifying, so a later tick claims it and judges it again.
+ *
+ * Three more paths take status rows first and the run row last, and the verdict takes the run row before its parts' status rows:
+ * - a cancel that retires a stale candidate: candidate, scheduler lock, the task's and the other parts' status rows, this lock, the event sequence, then the run row in `leaveReview`;
+ * - a rebuild's invalidation (`invalidate` in services/verifier/src/integrate.ts): the candidate rows it invalidates, scheduler lock, their parts' status rows, this lock, the event
+ *   sequence, then the run row as it reverts the run;
+ * - a merge reconcile (packages/integrations-github/src/reconcile.ts): the change request row, the verified parts' status rows (`markTaskMerged`), the event sequence, then the run row
+ *   as it marks the run merged.
+ * None of them can meet a verdict on a live candidate, one whose parts are `verifying`. Each touches the run row only through an `UPDATE ... WHERE lifecycle = 'ready_for_review'`,
+ * and a run with a part waiting for a verdict is never committed as `ready_for_review`: every path that sends a part to `verifying` or gives the run unfinished work (re-verify,
+ * a stale exit, a rebuild, an accepted plan, `leaveReviewForPlan`) takes it out of review in the same transaction, and the verdict's own `ready_for_review` is written only at its
+ * commit. Postgres tests that predicate against the committed row before it waits for a row lock, so the update skips the row the verdict holds rather than queueing behind it.
+ * The verdict may wait for their status rows, but they never wait for anything it holds: the two candidate-first paths take the candidate row before anything else, as the verdict
+ * does, so on the same candidate one simply goes first.
  */
 const lockClaimRows = (tx: Tx, scope: ClaimScope) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.claim_rows:${scope.tenantId}:${scope.projectId}`}, 0))`);
 
@@ -418,8 +432,26 @@ const REVERIFY_ACTOR = { kind: 'integration', id: 'reverify' } as const;
 const invalidateCheckRuns = (tx: Tx, run: RunScope, sha: string) => tx.execute(sql`UPDATE check_runs SET result = 'invalidated' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND candidate_sha = ${sha} AND result <> 'invalidated'`);
 
 async function leaveReview(tx: Tx, now: Date, run: RunScope, reason: string, candidateId: string, reopened: readonly string[]): Promise<void> {
+  await revertRun(tx, now, run, REVERIFY_ACTOR, { reason, candidateIds: [candidateId], reopenedTasks: reopened });
+}
+
+/**
+ * Takes a run out of `ready_for_review` and records `run.reverted`, or does nothing if it is not in review. Only a run in review is touched, so a caller whose run is already
+ * `running` neither writes nor waits for the row. Returns whether it moved.
+ */
+async function revertRun(tx: Tx, now: Date, run: RunScope, actor: Actor, payload: Record<string, unknown>): Promise<boolean> {
   const reverted = await tx.execute(sql`UPDATE runs SET lifecycle = 'running' WHERE tenant_id = ${run.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND lifecycle = 'ready_for_review' RETURNING run_id`);
-  if (reverted.length > 0) await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: run.runId, aggregateRevision: 0 }, now, { type: 'run.reverted', attemptId: null, actor: REVERIFY_ACTOR, payload: { reason, candidateIds: [candidateId], reopenedTasks: reopened } });
+  if (reverted.length > 0) await emit(tx, { projectId: run.projectId, runId: run.runId, taskId: run.runId, aggregateRevision: 0 }, now, { type: 'run.reverted', attemptId: null, actor, payload });
+  return reverted.length > 0;
+}
+
+/**
+ * An accepted plan revision put `taskIds` back to `planned` or added them, so the run has unfinished work and is not ready for review, whatever its record says. It leaves review
+ * here, as it does when its evidence is invalidated. A pull request already open stays as it is: the pull-request route refuses a run that is not in review, and a merge of it
+ * reconciles as `stale_candidate`. The caller holds the run row.
+ */
+export async function leaveReviewForPlan(tx: Tx, now: Date, run: RunScope, actor: Actor, planRevision: number, taskIds: readonly string[]): Promise<boolean> {
+  return revertRun(tx, now, run, actor, { reason: 'owner_replanned', planRevision, taskIds });
 }
 
 /**
