@@ -384,8 +384,12 @@ describe('a session', () => {
     c.send({ type: 'leave' });
     await c.waitFor((f) => f.type === 'ended' && f.reason === 'left');
     await link.waitFor((f) => f.type === 'close' && f.reason === 'left');
-    await new Promise((r) => setTimeout(r, 50));
-    const ended = (await eventsOf()).find((e) => e.type === 'terminal.control_ended');
+    // The end event is written after the close frame goes out, so wait for it rather than for a fixed time.
+    let ended: Awaited<ReturnType<typeof eventsOf>>[number] | undefined;
+    for (let i = 0; i < 100 && !ended; i++) {
+      ended = (await eventsOf()).find((e) => e.type === 'terminal.control_ended');
+      if (!ended) await new Promise((r) => setTimeout(r, 20));
+    }
     expect(ended).toMatchObject({ actor: 'human', id: 'owner_uid_1', attempt: lease.attemptId, payload: { reason: 'left', inputs: 1, withheld: 0 } });
     expect(JSON.stringify(ended)).not.toContain('hello world');
     expect((await sessionRow()).state).toBe('ended');
