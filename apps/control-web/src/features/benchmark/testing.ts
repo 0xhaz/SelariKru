@@ -28,7 +28,7 @@ function failedQuality(failed: readonly string[]): BenchmarkRecord['quality'] {
 
 const baseConfig: BenchmarkRecord['configuration'] = {
   manifestSha256: SHA.manifest, starterSha: SHA.starter, contractSha256: SHA.contract, verifierSha: SHA.verifier, candidateSha: 'c'.repeat(40),
-  harness: 'claude-code', harnessVersion: '2.1.0', codingModel: 'claude-sonnet-5-5', inferenceDestination: 'cloud', providerAccountReference: 'acct-demo',
+  harness: 'claude-code', harnessVersion: '2.1.0', codingModel: 'claude-sonnet-5-5', inferenceDestination: 'cloud', providerAccountReference: 'acct-demo', credentialMode: 'cli_login', accountTier: 'demo-tier',
   cacheCondition: 'warm', localHost: 'arm64-local', cloudHost: 'x86-cloud',
 };
 

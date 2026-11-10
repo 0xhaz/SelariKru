@@ -172,7 +172,7 @@ type Base = RawRecord;
 function baseRecord(trial: PlannedTrial, slot: AssistantSlot, route: BenchRoute, dataKind: RawRecord['dataKind'], fixtureId: string, sdkVersion: string, payload: string): Base {
   return {
     dataKind, status: 'not_run', track: 'assistant', trialId: trial.trialId, mode: route, blockId: null, attemptId: trial.trialId, slotId: slot.id, slotAttempt: trial.slotAttempt,
-    configuration: { candidateSha: null, inferenceDestination: route === 'ONLY_ON_DEVICE' ? 'device' : 'cloud', providerAccountReference: null, cacheCondition: slot.warmup ? null : 'warm', localHost: null, cloudHost: null },
+    configuration: { candidateSha: null, inferenceDestination: route === 'ONLY_ON_DEVICE' ? 'device' : 'cloud', providerAccountReference: null, credentialMode: null, accountTier: null, cacheCondition: slot.warmup ? null : 'warm', localHost: null, cloudHost: null },
     assistant: {
       fixtureId, requestedMode: route, observedInferenceSource: null, sdkVersion, schemaValid: null, warmup: slot.warmup, payloadSha256: payload,
       semanticReview: { reviewer: null, routeLabelHidden: null, retainedFacts: null, missingFacts: null, inventedRequirements: null },

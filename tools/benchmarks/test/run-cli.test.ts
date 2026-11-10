@@ -77,4 +77,21 @@ describe('the runner commands', () => {
     expect(lines.join('\n')).not.toContain('selarikru_test:');
     expect(await main(['report', '--manifest', manifestPath, '--records', records], io())).toBe(0);
   }, 60_000);
+
+  it('D6: with the tracked cli_login mode, preflight blocks the workers track until the CLI probe says logged in, and prints no account details', async () => {
+    const manifestPath = join(dir, 'manifest.json');
+    writeFileSync(manifestPath, JSON.stringify(resolvedManifest((m) => { m.credentials.mode = 'cli_login'; })));
+    const probeIo = (status: { present: boolean; loggedIn: boolean | null } | null): Io => ({ ...io({}), ...(status ? { cliLogin: async () => status } : {}) });
+    expect(await main(['run-workers', '--live', '--manifest', manifestPath, '--records', join(dir, 'r.json'), '--starter', dir], probeIo(null))).toBe(1);
+    expect(lines.join('\n')).toMatch(/claude_cli_login_unchecked/);
+    lines = [];
+    expect(await main(['run-workers', '--live', '--manifest', manifestPath, '--records', join(dir, 'r.json'), '--starter', dir], probeIo({ present: true, loggedIn: false }))).toBe(1);
+    expect(lines.join('\n')).toMatch(/claude_cli_not_logged_in/);
+    lines = [];
+    // Logged in: the credential check passes; the track is still refused for its other blockers (here the frozen hashes and no start).
+    expect(await main(['run-workers', '--live', '--manifest', manifestPath, '--records', join(dir, 'r.json'), '--starter', dir], probeIo({ present: true, loggedIn: true }))).toBe(1);
+    expect(lines.join('\n')).toMatch(/live dispatch refused: .*cohort_not_started: workers/);
+    expect(lines.join('\n')).not.toMatch(/claude_cli_/);
+    expect(lines.join('\n')).not.toMatch(/api_key_missing|@/);
+  });
 });

@@ -185,11 +185,14 @@ describe('T8.3 worker runner', () => {
   });
 
   it('a live-path run with fake adapters produces measured records the T8.4 report accepts', async () => {
-    const c = started(manifestFor(2));
-    const pf = preflight({ manifest: c.manifest, env: { ANTHROPIC_API_KEY: 'present' }, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts });
+    // D6: the owner's CLI login, with the probe faked; no API key in the environment.
+    const c = started(manifestFor(2, (m) => { m.credentials.mode = 'cli_login'; }));
+    const pf = preflight({ manifest: c.manifest, env: {}, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts, cliLogin: { present: true, loggedIn: true } });
     const e = env({ fail: ['FB-03'] });
     const { records } = await runWorkerCohort({ manifest: c.manifest, env: e, live: { preflight: pf, starts: c.starts } });
     expect(records.every((r) => r.dataKind === 'measured')).toBe(true);
+    // Every Track B record, run or not, names its credential mode and account tier.
+    expect(records.every((r) => r.configuration.credentialMode === 'cli_login' && r.configuration.accountTier === 'tier-2')).toBe(true);
     const file = exportResults({ manifest: c.manifest, starts: c.starts, records, generatedAtUtc: '2026-11-20T10:00:00.000Z' });
     const report = buildReport(file, c.manifest);
     const l1 = report.workers.modes.find((x) => x.mode === 'L1')!;

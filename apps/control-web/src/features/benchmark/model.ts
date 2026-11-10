@@ -497,6 +497,8 @@ const MATCH_DIMS: readonly Dim[] = [
   { label: 'harness version', pick: (r) => r.configuration.harnessVersion },
   { label: 'model', pick: (r) => r.configuration.codingModel },
   { label: 'account', pick: (r) => r.configuration.providerAccountReference },
+  { label: 'credential mode', pick: (r) => r.configuration.credentialMode, mixMessage: 'Credential modes differ (CLI login and API key): an account confounder, so this is not an isolated placement comparison.' },
+  { label: 'account tier', pick: (r) => r.configuration.accountTier, mixMessage: 'Account tiers differ: an account confounder, so this is not an isolated placement comparison.' },
   { label: 'inference destination', pick: (r) => r.configuration.inferenceDestination },
   { label: 'cache condition', pick: (r) => r.configuration.cacheCondition, mixMessage: 'Warm and cold attempts are mixed, so this is not a like-for-like comparison.' },
 ];

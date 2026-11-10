@@ -36,7 +36,7 @@ const shape = BenchmarkRecordSchema.shape;
 export const RawRecordSchema = BenchmarkRecordSchema.omit({
   protocolVersion: true, cohortId: true, configuration: true, resultSha256: true, publishedSha256: true, measuredResultsPresent: true,
 }).extend({
-  configuration: shape.configuration.pick({ candidateSha: true, inferenceDestination: true, providerAccountReference: true, cacheCondition: true, localHost: true, cloudHost: true }),
+  configuration: shape.configuration.pick({ candidateSha: true, inferenceDestination: true, providerAccountReference: true, credentialMode: true, accountTier: true, cacheCondition: true, localHost: true, cloudHost: true }),
 });
 export type RawRecord = z.infer<typeof RawRecordSchema>;
 
@@ -97,7 +97,7 @@ function toRecord(m: Manifest, r: RawRecord): BenchmarkRecord {
     configuration: {
       manifestSha256: fromManifest.manifestSha256, starterSha: fromManifest.starterSha, contractSha256: fromManifest.contractSha256,
       verifierSha: fromManifest.verifierSha, candidateSha: c.candidateSha, harness: fromManifest.harness, harnessVersion: fromManifest.harnessVersion,
-      codingModel: fromManifest.codingModel, inferenceDestination: c.inferenceDestination, providerAccountReference: c.providerAccountReference,
+      codingModel: fromManifest.codingModel, inferenceDestination: c.inferenceDestination, providerAccountReference: c.providerAccountReference, credentialMode: c.credentialMode, accountTier: c.accountTier,
       cacheCondition: c.cacheCondition, localHost: c.localHost, cloudHost: c.cloudHost,
     },
     assistant: r.assistant, timings: r.timings, resources: r.resources, cost: r.cost, humanMinutes: r.humanMinutes, quality: r.quality,
@@ -409,6 +409,22 @@ function pairProblem(mode: string, r: BenchmarkRecord | null): string | null {
 }
 
 /** Pairs are the frozen order's blocks, each side represented by its slot's last attempt. File order plays no part. */
+/**
+ * D6: the credential mode and account tier each side ran under. When they differ between the two modes, the comparison
+ * is not an isolated placement experiment, and the report says so. Only modes and tiers are named, never an account.
+ */
+function accountConfounder(a: string, b: string, blocks: readonly string[], slots: ReadonlyMap<string, SlotView>): string[] {
+  const accounts = (mode: string): string[] => [...new Set(ran(blocks.flatMap((blk) => {
+    const v = slots.get(`workers/${blk}/${mode}`);
+    return v === undefined ? [] : [...v.superseded, ...(v.representative === null ? [] : [v.representative])];
+  })).map((r) => `${r.configuration.credentialMode ?? 'unrecorded'}|${r.configuration.accountTier ?? 'unrecorded'}`))].sort();
+  const sa = accounts(a);
+  const sb = accounts(b);
+  if (sa.length === 0 || sb.length === 0 || (sa.length === 1 && sb.length === 1 && sa[0] === sb[0])) return [];
+  const say = (s: string[]) => s.map((x) => { const [mode, tier] = x.split('|'); return `${mode} on${s === sa ? ' account tier' : ''} ${tier}`; }).join(' and ');
+  return [`account confounder: ${a} ran with credential mode ${say(sa)}; ${b} with ${say(sb)}. Not an isolated placement comparison.`];
+}
+
 function compare(a: string, b: string, blocks: readonly string[], slots: ReadonlyMap<string, SlotView>): Comparison {
   const rep = (mode: string, block: string): BenchmarkRecord | null => slots.get(`workers/${block}/${mode}`)?.representative ?? null;
   const pairs: Pair[] = blocks.map((blockId) => {
@@ -423,6 +439,7 @@ function compare(a: string, b: string, blocks: readonly string[], slots: Readonl
   const confounders = pairs
     .filter((p) => p.permittedActions.a !== null && p.permittedActions.b !== null && p.permittedActions.a !== p.permittedActions.b)
     .map((p) => `${p.blockId}: ${a} had ${p.permittedActions.a} permitted human actions outside control mode, ${b} had ${p.permittedActions.b}.`);
+  confounders.push(...accountConfounder(a, b, blocks, slots));
   // Completion counts every attempt that ran in these blocks, superseded ones included.
   const completion = (mode: string): Completion => {
     const attempts = ran(blocks.flatMap((blk) => {

@@ -111,6 +111,7 @@ export function checkResults(file: BenchmarkFile, m: Manifest): string[] {
     trials.add(trialKey);
     const slot = slotIssue(r, order);
     if (slot !== null) issues.push(slot);
+    if (r.track === 'workers' && r.configuration.credentialMode === null) issues.push(`trial ${r.trialId}: a worker record names its credential mode (D6)`);
     if (r.track === 'workers' && r.timings.endToEndVerifiedMs !== null && r.timings.clockDomain !== SERVER_CLOCK) {
       issues.push(`trial ${r.trialId}: a delivery time must be on the ${SERVER_CLOCK} clock`);
     }

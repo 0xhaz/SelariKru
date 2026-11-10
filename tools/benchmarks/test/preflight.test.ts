@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, repairStart, type Manifest } from '../src/manifest.ts';
+import { claudeCliLoginProbe } from '../src/cli-login.ts';
 import { formatPreflight, preflight, type PreflightInput } from '../src/preflight.ts';
 import { HASHES, fixtureManifestText, resolvedManifest, SECRET, started } from './fixtures.ts';
 import { watchNetwork } from './network.ts';
@@ -228,5 +229,50 @@ describe('T8.1 manifest loader and preflight', () => {
     // No supported worker mode at all blocks the track.
     const none = preflight(input(resolvedManifest((m) => { m.workers.requiredModes = m.workers.requiredModes.map((r) => ({ ...r, availability: 'unsupported', unavailableReason: 'coupon' })); })));
     expect(none.liveDispatch.workers.blockers).toContain('no_supported_mode');
+  });
+
+  it('D6: the tracked manifest uses the owner\'s CLI login, and D4 is the approved $60 split but not marked authorized', () => {
+    const m = parseManifest(fixtureManifestText()).manifest;
+    expect(m.credentials.mode).toBe('cli_login');
+    expect(m.proposedVariableBudgetUsd).toMatchObject({ total: 60, codingPlanningVerificationModelsAndTools: 50, cloudRuntime: 5, assistantInference: 5, status: 'proposal_not_authorized', authorizedBy: null });
+  });
+
+  it('D6: in cli_login mode the API key is not asked for; the claude CLI must be present and logged in, checked without printing account details', () => {
+    const cli = resolvedManifest((m) => { m.credentials.mode = 'cli_login'; });
+    const ok = preflight(input(cli, { env: {}, cliLogin: { present: true, loggedIn: true } }));
+    expect(ok.liveDispatch.workers.allowed).toBe(true);
+    expect(ok.checks.find((c) => c.id === 'api_key')).toBeUndefined();
+    expect(ok.checks.find((c) => c.id === 'cli_login')).toMatchObject({ status: 'pass', tracks: ['workers'] });
+    const cases: [PreflightInput['cliLogin'], string][] = [
+      [{ present: false, loggedIn: null }, 'claude_cli_missing'],
+      [{ present: true, loggedIn: false }, 'claude_cli_not_logged_in'],
+      [{ present: true, loggedIn: null }, 'claude_cli_login_unknown'],
+      [undefined, 'claude_cli_login_unchecked'],
+    ];
+    for (const [cliLogin, blocker] of cases) {
+      const r = preflight(input(cli, { env: { ANTHROPIC_API_KEY: SECRET }, ...(cliLogin ? { cliLogin } : {}) }));
+      expect(r.liveDispatch.workers.blockers).toContain(blocker);
+      // The assistant track uses no model credential of the worker harness.
+      expect(r.liveDispatch.assistant.blockers).not.toContain(blocker);
+    }
+    // api_key mode ignores the CLI entirely.
+    expect(preflight(input(resolvedManifest(), { cliLogin: { present: false, loggedIn: null } })).liveDispatch.workers.allowed).toBe(true);
+  });
+
+  it('D6: the CLI login probe runs `claude auth status --json`, keeps only whether it is logged in, and never returns account details or a token', async () => {
+    const seen: string[][] = [];
+    const exec = (out: { stdout: string; code: number } | 'ENOENT') => async (file: string, args: readonly string[]) => {
+      seen.push([file, ...args]);
+      if (out === 'ENOENT') throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' });
+      return out;
+    };
+    const account = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'owner@example.com', orgName: 'Owner Org', apiKeySource: null, token: 'sk-ant-oat01-SECRETSECRET' });
+    const status = await claudeCliLoginProbe(exec({ stdout: account, code: 0 }))();
+    expect(status).toEqual({ present: true, loggedIn: true });
+    expect(JSON.stringify(status)).not.toMatch(/owner@example.com|Owner Org|sk-ant/);
+    expect(seen[0]).toEqual(['claude', 'auth', 'status', '--json']);
+    expect(await claudeCliLoginProbe(exec({ stdout: JSON.stringify({ loggedIn: false }), code: 1 }))()).toEqual({ present: true, loggedIn: false });
+    expect(await claudeCliLoginProbe(exec({ stdout: 'Logged in as owner@example.com', code: 0 }))()).toEqual({ present: true, loggedIn: null });
+    expect(await claudeCliLoginProbe(exec('ENOENT'))()).toEqual({ present: false, loggedIn: null });
   });
 });

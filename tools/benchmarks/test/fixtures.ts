@@ -19,6 +19,8 @@ export const SECRET = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
 export function resolvedManifest(over: (m: Manifest) => void = () => {}): Manifest {
   const m = parseManifest(fixtureManifestText()).manifest;
   m.cohortId = 'cohort-2026-11';
+  // The T8.1 tests exercise the API-key path; the tracked manifest's mode (D6) is cli_login, tested on its own.
+  m.credentials = { ...m.credentials, mode: 'api_key' };
   m.repository = { url: 'https://github.com/example/feedback-board', starterSha: STARTER, lockfileSha256: HASHES.lockfileSha256, contractSha256: '3'.repeat(64), verifierSha: 'feedbeef00112233445566778899aabbccddeeff', verifierSha256: HASHES.verifierSha256 };
   m.environment = {
     harness: 'claude-code', harnessVersion: '2.1.0', codingModel: 'claude-sonnet-5-5', inferenceProvider: 'anthropic', modelSettings: 'default', accountTier: 'tier-2', priceReference: 'rc-2026-11',
@@ -78,6 +80,8 @@ export interface WorkerOver {
   readonly failureDetail?: string;
   readonly account?: string;
   readonly slotAttempt?: number;
+  readonly credentialMode?: 'cli_login' | 'api_key';
+  readonly accountTier?: string;
 }
 
 /** One raw worker record, as a runner would write it. Completed and passing unless told otherwise. */
@@ -94,7 +98,7 @@ export function rawWorker(o: WorkerOver): RawRecord {
   return {
     dataKind: o.dataKind ?? 'measured', status, track: 'workers', trialId, mode: o.mode, blockId: `block-${o.block}`, attemptId: `${trialId}-a1`,
     slotId: `workers/block-${o.block}/${o.mode}`, slotAttempt: o.slotAttempt ?? 1,
-    configuration: { candidateSha: verified ? sha : null, inferenceDestination: 'cloud', providerAccountReference: o.account ?? null, cacheCondition: 'warm', localHost: o.mode === 'C1' ? null : 'arm64-laptop', cloudHost: o.mode === 'L1' ? null : 'cloud-run-x86' },
+    configuration: { candidateSha: verified ? sha : null, inferenceDestination: 'cloud', providerAccountReference: o.account ?? null, credentialMode: o.credentialMode ?? 'cli_login', accountTier: o.accountTier ?? 'tier-2', cacheCondition: 'warm', localHost: o.mode === 'C1' ? null : 'arm64-laptop', cloudHost: o.mode === 'L1' ? null : 'cloud-run-x86' },
     assistant: null,
     timings: { clockDomain: ran ? (o.clockDomain ?? 'server-monotonic') : null, startedAtUtc: null, endedAtUtc: null, firstOutputMs: null, generationCompleteMs: null, schemaValidationMs: null, endToEndVerifiedMs: verified ? ms : null, queueMs: null, startupMs: null, implementationMs: null, integrationMs: null, verificationMs: null, initialSetupMs: null, modelDownloadMs: null },
     resources: { localWorkerHours: null, cloudWorkerHours: null, integrationAndVerificationHours: null, workerHoursProvenance: 'unavailable', workerHoursSource: null, requestedVcpus: ran ? 2 : null, requestedMemoryGib: ran ? 4 : null, peakRssMiB: null, energyKwh: null, providerUsageByRole: ran ? [{ role: 'coding', inputTokens: 100_000 + o.block, outputTokens: 8_000, cacheTokens: null, provenance: 'observed', source: 'harness' }] : [], usageCoverage: ran ? 'partial' : 'none', integrationAndVerificationHoursAreSubsetOfHostTotals: true },
@@ -128,7 +132,7 @@ export function rawAssistant(o: AssistantOver): RawRecord {
   const slotId = o.warmup ? `assistant/warmup/${o.route}/${(o.index % 2) + 1}` : `assistant/${o.route}/${fixtureId}/rep-${Math.floor(o.index / 10) + 1}`;
   return {
     dataKind: 'measured', status, track: 'assistant', trialId, mode: o.route, blockId: null, attemptId: `${trialId}-a1`, slotId, slotAttempt: 1,
-    configuration: { candidateSha: null, inferenceDestination: device ? 'device' : 'cloud', providerAccountReference: null, cacheCondition: 'warm', localHost: null, cloudHost: null },
+    configuration: { candidateSha: null, inferenceDestination: device ? 'device' : 'cloud', providerAccountReference: null, credentialMode: null, accountTier: null, cacheCondition: 'warm', localHost: null, cloudHost: null },
     assistant: {
       fixtureId, requestedMode: o.route, observedInferenceSource: ran ? (o.observed === undefined ? (device ? 'ON_DEVICE' : 'IN_CLOUD') : o.observed) : null, sdkVersion: '12.5.0', schemaValid: ran ? true : null, warmup: o.warmup ?? false,
       payloadSha256: '9'.repeat(63) + String(o.index % 10), semanticReview: { reviewer: null, routeLabelHidden: null, retainedFacts: null, missingFacts: null, inventedRequirements: null },

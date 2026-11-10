@@ -21,6 +21,8 @@
     "codingModel": null,
     "inferenceDestination": null,
     "providerAccountReference": null,
+    "credentialMode": null,
+    "accountTier": null,
     "cacheCondition": null,
     "localHost": null,
     "cloudHost": null

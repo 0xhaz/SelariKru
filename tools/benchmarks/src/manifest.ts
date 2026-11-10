@@ -78,7 +78,13 @@ export const ManifestSchema = z.strictObject({
     verifierHostFrozen: z.boolean(),
   }),
   credentials: z.strictObject({
-    /** The environment variable holding the one benchmark API key (D6). Preflight checks it is set; its value is never read into output. */
+    /**
+     * D6: how the worker harness authenticates. `cli_login`: the owner's existing Claude Code CLI login; preflight checks the
+     * `claude` CLI is present and logged in, read-only, printing no account details. `api_key`: the key named by `apiKeyEnv`,
+     * checked by presence only. Every worker record carries the mode.
+     */
+    mode: z.enum(['cli_login', 'api_key']),
+    /** The environment variable holding the benchmark API key in `api_key` mode. Preflight checks it is set; its value is never read into output. */
     apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/),
     checkedBy: z.literal('presence_only_never_printed'),
   }),

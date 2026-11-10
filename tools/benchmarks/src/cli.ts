@@ -7,6 +7,7 @@ import { FrozenError, ManifestError, StartRecordSchema, TRACKS, freezeOrder, rea
 import { formatPreflight, preflight, type PreflightReport, type VerifierHashPair } from './preflight.ts';
 import { PUBLIC_RESULTS_PATH, PublishError, preparePublish, writePublished } from './publish.ts';
 import { ExportError, ReportError, buildReport, exportResults, renderReport } from './report.ts';
+import { claudeCliLoginProbe, type CliLoginProbe } from './cli-login.ts';
 import { RunUsageError } from './run-cli.ts';
 import { LiveRefusedError, OrderError } from './trials.ts';
 
@@ -52,6 +53,8 @@ export interface Io {
   readonly cwd?: string;
   /** Aborted on SIGINT: a running cohort cancels its trial and records the rest not run. */
   readonly signal?: AbortSignal;
+  /** D6, `cli_login` mode: the read-only claude CLI login probe. Absent: not checked, and preflight blocks the workers track. */
+  readonly cliLogin?: CliLoginProbe;
 }
 
 const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish|run-workers|run-assistant [--manifest p] [--verifier p] [--repo p] '
@@ -126,11 +129,13 @@ function required(flags: Map<string, string>, name: string): string {
   return v;
 }
 
-function runPreflight(ctx: Context, manifest: Manifest): PreflightReport {
+async function runPreflight(ctx: Context, manifest: Manifest): Promise<PreflightReport> {
   const verifierRoot = ctx.flags.get('verifier') ?? DEFAULTS.verifier;
   const repoRoot = ctx.flags.get('repo') ?? DEFAULTS.repo;
+  // The CLI login is probed only in cli_login mode, and only its presence and logged-in flag come back.
+  const cliLogin = manifest.credentials.mode === 'cli_login' && ctx.io.cliLogin ? await ctx.io.cliLogin() : undefined;
   return preflight({
-    manifest, env: ctx.io.env, starts: readStarts(ctx.startsDir),
+    manifest, env: ctx.io.env, starts: readStarts(ctx.startsDir), ...(cliLogin ? { cliLogin } : {}),
     verifier: { recorded: readRecorded(verifierRoot), recomputed: recompute(verifierRoot, repoRoot) },
   });
 }
@@ -148,8 +153,8 @@ async function runCommand(ctx: Context, which: 'workers' | 'assistant'): Promise
 const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<number>>> = {
   'run-workers': (ctx) => runCommand(ctx, 'workers'),
   'run-assistant': (ctx) => runCommand(ctx, 'assistant'),
-  preflight(ctx) {
-    const report = runPreflight(ctx, readManifest(ctx.manifestPath).manifest);
+  async preflight(ctx) {
+    const report = await runPreflight(ctx, readManifest(ctx.manifestPath).manifest);
     ctx.io.out(formatPreflight(report));
     return report.liveDispatch.workers.allowed && report.liveDispatch.assistant.allowed ? 0 : 1;
   },
@@ -161,7 +166,7 @@ const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<numbe
     ctx.io.out(`Froze seed and ${frozen.randomization.order.length} slots; order sha256 ${frozen.randomization.orderSha256}.`);
     return 0;
   },
-  'record-start'(ctx) {
+  async 'record-start'(ctx) {
     const track = required(ctx.flags, 'track');
     if (!(TRACKS as readonly string[]).includes(track)) throw new UsageError(`--track must be one of ${TRACKS.join(', ')}`);
     const t = track as Track;
@@ -177,7 +182,7 @@ const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<numbe
     if (existsSync(path)) throw new FrozenError(`${t} already has a start recorded at ${path}`);
     const stamp = manifest.starts[t];
     if (stamp !== null) throw new FrozenError(`${t} already started at ${stamp.startedAtUtc}; if its start file is missing, run record-start --repair`);
-    const decision = runPreflight(ctx, manifest).liveDispatch[t];
+    const decision = (await runPreflight(ctx, manifest)).liveDispatch[t];
     if (!decision.allowed) throw new BlockedError(`preflight blocks ${t}, so it cannot start: ${decision.blockers.join(', ')}`);
     const { start, manifest: stamped } = recordStart(manifest, t, ctx.io.now());
     // The stamp first: if the file write fails, the manifest still says the track started, so freeze stays refused
@@ -233,7 +238,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   process.once('SIGINT', () => stop.abort());
   const io: Io = {
     out: (s) => process.stdout.write(`${s}\n`), err: (s) => process.stderr.write(`${s}\n`), env: process.env,
-    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(), signal: stop.signal,
+    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(), signal: stop.signal, cliLogin: claudeCliLoginProbe(),
   };
   main(process.argv.slice(2), io).then((code) => { process.exitCode = code; });
 }

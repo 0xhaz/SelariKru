@@ -314,3 +314,23 @@ describe('T8.4 report', () => {
     expect(`${JSON.stringify(confounded)}${renderReport(confounded)}`).not.toContain(SECRET);
   });
 });
+
+describe('D6 credential mode', () => {
+  it('carries the credential mode and account tier on every worker record, and refuses a worker record without its mode', () => {
+    const file = exported([...pairedWorkers(1), rawWorker({ mode: 'H2', block: 1, status: 'not_run' })]);
+    for (const r of file.records) expect(r.configuration).toMatchObject({ credentialMode: 'cli_login', accountTier: 'tier-2' });
+    const bare = rawWorker({ mode: 'L1', block: 1 });
+    expect(() => exported([{ ...bare, configuration: { ...bare.configuration, credentialMode: null } }])).toThrow(/credential mode/);
+  });
+
+  it('states the account confounder when L1 and C1 or H2 use different credential modes or account tiers', () => {
+    const same = report(pairedWorkers(3));
+    expect(same.workers.comparisons.find((c) => c.id === 'L1-C1')!.confounders).toEqual([]);
+    const modes = report([...pairedWorkers(3).map((r) => (r.mode === 'C1' ? { ...r, configuration: { ...r.configuration, credentialMode: 'api_key' as const } } : r))]);
+    const c = modes.workers.comparisons.find((x) => x.id === 'L1-C1')!;
+    expect(c.confounders.join(' ')).toMatch(/account confounder: L1 ran with credential mode cli_login on account tier tier-2; C1 with api_key on tier-2/);
+    expect(renderReport(modes)).toMatch(/account confounder/);
+    const tiers = report([...pairedWorkers(3).map((r) => (r.mode === 'C1' ? { ...r, configuration: { ...r.configuration, accountTier: 'tier-4' } } : r))]);
+    expect(tiers.workers.comparisons.find((x) => x.id === 'L1-C1')!.confounders.join(' ')).toMatch(/account confounder: .*tier-2.*tier-4/);
+  });
+});

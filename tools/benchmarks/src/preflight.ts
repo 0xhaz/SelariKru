@@ -1,3 +1,4 @@
+import type { CliLoginStatus } from './cli-login.ts';
 import { isFrozen, startIssues, TRACKS, type Manifest, type StartRecords, type Track } from './manifest.ts';
 
 /**
@@ -9,7 +10,7 @@ import { isFrozen, startIssues, TRACKS, type Manifest, type StartRecords, type T
 export type { Track };
 export type CheckStatus = 'pass' | 'warn' | 'block';
 
-export type CheckId = 'required_fields' | 'budget_authority' | 'api_key' | 'verifier_host' | 'lockfile_frozen' | 'seed_and_order' | 'unchanged_since_start' | 'modes';
+export type CheckId = 'required_fields' | 'budget_authority' | 'api_key' | 'cli_login' | 'verifier_host' | 'lockfile_frozen' | 'seed_and_order' | 'unchanged_since_start' | 'modes';
 
 export interface Check {
   readonly id: CheckId;
@@ -58,6 +59,8 @@ export interface PreflightInput {
   };
   /** The cohort-start files present, per track. */
   readonly starts: StartRecords;
+  /** D6, `cli_login` mode: what the read-only `claude auth status` probe answered. Absent: not checked, which blocks. */
+  readonly cliLogin?: CliLoginStatus;
 }
 
 type Field = readonly [path: string, resolved: (m: Manifest) => boolean];
@@ -143,6 +146,19 @@ function apiKey(list: Checklist, m: Manifest, env: PreflightInput['env']): void 
   list.add({ id: 'api_key', label: 'API key present (D6)', status: present ? 'pass' : 'block', tracks: ['workers'], detail }, [`api_key_missing: ${name}`]);
 }
 
+/** D6, `cli_login` mode: the owner's Claude Code CLI login. Only whether it is present and logged in is ever known here. */
+function cliLogin(list: Checklist, status: CliLoginStatus | undefined): void {
+  const reason = status === undefined ? 'claude_cli_login_unchecked'
+    : !status.present ? 'claude_cli_missing'
+      : status.loggedIn === false ? 'claude_cli_not_logged_in'
+        : status.loggedIn === null ? 'claude_cli_login_unknown' : null;
+  const detail = reason === null ? 'The claude CLI is present and logged in. Checked read-only; no account details kept or printed.'
+    : reason === 'claude_cli_login_unchecked' ? 'The claude CLI login was not checked.'
+      : reason === 'claude_cli_missing' ? 'The claude CLI was not found.'
+        : reason === 'claude_cli_not_logged_in' ? 'The claude CLI is not logged in.' : 'The claude CLI login status could not be read.';
+  list.add({ id: 'cli_login', label: 'Claude CLI logged in (D6)', status: reason === null ? 'pass' : 'block', tracks: ['workers'], detail }, reason === null ? [] : [reason]);
+}
+
 function verifierHost(list: Checklist, m: Manifest): void {
   const frozen = m.environment.verificationEnvironment !== null && m.environment.verifierHostFrozen;
   const detail = frozen ? 'The verification environment is recorded and frozen.' : 'The verification environment is not recorded and frozen.';
@@ -217,7 +233,8 @@ export function preflight(input: PreflightInput): PreflightReport {
   const list = new Checklist();
   requiredFields(list, m);
   budgetAuthority(list, m);
-  apiKey(list, m, input.env);
+  if (m.credentials.mode === 'api_key') apiKey(list, m, input.env);
+  else cliLogin(list, input.cliLogin);
   verifierHost(list, m);
   lockfileFrozen(list, m, input.verifier);
   seedAndOrder(list, m);

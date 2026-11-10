@@ -26,7 +26,7 @@ export interface RunContext {
   readonly repoRoot: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly out: (s: string) => void;
-  readonly preflight: () => PreflightReport;
+  readonly preflight: () => Promise<PreflightReport>;
   readonly starts: () => StartRecords;
   readonly signal?: AbortSignal;
 }
@@ -40,8 +40,8 @@ function mode(ctx: RunContext): 'live' | 'dry-run' {
   return live ? 'live' : 'dry-run';
 }
 
-function gate(ctx: RunContext, track: Track): LiveAuthorization {
-  const live = { preflight: ctx.preflight(), starts: ctx.starts() };
+async function gate(ctx: RunContext, track: Track): Promise<LiveAuthorization> {
+  const live = { preflight: await ctx.preflight(), starts: ctx.starts() };
   assertLive(ctx.manifest, track, live);
   return live;
 }
@@ -65,7 +65,7 @@ export async function runWorkersCommand(ctx: RunContext): Promise<number> {
   const how = mode(ctx);
   const path = recordsPath(ctx);
   // Refused here, before any stack, sandbox or connection exists.
-  const live = how === 'live' ? gate(ctx, 'workers') : null;
+  const live = how === 'live' ? await gate(ctx, 'workers') : null;
   const { runWorkerCohort } = await import('./workers/runner.ts');
   const { loadDefaultPolicy } = await import('@selarikru/policy/load');
   const prior = readRecords(path);
@@ -115,7 +115,7 @@ export async function runWorkersCommand(ctx: RunContext): Promise<number> {
 export async function runAssistantCommand(ctx: RunContext): Promise<number> {
   const how = mode(ctx);
   const path = recordsPath(ctx);
-  const live = how === 'live' ? gate(ctx, 'assistant') : null;
+  const live = how === 'live' ? await gate(ctx, 'assistant') : null;
   const { runAssistantCohort } = await import('./assistant/runner.ts');
   const { loadBriefFixtures } = await import('./assistant/payload.ts');
   const fixtures = loadBriefFixtures(ctx.manifest, ctx.repoRoot);

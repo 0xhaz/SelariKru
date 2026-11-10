@@ -35,6 +35,7 @@
     "verifierHostFrozen": false
   },
   "credentials": {
+    "mode": "cli_login",
     "apiKeyEnv": "ANTHROPIC_API_KEY",
     "checkedBy": "presence_only_never_printed"
   },
@@ -219,6 +220,14 @@
     {
       "id": "assistant-requests",
       "text": "Each assistant request is single-turn on a new model instance, sent through the bench page in the owner's Chrome in the frozen order. Warm-up k sends fixture k in fixture order. A response whose inferenceSource is not the route's, or is missing or unknown, is a routing failure (status failed). firstOutputMs is null when the call does not stream. Model download and setup go to a separate setup ledger, never onto a record. Bytes are recorded as bytes; provider tokens only where the SDK reports them."
+    },
+    {
+      "id": "credentials-d6",
+      "text": "D6: local benchmarks use the owner's existing Claude Code CLI login (credentials.mode cli_login), not an API key. Preflight then checks, read-only with `claude auth status`, that the claude CLI is present and logged in, keeping only that flag: no account details are kept or printed and no token is read. In api_key mode it checks credentials.apiKeyEnv by presence only. Every worker record carries configuration.credentialMode and configuration.accountTier, and the report names an account confounder whenever two compared modes ran under different credential modes or account tiers."
+    },
+    {
+      "id": "budget-d4",
+      "text": "D4 is approved at $60 variable spend: $50 coding, planning and verification models and tools, $5 cloud runtime, $5 assistant inference. The manifest stays proposal_not_authorized until the owner marks it authorized, with payer, approver and time, at cohort start."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",

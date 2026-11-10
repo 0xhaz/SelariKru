@@ -101,11 +101,14 @@ export interface WorkerCohortResult {
 
 const notRunCriteria = (): RawRecord['quality']['criteria'] => FEEDBACK_CRITERIA.map((id) => ({ id, status: 'not_run' as const, evidenceReferences: [] }));
 
-function notRunRecord(p: PlannedTrial, dataKind: RawRecord['dataKind'], category: string, detail: string | null, confounders: readonly string[] = []): RawRecord {
+/** D6: every worker record names how the harness authenticated and the account tier, as the manifest pins them. */
+const accountOf = (m: Manifest) => ({ credentialMode: m.credentials.mode, accountTier: m.environment.accountTier });
+
+function notRunRecord(m: Manifest, p: PlannedTrial, dataKind: RawRecord['dataKind'], category: string, detail: string | null, confounders: readonly string[] = []): RawRecord {
   const slot = p.slot as Extract<Slot, { track: 'workers' }>;
   return {
     dataKind, status: 'not_run', track: 'workers', trialId: p.trialId, mode: slot.mode, blockId: slot.block, attemptId: p.trialId, slotId: slot.id, slotAttempt: p.slotAttempt,
-    configuration: { candidateSha: null, inferenceDestination: null, providerAccountReference: null, cacheCondition: null, localHost: null, cloudHost: null },
+    configuration: { candidateSha: null, inferenceDestination: null, providerAccountReference: null, ...accountOf(m), cacheCondition: null, localHost: null, cloudHost: null },
     assistant: null, timings: NO_TIMINGS, resources: NO_RESOURCES, cost: NO_COST, humanMinutes: NO_HUMAN_MINUTES,
     quality: { allRequiredChecksPassed: null, criteria: notRunCriteria(), withinDeclaredLimits: null }, operations: NO_OPERATIONS,
     failures: [{ category, detail }], confounders: [...confounders], artifactReferences: [],
@@ -149,11 +152,11 @@ export async function runWorkerCohort(o: WorkerCohortOptions): Promise<WorkerCoh
   const emit = (r: RawRecord, spentUsd: number | null = 0): void => { records.push(r); budget.charge(spentUsd); o.onRecord?.(r); };
   for (const trial of trials) {
     const mode = (trial.slot as Extract<Slot, { track: 'workers' }>).mode;
-    if (CLOUD_MODES.has(mode)) { emit(notRunRecord(trial, dataKind, CLOUD_UNAVAILABLE, CLOUD_UNAVAILABLE_NOTE, [CLOUD_UNAVAILABLE_NOTE])); continue; }
-    if (o.signal?.aborted) { emit(notRunRecord(trial, dataKind, 'cohort_stopped', 'the operator stopped the cohort before this trial')); continue; }
+    if (CLOUD_MODES.has(mode)) { emit(notRunRecord(m, trial, dataKind, CLOUD_UNAVAILABLE, CLOUD_UNAVAILABLE_NOTE, [CLOUD_UNAVAILABLE_NOTE])); continue; }
+    if (o.signal?.aborted) { emit(notRunRecord(m, trial, dataKind, 'cohort_stopped', 'the operator stopped the cohort before this trial')); continue; }
     const blocked = budget.blocker();
     if (blocked !== null) {
-      emit(notRunRecord(trial, dataKind, blocked, blocked === 'budget_exhausted' ? `the $${budget.ceiling} ceiling is spent` : 'an earlier trial\'s spend is unknown, so the remaining budget cannot be enforced'));
+      emit(notRunRecord(m, trial, dataKind, blocked, blocked === 'budget_exhausted' ? `the $${budget.ceiling} ceiling is spent` : 'an earlier trial\'s spend is unknown, so the remaining budget cannot be enforced'));
       continue;
     }
     const ran = await runLocalTrial({ trial, manifest: m, env, dataKind, budgetUsd: Math.min(budget.remaining, share), signal: o.signal, mono: o.mono ?? performanceClock });
@@ -206,7 +209,7 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
   const starterSha = m.repository.starterSha;
   const base: Omit<RawRecord, 'status' | 'timings' | 'resources' | 'cost' | 'humanMinutes' | 'quality' | 'operations' | 'failures' | 'confounders' | 'artifactReferences'> = {
     dataKind, track: 'workers', trialId: trial.trialId, mode: slot.mode, blockId: slot.block, attemptId: trial.trialId, slotId: slot.id, slotAttempt: trial.slotAttempt,
-    configuration: { candidateSha: null, inferenceDestination: null, providerAccountReference: null, cacheCondition: 'warm', localHost: m.environment.localHost, cloudHost: null },
+    configuration: { candidateSha: null, inferenceDestination: null, providerAccountReference: null, ...accountOf(m), cacheCondition: 'warm', localHost: m.environment.localHost, cloudHost: null },
     assistant: null,
   };
   const now = monotonicDateClock(mono);
