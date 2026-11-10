@@ -795,14 +795,14 @@ export function stackBrainSources(doc: StackDocument): StackSourceDraft[] {
   return [...doc.components].sort(byPath).map((c) => {
     const gates = targetGates(c.targets, { webChecks: 'not_run', native: NO_NATIVE }).filter((g) => g.state === 'incomplete');
     const sections: BrainSection[] = [{
-      anchor: `stack/${c.path}`, heading: c.name, key: `stack:${c.path}`,
+      anchor: `stack/${c.path}`, heading: c.name, key: `component:${c.path}`,
       text: `Component ${c.name} at ${c.path}. Targets: ${c.targets.map((t) => STACK_TARGET_LABELS[t]).join(', ') || 'none declared'}.${gates.length > 0 ? ` ${gates.map((g) => `${STACK_TARGET_LABELS[g.target]} gate incomplete: ${g.label}.`).join(' ')}` : ''} These are the recorded stack choices for this path, not tested integrations unless stated.`,
     }];
     for (const cat of STACK_CATEGORIES) {
       const s = c.categories[cat.id];
       if (s.state === 'not_decided') continue;
       sections.push({
-        anchor: `stack/${c.path}/${cat.id}`, heading: `${cat.label} (${c.path})`, key: `stack:${c.path}:${cat.id}`,
+        anchor: `stack/${c.path}/${cat.id}`, heading: `${cat.label} (${c.path})`, key: `component:${c.path}:${cat.id}`,
         text: s.state === 'none' ? `None: no ${cat.label} is used in this component.` : `Selected: ${s.items.map(itemText).join('; ')}.`,
       });
     }
@@ -810,9 +810,12 @@ export function stackBrainSources(doc: StackDocument): StackSourceDraft[] {
   });
 }
 
-/** The component path a Brain key about the stack names, or null when the key is not about the stack. */
+/**
+ * The component path a Brain key about a component's stack names (`component:<path>` or `component:<path>:<category>`), or null when the key is not one. The accepted
+ * brief's own `stack:<n>` lines are project-wide and are not component keys.
+ */
 export function stackKeyPath(key: string): string | null {
-  const m = /^stack:([^:]+)(?::|$)/.exec(key);
+  const m = /^component:([^:]+)(?::|$)/.exec(key);
   return m ? m[1]! : null;
 }
 

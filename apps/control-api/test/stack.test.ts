@@ -150,7 +150,7 @@ describe('stack settings feed the Project Brain as a cited source, scoped per co
     const [head] = await t.db.execute(sql`SELECT compiled_version FROM brain_heads`);
     expect(Number(head!['compiled_version'])).toBeGreaterThan(0);
     const brain = (await get(h.app, brainUrl)).body;
-    const web = claimsOf(brain).find((c: any) => c.key === 'stack:apps/web:frameworks');
+    const web = claimsOf(brain).find((c: any) => c.key === 'component:apps/web:frameworks');
     expect(web).toMatchObject({ page: 'architecture', status: 'current', text: expect.stringContaining('Next.js 15.1.0'), citations: [{ sourceId: 'stack:apps/web', anchor: 'stack/apps/web/frameworks' }] });
     const cite = web.citations[0];
     const src = await get(h.app, `${brainUrl}/sources/${encodeURIComponent(cite.sourceId)}/revisions/${cite.revision}`);
@@ -162,9 +162,9 @@ describe('stack settings feed the Project Brain as a cited source, scoped per co
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     const ctx = claim.body.lease.context;
     const keys = ctx.claims.map((c: any) => c.key);
-    expect(keys).toEqual(expect.arrayContaining(['stack:apps/web', 'stack:apps/web:frameworks']));
-    expect(keys.filter((k: string) => k.startsWith('stack:apps/mobile') || k.startsWith('stack:services/api'))).toEqual([]);
-    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:stack:apps/mobile:frameworks', reason: 'out_of_scope' }]));
+    expect(keys).toEqual(expect.arrayContaining(['component:apps/web', 'component:apps/web:frameworks']));
+    expect(keys.filter((k: string) => k.startsWith('component:apps/mobile') || k.startsWith('component:services/api'))).toEqual([]);
+    expect(ctx.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks', reason: 'out_of_scope' }]));
   });
 
   it('a restricted project\'s stack is never served to a streamable attempt, and is named only by its source', async () => {

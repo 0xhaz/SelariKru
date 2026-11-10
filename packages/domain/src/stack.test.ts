@@ -300,17 +300,28 @@ describe('stack selections: per component, None is not Not decided', () => {
     const compilation = compileBrain({ revisions, revocations: [], kept: new Set(), previous: [], version: 1, generatedAt: '2026-11-10T08:00:00.000Z' });
     const bundle = (paths: string[]) => buildContextBundle({ compilation, revisions, revocations: [], sourceHead: seq, destination: 'local', streamable: false, task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: [], dependsOn: [], paths } });
     const web = bundle(['apps/web/src']);
-    expect(web.claims.map((c) => c.key).sort()).toEqual(['stack:apps/web', 'stack:apps/web:frameworks']);
-    expect(web.claims.find((c) => c.key === 'stack:apps/web:frameworks')).toMatchObject({ text: expect.stringContaining('Next.js'), citations: [{ sourceId: 'stack:apps/web', revision: 1, anchor: 'stack/apps/web/frameworks' }] });
-    expect(web.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:stack:apps/mobile:frameworks', reason: 'out_of_scope' }]));
+    expect(web.claims.map((c) => c.key).sort()).toEqual(['component:apps/web', 'component:apps/web:frameworks']);
+    expect(web.claims.find((c) => c.key === 'component:apps/web:frameworks')).toMatchObject({ text: expect.stringContaining('Next.js'), citations: [{ sourceId: 'stack:apps/web', revision: 1, anchor: 'stack/apps/web/frameworks' }] });
+    expect(web.omissions).toEqual(expect.arrayContaining([{ kind: 'claim', id: 'architecture:component:apps/mobile:frameworks', reason: 'out_of_scope' }]));
     expect(JSON.stringify(web.claims)).not.toMatch(/FastAPI|Expo/);
     const mobile = bundle(['apps/mobile']);
-    expect(mobile.claims.find((c) => c.key === 'stack:apps/mobile:frameworks')!.text).toMatch(/Expo.*React Native/);
+    expect(mobile.claims.find((c) => c.key === 'component:apps/mobile:frameworks')!.text).toMatch(/Expo.*React Native/);
     expect(JSON.stringify(mobile.claims)).not.toMatch(/Next\.js|FastAPI/);
     const api = bundle(['services/api']);
-    expect(api.claims.find((c) => c.key === 'stack:services/api:payments')!.text).toMatch(/None/);
+    expect(api.claims.find((c) => c.key === 'component:services/api:payments')!.text).toMatch(/None/);
     // A task that touches nothing in any component gets no stack at all.
-    expect(bundle(['docs']).claims.filter((c) => c.key.startsWith('stack:'))).toEqual([]);
+    expect(bundle(['docs']).claims.filter((c) => c.key.startsWith('component:'))).toEqual([]);
+  });
+
+  it('the accepted brief\'s own stack lines (stack:1, stack:2) are not component claims and stay in scope for every task', () => {
+    const brief: BrainSourceRevision = {
+      sourceId: 'brief:p', revision: 1, kind: 'brief', title: 'Accepted brief', standing: 'accepted', classification: 'internal', allowedUse: allowedUseFor('internal'), derivedFrom: [], taskId: null,
+      provenance: { origin: 'onboarding', ref: 'blueprint:v1', recordedBy: 'control-api' }, contentSha256: 'a'.repeat(64), seq: 1, recordedAt: '2026-11-10T08:00:00.000Z',
+      sections: [{ anchor: 'stack/1', heading: 'React', text: 'Interactive UI', key: 'stack:1' }],
+    };
+    const compilation = compileBrain({ revisions: [brief], revocations: [], kept: new Set(), previous: [], version: 1, generatedAt: '2026-11-10T08:00:00.000Z' });
+    const b = buildContextBundle({ compilation, revisions: [brief], revocations: [], sourceHead: 1, destination: 'local', streamable: false, task: { taskId: 'T1', baseSha: 'b'.repeat(40), criteria: [], dependsOn: [], paths: ['src'] } });
+    expect(b.claims.map((c) => c.key)).toEqual(['stack:1']);
   });
 
   it('the repository root component is in scope for every task', () => {
@@ -318,7 +329,7 @@ describe('stack selections: per component, None is not Not decided', () => {
     doc = ok(doc, { kind: 'item.add', path: '.', category: 'package_build', item: { kind: 'catalog', entryId: 'pnpm' } });
     const s = stackBrainSources(doc);
     expect(s[0]!.sourceId).toBe('stack:.');
-    expect(s[0]!.sections.map((x) => x.key)).toContain('stack:.:package_build');
+    expect(s[0]!.sections.map((x) => x.key)).toContain('component:.:package_build');
   });
 });
 

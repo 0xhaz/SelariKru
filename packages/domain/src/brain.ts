@@ -395,7 +395,7 @@ export interface BundleTask {
   readonly criteria: readonly string[];
   /** Tasks this one depends on: their claims are in scope too. */
   readonly dependsOn: readonly string[];
-  /** The paths the task may change. A stack claim is in scope only for the components these touch (the repository root's always). Absent: the root's only. */
+  /** The paths the task may change. A component's stack claim (`component:<path>…`) is in scope only for the components these touch (the repository root's always). Absent: the root's only. */
   readonly paths?: readonly string[];
 }
 
