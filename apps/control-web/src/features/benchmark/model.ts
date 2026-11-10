@@ -1,4 +1,4 @@
-import { EXECUTION_LABELS, MODEL_ROUTE_LABELS } from '@selarikru/view-protocol';
+import { EXECUTION_LABELS, MODEL_ROUTE_LABELS, supersededAttemptIds } from '@selarikru/view-protocol';
 import type { Tone } from '@selarikru/ui';
 import { ASSISTANT_EVIDENCE_IDS, WORKER_MODES, allCriteriaPassed, type BenchmarkCohort, type BenchmarkFile, type BenchmarkLoad, type BenchmarkRecord, type WorkerMode } from './schema.ts';
 
@@ -317,11 +317,15 @@ function inferenceCell(records: readonly BenchmarkRecord[]): HostCell {
   return { text: only === null || only === undefined ? 'Not recorded' : MODEL_ROUTE_LABELS[only], detail };
 }
 
-function workerRow(mode: WorkerMode, records: readonly BenchmarkRecord[], kind: DataKind, planned: number): WorkerRow {
+/**
+ * `records` is every attempt: completion, cost, usage and hours count them all. `timed` leaves out superseded
+ * attempts (a later attempt in the same slot replaced them), so only a slot's representative is ever timed.
+ */
+function workerRow(mode: WorkerMode, records: readonly BenchmarkRecord[], timed: readonly BenchmarkRecord[], kind: DataKind, planned: number): WorkerRow {
   const counts = countRecords(records, workerPassed);
   const N = records.filter(comparable).length;
   const all = records.filter(ran);
-  const passing = records.filter((r) => comparable(r) && workerPassed(r) && r.timings.endToEndVerifiedMs !== null);
+  const passing = timed.filter((r) => comparable(r) && workerPassed(r) && r.timings.endToEndVerifiedMs !== null);
   const mixed = new Set(records.filter(comparable).map((r) => r.configuration.cacheCondition)).size > 1;
   const row: WorkerRow = {
     mode, workerCount: WORKER_COUNT[mode], workerLabel: workerLabel(mode), executionHost: hostCell(mode, records), inference: inferenceCell(records), cache: cacheLabel(records), counts,
@@ -356,11 +360,12 @@ function warmupLedger(records: readonly BenchmarkRecord[]): Figure {
   return charges.length > 0 ? { text: usd(charges.reduce((s, v) => s + v, 0)), detail: `${detail} Charges known for ${charges.length} of ${warm.length}.`, provenance: 'observed', basis: BASIS.warmups } : { text: 'Unavailable', detail: `${detail} Charges not recorded. Not zero.`, provenance: 'unavailable', basis: BASIS.warmups };
 }
 
-function assistantRow(mode: string, records: readonly BenchmarkRecord[], kind: DataKind, planned: number): AssistantRow {
+function assistantRow(mode: string, records: readonly BenchmarkRecord[], representatives: readonly BenchmarkRecord[], kind: DataKind, planned: number): AssistantRow {
   const counts = countRecords(records, assistantPassed);
   const measured = records.filter(comparable);
   const correct = measured.filter(routingOk);
-  const timed = measured.filter(assistantPassed);
+  // Only a slot's representative is timed; superseded attempts still count everywhere else.
+  const timed = representatives.filter((r) => comparable(r) && assistantPassed(r));
   const mixed = new Set(measured.map((r) => r.configuration.cacheCondition)).size > 1;
   const sources = [...new Set(measured.map((r) => (r.assistant?.observedInferenceSource === 'ON_DEVICE' ? 'On device' : r.assistant?.observedInferenceSource === 'IN_CLOUD' ? 'In cloud' : 'Unknown')))];
   const usageRollups = measured.map((r) => {
@@ -431,22 +436,31 @@ function criteriaText(record: BenchmarkRecord): string {
   return `${passed} of ${criteria.length} passed${failed.length > 0 ? `. Failed: ${failed.join(', ')}` : ''}`;
 }
 
-function attemptRow(record: BenchmarkRecord, kind: DataKind): AttemptRow {
+function attemptRow(record: BenchmarkRecord, kind: DataKind, superseded: boolean): AttemptRow {
   const passed = record.track === 'workers' ? workerPassed(record) : assistantPassed(record);
-  const status = statusOf(record, passed);
+  const outcome = statusOf(record, passed);
+  // A superseded attempt keeps its row and its outcome, named in the failure line; the status says it was replaced.
+  const status: { label: string; tone: Tone } = superseded ? { label: 'Superseded', tone: 'neutral' } : outcome;
   const ms = record.track === 'workers' ? record.timings.endToEndVerifiedMs : record.timings.generationCompleteMs;
   const costValue = record.cost.platformPaidActual ?? record.cost.platformPaidEstimated;
   const costProvenance: FigureProvenance = record.cost.platformPaidActual !== null ? 'observed' : record.cost.platformPaidEstimated !== null ? 'estimated' : 'unavailable';
-  const failure = record.failures.length > 0 ? record.failures.map((f) => (f.detail !== null ? `${f.category}: ${f.detail}` : f.category)).join('; ') : null;
+  const failures = record.failures.length > 0 ? record.failures.map((f) => (f.detail !== null ? `${f.category}: ${f.detail}` : f.category)).join('; ') : null;
+  const failure = superseded ? [`Replaced after: ${outcome.label}.`, failures].filter(Boolean).join(' ') : failures;
   const prefix = ran(record) ? 'Unavailable' : NOT_MEASURED;
   const wrongClock = record.track === 'workers' && ms !== null && record.timings.clockDomain !== SERVER_CLOCK;
   const timeBasis = record.track !== 'workers' ? BASIS.complete : wrongClock ? `End-to-end verified, ${clockLabel([record])}` : BASIS.time;
   return {
     attemptId: record.attemptId, mode: POLICY[record.mode] ?? record.mode, statusLabel: status.label, tone: status.tone, passed, criteria: criteriaText(record),
-    time: stamp(ms !== null ? { text: formatMs(ms), detail: wrongClock ? `Recorded on ${clockLabel([record])}.` : record.track === 'workers' && !passed ? 'Not a passing run, so not in the median.' : null, provenance: 'observed', basis: timeBasis } : { text: prefix, detail: null, provenance: 'unavailable', basis: timeBasis }, kind),
+    time: stamp(ms !== null ? { text: formatMs(ms), detail: timeDetail(record, passed, superseded, wrongClock), provenance: 'observed', basis: timeBasis } : { text: prefix, detail: null, provenance: 'unavailable', basis: timeBasis }, kind),
     cost: stamp(costValue !== null ? { text: usd(costValue), detail: null, provenance: costProvenance, basis: `Platform-paid. Rate card ${record.cost.rateCardVersion ?? 'not recorded'}.` } : { text: prefix, detail: null, provenance: 'unavailable', basis: 'Platform-paid.' }, kind),
     humanLabel: humanLabelOf(record), candidate: record.configuration.candidateSha?.slice(0, 12) ?? null, candidateFull: record.configuration.candidateSha, evidence: evidenceLinks(record.artifactReferences), failure,
   };
+}
+
+function timeDetail(record: BenchmarkRecord, passed: boolean, superseded: boolean, wrongClock: boolean): string | null {
+  if (superseded) return 'Superseded by a later attempt in the same slot, so not timed.';
+  if (wrongClock) return `Recorded on ${clockLabel([record])}.`;
+  return record.track === 'workers' && !passed ? 'Not a passing run, so not in the median.' : null;
 }
 
 const short = (value: string): string => (/^[0-9a-f]{16,}$/i.test(value) ? value.slice(0, 12) : value);
@@ -502,12 +516,13 @@ function dimensionReasons(records: readonly BenchmarkRecord[]): string[] {
   return reasons;
 }
 
-interface Side { readonly mode: string; readonly records: readonly BenchmarkRecord[]; readonly passedN: number; readonly N: number; readonly spread: Spread | null }
+/** `records` is every attempt, for completion; `representatives` leaves out superseded attempts, for times and pairs. */
+interface Side { readonly mode: string; readonly records: readonly BenchmarkRecord[]; readonly representatives: readonly BenchmarkRecord[]; readonly passedN: number; readonly N: number; readonly spread: Spread | null }
 
-function toSide(mode: string, records: readonly BenchmarkRecord[]): Side {
+function toSide(mode: string, records: readonly BenchmarkRecord[], representatives: readonly BenchmarkRecord[]): Side {
   const usable = records.filter(comparable);
-  const passing = usable.filter((r) => workerPassed(r) && r.timings.endToEndVerifiedMs !== null).map((r) => r.timings.endToEndVerifiedMs!);
-  return { mode, records, passedN: usable.filter(workerPassed).length, N: usable.length, spread: passing.length > 0 ? spreadOf(passing) : null };
+  const passing = representatives.filter((r) => comparable(r) && workerPassed(r) && r.timings.endToEndVerifiedMs !== null).map((r) => r.timings.endToEndVerifiedMs!);
+  return { mode, records, representatives, passedN: usable.filter(workerPassed).length, N: usable.length, spread: passing.length > 0 ? spreadOf(passing) : null };
 }
 
 /** One side's result in the plan's wording, always with its n of N, so no verdict is read without its sample. */
@@ -524,8 +539,8 @@ function pairsOf(a: Side, b: Side): { valid: number; excluded: string[] } {
     for (const r of rows.filter((x) => comparable(x) && x.blockId !== null)) map.set(r.blockId!, [...(map.get(r.blockId!) ?? []), r]);
     return map;
   };
-  const left = blocks(a.records);
-  const right = blocks(b.records);
+  const left = blocks(a.representatives);
+  const right = blocks(b.representatives);
   let valid = 0;
   const excluded: string[] = [];
   for (const block of [...new Set([...left.keys(), ...right.keys()])].sort()) {
@@ -577,16 +592,18 @@ const costExclusionsOf = (records: readonly BenchmarkRecord[]): string[] => [...
 function workerCohort(cohort: BenchmarkCohort, records: readonly BenchmarkRecord[], kind: DataKind): WorkerCohortView {
   const present = WORKER_MODES.filter((m) => records.some((r) => r.mode === m));
   const modes = WORKER_MODES.filter((m) => cohort.requiredModes.includes(m) || present.includes(m));
+  const superseded = supersededAttemptIds(records);
   const byMode = new Map(modes.map((mode) => [mode, records.filter((r) => r.mode === mode)]));
-  const rows = modes.map((mode) => workerRow(mode, byMode.get(mode)!, kind, cohort.plannedPerMode));
+  const repsOf = (mode: WorkerMode): BenchmarkRecord[] => byMode.get(mode)!.filter((r) => !superseded.has(r.attemptId));
+  const rows = modes.map((mode) => workerRow(mode, byMode.get(mode)!, repsOf(mode), kind, cohort.plannedPerMode));
   const countsOf = new Map(rows.map((r) => [r.mode, r.counts]));
   const pair = (first: WorkerMode, second: WorkerMode): Comparison | null => {
     if (!countsOf.has(first) || !countsOf.has(second)) return null;
     const mixedCapacity = WORKER_COUNT[first] !== WORKER_COUNT[second];
     const twoWorker = WORKER_COUNT[first] === 2 ? first : second;
     const oneWorker = WORKER_COUNT[first] === 2 ? second : first;
-    const sideA = toSide(first, byMode.get(first)!);
-    const sideB = toSide(second, byMode.get(second)!);
+    const sideA = toSide(first, byMode.get(first)!, repsOf(first));
+    const sideB = toSide(second, byMode.get(second)!, repsOf(second));
     const twice = ', with twice the coding capacity';
     const sides = [sideLine(sideA, mixedCapacity && first === twoWorker ? twice : ''), sideLine(sideB, mixedCapacity && second === twoWorker ? twice : '')];
     const pairs = pairsOf(sideA, sideB);
@@ -606,17 +623,22 @@ function workerCohort(cohort: BenchmarkCohort, records: readonly BenchmarkRecord
   const confounders = [...new Set(records.flatMap((r) => r.confounders))];
   const facts = [...WORKER_FACTS.map(([label, pick]) => factOf(label, records.filter(ran), pick)), { label: 'Order', value: cohort.order ?? 'Not recorded', full: cohort.order ?? 'Not recorded' }];
   const exclusions = rows.flatMap((r) => exclusionNotes(r.counts).map((n) => `${r.mode}: ${n}.`));
-  return { cohortId: cohort.cohortId, kind, planned: cohort.plannedPerMode, facts, attempts: records.map((r) => attemptRow(r, kind)), rows, comparisons, exclusions, confounders, costExclusions: costExclusionsOf(records) };
+  const attempts = records.map((r) => attemptRow(r, kind, superseded.has(r.attemptId)));
+  return { cohortId: cohort.cohortId, kind, planned: cohort.plannedPerMode, facts, attempts, rows, comparisons, exclusions, confounders, costExclusions: costExclusionsOf(records) };
 }
 
 function assistantCohortView(cohort: BenchmarkCohort, records: readonly BenchmarkRecord[], kind: DataKind): AssistantCohortView {
   const modes = [...cohort.requiredModes, ...new Set(records.map((r) => r.mode).filter((m) => !cohort.requiredModes.includes(m)))];
-  const rows = modes.map((mode) => assistantRow(mode, records.filter((r) => r.mode === mode), kind, cohort.plannedPerMode));
+  const superseded = supersededAttemptIds(records);
+  const rows = modes.map((mode) => {
+    const inMode = records.filter((r) => r.mode === mode);
+    return assistantRow(mode, inMode, inMode.filter((r) => !superseded.has(r.attemptId)), kind, cohort.plannedPerMode);
+  });
   const sides = rows.map((r) => `${r.requested}: ${r.completion.text}${r.complete.text !== NOT_MEASURED ? `, ${r.complete.text}` : ''}.${r.counts.total - r.counts.warmups < TARGET_ATTEMPTS_PER_MODE && r.counts.total > 0 ? ' Exploratory.' : ''}`);
   const reasons = kind === 'measured' ? ['Device and cloud run different models, so this compares routes. A winner needs the same model.'] : ['Simulated data never produces a comparison result. This shows the layout only.'];
   const facts: Fact[] = [factOf('SDK', records.filter(ran), (r) => r.assistant?.sdkVersion ?? null), factOf('Models', records.filter(ran), (r) => r.configuration.codingModel), { label: 'Order', value: cohort.order ?? 'Not recorded', full: cohort.order ?? 'Not recorded' }];
   const exclusions = rows.flatMap((r) => [...exclusionNotes(r.counts), ...(r.counts.warmups > 0 ? [`${plural(r.counts.warmups, 'warm-up request')} not timed`] : [])].map((n) => `${r.requested}: ${n}.`));
-  return { cohortId: cohort.cohortId, kind, planned: cohort.plannedPerMode, facts, attempts: records.map((r) => attemptRow(r, kind)), rows, comparison: { verdict: { kind: 'none', reasons }, sides }, exclusions, confounders: [...new Set(records.flatMap((r) => r.confounders))], costExclusions: costExclusionsOf(records) };
+  return { cohortId: cohort.cohortId, kind, planned: cohort.plannedPerMode, facts, attempts: records.map((r) => attemptRow(r, kind, superseded.has(r.attemptId))), rows, comparison: { verdict: { kind: 'none', reasons }, sides }, exclusions, confounders: [...new Set(records.flatMap((r) => r.confounders))], costExclusions: costExclusionsOf(records) };
 }
 
 const EMPTY_COUNTS: Counts = { total: 0, passed: 0, failed: 0, timedOut: 0, cancelled: 0, abandoned: 0, deniedStart: 0, notRun: 0, humanIntervened: 0, notRecorded: 0, warmups: 0 };

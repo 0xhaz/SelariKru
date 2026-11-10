@@ -162,7 +162,7 @@
     },
     {
       "id": "record-granularity",
-      "text": "One record per trial. Every trial fills one slot of the frozen randomization.order and records slotId and slotAttempt. A replacement is a new trial in the same slot with the next slotAttempt; the highest attempt represents the slot. Earlier attempts are superseded: kept, counted and shown, but left out of medians and pairs. A slot with no record is missing."
+      "text": "One record per trial. Every trial fills one slot of the frozen randomization.order and records slotId and slotAttempt. The highest attempt represents the slot and drives times and pairs. Earlier attempts are superseded: kept, shown and counted towards completion and spend, never timed or paired. A slot with no record is missing."
     },
     {
       "id": "permitted-human-action",
@@ -182,7 +182,7 @@
     },
     {
       "id": "starts",
-      "text": "record-start runs only on a passing preflight for its track. It writes the cohort-start file for the track (the preregistration record, kept in the repository) and stamps the same start time and manifest hash under starts. After either exists, freeze is refused, and preflight and export refuse a manifest whose hash differs from the start's (manifest_changed_after_start) or whose stamp and file disagree (start_record_mismatch)."
+      "text": "record-start runs only on a passing preflight for its track. It stamps the start time and manifest hash under starts first, then writes the cohort-start file for the track (the preregistration record, kept in the repository). If the file write fails, the stamp still refuses freeze and preflight reports start_record_mismatch until record-start --repair writes the file from the stamp; --repair also restores a lost stamp from the file, only for the same cohortId, and never re-hashes. After either exists, freeze is refused, and preflight and export refuse a manifest whose hash differs from the start's (manifest_changed_after_start)."
     },
     {
       "id": "published-hash",
@@ -191,6 +191,18 @@
     {
       "id": "unknown-stays-unknown",
       "text": "Human minutes are unavailable unless every category is recorded. A trial whose control-mode use or permitted human actions are not recorded is left out of pairs. Permitted human actions are shown per pair, and a difference within a pair is listed as a confounder."
+    },
+    {
+      "id": "slot-grammar",
+      "text": "Slots are the entries of randomization.order: workers/block-<n>/<mode> for a worker trial (its blockId is block-<n>), assistant/<route>/<fixtureId>/rep-<n> for a measured assistant request, and assistant/warmup/<route>/<n> for an excluded warm-up (assistant.warmup is true). slotAttempt runs 1..n within a slot with no gaps."
+    },
+    {
+      "id": "replacement-rule",
+      "text": "A slot may be retried only after an infrastructure outcome: denied_start, abandoned or not_run. A completed, failed, timed-out or cancelled attempt is final; a replacement after one is refused, so a cohort can never become best-of-N. Completion counts every attempt that ran, superseded ones included; a slot-level figure may sit beside it, labelled as slots."
+    },
+    {
+      "id": "start-reset",
+      "text": "Erasing both a track's stamp under starts and its cohort-start file makes the track look unstarted, so the seed could be re-frozen and the cohort restarted. Only git history would show it. Commit each cohort-start file and the stamped manifest as soon as record-start writes them."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",

@@ -314,3 +314,28 @@ export function startIssues(manifest: Manifest, track: Track, file: StartRecord 
   if (file !== null && (file.seed !== manifest.randomization.seed || file.orderSha256 !== manifest.randomization.orderSha256)) issues.push('seed_or_order_changed_after_start');
   return issues;
 }
+
+/**
+ * Reconciles a half-recorded start: a stamp with no cohort-start file (the file write failed after the stamp), or a
+ * file with no stamp. It copies what is there and never re-hashes, so a manifest changed since start stays blocked.
+ * Refused when both exist (they agree, or disagree and repair cannot choose), when neither does, or when the file
+ * belongs to another cohort.
+ */
+export function repairStart(manifest: Manifest, track: Track, file: StartRecord | null): { start: StartRecord; manifest: Manifest } {
+  const stamp = manifest.starts[track];
+  if (stamp === null && file === null) throw new FrozenError(`${track} has not started; there is nothing to repair`);
+  if (stamp !== null && file !== null) {
+    const agree = file.track === track && file.startedAtUtc === stamp.startedAtUtc && file.manifestSha256 === stamp.manifestSha256;
+    throw new FrozenError(agree ? `${track}: the stamp and the file agree; nothing to repair` : `${track}: the stamp and the file disagree; repair cannot choose between them`);
+  }
+  if (file !== null) {
+    if (file.track !== track || file.cohortId !== manifest.cohortId) throw new FrozenError(`${track}: the start file belongs to another cohort or track`);
+    const restored = { startedAtUtc: file.startedAtUtc, manifestSha256: file.manifestSha256 };
+    return { start: file, manifest: { ...manifest, starts: { ...manifest.starts, [track]: restored } } };
+  }
+  const start = StartRecordSchema.parse({
+    track, cohortId: manifest.cohortId, seed: manifest.randomization.seed, orderSha256: manifest.randomization.orderSha256,
+    manifestSha256: stamp!.manifestSha256, startedAtUtc: stamp!.startedAtUtc,
+  });
+  return { start, manifest };
+}

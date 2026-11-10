@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { BenchmarkFileSchema, BenchmarkRecordSchema, BenchmarkRecordTemplateSchema, type BenchmarkFile, type BenchmarkRecord } from './index.ts';
+import { BenchmarkFileSchema, BenchmarkRecordSchema, BenchmarkRecordTemplateSchema, reconcileSlots, slotViews, supersededAttemptIds, type BenchmarkFile, type BenchmarkRecord } from './index.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const template = JSON.parse(readFileSync(join(root, 'fixtures/benchmarks/result.template.json'), 'utf8')) as Record<string, unknown>;
@@ -105,5 +105,34 @@ describe('the benchmark result template and schema', () => {
     const r = measuredAssistant();
     expect(accepted([{ ...r, assistant: { ...r.assistant!, payloadSha256: null } }])).toBe(false);
     expect(accepted([{ ...r, assistant: { ...r.assistant!, payloadSha256: 'B'.repeat(64) } }])).toBe(false);
+  });
+});
+
+describe('slot reconciliation', () => {
+  const attempt = (slotId: string | null, slotAttempt: number | null, trialId: string, status: BenchmarkRecord['status'] = 'completed'): BenchmarkRecord =>
+    ({ ...measuredWorker(), trialId, attemptId: `${trialId}-a`, slotId, slotAttempt, status });
+
+  it('the last attempt represents its slot, whatever the record order, and a planned slot with no record is missing', () => {
+    const a1 = attempt('workers/block-1/L1', 1, 'a1', 'abandoned');
+    const a2 = attempt('workers/block-1/L1', 2, 'a2');
+    const b1 = attempt('workers/block-2/L1', 1, 'b1');
+    const planned = ['workers/block-1/L1', 'workers/block-2/L1', 'workers/block-3/L1'];
+    for (const records of [[a1, a2, b1], [b1, a2, a1]]) {
+      const views = slotViews(records, planned);
+      expect(views.map((v) => [v.slotId, v.representative?.trialId ?? null, v.superseded.map((s) => s.trialId)])).toEqual([
+        ['workers/block-1/L1', 'a2', ['a1']], ['workers/block-2/L1', 'b1', []], ['workers/block-3/L1', null, []],
+      ]);
+      const r = reconcileSlots(views);
+      expect(r.representatives.map((x) => x.trialId)).toEqual(['a2', 'b1']);
+      expect(r.superseded.map((x) => x.trialId)).toEqual(['a1']);
+      expect(r.missingSlots).toEqual(['workers/block-3/L1']);
+      expect(r.planned).toBe(3);
+    }
+  });
+
+  it('without a frozen order, slots come from the records, and a record with no slot stands alone', () => {
+    const views = slotViews([attempt(null, null, 'x'), attempt('workers/block-1/L1', 2, 'b'), attempt('workers/block-1/L1', 1, 'a', 'denied_start'), attempt(null, null, 'y')]);
+    expect(views.map((v) => [v.representative?.trialId, v.superseded.map((s) => s.trialId)])).toEqual([['x', []], ['b', ['a']], ['y', []]]);
+    expect(supersededAttemptIds([attempt('s', 1, 'a', 'not_run'), attempt('s', 2, 'b')])).toEqual(new Set(['a-a']));
   });
 });

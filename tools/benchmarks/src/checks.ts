@@ -1,4 +1,4 @@
-import { COMMIT_SHA, type BenchmarkFile, type BenchmarkRecord } from '@selarikru/view-protocol';
+import { COMMIT_SHA, REPLACEABLE_STATUSES, type BenchmarkFile, type BenchmarkRecord } from '@selarikru/view-protocol';
 import { manifestSha256, parseSlot, type Manifest } from './manifest.ts';
 
 /**
@@ -65,6 +65,35 @@ function configurationIssues(m: Manifest, r: BenchmarkRecord): string[] {
   return issues;
 }
 
+/**
+ * Within each slot (and data kind), attempts run 1..n with no gaps, and every attempt but the last ended in an
+ * infrastructure outcome. A completed, failed, timed-out or cancelled attempt is final: retrying it would turn the
+ * cohort into best-of-N.
+ */
+function attemptIssues(records: readonly BenchmarkRecord[]): string[] {
+  const slots = new Map<string, BenchmarkRecord[]>();
+  for (const r of records) {
+    if (r.slotId === null || r.slotAttempt === null) continue;
+    const key = `${r.dataKind}\0${r.slotId}`;
+    slots.set(key, [...(slots.get(key) ?? []), r]);
+  }
+  const issues: string[] = [];
+  for (const attempts of slots.values()) {
+    const slotId = attempts[0]!.slotId!;
+    const sorted = [...attempts].sort((x, y) => x.slotAttempt! - y.slotAttempt!);
+    const numbers = sorted.map((r) => r.slotAttempt!);
+    const repeated = numbers.filter((n, i) => numbers.indexOf(n) !== i);
+    for (const n of new Set(repeated)) issues.push(`slot ${slotId} has attempt ${n} twice`);
+    if (repeated.length === 0 && numbers.some((n, i) => n !== i + 1)) issues.push(`slot ${slotId}: attempts must run 1..n with no gaps (found ${numbers.join(', ')})`);
+    for (const r of sorted.slice(0, -1)) {
+      if (!REPLACEABLE_STATUSES.includes(r.status)) {
+        issues.push(`slot ${slotId}: attempt ${r.slotAttempt} (${r.status}) cannot be replaced; only ${REPLACEABLE_STATUSES.join(', ')} can`);
+      }
+    }
+  }
+  return issues;
+}
+
 export function checkResults(file: BenchmarkFile, m: Manifest): string[] {
   const issues: string[] = [];
   if (m.cohortId === null) return ['the manifest cohortId is unresolved'];
@@ -74,7 +103,6 @@ export function checkResults(file: BenchmarkFile, m: Manifest): string[] {
   }
   const order = new Set(m.randomization.order);
   const trials = new Set<string>();
-  const attempts = new Set<string>();
   for (const r of file.records) {
     if (r.cohortId !== cohortIdFor(m, r.track)) issues.push(`trial ${r.trialId} is not in this manifest's cohort`);
     if (!plannedModes(m, r.track).includes(r.mode)) issues.push(`trial ${r.trialId}: mode ${r.mode} is not planned in the manifest`);
@@ -83,15 +111,11 @@ export function checkResults(file: BenchmarkFile, m: Manifest): string[] {
     trials.add(trialKey);
     const slot = slotIssue(r, order);
     if (slot !== null) issues.push(slot);
-    else {
-      const attemptKey = `${r.dataKind}\0${r.slotId}\0${r.slotAttempt}`;
-      if (attempts.has(attemptKey)) issues.push(`slot ${r.slotId} has attempt ${r.slotAttempt} twice`);
-      attempts.add(attemptKey);
-    }
     if (r.track === 'workers' && r.timings.endToEndVerifiedMs !== null && r.timings.clockDomain !== SERVER_CLOCK) {
       issues.push(`trial ${r.trialId}: a delivery time must be on the ${SERVER_CLOCK} clock`);
     }
     issues.push(...configurationIssues(m, r));
   }
+  issues.push(...attemptIssues(file.records));
   return issues;
 }

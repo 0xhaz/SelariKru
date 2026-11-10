@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { redactSecrets } from '@selarikru/protocol';
 import { verifierHashes } from '@selarikru/verifier/hashing';
-import { FrozenError, ManifestError, StartRecordSchema, TRACKS, freezeOrder, readManifest, recordStart, type Manifest, type StartRecord, type StartRecords, type Track } from './manifest.ts';
+import { FrozenError, ManifestError, StartRecordSchema, TRACKS, freezeOrder, readManifest, recordStart, repairStart, type Manifest, type StartRecord, type StartRecords, type Track } from './manifest.ts';
 import { formatPreflight, preflight, type PreflightReport, type VerifierHashPair } from './preflight.ts';
 import { PUBLIC_RESULTS_PATH, PublishError, preparePublish, writePublished } from './publish.ts';
 import { ExportError, ReportError, buildReport, exportResults, renderReport } from './report.ts';
@@ -14,8 +14,9 @@ import { ExportError, ReportError, buildReport, exportResults, renderReport } fr
  *
  *   preflight     [--manifest p] [--verifier p] [--repo p] [--starts dir]         checklist; exit 1 when a track is blocked
  *   freeze        --seed s [--manifest p] [--starts dir]                          record the seed and its order; refused after any start
- *   record-start  --track workers|assistant [--manifest p] [--verifier p] [--repo p] [--starts dir]
- *                 on a passing preflight for the track, write its cohort-start file and stamp the manifest
+ *   record-start  --track workers|assistant [--manifest p] [--verifier p] [--repo p] [--starts dir] [--repair]
+ *                 on a passing preflight for the track, stamp the manifest, then write its cohort-start file;
+ *                 with --repair, only reconcile a stamp with no file (or a file with no stamp) for the same cohort
  *   report        --records p [--manifest p] [--starts dir] [--out p]             export raw records and print the report
  *   publish       --results p [--manifest p] [--out p]                            validate, redact, stamp and write for the web panel
  *
@@ -42,7 +43,9 @@ export interface Io {
   readonly cwd?: string;
 }
 
-const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish [--manifest p] [--verifier p] [--repo p] [--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p]';
+const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish [--manifest p] [--verifier p] [--repo p] '
+  + '[--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p] [--repair]';
+const BOOLEAN_FLAGS = new Set(['repair']);
 const FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out']);
 const PATH_FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'records', 'results', 'out']);
 
@@ -55,6 +58,11 @@ function parseArgs(argv: readonly string[], at: (p: string) => string): { comman
   for (let i = 0; i < rest.length; i += 2) {
     const arg = rest[i]!;
     const name = arg.replace(/^--/, '');
+    if (arg.startsWith('--') && BOOLEAN_FLAGS.has(name)) {
+      flags.set(name, 'true');
+      i -= 1;
+      continue;
+    }
     const value = rest[i + 1];
     if (!arg.startsWith('--') || !FLAGS.has(name) || value === undefined) throw new UsageError(`unexpected argument ${arg}`);
     flags.set(name, PATH_FLAGS.has(name) ? at(value) : value);
@@ -135,13 +143,24 @@ const COMMANDS: Readonly<Record<string, (ctx: Context) => number>> = {
     if (!(TRACKS as readonly string[]).includes(track)) throw new UsageError(`--track must be one of ${TRACKS.join(', ')}`);
     const t = track as Track;
     const path = startPath(ctx.startsDir, t);
-    if (existsSync(path)) throw new FrozenError(`${t} already has a start recorded at ${path}`);
     const { manifest } = readManifest(ctx.manifestPath);
+    if (ctx.flags.has('repair')) {
+      const repaired = repairStart(manifest, t, readStarts(ctx.startsDir)[t]);
+      if (repaired.manifest !== manifest) writeJson(ctx.manifestPath, repaired.manifest);
+      if (!existsSync(path)) writeJson(path, repaired.start);
+      ctx.io.out(`Repaired the ${t} start of ${repaired.start.startedAtUtc}; run preflight to confirm the manifest is unchanged since.`);
+      return 0;
+    }
+    if (existsSync(path)) throw new FrozenError(`${t} already has a start recorded at ${path}`);
+    const stamp = manifest.starts[t];
+    if (stamp !== null) throw new FrozenError(`${t} already started at ${stamp.startedAtUtc}; if its start file is missing, run record-start --repair`);
     const decision = runPreflight(ctx, manifest).liveDispatch[t];
     if (!decision.allowed) throw new BlockedError(`preflight blocks ${t}, so it cannot start: ${decision.blockers.join(', ')}`);
     const { start, manifest: stamped } = recordStart(manifest, t, ctx.io.now());
-    writeJson(path, start);
+    // The stamp first: if the file write fails, the manifest still says the track started, so freeze stays refused
+    // and preflight reports the missing file until `record-start --repair` writes it.
     writeJson(ctx.manifestPath, stamped);
+    writeJson(path, start);
     ctx.io.out(`Recorded the ${t} start at ${start.startedAtUtc}; the seed, order and manifest are now fixed for it.`);
     return 0;
   },

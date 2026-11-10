@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { redactSecrets } from '@selarikru/protocol';
-import { BenchmarkFileSchema, BenchmarkRecordSchema, allCriteriaPassed, type BenchmarkCohort, type BenchmarkFile, type BenchmarkRecord } from '@selarikru/view-protocol';
+import {
+  BenchmarkFileSchema, BenchmarkRecordSchema, allCriteriaPassed, reconcileSlots, slotViews,
+  type BenchmarkCohort, type BenchmarkFile, type BenchmarkRecord, type ReconciledSlots, type SlotView,
+} from '@selarikru/view-protocol';
 import { canonicalSha256 } from './canonical.ts';
 import { checkResults, cohortIdFor, manifestConfiguration, orderLabel } from './checks.ts';
 import { parseSlot, startIssues, TRACKS, type Manifest, type StartRecords, type Track } from './manifest.ts';
@@ -14,9 +17,10 @@ import { parseSlot, startIssues, TRACKS, type Manifest, type StartRecords, type 
  *
  * Rulings carried in the records and repeated in the report:
  * - One record per trial, and every trial fills one slot of the frozen order. A replacement is a new trial in the same
- *   slot with the next `slotAttempt`; the last attempt represents the slot. Earlier attempts are superseded: kept,
- *   counted and shown, but left out of medians, completion and pairs. Their spend is still spend. A slot with no
- *   record is missing.
+ *   slot with the next `slotAttempt`, allowed only after an infrastructure outcome (denied start, abandoned, not run).
+ *   The last attempt represents the slot and drives times and pairs. Earlier attempts are superseded: kept, shown,
+ *   and counted towards completion and spend. Completion counts every attempt that ran; a slot-level figure sits
+ *   beside it, labelled as such. A slot with no record is missing.
  * - A permitted human action outside control mode is counted in `operations.permittedHumanActions` (minutes in
  *   `humanMinutes.permittedAction`). It keeps the trial in comparisons and is shown beside the mode and per pair; a
  *   difference within a pair is a confounder. Control mode (`humanIntervened`) takes a trial out of comparisons, and so
@@ -187,6 +191,10 @@ export interface WorkerModeReport {
   readonly attempts: Accounting;
   readonly missingSlots: readonly string[];
   readonly superseded: readonly SupersededAttempt[];
+  /** Every attempt that ran, superseded ones included. This is the completion rate; `deliveryTime.completion` repeats it. */
+  readonly completion: Completion;
+  /** Slots by their last attempt. Shown beside `completion`, labelled as slots, never in its place. */
+  readonly slotCompletion: Completion;
   readonly deliveryTime: Timing;
   readonly providerInputTokensMedian: { readonly value: number | null; readonly provenance: Provenance; readonly n: number };
   readonly spend: Money;
@@ -229,6 +237,8 @@ export interface AssistantRouteReport {
   readonly attempts: Accounting;
   readonly missingSlots: readonly string[];
   readonly superseded: readonly SupersededAttempt[];
+  readonly completion: Completion;
+  readonly slotCompletion: Completion;
   readonly warmups: number;
   readonly routing: { readonly correct: number; readonly of: number };
   readonly schema: { readonly valid: number; readonly of: number };
@@ -316,38 +326,7 @@ const routedCorrectly = (r: BenchmarkRecord): boolean => r.assistant?.observedIn
 const assistantPassed = (r: BenchmarkRecord): boolean => r.status === 'completed' && r.assistant?.schemaValid === true && routedCorrectly(r);
 const ran = (rs: readonly BenchmarkRecord[]): BenchmarkRecord[] => rs.filter((r) => r.status !== 'not_run');
 
-/** One planned slot: its representative attempt (the last), and the earlier attempts it supersedes. */
-interface SlotView {
-  readonly slotId: string;
-  readonly representative: BenchmarkRecord | null;
-  readonly superseded: readonly BenchmarkRecord[];
-}
-
-function slotViews(slotIds: readonly string[], records: readonly BenchmarkRecord[]): SlotView[] {
-  return slotIds.map((slotId) => {
-    const attempts = records.filter((r) => r.slotId === slotId).sort((x, y) => x.slotAttempt! - y.slotAttempt!);
-    return { slotId, representative: attempts.at(-1) ?? null, superseded: attempts.slice(0, -1) };
-  });
-}
-
-interface Reconciled {
-  readonly representatives: readonly BenchmarkRecord[];
-  readonly superseded: readonly BenchmarkRecord[];
-  readonly all: readonly BenchmarkRecord[];
-  readonly missingSlots: readonly string[];
-  readonly planned: number;
-}
-
-function reconcile(views: readonly SlotView[]): Reconciled {
-  const representatives = views.flatMap((v) => (v.representative === null ? [] : [v.representative]));
-  const superseded = views.flatMap((v) => v.superseded);
-  return {
-    representatives, superseded, all: [...representatives, ...superseded],
-    missingSlots: views.filter((v) => v.representative === null).map((v) => v.slotId), planned: views.length,
-  };
-}
-
-function account(r: Reconciled, passed: (x: BenchmarkRecord) => boolean): Accounting {
+function account(r: ReconciledSlots, passed: (x: BenchmarkRecord) => boolean): Accounting {
   const reps = r.representatives;
   const count = (s: BenchmarkRecord['status']): number => reps.filter((x) => x.status === s).length;
   const p = reps.filter(passed).length;
@@ -394,11 +373,13 @@ const clean = (s: string): string => redactSecrets(s);
 interface ModePlan { readonly id: string; readonly supported: boolean; readonly reason: string | null }
 
 function workerMode(plan: ModePlan, views: readonly SlotView[]): WorkerModeReport {
-  const r = reconcile(views);
+  const r = reconcileSlots(views);
   const ranReps = ran(r.representatives);
   const ranAll = ran(r.all);
   const passing = r.representatives.filter(workerPassed);
-  const completion = { passed: passing.length, of: ranReps.length };
+  // Every attempt that ran is in the denominator; superseded attempts ended in an infrastructure outcome, so never pass.
+  const completion = { passed: ranAll.filter(workerPassed).length, of: ranAll.length };
+  const slotCompletion = { passed: passing.length, of: ranReps.length };
   const times = passing.flatMap((x) => (x.timings.endToEndVerifiedMs === null ? [] : [x.timings.endToEndVerifiedMs]));
   const deliveryTime = timing(times, completion);
   // Spend counts every attempt that ran, superseded ones included: it was spent.
@@ -410,7 +391,7 @@ function workerMode(plan: ModePlan, views: readonly SlotView[]): WorkerModeRepor
   return {
     mode: plan.id, required: true, supported: plan.supported, status: measured ? 'Measured' : 'Not measured',
     reason: measured ? null : plan.reason ?? (plan.supported ? null : 'Not supported.'),
-    attempts: account(r, workerPassed), missingSlots: r.missingSlots, superseded: supersededList(r.superseded),
+    attempts: account(r, workerPassed), missingSlots: r.missingSlots, superseded: supersededList(r.superseded), completion, slotCompletion,
     deliveryTime, providerInputTokensMedian: inputTokens(ranReps), spend, costPerDeliveredChange: perChange(spend, passing.length),
     humanMinutes: humanMinutesOf(ranAll), permittedHumanActions: permitted.length > 0 ? sum(permitted) : null,
     controlModeTrials: ranReps.filter((x) => x.operations.humanIntervened === true).length, failureCategories,
@@ -442,9 +423,13 @@ function compare(a: string, b: string, blocks: readonly string[], slots: Readonl
   const confounders = pairs
     .filter((p) => p.permittedActions.a !== null && p.permittedActions.b !== null && p.permittedActions.a !== p.permittedActions.b)
     .map((p) => `${p.blockId}: ${a} had ${p.permittedActions.a} permitted human actions outside control mode, ${b} had ${p.permittedActions.b}.`);
+  // Completion counts every attempt that ran in these blocks, superseded ones included.
   const completion = (mode: string): Completion => {
-    const reps = ran(blocks.flatMap((blk) => { const x = rep(mode, blk); return x === null ? [] : [x]; }));
-    return { passed: reps.filter(workerPassed).length, of: reps.length };
+    const attempts = ran(blocks.flatMap((blk) => {
+      const v = slots.get(`workers/${blk}/${mode}`);
+      return v === undefined ? [] : [...v.superseded, ...(v.representative === null ? [] : [v.representative])];
+    }));
+    return { passed: attempts.filter(workerPassed).length, of: attempts.length };
   };
   const exploratory = valid.length < MIN_VALID_PAIRS;
   return {
@@ -456,16 +441,18 @@ function compare(a: string, b: string, blocks: readonly string[], slots: Readonl
 }
 
 function assistantRoute(mode: string, measuredSlots: readonly SlotView[], warmupSlots: readonly SlotView[]): AssistantRouteReport {
-  const r = reconcile(measuredSlots);
-  const warm = reconcile(warmupSlots);
+  const r = reconcileSlots(measuredSlots);
+  const warm = reconcileSlots(warmupSlots);
   const ranReps = ran(r.representatives);
+  const ranAll = ran(r.all);
   const passing = r.representatives.filter(assistantPassed);
-  const completion = { passed: passing.length, of: ranReps.length };
+  const completion = { passed: ranAll.filter(assistantPassed).length, of: ranAll.length };
+  const slotCompletion = { passed: passing.length, of: ranReps.length };
   const pick = (f: (x: BenchmarkRecord) => number | null): number[] => passing.flatMap((x) => { const v = f(x); return v === null ? [] : [v]; });
   const generationComplete = timing(pick((x) => x.timings.generationCompleteMs), completion);
   return {
     mode, status: ranReps.length > 0 ? 'Measured' : 'Not measured', attempts: account(r, assistantPassed),
-    missingSlots: r.missingSlots, superseded: supersededList(r.superseded), warmups: warm.all.length,
+    missingSlots: r.missingSlots, superseded: supersededList(r.superseded), completion, slotCompletion, warmups: warm.all.length,
     routing: { correct: ranReps.filter(routedCorrectly).length, of: ranReps.length },
     schema: { valid: ranReps.filter((x) => x.assistant?.schemaValid === true).length, of: ranReps.length },
     generationComplete, firstOutput: timing(pick((x) => x.timings.firstOutputMs), completion),
@@ -484,7 +471,7 @@ export function buildReport(input: BenchmarkFile, manifest: Manifest): Report {
 
   const measured = file.records.filter((r) => r.dataKind === 'measured');
   const order = manifest.randomization.order;
-  const views = new Map(slotViews(order, measured).map((v) => [v.slotId, v]));
+  const views = new Map(slotViews(measured, order).map((v) => [v.slotId, v]));
   const slotsWhere = (test: (s: NonNullable<ReturnType<typeof parseSlot>>) => boolean): SlotView[] =>
     order.flatMap((id) => { const s = parseSlot(id); return s !== null && test(s) ? [views.get(id)!] : []; });
 
@@ -525,8 +512,9 @@ function workerLine(m: WorkerModeReport): string {
   const t = m.deliveryTime;
   const median = t.median !== null ? `; median ${formatMs(t.median)} (min ${formatMs(t.min!)}, max ${formatMs(t.max!)}, n=${t.n})` : '';
   const spendNote = m.spend.provenance === 'unavailable' && m.spend.knownSubtotal !== null ? ` (known subtotal ${usd(m.spend.knownSubtotal)})` : '';
+  const slots = `(slots: ${m.slotCompletion.passed} of ${m.slotCompletion.of} passed)`;
   const parts = [
-    `${rate(t.completion)}${median}.`,
+    `${rate(m.completion)}${median}. ${slots}`,
     `Attempts: ${a.passed} passed, ${a.completedFailing} completed failing, ${a.failed} failed, ${a.timedOut} timed out, ${a.cancelled} cancelled, `
       + `${a.deniedStart} denied, ${a.abandoned} abandoned, ${a.notRun} not run, ${a.superseded} superseded.`,
     missingText(a, m.missingSlots),
@@ -555,7 +543,7 @@ function routeLine(r: AssistantRouteReport): string {
   const g = r.generationComplete;
   const f = r.firstOutput;
   const parts = [
-    `${rate(g.completion)}${g.median !== null ? `; complete response median ${formatMs(g.median)} (n=${g.n})` : ''}.`,
+    `${rate(r.completion)}${g.median !== null ? `; complete response median ${formatMs(g.median)} (n=${g.n})` : ''}. (slots: ${r.slotCompletion.passed} of ${r.slotCompletion.of} passed)`,
     `First output: ${f.median !== null ? `median ${formatMs(f.median)} (n=${f.n})` : 'not available'}.`,
     `Routing ${r.routing.correct} of ${r.routing.of} correct; schema ${r.schema.valid} of ${r.schema.of} valid; ${r.warmups} warm-ups excluded from timing.`,
     supersededText(r.superseded),

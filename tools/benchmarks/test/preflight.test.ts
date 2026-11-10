@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, type Manifest } from '../src/manifest.ts';
+import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, repairStart, type Manifest } from '../src/manifest.ts';
 import { formatPreflight, preflight, type PreflightInput } from '../src/preflight.ts';
 import { HASHES, fixtureManifestText, resolvedManifest, SECRET, started } from './fixtures.ts';
 import { watchNetwork } from './network.ts';
@@ -178,6 +178,30 @@ describe('T8.1 manifest loader and preflight', () => {
     const other = { ...starts, workers: { ...starts.workers!, startedAtUtc: '2026-11-17T00:00:00.000Z' } };
     expect(preflight(input(manifest, { starts: other })).liveDispatch.workers.blockers).toContain('start_record_mismatch');
     expect(preflight(input(manifest, { starts: other })).liveDispatch.assistant.allowed).toBe(true);
+  });
+
+  it('repair reconciles a stamp with no file, or a file with no stamp, for the same cohort only', () => {
+    const { manifest, starts } = started();
+    const w = starts.workers!;
+    // Stamp present, file lost: the file is rebuilt from the stamp and the manifest.
+    const fromStamp = repairStart(manifest, 'workers', null);
+    expect(fromStamp.start).toEqual(w);
+    expect(fromStamp.manifest).toEqual(manifest);
+    // File present, stamp lost: the stamp is restored from the file.
+    const unstamped = { ...manifest, starts: { ...manifest.starts, workers: null } };
+    const fromFile = repairStart(unstamped, 'workers', w);
+    expect(fromFile.manifest.starts.workers).toEqual({ startedAtUtc: w.startedAtUtc, manifestSha256: w.manifestSha256 });
+    expect(preflight(input(fromFile.manifest, { starts })).liveDispatch.workers.allowed).toBe(true);
+    // A file from another cohort, one that disagrees with the stamp, nothing to repair, or nothing started: refused.
+    expect(() => repairStart(unstamped, 'workers', { ...w, cohortId: 'another-cohort' })).toThrow(/another cohort/);
+    expect(() => repairStart(manifest, 'workers', { ...w, startedAtUtc: '2026-11-17T00:00:00.000Z' })).toThrow(/disagree/);
+    expect(() => repairStart(manifest, 'workers', w)).toThrow(/nothing to repair/);
+    expect(() => repairStart(unstamped, 'workers', null)).toThrow(/has not started/);
+    // Repair copies what is there; it never re-hashes, so a manifest changed after start stays blocked.
+    const changed = structuredClone(manifest);
+    changed.environment.codingModel = 'other';
+    const repaired = repairStart(changed, 'workers', null);
+    expect(preflight(input(repaired.manifest, { starts: { ...starts, workers: repaired.start } })).liveDispatch.workers.blockers).toContain('manifest_changed_after_start');
   });
 
   it('unsupported modes remain visible', () => {

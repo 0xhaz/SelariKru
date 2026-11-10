@@ -148,7 +148,8 @@ describe('T8.4 report', () => {
 
   it('reconciles against the frozen order: a replacement represents its slot whatever the file order', () => {
     const base = pairedWorkers(3).map((r) => (r.trialId === 'w-b1-L1' ? { ...r, slotAttempt: 2 } : r));
-    const original = rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-orig', failed: true, slotAttempt: 1 });
+    // Only an infrastructure outcome may be replaced: the original was abandoned.
+    const original = rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-orig', status: 'abandoned', slotAttempt: 1 });
     const first = report([original, ...base]);
     const last = report([...base, original]);
     for (const r of [first, last]) {
@@ -157,20 +158,58 @@ describe('T8.4 report', () => {
       const l1 = r.workers.modes.find((m) => m.mode === 'L1')!;
       expect(l1.superseded.map((s) => s.trialId)).toEqual(['w-b1-L1-orig']);
       expect(l1.attempts).toMatchObject({ recorded: 4, superseded: 1, passed: 3, completedFailing: 0 });
-      // The superseded attempt's time is not in the median; its spend is in the total.
+      // The superseded attempt's time is not in the median; its spend is in the total, and it counts in completion.
       expect(l1.deliveryTime.n).toBe(3);
       expect(l1.spend.value).toBe(6);
+      expect(l1.deliveryTime.completion).toEqual({ passed: 3, of: 4 });
+      expect(l1.slotCompletion).toEqual({ passed: 3, of: 3 });
     }
     expect(JSON.stringify(first)).toBe(JSON.stringify(last));
-    // The other way round, a failing replacement represents the slot and the pair is excluded.
-    const failedReplacement = pairedWorkers(3).concat(rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-r2', failed: true, slotAttempt: 2 }));
-    const c = report(failedReplacement).workers.comparisons.find((x) => x.id === 'L1-C1')!;
-    expect(c).toMatchObject({ validPairs: 2, exploratory: true, headlineRatio: null });
-    expect(c.excludedPairs).toEqual([{ blockId: 'block-1', reason: 'L1 did not pass' }, { blockId: 'block-4', reason: 'L1 has no record' }, { blockId: 'block-5', reason: 'L1 has no record' }]);
+  });
+
+  it('every attempt that ran counts towards completion and the claim, superseded ones included', () => {
+    const records = [rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'abandoned' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })];
+    const l1 = report(records).workers.modes.find((m) => m.mode === 'L1')!;
+    expect(l1.deliveryTime.completion).toEqual({ passed: 1, of: 2 });
+    expect(l1.claim).toMatch(/^On this fixture\/configuration, 1 of 2 attempts passed;/);
+    // The slot-level figure sits beside it, labelled as slots.
+    expect(l1.slotCompletion).toEqual({ passed: 1, of: 1 });
+    expect(renderReport(report(records))).toMatch(/L1: 1 of 2 attempts passed;.*\(slots: 1 of 1 passed\)/);
+    // A replacement for a not-run attempt adds nothing that ran.
+    const notRun = [rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'not_run' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })];
+    expect(report(notRun).workers.modes.find((m) => m.mode === 'L1')!.deliveryTime.completion).toEqual({ passed: 1, of: 1 });
+    expect(report(records).workers.comparisons.find((c) => c.id === 'L1-C1')!.completion.a).toEqual({ passed: 1, of: 2 });
+  });
+
+  it('a slot is retried only after an infrastructure outcome, never after a real result', () => {
+    // Probe H: timed out, then retried until it passed. Refused, so there is no best-of-N.
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'timed_out' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })]))
+      .toThrow(/attempt 1 \(timed_out\) cannot be replaced/);
+    // Probe H2: passed, then replaced by a failure. Refused too.
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2, failed: true })]))
+      .toThrow(/attempt 1 \(completed\) cannot be replaced/);
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'failed' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })]))
+      .toThrow(/attempt 1 \(failed\) cannot be replaced/);
+    for (const status of ['denied_start', 'abandoned', 'not_run'] as const) {
+      expect(exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a', status }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })]).records).toHaveLength(2);
+    }
+    // The same rule holds on a results file handed to the report.
+    const c = started();
+    const file = structuredClone(exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'abandoned' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 2 })], c));
+    file.records[0]!.status = 'cancelled';
+    expect(() => buildReport(file, c.manifest)).toThrow(/cancelled\) cannot be replaced/);
+  });
+
+  it('slot attempts run 1..n with no gaps', () => {
+    // Probe G: attempts 1 and 3, with 2 dropped.
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1, trialId: 'a', status: 'abandoned' }), rawWorker({ mode: 'L1', block: 1, trialId: 'b', slotAttempt: 3 })]))
+      .toThrow(/attempts must run 1\.\.n with no gaps/);
+    // Probe G2: a lone attempt 2.
+    expect(() => exported([rawWorker({ mode: 'L1', block: 1, slotAttempt: 2 })])).toThrow(/attempts must run 1\.\.n with no gaps/);
   });
 
   it('a slot with no record is missing, by slot, even when a replacement makes the count look full', () => {
-    const l1 = [1, 2, 3, 4].map((b) => rawWorker({ mode: 'L1', block: b })).concat(rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-replacement', slotAttempt: 2 }));
+    const l1 = [1, 2, 3, 4].map((b) => rawWorker({ mode: 'L1', block: b, ...(b === 1 ? { status: 'denied_start' as const } : {}) })).concat(rawWorker({ mode: 'L1', block: 1, trialId: 'w-b1-L1-replacement', slotAttempt: 2 }));
     const mode = report(l1).workers.modes.find((m) => m.mode === 'L1')!;
     expect(mode.attempts).toMatchObject({ planned: 5, recorded: 5, superseded: 1, missing: 1 });
     expect(mode.missingSlots).toEqual(['workers/block-5/L1']);

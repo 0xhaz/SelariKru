@@ -14,3 +14,4 @@ export * from './skills.ts';
 export * from './product.ts';
 export * from './handover.ts';
 export * from './benchmark.ts';
+export * from './benchmark-slots.ts';

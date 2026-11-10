@@ -189,6 +189,28 @@ describe('the benchmark CLI', () => {
     expect(JSON.parse(readFileSync(manifestPath, 'utf8')).starts.assistant).toMatchObject({ startedAtUtc: '2026-11-21T08:30:00.000Z' });
   });
 
+  it('record-start stamps the manifest before writing the file, and --repair writes a lost file from the stamp', async () => {
+    const { manifestPath, tree } = setUp();
+    // A start directory that cannot be written: the stamp lands, the file does not.
+    const missingDir = join(dir, 'no-such-dir');
+    expect(await main(['record-start', '--track', 'workers', '--manifest', manifestPath, '--starts', missingDir, ...tree], io())).toBe(1);
+    expect(JSON.parse(readFileSync(manifestPath, 'utf8')).starts.workers).toMatchObject({ startedAtUtc: '2026-11-21T08:30:00.000Z' });
+    // Preflight sees the half-written start and blocks; record-start again is refused rather than restarting.
+    out = [];
+    expect(await main(['preflight', '--manifest', manifestPath, ...tree], io())).toBe(1);
+    expect(out.join('\n')).toContain('start_record_mismatch');
+    expect(await main(['record-start', '--track', 'workers', '--manifest', manifestPath, ...tree], io())).toBe(1);
+    expect(err.join('\n')).toMatch(/already started/);
+    // Repair writes the file from the stamp; preflight passes again.
+    expect(await main(['record-start', '--repair', '--track', 'workers', '--manifest', manifestPath, ...tree], io())).toBe(0);
+    expect(JSON.parse(readFileSync(join(dir, 'cohort-start-workers.json'), 'utf8'))).toMatchObject({ track: 'workers', startedAtUtc: '2026-11-21T08:30:00.000Z' });
+    out = [];
+    expect(await main(['preflight', '--manifest', manifestPath, ...tree], io())).toBe(0);
+    // Nothing left to repair.
+    expect(await main(['record-start', '--repair', '--track', 'workers', '--manifest', manifestPath, ...tree], io())).toBe(1);
+    expect(err.join('\n')).toMatch(/nothing to repair/);
+  });
+
   it('freeze records a seed and order, and refuses after start, by the file or by the manifest alone', async () => {
     const { manifestPath, tree } = setUp((m) => { m.randomization = { ...m.randomization, seed: null, order: [], orderSha256: null, frozenAtUtc: null }; });
     expect(await main(['freeze', '--manifest', manifestPath, '--seed', 'seed-abc'], io())).toBe(0);

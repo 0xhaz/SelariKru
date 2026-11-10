@@ -703,3 +703,52 @@ describe('simulated data', () => {
     expect(model.assistant.simulated[0]!.comparison.verdict.kind).toBe('none');
   });
 });
+
+describe('replacement attempts (slots)', () => {
+  /** L1 at index 0 retried in the same slot and block: attempt 1 ends `first`, attempt 2 passes in `ms`. */
+  function retried(first: Partial<Parameters<typeof workerRecord>[0]>, ms = 1_200_000): BenchmarkRecord[] {
+    const records = completeWorkers('measured').map((r) => ({ ...r, slotId: `workers/${r.blockId}/${r.mode}`, slotAttempt: 1 }));
+    const i = records.findIndex((r) => r.mode === 'L1' && r.blockId === 'block-0');
+    const original = { ...workerRecord({ mode: 'L1', index: 90, dataKind: 'measured', ...first }), blockId: 'block-0', slotId: 'workers/block-0/L1', slotAttempt: 1 };
+    const replacement = { ...records[i]!, slotAttempt: 2, timings: { ...records[i]!.timings, endToEndVerifiedMs: ms } };
+    records[i] = replacement;
+    return [original, ...records];
+  }
+
+  it('shows a superseded attempt in the attempts table as Superseded, and never drops it', () => {
+    const records = retried({ status: 'abandoned', ms: null });
+    const cohort = workersOf(benchmarkFile({ records }));
+    expect(cohort.attempts).toHaveLength(records.length);
+    const row = cohort.attempts.find((a) => a.attemptId === records[0]!.attemptId)!;
+    expect(row.statusLabel).toBe('Superseded');
+    expect(row.failure).toMatch(/Replaced after: Abandoned/);
+    expect(cohort.attempts.filter((a) => a.statusLabel === 'Superseded')).toHaveLength(1);
+  });
+
+  it('counts every attempt towards completion and cost, superseded ones included', () => {
+    const records = retried({ status: 'abandoned', ms: null, actualUsd: 2, estimatedUsd: 2 });
+    const l1 = workersOf(benchmarkFile({ records })).rows.find((r) => r.mode === 'L1')!;
+    expect(l1.completion.text).toBe('5 of 6 passed');
+    // Five passing attempts at $1.20 and the abandoned one at $2.
+    expect(l1.cost[0]!.text).toBe('$8.00');
+  });
+
+  it('times and pairs come from the representative: a superseded attempt is never timed or paired', () => {
+    // A fast superseded attempt must not pull the median down; the slot's own attempt is the one timed.
+    const records = retried({ ms: 60_000 }, 1_200_000);
+    const cohort = workersOf(benchmarkFile({ records }));
+    const l1 = cohort.rows.find((r) => r.mode === 'L1')!;
+    expect(l1.time.text).toBe('20m 40s median');
+    expect(l1.completion.text).toBe('6 of 6 passed');
+    // The block with two L1 attempts still pairs, on its representative.
+    const pairs = comparison(cohort, 'L1-C1').pairs;
+    expect(pairs.valid).toBe(5);
+    expect(pairs.excluded).toEqual([]);
+  });
+
+  it('records with no slot, like the demo data, are each their own attempt', () => {
+    const cohort = workersOf(benchmarkFile({ records: completeWorkers('measured') }));
+    expect(cohort.attempts.some((a) => a.statusLabel === 'Superseded')).toBe(false);
+    expect(comparison(cohort, 'L1-C1').pairs.valid).toBe(5);
+  });
+});
