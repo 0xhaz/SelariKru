@@ -9,6 +9,17 @@ import { API_POLICY, ORIGIN, PROJECT, RUN, TENANT, bearer, enrolRunner, get, mak
 const attachSpy = vi.spyOn(ControlHub.prototype, 'attach');
 let hub: { stillLive: (...args: unknown[]) => Promise<boolean>; db: any; links: Map<string, unknown>; whileFinishing: <T>(id: string, f: () => Promise<T>) => Promise<T>; endForAttempt: (id: string, reason: 'attempt_finished') => void };
 let t: TestDb;
+
+/** Polls an async predicate (or value) until it is truthy, and fails with a clear message on timeout. */
+async function waitUntil<T>(fn: () => T | Promise<T>, { timeoutMs = 2000, stepMs = 20 }: { timeoutMs?: number; stepMs?: number } = {}): Promise<NonNullable<T>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = await fn();
+    if (v) return v as NonNullable<T>;
+    if (Date.now() >= deadline) throw new Error(`waitUntil timed out after ${timeoutMs} ms: ${fn.toString().slice(0, 200)}`);
+    await new Promise((res) => setTimeout(res, stepMs));
+  }
+}
 let h: Harness;
 let base: string;
 let wsBase: string;
@@ -30,7 +41,7 @@ beforeEach(async () => {
   // A session left open by the previous test may still be writing its end while the tables are truncated.
   for (let i = 0; ; i += 1) {
     try {
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 30)); // a settle pause for writes with no observable signal
       await resetDb(t.db);
       return;
     } catch (err) {
@@ -134,7 +145,7 @@ describe('tickets', () => {
     const c = await Client.connect(lease.attemptId);
     c.send({ type: 'input', seq: 0, text: 'rm -rf /' });
     expect(await c.closed()).toBe(4401);
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 30)); // stays: asserts that nothing reaches the runner
     expect(link.frames.filter((f) => f.type !== 'linked')).toEqual([]);
     expect(await inputRows()).toEqual([]);
     link.close();
@@ -280,7 +291,7 @@ describe('gates', () => {
     const cancel = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: status!.rowRevision, idempotencyKey: 'c1' });
     expect(cancel.status).toBe(202);
     await c.waitFor((f) => f.type === 'ended' && f.reason === 'attempt_fenced');
-    await new Promise((r) => setTimeout(r, 40));
+    await waitUntil(async () => (await sessionRow()).state === 'ended');
     const next = await mint(lease.attemptId, owner({ origin: ORIGIN }), 'after-cancel');
     expect(next.status).toBe(409);
     expect(next.body.error.code).toBe('attempt_not_running');
@@ -293,7 +304,7 @@ describe('gates', () => {
     const c = await enter(lease.attemptId, link);
     const cancel = await post(h.app, '/v1/tasks/t1/commands', { command: 'cancel', expectedRevision: 9999, idempotencyKey: 'c2' });
     expect(cancel.status).toBe(409);
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 60)); // stays: asserts that no end arrives
     expect(c.frames.some((f) => f.type === 'ended')).toBe(false);
     c.ws.close();
     link.close();
@@ -385,11 +396,7 @@ describe('a session', () => {
     await c.waitFor((f) => f.type === 'ended' && f.reason === 'left');
     await link.waitFor((f) => f.type === 'close' && f.reason === 'left');
     // The end event is written after the close frame goes out, so wait for it rather than for a fixed time.
-    let ended: Awaited<ReturnType<typeof eventsOf>>[number] | undefined;
-    for (let i = 0; i < 100 && !ended; i++) {
-      ended = (await eventsOf()).find((e) => e.type === 'terminal.control_ended');
-      if (!ended) await new Promise((r) => setTimeout(r, 20));
-    }
+    const ended = await waitUntil(async () => (await eventsOf()).find((e) => e.type === 'terminal.control_ended'));
     expect(ended).toMatchObject({ actor: 'human', id: 'owner_uid_1', attempt: lease.attemptId, payload: { reason: 'left', inputs: 1, withheld: 0 } });
     expect(JSON.stringify(ended)).not.toContain('hello world');
     expect((await sessionRow()).state).toBe('ended');
@@ -402,7 +409,7 @@ describe('a session', () => {
     const c = await enter(lease.attemptId, link);
     c.ws.terminate();
     await link.waitFor((f) => f.type === 'close' && f.reason === 'connection_lost');
-    await new Promise((r) => setTimeout(r, 30));
+    await waitUntil(async () => (await sessionRow()).endReason);
     expect((await sessionRow()).endReason).toBe('connection_lost');
     link.close();
   });
@@ -446,7 +453,7 @@ describe('a session', () => {
     const c = await enter(lease.attemptId, link);
     await hub.whileFinishing(lease.attemptId, async () => {
       await t.db.update(schema.attempts).set({ endedAt: new Date(h.clock.now().getTime()) }).where(eq(schema.attempts.attemptId, lease.attemptId));
-      await new Promise((r) => setTimeout(r, 90)); // several 20 ms sweeps
+      await new Promise((r) => setTimeout(r, 90)); // stays: lets several 20 ms sweeps pass, asserting none ends the session
     });
     hub.endForAttempt(lease.attemptId, 'attempt_finished');
     await c.waitFor((f) => f.type === 'ended');
@@ -462,7 +469,7 @@ describe('a session', () => {
     await hub.whileFinishing(lease.attemptId, async () => {
       await t.db.update(schema.attempts).set({ endedAt: new Date(h.clock.now().getTime()) }).where(eq(schema.attempts.attemptId, lease.attemptId));
     });
-    await new Promise((r) => setTimeout(r, 90)); // several 20 ms sweeps, with only the second publish still running
+    await new Promise((r) => setTimeout(r, 90)); // stays: lets several 20 ms sweeps pass, asserting none ends the session; with only the second publish still running
     expect(c.frames.filter((f) => f.type === 'ended')).toEqual([]);
     releaseSecond();
     await second;
@@ -501,7 +508,7 @@ describe('a session', () => {
       };
     } });
     await vi.waitFor(() => expect(read).toBe(true));
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 5)); // stays: asserts the link is not overwritten afterwards
     expect(hub.links.get(lease.attemptId)).toBe(replacement);
     hub.links.delete(lease.attemptId);
   });
@@ -532,7 +539,7 @@ describe('a session', () => {
     await c.waitFor((f) => f.type === 'ended' && f.reason === 'attempt_fenced');
     await link.waitFor((f) => f.type === 'close');
     expect(await c.closed()).toBe(1000);
-    await new Promise((r) => setTimeout(r, 30));
+    await waitUntil(async () => (await sessionRow()).state === 'ended');
     expect((await sessionRow()).state).toBe('ended');
     link.close();
   });
@@ -619,22 +626,22 @@ describe('a session', () => {
     });
     await new Promise((r) => linkWs.once('open', r));
     linkWs.send(JSON.stringify({ type: 'hello', lease }));
-    await new Promise((r) => setTimeout(r, 50));
+    await waitUntil(() => linkFrames.some((f) => f.type === 'linked'));
     const ticket = await post(limited.app, `${pathOf(lease.attemptId)}/control-tickets`, { idempotencyKey: 'k' }, owner({ origin: ORIGIN }));
     const ws = new WebSocket(`${wsUrl}${pathOf(lease.attemptId)}/control`, { origin: ORIGIN });
     const frames: any[] = [];
     ws.on('message', (d) => frames.push(JSON.parse(d.toString())));
     await new Promise((r) => ws.once('open', r));
     ws.send(JSON.stringify({ type: 'auth', ticket: ticket.body.ticket }));
-    await new Promise((r) => setTimeout(r, 80));
+    await waitUntil(() => frames.some((f) => f.type === 'ready'));
     expect(frames.some((f) => f.type === 'ready')).toBe(true);
     if (!linkFrames.some((f) => f.type === 'linked')) throw new Error('link did not attach');
     for (let i = 1; i <= 2; i += 1) {
       ws.send(JSON.stringify({ type: 'input', seq: i, text: `line ${i}` }));
-      await new Promise((r) => setTimeout(r, 60));
+      await waitUntil(() => linkFrames.filter((f) => f.type === 'input').length === i);
     }
     for (let i = 3; i <= 5; i += 1) ws.send(JSON.stringify({ type: 'input', seq: i, text: `line ${i}` }));
-    await new Promise((r) => setTimeout(r, 150));
+    await waitUntil(() => frames.some((f) => f.type === 'ended' && f.reason === 'input_limit'));
     expect(linkFrames.filter((f) => f.type === 'input')).toHaveLength(2);
     expect(frames.filter((f) => f.type === 'refused' && f.code === 'rate_limited').length).toBeGreaterThan(0);
     expect(frames.some((f) => f.type === 'ended' && f.reason === 'input_limit')).toBe(true);
@@ -648,7 +655,7 @@ describe('a session', () => {
     const c = await enter(lease.attemptId, link);
     c.send({ type: 'input', seq: 1, text: 'one\nrm -rf /' });
     c.send({ type: 'input', seq: 2, text: 'x'.repeat(5000) });
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 60)); // stays: asserts that nothing reaches the shell
     expect(link.frames.filter((f) => f.type === 'input')).toEqual([]);
     expect(await inputRows()).toEqual([]);
     c.ws.close();
