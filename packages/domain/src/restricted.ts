@@ -41,10 +41,50 @@ export function restrictedReason(outcome: RestrictedOutcome, sent: string): stri
 
 /**
  * A restricted approval request as the record may hold it: the operation only if it is on the worker list, the destination host only if it is a plain host name, and the fixed
- * sentence built from those two. Anything else is dropped, and the agent's own reason is never kept.
+ * sentence built from those two. Anything else is dropped, and the agent's own reason is never kept. The host is kept on purpose: it is a checked DNS name, not free
+ * text, and the person deciding the request has to see where the worker wants to reach.
  */
 export function restrictedApproval<D extends { readonly host: string }>(operation: string | undefined, destination: D | null | undefined): { readonly operation: WorkerApprovalOperation | undefined; readonly destination: D | undefined; readonly reason: string } {
   const known = (WORKER_APPROVAL_OPERATIONS as readonly string[]).includes(operation ?? '') ? (operation as WorkerApprovalOperation) : undefined;
   const host = destination && ApprovalDestinationSchema.shape.host.safeParse(destination.host).success ? destination : undefined;
   return { operation: known, destination: host, reason: restrictedApprovalReason(known, host) };
+}
+
+/** What a read path shows in place of a reason a restricted attempt stored that no rule here allows. */
+export const RESTRICTED_WITHHELD = 'reason_withheld';
+
+/** A code the server itself writes: lowercase words and colon-separated arguments, no spaces, no slashes. No runner sentence ever had this shape. */
+const SERVER_CODE = /^[a-z][a-z0-9_]*(?::[a-z0-9_.-]+)*$/;
+const APPROVAL_SENTENCE = /^The worker asked for ([a-z_]+|an unnamed operation)(?: to reach ([a-z0-9.-]+))?\. Its own words stay on the device because this work is restricted\.$/;
+const INFRASTRUCTURE = 'infrastructure:';
+
+/**
+ * For a read path (the snapshot, the event stream, a repair's prior failure): a reason a restricted attempt stored, as it may be shown. Rows written before the closed list may
+ * hold a runner's sentence, and nothing rewrites stored data, so every read of a restricted attempt's reasons goes through this. It keeps a reason on the closed list, a
+ * server code, the gate's count and the fixed approval sentence, and withholds anything else.
+ */
+export function restrictedStoredReason(reason: string): string {
+  if (reason.startsWith(INFRASTRUCTURE)) {
+    const rest = reason.slice(INFRASTRUCTURE.length);
+    return (RESTRICTED_REASONS.infrastructure_failed as readonly string[]).includes(rest) || SERVER_CODE.test(rest) ? reason : `${INFRASTRUCTURE}${RESTRICTED_FALLBACK.infrastructure_failed}`;
+  }
+  if (Object.values(RESTRICTED_REASONS).some((list) => (list as readonly string[]).includes(reason)) || SERVER_CODE.test(reason)) return reason;
+  const count = diffViolationCount(reason);
+  if (count !== null && reason === restrictedDiffReason(count)) return reason;
+  const asked = APPROVAL_SENTENCE.exec(reason);
+  if (asked) {
+    const { operation, destination } = restrictedApproval(asked[1], asked[2] !== undefined ? { host: asked[2] } : undefined);
+    if ((operation !== undefined || asked[1] === 'an unnamed operation') && (asked[2] === undefined || destination !== undefined)) return reason;
+  }
+  return RESTRICTED_WITHHELD;
+}
+
+/** The payload fields that carry a reason. */
+const REASON_FIELDS = ['reason', 'requestedReason', 'reportedReason', 'blocked'] as const;
+
+/** An event payload of a restricted attempt, with each reason field read through `restrictedStoredReason`. Every other field is structured and is left as it is. */
+export function restrictedStoredPayload(payload: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...payload };
+  for (const f of REASON_FIELDS) if (typeof out[f] === 'string') out[f] = restrictedStoredReason(out[f] as string);
+  return out;
 }

@@ -1,4 +1,4 @@
-import { TaskSpecSchema } from '@selarikru/domain';
+import { restrictedStoredReason, TaskSpecSchema } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { ClaimRequestSchema, EnrollRequestSchema, HeartbeatRequestSchema, PairingCodeRequestSchema, ResultRequestSchema, TerminalUploadRequestSchema, redactSecrets, type LeaseRef } from '@selarikru/protocol';
 import { INFRASTRUCTURE_REASON_PREFIX, type Lease, type LeaseConflict, type PublishResult, type Runner } from '@selarikru/workflow';
@@ -70,7 +70,7 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   /** Why the last attempt at this task revision did not stand, for the repair's TASK.md: the verifier's verdict when there is one, else the attempt's own reason. Redacted and bounded. */
   async function priorFailureOf(lease: { tenantId: string; projectId: string; taskId: string; revision: number; attemptNumber: number }): Promise<string | null> {
-    const earlier = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason }).from(schema.attempts).where(and(
+    const earlier = await db.select({ attemptId: schema.attempts.attemptId, exitReason: schema.attempts.exitReason, streamable: sql<boolean>`coalesce(${schema.attempts.detail} ->> 'terminalStreamable' = 'true', false)` }).from(schema.attempts).where(and(
       eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.taskId, lease.taskId), eq(schema.attempts.revision, lease.revision), lt(schema.attempts.attemptNumber, lease.attemptNumber))).orderBy(desc(schema.attempts.attemptNumber));
     // A sandbox that could not be set up, or a runner that went silent, says nothing about the worker's code, so a repair is told about the last attempt that actually ended on its own terms.
     const prior = earlier.find((a) => a.exitReason !== 'lease_expired' && !a.exitReason?.startsWith(INFRASTRUCTURE_REASON_PREFIX));
@@ -79,7 +79,9 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const payload = (verdict?.['payload'] ?? null) as { summary?: unknown; failedChecks?: unknown } | null;
     const checks = Array.isArray(payload?.failedChecks) ? payload.failedChecks.filter((c): c is string => typeof c === 'string') : [];
     const fromVerdict = payload === null ? null : [checks.length > 0 ? `Verification failed: ${checks.join(', ')}.` : 'Verification failed.', typeof payload.summary === 'string' ? payload.summary : ''].join(' ').trim();
-    const text = fromVerdict ?? prior.exitReason;
+    // A restricted attempt's reason is read through the closed list: one stored before it may hold a runner's sentence.
+    const own = prior.exitReason === null || prior.streamable ? prior.exitReason : restrictedStoredReason(prior.exitReason);
+    const text = fromVerdict ?? own;
     return text ? redactSecrets(text).slice(0, 1000) : null;
   }
 

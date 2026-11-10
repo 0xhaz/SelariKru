@@ -1,4 +1,5 @@
 import { readEventsAfter } from '@selarikru/persistence';
+import { restrictedStoredPayload } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from './app.ts';
@@ -64,13 +65,24 @@ export function registerEventStream(app: FastifyInstance, ctx: AppContext): void
       wake = () => { clearTimeout(timer); res(); };
     });
 
+    /** Which of these attempts the claim did not clear for streaming. A missing label counts as restricted. */
+    const restrictedAttemptsOf = async (ids: readonly (string | null)[]): Promise<ReadonlySet<string>> => {
+      const wanted = [...new Set(ids.filter((id): id is string => id !== null))];
+      if (wanted.length === 0) return new Set();
+      const rows = await db.execute(sql`SELECT attempt_id FROM attempts WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND attempt_id IN (${sql.join(wanted.map((id) => sql`${id}`), sql`, `)}) AND coalesce(detail ->> 'terminalStreamable' = 'true', false) = false`);
+      return new Set(rows.map((r) => String(r['attempt_id'])));
+    };
+
     let cursor = after;
     let lastWrite = Date.now();
     try {
       while (!closed) {
         const batch = await readEventsAfter(db, config.tenantId, projectId, cursor, BATCH);
+        const restricted = await restrictedAttemptsOf(batch.map((e) => e.attemptId));
         for (const e of batch) {
-          await write(`id: ${e.sequence}\nevent: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+          // A restricted attempt's reasons are read through the closed list: events from before it may hold a runner's sentence, and stored rows are never rewritten.
+          const shown = e.attemptId !== null && restricted.has(e.attemptId) ? { ...e, payload: restrictedStoredPayload(e.payload) } : e;
+          await write(`id: ${e.sequence}\nevent: ${e.type}\ndata: ${JSON.stringify(shown)}\n\n`);
           cursor = e.sequence;
           lastWrite = Date.now();
         }

@@ -1002,6 +1002,20 @@ describe('controller', () => {
       expect(repair.lease.priorFailure.length).toBeLessThanOrEqual(1000);
     });
 
+    it('a repair of restricted work is told only the category, even from a row stored before the closed list', async () => {
+      const h = harness();
+      const { claim, fail } = await twoWorkerRun(h, 25);
+      const first = await claim();
+      await claim();
+      await fail(first.lease, 'could not build');
+      // As a runner's sentence was stored before the fix: a restricted attempt with a path in its reason.
+      await t.db.execute(sql`UPDATE attempts SET exit_reason = 'could not compute the diff: secret/RESTRICTED-CANARY.md', detail = detail || '{"terminalStreamable": false}'::jsonb WHERE attempt_id = ${first.lease.attemptId}`);
+      const repair = await claim();
+      expect(repair.lease.taskId).toBe(first.lease.taskId);
+      expect(JSON.stringify(repair.lease)).not.toContain('RESTRICTED-CANARY');
+      expect(repair.lease.priorFailure).toBe('reason_withheld');
+    });
+
     it('a repair is told about the last attempt that ran, never about a sandbox that could not be set up', async () => {
       const h = harness();
       const { runner, claim, fail } = await twoWorkerRun(h, 25);

@@ -44,7 +44,6 @@ export const latestCheckOf = (snapshot: ProjectViewSnapshot, taskId: string): Ch
 export const isClosedRun = (run: Pick<RunView, 'lifecycle'>): boolean => run.lifecycle === 'merged' || run.lifecycle === 'failed' || run.lifecycle === 'cancelled';
 /** The run's latest record is known not to stand. No evidence at all is not this: then the record is simply not reported, and the server decides. */
 export const recordNoLongerValid = (run: Pick<RunView, 'evidence'>): boolean => run.evidence?.candidate?.recordValid === false;
-/** Finished work on an open run whose record no longer stands: what a re-verify is for. Once a re-verify starts its check runs are gone and no row reads passed, so this clears itself. */
 /**
  * Whether a run may be shown as ready for review: the lifecycle says so, its record stands, and none of its live tasks is unfinished. The server takes a run out of review when
  * its plan gains work; until the next snapshot says so, a planned task is enough to stop it being presented as ready.
@@ -52,6 +51,7 @@ export const recordNoLongerValid = (run: Pick<RunView, 'evidence'>): boolean => 
 export const presentableAsReady = (snapshot: Pick<ProjectViewSnapshot, 'tasks'>, run: RunView): boolean =>
   run.lifecycle === 'ready_for_review' && !recordNoLongerValid(run) &&
   Object.values(snapshot.tasks).every((t) => t.runId !== run.runId || t.status === 'verified' || t.status === 'merged' || t.status === 'cancelled' || t.status === 'superseded');
+/** Finished work on an open run whose record no longer stands: what a re-verify is for. Once a re-verify starts its check runs are gone and no row reads passed, so this clears itself. */
 export const hasStaleRecord = (run: RunView): boolean => !isClosedRun(run) && run.evidence?.candidate?.live === true && recordNoLongerValid(run) && run.evidence.criteria.some((c) => c.state === 'passed');
 export const atFailedGate = (t: Pick<TaskView, 'status'>, latest: CheckView | undefined): boolean => t.status === 'failed' || (t.status === 'ready' && latest?.state === 'failed');
 const titleOf = (t: TaskView): string => t.title ?? t.taskId;

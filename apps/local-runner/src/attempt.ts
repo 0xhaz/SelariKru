@@ -47,6 +47,8 @@ export interface AttemptDeps {
   readonly timeoutScale?: number;
   /** How a person reaches this attempt's sandbox shell in control mode. Absent: this runner offers no control mode. */
   readonly control?: ControlDeps;
+  /** How the completion gate reads the workspace's changes. Default: the runtime's `computeChanges`; tests replace it to make it fail. */
+  readonly computeChanges?: typeof computeChanges;
   /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
   readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
 }
@@ -542,7 +544,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The real control: the actual diff against the shipped base, not what the agent says it did.
     let changes: FileChange[];
     try {
-      changes = await computeChanges(baseline, workspace, baseIgnores);
+      changes = await (deps.computeChanges ?? computeChanges)(baseline, workspace, baseIgnores);
     } catch (err) {
       return await finish('failed', why('diff_failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`), cost);
     }

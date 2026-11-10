@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { restrictedReason, type RestrictedOutcome } from '@selarikru/domain';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -164,7 +164,8 @@ describe('a restricted attempt publishes a category from the closed list for eve
   // The last field: whether the runner's own sentence for that branch names the canary, so its log has to hold it.
   const cases: [string, WorldOptions, (w: World, deps: AttemptDeps) => AttemptDeps, string, boolean][] = [
     ['the change set cannot be stored', { agent: async ({ write }) => void (await write(`src/${CANARY}.ts`, 'n')) }, (w, d) => ({ ...d, artifacts: brokenStore(w) }), 'failed', true],
-    ['the diff cannot be computed', { agent: async ({ cwd }) => { await mkdir(join(cwd, 'src', CANARY)); await chmod(join(cwd, 'src', CANARY), 0o000); } }, (_w, d) => d, 'failed', true],
+    // Injected: an unreadable directory would need a non-root user, and the message is what matters here.
+    ['the diff cannot be computed', { agent: async ({ write }) => void (await write('src/n.ts', 'n')) }, (_w, d) => ({ ...d, computeChanges: async () => { throw new Error(`EACCES: permission denied, scandir 'src/${CANARY}'`); } }), 'failed', true],
     ['allowedPaths are invalid', { task: { allowedPaths: [`/${CANARY}`] } }, (_w, d) => d, 'blocked', true],
     ['an MCP server connected', { initMcp: [{ name: CANARY, status: 'connected' }] }, (_w, d) => d, 'failed', true],
     ['the stream reports another model', { initModel: CANARY }, (_w, d) => d, 'blocked', true],
@@ -180,11 +181,7 @@ describe('a restricted attempt publishes a category from the closed list for eve
 
   it.each(cases)('when %s', async (name, world, adjust, outcome, named) => {
     const { w, deps } = await setup({ ...world, streamable: false });
-    try {
-      expect((await runAttempt(adjust(w, deps), w.lease)).outcome).toBe(outcome);
-    } finally {
-      await chmod(join(w.workRoot, 'attempts', 'att_1', 'workspace', 'src', CANARY), 0o755).catch(() => undefined);
-    }
+    expect((await runAttempt(adjust(w, deps), w.lease)).outcome).toBe(outcome);
     expect(w.api.published).toHaveLength(1);
     const sent = w.api.published[0] as { outcome: string; reason: string };
     expect(sent.outcome).toBe(outcome);

@@ -40,10 +40,15 @@ export function restrictedApprovalReason(operation: string | undefined, destinat
 /** The completion gate's reason for a restricted attempt: how many paths broke the rule, not which. The paths are names the agent chose. */
 export const restrictedDiffReason = (count: number): string => `diff outside allowedPaths: ${count} path(s); the paths stay on the device because this work is restricted`;
 
-/** Reads the count back out of a runner's completion-gate reason, so the server can reduce one a runner sent with paths in it. Null for any other reason. */
+/** The most paths a completion-gate count may claim. Anything above it is not a count this gate could produce, and is not rebuilt. */
+export const MAX_DIFF_VIOLATIONS = 1_000_000;
+
+/** Reads the count back out of a runner's completion-gate reason, so the server can reduce one a runner sent with paths in it. Null for any other reason, and for a count above the cap. */
 export function diffViolationCount(reason: string): number | null {
-  const m = /^diff outside allowedPaths: (\d+) path\(s\)/.exec(reason);
-  return m ? Number(m[1]) : null;
+  const m = /^diff outside allowedPaths: (\d{1,7}) path\(s\)/.exec(reason);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n <= MAX_DIFF_VIOLATIONS ? n : null;
 }
 
 /** A DNS name with an alphabetic last label: no raw IP addresses, schemes, ports, paths or wildcards. */
