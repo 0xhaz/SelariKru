@@ -229,6 +229,33 @@ describe('blocked work', () => {
     });
   });
 
+  describe('an open pull request the run moved on from for another reason', () => {
+    // The replan scenario: the run took new work while #7 was open on candidate A; later B was built and passed, and the run is ready again.
+    const moved = (lifecycle: 'running' | 'ready_for_review', rebuiltSha: string | null, rebuild: 'building' | 'verifying' | 'verified') => {
+      const s = snapshotOf({ tasks: [task('t', { status: 'verified', aggregateRevision: 4 }), task('t2', { status: lifecycle === 'running' ? 'running' : 'verified' })] });
+      s.runs['run'] = { ...s.runs['run']!, lifecycle };
+      (s as { changeRequests: unknown[] }).changeRequests = [{ runId: 'run', prNumber: 7, url: 'https://github.com/a/b/pull/7', status: 'open', candidateSha: 'a'.repeat(40), baseRef: 'main', observedHeadSha: 'a'.repeat(40), mergeCommitSha: null, observedAt: iso(0), outOfDate: { reason: 'superseded', at: iso(0), rebuiltSha, rebuild } }];
+      return s;
+    };
+    const card = (s: ReturnType<typeof moved>) => build(s).cards.find((c) => c.id === 'review:run');
+
+    it('while the run is running, still shows the pull request, out of date, and says not to merge it', () => {
+      const c = card(moved('running', null, 'building'))!;
+      expect(c).toMatchObject({ kind: 'reconciliation', chip: 'Pull request out of date' });
+      expect(c.summary).toContain('The run\'s work changed');
+      expect(c.summary).not.toMatch(/main moved/i);
+      expect(`${c.summary} ${c.note}`).toMatch(/Do not merge it/);
+      expect(c.actions.filter((a) => a.kind === 'command')).toEqual([]);
+    });
+
+    it('once the run is ready again on the new candidate, never reads as ready for review', () => {
+      const c = card(moved('ready_for_review', 'b'.repeat(40), 'verified'))!;
+      expect(c.kind).toBe('reconciliation');
+      expect(`${c.title} ${c.summary}`).not.toMatch(/ready for your review/i);
+      expect(c.note).toContain('Close pull request #7 on GitHub, and open the new one');
+    });
+  });
+
   describe('a record that no longer stands', () => {
     // The shape the snapshot route sends: a run in review, a verified task, and the candidate's evidence.
     const withRecord = (recordValid: boolean, over: { state?: 'passed' | 'failed'; lifecycle?: 'ready_for_review' | 'running' | 'merged' | 'cancelled' | 'failed'; pr?: 'open' | 'closed' | 'stale_candidate'; merged?: boolean } = {}) => {

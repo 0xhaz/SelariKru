@@ -10,13 +10,20 @@ const STAGE: Readonly<Record<OutOfDate['rebuild'], { readonly lead: string; read
   conflicted: { lead: 'could not be rebuilt: it conflicts with main', stage: 'A resolution task is proposed.', next: 'open a new one once the conflict is resolved and verification passes' },
 };
 
-/** What a person must be told about an open pull request main has left behind, by how the rebuild is going. One wording for every screen. */
+/** Why the run left this pull request behind: main moved under it, or the run's own work changed (a newer candidate, or a plan with work the old commit does not carry). */
+const CAUSE: Readonly<Record<OutOfDate['reason'], { readonly so: string; readonly and: string }>> = {
+  main_moved: { so: 'Main moved, so', and: 'Main moved and' },
+  superseded: { so: 'The run\'s work changed, so', and: 'The run\'s work changed and' },
+};
+
+/** What a person must be told about an open pull request the run has left behind, by why and by how the rebuild is going. One wording for every screen. */
 export function outOfDateCopy(cr: ChangeRequestView, outOfDate: OutOfDate): { readonly title: string; readonly summary: string; readonly next: string; readonly short: string } {
   const s = STAGE[outOfDate.rebuild];
+  const c = CAUSE[outOfDate.reason];
   return {
     title: `Pull request #${cr.prNumber} no longer holds the verified code`,
-    summary: `Main moved, so the code ${s.lead}. This pull request still holds the old commit. ${s.stage}`,
+    summary: `${c.so} the code ${s.lead}. This pull request still holds the old commit. Do not merge it. ${s.stage}`,
     next: `Close pull request #${cr.prNumber} on GitHub, and ${s.next}.`,
-    short: `Main moved and the code ${s.lead}. Pull request #${cr.prNumber} no longer holds the verified code. Close it, and ${s.next}.`,
+    short: `${c.and} the code ${s.lead}. Pull request #${cr.prNumber} no longer holds the verified code. Close it, and ${s.next}.`,
   };
 }

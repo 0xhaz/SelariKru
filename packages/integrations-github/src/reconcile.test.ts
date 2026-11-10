@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { sql } from 'drizzle-orm';
+import { withTx } from '@selarikru/persistence';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { setupTestDb, resetDb, type TestDb } from '@selarikru/workflow/test-helpers';
 import { openReviewablePr } from './pr.ts';
@@ -197,6 +198,35 @@ describe('reconciliation', () => {
     expect(await mergedEvents()).toHaveLength(0);
     expect(await status('task_a')).toBe('verified');
     expect(await lifecycle()).toBe('running');
+  });
+
+  it('a run that leaves review while the merge is being recorded is not marked merged, and the pull request reads as stale', async () => {
+    gh.humanMerges(1);
+    // A replan takes the run out of review and holds its row until it commits. The reconcile has already read the old lifecycle by the time it needs that row.
+    let commit!: () => void;
+    const released = new Promise<void>((r) => { commit = r; });
+    let locked!: () => void;
+    const holding = new Promise<void>((r) => { locked = r; });
+    const replan = withTx(tdb.db, async (tx) => {
+      await tx.execute(sql`UPDATE runs SET lifecycle = 'running'`);
+      locked();
+      await released;
+    });
+    await holding;
+    const pending = reconcileRun({ tenantId: TENANT, projectId: PROJECT, runId: RUN }, rdeps());
+    // Let the reconcile reach the run row, then let the replan commit under it.
+    for (let i = 0; i < 500; i++) {
+      const [row] = await tdb.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE cardinality(pg_blocking_pids(pid)) > 0 AND datname = current_database()`);
+      if (Number(row!['n']) > 0) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    commit();
+    await replan;
+    expect((await pending).status).toBe('stale');
+    expect(await lifecycle()).toBe('running');
+    expect(await status('task_a')).toBe('verified');
+    expect(await mergedEvents()).toHaveLength(0);
+    expect((await q(tdb.db, 'SELECT status FROM change_requests'))[0]).toEqual({ status: 'stale_candidate' });
   });
 
   it('a poll that read the old PR cannot write its state onto the row that replaced it', async () => {

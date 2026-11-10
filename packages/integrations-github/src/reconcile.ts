@@ -34,6 +34,25 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
   const pr = await deps.port.getPullRequest(row.repository, row.prNumber);
   if (!pr) return { status: 'unknown' };
   const now = deps.now();
+  // A run that leaves review after the lifecycle was read (a replan, a re-verify) makes the last write match nothing: the whole merge is rolled back and decided again, now as stale.
+  try {
+    return await recordReconcile(deps, where, row, pr, now);
+  } catch (e) {
+    if (!(e instanceof RunLeftReview)) throw e;
+    return recordReconcile(deps, where, row, pr, now);
+  }
+}
+
+/** Thrown inside the transaction so that nothing it wrote stands. */
+class RunLeftReview extends Error {
+  constructor() { super('the run left review while its merge was being recorded'); }
+}
+
+type ChangeRow = typeof schema.changeRequests.$inferSelect;
+type ObservedPr = NonNullable<Awaited<ReturnType<GitHubPort['getPullRequest']>>>;
+
+async function recordReconcile(deps: ReconcileDeps, where: ReturnType<typeof and>, row: ChangeRow, pr: ObservedPr, now: Date): Promise<ReconcileOutcome> {
+  const key = { tenantId: row.tenantId, projectId: row.projectId, runId: row.runId };
   return withTx(deps.db, async (tx): Promise<ReconcileOutcome> => {
     const locked = (await tx.select().from(schema.changeRequests).where(where).for('update'))[0];
     if (!locked || locked.status === 'merged') return { status: 'unchanged' };
@@ -70,8 +89,11 @@ export async function reconcileRun(key: RunKey, deps: ReconcileDeps): Promise<Re
         eq(schema.taskStatus.status, 'verified'), inArray(schema.taskStatus.taskId, partIds)))
       .orderBy(schema.taskStatus.taskId);
     for (const t of tasks) await markTaskMerged(tx, { tenantId: key.tenantId, projectId: key.projectId, taskId: t.taskId }, now, INTEGRATION_ACTOR, payload);
-    await tx.update(schema.runs).set({ lifecycle: 'merged' }).where(and(
-      eq(schema.runs.tenantId, key.tenantId), eq(schema.runs.projectId, key.projectId), eq(schema.runs.runId, key.runId), eq(schema.runs.lifecycle, 'ready_for_review')));
+    // The lifecycle above was read without the run row: the row is taken here, last, after the parts' status rows and the event sequence (the lock-order comment in
+    // services/workflow/src/verification.ts says why). If the run left review meanwhile, this matches nothing and nothing here may stand.
+    const moved = await tx.update(schema.runs).set({ lifecycle: 'merged' }).where(and(
+      eq(schema.runs.tenantId, key.tenantId), eq(schema.runs.projectId, key.projectId), eq(schema.runs.runId, key.runId), eq(schema.runs.lifecycle, 'ready_for_review'))).returning({ runId: schema.runs.runId });
+    if (moved.length === 0) throw new RunLeftReview();
     return { status: 'merged' };
   });
 }

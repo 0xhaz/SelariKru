@@ -347,8 +347,8 @@ export const ChangeRequestViewSchema = z
     observedHeadSha: z.string().nullable(),
     mergeCommitSha: z.string().nullable(),
     observedAt: Iso.nullable(),
-    /** Main moved and the run's code was rebuilt, so this open pull request no longer holds it. `rebuiltSha` is null until a rebuilt commit exists. Null: it still holds the run's code. */
-    outOfDate: z.object({ reason: z.literal('main_moved'), at: Iso, rebuiltSha: Id.nullable(), rebuild: z.enum(['building', 'verifying', 'verified', 'failed', 'conflicted']) }).strict().nullable().default(null),
+    /** This open pull request no longer holds the run's live candidate: `main_moved` when a rebuild for a newer main retired it, `superseded` for any other reason. `rebuiltSha` is null until a newer commit exists. Null: it still holds the run's code. */
+    outOfDate: z.object({ reason: z.enum(['main_moved', 'superseded']), at: Iso, rebuiltSha: Id.nullable(), rebuild: z.enum(['building', 'verifying', 'verified', 'failed', 'conflicted']) }).strict().nullable().default(null),
   })
   .strict();
 export type ChangeRequestView = z.infer<typeof ChangeRequestViewSchema>;

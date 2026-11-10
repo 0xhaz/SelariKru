@@ -533,6 +533,32 @@ describe('run orchestration chain', () => {
         expect(await taskStatus('t_ready_add')).toBe('verified');
       });
 
+      it('an open pull request is out of date once a replan gives the run new work, through the rebuild and after the run is ready again', async () => {
+        type Cr = { runId: string; prNumber: number; status: string; candidateSha: string; outOfDate: { reason: string; at: string; rebuiltSha: string | null; rebuild: string } | null };
+        const crOf = async (runId: string) => ((await app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json() as { changeRequests: Cr[] }).changeRequests.find((c) => c.runId === runId);
+        const { runId, sha: shaA, store } = await verifiedRun('t_pr_a');
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).status).toBe(200);
+        expect((await crOf(runId))?.outOfDate).toBeNull();
+
+        expect((await post(evApp, `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 1, tasks: [task(runId, 't_pr_b')] })).status).toBe(201);
+        // Candidate A is still the latest built, but it no longer holds the run's plan.
+        expect(await crOf(runId)).toMatchObject({ status: 'open', candidateSha: shaA, outOfDate: { reason: 'superseded', rebuiltSha: null, rebuild: 'building' } });
+
+        const { report } = await runWorker(await claim(), ({ write }) => { write('src/t_pr_b.ts', 'export const b = 1;\n'); });
+        expect(report.outcome).toBe('completed');
+        const { assembled } = await createAssemblyDriver({ db: t.db, artifacts: store, tenantId: TENANT, repoPath: repo, workRoot: join(root, 'integrate') }).tick();
+        const shaB = assembled[0]!;
+        expect(shaB).not.toBe(shaA);
+        expect(await crOf(runId)).toMatchObject({ outOfDate: { reason: 'superseded', rebuiltSha: shaB, rebuild: 'verifying' } });
+
+        expect((await verification(store, verifierRunner).tick()).verified).toBe(shaB);
+        expect(await lifecycle(runId)).toBe('ready_for_review');
+        // Ready again, on B: the pull request still holds A, so it must never read as ready.
+        expect(await crOf(runId)).toMatchObject({ status: 'open', candidateSha: shaA, outOfDate: { reason: 'superseded', rebuiltSha: shaB, rebuild: 'verified' } });
+        // The existing rule: close it to open one for B.
+        expect((await post(app, `/v1/runs/${runId}/pull-request`, {})).body.error.details).toMatchObject({ reason: 'candidate_changed', prNumber: expect.any(Number) });
+      });
+
       it('leaves a valid record alone: no re-verify, no cancel, no replan', async () => {
         const { runId, sha } = await verifiedRun('t_valid');
         const valid = await reverify(runId, 'b1');

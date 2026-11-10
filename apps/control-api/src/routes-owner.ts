@@ -1,4 +1,4 @@
-import { NO_HARNESS_CATALOG, availableCatalog, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
@@ -618,6 +618,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           leaseExpiresAt: schema.attempts.leaseExpiresAt, deadlineAt: schema.attempts.deadlineAt, outcome: schema.attempts.outcome,
           exitReason: schema.attempts.exitReason, startedAt: schema.attempts.startedAt, endedAt: schema.attempts.endedAt,
           lastTool: schema.attempts.lastTool, lastToolAt: schema.attempts.lastToolAt,
+          // Decided at claim. Anything but a clear yes is restricted, and its reasons are read through `restrictedStoredReason`.
+          streamable: sql<boolean>`coalesce(${schema.attempts.detail} ->> 'terminalStreamable' = 'true', false)`,
           modelRoute: schema.attempts.modelRoute, modelProvider: schema.attempts.modelProvider, modelId: schema.attempts.modelId, assignmentSource: schema.attempts.assignmentSource,
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
@@ -632,6 +634,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const retiredForMain = await tx.execute(sql`SELECT run_id, sha, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'invalidated' AND reason = 'base_changed' AND sha IS NOT NULL`);
         const candidateRows = await tx.execute(sql`SELECT run_id, sha, status, updated_at, detail -> 'rebuildDeferred' AS deferred, detail -> 'retryRefused' AS retry_refused FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status IN ('assembled', 'rejected', 'failed', 'conflicted')`);
         const whenOf = (v: unknown): number => new Date(v as string | Date).getTime();
+        // What each open pull request's candidate is now, and when each run last took a plan: an open pull request on anything but the run's live candidate is out of date.
+        const prCandidates = await tx.execute(sql`SELECT run_id, sha, status, parts, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND sha IN (SELECT candidate_sha FROM change_requests WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'open')`);
+        const planAccepted = await tx.execute(sql`SELECT DISTINCT ON (run_id) run_id, occurred_at FROM events WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type = 'plan.accepted' ORDER BY run_id, sequence DESC`);
         /** How the rebuild that left this pull request behind is going. A failed or conflicted one is said as such; only a run actually building says it is. */
         const rebuildState = (runId: string, retiredAt: unknown, liveSha: string | null): 'building' | 'verifying' | 'verified' | 'failed' | 'conflicted' => {
           if (liveSha !== null) return runs.find((r) => r.runId === runId)?.lifecycle === 'ready_for_review' ? 'verified' : 'verifying';
@@ -641,9 +646,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const reducedScopes = (await tx.select().from(schema.decisions).where(scope(schema.decisions))).filter((d) => d.context.startsWith(reducedScopeContext('')));
         // Why each blocked task stopped: the latest blocking event names it. Statuses alone can't say.
         const blockEvents = await tx.execute(sql`
-          SELECT DISTINCT ON (task_id) task_id, type, payload FROM events
+          SELECT DISTINCT ON (task_id) task_id, type, payload, attempt_id FROM events
           WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND type IN ('task.blocked', 'task.reopened', 'approval.denied')
           ORDER BY task_id, sequence DESC`);
+        // A restricted attempt's block reason is read through the same rule as its exit reason: rows from before the closed list may hold a runner's sentence.
+        const restrictedIds = new Set(attempts.filter((a) => !a.streamable).map((a) => a.attemptId));
+        for (const b of blockEvents) if (typeof b['attempt_id'] === 'string' && restrictedIds.has(b['attempt_id'])) b['payload'] = restrictedStoredPayload(b['payload'] as Record<string, unknown>);
 
         // The status a task is in now came with its latest status event; a row bumped for any other reason keeps its time.
         const statusEvents = await tx.execute(sql`
@@ -748,7 +756,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               enteredStatusAt: statusEvents.find((e) => e['task_id'] === s.taskId) ? eventTime(statusEvents.find((e) => e['task_id'] === s.taskId)!) : s.updatedAt.toISOString(),
               latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === s.taskId)),
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
-                attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason,
+                attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason === null || a.streamable ? a.exitReason : restrictedStoredReason(a.exitReason),
                 /** Where this attempt's sandbox runs. Null: its runner is no longer enrolled. */
                 location: runners.find((r) => r.runnerId === a.runner)?.location ?? null,
                 /** The tool the worker last started: a name, never its arguments. Null: nothing reported. */
@@ -785,12 +793,25 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           changeRequests: changes.map((c) => ({
             runId: c.runId, prNumber: c.prNumber, url: c.url, status: c.status, candidateSha: c.candidateSha, baseRef: c.baseRef,
             observedHeadSha: c.observedHeadSha ?? null, mergeCommitSha: c.mergeCommitSha ?? null, observedAt: c.observedAt?.toISOString() ?? null,
-            /** The run's code was rebuilt on a newer main, so this open pull request no longer holds it. `rebuiltSha` is null while nothing has been built yet. */
+            /**
+             * This open pull request no longer holds the run's live candidate, so it must not be merged: `main_moved` when a rebuild for a newer main retired it, `superseded` for any
+             * other reason (a newer candidate, or a plan that now has work the candidate does not carry). `rebuiltSha` is the run's newer candidate, null while nothing has been built.
+             */
             outOfDate: (() => {
-              const retired = c.status === 'open' ? retiredForMain.find((m) => m['run_id'] === c.runId && m['sha'] === c.candidateSha) : undefined;
-              if (!retired) return null;
-              const rebuiltSha = (candidateRows.find((l) => l['run_id'] === c.runId && l['status'] === 'assembled')?.['sha'] as string | undefined) ?? null;
-              return { reason: 'main_moved', at: new Date(retired['updated_at'] as string | Date).toISOString(), rebuiltSha, rebuild: rebuildState(c.runId, retired['updated_at'], rebuiltSha) };
+              if (c.status !== 'open') return null;
+              const live = candidateRows.find((l) => l['run_id'] === c.runId && l['status'] === 'assembled');
+              const rebuiltSha = live && live['sha'] !== c.candidateSha ? String(live['sha']) : null;
+              const retired = retiredForMain.find((m) => m['run_id'] === c.runId && m['sha'] === c.candidateSha);
+              if (retired) return { reason: 'main_moved', at: new Date(retired['updated_at'] as string | Date).toISOString(), rebuiltSha, rebuild: rebuildState(c.runId, retired['updated_at'], rebuiltSha) };
+              const own = prCandidates.find((p) => p['run_id'] === c.runId && p['sha'] === c.candidateSha);
+              const at = (v: unknown) => ({ reason: 'superseded' as const, at: new Date(v as string | Date).toISOString(), rebuiltSha, rebuild: rebuildState(c.runId, v, rebuiltSha) });
+              // Not the live candidate: retired for another reason, or another was built after it.
+              if (!own || own['status'] !== 'assembled' || rebuiltSha !== null) return at(own?.['updated_at'] ?? c.observedAt ?? new Date(0));
+              // Still the latest built, but the plan moved on: the run's live tasks at their current revisions are not the parts it carries.
+              const parts = new Set(((own['parts'] as { taskId?: unknown; revision?: unknown }[] | null) ?? []).map((p) => `${String(p.taskId)}@${String(p.revision)}`));
+              const liveTasks = statuses.filter((st) => st.status !== 'cancelled' && st.status !== 'superseded' && revisions.some((r) => r.taskId === st.taskId && r.revision === st.currentRevision && r.runId === c.runId)).map((st) => `${st.taskId}@${st.currentRevision}`);
+              if (liveTasks.length === parts.size && liveTasks.every((k) => parts.has(k))) return null;
+              return at(planAccepted.find((e) => e['run_id'] === c.runId)?.['occurred_at'] ?? own['updated_at']);
             })(),
           })),
           clientReports: reports.map((r) => ({

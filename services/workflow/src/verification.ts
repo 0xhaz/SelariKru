@@ -43,6 +43,12 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *     - a publish gets the same 503 on the runner route, and the runner retries it up to three times before letting the lease lapse to expiry;
  *     - lease expiry and the verifier are background loops: the pass that lost logs the error and the next tick does the work again, with no 503 anywhere. A verdict that loses
  *       releases its claim on the candidate, which stays assembled with its parts verifying, so a later tick claims it and judges it again.
+ * - The merge reconcile (packages/integrations-github/src/reconcile.ts) takes the event sequence (`change.merged`) and the verified parts' status rows, then the run row last. An
+ *   owner replan or re-verify of the same run holds the run row and then wants a status row or the event sequence, so the two can close a cycle while the run is still in review.
+ *   Postgres rolls one back:
+ *     - the replan or re-verify gets the retryable 503 `transaction_conflict`, nothing was recorded, and the owner sends it again;
+ *     - the reconcile throws with nothing recorded: a webhook hint stays `received` with the error and is processed again, and the poller reads every open pull request again on
+ *       its next pass. If instead the replan wins and commits first, the reconcile's last write matches no run in review, so it rolls itself back and decides again, as stale.
  *
  * Three more paths take status rows first and the run row last, and the verdict takes the run row before its parts' status rows:
  * - a cancel that retires a stale candidate: candidate, scheduler lock, the task's and the other parts' status rows, this lock, the event sequence, then the run row in `leaveReview`;
