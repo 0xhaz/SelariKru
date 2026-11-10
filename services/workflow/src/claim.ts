@@ -349,9 +349,11 @@ async function clearBlock(tx: Tx, key: TaskKey): Promise<void> {
 /** Writes `placement.blocked` and the queryable field when the permanent reason changed. Does not touch `updatedAt`, which orders the queue. */
 async function recordBlock(tx: Tx, key: TaskKey, c: Candidate, row: { placementBlock: string | null; rowRevision: number }, reason: string, modeId: string | null, now: Date): Promise<void> {
   if (row.placementBlock === reason) return;
-  const aggregateRevision = row.rowRevision + 1;
-  await tx.update(schema.taskStatus).set({ placementBlock: reason, rowRevision: aggregateRevision })
-    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
+  // An increment of the stored revision, as `setStatus` does: never the read one plus one, which an earlier write in this transaction may already have used.
+  const [moved] = await tx.update(schema.taskStatus).set({ placementBlock: reason, rowRevision: sql`${schema.taskStatus.rowRevision} + 1` })
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)))
+    .returning({ rowRevision: schema.taskStatus.rowRevision });
+  const aggregateRevision = moved!.rowRevision;
   await emit(tx, { projectId: c.projectId, runId: c.runId, taskId: c.taskId, aggregateRevision }, now, {
     type: 'placement.blocked', attemptId: null, actor: SCHEDULER_ACTOR, payload: { reason, mode: modeId },
   });

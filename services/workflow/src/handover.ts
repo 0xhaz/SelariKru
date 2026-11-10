@@ -423,6 +423,8 @@ export async function placementRefused(tx: Tx, key: TaskKey, row: CheckpointRow,
  * The caller holds the task's status row. `estimate` replaces the stored one when the offer follows a lost successor, whose time and hold the restart repeats.
  */
 async function offerRestart(tx: Tx, key: TaskKey, row: CheckpointRow, code: string, now: Date, attemptId: string | null, estimate?: Record<string, unknown>): Promise<void> {
+  // Event order: an offer made inside `closeLease` (a lost or blocked successor) is logged before the publish's or expiry's own attempt and task events, at the revision it moved;
+  // their later revisions follow it. Kept on purpose: the offer is decided by the attempt ending, and readers order by revision, which never goes back.
   await setRow(tx, row, { state: 'restart_offered', refusal: code, successorAttemptId: null, successorFence: null, ...(estimate ? { estimate } : {}), updatedAt: now });
   const aggregateRevision = await bumpRevision(tx, key);
   await emit(tx, { projectId: key.projectId, runId: row.runId, taskId: key.taskId, aggregateRevision }, now, {
@@ -568,6 +570,8 @@ export async function decideHandover(ctx: SchedulerContext, key: TaskKey, checkp
     if (!row) return err<HandoverRefusal>({ reason: 'handover_not_found', status: 404 });
     if (row.revision !== statusRow.currentRevision || TERMINAL_TASK.includes(statusRow.status)) return err<HandoverRefusal>({ reason: 'handover_stale', status: 409 });
     if (!(CHOICES[choice] ?? []).includes(row.state as HandoverState)) return err<HandoverRefusal>({ reason: choice === 'release' ? 'nothing_to_release' : 'no_restart_offered', status: 409 });
+    // A blocked task is not claimed, so a release or a restart would start nothing: only declining is offered. The owner unblocks the task on its own terms afterwards.
+    if (statusRow.status === 'blocked' && choice !== 'decline') return err<HandoverRefusal>({ reason: 'handover_task_blocked', status: 409 });
     const now = ctx.now();
     const state: HandoverState = choice === 'decline' ? 'declined' : 'fenced';
     const mode: HandoverMode = choice === 'restart' ? 'restart' : (row.mode as HandoverMode);

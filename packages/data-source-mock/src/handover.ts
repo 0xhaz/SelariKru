@@ -95,7 +95,7 @@ export function createDemoHandover(d: DemoHandoverDeps): DemoHandover {
       exclusions: state === 'stopping' ? [] : r.exclusions, refusal: state !== 'stopping' && r.refusal ? { code: r.refusal, text: HANDOVER_REASON_TEXT[r.refusal] ?? r.refusal } : null,
       estimate: estimate(null), latePublishes: 0, requestedAt: new Date(r.requestedAtMs).toISOString(),
       fencedAt: state === 'stopping' ? null : new Date(r.requestedAtMs + DEMO_HANDOVER_STEPS.fencedMs).toISOString(), updatedAt: new Date(now).toISOString(),
-      releasedAt: r.decision?.choice === 'release' ? new Date(r.decision.atMs).toISOString() : null, releasedBy: r.decision?.choice === 'release' ? OWNER : null, successorRetries: 0,
+      releasedAt: r.decision?.choice === 'release' ? new Date(r.decision.atMs).toISOString() : null, releasedBy: r.decision?.choice === 'release' ? OWNER : null, successorRetries: 0, taskBlocked: false,
       contentDropped: dropped && r.mode === 'resume' ? { at: new Date(now).toISOString(), reason: dropped, text: HANDOVER_CLOSE_TEXT[dropped] ?? dropped } : null,
       closed: state === 'declined' ? { reason: 'declined', text: HANDOVER_CLOSE_TEXT['declined']! } : null,
     };

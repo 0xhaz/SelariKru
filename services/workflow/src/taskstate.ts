@@ -45,11 +45,11 @@ export function buildTaskState(spec: TaskSpec, status: TaskStatus, attempts: rea
 }
 
 /**
- * Sets the status and moves the row's revision by one from what is stored, and returns it. The caller holds the row; `rowRevision` is what it read, and is also what an earlier
- * write in the same transaction may already have moved (`bumpRevision`), so the stored value, not the read one, is the base: a revision never repeats or goes back.
+ * Sets the status and moves the row's revision by one from what is stored, and returns it. The caller holds the row. `_seenRevision` is the revision the caller read when it
+ * locked the row; it is not used to write. An earlier write in the same transaction may already have moved the stored value (`bumpRevision`, `recordBlock`), so the stored
+ * value is the base and a revision never repeats or goes back. The argument stays so the many callers (the verifier's among them, whose source is hashed) read as before.
  */
-export async function setStatus(tx: Tx, key: TaskKey, rowRevision: number, status: TaskStatus, now: Date): Promise<number> {
-  void rowRevision;
+export async function setStatus(tx: Tx, key: TaskKey, _seenRevision: number, status: TaskStatus, now: Date): Promise<number> {
   const [row] = await tx
     .update(schema.taskStatus)
     .set({ status, rowRevision: sql`${schema.taskStatus.rowRevision} + 1`, updatedAt: now })

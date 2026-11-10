@@ -157,7 +157,12 @@ export function HandoverRecord({ record, live, busy, onDecide, loadDiff = null }
         <div className="rounded-card border border-warning p-3" data-testid="handover-refusal">
           <p className="text-fg wrap-anywhere"><span className={TONE_TEXT.warning}>Cannot resume safely.</span> {record.refusal.text}</p>
           {record.estimate ? <p className="mt-1 text-sm text-fg" data-testid="handover-restart-cost">A restart from the persisted input repeats the work: {costText(record.estimate.costUsd)}, {timeText(record.estimate.timeSeconds)}.{record.estimate.spentUsd && record.estimate.spentUsd.value !== null ? ` Already held for the lost cloud attempt(s): ${costText(record.estimate.spentUsd).replace(' at most', ' worst case')}.` : ''}</p> : null}
-          {record.state === 'restart_offered' ? (
+          {record.state === 'restart_offered' && record.taskBlocked ? (
+            <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="handover-blocked">
+              <p className="w-full text-sm text-fg">The task is blocked, so a release or a restart would start nothing. Decline to close this handover and keep the task where it is; unblock the task afterwards.</p>
+              <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('decline')}>Decline</button>
+            </div>
+          ) : record.state === 'restart_offered' ? (
             <div className="mt-3 flex flex-wrap gap-2">
               <button type="button" className={buttonPrimary} disabled={off} onClick={() => onDecide('restart')}>Restart from persisted input</button>
               <button type="button" className={buttonQuiet} disabled={off} onClick={() => onDecide('decline')}>Keep it local</button>

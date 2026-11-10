@@ -49,6 +49,8 @@ export const HandoverRecordViewSchema = z.object({
   releasedAt: z.string().nullable().default(null),
   releasedBy: z.string().nullable().default(null),
   successorRetries: z.number().int().min(0).default(0),
+  /** The task is blocked: a release or a restart would start nothing, so only declining is offered. */
+  taskBlocked: z.boolean().default(false),
   /** The stored checkpoint content was dropped: when and why. */
   contentDropped: z.object({ at: z.string(), reason: z.string(), text: z.string() }).nullable().default(null),
   /** Why the handover was closed or declined. */

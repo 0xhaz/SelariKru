@@ -10,7 +10,7 @@ import { schema } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { createScheduler, loadLatestAppliedRecord } from '@selarikru/workflow';
 import { CLOUD_POLICY } from '@selarikru/workflow/test-helpers';
-import { API_POLICY, PROJECT, RUN, TENANT, TEST_CATALOG, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, testClock, type Harness, type TestDb } from './helpers.ts';
+import { API_POLICY, CAPS, PROJECT, RUN, TENANT, TEST_CATALOG, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, testClock, type Harness, type TestDb } from './helpers.ts';
 
 const BASE = 'a'.repeat(40);
 const POLICY = { ...CLOUD_POLICY, operations: { ...API_POLICY.operations, destructive_data_migration: 'require_approval' } } as unknown as Policy;
@@ -307,5 +307,33 @@ describe('continue in cloud', () => {
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ prNumber: 7, candidateSha: 'c'.repeat(40) });
     expect(after[0].outOfDate).toMatchObject({ reason: 'superseded' });
+  });
+
+  it('a blocked task\'s handover offers only declining: a release or a restart is refused with handover_task_blocked (INFRA=1)', async () => {
+    await h.app.close();
+    const clock = testClock();
+    h = { ...makeHarness(t, { caps: { ...CAPS, maxInfraRetries: 1 } }, POLICY, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), now: clock.now }), clock };
+    await h.app.ready();
+    const prior = await localRunning();
+    await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k1' });
+    await post(h.app, '/v1/runners/checkpoint', checkpointBody(prior, [file('server/app.ts', 'x')]), bearer(local.token));
+    await post(h.app, '/v1/runners/result', { lease: prior, result: { outcome: 'failed', reason: 'handover' } }, bearer(local.token));
+    const id = (await get(h.app, url())).body.current.checkpointId;
+    await post(h.app, `${url()}/decision`, { checkpointId: id, choice: 'release', idempotencyKey: 'r1' });
+    for (let i = 0; i < 2; i++) {
+      expect((await claim(cloud.token)).lease).not.toBeNull();
+      clock.advance(70);
+      await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }).expireLeases(clock.now());
+      clock.advance(60);
+      await t.db.execute(sql`UPDATE runners SET last_seen_at = ${clock.now().toISOString()}::timestamptz`);
+    }
+    expect((await claim(cloud.token)).lease).toBeNull();
+    const view = (await get(h.app, url())).body;
+    expect(view.status).toBe('blocked');
+    expect(view.current).toMatchObject({ state: 'restart_offered', refusal: { code: 'infra_retries_exhausted' }, taskBlocked: true });
+    const refused = await post(h.app, `${url()}/decision`, { checkpointId: id, choice: 'restart', idempotencyKey: 'd1' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('handover_task_blocked');
+    expect((await post(h.app, `${url()}/decision`, { checkpointId: id, choice: 'decline', idempotencyKey: 'd2' })).body).toMatchObject({ state: 'declined' });
   });
 });

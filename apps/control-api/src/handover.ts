@@ -31,7 +31,7 @@ const text = (code: string): string => HANDOVER_REASON_TEXT[code] ?? code;
 const iso = (d: Date | null): string | null => d?.toISOString() ?? null;
 
 /** A handover row as a person may see it: by path, change, size and hash. The stored bytes never leave this function. */
-export function recordView(r: CheckpointRow) {
+export function recordView(r: CheckpointRow, taskStatus: string | null = null) {
   const files = (r.files ?? []) as { path: string; status: 'added' | 'modified' | 'deleted'; size: number | null; sha256: string | null }[];
   const diffs = (r.diffs ?? {}) as Record<string, { binary?: boolean; lines?: unknown[] | null; added?: number; removed?: number }>;
   const statOf = (path: string) => {
@@ -54,6 +54,8 @@ export function recordView(r: CheckpointRow) {
     estimate: Object.keys(r.estimate).length > 0 ? r.estimate : null,
     latePublishes: r.latePublishes, requestedAt: r.requestedAt.toISOString(), fencedAt: iso(r.fencedAt), updatedAt: r.updatedAt.toISOString(),
     releasedAt: iso(r.releasedAt), releasedBy: r.releasedBy, successorRetries: r.successorRetries,
+    // A blocked task takes no release or restart: only declining is offered.
+    taskBlocked: taskStatus === 'blocked',
     contentDropped: r.contentDroppedAt !== null ? { at: r.contentDroppedAt.toISOString(), reason: r.contentDroppedReason ?? 'unknown', text: HANDOVER_CLOSE_TEXT[r.contentDroppedReason ?? ''] ?? r.contentDroppedReason ?? '' } : null,
     closed: r.state === 'closed' || r.state === 'declined' ? { reason: r.closedReason ?? 'unknown', text: HANDOVER_CLOSE_TEXT[r.closedReason ?? ''] ?? r.closedReason ?? '' } : null,
   };
@@ -64,7 +66,7 @@ function taskView(a: HandoverAssessment, current: CheckpointRow | undefined) {
     taskId: a.taskId, status: a.status, attempt: a.attempt, baseSha: a.baseSha, allowedPaths: [...a.allowedPaths],
     resume: { ...a.resume, reasons: [...a.resume.reasons], reasonText: a.resume.reasons.map(text) },
     restart: { ...a.restart, reasons: [...a.restart.reasons], reasonText: a.restart.reasons.map(text) },
-    estimate: a.estimate, excludes: CHECKPOINT_EXCLUDES, current: current ? recordView(current) : null,
+    estimate: a.estimate, excludes: CHECKPOINT_EXCLUDES, current: current ? recordView(current, a.status) : null,
   };
 }
 
@@ -104,7 +106,9 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
     const ids = [...new Set([...running.map((r) => r.taskId), ...records.filter((r) => (OPEN_HANDOVER_STATES as readonly string[]).includes(r.state)).map((r) => r.taskId)])].sort();
     const tasks = [];
     for (const taskId of ids) tasks.push(taskView(await assessHandover(sched, { tenantId, projectId, taskId }, config.caps), records.find((r) => r.taskId === taskId)));
-    return { projectId, observedAt: now().toISOString(), notice: HANDOVER_NOTICE, tasks, records: records.map(recordView) };
+    const statuses = new Map((await db.select({ taskId: schema.taskStatus.taskId, status: schema.taskStatus.status }).from(schema.taskStatus)
+      .where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId)))).map((r) => [r.taskId, r.status] as const));
+    return { projectId, observedAt: now().toISOString(), notice: HANDOVER_NOTICE, tasks, records: records.map((r) => recordView(r, statuses.get(r.taskId) ?? null)) };
   };
   const refused = (reason: string, status: number) => new AppError(status, status === 404 ? 'task_not_found' : 'handover_refused', text(reason), { reason });
 
@@ -140,7 +144,10 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
     await requireTask(projectId, taskId!);
     return withTx(db, (tx) => idempotent(tx, { tenantId, projectId, key: `handover.decide:${body.checkpointId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
       const r = await decideHandover(sched, { tenantId, projectId, taskId: taskId! }, body.checkpointId, body.choice, uid, tx);
-      if (!r.ok) throw r.error.status === 404 ? new AppError(404, 'handover_not_found', text(r.error.reason), { reason: r.error.reason }) : refused(r.error.reason, r.error.status);
+      if (!r.ok) {
+        if (r.error.reason === 'handover_task_blocked') throw new AppError(409, 'handover_task_blocked', 'the task is blocked: only keeping it local is possible now', { reason: r.error.reason });
+        throw r.error.status === 404 ? new AppError(404, 'handover_not_found', text(r.error.reason), { reason: r.error.reason }) : refused(r.error.reason, r.error.status);
+      }
       return r.value;
     }));
   });

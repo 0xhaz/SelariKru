@@ -10,7 +10,7 @@ const task = (over: Partial<HandoverTaskView> = {}): HandoverTaskView => ({
 });
 const record = (state: HandoverRecordView['state'], over: Partial<HandoverRecordView> = {}): HandoverRecordView => ({
   checkpointId: 'c1', taskId: 't1', revision: 1, runId: 'r1', mode: 'resume', state, stateLabel: state, target: 'cloud', priorAttemptId: 'a1', priorFence: 1, nextFence: null,
-  successorAttemptId: null, successorFence: null, baseSha: 'c'.repeat(40), patch: null, exclusions: [], refusal: null, estimate, latePublishes: 0, requestedAt: '2026-11-10T00:00:00.000Z', fencedAt: null, updatedAt: '2026-11-10T00:00:00.000Z', releasedAt: null, releasedBy: null, successorRetries: 0, contentDropped: null, closed: null, ...over,
+  successorAttemptId: null, successorFence: null, baseSha: 'c'.repeat(40), patch: null, exclusions: [], refusal: null, estimate, latePublishes: 0, requestedAt: '2026-11-10T00:00:00.000Z', fencedAt: null, updatedAt: '2026-11-10T00:00:00.000Z', releasedAt: null, releasedBy: null, successorRetries: 0, taskBlocked: false, contentDropped: null, closed: null, ...over,
 });
 
 describe('handover presentation', () => {

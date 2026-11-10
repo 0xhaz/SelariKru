@@ -387,6 +387,10 @@ describe('checkpoint continuation', () => {
       // The event is at the status row's own revision, not a guess.
       const refused = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'checkpoint.refused' ORDER BY sequence DESC LIMIT 1`))[0]!;
       expect(Number(refused['aggregate_revision'])).toBe(await statusRevision());
+      // A blocked task cannot take a release or a restart: only declining is offered, and it is refused nothing.
+      const id = String((await handoverRow())['checkpoint_id']);
+      expect(await decideHandover(ctx, key, id, 'restart', 'owner')).toMatchObject({ ok: false, error: { reason: 'handover_task_blocked', status: 409 } });
+      expect(await decideHandover(ctx, key, id, 'decline', 'owner')).toMatchObject({ ok: true, value: { state: 'declined' } });
     });
 
     it('a successor that fails before its worker starts is offered again, not closed and placed anywhere', async () => {
@@ -413,6 +417,7 @@ describe('checkpoint continuation', () => {
       await s.publishResult(next.lease, { outcome: 'blocked', reason: 'toolchain_unresolved' });
       expect((await statusOf(t.db, 'T1')).status).toBe('blocked');
       expect(await handoverRow()).toMatchObject({ state: 'restart_offered', refusal: 'successor_failed' });
+      expect(await decideHandover(ctx, key, String((await handoverRow())['checkpoint_id']), 'restart', 'owner')).toMatchObject({ ok: false, error: { reason: 'handover_task_blocked' } });
       // Every event of the publish is at a revision the row really had, each one after the last: the offer moved it, then the status write moved it again.
       const revs = (await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE sequence > (SELECT max(sequence) FROM events WHERE type = 'attempt.route_changed') ORDER BY sequence`)).map((r) => Number(r['aggregate_revision']));
       expect(revs).toEqual([...revs].sort((a, b) => a - b).filter((r) => r > startedAt));
