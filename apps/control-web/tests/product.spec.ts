@@ -22,7 +22,7 @@ test('confirm the brief, add an outcome plan with an unknown baseline, see the t
   await expect(page.getByText(/authorizes no customer outreach and no connection to production data/)).toBeVisible();
 
   // Before anything is recorded, every product link says it is missing; the evidence the run already has is present.
-  await expect(traceLink(page, 'FB-03', 'problem_brief')).toHaveAttribute('data-state', 'Missing');
+  await expect(traceLink(page, 'FB-03', 'problem_brief')).toHaveAttribute('data-state', 'Proposed only'); // the demo's one worker proposal
   await expect(traceLink(page, 'FB-03', 'outcome_plan')).toHaveAttribute('data-state', 'Missing');
   await expect(traceLink(page, 'FB-03', 'verification')).toHaveAttribute('data-state', 'Present');
   await expect(traceLink(page, 'FB-03', 'merge')).toHaveAttribute('data-state', 'Missing');
@@ -55,7 +55,12 @@ test('confirm the brief, add an outcome plan with an unknown baseline, see the t
   await expect(traceLink(page, 'FB-03', 'release')).toContainText('a merge alone is not a release');
 
   // A person records the release: the outcome now waits for observations.
+  // Nothing is filled in for the person: the environment and the date are theirs to say.
+  await expect(page.getByLabel('Environment')).toHaveValue('');
+  await expect(page.getByLabel('Released on')).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Record release note' })).toBeDisabled();
   await page.getByLabel('Environment').fill('production');
+  await page.getByLabel('Released on').fill('2026-11-17');
   await page.getByRole('button', { name: 'Record release note' }).click();
   await expect(notice(page)).toContainText('Recorded the release');
   await expect(traceRow(page, 'FB-03').getByTestId('trace-outcome')).toHaveAttribute('data-outcome', 'Awaiting observations');
@@ -76,8 +81,20 @@ test('an outcome review records a decision and its follow-up is a proposal on De
   await expect(page.getByTestId('product-plan')).toBeVisible();
   await page.evaluate(() => window.__advance!(40_000));
   await page.getByRole('button', { name: 'Read again' }).click();
+  await page.getByLabel('Environment').fill('production');
+  await page.getByLabel('Released on').fill('2026-11-17');
   await page.getByRole('button', { name: 'Record release note' }).click();
   await expect(page.getByTestId('product-release')).toBeVisible();
+
+  // The review starts empty: the window and environment observed are the person's to give, and it can cite evidence.
+  await expect(page.getByLabel('Observed from')).toHaveValue('');
+  await expect(page.getByLabel('Observed environment')).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Record outcome review' })).toBeDisabled();
+  await page.getByLabel('Observed from').fill('2026-11-17');
+  await page.getByLabel('Observed to').fill('2026-11-30');
+  await page.getByLabel('Observed environment').fill('production');
+  await page.getByTestId('product-review-evidence').getByRole('checkbox').first().check();
+  await expect(page.getByText('Review due is not tracked automatically').first()).toBeVisible();
 
   await page.getByLabel('What was observed').fill('Too few triages in the window to say.');
   await page.getByLabel('Decision').selectOption('iterate');
@@ -101,4 +118,33 @@ test('390 px: the product view fits, by keyboard', async ({ page }) => {
   await page.getByRole('button', { name: 'Confirm brief' }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByTestId('product-brief-state')).toContainText('Confirmed');
+});
+
+test('fix round 1: a worker proposal is used only on request, and a typed number needs its provenance', async ({ page }) => {
+  await open(page);
+  const proposal = page.getByTestId('product-proposal');
+  await expect(proposal).toContainText('demo worker');
+  await expect(proposal).toContainText('Support agents');
+  // The form is the owner's text, not the worker's.
+  await expect(page.getByLabel('Target user or workflow')).toHaveValue(/Team leads/);
+  await page.getByRole('button', { name: 'Confirm brief' }).click();
+  await expect(page.getByTestId('product-brief-state')).toContainText('Confirmed, revision 1');
+  await expect(page.getByLabel('Target user or workflow')).toHaveValue(/Team leads/);
+  // Using it is explicit, and fills the form for the person to read before confirming.
+  await proposal.getByRole('button', { name: 'Use this proposal' }).click();
+  await expect(page.getByLabel('Target user or workflow')).toHaveValue(/Support agents/);
+  await page.getByRole('button', { name: 'Confirm brief' }).click();
+  await expect(page.getByTestId('product-brief-state')).toContainText('Confirmed, revision 2');
+  await expect(page.getByTestId('product-proposal')).toHaveCount(0);
+
+  await page.getByRole('checkbox', { name: 'FB-03' }).check();
+  await page.getByLabel('Metric definition').fill('Minutes to first triage');
+  await page.getByLabel('Learning question').fill('Sooner?');
+  await page.getByLabel('Baseline value').fill('12');
+  await expect(page.getByTestId('measure-problem-baseline')).toContainText('Choose observed or estimated');
+  await expect(page.getByRole('button', { name: 'Add outcome plan' })).toBeDisabled();
+  await page.getByLabel('Baseline provenance').selectOption('observed');
+  await expect(page.getByTestId('measure-problem-baseline')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Add outcome plan' }).click();
+  await expect(page.getByTestId('product-plan-baseline')).toHaveText('12 (observed)');
 });

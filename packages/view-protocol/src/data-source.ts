@@ -4,7 +4,7 @@ import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
 import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainView } from './brain.ts';
 import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
-import type { ProductAction, ProductView } from './product.ts';
+import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -51,8 +51,8 @@ export interface EngineeringDataSource {
   getAttemptSkills?(projectId: string, attemptId: string): Promise<AttemptSkillsView>;
   /** The product-learning records, trace and milestone summaries. Read on demand. Absent: this source has none. */
   getProduct?(projectId: string): Promise<ProductView>;
-  /** One owner product write. Answers with the product view as it is afterwards. */
-  productAction?(projectId: string, action: ProductAction): Promise<ProductView>;
+  /** One owner product write. Answers with the product view as it is afterwards, and whether text was redacted before saving. */
+  productAction?(projectId: string, action: ProductAction): Promise<ProductActionResult>;
   disconnect(): void;
 }
 

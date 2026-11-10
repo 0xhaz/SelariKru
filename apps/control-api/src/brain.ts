@@ -12,7 +12,7 @@ import { AppError, invalidRequest } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
 import { loadProductRecords } from './product.ts';
 import { loadStack } from './stack.ts';
-import { loadSpecRow, newId, requireProject } from './store.ts';
+import { leaseHolds, loadSpecRow, newId, requireProject } from './store.ts';
 
 /**
  * The Project Brain's server side (docs/second-brain.md §4, §7). Deterministic only: sources are snapshots of records this server already holds (the accepted blueprint,
@@ -376,6 +376,12 @@ export async function syncBrain(db: Db, tenantId: string, projectId: string, at:
   });
 }
 
+/** Whether the last compilation already read the records as they are now: one unlocked fingerprint read, the same check the periodic pass makes. */
+export async function brainCurrent(db: Executor, tenantId: string, projectId: string): Promise<boolean> {
+  const [head] = await db.select().from(schema.brainHeads).where(where(schema.brainHeads, tenantId, projectId));
+  return head !== undefined && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(db, tenantId, projectId));
+}
+
 /**
  * The periodic pass: compiles each of the tenant's projects whose records moved (a verifier's verdict, a merge the reconciler saw) without waiting for anyone to look.
  * One unlocked fingerprint read per project when nothing moved. Resolves with the projects it compiled.
@@ -586,7 +592,7 @@ export function registerBrainRoutes(app: FastifyInstance, ctx: AppContext): void
     const body = parseBody(BrainManifestRequestSchema, req.body);
     const stale = new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: body.lease.attemptId, fence: body.lease.fence });
     const [a] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, p.tenantId), eq(schema.attempts.attemptId, body.lease.attemptId)));
-    if (!a || a.runner !== p.runnerId || a.leaseFence !== body.lease.fence || a.leaseToken !== body.lease.leaseToken || a.endedAt !== null) throw stale;
+    if (!leaseHolds(a, p.runnerId, body.lease, now())) throw stale;
     if (a.detail['terminalStreamable'] !== true) throw new AppError(403, 'brain_manifest_restricted', 'a manifest is not accepted for work whose data stays on the device');
     const project = await requireProject(db, p.tenantId, a.projectId);
     const m: RepoManifest = body.manifest;

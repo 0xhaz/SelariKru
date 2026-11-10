@@ -62,13 +62,18 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   commits; a refused pack is recorded through the claim's own `placement.blocked` on the status row it already holds, and the attempt's `skill_execution_records` row is
  *   inserted with its attempt row. An intake takes no lock (it inserts a version nothing can use until it is reviewed). Delivering pack content after a claim commits
  *   reads only.
- * - product-learning records (apps/control-api/src/product.ts): an owner's brief, outcome plan, release note or outcome review, and a worker's proposed brief, each take
- *   the project's `product_heads` row first, with no other lock held, insert one immutable `product_records` revision, then append to the event sequence last
- *   (`product.recorded` by the owner, `product.proposed` by the worker). The plan, candidates, verification records, pull requests and Brain revisions they consult are
- *   read without a lock, and nothing here writes a task, a run, a status row or a plan proposal: a review's follow-up is stored with the review as a proposal. An owner's
- *   write is followed, after its transaction committed, by a Brain compile through the same `onSend` hook; the Brain reads `product_records` without a lock, and the
- *   product view's read compiles in its own transaction before it reads. So no product path takes the scheduler lock, a run row, a status row or the brain lock, and no
- *   path above takes `product_heads`.
+ * - product-learning records (apps/control-api/src/product.ts): an owner's brief, outcome plan, release note or outcome review takes the project's `product_heads`
+ *   row first, with no other lock held, inserts one immutable `product_records` revision (a brief started from a worker proposal deletes that `product_brief_proposals`
+ *   row under the same lock), then appends to the event sequence last (`product.recorded`, the owner as actor), first appending, in log order, the events of any earlier
+ *   record written while the project had no run. A worker's proposed brief takes its lease's `attempts` row first (`lockLease`: the lease is checked again under that lock,
+ *   so a revoke or expiry that committed first wins) and the runner row read, then `product_heads`, then its `product_brief_proposals` rows (insert, drop past the cap),
+ *   then the event sequence (`product.proposed`). After an activation commits, an `onSend` hook appends any deferred product events in its own transaction:
+ *   `product_heads`, then the event sequence. The plan, candidates, verification records, pull requests and Brain revisions are read without a lock, and nothing here
+ *   writes a task, a run, a status row or a plan proposal: a review's follow-up is stored with the review as a proposal. An owner's write is followed, after its
+ *   transaction committed, by a Brain compile through the same `onSend` hook; the Brain reads `product_records` without a lock, and the product view compiles (in
+ *   its own transaction) only when the records' fingerprint moved. A path that holds an attempt row and wants `product_heads` is only the proposal, and nothing holds
+ *   `product_heads` and wants an attempt row. So no product path takes the scheduler lock, a run row, a status row or the brain lock, and no path above takes
+ *   `product_heads`.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

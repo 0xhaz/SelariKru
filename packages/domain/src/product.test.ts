@@ -163,3 +163,40 @@ describe('product records as Project Brain sources', () => {
     expect(local.claims.some((c) => c.key === 'brief:target_user')).toBe(true);
   });
 });
+
+describe('fix round 1: the trace across runs', () => {
+  const run2 = { runId: 'run_b', candidate: null, criteria: [], pullRequest: null };
+  const twoRuns = (records: ProductRecord[]): TraceInput => {
+    const base = input(records);
+    return { ...base, tasks: [{ ...base.tasks[0]!, current: false }, { taskId: 'T2', runId: 'run_b', title: 'Next', status: 'ready', requirementIds: ['FB-05'], current: true }], runs: [...base.runs, run2] };
+  };
+
+  it('a released requirement stays released once a second run is planned, and its task reads not in the current plan', () => {
+    const rows = buildProductTrace(twoRuns([brief(), plan(), release()]));
+    const fb03 = row(rows, 'FB-03');
+    expect(fb03.release.state).toBe('released');
+    expect(fb03.outcome.label).toBe('Awaiting observations');
+    expect(link(fb03, 'task')).toMatchObject({ state: 'missing', label: expect.stringMatching(/^Not in the current plan/) });
+    expect(link(fb03, 'merge').state).toBe('present');
+    expect(row(rows, 'FB-05').release.state).toBe('not_released');
+  });
+
+  it('each run keeps its own milestone summary', () => {
+    const m = milestoneSummaries(twoRuns([brief(), plan(), release()]));
+    expect(m.map((x) => [x.runId, x.requirementIds, x.release.state])).toEqual([['run_a', ['FB-01', 'FB-03'], 'released'], ['run_b', ['FB-05'], 'not_released']]);
+  });
+
+  it('a cancelled or superseded task is not present, and the verification link names the record that judged the criterion', () => {
+    const base = input([brief()]);
+    const cancelled = row(buildProductTrace({ ...base, tasks: [{ ...base.tasks[0]!, status: 'cancelled' }] }), 'FB-03');
+    expect(link(cancelled, 'task')).toMatchObject({ state: 'missing', label: expect.stringMatching(/^Cancelled/) });
+    const superseded = row(buildProductTrace({ ...base, tasks: [{ ...base.tasks[0]!, status: 'superseded' }] }), 'FB-03');
+    expect(link(superseded, 'task')).toMatchObject({ state: 'stale', label: expect.stringMatching(/^Replaced/) });
+    const judged = { ...base, runs: [{ ...base.runs[0]!, criteria: base.runs[0]!.criteria.map((c) => ({ ...c, recordId: 'ver_judge' })) }] };
+    expect(link(row(buildProductTrace(judged), 'FB-03'), 'verification')).toMatchObject({ state: 'present', ref: 'ver_judge' });
+  });
+
+  it('pending worker proposals show the brief as proposed, never as confirmed', () => {
+    expect(link(row(buildProductTrace(input([], { briefProposals: 2 })), 'FB-03'), 'problem_brief')).toMatchObject({ state: 'proposed' });
+  });
+});

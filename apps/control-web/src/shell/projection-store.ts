@@ -1,5 +1,5 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
-import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductView } from '@selarikru/view-protocol';
+import { startProjection, type AuthorizedTerminalRequest, type TerminalChannel, type TerminalControlChannel, type AuthorizedViewCommand, type Clock, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectionSession, type ProjectionState, type RunFailuresView, type SessionStatus, type AttemptContextView, type BrainAction, type BrainSourceRevisionView, type BrainView, type StackActionRequestView, type StackView, type AttemptSkillsView, type SkillActionView, type SkillsView, type ProductAction, type ProductActionResult, type ProductView } from '@selarikru/view-protocol';
 
 /** Repeats `fn` every `ms` and returns the cancel function. Live uses timers; the demo drives it from the virtual clock. */
 export type Scheduler = (fn: () => void, ms: number) => () => void;
@@ -49,7 +49,7 @@ export interface ProjectionStoreState {
 /** Reads and writes of the product-learning records. A write refuses to send while the session is not live, as a command does. */
 export interface ProductPort {
   load(): Promise<ProductView>;
-  act(action: ProductAction): Promise<ProductView>;
+  act(action: ProductAction): Promise<ProductActionResult>;
 }
 
 /** Reads and writes of the skill library. An action refuses to send while the session is not live, as a command does. */

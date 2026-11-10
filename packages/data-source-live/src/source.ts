@@ -249,10 +249,10 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     productAction(projectId, action) {
       const base = `/v1/projects/${encodeURIComponent(projectId)}/product`;
       // Every write answers with the view as it is afterwards.
-      const after = { parse: (v: unknown) => ProductViewSchema.parse((v as { product?: unknown } | null)?.product) };
+      const after = { parse: (v: unknown) => ({ product: ProductViewSchema.parse((v as { product?: unknown } | null)?.product), redacted: (v as { redacted?: unknown } | null)?.redacted === true }) };
       const raise = action.classification !== undefined ? { classification: action.classification } : {};
       switch (action.kind) {
-        case 'save_brief': return readJson(`${base}/brief`, after, 'the product records', false, { expectedRevision: action.expectedRevision, confirm: action.confirm, content: action.content, ...raise });
+        case 'save_brief': return readJson(`${base}/brief`, after, 'the product records', false, { expectedRevision: action.expectedRevision, confirm: action.confirm, content: action.content, ...raise, ...(action.fromProposalId !== undefined ? { fromProposalId: action.fromProposalId } : {}) });
         case 'save_plan': return readJson(`${base}/outcome-plans`, after, 'the product records', false, { recordId: action.recordId, expectedRevision: action.expectedRevision, content: action.content, ...raise });
         case 'add_release': return readJson(`${base}/releases`, after, 'the product records', false, { content: action.content, ...raise });
         case 'add_review': return readJson(`${base}/outcome-reviews`, after, 'the product records', false, { content: action.content, ...raise });

@@ -23,9 +23,11 @@ function source(answer: (url: string, method: string) => Response) {
 
 describe('the live product records', () => {
   it('reads the view, sends each write to its route, and answers with the view the write returned', async () => {
-    const { calls, ds } = source((_url, method) => new Response(JSON.stringify(method === 'GET' ? VIEW : { record: {}, redacted: false, product: VIEW })));
-    expect(await ds.getProduct!('p')).toEqual(VIEW);
-    expect(await ds.productAction!('p', { kind: 'save_plan', recordId: null, expectedRevision: 0, content: PLAN })).toEqual(VIEW);
+    const { calls, ds } = source((_url, method) => new Response(JSON.stringify(method === 'GET' ? VIEW : { record: {}, redacted: true, product: VIEW })));
+    const read = await ds.getProduct!('p');
+    expect(read).toMatchObject(VIEW);
+    // The server's redaction notice is passed through.
+    expect(await ds.productAction!('p', { kind: 'save_plan', recordId: null, expectedRevision: 0, content: PLAN })).toEqual({ product: read, redacted: true });
     await ds.productAction!('p', { kind: 'add_release', content: { schemaVersion: 1, runId: 'r', environment: 'production', configuration: null, releasedOn: '2026-11-12', note: null } });
     expect(calls.filter((c) => c.method === 'POST').map((c) => c.url)).toEqual(['http://x/v1/projects/p/product/outcome-plans', 'http://x/v1/projects/p/product/releases']);
     // The unknown baseline goes over the wire as unknown: no number.

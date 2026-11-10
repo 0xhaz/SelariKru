@@ -16,7 +16,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
-import { requireProject, writeEvent } from './store.ts';
+import { leaseHolds, requireProject, writeEvent } from './store.ts';
 import { eventRunFor } from './settings.ts';
 
 /**
@@ -494,7 +494,7 @@ export function registerSkillRoutes(app: FastifyInstance, ctx: AppContext): void
     const body = parseBody(SkillConfirmRequestSchema, req.body);
     const stale = new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: body.lease.attemptId, fence: body.lease.fence });
     const [a] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, p.tenantId), eq(schema.attempts.attemptId, body.lease.attemptId)));
-    if (!a || a.runner !== p.runnerId || a.leaseFence !== body.lease.fence || a.leaseToken !== body.lease.leaseToken || a.endedAt !== null) throw stale;
+    if (!leaseHolds(a, p.runnerId, body.lease, now())) throw stale;
     const where = and(eq(schema.skillExecutionRecords.tenantId, p.tenantId), eq(schema.skillExecutionRecords.projectId, a.projectId), eq(schema.skillExecutionRecords.attemptId, a.attemptId));
     const [row] = await db.select().from(schema.skillExecutionRecords).where(where);
     const parsed = row ? SkillExecutionRecordSchema.safeParse(row.record) : null;

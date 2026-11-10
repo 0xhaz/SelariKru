@@ -460,3 +460,17 @@ describe('fix round 1: a claim racing a revoke (M7)', () => {
     }
   }, 25_000);
 });
+
+describe('fix round 1 (T6.6 M2): an expired lease', () => {
+  it('cannot confirm packs', async () => {
+    await pilotStack();
+    await bind('express-api-routes', 'express-api-routes@1.0.0');
+    await seedTask(t.db, specFor('api', BACKEND));
+    const { token } = await enrolRunner(h.app);
+    const lease = leaseOf(await post(h.app, '/v1/runners/claim', NEW, bearer(token)));
+    const packs = lease.skills.packs.map((p: any) => ({ versionId: p.versionId, digest: p.digest }));
+    h.clock.advance(600);
+    expect((await post(h.app, '/v1/runners/skills/confirm', { lease: ref(lease), packs }, bearer(token))).status).toBe(409);
+    expect((await get(h.app, url(`/attempts/${lease.attemptId}`))).body.confirmedAt).toBeNull();
+  });
+});

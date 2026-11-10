@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
-import { requireProject } from './store.ts';
+import { leaseHolds, requireProject } from './store.ts';
 import { boundSkillsForStack } from './skills.ts';
 
 /**
@@ -125,7 +125,7 @@ export function registerStackRoutes(app: FastifyInstance, ctx: AppContext): void
     const body = parseBody(StackDetectionRequestSchema, req.body);
     const stale = new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: body.lease.attemptId, fence: body.lease.fence });
     const [a] = await db.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, p.tenantId), eq(schema.attempts.attemptId, body.lease.attemptId)));
-    if (!a || a.runner !== p.runnerId || a.leaseFence !== body.lease.fence || a.leaseToken !== body.lease.leaseToken || a.endedAt !== null) throw stale;
+    if (!leaseHolds(a, p.runnerId, body.lease, now())) throw stale;
     if (a.detail['terminalStreamable'] !== true) throw new AppError(403, 'stack_detection_restricted', 'a detection is not accepted for work whose data stays on the device');
     await requireProject(db, p.tenantId, a.projectId);
     const d = body.detection;

@@ -5,7 +5,7 @@ import type { ProductAction, ProductView as ProductViewData } from '@selarikru/v
 import { DemoBadge } from '../../data-source/DemoBadge.tsx';
 import type { ConnectionState, ProductPort } from '../../shell/projection-store.ts';
 import { inputClass } from '../onboarding/ui.tsx';
-import { lines, measureFrom, measureLabel, planFrom, traceTable, type PlanForm } from './model.ts';
+import { lines, measureFrom, measureLabel, measureProblem, planFrom, traceTable, type PlanForm } from './model.ts';
 import { useProduct } from './useProduct.ts';
 
 export interface ProductViewProps {
@@ -26,8 +26,10 @@ const textArea = `${inputClass} mt-1 min-h-[4.5rem]`;
 const field = `${inputClass} mt-1`;
 
 function MeasureFields({ name, value, unit, provenance, onChange }: { name: string; value: string; unit: string; provenance: Measure['provenance']; onChange: (v: { value?: string; unit?: string; provenance?: Measure['provenance'] }) => void }) {
+  const problem = measureProblem(value, provenance);
   return (
     <fieldset className="grid gap-2 sm:grid-cols-3">
+      {problem ? <p role="alert" data-testid={`measure-problem-${name.toLowerCase()}`} className="text-sm text-warning sm:col-span-3">{name}: {problem}</p> : null}
       <legend className="text-sm font-medium text-fg">{name}</legend>
       <Field label={`${name} value`} hint="blank: unknown"><input className={field} inputMode="decimal" value={value} onChange={(e) => onChange({ value: e.target.value })} /></Field>
       <Field label={`${name} unit`}><input className={field} value={unit} maxLength={40} onChange={(e) => onChange({ unit: e.target.value })} /></Field>
@@ -41,20 +43,25 @@ function MeasureFields({ name, value, unit, provenance, onChange }: { name: stri
 // ---- brief ------------------------------------------------------------------------------------------------------------------------------
 
 function BriefSection({ view, live, act }: { view: ProductViewData; live: boolean; act: Act }) {
+  // The form starts from the owner's own latest text or the onboarding draft, never from a worker's proposal.
   const seed = view.brief.seed;
-  const [f, setF] = useState(() => ({
-    owner: seed?.owner ?? '', targetUser: seed?.targetUser ?? '', desiredChange: seed?.desiredChange ?? '', currentWorkaround: seed?.currentWorkaround ?? '', assumptions: (seed?.assumptions ?? []).join('\n'),
-    nonGoals: (seed?.nonGoals ?? []).join('\n'), unknowns: (seed?.unknowns ?? []).join('\n'), permissionScope: seed?.permissionScope ?? '', confidence: seed?.confidence ?? 'unknown', confidenceRationale: seed?.confidenceRationale ?? '',
-  }));
+  const formOf = (c: ProblemBriefContent | null) => ({
+    owner: c?.owner ?? '', targetUser: c?.targetUser ?? '', desiredChange: c?.desiredChange ?? '', currentWorkaround: c?.currentWorkaround ?? '', assumptions: (c?.assumptions ?? []).join('\n'),
+    nonGoals: (c?.nonGoals ?? []).join('\n'), unknowns: (c?.unknowns ?? []).join('\n'), permissionScope: c?.permissionScope ?? '', confidence: c?.confidence ?? 'unknown', confidenceRationale: c?.confidenceRationale ?? '',
+    evidence: c?.evidence ?? [],
+  });
+  const [f, setF] = useState(() => formOf(seed));
+  /** The proposal the owner chose to start from, if any. Saving records it. */
+  const [from, setFrom] = useState<string | null>(null);
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF((x) => ({ ...x, [k]: e.target.value }));
   const content: ProblemBriefContent = {
-    schemaVersion: 1, owner: f.owner.trim(), targetUser: f.targetUser.trim(), evidence: seed?.evidence ?? [], permissionScope: f.permissionScope.trim(), currentWorkaround: f.currentWorkaround.trim() || null,
+    schemaVersion: 1, owner: f.owner.trim(), targetUser: f.targetUser.trim(), evidence: f.evidence, permissionScope: f.permissionScope.trim(), currentWorkaround: f.currentWorkaround.trim() || null,
     assumptions: lines(f.assumptions), desiredChange: f.desiredChange.trim(), nonGoals: lines(f.nonGoals), unknowns: lines(f.unknowns), confidence: f.confidence as ProblemBriefContent['confidence'], confidenceRationale: f.confidenceRationale.trim() || null,
   };
   const ready = content.owner !== '' && content.targetUser !== '' && content.desiredChange !== '' && content.permissionScope !== '';
   const save = (confirm: boolean) => (e?: FormEvent) => {
     e?.preventDefault();
-    void act({ kind: 'save_brief', expectedRevision: view.brief.revision, confirm, content }, confirm ? 'Confirmed the brief. It is now an accepted Project Brain source.' : 'Saved the brief as a draft. It is a proposal until you confirm it.');
+    void act({ kind: 'save_brief', expectedRevision: view.brief.revision, confirm, content, ...(from !== null ? { fromProposalId: from } : {}) }, confirm ? 'Confirmed the brief. It is now an accepted Project Brain source.' : 'Saved the brief as a draft. It is a proposal until you confirm it.');
   };
   const { confirmed, latest } = view.brief;
   const state = confirmed && latest?.revision === confirmed.revision ? { label: `Confirmed, revision ${confirmed.revision}`, tone: 'success' as const }
@@ -63,7 +70,24 @@ function BriefSection({ view, live, act }: { view: ProductViewData; live: boolea
     <Panel title="Problem brief" labelId="product-brief" aside={<span data-testid="product-brief-state"><Chip tone={state.tone}>{state.label}</Chip></span>}>
       <p className="text-sm text-muted">{view.notice}</p>
       {seed === null ? <p className="mt-2 text-muted">There is no onboarding brief to start from. Fill in the brief below.</p> : null}
-      {content.evidence.length > 0 ? (
+      {view.brief.proposals.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          <h3 className="font-medium text-fg">Proposed by workers</h3>
+          <p className="text-sm text-muted">A proposal is a worker's suggestion. It is not your brief and is never confirmed unless you choose it, read it in the form and confirm. The newest {view.brief.proposalCap} are kept{view.brief.droppedProposals > 0 ? `; ${view.brief.droppedProposals} older ${view.brief.droppedProposals === 1 ? 'was' : 'were'} dropped` : ''}.</p>
+          <ul className="space-y-2">
+            {view.brief.proposals.map((p) => (
+              <li key={p.proposalId} data-testid="product-proposal" className="rounded-chip border border-warning p-3 text-sm">
+                <p className="text-fg"><Chip tone="warning">Proposal</Chip> by {p.proposedBy.id}, <Exact iso={p.proposedAt} /></p>
+                <p className="mt-1 text-fg wrap-anywhere">Target user: {p.content.targetUser}</p>
+                <p className="text-fg wrap-anywhere">Desired change: {p.content.desiredChange}</p>
+                <button type="button" className={`${buttonQuiet} mt-2`} disabled={from === p.proposalId} onClick={() => { setF(formOf(p.content)); setFrom(p.proposalId); }}>Use this proposal<span className="sr-only"> from {p.proposedBy.id}</span></button>
+              </li>
+            ))}
+          </ul>
+          {from !== null ? <p role="status" className="text-sm text-warning">The form now holds the worker's proposal. Read it before you confirm.</p> : null}
+        </div>
+      ) : null}
+      {f.evidence.length > 0 ? (
         <p className="mt-2 text-sm text-muted">Cites <span className="break-all font-mono text-mono">{content.evidence.map((c) => `${c.sourceId}@${c.revision}#${c.anchor}`).join(', ')}</span></p>
       ) : <p className="mt-2 text-sm text-muted">Cites no Project Brain evidence.</p>}
       <form className="mt-3 grid gap-3 sm:grid-cols-2" onSubmit={save(true)}>
@@ -118,7 +142,7 @@ function PlanSection({ view, live, act }: { view: ProductViewData; live: boolean
   const [f, setF] = useState<PlanForm>(() => EMPTY_PLAN(view.brief.confirmed?.kind === 'problem_brief' ? view.brief.confirmed.content.owner : (view.brief.seed?.owner ?? '')));
   const set = (patch: Partial<PlanForm>) => setF((x) => ({ ...x, ...patch }));
   const plan = planFrom(f);
-  const ready = plan.requirementIds.length > 0 && plan.metric !== '' && plan.reviewOwner !== '' && plan.decisionOptions.length > 0 && (plan.target.provenance !== 'unavailable' || plan.learningQuestion !== null);
+  const ready = measureProblem(f.baselineValue, f.baselineProvenance) === null && measureProblem(f.targetValue, f.targetProvenance) === null && plan.requirementIds.length > 0 && plan.metric !== '' && plan.reviewOwner !== '' && plan.decisionOptions.length > 0 && (plan.target.provenance !== 'unavailable' || plan.learningQuestion !== null);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void act({ kind: 'save_plan', recordId: null, expectedRevision: 0, content: plan }, `Added an outcome plan for ${plan.requirementIds.join(', ')}. Baseline: ${measureLabel(plan.baseline)}.`).then((ok) => { if (ok) setF(EMPTY_PLAN(f.reviewOwner)); });
@@ -176,7 +200,7 @@ function TraceSection({ view }: { view: ProductViewData }) {
   const rows = useMemo(() => traceTable(view.trace), [view.trace]);
   return (
     <Panel title="Trace" labelId="product-trace" aside={`${rows.length} requirement${rows.length === 1 ? '' : 's'}`}>
-      <p className="text-sm text-muted">Each accepted requirement from its problem to its outcome. A missing link is shown as missing. A merge is not a release, and a release is not an outcome.</p>
+      <p className="text-sm text-muted">Each accepted requirement from its problem to its outcome. A missing link is shown as missing. A merge is not a release, and a release is not an outcome. Review due is not tracked automatically.</p>
       {rows.length === 0 ? <p className="mt-2 text-muted">No accepted requirement yet.</p> : (
         <ul className="mt-3 space-y-3">
           {rows.map((r) => (
@@ -225,9 +249,10 @@ function MilestoneSection({ view }: { view: ProductViewData }) {
 function ReleaseForm({ view, live, act }: { view: ProductViewData; live: boolean; act: Act }) {
   const runs = view.mergedRuns.filter((r) => !r.released);
   const [runId, setRunId] = useState(runs[0]?.runId ?? '');
-  const [environment, setEnvironment] = useState('production');
+  // Nothing is filled in for the person: where and when they released is theirs to say.
+  const [environment, setEnvironment] = useState('');
   const [configuration, setConfiguration] = useState('');
-  const [releasedOn, setReleasedOn] = useState(view.observedAt.slice(0, 10));
+  const [releasedOn, setReleasedOn] = useState('');
   const [note, setNote] = useState('');
   const chosen = runs.some((r) => r.runId === runId) ? runId : (runs[0]?.runId ?? '');
   if (runs.length === 0) return <p className="text-sm text-muted" data-testid="product-no-merged-run">No merged run waits for a release note. A person merges on GitHub, and a merge alone is not a release.</p>;
@@ -262,7 +287,13 @@ function ReviewForm({ view, live, act }: { view: ProductViewData; live: boolean;
   const [decision, setDecision] = useState<ProductDecision>('investigate');
   const [followTitle, setFollowTitle] = useState('');
   const [followReason, setFollowReason] = useState('');
+  const [windowFrom, setWindowFrom] = useState('');
+  const [windowTo, setWindowTo] = useState('');
+  const [environment, setEnvironment] = useState('');
+  const [cited, setCited] = useState<string[]>([]);
   const id = useId();
+  const day = /^\d{4}-\d{2}-\d{2}$/;
+  const keyOf = (c: { sourceId: string; revision: number; anchor: string }) => `${c.sourceId}@${c.revision}#${c.anchor}`;
   if (plans.length === 0 || releases.length === 0) return <p className="text-sm text-muted">An outcome review needs an outcome plan and a release note first.</p>;
   const plan = plans.find((p) => p.recordId === planId) ?? plans[0]!;
   const release = releases.find((r) => r.recordId === releaseId) ?? releases[0]!;
@@ -270,15 +301,26 @@ function ReviewForm({ view, live, act }: { view: ProductViewData; live: boolean;
   const submit = (e: FormEvent) => {
     e.preventDefault();
     void act({ kind: 'add_review', content: {
-      schemaVersion: 1, planRecordId: plan.recordId, releaseRecordId: release.recordId, observedEnvironment: release.kind === 'release_note' ? release.content.environment : null, observedConfiguration: null,
-      windowFrom: release.kind === 'release_note' ? release.content.releasedOn : null, windowTo: null, evidence: [], result: measureFrom(value, unit, provenance), summary: summary.trim(), unknowns: lines(unknowns), decision,
+      schemaVersion: 1, planRecordId: plan.recordId, releaseRecordId: release.recordId, observedEnvironment: environment.trim(), observedConfiguration: null,
+      windowFrom, windowTo, evidence: view.citable.filter((c) => cited.includes(keyOf(c))).map((c) => ({ sourceId: c.sourceId, revision: c.revision, anchor: c.anchor })), result: measureFrom(value, unit, provenance), summary: summary.trim(), unknowns: lines(unknowns), decision,
       followUp: follow ? { title: followTitle.trim(), requirementIds: plan.kind === 'outcome_plan' ? plan.content.requirementIds.slice(0, 8) : [], reason: followReason.trim() } : null,
     } }, follow ? `Recorded the review: ${decision}. The follow-up is a proposal on Decisions; it changes no plan until you add it through a plan revision.` : `Recorded the review: ${decision}.`);
   };
   return (
     <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit} aria-describedby={`${id}-help`}>
       <h3 className="font-medium text-fg sm:col-span-2">Record an outcome review</h3>
-      <p id={`${id}-help`} className="text-sm text-muted sm:col-span-2">Your decision on what was observed. It changes no task, and an association it reports is not proof of cause. A follow-up you name here is a proposal only.</p>
+      <p id={`${id}-help`} className="text-sm text-muted sm:col-span-2">Your decision on what was observed. It changes no task, and an association it reports is not proof of cause. A follow-up you name here is a proposal only. Review due is not tracked automatically: record a review when you have looked.</p>
+      <Field label="Observed from"><input className={field} type="date" value={windowFrom} onChange={(e) => setWindowFrom(e.target.value)} /></Field>
+      <Field label="Observed to"><input className={field} type="date" value={windowTo} onChange={(e) => setWindowTo(e.target.value)} /></Field>
+      <Field label="Observed environment"><input className={field} value={environment} maxLength={120} onChange={(e) => setEnvironment(e.target.value)} /></Field>
+      <fieldset data-testid="product-review-evidence" className="sm:col-span-2">
+        <legend className="text-sm font-medium text-fg">Evidence to cite</legend>
+        {view.citable.length === 0 ? <p className="text-sm text-muted">No Project Brain source to cite yet.</p> : (
+          <span className="mt-1 grid max-h-48 gap-1 overflow-y-auto">
+            {view.citable.map((c) => <label key={keyOf(c)} className="flex items-start gap-1.5 text-sm text-fg"><input type="checkbox" className="mt-0.5" checked={cited.includes(keyOf(c))} onChange={(e) => setCited((xs) => (e.target.checked ? [...xs, keyOf(c)] : xs.filter((x) => x !== keyOf(c))))} /><span className="wrap-anywhere">{c.label} <span className="break-all font-mono text-mono text-muted">{keyOf(c)}</span></span></label>)}
+          </span>
+        )}
+      </fieldset>
       <Field label="Outcome plan"><select className={field} value={plan.recordId} onChange={(e) => setPlanId(e.target.value)}>{plans.map((p) => <option key={p.recordId} value={p.recordId}>{p.kind === 'outcome_plan' ? p.content.metric.slice(0, 60) : p.recordId}</option>)}</select></Field>
       <Field label="Release"><select className={field} value={release.recordId} onChange={(e) => setReleaseId(e.target.value)}>{releases.map((r) => <option key={r.recordId} value={r.recordId}>{r.kind === 'release_note' ? `${r.content.runId} on ${r.content.releasedOn}` : r.recordId}</option>)}</select></Field>
       <div className="sm:col-span-2"><MeasureFields name="Result" value={value} unit={unit} provenance={provenance} onChange={(v) => { if (v.value !== undefined) setValue(v.value); if (v.unit !== undefined) setUnit(v.unit); if (v.provenance) setProvenance(v.provenance); }} /></div>
@@ -287,7 +329,7 @@ function ReviewForm({ view, live, act }: { view: ProductViewData; live: boolean;
       <Field label="Decision"><select className={field} value={decision} onChange={(e) => setDecision(e.target.value as ProductDecision)}>{PRODUCT_DECISIONS.map((d) => <option key={d} value={d}>{d}</option>)}</select></Field>
       <Field label="Follow-up task title" hint="optional, a proposal"><input className={field} value={followTitle} maxLength={120} onChange={(e) => setFollowTitle(e.target.value)} /></Field>
       <Field label="Why the follow-up" hint="needed with a title"><input className={field} value={followReason} maxLength={300} onChange={(e) => setFollowReason(e.target.value)} /></Field>
-      <div className="sm:col-span-2"><button type="submit" className={buttonPrimary} disabled={!live || summary.trim() === '' || (followTitle.trim() !== '' && !follow)}>Record outcome review</button></div>
+      <div className="sm:col-span-2"><button type="submit" className={buttonPrimary} disabled={!live || summary.trim() === '' || environment.trim() === '' || !day.test(windowFrom) || !day.test(windowTo) || measureProblem(value, provenance) !== null || (followTitle.trim() !== '' && !follow)}>Record outcome review</button></div>
     </form>
   );
 }
@@ -322,9 +364,9 @@ export function ProductView({ port, connection, mode }: ProductViewProps) {
   const [notice, setNotice] = useState('');
   const view = product.view;
   const act: Act = async (a, done) => {
-    const ok = await product.act(a);
-    setNotice(ok ? done : '');
-    return ok;
+    const r = await product.act(a);
+    setNotice(r === null ? '' : r.redacted ? `${done} Some text was redacted before saving.` : done);
+    return r !== null;
   };
   if (!port) return <EmptyState title="Product records are not available">This connection does not serve product records.</EmptyState>;
   return (

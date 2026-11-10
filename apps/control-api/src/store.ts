@@ -113,3 +113,24 @@ export async function idempotent<T>(tx: Tx, scope: { tenantId: string; projectId
   }
   return stored.result;
 }
+
+export interface LeaseClaim { readonly attemptId: string; readonly fence: number; readonly leaseToken: string }
+
+/** Whether this runner holds this lease now: its attempt, fence and token, not ended, and not past its expiry. */
+export function leaseHolds(a: typeof schema.attempts.$inferSelect | undefined, runnerId: string, lease: LeaseClaim, now: Date): a is typeof schema.attempts.$inferSelect {
+  return a !== undefined && a.runner === runnerId && a.leaseFence === lease.fence && a.leaseToken === lease.leaseToken && a.endedAt === null && a.leaseExpiresAt !== null && a.leaseExpiresAt.getTime() > now.getTime();
+}
+
+export const staleLease = (lease: LeaseClaim) => new AppError(409, 'lease_conflict', 'the lease is not current', { reason: 'stale_fence', attemptId: lease.attemptId, fence: lease.fence });
+
+/**
+ * Locks the lease's attempt row inside a write's transaction and checks the lease again, so a revoke, an expiry or a new attempt that committed first wins. The runner must
+ * still be enrolled. Taken first in its transaction.
+ */
+export async function lockLease(tx: Tx, tenantId: string, runnerId: string, lease: LeaseClaim, now: Date): Promise<typeof schema.attempts.$inferSelect> {
+  const [a] = await tx.select().from(schema.attempts).where(and(eq(schema.attempts.tenantId, tenantId), eq(schema.attempts.attemptId, lease.attemptId))).for('update');
+  if (!leaseHolds(a, runnerId, lease, now)) throw staleLease(lease);
+  const [r] = await tx.select({ revokedAt: schema.runners.revokedAt }).from(schema.runners).where(and(eq(schema.runners.tenantId, tenantId), eq(schema.runners.runnerId, runnerId)));
+  if (!r || r.revokedAt !== null) throw staleLease(lease);
+  return a;
+}

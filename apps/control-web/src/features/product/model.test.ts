@@ -33,3 +33,14 @@ describe('the trace table', () => {
     expect(rows[0]!.links.map((l) => [l.name, l.state, l.tone])).toEqual([['Problem brief', 'Missing', 'warning'], ['Verification record', 'Present', 'success']]);
   });
 });
+
+describe('fix round 1: a number with no provenance', () => {
+  it('asks for observed or estimated instead of dropping the number', async () => {
+    const { measureProblem } = await import('./model.ts');
+    expect(measureProblem('12', 'unavailable')).toBe('You typed a number. Choose observed or estimated for it, or clear it to record unknown.');
+    expect(measureProblem('', 'unavailable')).toBeNull();
+    expect(measureProblem('12', 'observed')).toBeNull();
+    expect(measureProblem('twelve', 'estimated')).toBe('Enter a number, or clear it to record unknown.');
+    expect(planFrom({ ...FORM, baselineValue: '12' }).baseline.provenance).toBe('unavailable');
+  });
+});

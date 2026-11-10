@@ -296,6 +296,17 @@ describe('Project Brain: the repository manifest a runner reads', () => {
   });
 });
 
+describe('Project Brain: an expired lease (T6.6 fix round 1, M2)', () => {
+  it('cannot record a manifest', async () => {
+    await seedPlan();
+    const { token } = await enrolRunner(h.app);
+    const lease = await claimAs(token);
+    h.clock.advance(600);
+    const manifest = { commit: BASE, fileCount: 1, totalBytes: 1, docs: [] };
+    expect((await post(h.app, '/v1/runners/brain/manifest', { lease: { attemptId: lease.attemptId, fence: lease.fence, leaseToken: lease.leaseToken }, manifest }, bearer(token))).status).toBe(409);
+  });
+});
+
 describe('Project Brain: fix round 1', () => {
   it('a streamable local attempt gets no restricted claim or source text: a restricted note and a restricted sibling task are left out', async () => {
     await seedTask(t.db, specFor('T1', { title: 'Build the API', baseSha: BASE }), 'ready');

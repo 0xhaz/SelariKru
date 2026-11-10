@@ -78,3 +78,11 @@ export function traceTable(rows: readonly TraceRow[]): TraceTableRow[] {
     links: r.links.map((l) => ({ kind: l.kind, name: LINK_NAMES[l.kind], state: STATE[l.state].label, tone: STATE[l.state].tone, label: l.label, ref: l.ref })),
   }));
 }
+
+/** What a figure's fields still need before it can be saved, or null. A number with Unknown picked is never silently dropped: the person chooses. */
+export function measureProblem(value: string, provenance: Measure['provenance']): string | null {
+  const t = value.trim();
+  if (t === '') return null;
+  if (!Number.isFinite(Number(t))) return 'Enter a number, or clear it to record unknown.';
+  return provenance === 'unavailable' ? 'You typed a number. Choose observed or estimated for it, or clear it to record unknown.' : null;
+}

@@ -214,11 +214,14 @@ describe('product records: brief, outcome plan and trace', () => {
 
     const proposed = await post(h.app, '/v1/runners/product/brief-proposal', { lease, content: { ...seed, desiredChange: `Newest first, token ${CANARY}` } }, bearer(token));
     expect(proposed.status).toBe(201);
-    expect(proposed.body).toMatchObject({ recordId: 'brief', revision: 1, status: 'proposed' });
+    expect(proposed.body).toMatchObject({ proposalId: expect.stringMatching(/^proposal_/), status: 'proposed' });
     let view = (await get(h.app, url)).body;
     expect(view.brief.confirmed).toBeNull();
-    expect(view.brief.latest).toMatchObject({ status: 'proposed', proposedBy: { kind: 'worker', id: runnerId }, confirmedBy: null });
-    expect(view.brief.latest.content.desiredChange).not.toContain(CANARY);
+    // Kept beside the brief: the owner's revision line is untouched.
+    expect(view.brief.latest).toBeNull();
+    expect(view.brief.revision).toBe(0);
+    expect(view.brief.proposals[0]).toMatchObject({ proposalId: proposed.body.proposalId, proposedBy: { kind: 'worker', id: runnerId } });
+    expect(view.brief.proposals[0].content.desiredChange).not.toContain(CANARY);
     expect(link(row(view, 'FB-03'), 'problem_brief').state).toBe('proposed');
     // A proposal is not a Brain source: it is never served as accepted.
     expect((await get(h.app, `/v1/projects/${PROJECT}/brain`)).body.sources.some((s: any) => s.sourceId === 'product:brief')).toBe(false);
@@ -227,11 +230,11 @@ describe('product records: brief, outcome plan and trace', () => {
       VALUES (${TENANT}, ${PROJECT}, 'brief', 9, 'problem_brief', 'confirmed', 'internal', '{}'::jsonb, 'worker', ${runnerId}, ${runnerId}, 99, now())`)).rejects.toThrow();
 
     // A person confirms it, against the revision they read.
-    expect((await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: true, content: view.brief.latest.content })).status).toBe(409);
-    const confirmed = await post(h.app, `${url}/brief`, { expectedRevision: 1, confirm: true, content: view.brief.latest.content });
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 1, confirm: true, content: view.brief.proposals[0].content })).status).toBe(409);
+    const confirmed = await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: true, content: view.brief.proposals[0].content, fromProposalId: view.brief.proposals[0].proposalId });
     expect(confirmed.status).toBe(201);
     view = (await get(h.app, url)).body;
-    expect(view.brief.confirmed).toMatchObject({ revision: 2, status: 'confirmed', confirmedBy: 'owner_uid_1', proposedBy: { kind: 'human' } });
+    expect(view.brief.confirmed).toMatchObject({ revision: 1, status: 'confirmed', confirmedBy: 'owner_uid_1', proposedBy: { kind: 'human' } });
 
     const events = await productEvents();
     expect(events.map((e: any) => [e.type, e.actor_kind])).toEqual([['product.proposed', 'worker'], ['product.recorded', 'human']]);
@@ -283,12 +286,134 @@ describe('product records: brief, outcome plan and trace', () => {
     expect(claim.body.lease.context.omissions).toContainEqual({ kind: 'source', id: 'product:brief', reason: 'restricted_for_destination' });
   });
 
-  it('needs a run to record history against', async () => {
+  it('a brief can be confirmed before any run exists; its event is appended, in order, once the first run exists', async () => {
     await seedOnboarding();
     await t.db.execute(sql`DELETE FROM runs`);
-    const res = await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan({ requirementIds: ['FB-03'] }) });
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe('product_needs_run');
-    expect((await t.db.execute(sql`SELECT count(*)::int AS n FROM product_records`))[0]!['n']).toBe(0);
+    const seed = (await get(h.app, url)).body.brief.seed;
+    const res = await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: true, content: seed });
+    expect(res.status).toBe(201);
+    expect(res.body.record).toMatchObject({ status: 'confirmed', confirmedBy: 'owner_uid_1' });
+    expect(await productEvents()).toHaveLength(0);
+    // The first run: the next write appends the deferred event first, then its own.
+    await t.db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle, budget) VALUES (${TENANT}, ${PROJECT}, ${RUN}, 'running', '{"limitUsd":10}'::jsonb)`);
+    expect((await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan({ requirementIds: ['FB-03'] }) })).status).toBe(201);
+    const events = await productEvents();
+    expect(events.map((e: any) => [e.payload.action, e.payload.deferred ?? false])).toEqual([['brief_confirmed', true], ['outcome_plan_added', false]]);
+    expect(events[0]).toMatchObject({ actor_kind: 'human', actor_id: 'owner_uid_1' });
+  });
+});
+
+async function claimLease(): Promise<{ token: string; runnerId: string; lease: { attemptId: string; fence: number; leaseToken: string } }> {
+  await seedTask(t.db, specFor('T1', { title: 'Build the API', baseSha: BASE, requirementIds: ['FB-03'], criteria: [FB[1]!] }), 'ready');
+  const { token, runnerId } = await enrolRunner(h.app);
+  await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+  const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
+  return { token, runnerId, lease: { attemptId: claim.body.lease.attemptId, fence: claim.body.lease.fence, leaseToken: claim.body.lease.leaseToken } };
+}
+const propose = (token: string, lease: unknown, content: unknown) => post(h.app, '/v1/runners/product/brief-proposal', { lease, content }, bearer(token));
+
+describe('fix round 1', () => {
+  it('I1: a released requirement stays released after a second run is planned, each run keeps its summary, and a requirement ever accepted can get a plan', async () => {
+    await seedOnboarding();
+    await seedTask(t.db, specFor('T1', { title: 'Build', baseSha: BASE, requirementIds: ['FB-03', 'ZZ-1'], criteria: [FB[1]!] }), 'merged');
+    await seedPr('merged', MERGE);
+    expect((await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan() })).status).toBe(201);
+    expect((await post(h.app, `${url}/releases`, { content: release() })).status).toBe(201);
+    expect(row((await get(h.app, url)).body, 'FB-03').outcome.label).toBe('Awaiting observations');
+
+    await t.db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle, budget, plan_revision, created_at) VALUES (${TENANT}, ${PROJECT}, 'run_2', 'running', '{"limitUsd":10}'::jsonb, 1, now() + interval '1 hour')`);
+    await seedTask(t.db, specFor('T2', { runId: 'run_2', title: 'Next', baseSha: BASE, requirementIds: ['FB-05'] }), 'ready');
+    const v = (await get(h.app, url)).body;
+    const fb03 = row(v, 'FB-03');
+    expect(fb03.release.state).toBe('released');
+    expect(fb03.outcome.label).toBe('Awaiting observations');
+    expect(link(fb03, 'task')).toMatchObject({ state: 'missing', label: expect.stringMatching(/^Not in the current plan/) });
+    expect(v.milestones.map((m: any) => [m.runId, m.release.state])).toEqual([[RUN, 'released'], ['run_2', 'not_released']]);
+    expect((await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan({ requirementIds: ['ZZ-1'] }) })).status).toBe(201);
+  });
+
+  it('M2: the brief proposal refuses a wrong fence, a wrong token, another runner, an ended attempt and an expired lease', async () => {
+    await seedOnboarding();
+    const { token, lease } = await claimLease();
+    const seed = (await get(h.app, url)).body.brief.seed;
+    expect((await propose(token, { ...lease, fence: lease.fence + 1 }, seed)).status).toBe(409);
+    expect((await propose(token, { ...lease, leaseToken: 'x'.repeat(lease.leaseToken.length) }, seed)).status).toBe(409);
+    const other = await enrolRunner(h.app);
+    expect((await propose(other.token, lease, seed)).status).toBe(409);
+    h.clock.advance(600);
+    expect((await propose(token, lease, seed)).status).toBe(409);
+    await t.db.execute(sql`UPDATE attempts SET ended_at = now(), lease_expires_at = now() + interval '1 day'`);
+    expect((await propose(token, lease, seed)).status).toBe(409);
+    expect((await t.db.execute(sql`SELECT count(*)::int AS n FROM product_brief_proposals`))[0]!['n']).toBe(0);
+  });
+
+  it('M4: restricted work is refused before its body is read', async () => {
+    await seedOnboarding();
+    const { token, lease } = await claimLease();
+    await t.db.execute(sql`UPDATE attempts SET detail = jsonb_set(detail, '{terminalStreamable}', 'false')`);
+    const res = await propose(token, lease, { not: 'a brief' });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('product_proposal_restricted');
+  });
+
+  it('M3: worker proposals sit beside the brief, never move the owner\'s revision or prefill the form, and only the newest five are kept', async () => {
+    await seedOnboarding();
+    const { token, lease } = await claimLease();
+    const v0 = (await get(h.app, url)).body;
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: true, content: { ...v0.brief.seed, targetUser: 'OWNER USER' } })).status).toBe(201);
+    const seen = (await get(h.app, url)).body;
+    for (let i = 1; i <= 6; i++) expect((await propose(token, lease, { ...v0.brief.seed, targetUser: `WORKER ${i}` })).status).toBe(201);
+    const v = (await get(h.app, url)).body;
+    expect(v.brief.revision).toBe(seen.brief.revision);
+    expect(v.brief.seed.targetUser).toBe('OWNER USER');
+    expect(v.brief.confirmed.content.targetUser).toBe('OWNER USER');
+    expect(v.brief.proposals.map((p: any) => p.content.targetUser)).toEqual(['WORKER 6', 'WORKER 5', 'WORKER 4', 'WORKER 3', 'WORKER 2']);
+    expect(v.brief.droppedProposals).toBe(1);
+    // The owner saves against the revision they read, and what is confirmed is the owner's text.
+    const saved = await post(h.app, `${url}/brief`, { expectedRevision: seen.brief.revision, confirm: true, content: { ...v0.brief.seed, targetUser: 'OWNER EDIT' } });
+    expect(saved.status).toBe(201);
+    expect(saved.body.record.content.targetUser).toBe('OWNER EDIT');
+    // Using a proposal is explicit and recorded.
+    const used = await post(h.app, `${url}/brief`, { expectedRevision: 2, confirm: true, content: v.brief.proposals[0].content, fromProposalId: v.brief.proposals[0].proposalId });
+    expect(used.status).toBe(201);
+    expect((await productEvents()).at(-1)).toMatchObject({ type: 'product.recorded', payload: { action: 'brief_confirmed', fromProposalId: v.brief.proposals[0].proposalId } });
+    expect((await get(h.app, url)).body.brief.proposals.map((p: any) => p.proposalId)).not.toContain(v.brief.proposals[0].proposalId);
+  });
+
+  it('M8: a review must be of a release whose run carries the plan\'s requirements, and a follow-up names accepted requirements', async () => {
+    await seedOnboarding();
+    await seedTaskFor('merged');
+    await seedPr('merged', MERGE);
+    const other = await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan({ requirementIds: ['FB-05'] }) });
+    const p = await post(h.app, `${url}/outcome-plans`, { recordId: null, expectedRevision: 0, content: plan() });
+    const r = await post(h.app, `${url}/releases`, { content: release() });
+    const mismatch = await post(h.app, `${url}/outcome-reviews`, { content: review(other.body.record.recordId, r.body.record.recordId) });
+    expect(mismatch.status).toBe(422);
+    expect(mismatch.body.error.code).toBe('product_requirement_mismatch');
+    const badFollow = await post(h.app, `${url}/outcome-reviews`, { content: review(p.body.record.recordId, r.body.record.recordId, { followUp: { title: 'x', requirementIds: ['FB-99'], reason: 'y' } }) });
+    expect(badFollow.body.error.code).toBe('product_requirement_unknown');
+    expect((await post(h.app, `${url}/outcome-reviews`, { content: review(p.body.record.recordId, r.body.record.recordId) })).status).toBe(201);
+  });
+
+  it('M9: reading the product view does not take the brain lock when the records have not moved', async () => {
+    await seedOnboarding();
+    await get(h.app, url);
+    await t.db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '8s'`);
+      await tx.execute(sql`SELECT 1 FROM brain_heads WHERE tenant_id = ${TENANT} AND project_id = ${PROJECT} FOR UPDATE`);
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const read = await Promise.race([get(h.app, url), new Promise<'blocked'>((resolve) => { timer = setTimeout(() => resolve('blocked'), 4_000); })]);
+        expect(read === 'blocked' ? 'blocked' : (read as any).status).toBe(200);
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+  });
+
+  it('M7: the write answers with whether text was redacted', async () => {
+    await seedOnboarding();
+    const clean = await confirmSeed();
+    expect(clean.body.redacted).toBe(false);
   });
 });

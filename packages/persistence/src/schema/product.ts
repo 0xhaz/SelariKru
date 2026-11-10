@@ -13,6 +13,12 @@ export const productHeads = pgTable(
     ...scope(),
     /** The last position written to the product log. */
     lastSeq: integer('last_seq').notNull().default(0),
+    /** The last log position whose event is appended. Records written while the project had no run wait here and are appended, in order, once it has one. */
+    eventedSeq: integer('evented_seq').notNull().default(0),
+    /** Worker proposals dropped because newer ones passed the cap. */
+    droppedProposals: integer('dropped_proposals').notNull().default(0),
+    /** The last proposal position given. Proposals are ordered by it, newest last. */
+    proposalSeq: integer('proposal_seq').notNull().default(0),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId] }),
@@ -34,6 +40,8 @@ export const productRecords = pgTable(
     proposedBy: text('proposed_by').notNull(),
     /** Set only on a revision a person confirmed. */
     confirmedBy: text('confirmed_by'),
+    /** What the write's event says (action and ids), kept with the revision so an event deferred for want of a run says the same. No text. */
+    eventDetail: jsonb('event_detail').$type<Record<string, unknown>>().notNull().default({}),
     seq: integer('seq').notNull(),
     recordedAt: tstz('recorded_at').notNull(),
   },
@@ -47,5 +55,28 @@ export const productRecords = pgTable(
     check('product_records_proposer', sql`${t.proposedByKind} IN ('human', 'worker')`),
     // Only a person confirms: a confirmed revision names who did, and a worker's revision is only ever a proposal.
     check('product_records_confirmed', sql`(${t.status} = 'confirmed') = (${t.confirmedBy} IS NOT NULL) AND (${t.proposedByKind} = 'human' OR ${t.status} = 'proposed')`),
+  ],
+);
+
+/**
+ * Workers' proposed briefs, kept apart from the brief's revision line so a proposal never moves the revision an owner saves against. Only the newest few are kept: a new
+ * proposal past the cap drops the oldest, and the head counts how many were dropped. A proposal an owner used is removed; the owner's revision and its event name it.
+ */
+export const productBriefProposals = pgTable(
+  'product_brief_proposals',
+  {
+    ...scope(),
+    proposalId: text('proposal_id').notNull(),
+    content: jsonb('content').$type<Record<string, unknown>>().notNull(),
+    classification: text('classification').notNull(),
+    proposedBy: text('proposed_by').notNull(),
+    attemptId: text('attempt_id').notNull(),
+    seq: integer('seq').notNull(),
+    proposedAt: tstz('proposed_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.proposalId] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+    check('product_brief_proposals_classification', sql`${t.classification} IN ('public', 'internal', 'restricted', 'secret')`),
   ],
 );

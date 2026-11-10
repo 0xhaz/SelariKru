@@ -8,8 +8,8 @@ export interface ProductState {
   readonly error: string | null;
   readonly busy: boolean;
   reload(): void;
-  /** Sends one write. Resolves false, with `error` set and the records read again, when it did not go through. */
-  act(action: ProductAction): Promise<boolean>;
+  /** Sends one write. Resolves null, with `error` set and the records read again, when it did not go through; else whether the server redacted text. */
+  act(action: ProductAction): Promise<{ readonly redacted: boolean } | null>;
 }
 
 const messageOf = (e: unknown): string => {
@@ -36,16 +36,16 @@ export function useProduct(port: ProductPort | null): ProductState {
     port.load().then((v) => { if (alive.current) { setView(v); setError(null); } }, () => { if (alive.current) setError('The product records could not be read. Try again.'); }).finally(() => { if (alive.current) setLoading(false); });
   }, [port, nonce]);
   const reload = useCallback(() => setNonce((n) => n + 1), []);
-  const act = useCallback(async (action: ProductAction): Promise<boolean> => {
-    if (!port) return false;
+  const act = useCallback(async (action: ProductAction): Promise<{ readonly redacted: boolean } | null> => {
+    if (!port) return null;
     setBusy(true);
     try {
       const next = await port.act(action);
-      if (alive.current) { setView(next); setError(null); }
-      return true;
+      if (alive.current) { setView(next.product); setError(null); }
+      return { redacted: next.redacted };
     } catch (e) {
       if (alive.current) { setError(messageOf(e)); setNonce((n) => n + 1); }
-      return false;
+      return null;
     } finally {
       if (alive.current) setBusy(false);
     }

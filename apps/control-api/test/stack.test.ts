@@ -246,6 +246,12 @@ describe('static detection from a runner: a proposal until the owner confirms it
     return { ref: { attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken }, token };
   }
 
+  it('refuses a detection on an expired lease (T6.6 fix round 1, M2)', async () => {
+    const { ref, token } = await lease();
+    h.clock.advance(600);
+    expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(409);
+  });
+
   it('records the detection with evidence, drops entries the catalog does not know, redacts command text, and proposes commands that are not in effect', async () => {
     const { ref, token } = await lease();
     expect((await post(h.app, '/v1/runners/stack/detection', { lease: { ...ref, leaseToken: 'nope' }, detection }, bearer(token))).status).toBe(409);
@@ -308,7 +314,7 @@ describe('static detection from a runner: a proposal until the owner confirms it
     const { ref, token } = await lease();
     await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
     const before = (await get(h.app, stackUrl)).body;
-    h.clock.advance(60);
+    h.clock.advance(30); // within the lease: an expired lease is refused
     expect((await post(h.app, '/v1/runners/stack/detection', { lease: ref, detection }, bearer(token))).status).toBe(200);
     const after = (await get(h.app, stackUrl)).body;
     expect(after).toMatchObject({ updatedBy: before.updatedBy, updatedAt: before.updatedAt });

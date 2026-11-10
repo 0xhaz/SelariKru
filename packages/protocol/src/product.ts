@@ -6,7 +6,11 @@ import { LeaseRefSchema } from './runner.ts';
 const RaiseLabel = z.enum(['public', 'internal', 'restricted']).optional();
 
 /** Save the brief against the revision last read: as a draft (`confirm: false`, a proposal) or confirmed. Only an owner session can send this. */
-export const ProductBriefRequestSchema = z.strictObject({ expectedRevision: z.number().int().min(0), confirm: z.boolean(), content: ProblemBriefContentSchema, classification: RaiseLabel });
+export const ProductBriefRequestSchema = z.strictObject({
+  expectedRevision: z.number().int().min(0), confirm: z.boolean(), content: ProblemBriefContentSchema, classification: RaiseLabel,
+  /** The worker proposal the owner chose to start from, explicitly. Recorded with the revision; the proposal is then removed from the pending list. */
+  fromProposalId: z.string().min(1).max(80).optional(),
+});
 export type ProductBriefRequest = z.infer<typeof ProductBriefRequestSchema>;
 /** A new outcome plan (`recordId` null), or the next revision of one against the revision last read. */
 export const OutcomePlanRequestSchema = z.strictObject({ recordId: z.string().min(1).max(80).nullable(), expectedRevision: z.number().int().min(0), content: OutcomePlanContentSchema, classification: RaiseLabel });

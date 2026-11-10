@@ -222,7 +222,7 @@ export interface TraceRun {
   /** The run's latest candidate. Null: none was assembled. */
   readonly candidate: { readonly sha: string; readonly live: boolean; readonly recordId: string | null; readonly recordValid: boolean } | null;
   /** What the trusted verifier last said about each criterion, on that candidate. */
-  readonly criteria: readonly { readonly criterionId: string; readonly state: string; readonly verified: boolean; readonly candidateSha: string | null }[];
+  readonly criteria: readonly { readonly criterionId: string; readonly state: string; readonly verified: boolean; readonly candidateSha: string | null; /** The record whose check judged this criterion. */ readonly recordId?: string | null }[];
   readonly pullRequest: { readonly prNumber: number; readonly url: string; readonly status: string; readonly mergeCommitSha: string | null } | null;
 }
 
@@ -230,9 +230,12 @@ export interface TraceInput {
   /** The accepted requirements and criteria, with their text when known. */
   readonly requirements: readonly { readonly id: string; readonly text: string | null }[];
   /** The current plan's tasks. */
-  readonly tasks: readonly { readonly taskId: string; readonly runId: string; readonly title: string | null; readonly status: string; readonly requirementIds: readonly string[] }[];
+  readonly tasks: readonly { readonly taskId: string; readonly runId: string; readonly title: string | null; readonly status: string; readonly requirementIds: readonly string[]; /** In the current plan. Absent: true. */ readonly current?: boolean }[];
+  /** Every run with a plan, a pull request or a release note, oldest first. */
   readonly runs: readonly TraceRun[];
   readonly records: readonly ProductRecord[];
+  /** Workers' brief proposals waiting for a person. They make the brief link `proposed` while nothing is confirmed. */
+  readonly briefProposals?: number;
 }
 
 const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -258,21 +261,29 @@ export function buildProductTrace(input: TraceInput): TraceRow[] {
 
   return [...ids.entries()].sort(([a], [b]) => byString(a, b)).map(([id, text]) => {
     const tasks = input.tasks.filter((t) => t.requirementIds.includes(id)).sort((a, b) => byString(a.taskId, b.taskId));
-    const runIds = [...new Set(tasks.map((t) => t.runId))].sort(byString);
-    const run = runIds.map((r) => runs.get(r)).find((r) => r !== undefined);
+    const carried = new Set(tasks.map((t) => t.runId));
+    // Oldest first, as the runs are given; the evidence links read the latest run that carries the requirement.
+    const runIds = [...input.runs.map((r) => r.runId).filter((r) => carried.has(r)), ...[...carried].filter((r) => !runs.has(r)).sort(byString)];
+    const run = [...runIds].reverse().map((r) => runs.get(r)).find((r) => r !== undefined);
+    const current = tasks.filter((t) => t.current !== false);
+    const live = current.filter((t) => t.status !== 'cancelled' && t.status !== 'superseded');
+    const named = (ts: typeof tasks) => ts.map((t) => `${t.title ?? t.taskId} (${t.status})`).join('; ').slice(0, 300);
     const myPlans = plans.filter((p) => p.content.requirementIds.includes(id));
     const links: TraceLink[] = [];
 
     links.push(brief.confirmed
       ? { kind: 'problem_brief', state: 'present', label: `Confirmed brief, revision ${brief.confirmed.revision}`, ref: ref(brief.confirmed) }
-      : brief.latest ? { kind: 'problem_brief', state: 'proposed', label: 'Only a proposed brief: no one has confirmed it', ref: ref(brief.latest) }
+      : brief.latest ? { kind: 'problem_brief', state: 'proposed', label: 'Only a draft brief: no one has confirmed it', ref: ref(brief.latest) }
+        : (input.briefProposals ?? 0) > 0 ? { kind: 'problem_brief', state: 'proposed', label: 'Only a worker\'s proposal: no one has confirmed a brief', ref: null }
         : { kind: 'problem_brief', state: 'missing', label: 'No problem brief yet', ref: null });
     links.push(myPlans.length > 0
       ? { kind: 'outcome_plan', state: 'present', label: myPlans.map((p) => p.content.metric).join('; ').slice(0, 300), ref: myPlans.map(ref).join(', ') }
       : { kind: 'outcome_plan', state: 'missing', label: `No outcome plan names ${id}`, ref: null });
-    links.push(tasks.length > 0
-      ? { kind: 'task', state: 'present', label: tasks.map((t) => `${t.title ?? t.taskId} (${t.status})`).join('; ').slice(0, 300), ref: tasks.map((t) => t.taskId).join(', ') }
-      : { kind: 'task', state: 'missing', label: `No plan task carries ${id}`, ref: null });
+    if (live.length > 0) links.push({ kind: 'task', state: 'present', label: named(live), ref: live.map((t) => t.taskId).join(', ') });
+    else if (current.some((t) => t.status === 'superseded')) links.push({ kind: 'task', state: 'stale', label: `Replaced: ${named(current)}`, ref: current.map((t) => t.taskId).join(', ') });
+    else if (current.length > 0) links.push({ kind: 'task', state: 'missing', label: `Cancelled: ${named(current)}`, ref: current.map((t) => t.taskId).join(', ') });
+    else if (tasks.length > 0) links.push({ kind: 'task', state: 'missing', label: `Not in the current plan; carried earlier by ${named(tasks)}`.slice(0, 300), ref: tasks.map((t) => t.taskId).join(', ') });
+    else links.push({ kind: 'task', state: 'missing', label: `No plan task carries ${id}`, ref: null });
 
     const c = run?.candidate ?? null;
     links.push(c === null ? { kind: 'candidate', state: 'missing', label: 'No candidate assembled', ref: null }
@@ -280,7 +291,7 @@ export function buildProductTrace(input: TraceInput): TraceRow[] {
         : { kind: 'candidate', state: 'stale', label: `Candidate ${short(c.sha)} was replaced or rejected`, ref: c.sha });
 
     const crit = run?.criteria.find((x) => x.criterionId === id);
-    const recordId = c?.recordId ?? null;
+    const recordId = crit?.recordId ?? c?.recordId ?? null;
     if (!crit || crit.state === 'not_run') links.push({ kind: 'verification', state: 'missing', label: 'Not verified yet: no verification record judged it', ref: recordId });
     else if (crit.state === 'not_delivered') links.push({ kind: 'verification', state: 'missing', label: 'Not delivered: the work was stopped', ref: recordId });
     else if (crit.state === 'passed' && crit.verified) links.push({ kind: 'verification', state: 'present', label: `Passed on candidate ${short(crit.candidateSha ?? c?.sha ?? '')}${recordId ? `, record ${recordId}` : ''}`, ref: recordId });
@@ -294,7 +305,7 @@ export function buildProductTrace(input: TraceInput): TraceRow[] {
     const myReleases = releases.filter((r) => runIds.includes(r.content.runId) && merged(runs.get(r.content.runId)));
     const released = myReleases.length > 0;
     links.push(released
-      ? { kind: 'release', state: 'present', label: myReleases.map((r) => `Released to ${r.content.environment} on ${r.content.releasedOn}`).join('; '), ref: myReleases.map(ref).join(', ') }
+      ? { kind: 'release', state: 'present', label: myReleases.map((r) => `Released ${r.content.runId} to ${r.content.environment} on ${r.content.releasedOn}`).join('; '), ref: myReleases.map(ref).join(', ') }
       : { kind: 'release', state: 'missing', label: merged(run) ? 'No release note: a merge alone is not a release' : 'Not released', ref: null });
 
     const relevant = reviews.filter((v) => myPlans.some((p) => p.recordId === v.content.planRecordId) && myReleases.some((r) => r.recordId === v.content.releaseRecordId)).sort((a, b) => b.seq - a.seq);
@@ -330,11 +341,13 @@ export type MilestoneSummary = z.infer<typeof MilestoneSummarySchema>;
 
 /** Per run: the requirements it covers, its evidence, its release state and its outcome states, with citations. Derived from the trace; deterministic, no model. */
 export function milestoneSummaries(input: TraceInput): MilestoneSummary[] {
-  const rows = buildProductTrace(input);
-  const runIds = [...new Set([...input.runs.map((r) => r.runId), ...input.tasks.map((t) => t.runId)])].sort(byString);
+  const runIds = [...new Set([...input.runs.map((r) => r.runId), ...input.tasks.map((t) => t.runId)])];
   return runIds.map((runId) => {
-    const mine = rows.filter((r) => r.runIds.includes(runId));
+    // Each run is summarized on its own evidence: its tasks, its candidate and pull request, and the records about it.
     const run = input.runs.find((r) => r.runId === runId);
+    const tasks = input.tasks.filter((t) => t.runId === runId).map((t) => ({ ...t, current: true }));
+    const carriedHere = new Set(tasks.flatMap((t) => t.requirementIds));
+    const mine = buildProductTrace({ ...input, requirements: input.requirements.filter((r) => carriedHere.has(r.id)), tasks, runs: run ? [run] : [] }).filter((r) => carriedHere.has(r.requirementId));
     const counts = new Map<string, { state: OutcomeState; label: string; count: number }>();
     for (const r of mine) {
       const k = `${r.outcome.state}:${r.outcome.label}`;
