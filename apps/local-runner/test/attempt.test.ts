@@ -1,4 +1,5 @@
-import { mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { restrictedReason, type RestrictedOutcome } from '@selarikru/domain';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
@@ -154,6 +155,51 @@ describe('a restricted attempt keeps the agent\'s words on this machine', () => 
     expect(reason).toMatch(/^diff outside allowedPaths: 1 path\(s\)/);
     expect(reason).not.toContain('RESTRICTED-CANARY');
     expect(w.logs.join('\n')).toContain('RESTRICTED-CANARY');
+  });
+});
+
+describe('a restricted attempt publishes a category from the closed list for every error branch', () => {
+  const CANARY = 'RESTRICTED-CANARY';
+  const brokenStore = (w: World) => ({ ...w.artifacts, put: async () => { throw new Error(`ENOSPC writing secret/${CANARY}.md`); }, get: w.artifacts.get.bind(w.artifacts), has: w.artifacts.has.bind(w.artifacts) });
+  // The last field: whether the runner's own sentence for that branch names the canary, so its log has to hold it.
+  const cases: [string, WorldOptions, (w: World, deps: AttemptDeps) => AttemptDeps, string, boolean][] = [
+    ['the change set cannot be stored', { agent: async ({ write }) => void (await write(`src/${CANARY}.ts`, 'n')) }, (w, d) => ({ ...d, artifacts: brokenStore(w) }), 'failed', true],
+    ['the diff cannot be computed', { agent: async ({ cwd }) => { await mkdir(join(cwd, 'src', CANARY)); await chmod(join(cwd, 'src', CANARY), 0o000); } }, (_w, d) => d, 'failed', true],
+    ['allowedPaths are invalid', { task: { allowedPaths: [`/${CANARY}`] } }, (_w, d) => d, 'blocked', true],
+    ['an MCP server connected', { initMcp: [{ name: CANARY, status: 'connected' }] }, (_w, d) => d, 'failed', true],
+    ['the stream reports another model', { initModel: CANARY }, (_w, d) => d, 'blocked', true],
+    ['the toolchain pin cannot be resolved', { baseFiles: { 'package.json': JSON.stringify({ packageManager: 'pnpm@10.11.0' }), '.nvmrc': `${CANARY}\n` } }, (_w, d) => d, 'blocked', false],
+    ['the task bundle cannot be built', {}, (w, d) => ({ ...d, repos: { proj1: join(w.root, CANARY) } }), 'failed', false],
+  ];
+
+  const category: Record<string, string> = {
+    'the change set cannot be stored': 'change_set_store_failed', 'the diff cannot be computed': 'diff_failed', 'allowedPaths are invalid': 'allowed_paths_invalid',
+    'an MCP server connected': 'unexpected_mcp_server', 'the stream reports another model': 'model_mismatch', 'the toolchain pin cannot be resolved': 'toolchain_unresolved',
+    'the task bundle cannot be built': 'task_bundle_failed',
+  };
+
+  it.each(cases)('when %s', async (name, world, adjust, outcome, named) => {
+    const { w, deps } = await setup({ ...world, streamable: false });
+    try {
+      expect((await runAttempt(adjust(w, deps), w.lease)).outcome).toBe(outcome);
+    } finally {
+      await chmod(join(w.workRoot, 'attempts', 'att_1', 'workspace', 'src', CANARY), 0o755).catch(() => undefined);
+    }
+    expect(w.api.published).toHaveLength(1);
+    const sent = w.api.published[0] as { outcome: string; reason: string };
+    expect(sent.outcome).toBe(outcome);
+    expect(JSON.stringify(sent)).not.toContain(CANARY);
+    // The closed list keeps it as sent: nothing outside it left this machine.
+    expect(restrictedReason(outcome as RestrictedOutcome, sent.reason)).toBe(sent.reason);
+    expect(sent.reason).toBe(category[name]);
+    // The detail is not lost: it is in this runner's own log.
+    if (named) expect(w.logs.join('\n')).toContain(CANARY);
+  });
+
+  it('streamable work still publishes the detail', async () => {
+    const { w, deps } = await setup({ agent: async ({ write }) => void (await write('src/n.ts', 'n')) });
+    await runAttempt({ ...deps, artifacts: brokenStore(w) }, w.lease);
+    expect((w.api.published[0] as { reason: string }).reason).toContain(CANARY);
   });
 });
 

@@ -288,11 +288,14 @@ describe('repair require_approval', () => {
 describe('a restricted attempt: the server keeps the agent\'s words out whatever the runner sends', () => {
   const WORDS = 'drop the patients table holding RESTRICTED-CANARY rows';
   const restrict = (lease: Lease) => t.db.execute(sql`UPDATE attempts SET detail = detail || '{"terminalStreamable": false}'::jsonb WHERE attempt_id = ${lease.attemptId}`);
-  const leaked = async () => JSON.stringify([
-    ...(await t.db.execute(sql`SELECT * FROM approvals`)),
-    ...(await t.db.execute(sql`SELECT exit_reason FROM attempts`)),
-    ...(await t.db.execute(sql`SELECT payload FROM events`)),
-  ]).includes('RESTRICTED-CANARY');
+  /** Every row of every table in this test's schema: the canary must be in none of them, events and outbox included. */
+  const leaked = async () => {
+    const tables = await t.db.execute(sql`SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`);
+    const rows: unknown[] = [];
+    for (const tb of tables) rows.push(...(await t.db.execute(sql.raw(`SELECT * FROM "${String(tb['table_name'])}"`))));
+    return JSON.stringify(rows).includes('RESTRICTED-CANARY');
+  };
+  const exitReason = async (lease: Lease) => String((await t.db.execute(sql`SELECT exit_reason FROM attempts WHERE attempt_id = ${lease.attemptId}`))[0]!['exit_reason']);
 
   it('an approval request is recorded with a fixed sentence naming the operation', async () => {
     const lease = await claimOne();
@@ -311,6 +314,10 @@ describe('a restricted attempt: the server keeps the agent\'s words out whatever
     const b = await claimOne('t_deny');
     await restrict(b);
     await request(b, undefined, WORDS);
+    // The wire refuses an operation outside the closed list; the scheduler does not rely on it.
+    const c = await claimOne('t_odd');
+    await restrict(c);
+    await request(c, 'RESTRICTED-CANARY', WORDS);
     expect(await leaked()).toBe(false);
   });
 
@@ -320,6 +327,48 @@ describe('a restricted attempt: the server keeps the agent\'s words out whatever
     await s.publishResult(lease, { outcome: 'failed', reason: 'diff outside allowedPaths: 1 path(s): secret/RESTRICTED-CANARY.md (outside)' } as PublishResult);
     expect(await leaked()).toBe(false);
     expect(String((await t.db.execute(sql`SELECT exit_reason FROM attempts`))[0]!['exit_reason'])).toMatch(/^diff outside allowedPaths: 1 path\(s\); the paths stay on the device/);
+  });
+
+  // One per runner error branch that can carry a path or the agent's words, and one that names nothing a runner could ever send.
+  it.each([
+    ['failed', 'could not compute the diff: ENOENT: no such file or directory, lstat \'/w/secret/RESTRICTED-CANARY.md\'', 'worker_failed'],
+    ['failed', 'change set could not be stored: secret/RESTRICTED-CANARY.md changed after it was checked', 'worker_failed'],
+    ['failed', 'completion gate error: secret/RESTRICTED-CANARY.md', 'worker_failed'],
+    ['failed', 'could not build the task bundle: secret/RESTRICTED-CANARY.md', 'worker_failed'],
+    ['failed', 'unexpected MCP server connected: RESTRICTED-CANARY', 'worker_failed'],
+    ['blocked', 'model_mismatch: recorded a, the stream reports RESTRICTED-CANARY', 'worker_blocked'],
+    ['blocked', 'toolchain_unresolved: secret/RESTRICTED-CANARY/.nvmrc', 'worker_blocked'],
+    ['infrastructure_failed', 'provisioning_failed: sandbox unavailable: secret/RESTRICTED-CANARY', 'provisioning_failed'],
+    ['infrastructure_failed', 'RESTRICTED-CANARY', 'provisioning_failed'],
+  ] as const)('%s with "%s" keeps only a fixed category', async (outcome, reason, category) => {
+    const lease = await claimOne();
+    await restrict(lease);
+    expect(await s.publishResult(lease, { outcome, reason } as PublishResult)).toMatchObject({ ok: true });
+    expect(await leaked()).toBe(false);
+    expect(await exitReason(lease)).toBe(outcome === 'infrastructure_failed' ? `infrastructure:${category}` : category);
+  });
+
+  it('a reason on the closed list is kept as sent', async () => {
+    const lease = await claimOne();
+    await restrict(lease);
+    await s.publishResult(lease, { outcome: 'blocked', reason: 'model_mismatch' } as PublishResult);
+    expect(await exitReason(lease)).toBe('model_mismatch');
+  });
+
+  it('a result that meets an owner\'s cancel keeps the category too', async () => {
+    const lease = await claimOne();
+    await restrict(lease);
+    await t.db.insert(schema.taskCommands).values({ tenantId: TENANT, projectId: PROJECT, operationId: 'op_cancel_canary', taskId: 't1', revision: 1, command: 'cancel', state: 'cancel_requested', requestedBy: 'owner', requestedAt: clock.now(), detail: {} });
+    expect(await s.publishResult(lease, { outcome: 'failed', reason: 'could not compute the diff: secret/RESTRICTED-CANARY.md' } as PublishResult)).toMatchObject({ ok: true, value: { taskStatus: 'cancelled' } });
+    expect(await leaked()).toBe(false);
+    expect(await exitReason(lease)).toBe('worker_failed');
+  });
+
+  it('an attempt with no label at all is treated as restricted', async () => {
+    const lease = await claimOne();
+    await t.db.execute(sql`UPDATE attempts SET detail = detail - 'terminalStreamable' WHERE attempt_id = ${lease.attemptId}`);
+    await s.publishResult(lease, { outcome: 'failed', reason: 'change set could not be stored: secret/RESTRICTED-CANARY.md changed after it was checked' } as PublishResult);
+    expect(await leaked()).toBe(false);
   });
 
   it('a streamable attempt keeps the agent\'s words', async () => {

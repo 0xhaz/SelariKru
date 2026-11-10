@@ -1,4 +1,4 @@
-import { PILOT_ROLE_PATHS, restrictedApprovalReason, restrictedDiffReason } from '@selarikru/domain';
+import { PILOT_ROLE_PATHS, restrictedApproval, restrictedDiffReason, restrictedReason, type RestrictedOutcome, type RestrictedReason } from '@selarikru/domain';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
@@ -153,6 +153,17 @@ interface Flags {
   aborted: boolean;
 }
 
+/**
+ * Why an attempt ended, in two forms. Restricted work publishes only `category`, from the closed list the server also enforces; streamable work publishes `text`; this runner
+ * logs `text` either way, so the detail stays on this machine. `count` is the completion gate's: restricted work publishes how many paths, never which.
+ */
+interface Why<O extends RestrictedOutcome> {
+  readonly category: RestrictedReason<O>;
+  readonly text: string;
+  readonly count?: number;
+}
+const why = <O extends RestrictedOutcome>(category: RestrictedReason<O>, text: string = category): Why<O> => ({ category, text });
+
 /** One claimed attempt, end to end. Publishes at most one result, and always cleans up the sandbox and the workspace. */
 export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promise<AttemptReport> {
   const ref = leaseRef(lease);
@@ -249,16 +260,23 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     reportedUsage = { reportedUsage: { setupSeconds } };
     return setupSeconds;
   };
-  const finish = async (outcome: 'completed' | 'failed' | 'blocked' | 'approval_requested' | 'infrastructure_failed', reason: string | null, cost: number | null, manifest: string | null, approval?: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null }): Promise<AttemptReport> => {
-    const result: RunnerResult =
-      outcome === 'completed'
-        ? { outcome, ...(manifest !== null ? { changeManifestSha256: manifest } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
-        : outcome === 'approval_requested'
-          ? { outcome, reason: clip(reason ?? outcome), operation: approval!.operation, ...(approval!.destination ? { destination: approval!.destination } : {}), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage }
-          : { outcome, reason: clip(reason ?? outcome), ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage };
+  const costed = (cost: number | null) => ({ ...(cost !== null ? { reportedCostUsd: cost } : {}), ...reportedUsage });
+  const send = async (result: RunnerResult, detail: string | null, manifest: string | null): Promise<AttemptReport> => {
     const ok = await publish(result);
-    log(`${outcome}${reason ? `: ${clip(reason, 200)}` : ''}${ok ? '' : ' (result not accepted)'}`);
-    return ok ? { outcome, reason: reason === null ? null : clip(reason), changeManifest: manifest } : { outcome: 'lease_lost', reason: 'result not accepted', changeManifest: manifest };
+    log(`${result.outcome}${detail ? `: ${clip(detail, 200)}` : ''}${ok ? '' : ' (result not accepted)'}`);
+    return ok ? { outcome: result.outcome, reason: detail === null ? null : clip(detail), changeManifest: manifest } : { outcome: 'lease_lost', reason: 'result not accepted', changeManifest: manifest };
+  };
+  // The claim decided this from every source's label. Anything but a clear yes is restricted.
+  const restricted = lease.streamable !== true;
+  const finish = <O extends RestrictedOutcome>(outcome: O, reason: Why<O>, cost: number | null): Promise<AttemptReport> => {
+    const published = restricted ? restrictedReason(outcome, reason.count !== undefined ? restrictedDiffReason(reason.count) : reason.category) : clip(reason.text);
+    return send({ outcome, reason: published, ...costed(cost) } as RunnerResult, reason.text, null);
+  };
+  const finishCompleted = (cost: number | null, manifest: string): Promise<AttemptReport> => send({ outcome: 'completed', changeManifestSha256: manifest, ...costed(cost) }, null, manifest);
+  const finishApproval = (request: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string }, cost: number | null): Promise<AttemptReport> => {
+    // Restricted work publishes a fixed sentence; the agent's words stay in this log, on this machine.
+    const reason = restricted ? restrictedApproval(request.operation, request.destination).reason : clip(request.reason);
+    return send({ outcome: 'approval_requested', reason, operation: request.operation, ...(request.destination ? { destination: request.destination } : {}), ...costed(cost) }, request.reason, null);
   };
 
   try {
@@ -271,37 +289,37 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
 
     const repo = deps.repos[task.projectId];
-    if (task.execution === 'cloud') return await finish('blocked', 'task requires cloud execution; this is a local runner', null, null);
-    if (repo === undefined) return await finish('blocked', 'no local source repository is configured for this project', null, null);
+    if (task.execution === 'cloud') return await finish('blocked', why('cloud_execution_required', 'task requires cloud execution; this is a local runner'), null);
+    if (repo === undefined) return await finish('blocked', why('no_local_repository', 'no local source repository is configured for this project'), null);
     const allowed = validateAllowedPaths(task.allowedPaths);
-    if (!allowed.ok) return await finish('blocked', allowed.reason, null, null);
-    if (!FULL_SHA.test(task.baseSha)) return await finish('blocked', 'task base is not a full commit id', null, null);
+    if (!allowed.ok) return await finish('blocked', why('allowed_paths_invalid', allowed.reason), null);
+    if (!FULL_SHA.test(task.baseSha)) return await finish('blocked', why('base_not_full_commit', 'task base is not a full commit id'), null);
     // A grant that reaches the network is only honest if the sandbox can limit egress to exactly that destination. It cannot yet (see the runtime), so
     // the task stops here, before any sandbox exists, and says why. New requests of this kind are refused when asked; this holds for a grant already issued.
     // Note that every sandbox still has the machine-wide allowlist it inherits from sbx policy: no attempt runs with a network limited to what was granted.
     const grants = lease.grants ?? [];
     const egressGrants = grants.filter((g) => g.destination !== null);
     if (egressGrants.length > 0 && (await deps.runtime.capabilities()).egressAllowlist !== 'enforced') {
-      return await finish('blocked', `egress_enforcement_unavailable: this runtime cannot limit a sandbox to ${egressGrants.map((g) => g.destination!.host).join(', ')}`, null, null);
+      return await finish('blocked', why('egress_enforcement_unavailable', `egress_enforcement_unavailable: this runtime cannot limit a sandbox to ${egressGrants.map((g) => g.destination!.host).join(', ')}`), null);
     }
 
     // The recorded model is what launches, or nothing does. These checks sit before the sandbox: an unsupported model must fail with no sandbox created.
     const assignment = lease.assignment;
-    if (assignment === null) return await finish('blocked', 'no_model_recorded: this attempt carries no recorded model, so it cannot run', null, null);
+    if (assignment === null) return await finish('blocked', why('no_model_recorded', 'no_model_recorded: this attempt carries no recorded model, so it cannot run'), null);
     const harnessEntry = (deps.harnesses ?? DEFAULT_HARNESSES).find((h) => h.provider === assignment.provider);
-    if (harnessEntry === undefined) return await finish('blocked', `unsupported_provider:${assignment.provider}/${assignment.model}`, null, null);
-    if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', `unsupported_model:${assignment.provider}/${assignment.model}`, null, null);
+    if (harnessEntry === undefined) return await finish('blocked', why('unsupported_provider', `unsupported_provider:${assignment.provider}/${assignment.model}`), null);
+    if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', why('unsupported_model', `unsupported_model:${assignment.provider}/${assignment.model}`), null);
 
     // Read from the base commit before any sandbox exists: a pin that cannot be read fails the same way every time, so it blocks instead of spending retries.
     const toolchain = await resolveToolchain(repo, task.baseSha);
-    if (toolchain.kind === 'read_failed') return await finish('infrastructure_failed', `provisioning_failed: ${toolchain.reason}`, null, null);
-    if (toolchain.kind === 'unresolved') return await finish('blocked', `toolchain_unresolved: ${toolchain.reason}`, null, null);
+    if (toolchain.kind === 'read_failed') return await finish('infrastructure_failed', why('provisioning_failed: the toolchain pin could not be read', `provisioning_failed: ${toolchain.reason}`), null);
+    if (toolchain.kind === 'unresolved') return await finish('blocked', why('toolchain_unresolved', `toolchain_unresolved: ${toolchain.reason}`), null);
     const toolchainSpec: ToolchainSpec | null = toolchain.kind === 'pinned' ? { nodeVersion: toolchain.nodeVersion, pnpmVersion: toolchain.pnpmVersion } : null;
 
     const signalPath = join(workspace, APPROVAL_SIGNAL_RELATIVE_PATH);
     const taskFile = renderTaskFile(task, { signalPath, grants, ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
     if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
-      return await finish('blocked', 'task text contains a secret-shaped value; it was not sent to the agent', null, null);
+      return await finish('blocked', why('secret_in_task_text', 'task text contains a secret-shaped value; it was not sent to the agent'), null);
     }
 
     const leaseDeadline = Date.parse(lease.deadlineAt);
@@ -326,25 +344,25 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       baseIgnores = b.baseIgnores;
       log(`bundle ready: ${b.fileCount} files, ${b.excluded.length} excluded`);
     } catch (err) {
-      return await finish('failed', `could not build the task bundle: ${err instanceof Error ? err.message : 'error'}`, null, null);
+      return await finish('failed', why('task_bundle_failed', `could not build the task bundle: ${err instanceof Error ? err.message : 'error'}`), null);
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-    if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
+    if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
 
     try {
       handle = await deps.runtime.create({ attemptId: lease.attemptId, taskId: task.taskId, workspacePath: workspace, cpus: deps.cpus, memoryMiB: deps.memoryMiB });
     } catch (err) {
       // No host fallback, ever. No worker ran either, so this is the infrastructure's failure and spends no repair.
       markSetup();
-      return await finish('infrastructure_failed', `provisioning_failed: sandbox unavailable: ${err instanceof Error ? err.message : 'error'}`, null, null);
+      return await finish('infrastructure_failed', why('provisioning_failed: sandbox unavailable', `provisioning_failed: sandbox unavailable: ${err instanceof Error ? err.message : 'error'}`), null);
     }
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-    if (flags.cancelled || flags.timedOut) return await finish('failed', flags.timedOut ? 'attempt timeout reached before the agent started' : 'cancelled by owner request before the agent started', null, null);
+    if (flags.cancelled || flags.timedOut) return await finish('failed', flags.timedOut ? why('timeout_before_start', 'attempt timeout reached before the agent started') : why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
 
     if (toolchainSpec !== null) {
-      if (deps.runtime.provision === undefined) return await finish('infrastructure_failed', 'provisioning_failed: this runtime cannot set up a Node toolchain', null, null);
+      if (deps.runtime.provision === undefined) return await finish('infrastructure_failed', why('provisioning_failed: this runtime cannot set up a Node toolchain'), null);
       log(`provisioning toolchain: node ${toolchainSpec.nodeVersion} pnpm ${toolchainSpec.pnpmVersion}`);
       provisioning = new AbortController();
       const provisioned = await deps.runtime.provision(handle, toolchainSpec, { signal: provisioning.signal, timeoutMs: Math.max(1, budgetMs - (Date.now() - startedMs)) });
@@ -352,14 +370,14 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       markSetup();
       if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
       if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-      if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
+      if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
       // Nothing ran yet, so even the clock running out here is the setup's doing, not the worker's.
-      if (flags.timedOut) return await finish('infrastructure_failed', 'provisioning_failed: the attempt timeout was reached during setup', null, null);
+      if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
       if (!provisioned.ok) {
         // One line each: the log clips a line, and the cause is often not on the last one. The sandbox is gone after this, so this is the only copy.
         for (const line of (provisioned.detail ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-40)) log(`provisioning output: ${line}`);
-        // Restricted output stays on this machine: the published reason then carries the runtime's sentence and no line the guest printed.
-        return await finish('infrastructure_failed', `provisioning_failed: ${lease.streamable === true ? provisioned.reason : provisioned.summary}`, null, null);
+        // Restricted output stays on this machine: restricted work publishes the fixed category, and the runtime's sentence stays in this log with the guest's lines.
+        return await finish('infrastructure_failed', why('provisioning_failed: a setup step failed', `provisioning_failed: ${provisioned.reason}`), null);
       }
       log(`toolchain ready: node ${provisioned.nodeVersion} pnpm ${provisioned.pnpmVersion} arch ${provisioned.arch} in ${provisioned.seconds.toFixed(1)}s`);
     }
@@ -379,9 +397,9 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The heartbeat kept running while the server answered: a shutdown, a lost lease or an owner's cancel that arrived meanwhile must not start a worker.
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-    if (flags.cancelled) return await finish('failed', 'cancelled by owner request before the agent started', null, null);
+    if (flags.cancelled) return await finish('failed', why('cancelled_before_start', 'cancelled by owner request before the agent started'), null);
     // Nothing ran yet, so a clock that ran out while the server answered is the setup's, not the worker's.
-    if (flags.timedOut) return await finish('infrastructure_failed', 'provisioning_failed: the attempt timeout was reached during setup', null, null);
+    if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
     armDeadline(workMs);
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
     const harness = harnessEntry.create(launcher);
@@ -393,14 +411,14 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let cost: number | null = null;
     let mcpViolation: string[] | null = null;
     // A worker silently running a different model from the record is the failure this feature exists to prevent: it stops here and is reported, never tolerated.
-    let modelFault: string | null = null;
+    let modelFault: Why<'blocked'> | null = null;
     // No init event means nothing ever said which model ran, so the attempt cannot count as done.
     let initSeen = false;
     // The agent's first approval signal ends the attempt: the runner stops it and the control plane decides whether a person is asked.
     let approvalRequest: { readonly operation: WorkerApprovalOperation; readonly destination: ApprovalDestination | null; readonly reason: string } | null = null;
     let approvalRefused: ApprovalRefusalReason | null = null;
     // Asked for something a grant could not make real. Stopped here; no person is asked.
-    let approvalUnavailable: string | null = null;
+    let approvalUnavailable: 'egress_enforcement_unavailable' | 'scope_grant_unavailable' | null = null;
     let coveredSignal = false;
     const setupSeconds = markSetup();
     // The claim decided this from every source's label. Work that may not leave this machine never turns previews on, so there is nothing to upload.
@@ -419,8 +437,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
           log(`session: mode=${ev.permissionMode ?? 'unknown'} connectedMcp=${ev.connectedMcpServers === null ? 'unreported' : JSON.stringify(ev.connectedMcpServers)}`);
           initSeen = ev.initObserved;
           if (ev.initObserved && ev.model !== assignment.model) {
-            modelFault = ev.model === null ? `model_unverified: recorded ${assignment.model}, the stream did not say which model ran` : `model_mismatch: recorded ${assignment.model}, the stream reports ${ev.model}`;
-            log(modelFault);
+            modelFault = ev.model === null ? why('model_unverified', `model_unverified: recorded ${assignment.model}, the stream did not say which model ran`) : why('model_mismatch', `model_mismatch: recorded ${assignment.model}, the stream reports ${ev.model}`);
+            log(modelFault.text);
             requestStop();
           }
           if (ev.connectedMcpServers !== null && ev.connectedMcpServers.length > 0) {
@@ -451,9 +469,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
               approvalUnavailable = unavailable;
               log(`agent asked for ${ev.operation}, which cannot take effect: ${unavailable}`);
             } else {
-              // Restricted work publishes a fixed sentence; the agent's words stay in this log, on this machine.
-              const restricted = lease.streamable !== true;
-              approvalRequest = { operation: ev.operation, destination: ev.destination, reason: restricted ? restrictedApprovalReason(ev.operation, ev.destination) : ev.reason };
+              // Restricted work publishes a fixed sentence (`finishApproval`); the agent's words stay in this log, on this machine.
+              approvalRequest = { operation: ev.operation, destination: ev.destination, reason: ev.reason };
               log(`agent requested approval: ${ev.operation}${restricted ? ` (restricted; its reason stays here: ${redactSecrets(ev.reason)})` : ''}`);
             }
             requestStop();
@@ -501,20 +518,20 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
 
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
     if (flags.leaseLost) return { outcome: 'lease_lost', reason: null, changeManifest: null };
-    if (!confirmed) return await finish('failed', 'agent stop was not confirmed; the workspace is not trusted', cost, null);
-    if (mcpViolation !== null) return await finish('failed', `unexpected MCP server connected: ${(mcpViolation as string[]).join(', ')}`, cost, null);
+    if (!confirmed) return await finish('failed', why('agent_stop_unconfirmed', 'agent stop was not confirmed; the workspace is not trusted'), cost);
+    if (mcpViolation !== null) return await finish('failed', why('unexpected_mcp_server', `unexpected MCP server connected: ${(mcpViolation as string[]).join(', ')}`), cost);
     // Blocked, not failed: this is a configuration fault, and repairs would only repeat it.
-    if (modelFault !== null) return await finish('blocked', modelFault, cost, null);
-    if (flags.cancelled) return await finish('failed', 'cancelled by owner request; agent stopped and confirmed', cost, null);
-    if (flags.timedOut) return await finish('failed', 'attempt timeout reached; agent stopped and confirmed', cost, null);
-    if (refused !== null) return await finish('blocked', `harness capability unavailable: ${refused}`, cost, null);
+    if (modelFault !== null) return await finish('blocked', modelFault, cost);
+    if (flags.cancelled) return await finish('failed', why('cancelled', 'cancelled by owner request; agent stopped and confirmed'), cost);
+    if (flags.timedOut) return await finish('failed', why('attempt_timeout', 'attempt timeout reached; agent stopped and confirmed'), cost);
+    if (refused !== null) return await finish('blocked', why('harness_capability_unavailable', `harness capability unavailable: ${refused}`), cost);
     // A refused or requested approval is the agent's outcome even though it was stopped before producing a result.
-    if (approvalRefused !== null) return await finish('blocked', `approval_signal_refused: ${approvalRefused}`, cost, null);
-    if (approvalUnavailable !== null) return await finish('blocked', approvalUnavailable, cost, null);
-    if (approvalRequest !== null) return await finish('approval_requested', (approvalRequest as { reason: string }).reason, cost, null, approvalRequest);
-    if (!resultOk) return await finish('failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote, cost, null);
-    if (exitFailed) return await finish('failed', exitNote || 'agent exited with an error', cost, null);
-    if (!initSeen) return await finish('blocked', `model_unverified: recorded ${assignment.model}, the stream never reported a model`, cost, null);
+    if (approvalRefused !== null) return await finish('blocked', why('approval_signal_refused', `approval_signal_refused: ${approvalRefused}`), cost);
+    if (approvalUnavailable !== null) return await finish('blocked', why(approvalUnavailable), cost);
+    if (approvalRequest !== null) return await finishApproval(approvalRequest, cost);
+    if (!resultOk) return await finish('failed', why('agent_result_failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote), cost);
+    if (exitFailed) return await finish('failed', why('agent_exit_failed', exitNote || 'agent exited with an error'), cost);
+    if (!initSeen) return await finish('blocked', why('model_unverified', `model_unverified: recorded ${assignment.model}, the stream never reported a model`), cost);
 
     // The signal file of a covered request is the protocol, not the agent's work; a stray copy in any other form is left for the gate to refuse.
     if (coveredSignal) {
@@ -527,31 +544,27 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     try {
       changes = await computeChanges(baseline, workspace, baseIgnores);
     } catch (err) {
-      return await finish('failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`, cost, null);
+      return await finish('failed', why('diff_failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`), cost);
     }
-    if (changes.some((c) => c.path === RESERVED_DIR || c.path.startsWith(`${RESERVED_DIR}/`))) return await finish('failed', 'a change touches the reserved .selarikru directory', cost, null);
+    if (changes.some((c) => c.path === RESERVED_DIR || c.path.startsWith(`${RESERVED_DIR}/`))) return await finish('failed', why('reserved_path_changed', 'a change touches the reserved .selarikru directory'), cost);
     let check: ReturnType<typeof checkAllowedPaths>;
     try {
       check = checkAllowedPaths(changes, allowed.normalized);
     } catch (err) {
-      return await finish('failed', `completion gate error: ${err instanceof Error ? err.message : 'error'}`, cost, null);
+      return await finish('failed', why('completion_gate_error', `completion gate error: ${err instanceof Error ? err.message : 'error'}`), cost);
     }
     if (!check.ok) {
       const shown = check.violations.slice(0, 5).map((v) => `${v.path} (${v.reason})`).join(', ');
-      if (lease.streamable !== true) {
-        // The paths are names the agent chose: restricted work reports how many, and the names stay in this log.
-        log(`diff outside allowedPaths: ${redactSecrets(shown)}`);
-        return await finish('failed', restrictedDiffReason(check.violations.length), cost, null);
-      }
-      return await finish('failed', `diff outside allowedPaths: ${check.violations.length} path(s): ${shown}`, cost, null);
+      // The paths are names the agent chose: restricted work reports how many, and the names stay in this log.
+      return await finish('failed', { category: 'diff_outside_allowed_paths', text: `diff outside allowedPaths: ${check.violations.length} path(s): ${shown}`, count: check.violations.length }, cost);
     }
     let manifest: string;
     try {
       manifest = await storeChanges(deps.artifacts, workspace, changes, task);
     } catch (err) {
-      return await finish('failed', `change set could not be stored: ${err instanceof Error ? err.message : 'error'}`, cost, null);
+      return await finish('failed', why('change_set_store_failed', `change set could not be stored: ${err instanceof Error ? err.message : 'error'}`), cost);
     }
-    return await finish('completed', null, cost, manifest);
+    return await finishCompleted(cost, manifest);
   } finally {
     await control?.shutdown();
     feed?.abort();

@@ -1,4 +1,4 @@
-import { approvalUnavailableReason, diffViolationCount, restrictedApprovalReason, restrictedDiffReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
+import { approvalUnavailableReason, restrictedApproval, restrictedReason, transition, TaskSpecSchema, type Result, type TaskEvent, type TaskState, type TaskStatus, err, ok } from '@selarikru/domain';
 import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
@@ -145,16 +145,23 @@ export async function publishResult(ctx: SchedulerContext, lease: Lease, result:
 }
 
 /**
- * What a restricted attempt may put in the record. Restricted output stays on the device, and an approval's reason and the paths of a diff outside `allowedPaths` are the
- * agent's own words. A conforming runner already sends fixed text for both; this holds for one that does not. Every other reason a runner sends is its own sentence.
+ * What a restricted attempt may put in the record: for every outcome, a category from the closed list in `RESTRICTED_REASONS`, and for an approval request the fixed sentence
+ * built from a known operation and a checked host. Restricted output stays on the device, and any sentence a runner wrote can carry a path or the agent's words. This runs
+ * before anything is stored or emitted, so the exit reason, the failure and blocked reasons, the approval row and every event payload see only the category. A conforming
+ * runner already sends the category; this holds for one that does not, and for any error branch a runner adds later.
  */
-function withoutAgentWords(result: PublishResult): PublishResult {
-  if (result.outcome === 'approval_requested') return { ...result, reason: restrictedApprovalReason(result.operation, result.destination) };
-  if (result.outcome === 'failed' || result.outcome === 'blocked') {
-    const count = diffViolationCount(result.reason);
-    if (count !== null) return { ...result, reason: restrictedDiffReason(count) };
+function restrictedResult(result: PublishResult): PublishResult {
+  switch (result.outcome) {
+    case 'completed':
+      return result;
+    case 'approval_requested': {
+      const { operation, destination, reason } = restrictedApproval(result.operation, result.destination);
+      const { operation: _op, destination: _dest, ...rest } = result;
+      return { ...rest, reason, ...(operation !== undefined ? { operation } : {}), ...(destination !== undefined ? { destination } : {}) };
+    }
+    default:
+      return { ...result, reason: restrictedReason(result.outcome, result.reason) };
   }
-  return result;
 }
 
 async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: PublishResult, statusRow: { status: string; currentRevision: number; rowRevision: number }): Promise<PublishReceipt> {
@@ -166,7 +173,7 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
   const live = attempt!;
   // Decided at claim from every source's label and stored with the attempt; the runner's word is not asked. A row without it is treated as restricted.
   const restricted = (live.detail as { terminalStreamable?: unknown } | null)?.terminalStreamable !== true;
-  const result = restricted ? withoutAgentWords(sent) : sent;
+  const result = restricted ? restrictedResult(sent) : sent;
 
   const revisions = await tx
     .select({ spec: schema.taskRevisions.spec })
