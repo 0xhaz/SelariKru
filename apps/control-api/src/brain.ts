@@ -10,7 +10,7 @@ import type { AppContext } from './app.ts';
 import { sha256Hex } from './auth.ts';
 import { AppError, invalidRequest } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
-import { loadProductRecords } from './product.ts';
+import { flushProductEvents, loadProductRecords } from './product.ts';
 import { loadStack } from './stack.ts';
 import { leaseHolds, loadSpecRow, newId, requireProject } from './store.ts';
 
@@ -393,10 +393,17 @@ export async function refreshBrains(ctx: { db: Db; tenantId: string; now: () => 
     // One project that cannot be compiled never stalls the others. It is reported by error name and code only: a failed query's parameters can hold source text.
     try {
       const [head] = await ctx.db.select().from(schema.brainHeads).where(where(schema.brainHeads, ctx.tenantId, projectId));
-      if (head && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(ctx.db, ctx.tenantId, projectId))) continue;
-      if (await syncBrain(ctx.db, ctx.tenantId, projectId, ctx.now(), undefined, ctx.onSkip)) compiled.push(projectId);
+      const current = head !== undefined && head.compiledVersion > 0 && head.recordsMark === (await recordsMark(ctx.db, ctx.tenantId, projectId));
+      if (!current && (await syncBrain(ctx.db, ctx.tenantId, projectId, ctx.now(), undefined, ctx.onSkip))) compiled.push(projectId);
     } catch (err) {
       ctx.onError?.({ projectId, error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown; cause?: { code?: unknown } } | null)?.code ?? (err as { cause?: { code?: unknown } } | null)?.cause?.code ?? null });
+    }
+    // Product events written before the project had a run, appended once it has one. Its own try: a backlog that cannot be written never stalls the Brain, and the
+    // reverse.
+    try {
+      await flushProductEvents(ctx.db, ctx.tenantId, projectId, ctx.now());
+    } catch (err) {
+      ctx.onError?.({ projectId, error: err instanceof Error ? err.name : 'unknown', code: (err as { code?: unknown } | null)?.code ?? null });
     }
   }
   return compiled;

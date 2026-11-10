@@ -8,6 +8,7 @@ import { and, eq } from 'drizzle-orm';
 import { ConfigError } from './config.ts';
 import { PILOT_CRITERIA } from '@selarikru/domain';
 import { DEMO } from './demo.ts';
+import { flushProductEvents } from './product.ts';
 import { writeEvent } from './store.ts';
 
 /**
@@ -82,6 +83,13 @@ export function readRealRunConfig(env: Env): RealRunConfig {
 
 /** Inserts the project and its run when absent. A project already pointed elsewhere is refused, never rewritten. Safe to repeat. */
 export async function seedRealRun(db: Db, cfg: RealRunConfig): Promise<{ created: boolean }> {
+  const result = await seedRealRunRows(db, cfg);
+  // Product events written before the project had a run are appended now that it has one, in their own transaction.
+  if (result.created) await flushProductEvents(db, cfg.tenantId, cfg.projectId, new Date());
+  return result;
+}
+
+async function seedRealRunRows(db: Db, cfg: RealRunConfig): Promise<{ created: boolean }> {
   return withTx(db, async (tx) => {
     await tx.insert(schema.projects).values({ tenantId: cfg.tenantId, projectId: cfg.projectId, repository: cfg.repository, defaultBranch: cfg.defaultBranch, classification: 'internal' }).onConflictDoNothing();
     const project = (await tx.select().from(schema.projects).where(and(eq(schema.projects.tenantId, cfg.tenantId), eq(schema.projects.projectId, cfg.projectId))))[0]!;

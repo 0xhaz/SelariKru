@@ -1256,3 +1256,20 @@ describe('plan task roles', () => {
     expect(Object.keys(PLACEMENT_MODES.H2.rolePlacement).sort()).toEqual([...PLAN_TASK_ROLES].sort());
   });
 });
+
+describe('T6.6 product records written during setup', () => {
+  it('a brief confirmed before the first run gets its event when the project is activated, with no further product write', async () => {
+    const h = harness();
+    let v = await configuredWithRunner(h);
+    const product = `/v1/projects/${v.projectId}/product`;
+    const seed = (await get(h.app, product)).body.brief.seed;
+    expect((await post(h.app, `${product}/brief`, { expectedRevision: 0, confirm: true, content: seed })).status).toBe(201);
+    const productEvents = () => t.db.execute(sql`SELECT type, actor_kind, payload FROM events WHERE project_id = ${v.projectId} AND type LIKE 'product.%' ORDER BY sequence`);
+    expect(await productEvents()).toHaveLength(0);
+    v = (await check(h, v)).body;
+    expect(v.state).toBe('ready');
+    expect((await activate(h, v)).status).toBe(200);
+    const events = await productEvents();
+    expect(events.map((e: any) => [e.type, e.actor_kind, e.payload.action, e.payload.deferred])).toEqual([['product.recorded', 'human', 'brief_confirmed', true]]);
+  });
+});

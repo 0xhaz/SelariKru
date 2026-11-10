@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  BlueprintContentSchema, BrainSectionSchema, briefSeed, briefState, buildProductTrace, canConfirmBrief, latestProductRecords, milestoneSummaries, OutcomePlanContentSchema,
+  BlueprintContentSchema, BrainSectionSchema, briefSeed, canonicalJson, briefState, buildProductTrace, canConfirmBrief, latestProductRecords, milestoneSummaries, OutcomePlanContentSchema,
   OutcomeReviewContentSchema, PRODUCT_NOTICE, ProblemBriefContentSchema, productLabel, ProductRecordSchema, ReleaseNoteContentSchema, TaskSpecSchema,
   type Actor, type BrainCitation, type BrainClassification, type ProblemBriefContent, type ProductRecord, type ProductRecordKind, type TraceInput, type TraceRun,
 } from '@selarikru/domain';
@@ -11,6 +11,7 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, lte } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from './app.ts';
+import { sha256Hex } from './auth.ts';
 import { brainCurrent, syncBrain } from './brain.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
@@ -245,7 +246,7 @@ async function lockHead(tx: Tx, tenantId: string, projectId: string) {
  * Appends the events of every record past the head's evented position, up to `upTo`, in log order, when the project has a run; otherwise leaves them waiting. Held under the
  * product lock, and the event sequence is the last thing it takes.
  */
-async function flushEvents(tx: Tx, tenantId: string, projectId: string, head: { eventedSeq: number }, upTo: number, at: Date, runHint: string | null = null): Promise<void> {
+async function flushEvents(tx: Tx, tenantId: string, projectId: string, head: { eventedSeq: number }, upTo: number, at: Date, runHint: string | null = null, /** The log position this write just made, if any: every other row appended here was deferred. */ current: number | null = null): Promise<void> {
   if (head.eventedSeq >= upTo) return;
   const runId = await eventRunFor(tx, tenantId, projectId, runHint);
   if (runId === null) return;
@@ -253,14 +254,16 @@ async function flushEvents(tx: Tx, tenantId: string, projectId: string, head: { 
   for (const r of rows) {
     await writeEvent(tx, at, {
       projectId, runId, taskId: runId, aggregateRevision: r.seq, type: 'product.recorded', actor: { kind: 'human', id: r.confirmedBy ?? r.proposedBy },
-      payload: { recordId: r.recordId, kind: r.kind, revision: r.revision, status: r.status, classification: r.classification, ...r.eventDetail, ...(r.seq !== upTo || r.recordedAt.getTime() !== at.getTime() ? { deferred: true, recordedAt: r.recordedAt.toISOString() } : {}) },
+      payload: { recordId: r.recordId, kind: r.kind, revision: r.revision, status: r.status, classification: r.classification, ...r.eventDetail, ...(r.seq !== current ? { deferred: true, recordedAt: r.recordedAt.toISOString() } : {}) },
     });
   }
   await tx.update(schema.productHeads).set({ eventedSeq: upTo }).where(where(schema.productHeads, tenantId, projectId));
 }
 
-/** Appends any events still waiting for a run. For the activation hook and a write that has nothing else to record. */
+/** Appends any events still waiting for a run: after a run is created, and on the periodic pass. One unlocked read when there is no backlog. */
 export async function flushProductEvents(db: Db, tenantId: string, projectId: string, at: Date): Promise<void> {
+  const [peek] = await db.select({ last: schema.productHeads.lastSeq, evented: schema.productHeads.eventedSeq }).from(schema.productHeads).where(where(schema.productHeads, tenantId, projectId));
+  if (!peek || peek.evented >= peek.last) return;
   await withTx(db, async (tx) => {
     const head = await lockHead(tx, tenantId, projectId);
     await flushEvents(tx, tenantId, projectId, head, head.lastSeq, at);
@@ -296,6 +299,7 @@ async function writeRecord(db: Db, w: WriteSpec): Promise<ProductRecord> {
     if (w.fromProposalId !== undefined) {
       const gone = await tx.delete(schema.productBriefProposals).where(and(where(schema.productBriefProposals, w.tenantId, w.projectId), eq(schema.productBriefProposals.proposalId, w.fromProposalId))).returning({ id: schema.productBriefProposals.proposalId });
       if (gone.length === 0) throw new AppError(404, 'product_proposal_not_found', 'that proposal is no longer pending; nothing was saved');
+      await tx.update(schema.productProposalAudit).set({ outcome: 'used', settledAt: w.at }).where(and(where(schema.productProposalAudit, w.tenantId, w.projectId), eq(schema.productProposalAudit.proposalId, w.fromProposalId)));
     }
     const seq = head.lastSeq + 1;
     const [row] = await tx.insert(schema.productRecords).values({
@@ -303,7 +307,7 @@ async function writeRecord(db: Db, w: WriteSpec): Promise<ProductRecord> {
       proposedByKind: 'human', proposedBy: w.by, confirmedBy: w.confirmedBy, eventDetail: w.detail, seq, recordedAt: w.at,
     }).returning();
     await tx.update(schema.productHeads).set({ lastSeq: seq }).where(where(schema.productHeads, w.tenantId, w.projectId));
-    await flushEvents(tx, w.tenantId, w.projectId, head, seq, w.at);
+    await flushEvents(tx, w.tenantId, w.projectId, head, seq, w.at, null, seq);
     const rec = toRecord(row!);
     if (!rec) throw invalidRequest('the record could not be stored');
     return rec;
@@ -328,10 +332,11 @@ export function registerProductRoutes(app: FastifyInstance, ctx: AppContext): vo
   const view = (projectId: string) => productView(db, ctx, tenantId, projectId, now());
   const raise = (l: string | undefined) => l ?? 'public';
 
-  // Product events written while the project had no run are appended once activation has made its first run, after that request committed. A failure is logged; the next
-  // product write appends them.
+  // Product events written while the project had no run are appended once a run exists: after activation or a run create committed. A failure is logged; the periodic
+  // pass and the next product write append them.
+  const RUN_CREATES = new Set(['/v1/onboarding/:id/activate', '/v1/projects/:id/runs']);
   app.addHook('onSend', async (req, reply, payload) => {
-    if (req.method !== 'POST' || reply.statusCode >= 300 || req.principal?.kind !== 'owner' || req.routeOptions.url !== '/v1/onboarding/:id/activate') return payload;
+    if (req.method !== 'POST' || reply.statusCode >= 300 || req.principal?.kind !== 'owner' || !RUN_CREATES.has(req.routeOptions.url ?? '')) return payload;
     const projectId = (req.params as { id?: string }).id ?? '';
     try {
       if ((await db.select({ p: schema.projects.projectId }).from(schema.projects).where(and(eq(schema.projects.tenantId, tenantId), eq(schema.projects.projectId, projectId)))).length > 0) await flushProductEvents(db, tenantId, projectId, now());
@@ -457,18 +462,25 @@ export function registerProductRoutes(app: FastifyInstance, ctx: AppContext): vo
       if (a.detail['terminalStreamable'] !== true) throw new AppError(403, 'product_proposal_restricted', 'a proposal is not accepted from work whose data stays on the device');
       const head = await lockHead(tx, p.tenantId, a.projectId);
       const pseq = head.proposalSeq + 1;
+      // What was proposed, kept after the text is gone: a digest of the canonical stored text and its length.
+      const text = canonicalJson(content);
+      const digest = { contentSha256: sha256Hex(text), contentLength: text.length };
+      await tx.insert(schema.productProposalAudit).values({ tenantId: p.tenantId, projectId: a.projectId, proposalId, ...digest, proposedBy: p.runnerId, attemptId: a.attemptId, proposedAt: at, outcome: 'pending' });
       await tx.insert(schema.productBriefProposals).values({ tenantId: p.tenantId, projectId: a.projectId, proposalId, content: content as unknown as Record<string, unknown>, classification, proposedBy: p.runnerId, attemptId: a.attemptId, seq: pseq, proposedAt: at });
       const all = await tx.select({ id: schema.productBriefProposals.proposalId }).from(schema.productBriefProposals).where(where(schema.productBriefProposals, p.tenantId, a.projectId))
         .orderBy(desc(schema.productBriefProposals.seq));
       const drop = all.slice(BRIEF_PROPOSAL_CAP).map((x) => x.id).filter((id) => id !== proposalId);
-      if (drop.length > 0) await tx.delete(schema.productBriefProposals).where(and(where(schema.productBriefProposals, p.tenantId, a.projectId), inArray(schema.productBriefProposals.proposalId, drop)));
+      if (drop.length > 0) {
+        await tx.delete(schema.productBriefProposals).where(and(where(schema.productBriefProposals, p.tenantId, a.projectId), inArray(schema.productBriefProposals.proposalId, drop)));
+        await tx.update(schema.productProposalAudit).set({ outcome: 'dropped', settledAt: at }).where(and(where(schema.productProposalAudit, p.tenantId, a.projectId), inArray(schema.productProposalAudit.proposalId, drop)));
+      }
       await tx.update(schema.productHeads).set({ proposalSeq: pseq, droppedProposals: head.droppedProposals + drop.length }).where(where(schema.productHeads, p.tenantId, a.projectId));
       await flushEvents(tx, p.tenantId, a.projectId, head, head.lastSeq, at, a.taskId);
       const runId = await eventRunFor(tx, p.tenantId, a.projectId, a.taskId);
       if (runId === null) throw new AppError(409, 'product_needs_run', 'this attempt has no run to record the proposal against');
       await writeEvent(tx, at, {
         projectId: a.projectId, runId, taskId: runId, attemptId: a.attemptId, aggregateRevision: head.lastSeq, type: 'product.proposed', actor: { kind: 'worker', id: p.runnerId },
-        payload: { proposalId, kind: 'problem_brief', classification, action: 'brief_proposed', dropped: drop.length },
+        payload: { proposalId, kind: 'problem_brief', classification, action: 'brief_proposed', dropped: drop.length, ...digest },
       });
     });
     return reply.code(201).send({ proposalId, status: 'proposed' });

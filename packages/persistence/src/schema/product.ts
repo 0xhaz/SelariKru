@@ -80,3 +80,27 @@ export const productBriefProposals = pgTable(
     check('product_brief_proposals_classification', sql`${t.classification} IN ('public', 'internal', 'restricted', 'secret')`),
   ],
 );
+
+/**
+ * What each worker proposal said, kept after the proposal itself is used or dropped: a sha256 of its canonical stored text and the text's length, never the text. `outcome`
+ * moves from `pending` to `used` (an owner started from it, so its text became that owner's revision) or `dropped` (a newer one passed the cap).
+ */
+export const productProposalAudit = pgTable(
+  'product_proposal_audit',
+  {
+    ...scope(),
+    proposalId: text('proposal_id').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    contentLength: integer('content_length').notNull(),
+    proposedBy: text('proposed_by').notNull(),
+    attemptId: text('attempt_id').notNull(),
+    proposedAt: tstz('proposed_at').notNull(),
+    outcome: text('outcome').notNull(),
+    settledAt: tstz('settled_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.proposalId] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+    check('product_proposal_audit_outcome', sql`${t.outcome} IN ('pending', 'used', 'dropped')`),
+  ],
+);

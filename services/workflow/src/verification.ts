@@ -67,8 +67,9 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   row under the same lock), then appends to the event sequence last (`product.recorded`, the owner as actor), first appending, in log order, the events of any earlier
  *   record written while the project had no run. A worker's proposed brief takes its lease's `attempts` row first (`lockLease`: the lease is checked again under that lock,
  *   so a revoke or expiry that committed first wins) and the runner row read, then `product_heads`, then its `product_brief_proposals` rows (insert, drop past the cap),
- *   then the event sequence (`product.proposed`). After an activation commits, an `onSend` hook appends any deferred product events in its own transaction:
- *   `product_heads`, then the event sequence. The plan, candidates, verification records, pull requests and Brain revisions are read without a lock, and nothing here
+ *   then the event sequence (`product.proposed`); it also records the proposal's digest in `product_proposal_audit` under the same locks. After an activation or a
+ *   run create commits (an `onSend` hook), after the real-run seed commits, and on the periodic Brain pass (its own try per project), any deferred product events
+ *   are appended in their own transaction: `product_heads`, then the event sequence. The plan, candidates, verification records, pull requests and Brain revisions are read without a lock, and nothing here
  *   writes a task, a run, a status row or a plan proposal: a review's follow-up is stored with the review as a proposal. An owner's write is followed, after its
  *   transaction committed, by a Brain compile through the same `onSend` hook; the Brain reads `product_records` without a lock, and the product view compiles (in
  *   its own transaction) only when the records' fingerprint moved. A path that holds an attempt row and wants `product_heads` is only the proposal, and nothing holds

@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { blueprintFromAnswers, UNKNOWN_MEASURE, VerificationRecordSchema } from '@selarikru/domain';
+import { createHash } from 'node:crypto';
+import { blueprintFromAnswers, canonicalJson, UNKNOWN_MEASURE, VerificationRecordSchema } from '@selarikru/domain';
 import { LocalDiskArtifactStore } from '../../../packages/artifacts/src/index.ts';
 import { loadValidRecord } from '../../../services/verifier/src/service.ts';
 import { refreshBrains } from '../src/brain.ts';
@@ -415,5 +416,57 @@ describe('fix round 1', () => {
     await seedOnboarding();
     const clean = await confirmSeed();
     expect(clean.body.redacted).toBe(false);
+  });
+});
+
+describe('fix round 2', () => {
+  it('a backlog written before any run is flushed when a run is created, with no further product write, every row marked deferred under a frozen clock', async () => {
+    // A project set up outside onboarding, so a run can be created directly; it has no run yet.
+    await t.db.execute(sql`DELETE FROM runs`);
+    const content = { schemaVersion: 1, owner: 'owner_uid_1', targetUser: 'Team leads', evidence: [], permissionScope: 'Owner notes only', currentWorkaround: null, assumptions: [], desiredChange: 'Newest first', nonGoals: [], unknowns: [], confidence: 'unknown', confidenceRationale: null };
+    // The clock does not move: deferral is read from the log position, not from time.
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: false, content })).status).toBe(201);
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 1, confirm: true, content })).status).toBe(201);
+    expect(await productEvents()).toHaveLength(0);
+    const run = await post(h.app, `/v1/projects/${PROJECT}/runs`, { idempotencyKey: 'r2-run', title: 'First run', budgetLimitUsd: 5 });
+    expect(run.status, JSON.stringify(run.body)).toBe(201);
+    const events = await productEvents();
+    expect(events.map((e: any) => [e.payload.action, e.payload.deferred])).toEqual([['brief_saved', true], ['brief_confirmed', true]]);
+    // The next write is the current one: not deferred.
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 2, confirm: true, content })).status).toBe(201);
+    expect(((await productEvents()).at(-1) as any).payload.deferred).toBeUndefined();
+  });
+
+  it('the periodic Brain pass flushes a backlog too', async () => {
+    await seedOnboarding();
+    await t.db.execute(sql`DELETE FROM runs`);
+    expect((await confirmSeed()).status).toBe(201);
+    // A run that appeared without any route (a seed script): only the periodic pass can see it.
+    await t.db.execute(sql`INSERT INTO runs (tenant_id, project_id, run_id, lifecycle, budget) VALUES (${TENANT}, ${PROJECT}, ${RUN}, 'running', '{"limitUsd":10}'::jsonb)`);
+    await refreshBrains({ db: t.db, tenantId: TENANT, now: h.clock.now });
+    expect((await productEvents()).map((e: any) => e.payload.deferred)).toEqual([true]);
+  });
+
+  it('a worker proposal leaves an audit of what was proposed (digest and length, no text) after it is used or dropped', async () => {
+    await seedOnboarding();
+    const { token, lease } = await claimLease();
+    const seed = (await get(h.app, url)).body.brief.seed;
+    const p1 = await propose(token, lease, { ...seed, targetUser: 'FIRST WORKER TEXT' });
+    const shown = (await get(h.app, url)).body.brief.proposals[0];
+    for (let i = 0; i < 5; i++) await propose(token, lease, { ...seed, targetUser: `LATER ${i}` });
+    const audit = await t.db.execute(sql`SELECT proposal_id, content_sha256, content_length, outcome FROM product_proposal_audit ORDER BY proposal_id`);
+    const first = audit.find((r: any) => r['proposal_id'] === p1.body.proposalId) as Record<string, unknown>;
+    const text = canonicalJson(shown.content);
+    expect(first).toMatchObject({ content_sha256: createHash('sha256').update(text).digest('hex'), content_length: text.length, outcome: 'dropped' });
+    expect(JSON.stringify(await t.db.execute(sql`SELECT * FROM product_brief_proposals`))).not.toContain('FIRST WORKER TEXT');
+    expect(JSON.stringify(audit)).not.toContain('WORKER');
+    const ev = (await productEvents()).find((e: any) => e.payload.proposalId === p1.body.proposalId)!;
+    expect(ev.payload).toMatchObject({ contentSha256: first['content_sha256'], contentLength: text.length });
+
+    const used = (await get(h.app, url)).body.brief.proposals[0];
+    expect((await post(h.app, `${url}/brief`, { expectedRevision: 0, confirm: true, content: used.content, fromProposalId: used.proposalId })).status).toBe(201);
+    const after = await t.db.execute(sql`SELECT outcome FROM product_proposal_audit WHERE proposal_id = ${used.proposalId}`);
+    expect(after[0]!['outcome']).toBe('used');
+    expect((await t.db.execute(sql`SELECT count(*)::int AS n FROM product_proposal_audit`))[0]!['n']).toBe(6);
   });
 });
