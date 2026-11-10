@@ -639,15 +639,51 @@ importers:
 
   tools/benchmarks:
     dependencies:
+      '@selarikru/artifacts':
+        specifier: workspace:*
+        version: link:../../packages/artifacts
+      '@selarikru/control-api':
+        specifier: workspace:*
+        version: link:../../apps/control-api
+      '@selarikru/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@selarikru/harness-claude':
+        specifier: workspace:*
+        version: link:../../packages/harness-claude
+      '@selarikru/inference-firebase-web':
+        specifier: workspace:*
+        version: link:../../packages/inference-firebase-web
+      '@selarikru/local-runner':
+        specifier: workspace:*
+        version: link:../../apps/local-runner
+      '@selarikru/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@selarikru/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@selarikru/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@selarikru/runtime-docker-local':
+        specifier: workspace:*
+        version: link:../../packages/runtime-docker-local
       '@selarikru/verifier':
         specifier: workspace:*
         version: link:../../services/verifier
       '@selarikru/view-protocol':
         specifier: workspace:*
         version: link:../../packages/view-protocol
+      '@selarikru/workflow':
+        specifier: workspace:*
+        version: link:../../services/workflow
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+      playwright-core:
+        specifier: 1.65.0
+        version: 1.65.0
       zod:
         specifier: 4.6.7
         version: 4.6.7

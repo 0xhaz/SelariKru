@@ -3,16 +3,28 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Benchmark tooling, file-only half: manifest loader and preflight, results export and report, and the scripted publish to the web app. Reads and writes files only: it dispatches nothing, calls no model, spends nothing and touches no network.",
+  "description": "Benchmark tooling: manifest loader and preflight, results export and report, the scripted publish to the web app, and the two runners (Track A assistant routes through the bench page, Track B workers through the real control API, runner and verifier). Every live path is behind preflight and an explicit --live flag; tests use fake adapters only.",
   "scripts": {
     "benchmark": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
+    "@selarikru/artifacts": "workspace:*",
+    "@selarikru/control-api": "workspace:*",
+    "@selarikru/domain": "workspace:*",
+    "@selarikru/harness-claude": "workspace:*",
+    "@selarikru/inference-firebase-web": "workspace:*",
+    "@selarikru/local-runner": "workspace:*",
+    "@selarikru/persistence": "workspace:*",
+    "@selarikru/policy": "workspace:*",
     "@selarikru/protocol": "workspace:*",
+    "@selarikru/runtime-docker-local": "workspace:*",
     "@selarikru/verifier": "workspace:*",
     "@selarikru/view-protocol": "workspace:*",
+    "@selarikru/workflow": "workspace:*",
+    "ajv": "8.20.0",
+    "playwright-core": "1.65.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

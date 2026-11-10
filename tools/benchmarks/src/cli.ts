@@ -7,10 +7,12 @@ import { FrozenError, ManifestError, StartRecordSchema, TRACKS, freezeOrder, rea
 import { formatPreflight, preflight, type PreflightReport, type VerifierHashPair } from './preflight.ts';
 import { PUBLIC_RESULTS_PATH, PublishError, preparePublish, writePublished } from './publish.ts';
 import { ExportError, ReportError, buildReport, exportResults, renderReport } from './report.ts';
+import { RunUsageError } from './run-cli.ts';
+import { LiveRefusedError, OrderError } from './trials.ts';
 
 /**
- * `pnpm --filter ./tools/benchmarks benchmark <command>`. Every command reads and writes files only: none dispatches a
- * run, calls a model, spends or opens a connection.
+ * `pnpm --filter ./tools/benchmarks benchmark <command>`. Every command except the two runners reads and writes files
+ * only: none dispatches a run, calls a model, spends or opens a connection. The runners are gated as described below.
  *
  *   preflight     [--manifest p] [--verifier p] [--repo p] [--starts dir]         checklist; exit 1 when a track is blocked
  *   freeze        --seed s [--manifest p] [--starts dir]                          record the seed and its order; refused after any start
@@ -19,6 +21,13 @@ import { ExportError, ReportError, buildReport, exportResults, renderReport } fr
  *                 with --repair, only reconcile a stamp with no file (or a file with no stamp) for the same cohort
  *   report        --records p [--manifest p] [--starts dir] [--out p]             export raw records and print the report
  *   publish       --results p [--manifest p] [--out p]                            validate, redact, stamp and write for the web panel
+ *   run-workers   --dry-run|--live --records p --starter repo [--work dir] [--evidence dir] [--manifest p] [--starts dir]
+ *                 Track B: L1 through the real control API, runner and verifier; C1 and H2 Not measured (cloud_unavailable)
+ *   run-assistant --dry-run|--live --records p [--cdp url --bench-url url] [--manifest p] [--starts dir]
+ *                 Track A: both routes through the control web bench page in the owner's Chrome, over CDP
+ *
+ * The file-only commands above dispatch nothing. The two run commands dispatch only with `--live`, and only after
+ * preflight passes for their track and its start is recorded; `--dry-run` uses fakes and records simulated data.
  *
  * `--verifier` is the verifier package (default services/verifier) and `--repo` the directory holding pnpm-lock.yaml;
  * preflight recomputes their hashes with the verifier's own hashing. Start files are `cohort-start-<track>.json` in
@@ -41,13 +50,15 @@ export interface Io {
   readonly now: () => string;
   /** Relative paths resolve against this. */
   readonly cwd?: string;
+  /** Aborted on SIGINT: a running cohort cancels its trial and records the rest not run. */
+  readonly signal?: AbortSignal;
 }
 
-const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish [--manifest p] [--verifier p] [--repo p] '
-  + '[--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p] [--repair]';
-const BOOLEAN_FLAGS = new Set(['repair']);
-const FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out']);
-const PATH_FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'records', 'results', 'out']);
+const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish|run-workers|run-assistant [--manifest p] [--verifier p] [--repo p] '
+  + '[--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p] [--repair] [--live|--dry-run] [--starter repo] [--work dir] [--evidence dir] [--cdp url] [--bench-url url]';
+const BOOLEAN_FLAGS = new Set(['repair', 'live', 'dry-run']);
+const FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out', 'starter', 'work', 'evidence', 'cdp', 'bench-url']);
+const PATH_FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'records', 'results', 'out', 'starter', 'work', 'evidence']);
 
 class UsageError extends Error {}
 class BlockedError extends Error {}
@@ -124,7 +135,19 @@ function runPreflight(ctx: Context, manifest: Manifest): PreflightReport {
   });
 }
 
-const COMMANDS: Readonly<Record<string, (ctx: Context) => number>> = {
+async function runCommand(ctx: Context, which: 'workers' | 'assistant'): Promise<number> {
+  const { runAssistantCommand, runWorkersCommand } = await import('./run-cli.ts');
+  const { manifest } = readManifest(ctx.manifestPath);
+  const run = which === 'workers' ? runWorkersCommand : runAssistantCommand;
+  return run({
+    flags: ctx.flags, manifest, repoRoot: REPO_ROOT, env: ctx.io.env, out: ctx.io.out,
+    preflight: () => runPreflight(ctx, manifest), starts: () => readStarts(ctx.startsDir), ...(ctx.io.signal ? { signal: ctx.io.signal } : {}),
+  });
+}
+
+const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<number>>> = {
+  'run-workers': (ctx) => runCommand(ctx, 'workers'),
+  'run-assistant': (ctx) => runCommand(ctx, 'assistant'),
   preflight(ctx) {
     const report = runPreflight(ctx, readManifest(ctx.manifestPath).manifest);
     ctx.io.out(formatPreflight(report));
@@ -184,7 +207,7 @@ const COMMANDS: Readonly<Record<string, (ctx: Context) => number>> = {
   },
 };
 
-const KNOWN_ERRORS = [ManifestError, ExportError, ReportError, PublishError, FrozenError, BlockedError, SyntaxError];
+const KNOWN_ERRORS = [ManifestError, ExportError, ReportError, PublishError, FrozenError, BlockedError, SyntaxError, LiveRefusedError, OrderError];
 
 export async function main(argv: readonly string[], io: Io): Promise<number> {
   const at = (p: string): string => (isAbsolute(p) ? p : resolve(io.cwd ?? process.cwd(), p));
@@ -193,9 +216,9 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
     const run = command === undefined ? undefined : COMMANDS[command];
     if (run === undefined) throw new UsageError(command === undefined ? 'a command is required' : `unknown command ${command}`);
     const manifestPath = flags.get('manifest') ?? DEFAULTS.manifest;
-    return run({ flags, io, manifestPath, startsDir: flags.get('starts') ?? dirname(manifestPath) });
+    return await run({ flags, io, manifestPath, startsDir: flags.get('starts') ?? dirname(manifestPath) });
   } catch (e) {
-    if (e instanceof UsageError) {
+    if (e instanceof UsageError || e instanceof RunUsageError) {
       io.err(`${e.message}\n${USAGE}`);
       return 2;
     }
@@ -206,9 +229,11 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const stop = new AbortController();
+  process.once('SIGINT', () => stop.abort());
   const io: Io = {
     out: (s) => process.stdout.write(`${s}\n`), err: (s) => process.stderr.write(`${s}\n`), env: process.env,
-    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(),
+    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(), signal: stop.signal,
   };
   main(process.argv.slice(2), io).then((code) => { process.exitCode = code; });
 }

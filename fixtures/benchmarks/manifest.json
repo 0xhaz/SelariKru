@@ -203,6 +203,22 @@
     {
       "id": "start-reset",
       "text": "Erasing both a track's stamp under starts and its cohort-start file makes the track look unstarted, so the seed could be re-frozen and the cohort restarted. Only git history would show it. Commit each cohort-start file and the stamped manifest as soon as record-start writes them."
+    },
+    {
+      "id": "worker-trial-isolation",
+      "text": "Each worker trial gets a fresh clone of the starter holding only the starter commit, a fresh bench_<random> PostgreSQL schema (dropped after the trial), a fresh project, run (a benchmark trial with the manifest's coding model pinned), runner enrolment and owner credential, and a fresh sandbox runtime with its own agent home. Setup is timed apart in timings.initialSetupMs. The deadline is workers.attemptTimeoutSeconds from coordinator acceptance (the plan.accepted event); delivery intervals are differences of the trial's server event times on its monotonic clock."
+    },
+    {
+      "id": "worker-budget",
+      "text": "The workers ceiling is codingPlanningVerificationModelsAndTools plus cloudRuntime. Each runnable trial may hold at most its share of it (ceiling / runnable trials), spread over every attempt the repair policy allows. A trial is charged its reported cost, or for an attempt that reported none, its worst-case hold. When the ceiling is spent, or a spend cannot be bounded at all, every remaining trial is recorded not_run (budget_exhausted or budget_unmetered); not_run is replaceable, so a later run continues in the same slot."
+    },
+    {
+      "id": "cloud-unavailable",
+      "text": "C1 and H2 need cloud capacity. Until it exists they are recorded not_run with failure category cloud_unavailable, once per slot, and never faked. The T6.7 cloud-location runner is a local process, so it does not count as cloud for this benchmark."
+    },
+    {
+      "id": "assistant-requests",
+      "text": "Each assistant request is single-turn on a new model instance, sent through the bench page in the owner's Chrome in the frozen order. Warm-up k sends fixture k in fixture order. A response whose inferenceSource is not the route's, or is missing or unknown, is a routing failure (status failed). firstOutputMs is null when the call does not stream. Model download and setup go to a separate setup ledger, never onto a record. Bytes are recorded as bytes; provider tokens only where the SDK reports them."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",
