@@ -136,7 +136,7 @@ describe('stack settings: selections are metadata only', () => {
 
 describe('stack settings feed the Project Brain as a cited source, scoped per component', () => {
   it('an owner write compiles the Brain; each worker gets only its component\'s stack, cited, and the records reader version moved', async () => {
-    expect(RECORDS_READER_VERSION).toBe('4');
+    expect(RECORDS_READER_VERSION).toBe('5');
     await seedTask(t.db, specFor('T1', { title: 'Build the web screen', baseSha: BASE, allowedPaths: ['apps/web'] }), 'ready');
     await mustAct({ kind: 'component.upsert', path: 'apps/web', name: 'Web', targets: ['web'] });
     await mustAct({ kind: 'component.upsert', path: 'apps/mobile', name: 'Mobile', targets: ['ios', 'android'] });
