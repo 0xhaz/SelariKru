@@ -8,6 +8,8 @@ import type { Manifest } from '../src/manifest.ts';
 import { buildReport, exportResults, type RawRecord } from '../src/report.ts';
 import { DRY_RUN_WORKER, IN_REPO_STARTER, dryRunHarness, fakeRuntimeFactory, scriptedVerifier, type WorkerScript } from '../src/workers/dry-run.ts';
 import { starterRepoFrom } from '../src/workers/isolation.ts';
+import { sandboxName } from '@selarikru/runtime-docker-local';
+import { FakeSbx } from '@selarikru/runtime-docker-local/fake-sbx';
 import { runWorkerCohort, type WorkerEnvironment } from '../src/workers/runner.ts';
 import { NO_STARTS } from '../src/manifest.ts';
 import { preflight } from '../src/preflight.ts';
@@ -187,7 +189,7 @@ describe('T8.3 worker runner', () => {
   it('a live-path run with fake adapters produces measured records the T8.4 report accepts', async () => {
     // D6: the owner's CLI login, with the probe faked; no API key in the environment.
     const c = started(manifestFor(2, (m) => { m.credentials.mode = 'cli_login'; }));
-    const pf = preflight({ manifest: c.manifest, env: {}, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts, cliLogin: { present: true, loggedIn: true } });
+    const pf = preflight({ manifest: c.manifest, env: {}, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts, cliLogin: { present: true, loggedIn: true, sandboxSecret: true } });
     const e = env({ fail: ['FB-03'] });
     const { records } = await runWorkerCohort({ manifest: c.manifest, env: e, live: { preflight: pf, starts: c.starts } });
     expect(records.every((r) => r.dataKind === 'measured')).toBe(true);
@@ -210,4 +212,67 @@ describe('T8.3 worker runner', () => {
     expect(readdirSync(join(root, 'work'))).toEqual([]);
     expect(plannedTrials(manifest, 'workers', first.records).filter((p) => p.slot.mode === 'L1').map((p) => [p.slot.id, p.slotAttempt])).toEqual([['workers/block-1/L1', 2]]);
   });
+
+  it('C1: a trial sweeps only its own scope, leaving the owner\'s live sandbox and a legacy one on the same machine', async () => {
+    const owner = sandboxName('owner-tenant:owner-runner', 'task_live', 'att_live');
+    const legacy = 'selarikru-t12345678-a87654321';
+    const runtimes = fakeRuntimeFactory(DRY_RUN_WORKER, [REPO_ROOT], (options) => {
+      const sbx = new FakeSbx(options);
+      sbx.sandboxes.set(owner, { status: 'running', mounts: [], workspaces: [], agent: 'claude' });
+      sbx.sandboxes.set(legacy, { status: 'stopped', mounts: [], workspaces: [], agent: 'claude' });
+      return sbx;
+    });
+    const e = { ...env(), runtime: runtimes, runtimes };
+    const { records } = await runWorkerCohort({ manifest: manifestFor(2), env: e, live: null });
+    expect(workers(records, 'L1').map((r) => [r.status, r.operations.cleanupConfirmed])).toEqual([['completed', true], ['completed', true]]);
+    const machine = runtimes.made[0]!.sbx;
+    expect(runtimes.made[1]!.sbx).toBe(machine);
+    expect([...machine.sandboxes.keys()].sort()).toEqual([legacy, owner].sort());
+    expect(machine.calls.filter((c) => c[0] === 'rm' || c[0] === 'stop').flat()).not.toContain(owner);
+    expect(machine.calls.filter((c) => c[0] === 'rm' || c[0] === 'stop').flat()).not.toContain(legacy);
+  }, 60_000);
+
+  it('C1: live dispatch refuses with sandbox_scope_unavailable when the cohort has no identity to scope trials by', async () => {
+    const c = started(manifestFor(1));
+    const pf = preflight({ manifest: c.manifest, env: { ANTHROPIC_API_KEY: 'present' }, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts });
+    const noId = { ...c.manifest, cohortId: null };
+    await expect(runWorkerCohort({ manifest: noId, env: env(), live: { preflight: { ...pf, liveDispatch: { ...pf.liveDispatch, workers: { allowed: true, blockers: [] } } }, starts: c.starts } })).rejects.toThrow(/sandbox_scope_unavailable/);
+  });
+
+  it('I1: claims refused before any start end the trial early as a replaceable denied start, naming the refusal', async () => {
+    const e = env({ timeScale: 1 / 600 });
+    // Once the run exists, the runner stops offering the pinned model: every claim is refused and no task is blocked.
+    const report = e.runnerReport.map((r) => ({ ...r, models: [...r.models] }));
+    const runtimes = e.runtimes;
+    const refusing = { ...e, runnerReport: report, runtime: Object.assign((o: Parameters<typeof runtimes>[0]) => { for (const r of report) (r as { models: string[] }).models = ['claude-haiku-5-5']; return runtimes(o); }, { made: runtimes.made }) };
+    const started = Date.now();
+    const { records } = await runWorkerCohort({ manifest: manifestFor(1), env: refusing, live: null });
+    const [r] = workers(records, 'L1');
+    expect(r!.status).toBe('denied_start');
+    expect(r!.failures[0]).toMatchObject({ category: 'start_denied' });
+    expect(r!.failures[0]!.detail).toMatch(/\S/);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(runtimes.made.flatMap((m) => m.sbx.calls.filter((c) => c[0] === 'create'))).toEqual([]);
+    expect(plannedTrials(manifestFor(1), 'workers', records).filter((p) => p.slot.mode === 'L1').map((p) => p.slotAttempt)).toEqual([2]);
+  }, 60_000);
+
+  it('M6: a refused plan is a replaceable denied start', async () => {
+    const base = env();
+    const policy = { ...base.policy, operations: { ...base.policy.operations, assign_replan_tasks: 'deny' as const } };
+    const { records } = await runWorkerCohort({ manifest: manifestFor(1), env: { ...base, policy }, live: null });
+    expect(workers(records, 'L1')[0]).toMatchObject({ status: 'denied_start', failures: [expect.objectContaining({ category: 'plan_refused' })] });
+  }, 60_000);
+
+  it('I4: every trial records how the login reaches the sandbox and the agent state before and after', async () => {
+    const e = { ...env(), agentState: async () => ({ scopedSandboxes: [] as string[], kitShortcut: null, sandboxSecret: true }) };
+    const { records } = await runWorkerCohort({ manifest: manifestFor(1, (m) => { m.credentials.mode = 'cli_login'; }), env: e, live: null });
+    const [r] = workers(records, 'L1');
+    expect(r!.configuration.credentialPath).toMatch(/^cli_login: .*sbx global anthropic service secret/);
+    expect(r!.configuration.agentState).toMatch(/before: no sandbox in scope; after: no sandbox in scope/);
+    expect(r!.confounders.join(' ')).not.toMatch(/shared_agent_state/);
+    // A kit shortcut replaces the agent image for every sandbox on the machine: shared agent state, named as a confounder.
+    const shared = { ...env(), agentState: async () => ({ scopedSandboxes: [] as string[], kitShortcut: 'myorg/claude:latest', sandboxSecret: true }) };
+    const again = await runWorkerCohort({ manifest: manifestFor(1), env: shared, live: null });
+    expect(workers(again.records, 'L1')[0]!.confounders.join(' ')).toMatch(/shared_agent_state/);
+  }, 60_000);
 });

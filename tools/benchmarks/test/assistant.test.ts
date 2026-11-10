@@ -21,6 +21,10 @@ interface FakeSdkOptions {
   /** What one generation answers, by call number (from 1) and spec. Default: a valid proposal from the requested route. */
   answer?: (n: number, spec: ModelSpec, prompt: string) => SdkGenerateResult | 'throw' | 'hang';
   generationMs?: (n: number, spec: ModelSpec) => number;
+  /** Real milliseconds a generation takes, by call number. Default: none. */
+  realDelayMs?: (n: number) => number;
+  /** Real milliseconds the device model download takes. */
+  realDownloadMs?: number;
 }
 
 const ALLOWED = (prompt: string): string[] => /Allowed requirement IDs: ([^.]+)\./.exec(prompt)![1]!.split(', ');
@@ -28,10 +32,14 @@ const validText = (prompt: string): string => JSON.stringify({ summary: 'A short
 
 function fakeSdk(clock: Clock, o: FakeSdkOptions = {}) {
   let availability: DeviceAvailability = o.availability ?? 'available';
-  const calls = { createModel: [] as ModelSpec[], generate: [] as string[] };
+  const calls = { createModel: [] as ModelSpec[], generate: [] as string[], inFlight: 0, maxInFlight: 0, overlapped: [] as number[] };
   const sdk: AssistantSdk = {
     async availability() { return availability; },
-    async initializeDeviceModel() { clock.t += o.downloadMs ?? 0; availability = 'available'; },
+    async initializeDeviceModel() {
+      clock.t += o.downloadMs ?? 0;
+      if (o.realDownloadMs) await new Promise((r) => setTimeout(r, o.realDownloadMs));
+      availability = 'available';
+    },
     createModel(spec) {
       calls.createModel.push(spec);
       return {
@@ -42,6 +50,12 @@ function fakeSdk(clock: Clock, o: FakeSdkOptions = {}) {
           const a = o.answer?.(n, spec, prompt);
           if (a === 'throw') throw Object.assign(new Error('provider said: quota for project-123 exceeded'), { code: 'AI/quota-exceeded' });
           if (a === 'hang') return new Promise(() => {});
+          calls.inFlight += 1;
+          calls.maxInFlight = Math.max(calls.maxInFlight, calls.inFlight);
+          if (calls.inFlight > 1) calls.overlapped.push(n);
+          const delay = o.realDelayMs?.(n) ?? 0;
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          calls.inFlight -= 1;
           return a ?? { text: validText(prompt), inferenceSource: spec.mode === 'ONLY_ON_DEVICE' ? 'on_device' : 'in_cloud', ...(spec.mode === 'ONLY_IN_CLOUD' ? { usage: { inputTokens: 210, outputTokens: 80 } } : {}) };
         },
       };
@@ -73,7 +87,8 @@ const fixturesFor = (m: Manifest) => loadBriefFixtures(m, REPO_ROOT);
 const AT = '2026-11-20T10:00:00.000Z';
 
 function liveCohort(over: (m: Manifest) => void = () => {}): { manifest: Manifest; starts: StartRecords; live: { preflight: ReturnType<typeof preflight>; starts: StartRecords } } {
-  const c = started(resolvedManifest(over));
+  // M5: the bench page's environment must match the pinned assistant fields; the fake bridge reports the adapter's own SDK and cloud model.
+  const c = started(resolvedManifest((m) => { m.assistant.sdkVersion = '13.1.0'; m.assistant.cloudModel = 'gemini-3.5-flash-lite'; over(m); }));
   const pf = preflight({ manifest: c.manifest, env: {}, verifier: { recorded: HASHES, recomputed: HASHES }, starts: c.starts });
   return { ...c, live: { preflight: pf, starts: c.starts } };
 }
@@ -161,11 +176,11 @@ describe('T8.2 assistant runner', () => {
 
   it('every attempt retained', async () => {
     const c = liveCohort();
-    // Errors, a hang past the request limit, malformed output, a requirement ID the fixture does not allow: all kept.
-    const { adapter } = bench({
+    // Errors, a call that outlasts the request limit (and then settles), malformed output, a requirement ID the fixture does not allow: all kept.
+    const { adapter, calls } = bench({
+      realDelayMs: (n) => (n === 11 ? 300 : 0),
       answer: (n, _spec, prompt) => {
         if (n === 10) return 'throw';
-        if (n === 11) return 'hang';
         if (n === 12) return { text: 'not json', inferenceSource: _spec.mode === 'ONLY_ON_DEVICE' ? 'on_device' : 'in_cloud' };
         if (n === 13) return { text: JSON.stringify({ summary: 's', acceptanceCriteria: [{ requirementId: ALLOWED(prompt).includes('FB-08') ? 'FB-01' : 'FB-08', text: 't' }] }), inferenceSource: _spec.mode === 'ONLY_ON_DEVICE' ? 'on_device' : 'in_cloud' };
         return undefined as never;
@@ -178,8 +193,9 @@ describe('T8.2 assistant runner', () => {
     expect(records[10]).toMatchObject({ status: 'timed_out', failures: [{ category: 'request_timeout' }] });
     expect(records[11]).toMatchObject({ status: 'completed', assistant: expect.objectContaining({ schemaValid: false }), failures: [{ category: 'output_not_json' }] });
     expect(records[12]).toMatchObject({ status: 'completed', assistant: expect.objectContaining({ schemaValid: false }), failures: [{ category: 'requirement_id_outside_fixture' }] });
-    // Every request that answered keeps its output for the blinded review (the error's is null); only the one that never answered has none.
+    // Every request that answered in time keeps its output for the blinded review (the error's is null); the timed-out one has none.
     expect(outputs).toHaveLength(63);
+    expect(calls.maxInFlight).toBe(1);
     const file = exportResults({ manifest: c.manifest, starts: c.starts, records, generatedAtUtc: AT });
     expect(file.records).toHaveLength(64);
     const report = buildReport(file, c.manifest);
@@ -286,5 +302,67 @@ describe('T8.2 assistant runner', () => {
     expect((await adapter.environment()).sdkVersion).toBe('13.1.0');
     await adapter.close!();
     expect(closed).toBe(2);
+  });
+
+  it('I2: a request that outlasts its limit is waited for before the next send, so no two requests ever overlap', async () => {
+    const c = liveCohort();
+    const { adapter, calls } = bench({ realDelayMs: (n) => (n === 5 ? 300 : 5) });
+    const { records } = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter, live: c.live, requestTimeoutMs: 100 });
+    expect(calls.maxInFlight).toBe(1);
+    expect(calls.overlapped).toEqual([]);
+    expect(records[4]).toMatchObject({ status: 'timed_out' });
+    expect(records.filter((r) => r.status === 'completed')).toHaveLength(63);
+    expect(records.some((r) => r.confounders.length > 0)).toBe(false);
+  });
+
+  it('I2: a call that never settles stops its route; its remaining slots are not run, and no later sample is recorded as clean', async () => {
+    const c = liveCohort();
+    let stalledRoute: string | null = null;
+    const { adapter } = bench({ answer: (n, spec) => { if (n === 5) { stalledRoute = spec.mode; return 'hang'; } return undefined as never; } });
+    const { records } = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter, live: c.live, requestTimeoutMs: 50 });
+    expect(records).toHaveLength(64);
+    expect(records[4]).toMatchObject({ status: 'timed_out' });
+    const after = records.slice(5);
+    for (const r of after.filter((x) => x.mode === stalledRoute)) expect(r).toMatchObject({ status: 'not_run', failures: [{ category: 'route_stalled' }] });
+    for (const r of after.filter((x) => x.mode !== stalledRoute)) expect(r.confounders.join(' ')).toMatch(/overlapped_in_flight_call/);
+  });
+
+  it('I3: a bridge or CDP transport failure is infrastructure: the slot is abandoned and the rest of the cohort is not run', async () => {
+    const c = liveCohort();
+    bench();
+    let n = 0;
+    const page: PageLike = {
+      url: () => 'https://selarikru.web.app/bench.html',
+      async evaluate(fn, arg) {
+        n += 1;
+        // The 2 readiness calls plus env, then setup and generate pairs: fail partway through.
+        if (n === 20) throw new Error('Target page, context or browser has been closed');
+        return structuredClone(await fn(structuredClone(arg)));
+      },
+    };
+    const { records } = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter: benchPageAdapter(page), live: c.live });
+    expect(records).toHaveLength(64);
+    const i = records.findIndex((r) => r.status === 'abandoned');
+    expect(records[i]!.failures).toEqual([{ category: 'bench_transport_failure', detail: null }]);
+    expect(JSON.stringify(records[i])).not.toContain('Target page');
+    for (const r of records.slice(i + 1)) expect(r).toMatchObject({ status: 'not_run', failures: [{ category: 'cohort_stopped' }] });
+    expect(exportResults({ manifest: c.manifest, starts: c.starts, records, generatedAtUtc: AT }).records).toHaveLength(64);
+  });
+
+  it('M3: setup has its own long bound from the manifest, apart from the request limit, and its time goes to the ledger', async () => {
+    const c = liveCohort((m) => { m.assistant.setupTimeoutSeconds = 5; });
+    const { adapter } = bench({ availability: 'downloadable', realDownloadMs: 300 });
+    const { records, setupLedger } = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter, live: c.live, requestTimeoutMs: 100 });
+    expect(setupLedger.find((e) => e.route === 'ONLY_ON_DEVICE')).toMatchObject({ outcome: 'ready' });
+    expect(records.filter((r) => r.mode === 'ONLY_ON_DEVICE' && r.status === 'completed')).toHaveLength(32);
+  });
+
+  it('M5: a live cohort refuses a bench page whose SDK, cloud model or origin is not the pinned one, and M4: the adapter is closed anyway', async () => {
+    const c = liveCohort((m) => { m.assistant.cloudModel = 'some-other-model'; m.assistant.origin = 'https://elsewhere.example'; });
+    const { adapter } = bench();
+    let closed = 0;
+    await expect(runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter: { ...adapter, close: async () => { closed += 1; } }, live: c.live }))
+      .rejects.toThrow(/bench_environment_mismatch: cloudModel.*bench_environment_mismatch: origin|bench_environment_mismatch: cloudModel, bench_environment_mismatch: origin/);
+    expect(closed).toBe(1);
   });
 });

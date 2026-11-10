@@ -14,6 +14,9 @@ import { LeaseLostError, type ClaimedLease, type RunnerApi, type RunnerResult } 
 export const resultLine = (over: Record<string, unknown> = {}) =>
   JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 2, duration_ms: 10, total_cost_usd: 0.05, terminal_reason: 'completed', usage: { input_tokens: 6, output_tokens: 20 }, ...over });
 
+/** The owner scope this world's runner names its sandboxes under: its tenant and runner id. */
+export const WORLD_SCOPE = 'ten:runner_world';
+
 export interface World {
   root: string;
   repo: string;
@@ -113,6 +116,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
   const sbx = new FakeSbx(fake);
   sbx.addForeign('hq-askwell-jim');
   const runtime = new SbxRuntimeAdapter(sbx, {
+    scope: WORLD_SCOPE,
     home: '/Users/nobody',
     forbidden: ['/repo/selarikru'],
     attemptsRoot: join(workRoot, 'attempts'),

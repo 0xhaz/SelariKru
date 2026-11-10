@@ -49,7 +49,7 @@ describe('workspace guard', () => {
 });
 
 describe('sbx command allow-list', () => {
-  const ours = sandboxName('t1', 'a1');
+  const ours = sandboxName('tenant_a:runner_1', 't1', 'a1');
   it('allows only our verbs on our sandboxes', () => {
     expect(() => assertSafeSbxArgs(['ls', '--json'])).not.toThrow();
     expect(() => assertSafeSbxArgs(['stop', ours])).not.toThrow();
@@ -60,7 +60,7 @@ describe('sbx command allow-list', () => {
   it('refuses reset, prune, policy, settings, daemon, cloud, and any sandbox that is not ours', () => {
     for (const a of [['reset'], ['prune'], ['policy', 'init', 'allow-all'], ['settings', 'set', 'x', 'y'], ['daemon', 'stop'], ['--cloud', 'ls'], ['attach', ours], ['move', ours],
       ['stop', 'hq-askwell-jim'], ['rm', '--force', 'hq-askwell-jim'], ['rm', '--force', ours, 'hq-askwell-jim'], ['exec', 'hq-askwell-jim', 'sh'], ['exec', '-w', '/w', 'selarikru-spike-a', 'sh'],
-      ['create', '--name', 'hq-askwell-x', 'claude', '/w'], ['stop', ours, 'hq-askwell-jim'], ['rm', ours]])
+      ['create', '--name', 'hq-askwell-x', 'claude', '/w'], ['create', '--name', 'selarikru-t12345678-a87654321', 'claude', '/w'], ['stop', ours, 'hq-askwell-jim'], ['rm', ours]])
       expect(() => assertSafeSbxArgs(a), a.join(' ')).toThrow(UnsafeSbxCommandError);
   });
 });

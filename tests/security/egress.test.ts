@@ -53,7 +53,7 @@ describe('unapproved network reach', () => {
     const ws = join(root, 'attempts', 'a1', 'workspace');
     mkdirSync(ws, { recursive: true });
     const sbx = new FakeSbx();
-    const runtime = new SbxRuntimeAdapter(sbx, { home: '/Users/nobody', forbidden: [], attemptsRoot: join(root, 'attempts') });
+    const runtime = new SbxRuntimeAdapter(sbx, { scope: 'security:runner', home: '/Users/nobody', forbidden: [], attemptsRoot: join(root, 'attempts') });
     expect((await runtime.capabilities()).egressAllowlist).toBe('unsupported');
     await expect(runtime.create({ attemptId: 'a1', taskId: 't1', workspacePath: ws, cpus: 2, memoryMiB: 4096, egressAllowlist: ['api.example.com'] })).rejects.toThrow(/egress/);
     expect(claimCalls(sbx, 'create')).toEqual([]);

@@ -27,7 +27,12 @@ export interface BenchGenerateRequest {
   readonly prompt: string;
   /** The schema sent with the request (already narrowed to the fixture's requirement IDs). */
   readonly responseSchema: Readonly<Record<string, unknown>>;
+  /** The fixture file's classification. Anything but synthetic, cloud-permitted input is refused before a model is built. */
+  readonly dataClassification: string;
 }
+
+/** The only input the bench page ever sends: synthetic fixtures that may go to the cloud route. */
+export const BENCH_CLASSIFICATION = 'synthetic_cloud_permitted';
 
 export interface BenchGenerateResult {
   readonly outcome: 'ok' | 'error';
@@ -99,6 +104,7 @@ export function createBenchBridge(o: BenchBridgeOptions): BenchBridge {
     },
     async generate(req) {
       if (!isRoute(req.route)) throw new Error('unknown route');
+      if (req.dataClassification !== BENCH_CLASSIFICATION) throw new Error('the bench page sends only synthetic, cloud-permitted fixtures');
       // A new model per request: single-turn, no history.
       const model = o.sdk.createModel({ mode: req.route, allowCloud: req.route === 'ONLY_IN_CLOUD', systemInstruction: req.systemInstruction, schema: req.responseSchema });
       const t0 = now();

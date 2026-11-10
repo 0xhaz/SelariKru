@@ -54,7 +54,8 @@ async function main(): Promise<void> {
     const repos = await loadRepos(values.repo ?? []);
     const workRoot = join(stateDir, 'work');
     await mkdir(join(workRoot, 'attempts'), { recursive: true, mode: 0o700 });
-    const runtime = new SbxRuntimeAdapter(new NodeSbxRunner(), { home: homedir(), forbidden: [platformRepo], attemptsRoot: join(workRoot, 'attempts') });
+    // Sandboxes are named under this runner's own scope (its tenant and runner id), so its sweeps never touch another runner's on this machine.
+    const runtime = new SbxRuntimeAdapter(new NodeSbxRunner(), { scope: `${creds.tenantId}:${creds.runnerId}`, log, home: homedir(), forbidden: [platformRepo], attemptsRoot: join(workRoot, 'attempts') });
     const caps = await runtime.capabilities();
     if (caps.runtimeVersion === null) throw new Error('sbx is not available; install and sign in to Docker Sandboxes. There is no host-mode fallback.');
     log(`sbx ${caps.runtimeVersion}; ${Object.keys(repos).length} project source(s) configured; outbound connections only`);

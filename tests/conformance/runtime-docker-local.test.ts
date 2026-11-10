@@ -12,6 +12,7 @@ runtimeConformance('sbx adapter over a faked sbx', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'conf-fake-')));
   const sbx = new FakeSbx();
   const runtime = new SbxRuntimeAdapter(sbx, {
+    scope: 'conformance:fake',
     home: '/Users/nobody',
     forbidden: [],
     attemptsRoot: join(root, 'attempts'),

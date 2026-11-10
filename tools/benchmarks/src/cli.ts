@@ -24,6 +24,7 @@ import { LiveRefusedError, OrderError } from './trials.ts';
  *   publish       --results p [--manifest p] [--out p]                            validate, redact, stamp and write for the web panel
  *   run-workers   --dry-run|--live --records p --starter repo [--work dir] [--evidence dir] [--manifest p] [--starts dir]
  *                 Track B: L1 through the real control API, runner and verifier; C1 and H2 Not measured (cloud_unavailable)
+ *   sweep-schemas --older-than-hours h                                           drop stale bench_<time>_<random> schemas (DATABASE_URL); manual only
  *   run-assistant --dry-run|--live --records p [--cdp url --bench-url url] [--manifest p] [--starts dir]
  *                 Track A: both routes through the control web bench page in the owner's Chrome, over CDP
  *
@@ -57,10 +58,10 @@ export interface Io {
   readonly cliLogin?: CliLoginProbe;
 }
 
-const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish|run-workers|run-assistant [--manifest p] [--verifier p] [--repo p] '
+const USAGE = 'usage: benchmark preflight|freeze|record-start|report|publish|run-workers|run-assistant|sweep-schemas [--older-than-hours h] [--manifest p] [--verifier p] [--repo p] '
   + '[--starts dir] [--track t] [--seed s] [--records p] [--results p] [--out p] [--repair] [--live|--dry-run] [--starter repo] [--work dir] [--evidence dir] [--cdp url] [--bench-url url]';
 const BOOLEAN_FLAGS = new Set(['repair', 'live', 'dry-run']);
-const FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out', 'starter', 'work', 'evidence', 'cdp', 'bench-url']);
+const FLAGS = new Set(['older-than-hours', 'manifest', 'verifier', 'repo', 'starts', 'track', 'seed', 'records', 'results', 'out', 'starter', 'work', 'evidence', 'cdp', 'bench-url']);
 const PATH_FLAGS = new Set(['manifest', 'verifier', 'repo', 'starts', 'records', 'results', 'out', 'starter', 'work', 'evidence']);
 
 class UsageError extends Error {}
@@ -152,6 +153,16 @@ async function runCommand(ctx: Context, which: 'workers' | 'assistant'): Promise
 
 const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<number>>> = {
   'run-workers': (ctx) => runCommand(ctx, 'workers'),
+  async 'sweep-schemas'(ctx) {
+    const url = ctx.io.env['DATABASE_URL'];
+    if (!url) throw new UsageError('DATABASE_URL must name the PostgreSQL server');
+    const hours = Number(required(ctx.flags, 'older-than-hours'));
+    if (!Number.isFinite(hours) || hours <= 0) throw new UsageError('--older-than-hours must be a positive number');
+    const { sweepBenchSchemas } = await import('./workers/stack.ts');
+    const dropped = await sweepBenchSchemas(url, { olderThanMs: hours * 3_600_000 });
+    ctx.io.out(`Dropped ${dropped.length} stale bench_ schema(s) older than ${hours} h. Only bench_<time>_<random> schemas are ever dropped.`);
+    return 0;
+  },
   'run-assistant': (ctx) => runCommand(ctx, 'assistant'),
   async preflight(ctx) {
     const report = await runPreflight(ctx, readManifest(ctx.manifestPath).manifest);
@@ -238,7 +249,7 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   process.once('SIGINT', () => stop.abort());
   const io: Io = {
     out: (s) => process.stdout.write(`${s}\n`), err: (s) => process.stderr.write(`${s}\n`), env: process.env,
-    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(), signal: stop.signal, cliLogin: claudeCliLoginProbe(),
+    now: () => new Date().toISOString(), cwd: process.env.INIT_CWD ?? process.cwd(), signal: stop.signal, cliLogin: async () => ({ ...(await claudeCliLoginProbe()()), sandboxSecret: await (await import('./workers/agent-state.ts')).sbxAnthropicSecret() }),
   };
   main(process.argv.slice(2), io).then((code) => { process.exitCode = code; });
 }

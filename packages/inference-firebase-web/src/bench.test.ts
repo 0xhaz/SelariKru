@@ -26,7 +26,7 @@ function fake(o: { availability?: DeviceAvailability; downloadMs?: number; after
   return { bridge: createBenchBridge({ sdk, now: () => clock.t }), specs, prompts };
 }
 
-const req = (route: 'ONLY_ON_DEVICE' | 'ONLY_IN_CLOUD') => ({ route, systemInstruction: 'sys', prompt: 'p', responseSchema: { type: 'object' } });
+const req = (route: 'ONLY_ON_DEVICE' | 'ONLY_IN_CLOUD') => ({ route, systemInstruction: 'sys', prompt: 'p', responseSchema: { type: 'object' }, dataClassification: 'synthetic_cloud_permitted' });
 
 describe('bench bridge (T8.2)', () => {
   it('times a device model download in setup, apart from generation, and needs none for the cloud', async () => {
@@ -61,5 +61,11 @@ describe('bench bridge (T8.2)', () => {
     const { bridge } = fake();
     installBenchBridge(bridge, target);
     expect((target as Record<string, unknown>)[BENCH_GLOBAL]).toBe(bridge);
+  });
+
+  it('M2: refuses any input not marked synthetic_cloud_permitted, before a model is built', async () => {
+    const { bridge, specs } = fake();
+    for (const dataClassification of ['restricted', 'internal', '']) await expect(bridge.generate({ ...req('ONLY_IN_CLOUD'), dataClassification })).rejects.toThrow(/synthetic/);
+    expect(specs).toEqual([]);
   });
 });

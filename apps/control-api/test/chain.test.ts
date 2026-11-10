@@ -117,7 +117,7 @@ async function runWorker(lease: ClaimedLease, script: Script): Promise<{ report:
       stream.end(0);
     },
   });
-  const runtime = new SbxRuntimeAdapter(sbx, { home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
+  const runtime = new SbxRuntimeAdapter(sbx, { scope: 'chain:runner', home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
   const report = await runAttempt({
     api: new HttpRunnerApi(`http://127.0.0.1:${port}`, token), runtime, artifacts: new LocalDiskArtifactStore(resolveArtifactDir({ SELARIKRU_ARTIFACT_DIR: artifactDir })), workRoot: join(root, 'work'),
     repos: { [PROJECT]: repo }, heartbeatMs: 50, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => logs.push(l),

@@ -23,6 +23,8 @@
     "providerAccountReference": null,
     "credentialMode": null,
     "accountTier": null,
+    "credentialPath": null,
+    "agentState": null,
     "cacheCondition": null,
     "localHost": null,
     "cloudHost": null

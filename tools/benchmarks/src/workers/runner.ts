@@ -13,7 +13,7 @@ import type { VerifierRunner } from '../../../../services/verifier/src/service.t
 import { monotonicDateClock, performanceClock, type Monotonic } from '../clock.ts';
 import type { Manifest, Slot } from '../manifest.ts';
 import type { RawRecord } from '../report.ts';
-import { assertLive, NO_COST, NO_HUMAN_MINUTES, NO_OPERATIONS, NO_RESOURCES, NO_TIMINGS, plannedTrials, type LiveAuthorization, type PlannedTrial } from '../trials.ts';
+import { assertLive, LiveRefusedError, NO_COST, NO_HUMAN_MINUTES, NO_OPERATIONS, NO_RESOURCES, NO_TIMINGS, plannedTrials, type LiveAuthorization, type PlannedTrial } from '../trials.ts';
 import { collectTrial, type TrialEvidence } from './collect.ts';
 import { freshStarterRepo, git, repoState } from './isolation.ts';
 import { openStack, type Stack } from './stack.ts';
@@ -59,7 +59,11 @@ export interface WorkerEnvironment {
   readonly verifierRunner: VerifierRunner;
   readonly verifierHost: string;
   /** A fresh sandbox runtime for one trial, with its own agent home and attempts root. */
-  runtime(o: { readonly home: string; readonly attemptsRoot: string; readonly trialId: string }): SweepingRuntime;
+  /**
+   * `scope` is the trial's own sandbox owner scope: the runtime must name its sandboxes under it, so the trial's sweeps never touch the
+   * owner's live sandboxes or another runner's on this machine.
+   */
+  runtime(o: { readonly home: string; readonly attemptsRoot: string; readonly trialId: string; readonly scope: string }): SweepingRuntime;
   /** Kept evidence per trial (verification record and candidate diff). Absent: none kept. */
   readonly evidenceDir?: string;
   readonly driverIntervalMs: number;
@@ -69,7 +73,38 @@ export interface WorkerEnvironment {
   readonly timeScale?: number;
   readonly onTrialStart?: (state: TrialStartState) => void;
   readonly log?: (line: string) => void;
+  /**
+   * I1: a trial whose claims are refused this many times in a row before any attempt starts, or that sees no start within `startWindowMs`, ends
+   * as a replaceable denied start naming the last refusal. Defaults 5 and 3 minutes.
+   */
+  readonly maxStartRefusals?: number;
+  readonly startWindowMs?: number;
+  /** I4: reads the worker agent's state for a trial's scope, before and after it. Absent (the dry run): not checked. */
+  readonly agentState?: (scope: string) => Promise<AgentState>;
 }
+
+/** What `agentState` reports. Names only; never a credential or account detail. */
+export interface AgentState {
+  /** Sandboxes in the trial's own scope. Empty before a trial starts and after it ends, or state could carry over. */
+  readonly scopedSandboxes: readonly string[];
+  /** sbx's `kit.shortcuts.claude` setting: a machine-wide image override for every Claude sandbox. Null when unset. */
+  readonly kitShortcut: string | null;
+  /** Whether sbx holds a global `anthropic` service secret, the path by which the owner's login reaches every sandbox. Null when unknown. */
+  readonly sandboxSecret: boolean | null;
+}
+
+export const SHARED_AGENT_STATE = 'shared_agent_state';
+
+/** How the credential reaches the worker's sandbox, as recorded on every live trial. Never the credential. */
+function credentialPathOf(m: Manifest, state: AgentState | null): string {
+  if (state === null) return `${m.credentials.mode}: not checked (dry run: no credential reaches the scripted worker)`;
+  const via = state.sandboxSecret === true ? 'the sbx global anthropic service secret (OAuth), injected by the sbx proxy; nothing is copied into the sandbox and no home directory is mounted'
+    : state.sandboxSecret === false ? 'no sbx anthropic service secret found, so the sandbox has no credential' : 'unknown: the sbx secret list could not be read';
+  return `${m.credentials.mode}: ${via}`;
+}
+
+const describeState = (s: AgentState | null): string => (s === null ? 'not checked'
+  : `${s.scopedSandboxes.length === 0 ? 'no sandbox in scope' : `${s.scopedSandboxes.length} sandbox(es) in scope`}${s.kitShortcut ? `, kit.shortcuts.claude=${s.kitShortcut}` : ''}`);
 
 export interface WorkerCohortOptions {
   readonly manifest: Manifest;
@@ -102,7 +137,7 @@ export interface WorkerCohortResult {
 const notRunCriteria = (): RawRecord['quality']['criteria'] => FEEDBACK_CRITERIA.map((id) => ({ id, status: 'not_run' as const, evidenceReferences: [] }));
 
 /** D6: every worker record names how the harness authenticated and the account tier, as the manifest pins them. */
-const accountOf = (m: Manifest) => ({ credentialMode: m.credentials.mode, accountTier: m.environment.accountTier });
+const accountOf = (m: Manifest) => ({ credentialMode: m.credentials.mode, accountTier: m.environment.accountTier, credentialPath: null, agentState: null });
 
 function notRunRecord(m: Manifest, p: PlannedTrial, dataKind: RawRecord['dataKind'], category: string, detail: string | null, confounders: readonly string[] = []): RawRecord {
   const slot = p.slot as Extract<Slot, { track: 'workers' }>;
@@ -135,9 +170,18 @@ class Budget {
   }
 }
 
+/** A trial's sandbox owner scope. Null when the cohort has no identity to scope by, and then nothing runs live. */
+export function sandboxScopeFor(m: Manifest, trialId: string, suffix: string): string | null {
+  return m.cohortId === null ? null : `bench:${m.cohortId}:${trialId}:${suffix}`;
+}
+
 export async function runWorkerCohort(o: WorkerCohortOptions): Promise<WorkerCohortResult> {
   const { manifest: m, env } = o;
-  if (o.live !== null) assertLive(m, 'workers', o.live);
+  if (o.live !== null) {
+    // Without its own scope a trial could only sweep machine-wide: refused before any trial, and no sandbox is touched.
+    if (sandboxScopeFor(m, 'probe', 'probe') === null) throw new LiveRefusedError(['sandbox_scope_unavailable']);
+    assertLive(m, 'workers', o.live);
+  }
   const dataKind: RawRecord['dataKind'] = o.live === null ? 'simulated' : 'measured';
   const prior = (o.prior ?? []).filter((r) => r.track === 'workers' && r.dataKind === dataKind);
   // A cloud mode whose last record says cloud was unavailable stays recorded as such while it still is.
@@ -175,7 +219,26 @@ interface TrialInput {
   readonly mono: Monotonic;
 }
 
-type Ending = 'delivered' | 'failed' | 'timed_out' | 'cancelled';
+type Ending = 'delivered' | 'failed' | 'timed_out' | 'cancelled' | 'denied';
+
+/** I1: what the runner's claims answered before the trial's first start. */
+interface ClaimWatch { refusals: number; lastReason: string | null; leased: boolean }
+
+function watchClaims(api: HttpRunnerApi, watch: ClaimWatch): HttpRunnerApi {
+  return new Proxy(api, {
+    get(target, prop) {
+      if (prop === 'claim') {
+        return async (...args: Parameters<HttpRunnerApi['claim']>) => {
+          const r = await target.claim(...args);
+          if (r.lease) { watch.leased = true; watch.refusals = 0; } else { watch.refusals += 1; watch.lastReason = r.reason; }
+          return r;
+        };
+      }
+      const v = Reflect.get(target, prop) as unknown;
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  });
+}
 
 const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_');
 const until = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
@@ -186,10 +249,10 @@ const until = (ms: number, signal: AbortSignal): Promise<void> => new Promise((r
 });
 
 /** L1: both pilot roles on one local coding slot, as the product schedules them. */
-function tasksFor(m: Manifest, stack: Stack, runId: string, starterSha: string, timeoutSeconds: number, maxCostUsd: number, policy: Policy) {
+function tasksFor(m: Manifest, stack: Stack, runId: string, starterSha: string, timeoutSeconds: number, maxCostUsd: number, policy: Policy, suffix: string) {
   const maxAttempts = 1 + (policy.limits?.repairAttempts ?? 2);
   return (['backend', 'frontend'] as const).map((role) => ({
-    schemaVersion: 1, tenantId: stack.tenantId, projectId: stack.projectId, runId, taskId: `t_${role}`, boardId: 'feedback-board', revision: 1, role,
+    schemaVersion: 1, tenantId: stack.tenantId, projectId: stack.projectId, runId, taskId: `t_${role}_${suffix}`, boardId: 'feedback-board', revision: 1, role,
     title: `Feedback Board ${role}`, baseSha: starterSha, requirementIds: [...m.requirementIds], dependencies: [], contractRefs: [], allowedPaths: [...PILOT_ROLE_PATHS[role]],
     resourceClaims: [], acceptanceCheckIds: [], classification: 'internal', policyVersion: policy.policyVersion, execution: 'local', inferencePolicyId: 'benchmark',
     limits: { maxAttempts, timeoutSeconds, maxCostUsd },
@@ -213,7 +276,10 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
     assistant: null,
   };
   const now = monotonicDateClock(mono);
-  const trialRoot = join(env.workRoot, `${safe(trial.trialId)}-${randomBytes(3).toString('hex')}`);
+  // Trial-unique: the sandbox scope and the task ids, so nothing this trial names can collide with another trial or the owner's runs.
+  const trialSuffix = randomBytes(4).toString('hex');
+  const scope = sandboxScopeFor(m, trial.trialId, trialSuffix)!;
+  const trialRoot = join(env.workRoot, `${safe(trial.trialId)}-${trialSuffix}`);
   const repoPath = join(trialRoot, 'source');
   const agentHome = join(trialRoot, 'agent-home');
   const artifactDir = join(trialRoot, 'artifacts');
@@ -228,6 +294,7 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
 
   let runId: string;
   let runnerToken: string;
+  let stateBefore: AgentState | null = null;
   try {
     if (starterSha === null) throw new Error('the manifest names no starter commit');
     freshStarterRepo(env.starterRepo, starterSha, repoPath);
@@ -251,7 +318,8 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
     });
     if (run.status !== 201) throw new Error(`the run was refused (${run.status} ${String(run.body?.error?.code ?? '')})`);
     runId = String(run.body.runId);
-    runtime = env.runtime({ home: agentHome, attemptsRoot: join(trialRoot, 'runner', 'attempts'), trialId: trial.trialId });
+    runtime = env.runtime({ home: agentHome, attemptsRoot: join(trialRoot, 'runner', 'attempts'), trialId: trial.trialId, scope });
+    stateBefore = env.agentState ? await env.agentState(scope) : null;
   } catch (e) {
     log(`setup failed: ${e instanceof Error ? e.message : String(e)}`);
     await stack?.close().catch(() => undefined);
@@ -264,19 +332,22 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
   // repair policy allows (two roles, each 1 + repairs) must fit in the trial's budget.
   const maxAttempts = 1 + (env.policy.limits?.repairAttempts ?? 2);
   const perTaskCap = Math.max(0.01, Math.floor((t.budgetUsd / (2 * maxAttempts)) * 100) / 100);
-  const accepted = await stack.owner('POST', `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, tasks: tasksFor(m, stack, runId, starterSha!, taskTimeoutSeconds, perTaskCap, env.policy) });
+  const accepted = await stack.owner('POST', `/v1/runs/${runId}/plan-revisions`, { expectedRevision: 0, tasks: tasksFor(m, stack, runId, starterSha!, taskTimeoutSeconds, perTaskCap, env.policy, trialSuffix) });
   const acceptedMono = mono();
   const loopAbort = new AbortController();
   let ending: Ending = 'failed';
   let loop: Promise<void> = Promise.resolve();
   const failures: { category: string; detail: string | null }[] = [];
+  const watch: ClaimWatch = { refusals: 0, lastReason: null, leased: false };
   if (accepted.status !== 201) {
+    // M6: the run never got a plan to start from: an infrastructure outcome, so the slot may be retried.
+    ending = 'denied';
     failures.push({ category: 'plan_refused', detail: String(accepted.body?.error?.code ?? accepted.status) });
   } else {
     stack.startDrivers();
     const api = new HttpRunnerApi(stack.apiBase, runnerToken, stack.fetch);
     const runner = new RunnerLoop({
-      api, runtime: runtime!, pollMs: env.pollMs, slots: 1, log: (l) => log(l), projects: [stack.projectId],
+      api: watchClaims(api, watch), runtime: runtime!, pollMs: env.pollMs, slots: 1, log: (l) => log(l), projects: [stack.projectId],
       harnessReport: async () => env.runnerReport,
       attempt: {
         api, runtime: runtime!, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot: join(trialRoot, 'runner'), repos: { [stack.projectId]: repoPath },
@@ -284,8 +355,11 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
       },
     });
     loop = runner.run(loopAbort.signal).catch((e) => log(`runner loop ended with an error: ${e instanceof Error ? e.message : String(e)}`));
-    ending = await waitForEnding(stack, runId, { acceptedMono, deadlineMs, mono, pollMs: env.pollMs, signal: t.signal });
-    if (ending === 'timed_out' || ending === 'cancelled') await cancelOpenTasks(stack, ending);
+    ending = await waitForEnding(stack, runId, {
+      acceptedMono, deadlineMs, mono, pollMs: env.pollMs, signal: t.signal, watch, maxRefusals: env.maxStartRefusals ?? 5, startWindowMs: env.startWindowMs ?? 180_000,
+    });
+    if (ending === 'denied') failures.push({ category: 'start_denied', detail: watch.lastReason ?? 'no attempt started within the start window' });
+    if (ending !== 'delivered' && ending !== 'failed') await cancelOpenTasks(stack, ending);
   }
   // Stop the worker side, bounded: the runner stops its agent and destroys its sandbox on abort.
   loopAbort.abort();
@@ -299,13 +373,18 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
     failures.push({ category: 'evidence_unreadable', detail: e instanceof Error ? redactSecrets(e.message).slice(0, 200) : null });
   }
   const leftover = await runtime!.sweepOrphans(new Set()).catch(() => ['unknown']);
+  const stateAfter = env.agentState ? await env.agentState(scope).catch(() => null) : null;
+  const shared = [stateBefore, stateAfter].some((s) => s !== null && (s.kitShortcut !== null || s.scopedSandboxes.length > 0))
+    || (env.agentState !== undefined && stateAfter === null);
+  if (shared) confounders.push(`${SHARED_AGENT_STATE}: before: ${describeState(stateBefore)}; after: ${describeState(stateAfter)}`);
   await stack.close().catch((e) => failures.push({ category: 'teardown_failed', detail: e instanceof Error ? redactSecrets(e.message).slice(0, 200) : null }));
   rmSync(trialRoot, { recursive: true, force: true });
   const cleanupConfirmed = leftover.length === 0 && !existsSync(trialRoot) && !failures.some((f) => f.category === 'teardown_failed');
   if (evidence !== null && evidence.unreportedAttempts > 0) {
     confounders.push(`${evidence.unreportedAttempts} attempt(s) reported no cost; the budget was charged their worst-case hold`);
   }
-  const record = toRecord({ base, evidence, ending, failures, confounders, initialSetupMs, cleanupConfirmed, deadlineMs, repairAttempts: env.policy.limits?.repairAttempts ?? 2, now });
+  const withState = { ...base, configuration: { ...base.configuration, credentialPath: credentialPathOf(m, stateBefore), agentState: env.agentState ? `before: ${describeState(stateBefore)}; after: ${describeState(stateAfter)}` : null } };
+  const record = toRecord({ base: withState, evidence, ending, failures, confounders, initialSetupMs, cleanupConfirmed, deadlineMs, repairAttempts: env.policy.limits?.repairAttempts ?? 2, now });
   return { record, spentUsd: evidence === null ? null : evidence.spendBoundUsd };
 }
 
@@ -325,7 +404,9 @@ function repositoryOf(m: Manifest): string {
 const TERMINAL_TASK: ReadonlySet<string> = new Set(['failed', 'blocked', 'cancelled']);
 
 /** Waits on the run's own state, never a fixed sleep: delivered, a task that cannot finish, the deadline, or the operator. */
-async function waitForEnding(stack: Stack, runId: string, w: { acceptedMono: number; deadlineMs: number; mono: Monotonic; pollMs: number; signal: AbortSignal | undefined }): Promise<Ending> {
+async function waitForEnding(stack: Stack, runId: string, w: {
+  acceptedMono: number; deadlineMs: number; mono: Monotonic; pollMs: number; signal: AbortSignal | undefined; watch: ClaimWatch; maxRefusals: number; startWindowMs: number;
+}): Promise<Ending> {
   const tick = new AbortController();
   const onAbort = () => tick.abort();
   w.signal?.addEventListener('abort', onAbort, { once: true });
@@ -336,6 +417,7 @@ async function waitForEnding(stack: Stack, runId: string, w: { acceptedMono: num
       if (run?.['lifecycle'] === 'ready_for_review') return 'delivered';
       const tasks = await stack.db.execute(sql`SELECT status FROM task_status WHERE tenant_id = ${stack.tenantId} AND project_id = ${stack.projectId}`);
       if (tasks.some((r) => TERMINAL_TASK.has(String(r['status'])))) return 'failed';
+      if (!w.watch.leased && (w.watch.refusals >= w.maxRefusals || w.mono() - w.acceptedMono >= w.startWindowMs)) return 'denied';
       const left = w.deadlineMs - (w.mono() - w.acceptedMono);
       if (left <= 0) return 'timed_out';
       await until(Math.min(w.pollMs, left), tick.signal);
@@ -382,6 +464,7 @@ function toRecord(r: RecordInput): RawRecord {
   let status: RawRecord['status'];
   if (r.ending === 'timed_out') { status = 'timed_out'; failures.push({ category: 'attempt_deadline', detail: `the ${r.deadlineMs / 1000} s deadline from coordinator acceptance ran out` }); }
   else if (r.ending === 'cancelled') { status = 'cancelled'; failures.push({ category: 'operator_cancelled', detail: null }); }
+  else if (r.ending === 'denied') status = 'denied_start';
   else if (e?.verdict) status = 'completed';
   else if (e !== null && e.attempts.every((a) => a.startedAt === null) && failures.length === 0) {
     status = 'denied_start';

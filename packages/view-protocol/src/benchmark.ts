@@ -63,6 +63,10 @@ const ConfigurationSchema = z.strictObject({
   credentialMode: z.enum(['cli_login', 'api_key']).nullable(),
   /** Added to the template: the provider account tier the attempt ran under, as the manifest records it. Never an account identity. */
   accountTier: nullableText,
+  /** Added to the template (D6): how the credential reaches the worker's sandbox, for example the sbx proxy's global service secret. Never the credential. */
+  credentialPath: nullableText,
+  /** Added to the template: the worker agent's state checked before and after the trial (sandboxes in the trial's scope, image overrides). Null when not checked. */
+  agentState: nullableText,
   cacheCondition: z.enum(['warm', 'cold']).nullable(),
   localHost: nullableText,
   cloudHost: nullableText,

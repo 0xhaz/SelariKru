@@ -97,7 +97,7 @@ describe('SbxRuntimeAdapter.provision', () => {
     const sbx = new FakeSbx(opts);
     const ws = join(root, 'attempts', 'a1', 'workspace');
     await mkdir(ws, { recursive: true });
-    const rt = new SbxRuntimeAdapter(sbx, { home: '/Users/nobody', forbidden: [], attemptsRoot: join(root, 'attempts'), timeouts: { signalMs: 50, graceMs: 60, stopMs: 80, lsMs: 50, createMs: 500, rmMs: 100 } });
+    const rt = new SbxRuntimeAdapter(sbx, { scope: 'tenant_a:runner_1', home: '/Users/nobody', forbidden: [], attemptsRoot: join(root, 'attempts'), timeouts: { signalMs: 50, graceMs: 60, stopMs: 80, lsMs: 50, createMs: 500, rmMs: 100 } });
     const handle = await rt.create({ attemptId: 'a1', taskId: 't1', workspacePath: ws, cpus: 2, memoryMiB: 4096 });
     return { sbx, rt, handle, ws };
   };

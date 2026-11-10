@@ -95,6 +95,8 @@ export const ManifestSchema = z.strictObject({
     expectedObservedSources: z.tuple([z.literal('ON_DEVICE'), z.literal('IN_CLOUD')]),
     repetitionsPerFixture: z.number().int().positive(),
     excludedWarmupsPerRoute: z.number().int().nonnegative(),
+    /** M3: how long one route's setup (a device model download and readiness) may take, apart from any request limit. */
+    setupTimeoutSeconds: z.number().int().positive(),
     coldStartCohort: text,
     sdkVersion: nullableText,
     browserVersion: nullableText,

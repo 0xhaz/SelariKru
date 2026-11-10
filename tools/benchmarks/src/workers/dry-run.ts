@@ -43,15 +43,22 @@ export const DRY_RUN_WORKER: WorkerScript = ({ role, write, home }) => {
 };
 
 export interface FakeRuntimeFactory {
-  (o: { readonly home: string; readonly attemptsRoot: string; readonly trialId: string }): SbxRuntimeAdapter;
+  (o: { readonly home: string; readonly attemptsRoot: string; readonly trialId: string; readonly scope: string }): SbxRuntimeAdapter;
   /** Every fake `sbx` made so far, one per trial, in order. */
   readonly made: { readonly trialId: string; readonly sbx: FakeSbx }[];
 }
 
-export function fakeRuntimeFactory(script: WorkerScript = DRY_RUN_WORKER, forbidden: readonly string[] = []): FakeRuntimeFactory {
+/**
+ * `shared`: one fake `sbx` for every trial, standing for one machine, so a test can put the owner's own sandboxes beside the trials'. Default:
+ * a new fake per trial.
+ */
+export function fakeRuntimeFactory(script: WorkerScript = DRY_RUN_WORKER, forbidden: readonly string[] = [], shared?: (options: ConstructorParameters<typeof FakeSbx>[0]) => FakeSbx): FakeRuntimeFactory {
   const made: { trialId: string; sbx: FakeSbx }[] = [];
+  let home = '';
+  let machine: FakeSbx | null = null;
   const factory = ((o) => {
-    const sbx = new FakeSbx({
+    home = o.home;
+    const options: ConstructorParameters<typeof FakeSbx>[0] = {
       onStream: (stream, args) => {
         if (args[1] === '-i') return;
         const cwd = args[2]!;
@@ -60,16 +67,17 @@ export function fakeRuntimeFactory(script: WorkerScript = DRY_RUN_WORKER, forbid
         const write = (rel: string, body: string): void => { mkdirSync(dirname(join(cwd, rel)), { recursive: true }); writeFileSync(join(cwd, rel), body); };
         void (async () => {
           stream.push(`${initEvent}\n`);
-          const keepOpen = (await script({ role: role ?? null, cwd, home: o.home, stream, write })) === false;
+          const keepOpen = (await script({ role: role ?? null, cwd, home, stream, write })) === false;
           if (keepOpen || stream.isEnded) return;
           stream.push(`${RESULT_LINE}\n`);
           stream.end(0);
         })();
       },
-    });
+    };
+    const sbx = shared ? (machine ??= shared(options)) : new FakeSbx(options);
     made.push({ trialId: o.trialId, sbx });
     return new SbxRuntimeAdapter(sbx, {
-      home: o.home, forbidden: [...forbidden], attemptsRoot: o.attemptsRoot,
+      scope: o.scope, home: o.home, forbidden: [...forbidden], attemptsRoot: o.attemptsRoot,
       timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 },
     });
   }) as FakeRuntimeFactory;

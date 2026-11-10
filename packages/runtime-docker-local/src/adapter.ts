@@ -16,7 +16,7 @@ import type {
 import { redactSecrets } from '@selarikru/protocol';
 import { SbxControlShell, controlShellArgs } from './control-shell.ts';
 import { assertSafeWorkspace, auditMounts } from './guards.ts';
-import { isOurSandbox, sandboxName, taskPrefix } from './names.ts';
+import { inScope, isLegacySandbox, sandboxName, taskPrefix } from './names.ts';
 import type { SbxCommandRunner, SbxResult } from './sbx.ts';
 import { EXACT_VERSION, NODE_TARBALL_SHA256, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT } from './toolchain.ts';
 
@@ -54,6 +54,13 @@ export interface SbxRuntimeOptions {
   readonly forbidden: readonly string[];
   readonly attemptsRoot: string | null;
   readonly timeouts?: Partial<RuntimeTimeouts>;
+  /**
+   * The owner identity this runtime's sandboxes are named under: `tenant:runnerId` for a runner, a trial's own scope for a
+   * benchmark trial. Sweeps and reconciliation touch only sandboxes in this scope.
+   */
+  readonly scope: string;
+  /** Told once per legacy (unscoped) sandbox found, which is never swept automatically. */
+  readonly log?: (line: string) => void;
 }
 
 const PID_FILE = '/tmp/selarikru-attempt.pid';
@@ -107,6 +114,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
   private readonly clientKilled = new WeakSet<AttemptHandle>();
   /** Sandboxes whose toolchain is installed and verified. Only these launch with it on PATH. */
   private readonly provisioned = new Set<string>();
+  private readonly legacySeen = new Set<string>();
   constructor(
     private readonly sbx: SbxCommandRunner,
     private readonly opts: SbxRuntimeOptions,
@@ -144,8 +152,8 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
 
   /** Reconcile before any duplicate side effect: remove every older worker of this task, by stable name prefix. */
   private async reconcileTask(taskId: string): Promise<void> {
-    const prefix = taskPrefix(taskId);
-    for (const e of await this.list()) if (e.name.startsWith(prefix) && isOurSandbox(e.name)) await this.removeByName(e.name);
+    const prefix = taskPrefix(this.opts.scope, taskId);
+    for (const e of await this.list()) if (e.name.startsWith(prefix) && inScope(e.name, this.opts.scope)) await this.removeByName(e.name);
   }
 
   async create(spec: SandboxSpec): Promise<SandboxHandle> {
@@ -153,7 +161,7 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
     // destination without changing global policy, so a sandbox that needs an allowlist is refused, never created under whatever is already allowed.
     if ((spec.egressAllowlist?.length ?? 0) > 0) throw new SandboxCreateError('this runtime cannot restrict egress to a granted destination');
     const workspace = await assertSafeWorkspace(spec.workspacePath, { home: this.opts.home, forbidden: this.opts.forbidden, attemptsRoot: this.opts.attemptsRoot });
-    const name = sandboxName(spec.taskId, spec.attemptId);
+    const name = sandboxName(this.opts.scope, spec.taskId, spec.attemptId);
     await this.reconcileTask(spec.taskId);
 
     const args = [
@@ -322,11 +330,18 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, arch: arch ?? 'unknown', nodeVersion: node, pnpmVersion: pnpm, seconds: (Date.now() - startedMs) / 1000 };
   }
 
-  /** Removes every selarikru-managed sandbox that no active attempt owns (startup: after a crash or laptop sleep). */
+  /**
+   * Removes every sandbox in this runtime's own scope that no active attempt owns (startup: after a crash or laptop sleep). Other scopes are
+   * another runner's or a benchmark trial's and are left alone; a legacy unscoped name is left alone and reported once.
+   */
   async sweepOrphans(active: ReadonlySet<string>): Promise<string[]> {
     const removed: string[] = [];
     for (const e of await this.list()) {
-      if (isOurSandbox(e.name) && !active.has(e.name)) {
+      if (isLegacySandbox(e.name) && !this.legacySeen.has(e.name)) {
+        this.legacySeen.add(e.name);
+        this.opts.log?.(`left legacy sandbox ${e.name} in place: it has no owner scope, so it is never swept automatically`);
+      }
+      if (inScope(e.name, this.opts.scope) && !active.has(e.name)) {
         await this.removeByName(e.name);
         removed.push(e.name);
       }

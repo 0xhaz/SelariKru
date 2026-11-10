@@ -2,7 +2,7 @@ import { mapInferenceSource } from '@selarikru/inference-firebase-web/models';
 import type { BenchEnvironment, BenchGenerateResult, BenchRoute, BenchSetupResult } from '@selarikru/inference-firebase-web/bench';
 import type { Manifest, Slot } from '../manifest.ts';
 import type { RawRecord } from '../report.ts';
-import { assertLive, NO_COST, NO_HUMAN_MINUTES, NO_OPERATIONS, NO_RESOURCES, NO_TIMINGS, plannedTrials, type LiveAuthorization, type PlannedTrial } from '../trials.ts';
+import { assertLive, LiveRefusedError, NO_COST, NO_HUMAN_MINUTES, NO_OPERATIONS, NO_RESOURCES, NO_TIMINGS, plannedTrials, type LiveAuthorization, type PlannedTrial } from '../trials.ts';
 import { composeRequest, type BriefFixtures } from './payload.ts';
 import type { RouteAdapter } from './route.ts';
 import { validator } from './validate.ts';
@@ -48,8 +48,10 @@ export interface AssistantCohortOptions {
   readonly prior?: readonly RawRecord[];
   /** Null: a dry run, recorded as simulated. */
   readonly live: LiveAuthorization | null;
-  /** Per-request limit. A request still running then is recorded timed out. Default 120 s. */
+  /** Per-request limit. A request still running then is recorded timed out, and the next waits for it to settle. Default 120 s. */
   readonly requestTimeoutMs?: number;
+  /** Per-route setup limit (a device model download). Default: the manifest's `assistant.setupTimeoutSeconds`. */
+  readonly setupTimeoutMs?: number;
   /** Aborted by the operator: the rest of the cohort is recorded not run. */
   readonly signal?: AbortSignal;
   readonly onRecord?: (r: RawRecord) => void;
@@ -77,6 +79,24 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 export async function runAssistantCohort(o: AssistantCohortOptions): Promise<AssistantCohortResult> {
+  // M4: whatever happens after the adapter exists, it is closed (for a CDP connection, a disconnect).
+  try {
+    return await runCohort(o);
+  } finally {
+    await o.adapter.close?.().catch(() => undefined);
+  }
+}
+
+/** M5: the bench page must be the pinned configuration. Each difference is a named blocker. */
+function environmentIssues(m: Manifest, env: BenchEnvironment): string[] {
+  const a = m.assistant;
+  const pinned: [string, string | null, string | null][] = [['sdkVersion', a.sdkVersion, env.sdkVersion], ['cloudModel', a.cloudModel, env.cloudModel], ['origin', a.origin, env.origin]];
+  return pinned.filter(([, want, got]) => want !== got).map(([field]) => `bench_environment_mismatch: ${field}`);
+}
+
+class TransportFailure extends Error {}
+
+async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResult> {
   const { manifest: m } = o;
   if (o.live !== null) assertLive(m, 'assistant', o.live);
   const dataKind: RawRecord['dataKind'] = o.live === null ? 'simulated' : 'measured';
@@ -84,13 +104,22 @@ export async function runAssistantCohort(o: AssistantCohortOptions): Promise<Ass
   const trials = plannedTrials(m, 'assistant', prior);
   const wallNow = o.wallNow ?? (() => new Date());
   const timeoutMs = o.requestTimeoutMs ?? 120_000;
+  // M3: a device model download can take many minutes; setup has its own bound from the manifest.
+  const setupTimeoutMs = o.setupTimeoutMs ?? m.assistant.setupTimeoutSeconds * 1000;
   const validate = validator(o.fixtures);
   const environment = await o.adapter.environment();
+  if (o.live !== null) {
+    const issues = environmentIssues(m, environment);
+    if (issues.length > 0) throw new LiveRefusedError(issues);
+  }
   const setupLedger: SetupLedgerEntry[] = [];
   const outputs: OutputEntry[] = [];
   const records: RawRecord[] = [];
   const ready = new Map<BenchRoute, BenchSetupResult>();
   const emit = (r: RawRecord) => { records.push(r); o.onRecord?.(r); };
+  /** I2: routes whose call never settled after timing out. Their remaining slots are not run; any later sample may overlap that call. */
+  const stalled = new Set<BenchRoute>();
+  let transportFailed = false;
 
   for (const trial of trials) {
     const slot = trial.slot as AssistantSlot;
@@ -99,72 +128,85 @@ export async function runAssistantCohort(o: AssistantCohortOptions): Promise<Ass
     const fixture = o.fixtures.fixtures.find((f) => f.id === fixtureId)!;
     const req = await composeRequest(o.fixtures, fixtureId);
     const base = baseRecord(trial, slot, route, dataKind, fixtureId, environment.sdkVersion, req.payloadSha256);
-    if (o.signal?.aborted) { emit(notRun(base, 'cohort_stopped')); continue; }
+    if (o.signal?.aborted || transportFailed) { emit(notRun(base, 'cohort_stopped')); continue; }
+    if (stalled.has(route)) { emit({ ...notRun(base, 'route_stalled'), failures: [{ category: 'route_stalled', detail: 'an earlier request on this route never settled, so nothing more was sent on it' }] }); continue; }
+    const overlapNote = stalled.size > 0 ? [`overlapped_in_flight_call: a stalled ${[...stalled].join(', ')} call may still be running in the page`] : [];
 
-    // Setup before a route's first request, timed apart and ledgered, never on a record.
-    let setup = ready.get(route);
-    if (setup === undefined) {
-      try {
-        setup = await withTimeout(o.adapter.setup(route), timeoutMs);
-      } catch {
-        setup = { route, availability: 'unknown', outcome: 'failed', downloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' };
-      }
-      setupLedger.push({ route, at: wallNow().toISOString(), availability: setup.availability, outcome: setup.outcome, modelDownloadMs: setup.downloadMs, errorCode: setup.errorCode, clockDomain: setup.clockDomain });
-      if (setup.outcome === 'ready') ready.set(route, setup);
-    }
-    if (setup.outcome !== 'ready') {
-      // The route cannot serve: nothing is sent, so nothing can fall back. A denied start may be retried in its slot later.
-      emit({ ...base, status: 'denied_start', failures: [{ category: 'route_unavailable', detail: `${route} setup ${setup.outcome} (${setup.availability})` }] });
-      continue;
-    }
-
-    const startedAt = wallNow();
-    let res: BenchGenerateResult;
     try {
-      res = await withTimeout(o.adapter.generate({ route, systemInstruction: req.systemInstruction, prompt: req.prompt, responseSchema: req.responseSchema }), timeoutMs);
-    } catch (e) {
-      const timedOut = e instanceof RequestTimeout;
+      // Setup before a route's first request, timed apart and ledgered, never on a record.
+      let setup = ready.get(route);
+      if (setup === undefined) {
+        setup = await transport(o.adapter.setup(route), setupTimeoutMs).catch((e: unknown) => {
+          if (e instanceof RequestTimeout) return { route, availability: 'unknown' as const, outcome: 'failed' as const, downloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' as const };
+          throw e;
+        });
+        setupLedger.push({ route, at: wallNow().toISOString(), availability: setup.availability, outcome: setup.outcome, modelDownloadMs: setup.downloadMs, errorCode: setup.errorCode, clockDomain: setup.clockDomain });
+        if (setup.outcome === 'ready') ready.set(route, setup);
+      }
+      if (setup.outcome !== 'ready') {
+        // The route cannot serve: nothing is sent, so nothing can fall back. A denied start may be retried in its slot later.
+        emit({ ...base, status: 'denied_start', failures: [{ category: 'route_unavailable', detail: `${route} setup ${setup.outcome} (${setup.availability})` }] });
+        continue;
+      }
+
+      const startedAt = wallNow();
+      const call = o.adapter.generate({ route, systemInstruction: req.systemInstruction, prompt: req.prompt, responseSchema: req.responseSchema, dataClassification: o.fixtures.dataClassification });
+      let res: BenchGenerateResult;
+      try {
+        res = await transport(call, timeoutMs);
+      } catch (e) {
+        if (!(e instanceof RequestTimeout)) throw e;
+        emit({ ...ran(base, startedAt, wallNow()), status: 'timed_out', failures: [{ category: 'request_timeout', detail: `no response within ${timeoutMs} ms` }], confounders: overlapNote });
+        // I2: never send the next request while this one may still be running in the page.
+        const settled = await Promise.race([call.then(() => true, () => true), new Promise<boolean>((r) => setTimeout(() => r(false), 2 * timeoutMs))]);
+        if (!settled) stalled.add(route);
+        continue;
+      }
+      outputs.push({ trialId: trial.trialId, fixtureId, text: res.text });
+      const observed = mapInferenceSource(res.inferenceSource);
+      const routedCorrectly = res.outcome === 'ok' && res.inferenceSource === EXPECTED[route];
+      const validation = res.outcome === 'ok' ? validate(fixture, res.text) : null;
+      const failures: RawRecord['failures'] = [];
+      if (res.outcome === 'error') failures.push({ category: 'generation_error', detail: res.errorCode });
+      else if (!routedCorrectly) failures.push({ category: 'routing_failure', detail: res.inferenceSource === null ? 'no inference source reported' : `observed ${observed === 'UNKNOWN' ? 'an unknown source' : observed} for ${route}` });
+      for (const f of validation?.failures ?? []) failures.push({ category: f, detail: null });
+      const reportedUsage = res.usage;
+      const record = ran(base, startedAt, wallNow());
       emit({
-        ...ran(base, startedAt, wallNow()), status: timedOut ? 'timed_out' : 'failed',
-        failures: [{ category: timedOut ? 'request_timeout' : 'bench_page_error', detail: timedOut ? `no response within ${timeoutMs} ms` : null }],
+        ...record,
+        status: res.outcome === 'error' || !routedCorrectly ? 'failed' : 'completed',
+        assistant: {
+          ...record.assistant!, observedInferenceSource: observed === 'UNKNOWN' ? null : observed, schemaValid: validation?.schemaValid ?? null,
+          providerInputTokens: reportedUsage?.inputTokens ?? null, providerOutputTokens: reportedUsage?.outputTokens ?? null,
+          inputBytes: req.inputBytes, outputBytes: res.text === null ? null : Buffer.byteLength(res.text, 'utf8'),
+        },
+        timings: {
+          ...record.timings, clockDomain: res.clockDomain,
+          // Null when the call did not stream: never the total in its place.
+          firstOutputMs: res.streaming ? res.firstOutputMs : null,
+          generationCompleteMs: res.generationCompleteMs,
+        },
+        resources: {
+          ...record.resources,
+          providerUsageByRole: reportedUsage && reportedUsage.inputTokens !== null && reportedUsage.outputTokens !== null
+            ? [{ role: 'assistant', inputTokens: reportedUsage.inputTokens, outputTokens: reportedUsage.outputTokens, cacheTokens: null, provenance: 'observed', source: 'firebase_ai_logic_usage_metadata' }] : [],
+          usageCoverage: reportedUsage ? 'partial' : 'none',
+        },
+        failures, confounders: overlapNote,
       });
-      continue;
+    } catch (e) {
+      if (!(e instanceof TransportFailure)) throw e;
+      // I3: the bridge or the CDP link failed. That is infrastructure, not a sample: this slot is abandoned and the cohort stops.
+      transportFailed = true;
+      emit({ ...base, status: 'abandoned', failures: [{ category: 'bench_transport_failure', detail: null }] });
     }
-    outputs.push({ trialId: trial.trialId, fixtureId, text: res.text });
-    const observed = mapInferenceSource(res.inferenceSource);
-    const routedCorrectly = res.outcome === 'ok' && res.inferenceSource === EXPECTED[route];
-    const validation = res.outcome === 'ok' ? validate(fixture, res.text) : null;
-    const failures: RawRecord['failures'] = [];
-    if (res.outcome === 'error') failures.push({ category: 'generation_error', detail: res.errorCode });
-    else if (!routedCorrectly) failures.push({ category: 'routing_failure', detail: res.inferenceSource === null ? 'no inference source reported' : `observed ${observed === 'UNKNOWN' ? 'an unknown source' : observed} for ${route}` });
-    for (const f of validation?.failures ?? []) failures.push({ category: f, detail: null });
-    const reportedUsage = res.usage;
-    const record = ran(base, startedAt, wallNow());
-    emit({
-      ...record,
-      status: res.outcome === 'error' || !routedCorrectly ? 'failed' : 'completed',
-      assistant: {
-        ...record.assistant!, observedInferenceSource: observed === 'UNKNOWN' ? null : observed, schemaValid: validation?.schemaValid ?? null,
-        providerInputTokens: reportedUsage?.inputTokens ?? null, providerOutputTokens: reportedUsage?.outputTokens ?? null,
-        inputBytes: req.inputBytes, outputBytes: res.text === null ? null : Buffer.byteLength(res.text, 'utf8'),
-      },
-      timings: {
-        ...record.timings, clockDomain: res.clockDomain,
-        // Null when the call did not stream: never the total in its place.
-        firstOutputMs: res.streaming ? res.firstOutputMs : null,
-        generationCompleteMs: res.generationCompleteMs,
-      },
-      resources: {
-        ...record.resources,
-        providerUsageByRole: reportedUsage && reportedUsage.inputTokens !== null && reportedUsage.outputTokens !== null
-          ? [{ role: 'assistant', inputTokens: reportedUsage.inputTokens, outputTokens: reportedUsage.outputTokens, cacheTokens: null, provenance: 'observed', source: 'firebase_ai_logic_usage_metadata' }] : [],
-        usageCoverage: reportedUsage ? 'partial' : 'none',
-      },
-      failures,
-    });
   }
-  await o.adapter.close?.();
   return { records, setupLedger, outputs, environment };
+}
+
+/** A bounded call to the page: a timeout is `RequestTimeout`; any rejection from the bridge or the CDP link is a `TransportFailure`. Its message is never kept. */
+function transport<T>(p: Promise<T>, ms: number): Promise<T> {
+  return withTimeout(p, ms).catch((e: unknown) => { throw e instanceof RequestTimeout ? e : new TransportFailure(); });
 }
 
 type Base = RawRecord;
@@ -172,7 +214,7 @@ type Base = RawRecord;
 function baseRecord(trial: PlannedTrial, slot: AssistantSlot, route: BenchRoute, dataKind: RawRecord['dataKind'], fixtureId: string, sdkVersion: string, payload: string): Base {
   return {
     dataKind, status: 'not_run', track: 'assistant', trialId: trial.trialId, mode: route, blockId: null, attemptId: trial.trialId, slotId: slot.id, slotAttempt: trial.slotAttempt,
-    configuration: { candidateSha: null, inferenceDestination: route === 'ONLY_ON_DEVICE' ? 'device' : 'cloud', providerAccountReference: null, credentialMode: null, accountTier: null, cacheCondition: slot.warmup ? null : 'warm', localHost: null, cloudHost: null },
+    configuration: { candidateSha: null, inferenceDestination: route === 'ONLY_ON_DEVICE' ? 'device' : 'cloud', providerAccountReference: null, credentialMode: null, accountTier: null, credentialPath: null, agentState: null, cacheCondition: slot.warmup ? null : 'warm', localHost: null, cloudHost: null },
     assistant: {
       fixtureId, requestedMode: route, observedInferenceSource: null, sdkVersion, schemaValid: null, warmup: slot.warmup, payloadSha256: payload,
       semanticReview: { reviewer: null, routeLabelHidden: null, retainedFacts: null, missingFacts: null, inventedRequirements: null },

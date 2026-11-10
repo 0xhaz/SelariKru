@@ -220,7 +220,7 @@ export class World {
         stream.end(0);
       },
     });
-    const runtime = new SbxRuntimeAdapter(sbx, { home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(this.root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
+    const runtime = new SbxRuntimeAdapter(sbx, { scope: 'security:runner', home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(this.root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
     const report = await runAttempt({
       api: this.api(opts.token), runtime, artifacts: new LocalDiskArtifactStore(this.artifactDir), workRoot: join(this.root, 'work'),
       repos: { [PROJECT]: this.repo }, heartbeatMs: opts.heartbeatMs ?? 40, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => this.logs.push(l),

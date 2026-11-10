@@ -91,8 +91,9 @@ export async function runWorkersCommand(ctx: RunContext): Promise<number> {
     const catalog = await detectClaude();
     env = {
       catalog, runnerReport: catalog.providers.map((p) => ({ provider: p.provider, harnessVersion: p.harnessVersion, models: p.models.map((m) => m.id) })),
-      runtime: (o: { home: string; attemptsRoot: string }) => new SbxRuntimeAdapter(new NodeSbxRunner(), { home: homedir(), forbidden: [ctx.repoRoot], attemptsRoot: o.attemptsRoot }),
+      runtime: (o: { home: string; attemptsRoot: string; scope: string }) => new SbxRuntimeAdapter(new NodeSbxRunner(), { scope: o.scope, home: homedir(), forbidden: [ctx.repoRoot], attemptsRoot: o.attemptsRoot, log: (l: string) => ctx.out(l) }),
       verifierRunner: dockerRunner(), verifierHost: LOCAL_DOCKER_HOST,
+      agentState: (await import('./workers/agent-state.ts')).sbxAgentState(),
     };
   }
   try {

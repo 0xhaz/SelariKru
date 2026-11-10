@@ -7,7 +7,7 @@ import type { SandboxSpec } from '@selarikru/protocol';
 import { runtimeConformance } from './runtime.ts';
 
 /**
- * The same suite against the real `sbx`. Opt in with SELARIKRU_REAL_SBX=1: it creates and removes `selarikru-t*` sandboxes
+ * The same suite against the real `sbx`. Opt in with SELARIKRU_REAL_SBX=1: it creates and removes `selarikru-s<scope>-t*` sandboxes in its own scope
  * only, by explicit name, and never touches any other sandbox, policy or setting.
  */
 const enabled = process.env['SELARIKRU_REAL_SBX'] === '1';
@@ -18,6 +18,7 @@ if (enabled) {
   runtimeConformance('sbx adapter over the real sbx', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'conf-real-')));
     const runtime = new SbxRuntimeAdapter(new NodeSbxRunner(), {
+      scope: `conformance:real:${run}`,
       home: homedir(),
       forbidden: [resolve(import.meta.dirname, '..', '..')],
       attemptsRoot: join(root, 'attempts'),

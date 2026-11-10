@@ -30,9 +30,17 @@ export interface FreshSchema {
   close(): Promise<void>;
 }
 
-/** A new, migrated schema named `bench_<random>`. Only this schema is ever written or dropped. */
-export async function freshSchema(databaseUrl: string): Promise<FreshSchema> {
-  const name = `bench_${randomBytes(6).toString('hex')}`;
+/** `bench_<creation time, base 36>_<random>`: the age is in the name, so a stale schema can be found without any other record. */
+export function benchSchemaName(createdAtMs: number = Date.now()): string {
+  return `bench_${createdAtMs.toString(36)}_${randomBytes(4).toString('hex')}`;
+}
+
+const BENCH_SCHEMA = /^bench_([0-9a-z]{6,12})_[0-9a-f]{8}$/;
+
+/** A new, migrated schema named by `benchSchemaName`. Only this schema is ever written or dropped. */
+export async function freshSchema(databaseUrl: string, onSchema?: (name: string) => void): Promise<FreshSchema> {
+  const name = benchSchemaName();
+  onSchema?.(name);
   const admin = createDb(databaseUrl, { max: 1 });
   try {
     await admin.db.execute(sql.raw(`CREATE SCHEMA ${name}`));
@@ -78,6 +86,32 @@ export function injectFetch(app: FastifyInstance): typeof fetch {
   }) as typeof fetch;
 }
 
+/**
+ * M1: drops `bench_` schemas older than the threshold, as a manual command only (never during a stack run). Refuses anything that is not a
+ * `bench_<time>_<random>` name, including the default schema; a `bench_` name whose age it cannot read is left in place.
+ */
+export async function sweepBenchSchemas(databaseUrl: string, o: { readonly olderThanMs: number; readonly now?: number }): Promise<string[]> {
+  if (!(o.olderThanMs > 0)) throw new Error('the threshold must be positive');
+  const now = o.now ?? Date.now();
+  const admin = createDb(databaseUrl, { max: 1 });
+  try {
+    const rows = await admin.db.execute(sql`SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'bench\_%'`);
+    const dropped: string[] = [];
+    for (const r of rows) {
+      const name = String(r['schema_name']);
+      const m = BENCH_SCHEMA.exec(name);
+      if (m === null || name === 'public') continue;
+      const created = parseInt(m[1]!, 36);
+      if (!Number.isFinite(created) || now - created < o.olderThanMs) continue;
+      await admin.db.execute(sql.raw(`DROP SCHEMA IF EXISTS ${name} CASCADE`));
+      dropped.push(name);
+    }
+    return dropped;
+  } finally {
+    await admin.close();
+  }
+}
+
 export interface StackOptions {
   readonly databaseUrl: string;
   /** The trial's own source repository (a fresh clone at the starter SHA). Candidates are assembled into it. */
@@ -93,6 +127,8 @@ export interface StackOptions {
   readonly repository: string;
   readonly attemptTimeoutSeconds: number;
   readonly driverIntervalMs: number;
+  /** Told the schema's name as soon as it exists (tests). */
+  readonly onSchema?: (name: string) => void;
 }
 
 export interface Stack {
@@ -112,7 +148,17 @@ export interface Stack {
 }
 
 export async function openStack(o: StackOptions): Promise<Stack> {
-  const fresh = await freshSchema(o.databaseUrl);
+  const fresh = await freshSchema(o.databaseUrl, o.onSchema);
+  try {
+    return await stackOn(fresh, o);
+  } catch (e) {
+    // M1: nothing after the schema exists may leave it, or its pool, behind.
+    await fresh.close().catch(() => undefined);
+    throw e;
+  }
+}
+
+async function stackOn(fresh: FreshSchema, o: StackOptions): Promise<Stack> {
   const { db } = fresh;
   const ownerUid = `bench-owner-${randomBytes(4).toString('hex')}`;
   const ownerToken = randomBytes(24).toString('hex');
@@ -125,8 +171,13 @@ export async function openStack(o: StackOptions): Promise<Stack> {
   const verifier = { async verifyToken(token: string) { if (token === ownerToken) return { uid: ownerUid }; throw new Error('bad token'); } };
   const scheduler = createScheduler({ catalog: o.catalog, db, now: o.now, policy: o.policy });
   const app = buildApp({ config, db, verifier, now: o.now, scheduler, policy: o.policy, catalog: o.catalog });
-  await app.ready();
-  await db.insert(schema.projects).values({ tenantId: BENCH_TENANT, projectId, repository: o.repository, defaultBranch: 'main', classification: 'internal' });
+  try {
+    await app.ready();
+    await db.insert(schema.projects).values({ tenantId: BENCH_TENANT, projectId, repository: o.repository, defaultBranch: 'main', classification: 'internal' });
+  } catch (e) {
+    await app.close().catch(() => undefined);
+    throw e;
+  }
   const fetchImpl = injectFetch(app);
 
   const owner = async (method: 'GET' | 'POST', path: string, body?: unknown) => {

@@ -107,7 +107,7 @@ describe('the shell frames', () => {
   it('the adapter opens it inside the handle\'s own sandbox', async () => {
     const sbx = new FakeSbx();
     sbx.addForeign(NAME);
-    const adapter = new SbxRuntimeAdapter(sbx, { home: '/h', forbidden: [], attemptsRoot: null });
+    const adapter = new SbxRuntimeAdapter(sbx, { scope: 'tenant_a:runner_1', home: '/h', forbidden: [], attemptsRoot: null });
     await adapter.openControlShell({ sandboxId: NAME, attemptId: 'a', taskId: 't', workspacePath: '/ws' }, 'ctl_9');
     expect(sbx.calls[0]!.slice(0, 5)).toEqual(['exec', '-i', '-w', '/ws', NAME]);
   });

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { isOurSandbox } from './names.ts';
+import { isOurSandbox, OUR_SANDBOX } from './names.ts';
 import type { AttemptExit } from '@selarikru/protocol';
 
 export interface SbxResult {
@@ -65,7 +65,9 @@ export function assertSafeSbxArgs(args: readonly string[]): void {
       return;
     case 'create': {
       const i = args.indexOf('--name');
-      ours(i >= 0 ? args[i + 1] : undefined);
+      const name = i >= 0 ? args[i + 1] : undefined;
+      // A new sandbox always carries an owner scope; a legacy unscoped name is never created.
+      if (name === undefined || !OUR_SANDBOX.test(name)) bad(`sandbox ${JSON.stringify(name)} is not a scoped selarikru sandbox name`);
       return;
     }
     case 'exec': {

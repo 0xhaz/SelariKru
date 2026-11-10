@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { renderTaskFile, runAttempt, storeChanges, type AttemptDeps } from '../src/attempt.ts';
 import { ApiStatusError, HttpRunnerApi, LeaseLostError } from '../src/api.ts';
 import { buildTaskBundle, sandboxName } from '@selarikru/runtime-docker-local';
-import { makeWorld, type World, type WorldOptions } from './world.ts';
+import { makeWorld, WORLD_SCOPE, type World, type WorldOptions } from './world.ts';
 
 let w: World | null = null;
 afterEach(async () => {
@@ -245,7 +245,7 @@ describe('in-guest limit and runner shutdown', () => {
     expect(report.outcome).toBe('aborted');
     expect(w.api.published).toHaveLength(0);
     expect(w.sbx.streams[0]!.isEnded).toBe(true);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
   });
 });
 
@@ -257,7 +257,7 @@ describe('runAttempt', () => {
     expect((w.api.published[0] as { changeManifestSha256: string }).changeManifestSha256).toBe(report.changeManifest);
     expect(report.outcome).toBe('completed');
     // the sandbox was created with a stable name, its workspace holds the pinned source, and calibration material is absent
-    const name = sandboxName('task1', 'att_1');
+    const name = sandboxName(WORLD_SCOPE, 'task1', 'att_1');
     expect(w.sbx.calls.find((c) => c[0] === 'create')).toContain(name);
     expect(w.sbx.sandboxes.has(name)).toBe(false);
     expect(w.sbx.sandboxes.has('hq-askwell-jim')).toBe(true);
@@ -281,7 +281,7 @@ describe('runAttempt', () => {
     expect(w.api.published).toHaveLength(1);
     expect(w.api.published[0]).toMatchObject({ outcome: 'failed' });
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/outside allowedPaths.*contract\/runtime\.md/);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
   });
 
   it('sandbox failure never falls back to host mode', async () => {
@@ -292,7 +292,7 @@ describe('runAttempt', () => {
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/sandbox/i);
     // no agent ever started, on the host or anywhere else
     expect(w.sbx.streams).toHaveLength(0);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
     expect(w.sbx.calls.every((c) => ['ls', 'create', 'rm', '--version'].includes(c[0]!))).toBe(true);
   });
 
@@ -312,7 +312,7 @@ describe('runAttempt', () => {
     expect((w.api.published[0] as { reason: string }).reason).toMatch(/cancel/i);
     expect(w.sbx.calls.some((c) => c[0] === 'exec' && c.join(' ').includes('selarikru-attempt.pid') && c.join(' ').includes('kill -INT'))).toBe(true);
     expect(w.sbx.streams[0]!.isEnded).toBe(true);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
   });
 
   it('a lost lease stops the agent, publishes nothing, and still destroys the sandbox', async () => {
@@ -327,7 +327,7 @@ describe('runAttempt', () => {
     expect(report.outcome).toBe('lease_lost');
     expect(w.api.published).toHaveLength(0);
     expect(w.sbx.streams[0]!.isEnded).toBe(true);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
   });
 
   it('repeated heartbeat network failures stop the agent locally, because a replacement may already be scheduled', async () => {
@@ -400,7 +400,7 @@ describe('runAttempt', () => {
     const { w, deps } = await setup({ publishThrows: true });
     const report = await runAttempt(deps, w.lease);
     expect(report.outcome).toBe('lease_lost');
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
     expect(await exists(join(w.workRoot, 'attempts', 'att_1'))).toBe(false);
   });
 

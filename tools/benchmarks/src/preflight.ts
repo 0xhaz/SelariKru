@@ -151,8 +151,13 @@ function cliLogin(list: Checklist, status: CliLoginStatus | undefined): void {
   const reason = status === undefined ? 'claude_cli_login_unchecked'
     : !status.present ? 'claude_cli_missing'
       : status.loggedIn === false ? 'claude_cli_not_logged_in'
-        : status.loggedIn === null ? 'claude_cli_login_unknown' : null;
-  const detail = reason === null ? 'The claude CLI is present and logged in. Checked read-only; no account details kept or printed.'
+        : status.loggedIn === null ? 'claude_cli_login_unknown'
+          // The host login is not what the sandbox uses: sbx's global anthropic service secret is. Without it the worker has no credential.
+          : status.sandboxSecret === undefined ? 'sbx_anthropic_secret_unchecked'
+            : status.sandboxSecret === false ? 'sbx_anthropic_secret_missing'
+              : status.sandboxSecret === null ? 'sbx_anthropic_secret_unknown' : null;
+  const detail = reason === null ? 'The claude CLI is present and logged in, and sbx holds the global anthropic service secret that carries the login into each sandbox. Checked read-only; no account details kept or printed.'
+    : reason.startsWith('sbx_') ? 'The claude CLI is logged in, but sbx\'s global anthropic service secret, which carries the login into each sandbox, is missing or unreadable.'
     : reason === 'claude_cli_login_unchecked' ? 'The claude CLI login was not checked.'
       : reason === 'claude_cli_missing' ? 'The claude CLI was not found.'
         : reason === 'claude_cli_not_logged_in' ? 'The claude CLI is not logged in.' : 'The claude CLI login status could not be read.';
@@ -244,6 +249,13 @@ export function preflight(input: PreflightInput): PreflightReport {
   return { liveDispatch: { workers: list.decide('workers'), assistant: list.decide('assistant') }, checks: list.checks, modes };
 }
 
+/** M8: what the owner sets up before a live Track A cohort. */
+const RUNBOOK: readonly string[] = [
+  'Start a separate Chrome profile for CDP, never your everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>.',
+  'In that profile, sign in to the control web, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort.',
+  'Then run: benchmark run-assistant --live --cdp http://127.0.0.1:9222 --bench-url <the bench page URL> --records <file>.',
+];
+
 const MARK: Readonly<Record<CheckStatus, string>> = { pass: 'PASS ', warn: 'WARN ', block: 'BLOCK' };
 
 export function formatPreflight(report: PreflightReport): string {
@@ -254,6 +266,7 @@ export function formatPreflight(report: PreflightReport): string {
     const kind = mode.required ? mode.track : `${mode.track}, optional`;
     lines.push(`  ${mode.id} (${kind}): ${mode.status}${mode.reason ? ` - ${mode.reason}` : ''}`);
   }
+  lines.push('', 'T8.5 runbook (Track A, live):', ...RUNBOOK.map((l) => `  - ${l}`));
   lines.push('');
   for (const t of ['assistant', 'workers'] as const) {
     const d = report.liveDispatch[t];

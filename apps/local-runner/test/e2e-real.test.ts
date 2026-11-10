@@ -66,7 +66,7 @@ describe.skipIf(!enabled)('real end-to-end attempt', () => {
       );
       const { token } = await enrolRunner(app, 'local');
       const api = new HttpRunnerApi(`http://127.0.0.1:${port}`, token);
-      const runtime = new SbxRuntimeAdapter(new NodeSbxRunner(), { home: homedir(), forbidden: [platformRepo], attemptsRoot: join(workRoot, 'attempts') });
+      const runtime = new SbxRuntimeAdapter(new NodeSbxRunner(), { scope: 'e2e-real:runner', home: homedir(), forbidden: [platformRepo], attemptsRoot: join(workRoot, 'attempts') });
       const claim = await api.claim();
       expect(claim.lease?.taskId).toBe(taskId);
       const t0 = Date.now();

@@ -12,6 +12,11 @@ export interface CliLoginStatus {
   readonly present: boolean;
   /** Logged in, not logged in, or null when the answer could not be read. */
   readonly loggedIn: boolean | null;
+  /**
+   * How the login reaches a sandbox: sbx's global `anthropic` service secret (OAuth), injected by its proxy. True when sbx lists it,
+   * false when it does not, null when the list could not be read, absent when not checked.
+   */
+  readonly sandboxSecret?: boolean | null;
 }
 
 export type CliLoginProbe = () => Promise<CliLoginStatus>;

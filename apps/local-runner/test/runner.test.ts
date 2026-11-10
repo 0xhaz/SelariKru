@@ -8,8 +8,8 @@ import { loadCredentials, pair } from '../src/credentials.ts';
 import { RunnerLoop } from '../src/loop.ts';
 import { HttpRunnerApi, assertSafeApiUrl } from '../src/api.ts';
 import { runAttempt, type AttemptDeps } from '../src/attempt.ts';
-import { sandboxName } from '@selarikru/runtime-docker-local';
-import { makeWorld, type World } from './world.ts';
+import { SbxRuntimeAdapter, sandboxName } from '@selarikru/runtime-docker-local';
+import { makeWorld, WORLD_SCOPE, type World } from './world.ts';
 
 let w: World | null = null;
 let tmp: string | null = null;
@@ -63,7 +63,7 @@ describe('RunnerLoop', () => {
     w = await makeWorld({});
     w.sbx.addForeign('selarikru-spike-a');
     // an orphan from a previous run of this runner
-    const orphan = sandboxName('old-task', 'old-attempt');
+    const orphan = sandboxName(WORLD_SCOPE, 'old-task', 'old-attempt');
     w.sbx.sandboxes.set(orphan, { status: 'stopped', mounts: [], workspaces: [], agent: 'claude' });
     const logs: string[] = [];
     w.api.claim = vi.fn(async () => ({ lease: null, reason: 'nothing_ready' }));
@@ -76,6 +76,26 @@ describe('RunnerLoop', () => {
     expect(logs.join('\n')).toContain('removed 1 orphaned');
   });
 
+  it('C1: two runners on one machine never sweep each other\'s sandboxes, and a legacy unscoped one is left alone', async () => {
+    w = await makeWorld({});
+    // Another runner on the same sbx (for example T6.7's cloud-location runner, or a benchmark trial), with a live sandbox of its own.
+    const other = new SbxRuntimeAdapter(w.sbx, { scope: 'ten:runner_other', home: '/Users/nobody', forbidden: [], attemptsRoot: null });
+    const theirs = sandboxName('ten:runner_other', 'task1', 'att_1');
+    w.sbx.sandboxes.set(theirs, { status: 'running', mounts: [], workspaces: [], agent: 'claude' });
+    const legacy = 'selarikru-t12345678-a87654321';
+    w.sbx.sandboxes.set(legacy, { status: 'stopped', mounts: [], workspaces: [], agent: 'claude' });
+    const mine = sandboxName(WORLD_SCOPE, 'task1', 'att_1');
+    w.sbx.sandboxes.set(mine, { status: 'stopped', mounts: [], workspaces: [], agent: 'claude' });
+    w.api.claim = vi.fn(async () => ({ lease: null, reason: 'nothing_ready' }));
+    const ctl = new AbortController();
+    await new RunnerLoop({ api: w.api, runtime: w.runtime, attempt: deps(w), pollMs: 5, sleep: async () => ctl.abort(), log: () => undefined }).run(ctl.signal);
+    expect(w.sbx.sandboxes.has(mine)).toBe(false);
+    expect(w.sbx.sandboxes.has(theirs)).toBe(true);
+    expect(w.sbx.sandboxes.has(legacy)).toBe(true);
+    expect(await other.sweepOrphans(new Set([theirs]))).toEqual([]);
+    expect(w.sbx.sandboxes.has(theirs)).toBe(true);
+  });
+
   it('aborting the loop reaches the running attempt, which stops and cleans up, and the loop ends promptly', async () => {
     const ctl = new AbortController();
     w = await makeWorld({ agent: async () => { setTimeout(() => ctl.abort(), 50); return false; } });
@@ -85,7 +105,7 @@ describe('RunnerLoop', () => {
     await loop.run(ctl.signal);
     expect(Date.now() - t0).toBeLessThan(5000);
     expect(w.sbx.streams[0]!.isEnded).toBe(true);
-    expect(w.sbx.sandboxes.has(sandboxName('task1', 'att_1'))).toBe(false);
+    expect(w.sbx.sandboxes.has(sandboxName(WORLD_SCOPE, 'task1', 'att_1'))).toBe(false);
     expect(w.api.published).toHaveLength(0);
   });
 

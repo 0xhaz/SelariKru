@@ -328,9 +328,10 @@ describe('D6 credential mode', () => {
     expect(same.workers.comparisons.find((c) => c.id === 'L1-C1')!.confounders).toEqual([]);
     const modes = report([...pairedWorkers(3).map((r) => (r.mode === 'C1' ? { ...r, configuration: { ...r.configuration, credentialMode: 'api_key' as const } } : r))]);
     const c = modes.workers.comparisons.find((x) => x.id === 'L1-C1')!;
-    expect(c.confounders.join(' ')).toMatch(/account confounder: L1 ran with credential mode cli_login on account tier tier-2; C1 with api_key on tier-2/);
+    // M7: both sides worded alike, and the tier labelled as declared in the manifest, not observed.
+    expect(c.confounders).toContain('account confounder: L1 ran with credential mode cli_login on account tier tier-2 (declared); C1 ran with credential mode api_key on account tier tier-2 (declared). Not an isolated placement comparison.');
     expect(renderReport(modes)).toMatch(/account confounder/);
     const tiers = report([...pairedWorkers(3).map((r) => (r.mode === 'C1' ? { ...r, configuration: { ...r.configuration, accountTier: 'tier-4' } } : r))]);
-    expect(tiers.workers.comparisons.find((x) => x.id === 'L1-C1')!.confounders.join(' ')).toMatch(/account confounder: .*tier-2.*tier-4/);
+    expect(tiers.workers.comparisons.find((x) => x.id === 'L1-C1')!.confounders.join(' ')).toMatch(/account confounder: L1 ran with credential mode cli_login on account tier tier-2 \(declared\); C1 ran with credential mode cli_login on account tier tier-4 \(declared\)/);
   });
 });

@@ -51,6 +51,7 @@
     ],
     "repetitionsPerFixture": 3,
     "excludedWarmupsPerRoute": 2,
+    "setupTimeoutSeconds": 1800,
     "coldStartCohort": "not_planned",
     "sdkVersion": null,
     "browserVersion": null,
@@ -207,7 +208,7 @@
     },
     {
       "id": "worker-trial-isolation",
-      "text": "Each worker trial gets a fresh clone of the starter holding only the starter commit, a fresh bench_<random> PostgreSQL schema (dropped after the trial), a fresh project, run (a benchmark trial with the manifest's coding model pinned), runner enrolment and owner credential, and a fresh sandbox runtime with its own agent home. Setup is timed apart in timings.initialSetupMs. The deadline is workers.attemptTimeoutSeconds from coordinator acceptance (the plan.accepted event); delivery intervals are differences of the trial's server event times on its monotonic clock."
+      "text": "Each worker trial gets a fresh clone of the starter holding only the starter commit, a fresh bench_<time>_<random> PostgreSQL schema (dropped after the trial), a fresh project, run (a benchmark trial with the manifest's coding model pinned), runner enrolment, owner credential and trial-unique task ids, and a fresh sandbox runtime whose sandboxes are named under the trial's own owner scope, so its sweeps never touch the owner's or another runner's sandboxes. Each attempt's sandbox is a new container from the agent image, created with --skills off and only the workspace mounted, and removed after the attempt: Claude config, memory, history and CLAUDE.md inside it do not outlive the attempt, and the host home (~/.claude) never reaches it. What every sandbox on the machine does share: the owner's login, which reaches each sandbox as the sbx global anthropic service secret (OAuth) injected by the sbx proxy, and any sbx kit.shortcuts.claude image override; a set override, or a sandbox already in the trial's scope, is recorded as the confounder shared_agent_state. Every live trial records configuration.credentialPath and configuration.agentState (sandboxes in scope and the image override, before and after); the T8.5 first live trial checks both. Setup is timed apart in timings.initialSetupMs. The deadline is workers.attemptTimeoutSeconds from coordinator acceptance (the plan.accepted event); delivery intervals are differences of the trial's server event times on its monotonic clock. Claims refused 5 times in a row, or no start within 3 minutes, end the trial as a replaceable denied_start naming the refusal."
     },
     {
       "id": "worker-budget",
@@ -228,6 +229,10 @@
     {
       "id": "budget-d4",
       "text": "D4 is approved at $60 variable spend: $50 coding, planning and verification models and tools, $5 cloud runtime, $5 assistant inference. The manifest stays proposal_not_authorized until the owner marks it authorized, with payer, approver and time, at cohort start."
+    },
+    {
+      "id": "cdp-profile",
+      "text": "Track A drives the owner's Chrome over CDP. Start a separate Chrome profile for it, never the owner's everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>. In that profile, sign in to the control web as the owner, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort (its download is per profile). The runner accepts only a loopback CDP endpoint, finds the already-open bench tab, never opens or navigates one, and disconnects when done."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",

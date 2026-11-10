@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { deriveOrder, freezeOrder, ManifestError, manifestSha256, NO_STARTS, orderSha256, parseManifest, recordStart, repairStart, type Manifest } from '../src/manifest.ts';
 import { claudeCliLoginProbe } from '../src/cli-login.ts';
+import { sbxAgentState, sbxAnthropicSecret } from '../src/workers/agent-state.ts';
+import { sandboxName } from '@selarikru/runtime-docker-local';
 import { formatPreflight, preflight, type PreflightInput } from '../src/preflight.ts';
 import { HASHES, fixtureManifestText, resolvedManifest, SECRET, started } from './fixtures.ts';
 import { watchNetwork } from './network.ts';
@@ -239,7 +241,7 @@ describe('T8.1 manifest loader and preflight', () => {
 
   it('D6: in cli_login mode the API key is not asked for; the claude CLI must be present and logged in, checked without printing account details', () => {
     const cli = resolvedManifest((m) => { m.credentials.mode = 'cli_login'; });
-    const ok = preflight(input(cli, { env: {}, cliLogin: { present: true, loggedIn: true } }));
+    const ok = preflight(input(cli, { env: {}, cliLogin: { present: true, loggedIn: true, sandboxSecret: true } }));
     expect(ok.liveDispatch.workers.allowed).toBe(true);
     expect(ok.checks.find((c) => c.id === 'api_key')).toBeUndefined();
     expect(ok.checks.find((c) => c.id === 'cli_login')).toMatchObject({ status: 'pass', tracks: ['workers'] });
@@ -248,6 +250,10 @@ describe('T8.1 manifest loader and preflight', () => {
       [{ present: true, loggedIn: false }, 'claude_cli_not_logged_in'],
       [{ present: true, loggedIn: null }, 'claude_cli_login_unknown'],
       [undefined, 'claude_cli_login_unchecked'],
+      // I4: the host login reaches a sandbox only through sbx's global anthropic service secret.
+      [{ present: true, loggedIn: true }, 'sbx_anthropic_secret_unchecked'],
+      [{ present: true, loggedIn: true, sandboxSecret: false }, 'sbx_anthropic_secret_missing'],
+      [{ present: true, loggedIn: true, sandboxSecret: null }, 'sbx_anthropic_secret_unknown'],
     ];
     for (const [cliLogin, blocker] of cases) {
       const r = preflight(input(cli, { env: { ANTHROPIC_API_KEY: SECRET }, ...(cliLogin ? { cliLogin } : {}) }));
@@ -274,5 +280,33 @@ describe('T8.1 manifest loader and preflight', () => {
     expect(await claudeCliLoginProbe(exec({ stdout: JSON.stringify({ loggedIn: false }), code: 1 }))()).toEqual({ present: true, loggedIn: false });
     expect(await claudeCliLoginProbe(exec({ stdout: 'Logged in as owner@example.com', code: 0 }))()).toEqual({ present: true, loggedIn: null });
     expect(await claudeCliLoginProbe(exec('ENOENT'))()).toEqual({ present: false, loggedIn: null });
+  });
+
+  it('I4: the sbx probes are read-only and keep only names and flags', async () => {
+    const calls: string[][] = [];
+    const exec = async (file: string, args: readonly string[]) => {
+      calls.push([file, ...args]);
+      if (args[0] === 'secret') return { code: 0, stdout: 'SCOPE TYPE NAME\n(global) service github\n(global) service anthropic (oauth configured)\n' };
+      if (args[0] === 'settings') return { code: 0, stdout: '\n' };
+      return { code: 0, stdout: JSON.stringify([{ name: sandboxName('bench:c:t:1', 'x', 'y') }, { name: 'hq-askwell-jim' }, { name: sandboxName('owner:runner', 'x', 'y') }]) };
+    };
+    expect(await sbxAnthropicSecret(exec)).toBe(true);
+    expect(await sbxAgentState(exec)('bench:c:t:1')).toEqual({ scopedSandboxes: [sandboxName('bench:c:t:1', 'x', 'y')], kitShortcut: null, sandboxSecret: true });
+    expect(new Set(calls.map((c) => c.slice(1, 3).join(' ')))).toEqual(new Set(['secret ls', 'ls --json', 'settings get']));
+    expect(await sbxAnthropicSecret(async () => ({ code: 0, stdout: '(global) service github\n' }))).toBe(false);
+    expect(await sbxAnthropicSecret(async () => ({ code: 1, stdout: '' }))).toBeNull();
+  });
+
+  it('M8: the preflight output carries the T8.5 runbook notes: a separate Chrome profile for CDP, with the device model downloaded in it', () => {
+    const m = parseManifest(fixtureManifestText()).manifest;
+    const note = m.protocolNotes.find((n) => n.id === 'cdp-profile');
+    expect(note?.text).toMatch(/--user-data-dir/);
+    expect(note?.text).toMatch(/device model/);
+    const text = formatPreflight(preflight(input(m)));
+    expect(text).toMatch(/T8\.5 runbook/);
+    expect(text).toMatch(/--remote-debugging-port=9222 --user-data-dir=/);
+    expect(text).toMatch(/download the on-device model in that profile/);
+    // I4: the isolation note says what is actually true about agent state.
+    expect(m.protocolNotes.find((n) => n.id === 'worker-trial-isolation')?.text).toMatch(/sbx global anthropic service secret/);
   });
 });

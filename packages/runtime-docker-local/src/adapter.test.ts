@@ -19,10 +19,11 @@ afterEach(async () => {
 });
 
 const spec = (over: Partial<SandboxSpec> = {}): SandboxSpec => ({ attemptId: 'a1', taskId: 't1', workspacePath: ws, cpus: 2, memoryMiB: 4096, ...over });
-const make = (opts: FakeOptions = {}) => {
-  const sbx = new FakeSbx(opts);
-  sbx.addForeign('hq-askwell-jim');
+const SCOPE = 'tenant_a:runner_1';
+const make = (opts: FakeOptions = {}, sbx = new FakeSbx(opts), scope = SCOPE, log?: (l: string) => void) => {
+  if (!sbx.sandboxes.has('hq-askwell-jim')) sbx.addForeign('hq-askwell-jim');
   const rt = new SbxRuntimeAdapter(sbx, {
+    scope, ...(log ? { log } : {}),
     home: '/Users/nobody',
     forbidden: ['/repo/selarikru'],
     attemptsRoot: join(root, 'attempts'),
@@ -36,7 +37,7 @@ describe('SbxRuntimeAdapter.create', () => {
   it('creates a stable-named sandbox with exactly one mount and no env, ports, volumes or shared skills', async () => {
     const { sbx, rt } = make();
     const h = await rt.create(spec());
-    expect(h.sandboxId).toBe(sandboxName('t1', 'a1'));
+    expect(h.sandboxId).toBe(sandboxName(SCOPE, 't1', 'a1'));
     const create = sbx.calls.find((c) => c[0] === 'create')!;
     expect(create.filter((a) => a === ws)).toHaveLength(1);
     expect(create.slice(-2)).toEqual(['claude', ws]);
@@ -55,14 +56,14 @@ describe('SbxRuntimeAdapter.create', () => {
     for (const extra of ['/Users/nobody:/home/agent', '/var/run/docker.sock:/var/run/docker.sock', '/Users/nobody/.claude:/home/agent/.claude']) {
       const m = make({ extraMounts: [extra] });
       await expect(m.rt.create(spec())).rejects.toBeInstanceOf(SandboxCreateError);
-      expect(m.sbx.sandboxes.has(sandboxName('t1', 'a1'))).toBe(false);
+      expect(m.sbx.sandboxes.has(sandboxName(SCOPE, 't1', 'a1'))).toBe(false);
     }
   });
 
   it('sandbox failure never falls back to host mode: create failure throws, removes any orphan, and runs nothing else', async () => {
     const { sbx, rt } = make({ failCreate: true, createLeavesOrphan: true });
     await expect(rt.create(spec())).rejects.toBeInstanceOf(SandboxCreateError);
-    expect(sbx.sandboxes.has(sandboxName('t1', 'a1'))).toBe(false);
+    expect(sbx.sandboxes.has(sandboxName(SCOPE, 't1', 'a1'))).toBe(false);
     expect(sbx.sandboxes.has('hq-askwell-jim')).toBe(true);
     const verbs = new Set(sbx.calls.map((c) => c[0]));
     expect([...verbs].every((v) => ['--version', 'ls', 'create', 'rm', 'stop'].includes(v!))).toBe(true);
@@ -247,5 +248,32 @@ describe('SbxRuntimeAdapter start/stop/inspect/destroy', () => {
     expect(sbx.sandboxes.has(a.sandboxId)).toBe(true);
     expect(sbx.sandboxes.has('selarikru-spike-a')).toBe(true);
     expect(sbx.sandboxes.has('hq-askwell-jim')).toBe(true);
+  });
+
+  it('C1: two runtimes on one sbx, in different owner scopes, never sweep or reconcile away each other\'s sandboxes', async () => {
+    const sbx = new FakeSbx();
+    const mine = make({}, sbx, 'tenant_a:runner_1');
+    const theirs = make({}, sbx, 'tenant_a:runner_2');
+    const ws2 = join(root, 'attempts', 'b', 'workspace');
+    await mkdir(ws2, { recursive: true });
+    const a = await mine.rt.create(spec());
+    // The same task and attempt ids in another scope are another sandbox, and creating it leaves the first in place.
+    const b = await theirs.rt.create(spec({ workspacePath: ws2 }));
+    expect(a.sandboxId).not.toBe(b.sandboxId);
+    expect(sbx.sandboxes.has(a.sandboxId)).toBe(true);
+    expect(await mine.rt.sweepOrphans(new Set())).toEqual([a.sandboxId]);
+    expect(sbx.sandboxes.has(b.sandboxId)).toBe(true);
+    expect(await theirs.rt.sweepOrphans(new Set())).toEqual([b.sandboxId]);
+  });
+
+  it('C1: a legacy unscoped sandbox is never swept, and is reported once', async () => {
+    const logs: string[] = [];
+    const sbx = new FakeSbx();
+    const { rt } = make({}, sbx, SCOPE, (l) => logs.push(l));
+    sbx.addForeign('selarikru-t12345678-a87654321');
+    expect(await rt.sweepOrphans(new Set())).toEqual([]);
+    expect(await rt.sweepOrphans(new Set())).toEqual([]);
+    expect(sbx.sandboxes.has('selarikru-t12345678-a87654321')).toBe(true);
+    expect(logs.filter((l) => l.includes('selarikru-t12345678-a87654321'))).toHaveLength(1);
   });
 });
