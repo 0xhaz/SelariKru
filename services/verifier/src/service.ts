@@ -209,6 +209,27 @@ async function readFixtures(fixtures: string | undefined): Promise<{ path: strin
  * live assembled candidate, and an `Error` when the deps do not carry a verifier principal. Runner failures never throw: they become
  * a record with result `error`.
  */
+/**
+ * The verdict transaction's locks, before it writes anything: the candidate row, the run row, then each part's status row in task order. Returns the candidate's status
+ * and verification holder, and whether every part is still live at the revision the candidate carries.
+ *
+ * The run row comes up front, though only `markRunReadyForReview` writes it at the end: taken there, after the claim lock and the project's event sequence, it closed a
+ * cycle with an owner replan or re-verify, which hold the run row and then want the event sequence.
+ */
+export async function lockForVerdict(
+  tx: Tx, candidate: { readonly tenantId: string; readonly projectId: string; readonly runId: string; readonly sha: string }, parts: readonly { readonly taskId: string; readonly revision: number }[],
+): Promise<{ readonly status: string | null; readonly holder: string | null; readonly partsLive: boolean }> {
+  const cur = await tx.execute(sql`
+    SELECT status, detail -> 'verification' ->> 'holder' AS holder FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
+  await tx.execute(sql`SELECT 1 FROM runs WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} FOR UPDATE`);
+  let partsLive = true;
+  for (const p of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
+    const row = await tx.execute(sql`SELECT status, current_revision FROM task_status WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} FOR UPDATE`);
+    if (row.length === 0 || Number(row[0]!['current_revision']) !== p.revision || !LIVE_PART_STATUSES.includes(String(row[0]!['status']))) partsLive = false;
+  }
+  return { status: cur[0] ? String(cur[0]['status']) : null, holder: (cur[0]?.['holder'] as string | null | undefined) ?? null, partsLive };
+}
+
 export async function verifyCandidate(candidate: CandidateRef, deps: VerificationDeps): Promise<VerificationRecord> {
   if (deps.verifier.kind !== 'verifier') throw new Error('verification evidence can only be written by a verifier principal');
   if (!FULL_SHA.test(candidate.sha)) throw new CandidateNotVerifiable('invalid_request', 'a full candidate commit id is required');
@@ -318,17 +339,12 @@ export async function verifyCandidate(candidate: CandidateRef, deps: Verificatio
         tenantId: candidate.tenantId, projectId: candidate.projectId, runId: candidate.runId, dedupeKey: `verification:${recordId}`, role: VERIFICATION_ROLE,
         metric: 'worker_seconds', quantity: (spentMs / 1000).toFixed(3), provenance: 'observed', source: 'verifier', phase: 'active', host: deps.host.startsWith('local') ? 'local' : 'cloud', basis: 'measured', recordedAt: now(),
       });
-      const cur = await tx.execute(sql`
-        SELECT status, detail -> 'verification' ->> 'holder' AS holder FROM candidates WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND run_id = ${candidate.runId} AND sha = ${candidate.sha} FOR UPDATE`);
+      const locked = await lockForVerdict(tx, candidate, parts);
       // The fence: a run that lost its lease (expired and taken, or the candidate re-assembled) writes nothing at all.
-      if (cur[0]?.['holder'] !== holder) throw new CandidateNotVerifiable('lease_lost', 'this verification no longer holds the candidate');
-      const assembled = cur[0]?.['status'] === 'assembled';
+      if (locked.holder !== holder) throw new CandidateNotVerifiable('lease_lost', 'this verification no longer holds the candidate');
+      const assembled = locked.status === 'assembled';
       // A part cancelled or replanned during the run means the tree contains work that is no longer wanted: the verdict can release nothing.
-      let partsLive = true;
-      for (const p of [...parts].sort((a, b) => (a.taskId < b.taskId ? -1 : 1))) {
-        const row = await tx.execute(sql`SELECT status, current_revision FROM task_status WHERE tenant_id = ${candidate.tenantId} AND project_id = ${candidate.projectId} AND task_id = ${p.taskId} FOR UPDATE`);
-        if (row.length === 0 || Number(row[0]!['current_revision']) !== p.revision || !LIVE_PART_STATUSES.includes(String(row[0]!['status']))) partsLive = false;
-      }
+      const partsLive = locked.partsLive;
       const live = assembled && partsLive;
       const notLiveReason = assembled ? 'candidate_part_not_live' : 'candidate_invalidated';
       const taskOutcomes: TaskOutcome[] = [];

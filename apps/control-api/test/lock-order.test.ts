@@ -4,7 +4,8 @@
  */
 import { sql } from 'drizzle-orm';
 import { withTx, type Tx } from '@selarikru/persistence';
-import { lockStaleCandidate, type TrustedVerifier } from '@selarikru/workflow';
+import { lockStaleCandidate, markRunReadyForReview, type TrustedVerifier } from '@selarikru/workflow';
+import { lockForVerdict } from '../../../services/verifier/src/service.ts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PROJECT, RUN, TENANT, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
@@ -88,6 +89,29 @@ describe('replan lock order', () => {
   it('does not deadlock against the claim poll (scheduler lock, a status row, then the run row)', async () => {
     await seedTask(t.db, specFor('t1'), 'ready');
     const res = await race(async (tx) => { await schedulerLock(tx); await statusRow(tx, 't1'); }, runRow, () => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('t1', { revision: 2 })] }));
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+  });
+});
+
+describe('a verdict against a replan of the same run', () => {
+  // Adapted from the probe in the T7.4a review. The verdict takes the verifier's real locks (`lockForVerdict`), then what `applyVerification` takes after them (a status
+  // write, the claim lock, the event sequence), then the real `markRunReadyForReview`. The replan is the real route, adding a task to the run.
+  it('neither side deadlocks: the verdict marks the run ready and the replan goes through after it', async () => {
+    await seedTask(t.db, specFor('a'), 'verifying');
+    await t.db.execute(sql`INSERT INTO candidates (tenant_id, project_id, candidate_id, run_id, target, sha, base_sha, parts, status) VALUES (${TENANT}, ${PROJECT}, 'cand_v', ${RUN}, 'main', ${SHA}, ${'0'.repeat(40)}, '[{"taskId":"a","revision":1}]'::jsonb, 'assembled')`);
+    await t.db.execute(sql`INSERT INTO project_sequences (tenant_id, project_id, last_sequence) VALUES (${TENANT}, ${PROJECT}, 0) ON CONFLICT DO NOTHING`);
+    let ready: boolean | undefined;
+    const res = await race(
+      async (tx) => {
+        await lockForVerdict(tx, { tenantId: TENANT, projectId: PROJECT, runId: RUN, sha: SHA }, [{ taskId: 'a', revision: 1 }]);
+        await tx.execute(sql`UPDATE task_status SET status = 'verified' WHERE tenant_id = ${TENANT} AND project_id = ${PROJECT} AND task_id = 'a'`);
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.claim_rows:${TENANT}:${PROJECT}`}, 0))`);
+        await tx.execute(sql`UPDATE project_sequences SET last_sequence = last_sequence + 1 WHERE tenant_id = ${TENANT} AND project_id = ${PROJECT}`);
+      },
+      async (tx) => { ready = await markRunReadyForReview(tx, { tenantId: TENANT, projectId: PROJECT, taskId: 'a' }, RUN, ['a']); },
+      () => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('b')] }),
+    );
+    expect(ready).toBe(true);
     expect(res.status, JSON.stringify(res.body)).toBe(201);
   });
 });

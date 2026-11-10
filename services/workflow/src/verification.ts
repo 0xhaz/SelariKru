@@ -26,10 +26,22 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  * lock, then `resource_claims` rows and the project's event sequence. Holding this lock, nothing waits for a status row or the scheduler lock, and a transaction that writes for several
  * parts takes it before its first event. The scheduler lock could not serve here: claiming takes it before status rows, and every caller of `releaseTaskClaims` already holds one.
  *
- * The run row is the one place paths disagree. The claim poll and the lease paths (publish, expiry, budget stop) lock a task's status row and then its run row, through `lockBudget`.
- * The claim poll does so under the scheduler lock, so an owner route that locks a run row first (re-verify, replan) takes the candidate and the scheduler lock before it
- * (`lockBeforeRunRow`). A lease path holds no scheduler lock: a route that then waits on a leased task's status row can still meet it in a cycle, and Postgres breaks that by
- * rolling one back, which the API returns as a retryable `transaction_conflict`.
+ * Who follows it. The verifier's verdict (`lockForVerdict` in services/verifier): candidate, run row, its parts' status rows, this lock, event sequence. An owner re-verify:
+ * candidate, scheduler lock, run row, status rows, this lock (`lockBeforeRunRow`, `reverifyRun`). An owner replan: candidate if stale, scheduler lock, run row, the named tasks'
+ * status rows. A cancel: candidate if stale, the task's status row, this lock; it takes no run row.
+ *
+ * Paths that still disagree, all at the run row, and how the loser of each recovers:
+ * - The claim poll (`tryClaim`) takes the scheduler lock, a claimable task's status row, then the run row (`lockBudget`). Replan and re-verify hold the scheduler lock before
+ *   their run row, so they wait for it rather than cross it. The verdict takes no scheduler lock, but its parts are `verifying` and the poll only locks claimable rows, so the
+ *   two never want the same status row. No cycle.
+ * - The lease paths take a leased task's status row and then the run row with no scheduler lock: a runner's publish and the budget stop after a reconciled cost (`settle`,
+ *   `lockBudget`), and lease expiry. Re-verify and the verdict lock only tasks with no live lease (verified, blocked, verifying), so they cannot meet these. A replan can: it
+ *   locks the status row of any task it names, and a task whose attempt is still leased is one (it is refused, but only after the lock). Postgres breaks that cycle by rolling
+ *   one side back:
+ *     - the replan gets a 503 `transaction_conflict`, nothing was recorded, and the owner sends it again (the screen says retrying is safe);
+ *     - a publish gets the same 503 on the runner route, and the runner retries it up to three times before letting the lease lapse to expiry;
+ *     - lease expiry and the verifier are background loops: the pass that lost logs the error and the next tick does the work again, with no 503 anywhere. A verdict that loses
+ *       releases its claim on the candidate, which stays assembled with its parts verifying, so a later tick claims it and judges it again.
  */
 const lockClaimRows = (tx: Tx, scope: ClaimScope) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.claim_rows:${scope.tenantId}:${scope.projectId}`}, 0))`);
 
@@ -479,6 +491,9 @@ export async function retireStaleCandidate(ctx: { readonly now: () => Date }, tx
 /**
  * Sets the run `ready_for_review` only when the tasks covered by one live passing verdict are exactly the run's live tasks (current
  * revisions that are not cancelled or superseded) and every one of them is verified or merged. Returns whether the run is ready.
+ *
+ * It writes the run row last, after the claim lock and the event sequence, so the caller must already hold that row: the verdict takes it with the candidate
+ * (`lockForVerdict`). Locked here for the first time, it would close a cycle with an owner replan or re-verify that holds the run row and wants the event sequence.
  */
 export async function markRunReadyForReview(tx: Tx, key: TaskKey, runId: string, coveredTaskIds: readonly string[]): Promise<boolean> {
   const tasks = await tx
