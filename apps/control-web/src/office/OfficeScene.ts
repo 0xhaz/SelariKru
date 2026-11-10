@@ -40,7 +40,11 @@ export class OfficeScene {
   private last = 0;
   private raf = 0;
   private dirty = true;
-  readonly reducedMotion: boolean;
+  /** Followed live: a change of the preference during the session starts or stops the animation. */
+  reducedMotion: boolean;
+  /** Set while the canvas cannot be seen: a maximised drawer or the Settings modal covers it. */
+  private paused = false;
+  private once = 0;
   private readonly rand = mulberry32(3);
   private readonly cleanups: (() => void)[] = [];
   private homed = false;
@@ -65,12 +69,22 @@ export class OfficeScene {
     this.cleanups.push(() => observer.disconnect());
     resize();
     this.cleanups.push(attachInput(this));
-    if (!this.reducedMotion) this.raf = requestAnimationFrame(this.tick);
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onMotion = (): void => { this.reducedMotion = motion.matches; this.invalidate(); this.run(); };
+    motion.addEventListener('change', onMotion);
+    this.cleanups.push(() => motion.removeEventListener('change', onMotion));
+    // A hidden tab draws nothing.
+    const onVisible = (): void => this.run();
+    document.addEventListener('visibilitychange', onVisible);
+    this.cleanups.push(() => document.removeEventListener('visibilitychange', onVisible));
+    this.run();
   }
 
   destroy(): void {
     cancelAnimationFrame(this.raf);
+    cancelAnimationFrame(this.once);
     this.raf = 0;
+    this.once = 0;
     this.cleanups.forEach((fn) => fn());
     this.canvas.remove();
   }
@@ -78,7 +92,28 @@ export class OfficeScene {
   /** Asks for one more frame. Under reduced motion nothing animates, so the canvas is drawn only when something changed. */
   invalidate(): void {
     this.dirty = true;
-    if (this.reducedMotion && this.raf === 0) this.raf = requestAnimationFrame(() => { this.raf = 0; this.draw(); });
+    if (this.raf === 0 && this.once === 0) this.once = requestAnimationFrame(() => { this.once = 0; this.draw(); });
+  }
+
+  /** The animation loop runs only when it can be seen and motion is allowed; otherwise the canvas is drawn once per change. */
+  private animating(): boolean {
+    return !this.reducedMotion && !this.paused && document.visibilityState !== 'hidden';
+  }
+
+  private run(): void {
+    if (this.animating()) {
+      if (this.raf === 0) { this.last = 0; this.raf = requestAnimationFrame(this.tick); }
+    } else if (this.raf !== 0) {
+      cancelAnimationFrame(this.raf);
+      this.raf = 0;
+    }
+  }
+
+  setPaused(paused: boolean): void {
+    if (paused === this.paused) return;
+    this.paused = paused;
+    this.run();
+    this.invalidate();
   }
 
   zoomBy(delta: number): void {
@@ -160,7 +195,7 @@ export class OfficeScene {
     }
     for (const pr of this.prs.values()) {
       const before = prev.get(pr.num);
-      if (before && before.review !== pr.review && pr.review === 'changes') this.gateMode = { mode: 'changes', at: this.t };
+      if (before && before.verification !== pr.verification && pr.verification === 'out_of_date') this.gateMode = { mode: 'changes', at: this.t };
     }
     if (this.reducedMotion) {
       for (const p of this.parcels) {
@@ -178,8 +213,9 @@ export class OfficeScene {
     const dt = this.last ? Math.min(0.1, (now - this.last) / 1000) : 0;
     this.last = now;
     this.step(dt);
+    this.dirty = true;
     this.draw();
-    this.raf = requestAnimationFrame(this.tick);
+    this.raf = this.animating() ? requestAnimationFrame(this.tick) : 0;
   };
 
   private step(dt: number): void {
@@ -230,7 +266,7 @@ export class OfficeScene {
   private draw(): void {
     const l = this.layout;
     const world = this.world;
-    if (!this.dirty && this.reducedMotion) return;
+    if (!this.dirty) return;
     this.dirty = false;
     const g = this.ctx;
     const dpr = window.devicePixelRatio || 1;
@@ -297,6 +333,7 @@ export class OfficeScene {
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
     const open = w.parcels.filter((x) => !x.merged && !x.closed).length;
     if (kind === 'gate') return { title: 'Verification gate', sub: `${w.verifying ? 'A task is verifying' : 'Nothing is verifying'}. Opens Evidence and PR.` };
-    return { title: 'Pull requests', sub: `${open} open. Opens Evidence and PR.` };
+    const verified = w.parcels.filter((x) => !x.merged && !x.closed && x.verification === 'verified').length;
+    return { title: 'Pull requests', sub: `${open} open, ${verified} with a verified candidate. Opens Evidence and PR.` };
   }
 }

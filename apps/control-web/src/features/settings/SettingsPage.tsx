@@ -152,7 +152,7 @@ function ProjectTab({ projectLabel, snapshot }: { projectLabel: string; snapshot
       </Panel>
       <Panel title="Font" labelId="settings-font-title">
         <fieldset>
-          <legend className="mb-2 text-sm text-muted">For panels, drawers, settings and terminals, in this browser only. The office keeps its pixel lettering. The theme is in the top bar.</legend>
+          <legend className="mb-2 text-sm text-muted">For panels, drawers, settings and terminals, in this browser only. The office keeps its pixel lettering.</legend>
           <div className="flex flex-wrap gap-2">
             {FONT_STYLES.map((f) => (
               <label key={f.id} className="flex cursor-pointer items-start gap-2 border-2 border-line bg-panel-2 px-3 py-2">

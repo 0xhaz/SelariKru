@@ -1,3 +1,5 @@
+// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
+
 import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useStore } from 'zustand';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
@@ -86,8 +88,9 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
 }
 
 /**
- * The workspace frame (T5.12, adapted from the reference layout): the office canvas in the centre, the top bar, the team panel, and each screen in a
- * drawer over the office. Every screen reads one projection store.
+ * The workspace frame (T5.12). Its structure and keyboard handling are adapted from the reference's App.tsx: the office canvas always in view,
+ * the floating top bar, team cards and activity feed, each screen in a side drawer over the office, and Settings as a modal. Every screen reads
+ * one projection store.
  */
 export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref }: AppShellProps) {
   const route = useRoute();
@@ -216,9 +219,29 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   }, [route]);
   // Keyboard and screen reader users land on the new view. Not on first load, where the browser's own start point is right.
   const previousRoute = useRef(route);
+  // What last had focus outside the Settings modal, so closing Settings (Escape, ✕ or the backdrop) can give focus back to what opened it.
+  const settingsOpener = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const onFocus = (e: FocusEvent): void => {
+      const t = e.target;
+      if (t instanceof HTMLElement && !t.closest('[data-shell-modal]')) settingsOpener.current = t;
+    };
+    document.addEventListener('focusin', onFocus);
+    return () => document.removeEventListener('focusin', onFocus);
+  }, []);
   useEffect(() => {
     if (previousRoute.current === route) return;
+    const from = previousRoute.current;
     previousRoute.current = route;
+    if (from === 'settings' && route !== 'settings') {
+      // The top bar was inert under the modal; it is live again before focus goes back.
+      if (chromeRef.current) chromeRef.current.inert = false;
+      const opener = settingsOpener.current;
+      const visible = (el: HTMLElement | null | undefined): el is HTMLElement => !!el && el.isConnected && el.getClientRects().length > 0;
+      // A link chosen in the More menu is hidden once the menu closes: its button stands in for it.
+      const target: HTMLElement | null | undefined = visible(opener) ? opener : (opener as HTMLElement | null)?.closest('[data-more]')?.querySelector<HTMLElement>('[data-testid="top-bar-more"]');
+      if (visible(target)) { target.focus(); return; }
+    }
     document.getElementById('main')?.focus();
   }, [route]);
   useEffect(() => {
@@ -384,7 +407,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   return (
     <div className="relative min-h-screen">
       <div ref={chromeRef}>
-        <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} />
+        <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} paused={frame === 'settings' || (frame === 'drawer' && drawerMaximized && panelWide)} />
         <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:bg-cream focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
         <Announcer message={announcement} />
         <TopBar

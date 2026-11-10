@@ -1,7 +1,7 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 //
 // Pull-request parcels on the belt. Their position follows the pull request's recorded state: a verified candidate waits past the gate for
-// a human merge, a merged one runs on to main and leaves, and one that no longer holds the run's code waits before the gate.
+// a human merge, a merged one runs on to main and leaves, and one not verified, or no longer holding the run's code, waits before the gate.
 
 import type { OfficeParcel } from '../model.ts';
 import type { OfficeLayout } from '../layout/layout.ts';
@@ -41,8 +41,7 @@ export class BeltPath {
 /** Where a parcel rests for its pull request's state. */
 export function restingPlace(pr: OfficeParcel, path: BeltPath): number {
   if (pr.merged) return path.len;
-  if (pr.review === 'changes') return path.gateEntry;
-  return path.gateExit;
+  return pr.verification === 'verified' ? path.gateExit : path.gateEntry;
 }
 
 export function updateParcels(parcels: Parcel[], prs: ReadonlyMap<number, OfficeParcel>, path: BeltPath, dt: number, onMerged: (p: Parcel) => void): void {

@@ -14,13 +14,15 @@ export interface OfficeCanvasProps {
   readonly onOpenPlace: (place: 'plan' | 'prs') => void;
   /** True on the office screen, where the canvas is the subject. Behind a drawer it is decoration and hidden from assistive technology. */
   readonly subject: boolean;
+  /** True while the office cannot be seen (a maximised drawer, the Settings modal): its animation stops. */
+  readonly paused: boolean;
 }
 
 /**
  * The pixel office behind every screen. A picture of what the team panel lists: it has role="img" and a summary label, and the team panel is
  * its keyboard path. Mounted once; it follows the world it is given.
  */
-export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject }: OfficeCanvasProps) {
+export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject, paused }: OfficeCanvasProps) {
   const host = useRef<HTMLDivElement>(null);
   const scene = useRef<OfficeScene | null>(null);
   const latest = useRef({ insets, onOpenWorker, onOpenPlace });
@@ -49,12 +51,17 @@ export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject
       ui.setHover(null);
       s.destroy();
       scene.current = null;
+      if (import.meta.env.DEV) delete (window as unknown as { __selarikruOffice?: OfficeScene }).__selarikruOffice;
     };
   }, []);
 
   useEffect(() => {
     if (world) scene.current?.setWorld(world);
   }, [world]);
+
+  useEffect(() => {
+    scene.current?.setPaused(paused);
+  }, [paused]);
 
   useEffect(() => {
     scene.current?.camera.apply();

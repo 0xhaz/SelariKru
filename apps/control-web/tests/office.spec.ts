@@ -248,3 +248,69 @@ test('no storage key, event name or visible text uses the reference\'s names', a
     expect(await page.evaluate(() => document.documentElement.outerHTML)).not.toMatch(/jsm|javascript mastery/i);
   }
 });
+
+test.describe('closing Settings', () => {
+  for (const how of ['Escape on the modal', 'Escape on its main region', 'the close button', 'the backdrop'] as const) {
+    test(`${how} closes Settings and gives focus back to the button that opened it`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await spied(page, 'healthy-parallel-work');
+      const opener = page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Settings' });
+      await opener.focus();
+      await page.keyboard.press('Enter');
+      const modal = page.getByRole('dialog', { name: 'Settings' });
+      await expect(modal).toBeVisible();
+      if (how === 'Escape on the modal') { await modal.focus(); await page.keyboard.press('Escape'); }
+      else if (how === 'Escape on its main region') { await expect(page.locator('#main')).toBeFocused(); await page.keyboard.press('Escape'); }
+      else if (how === 'the close button') await page.getByRole('link', { name: 'Close settings' }).click();
+      else await page.mouse.click(8, 450);
+      await expect(modal).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toHaveCount(1);
+      await expect(opener).toBeFocused();
+    });
+  }
+
+  test('a control inside Settings keeps its own Escape, and Settings stays open', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work', '#/settings?section=stack');
+    const search = page.locator('#main').getByRole('combobox').first();
+    await search.click();
+    await page.keyboard.type('re');
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+    await expect(search).toBeFocused();
+    // A button inside is a control too: Escape there does nothing.
+    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'MCP' }).focus();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+  });
+
+  test('a screen picked from the More menu is named on the More button, and closing Settings from it focuses More', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    const nav = page.getByRole('navigation', { name: 'Primary' });
+    await nav.getByRole('button', { name: /^More/ }).click();
+    await nav.getByRole('link', { name: 'Brain' }).click();
+    const more = nav.getByRole('button', { name: /^More: Brain/ });
+    await expect(more).toBeVisible();
+    await expect(more).toHaveAttribute('aria-current', 'page');
+  });
+});
+
+test('the office stops animating while it cannot be seen, and follows a change of the reduced-motion preference', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await spied(page, 'healthy-parallel-work', '#/team');
+  const looping = () => page.evaluate(() => { const o = (window as unknown as { __selarikruOffice?: { raf: number } }).__selarikruOffice; return o ? o.raf !== 0 : null; });
+  await expect.poll(looping).toBe(true);
+  await page.getByRole('button', { name: 'Maximize' }).click();
+  await expect.poll(looping).toBe(false);
+  await page.getByRole('button', { name: 'Restore size' }).click();
+  await expect.poll(looping).toBe(true);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect.poll(looping).toBe(false);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expect.poll(looping).toBe(true);
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Settings' }).click();
+  await expect.poll(looping).toBe(false);
+});
+

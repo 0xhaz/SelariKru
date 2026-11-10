@@ -18,7 +18,7 @@ const notice = (page: Page) => page.getByTestId('product-notice');
 test('confirm the brief, add an outcome plan with an unknown baseline, see the trace, record a release, see Awaiting observations', async ({ page }) => {
   const requests = await open(page);
   await expect(page.getByTestId('product-demo-badge')).toHaveText(/Demo data/);
-  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Product', includeHidden: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^More: Product/ })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText(/authorizes no customer outreach and no connection to production data/)).toBeVisible();
 
   // Before anything is recorded, every product link says it is missing; the evidence the run already has is present.

@@ -1,6 +1,6 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the side drawer (resize handle, maximise) and the centred settings modal.
 
-import { useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { hrefFor, type Route } from '../route.ts';
 import { DRAWER_DEFAULT, ui, useUi } from '../ui-store.ts';
 import { MISSION_CONTROL } from '../views.ts';
@@ -20,6 +20,8 @@ function MaximizeButton() {
 /** The drawer's left edge: drag to resize (remembered in this browser), double-click for the default width. Pointer only; Maximize is the key path. */
 function ResizeHandle() {
   const start = useRef<{ x: number; width: number } | null>(null);
+  // However a drag ends, text selection comes back: on release, on a lost capture, and if the drawer closes mid-drag.
+  useEffect(() => () => { document.body.style.userSelect = ''; }, []);
   const down = (e: ReactPointerEvent<HTMLDivElement>): void => {
     if (e.button !== 0) return;
     const aside = e.currentTarget.parentElement;
@@ -40,7 +42,7 @@ function ResizeHandle() {
     <div
       aria-hidden="true" data-testid="drawer-resize" title="Drag to resize. Double-click to reset."
       className="group absolute -left-[9px] top-0 z-10 hidden h-full w-[12px] cursor-col-resize justify-center xl:flex"
-      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onDoubleClick={() => ui.setDrawerWidth(DRAWER_DEFAULT)}
+      onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onLostPointerCapture={up} onDoubleClick={() => ui.setDrawerWidth(DRAWER_DEFAULT)}
     >
       <div className="my-auto h-12 w-[4px] bg-ink opacity-0 group-hover:opacity-60" />
     </div>
@@ -96,7 +98,7 @@ export function SettingsModal({ children, paused }: { children: ReactNode; pause
   return (
     <div className="pointer-events-auto fixed inset-0 z-30 grid place-items-center bg-[rgba(36,26,46,0.55)] p-2 sm:p-4" data-testid="settings-backdrop"
       onMouseDown={(e) => { if (e.target === e.currentTarget) window.location.hash = hrefFor('office'); }}>
-      <div role="dialog" aria-modal="true" aria-label="Settings" data-testid="view-drawer" data-view="settings" className="panel relative flex h-[min(760px,calc(100dvh-1rem))] w-[min(1080px,100%)] flex-col sm:h-[min(760px,calc(100dvh-2rem))]">
+      <div role="dialog" aria-modal="true" aria-label="Settings" data-shell-modal="" tabIndex={-1} data-testid="view-drawer" data-view="settings" className="panel relative flex outline-none h-[min(760px,calc(100dvh-1rem))] w-[min(1080px,100%)] flex-col sm:h-[min(760px,calc(100dvh-2rem))]">
         <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
           <div className="flex shrink-0 items-center gap-3 border-b-[3px] border-ink px-4 py-2">
             <span className="min-w-0 flex-1 truncate text-[13px] text-muted"><kbd className="kbd">Esc</kbd> on the page closes</span>

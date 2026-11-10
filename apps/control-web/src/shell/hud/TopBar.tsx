@@ -100,11 +100,12 @@ function More({ items, route, ...counts }: { items: readonly NavItem[]; route: R
   const onKey = (e: KeyboardEvent<HTMLDivElement>): void => {
     if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); }
   };
-  const inside = items.some((i) => topBarRouteOf(route) === i.route);
+  // The screen open now, when it is one of these, is named on the button itself, so the current page is never only inside a closed menu.
+  const current = items.find((i) => topBarRouteOf(route) === i.route) ?? null;
   return (
-    <div ref={box} className="relative" onKeyDown={onKey}>
-      <button ref={button} type="button" className="btn text-sm" aria-expanded={open} aria-controls={id} data-testid="top-bar-more" onClick={() => setOpen((o) => !o)} style={inside ? { background: 'var(--color-yellow)' } : undefined}>
-        More <span aria-hidden="true">{open ? '▴' : '▾'}</span>
+    <div ref={box} className="relative" data-more="" onKeyDown={onKey}>
+      <button ref={button} type="button" className="btn text-sm" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid="top-bar-more" onClick={() => setOpen((o) => !o)} style={current ? { background: 'var(--color-yellow)' } : undefined}>
+        {current ? <>More: {current.label}</> : 'More'} <span aria-hidden="true">{open ? '▴' : '▾'}</span>
       </button>
       <ul id={id} hidden={!open} className="panel absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[11rem] list-none flex-col gap-2 p-2">
         {items.map((i) => <li key={i.route}><NavLink item={i} route={route} {...counts} onPick={() => setOpen(false)} /></li>)}
@@ -120,6 +121,11 @@ function More({ items, route, ...counts }: { items: readonly NavItem[]; route: R
 export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props, ref) {
   const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionUrgent, attentionBadge, decisionCount, teamToggle, teamFold, panelWide } = props;
   const counts = { attentionBadge, attentionCount, decisionCount };
+  // The narrow nav scrolls sideways: the current page must be in view, or the operator cannot tell where they are.
+  const navRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  }, [route]);
   return (
     <header ref={ref} data-testid="top-bar" className="panel sticky top-0 z-40 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 xl:fixed xl:left-4 xl:right-4 xl:top-[10px] xl:h-[50px] xl:flex-nowrap xl:py-0">
       <p className="flex min-w-0 flex-1 items-center gap-2.5 xl:flex-none">
@@ -128,7 +134,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
         <span className="min-w-0 truncate text-[16px] text-muted" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
-      <nav aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 xl:order-2 xl:w-auto xl:flex-1 xl:justify-end">
+      <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 xl:order-2 xl:w-auto xl:flex-1 xl:justify-end">
         {/* Scrolls sideways when narrow; the More menu sits outside the scroller so its list is never clipped. */}
         <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:overflow-visible xl:p-0">
           {TOP_BAR.filter((i) => DIRECT.has(i.route)).map((i) => <NavLink key={i.route} item={i} route={route} {...counts} />)}

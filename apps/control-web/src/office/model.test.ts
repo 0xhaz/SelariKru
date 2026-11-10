@@ -82,8 +82,26 @@ describe('the office world', () => {
 
   it('turns each pull request into a parcel, and the gate scans while a task verifies', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.parcels).toEqual([{ num: 12, authorId: null, review: 'passed', merged: false, closed: false }]);
+    // No per-criterion evidence is connected for this run, so nothing says its candidate is verified: never inferred from the PR being open.
+    expect(world.parcels).toEqual([{ num: 12, authorId: null, verification: 'unverified', merged: false, closed: false }]);
     expect(world.verifying).toBe(true);
+  });
+
+  it('a pull request is verified only when its own candidate is live, its record stands and every approved criterion passed', () => {
+    const candidate = { sha: 'abc', status: 'verified', live: true, baseSha: 'b', treeSha: null, target: 't', recordedAt: iso(20), recordId: 'r', recordValid: true, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [] };
+    const withRun = (over: { criteria?: { verified: number; total: number }; candidate?: Partial<typeof candidate>; outOfDate?: boolean }) => {
+      const s = snapshot();
+      s.runs['run'] = { ...s.runs['run']!, criteria: over.criteria ?? { verified: 2, total: 2 }, evidence: { candidate: { ...candidate, ...over.candidate }, criteria: [] } };
+      if (over.outOfDate) s.changeRequests = [{ ...s.changeRequests[0]!, outOfDate: { reason: 'main_moved', at: iso(5), rebuiltSha: null, rebuild: 'building' } }];
+      return buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').parcels[0]!.verification;
+    };
+    expect(withRun({})).toBe('verified');
+    expect(withRun({ criteria: { verified: 1, total: 2 } })).toBe('unverified');
+    expect(withRun({ criteria: { verified: 0, total: 0 } })).toBe('unverified');
+    expect(withRun({ candidate: { sha: 'other' } })).toBe('unverified');
+    expect(withRun({ candidate: { live: false } })).toBe('unverified');
+    expect(withRun({ candidate: { recordValid: false } })).toBe('unverified');
+    expect(withRun({ outOfDate: true })).toBe('out_of_date');
   });
 
   it('says what it shows in words, for the canvas label', () => {

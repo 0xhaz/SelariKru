@@ -25,14 +25,18 @@ const OWNS_KEYS = [
   '[data-terminal]', '[role="log"]', 'dialog', '[role="dialog"]', '[role="alertdialog"]',
 ].join(', ');
 
-/** Where focus rests when nothing in particular has it: Escape there means "back to the office". */
-const RESTING = ['body', 'html', '#main', '[data-office-canvas]', '[data-focus-landing]'].join(', ');
+/**
+ * Where focus rests when nothing in particular has it: Escape there means "back to the office". The shell's own Settings modal is a dialog, but
+ * focus resting on it or on its main region is still resting, so Escape closes it; a control inside it keeps its own Escape.
+ */
+const RESTING = ['body', 'html', '#main', '[data-office-canvas]', '[data-focus-landing]', '[data-shell-modal]'].join(', ');
 
 export function shortcutFor(e: KeyInput): ShortcutAction | null {
   if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return null;
   const t = e.target;
+  if (e.key === 'Escape' && (t === null || t.matches(RESTING))) return { kind: 'escape' };
   if (t && t.closest(OWNS_KEYS)) return null;
-  if (e.key === 'Escape') return t === null || t.matches(RESTING) ? { kind: 'escape' } : null;
+  if (e.key === 'Escape') return null;
   if (e.key === '+' || e.key === '=') return { kind: 'zoom', delta: 1 };
   if (e.key === '-') return { kind: 'zoom', delta: -1 };
   if (/^[1-9]$/.test(e.key)) return { kind: 'open-worker', index: Number(e.key) - 1 };

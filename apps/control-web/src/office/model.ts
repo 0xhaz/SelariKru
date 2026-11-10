@@ -1,4 +1,4 @@
-import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
+import type { ChangeRequestView, ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
 import { currentRun } from '../features/settings/model.ts';
 import type { TeamModel, TeamRow } from '../features/team/model.ts';
 import { agentPalette, stateStyle, type RobotState } from '../theme/tokens.ts';
@@ -30,8 +30,11 @@ export interface OfficeNote {
 export interface OfficeParcel {
   readonly num: number;
   readonly authorId: string | null;
-  /** `passed`: it holds a verified candidate and waits for a human merge. `changes`: it no longer holds the run's live candidate. */
-  readonly review: 'passed' | 'changes';
+  /**
+   * From the run's own verification record, never from the pull request being open. `verified`: its candidate is the run's live candidate,
+   * the record stands and every approved criterion passed. `out_of_date`: it no longer holds the run's live candidate. Otherwise `unverified`.
+   */
+  readonly verification: 'verified' | 'unverified' | 'out_of_date';
   readonly merged: boolean;
   readonly closed: boolean;
 }
@@ -45,6 +48,15 @@ export interface OfficeWorld {
   readonly verifying: boolean;
   /** The canvas's text equivalent. */
   readonly summary: string;
+}
+
+function prVerification(snapshot: ProjectViewSnapshot, c: ChangeRequestView): OfficeParcel['verification'] {
+  if (c.outOfDate || c.status === 'stale_candidate') return 'out_of_date';
+  const run = snapshot.runs[c.runId];
+  const candidate = run?.evidence?.candidate ?? null;
+  const criteria = run?.criteria ?? null;
+  const verified = candidate !== null && criteria !== null && candidate.sha === c.candidateSha && candidate.live && candidate.recordValid && criteria.total > 0 && criteria.verified === criteria.total;
+  return verified ? 'verified' : 'unverified';
 }
 
 const DONE = new Set<TaskView['status']>(['verified', 'merged']);
@@ -97,7 +109,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
 
   const parcels = snapshot.changeRequests.map((c): OfficeParcel => {
     const merged = c.status === 'merged' || c.mergeCommitSha !== null;
-    return { num: c.prNumber, authorId: null, review: c.outOfDate ? 'changes' : 'passed', merged, closed: !merged && c.status === 'closed' };
+    return { num: c.prNumber, authorId: null, verification: prVerification(snapshot, c), merged, closed: !merged && c.status === 'closed' };
   });
   const verifying = Object.values(snapshot.tasks).some((t) => t.status === 'verifying');
 

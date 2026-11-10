@@ -49,6 +49,15 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFor(key('Escape', { target: el([], ['button']) }))).toBeNull();
   });
 
+  it('Escape on the Settings modal or its main region closes it, though the modal is a dialog; a control inside it keeps its own Escape', () => {
+    expect(shortcutFor(key('Escape', { target: el(['[role="dialog"]', '[data-shell-modal]'], ['#main']) }))).toEqual({ kind: 'escape' });
+    expect(shortcutFor(key('Escape', { target: el(['[role="dialog"]'], ['[data-shell-modal]', '[role="dialog"]']) }))).toEqual({ kind: 'escape' });
+    expect(shortcutFor(key('Escape', { target: el(['[role="dialog"]', '[data-shell-modal]', '[role="combobox"]'], ['input']) }))).toBeNull();
+    expect(shortcutFor(key('Escape', { target: el(['[role="dialog"]', '[data-shell-modal]'], ['button']) }))).toBeNull();
+    // Digits stay with the dialog.
+    expect(shortcutFor(key('1', { target: el(['[role="dialog"]', '[data-shell-modal]'], ['#main']) }))).toBeNull();
+  });
+
   it('digits on a focused control in the page still open a worker: only text entry is protected', () => {
     expect(shortcutFor(key('3', { target: el(['nav'], ['a']) }))).toEqual({ kind: 'open-worker', index: 2 });
   });

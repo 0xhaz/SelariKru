@@ -127,11 +127,13 @@ export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficeParcel[]) {
   prs.slice(-6).forEach((pr, i) => {
     const x = b.x + 3 + (i % 3) * 20;
     const y = b.y + 11 + Math.floor(i / 3) * 14;
-    const col = pr.merged ? '#00873a' : pr.review === 'changes' ? colors.red : colors.green;
+    // Colour only from the run's verification record: green is a verified candidate, grey is not verified, orange is out of date.
+    const col = pr.merged ? '#00873a' : pr.verification === 'verified' ? colors.green : pr.verification === 'out_of_date' ? colors.orange : C.metalD;
     p.rect(x + 1, y + 1, 18, 12, C.ink, 0.3);
     p.rect(x, y, 18, 12, pr.merged ? '#e0dccf' : C.white);
     text(p, `#${pr.num % 1000}`, x + 2, y + 3, C.ink);
     p.rect(x + 2, y + 9, 14, 2, col);
+    if (pr.verification === 'out_of_date' && !pr.merged) text(p, 'OLD', x + 3, y - 6, C.orange);
   });
 }
 
