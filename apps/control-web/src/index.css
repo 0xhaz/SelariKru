@@ -1,15 +1,114 @@
+/* Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the pixel panel, button, chip and field rules and the font switch. */
 @import "tailwindcss";
+@import "@fontsource/pixelify-sans/400.css";
+@import "@fontsource/pixelify-sans/600.css";
+@import "@fontsource/pixelify-sans/700.css";
+@import "@fontsource/vt323/400.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/700.css";
 
 @import "@selarikru/ui/tokens.css";
 @source "../../../packages/ui/src";
 
-:root {
-  color-scheme: dark;
-  /* The sticky header must never cover a focused element (WCAG 2.2, 2.4.11). */
-  scroll-padding-top: 8rem;
+/* Pixel-only colours, for the office lawn and the thick panel edges. Text always uses the semantic tokens below. */
+@theme {
+  --color-grass: #4a8f3d;
+  --color-edge: #241a2e;
 }
-:root[data-theme="light"] {
+
+/*
+ * The pixel theme, mapped onto the semantic tokens every view already uses. Light is the reference's cream and ink; dark is its navy.
+ * Where a reference colour failed WCAG AA as text it was darkened (light) or lightened (dark); see the T5.12 report for the list.
+ * tests/quality.spec.ts measures the painted result in both themes.
+ */
+:root {
   color-scheme: light;
+  --color-bg: #fff6e9;
+  --color-panel: #fffaf2;
+  --color-panel-2: #f0dfc2;
+  --color-line: #c9b28c;
+  --color-line-strong: #241a2e;
+  --color-fg: #241a2e;
+  --color-muted: #5e4d56;
+  --color-active: #1a5aa0;
+  --color-success: #0a6631;
+  --color-warning: #7f4600;
+  --color-danger: #b0003a;
+  --color-active-tint: #dcebfa;
+  --color-success-tint: #dcf2df;
+  --color-warning-tint: #fbe6c4;
+  --color-danger-tint: #fadbe3;
+  --color-backdrop: #241a2e8c;
+  --color-edge: #241a2e;
+  --pixel-drop: #241a2e73;
+  --pixel-bevel-hi: #ffffff;
+  --pixel-bevel-lo: #f0dfc2;
+  --radius-card: 0px;
+  --radius-chip: 0px;
+  --font-sans: "Pixelify Sans", "Trebuchet MS", system-ui, sans-serif;
+  --font-mono: "VT323", ui-monospace, Menlo, Consolas, monospace;
+  --text-mono: 18px;
+  /* The sticky header must never cover a focused element (WCAG 2.2, 2.4.11). */
+  scroll-padding-top: 9rem;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #16213f;
+  --color-panel: #1d2b53;
+  --color-panel-2: #26376a;
+  --color-line: #3b4a7a;
+  --color-line-strong: #8a96c0;
+  --color-fg: #fff6e9;
+  --color-muted: #bfc8e8;
+  --color-active: #4dbcff;
+  --color-success: #3ee07a;
+  --color-warning: #ffd23a;
+  --color-danger: #ff8fb5;
+  --color-active-tint: #1b3a66;
+  --color-success-tint: #173d33;
+  --color-warning-tint: #3b3318;
+  --color-danger-tint: #3d1d3b;
+  --color-backdrop: #000000a6;
+  --color-edge: #0b0f1f;
+  --pixel-drop: #00000080;
+  --pixel-bevel-hi: #ffffff14;
+  --pixel-bevel-lo: #00000040;
+}
+/* The light block in the shared tokens is replaced, not layered: the pixel light values above stand. */
+:root[data-theme="light"] {
+  --color-bg: #fff6e9;
+  --color-panel: #fffaf2;
+  --color-panel-2: #f0dfc2;
+  --color-line: #c9b28c;
+  --color-line-strong: #241a2e;
+  --color-fg: #241a2e;
+  --color-muted: #5e4d56;
+  --color-active: #1a5aa0;
+  --color-success: #0a6631;
+  --color-warning: #7f4600;
+  --color-danger: #b0003a;
+  --color-active-tint: #dcebfa;
+  --color-success-tint: #dcf2df;
+  --color-warning-tint: #fbe6c4;
+  --color-danger-tint: #fadbe3;
+  --color-backdrop: #241a2e8c;
+}
+
+/* Font styles (Settings, Project, Font). The office canvas keeps its own pixel lettering. */
+html[data-font="clean"] {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --text-mono: 13px;
+}
+html[data-font="mono"] {
+  --font-sans: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --text-mono: 13px;
 }
 
 body {
@@ -20,9 +119,12 @@ body {
   line-height: 1.5;
   margin: 0;
 }
+h1, h2 {
+  letter-spacing: 0.01em;
+}
 
 :focus-visible {
-  outline: 2px solid var(--color-active);
+  outline: 3px solid var(--color-active);
   outline-offset: 2px;
 }
 
@@ -32,11 +134,136 @@ body {
   outline: none;
 }
 
+/* ---- Pixel look, applied to the shared building blocks so every view takes it without a rewrite. ---- */
+
+/* Chunky game panel: thick edge, light bevel, hard drop shadow with no blur. */
+.panel {
+  background: var(--color-panel);
+  border: 3px solid var(--color-edge);
+  box-shadow: inset -3px -3px 0 var(--pixel-bevel-lo), inset 3px 3px 0 var(--pixel-bevel-hi), 0 4px 0 var(--pixel-drop);
+}
+.rounded-card.border {
+  border-width: 3px;
+  border-color: var(--color-edge);
+  box-shadow: 0 4px 0 var(--pixel-drop);
+}
+.rounded-card.border.border-dashed {
+  box-shadow: none;
+}
+button.rounded-chip,
+a.rounded-chip {
+  border-width: 2px;
+  border-style: solid;
+  box-shadow: 0 3px 0 var(--color-edge);
+}
+button.rounded-chip:not([class*="border-"]),
+a.rounded-chip:not([class*="border-"]) {
+  border-color: var(--color-edge);
+}
+button.rounded-chip:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow: 0 0 0 var(--color-edge);
+}
+button.rounded-chip:disabled {
+  box-shadow: none;
+}
+
+/* The reference's button, for the HUD. */
+.btn {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  min-height: 2rem;
+  border: 2px solid var(--color-edge);
+  background: var(--color-panel);
+  color: var(--color-fg);
+  padding: 1px 10px;
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  box-shadow: inset -2px -2px 0 var(--pixel-bevel-lo), 0 3px 0 var(--color-edge);
+}
+.btn:hover {
+  background: var(--color-panel-2);
+}
+.btn:active,
+.btn[aria-pressed="true"],
+.btn[aria-current="page"] {
+  transform: translateY(3px);
+  box-shadow: inset -2px -2px 0 var(--pixel-bevel-lo), 0 0 0 var(--color-edge);
+}
+.btn[aria-pressed="true"],
+.btn[aria-current="page"] {
+  background: var(--color-active-tint);
+}
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 6px 1px;
+  border: 2px solid var(--color-edge);
+  background: var(--color-panel-2);
+  color: var(--color-fg);
+  white-space: nowrap;
+}
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+  line-height: 1;
+  border: 2px solid var(--color-edge);
+  padding: 0 4px;
+  background: var(--color-panel);
+  color: var(--color-fg);
+}
+/* A coloured square beside a state word: never the only signal. */
+.swatch {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-edge);
+}
+
+@keyframes pixel-blink {
+  50% { opacity: 0.25; }
+}
+.led {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #00e436;
+  box-shadow: 0 0 0 2px var(--color-edge);
+  animation: pixel-blink 1s steps(1) infinite;
+}
+.led[data-off] {
+  background: #83769c;
+  animation: none;
+}
+
 .progress-fill {
   transition: width 200ms ease-out;
 }
 @media (prefers-reduced-motion: reduce) {
-  .progress-fill {
+  .progress-fill,
+  .led {
     transition: none;
+    animation: none;
   }
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+}
+
+.pixelated {
+  image-rendering: pixelated;
 }

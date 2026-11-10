@@ -5,13 +5,13 @@ const KEY = 'selarikru.theme';
 
 function read(): Theme {
   try {
-    return window.localStorage.getItem(KEY) === 'light' ? 'light' : 'dark';
+    return window.localStorage.getItem(KEY) === 'dark' ? 'dark' : 'light';
   } catch {
-    return 'dark'; // storage can be blocked; the default still works
+    return 'light'; // storage can be blocked; the default still works
   }
 }
 
-/** A browser-local presentation preference, applied at once. Dark is the default so the assistant's validated appearance does not change. */
+/** A browser-local presentation preference, applied at once. Light, the pixel theme's cream and ink, is the default (owner decision, T5.12). */
 export function useTheme(): readonly [Theme, () => void] {
   const [theme, setTheme] = useState<Theme>(read);
   useEffect(() => {
