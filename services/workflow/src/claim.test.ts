@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { schema } from '@selarikru/persistence';
+import postgres from 'postgres';
+import { schema, withTx } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { applyVerification, createScheduler, type Scheduler } from './index.ts';
 import { TEST_CATALOG,
-  TEST_MODELS, CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
+  TEST_MODELS, TEST_DATABASE_URL, CAPS, CLOUD_POLICY, PROJECT, RUN, TENANT, capsWith, countRows, eventTypes, makeScheduler, resetDb, runner, seedTask, setupTestDb, specFor, statusOf,
   testClock, type TestClock, type TestDb,
 } from '../test/helpers.ts';
 
@@ -393,5 +394,51 @@ describe('claim preconditions', () => {
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
     const rows = await t.db.execute(sql`SELECT payload::text AS p FROM events`);
     expect(rows.map((r) => String(r['p'])).join()).not.toContain(lease.leaseToken);
+  });
+});
+
+describe('claim lock order: no event sequence held while a status row is still to be locked (T7.5)', () => {
+  it('a claim that records a block on one candidate and then waits for the next one\'s row does not deadlock against a path that holds that row and then appends an event', async () => {
+    // T_a is first in the queue and can only be blocked (restricted data on a cloud model): the claim records that, with an event. T_b is next.
+    await seedTask(t.db, specFor('ta', { classification: 'restricted' }));
+    await seedTask(t.db, specFor('tb'));
+    await t.db.execute(sql`UPDATE task_status SET updated_at = now() - interval '1 hour' WHERE task_id = 'ta'`);
+    await t.db.execute(sql`INSERT INTO project_sequences (tenant_id, project_id, last_sequence) VALUES (${TENANT}, ${PROJECT}, 0) ON CONFLICT DO NOTHING`);
+    // Warm the pool so the claim does not queue behind this process for a connection.
+    await Promise.all([0, 1, 2].map(() => withTx(t.db, (tx) => tx.execute(sql`SELECT pg_sleep(0.02)`))));
+
+    // The competitor is a path that takes tb's status row, then the event sequence (a cancel, a publish, the handover sweep): on its own connection, with a lock
+    // timeout and a long deadlock timeout, so if there is a cycle Postgres aborts the claim and the test sees it.
+    const other = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
+    let claim: Promise<unknown> = Promise.resolve();
+    try {
+      await other.begin(async (q) => {
+        await q.unsafe(`SET LOCAL search_path TO ${t.schema}`);
+        await q.unsafe(`SET LOCAL lock_timeout = '10s'`);
+        await q.unsafe(`SET LOCAL deadlock_timeout = '20s'`);
+        await q.unsafe(`SELECT 1 FROM task_status WHERE task_id = 'tb' FOR UPDATE`);
+        const [me] = await q.unsafe(`SELECT pg_backend_pid() AS pid`);
+        claim = s.tryClaim(runner('r1'), CAPS).then((v) => v, (e: unknown) => e);
+        // Bounded: the claim is queued behind tb's row (after recording ta's block).
+        let queued = false;
+        for (let i = 0; i < 500 && !queued; i++) {
+          const [row] = await q.unsafe(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${Number(me!['pid'])} = ANY(pg_blocking_pids(pid))`);
+          queued = Number(row!['n']) > 0;
+          if (!queued) await new Promise((r) => setTimeout(r, 10));
+        }
+        expect(queued).toBe(true);
+        // Now the sequence, as appending an event would.
+        await q.unsafe(`UPDATE project_sequences SET last_sequence = last_sequence WHERE tenant_id = '${TENANT}' AND project_id = '${PROJECT}'`);
+      });
+    } finally {
+      await other.end();
+    }
+    const out = await claim;
+    expect((out as { code?: unknown } | null)?.code ?? (out as { cause?: { code?: unknown } } | null)?.cause?.code).not.toBe('40P01');
+    expect(out).toMatchObject({ ok: true, lease: { taskId: 'tb' } });
+    // ta's block was still recorded, once, and before tb's start.
+    const types = (await t.db.execute(sql`SELECT type, task_id FROM events ORDER BY sequence`)).map((r) => `${String(r['type'])}:${String(r['task_id'])}`);
+    expect(types[0]).toBe('placement.blocked:ta');
+    expect(types).toContain('attempt.started:tb');
   });
 });

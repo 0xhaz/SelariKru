@@ -94,12 +94,18 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   A task blocked while a handover holds it (`refuseRepair` in the claim, a blocked publish, a timed-out attempt whose repairs ran out) offers the handover to the owner
  *   after its own status write, on the status row it holds (`heldTaskBlocked`). Every offer moves the status row's revision itself (`bumpRevision`, an increment of the
  *   stored value) and emits at that revision; `setStatus` increments the stored value too, so a later write in the same transaction never repeats or lowers it. None of
- *   these takes a lock the paths above do not already hold, and the claim's mid-loop `recordBlock` emission is left exactly as it was. So every handover path
+ *   these takes a lock the paths above do not already hold; the claim's mid-loop emissions are deferred until it has locked its last status row (below). So every handover path
  *   takes the status row before the `checkpoints` row and the run row (when it takes one) before it too, no path holds a `checkpoints` row and waits for a status row,
  *   the scheduler lock or a run row, and none takes the candidate row, the claim lock, the brain lock or `product_heads`. The verdict, re-verify and settle never touch
  *   a running task's handover, and a replan meets the request exactly as it meets the claim poll (the scheduler lock serialises them).
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
+ *
+ * The claim poll and the event sequence (T7.5). `tryClaim` locks candidates' status rows one by one in one transaction, and a candidate it skips may still emit (a recorded
+ * block or hold, a refused repair, an approval gate). Appending an event takes the project's event sequence, and a publish, a lease expiry, a cancel and the handover sweep take
+ * a status row and then the sequence; so the claim defers every event it emits (`deferEvents`) and appends them, in emission order, only after its last status-row lock
+ * (`flushEvents`, when it returns). Chosen over locking every candidate's row up front, which would hold rows of tasks it never claims and change which blocks it records.
+ * The claim therefore never holds the event sequence while it waits for a status row.
  *
  * Paths that still disagree, all at the run row, and how the loser of each recovers:
  * - The claim poll (`tryClaim`) takes the scheduler lock, a claimable task's status row, then the run row (`lockBudget`). Replan and re-verify hold the scheduler lock before

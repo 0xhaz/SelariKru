@@ -6,7 +6,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { policyRevokedReason } from '@selarikru/domain';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
-import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
+import { deferEvents, emit, flushEvents, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { resolveAssignment, routeRefusal, worstCaseHold, type WorstCaseHold } from './assignment.ts';
 import { INFRASTRUCTURE_REASON_PREFIX, leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
@@ -130,11 +130,18 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     const counts = await runningCounts(tx, runner.tenantId);
     const gates = await loadRunGates(tx, runner.tenantId, candidates.map((c) => c.runId));
     const skipped: SkippedCandidate[] = [];
+    // Every event a candidate emits (a recorded block or hold, a refused repair, an approval gate, the claim itself) waits until no status row is left to lock: appending
+    // takes the project's event sequence, which a publish, a lease expiry, a cancel or the handover sweep takes after their status row. See verification.ts.
+    deferEvents(tx);
     for (const c of candidates) {
       const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now, gateFor(gates, c.projectId, c.runId));
-      if ('lease' in r) return { ok: true, lease: r.lease, skipped };
+      if ('lease' in r) {
+        await flushEvents(tx);
+        return { ok: true, lease: r.lease, skipped };
+      }
       skipped.push({ taskId: c.taskId, reason: r.reason });
     }
+    await flushEvents(tx);
     return { ok: false, reason: 'no_claimable_task', skipped };
   });
 }

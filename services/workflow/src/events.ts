@@ -34,5 +34,25 @@ export async function emit(tx: Tx, scope: EventScope, now: Date, input: { type: 
   };
   const authority = checkEventAuthority(envelope);
   if (!authority.ok) throw new Error(`scheduler emitted a forbidden event: ${JSON.stringify(authority.error)}`);
-  await appendEvent(tx, envelope);
+  const held = deferred.get(tx);
+  if (held) held.push(envelope);
+  else await appendEvent(tx, envelope);
+}
+
+/** Events a transaction emitted while it may still lock status rows. Appending takes the project's event sequence, so they wait here until `flushEvents`. */
+const deferred = new WeakMap<Tx, EventEnvelope[]>();
+
+/**
+ * From now until `flushEvents`, `emit` in `tx` queues instead of appending. For a transaction that locks several status rows one by one (the claim poll): appending takes the
+ * project's event sequence, and holding that while waiting for the next status row closes a cycle with every path that holds a status row and then appends an event.
+ */
+export function deferEvents(tx: Tx): void {
+  deferred.set(tx, []);
+}
+
+/** Appends what `deferEvents` held, in the order it was emitted, and stops deferring. Call once the transaction locks no more status rows. */
+export async function flushEvents(tx: Tx): Promise<void> {
+  const held = deferred.get(tx);
+  deferred.delete(tx);
+  for (const e of held ?? []) await appendEvent(tx, e);
 }
