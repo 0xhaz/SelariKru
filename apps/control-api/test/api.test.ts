@@ -49,6 +49,8 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/brain/notes`],
   ['POST', `/v1/projects/${PROJECT}/brain/sources/a1/revoke`],
   ['POST', `/v1/projects/${PROJECT}/brain/conflicts/a1/keep`],
+  ['GET', `/v1/projects/${PROJECT}/stack`],
+  ['POST', `/v1/projects/${PROJECT}/stack`],
   ['GET', `/v1/projects/${PROJECT}/attempts/a1/context`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
@@ -58,6 +60,7 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/task'],
   ['POST', '/v1/runners/terminal'],
   ['POST', '/v1/runners/brain/manifest'],
+  ['POST', '/v1/runners/stack/detection'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 
