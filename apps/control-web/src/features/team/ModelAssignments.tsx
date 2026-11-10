@@ -5,6 +5,8 @@ import { CommandNotSent } from '../../shell/projection-store.ts';
 import { rejectionView } from '../decisions/copy.ts';
 import { roleName } from './TeamSignals.tsx';
 import type { AssignmentTarget, AssignmentsModel, ProviderChoice } from './assignments.ts';
+import { assignmentStatus } from '../settings/model.ts';
+import { StatusLine } from '../settings/SettingsPanel.tsx';
 
 const selectClass = 'rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg';
 const APPLIES = 'Applies to the next attempt. Work already running keeps its model.';
@@ -94,6 +96,8 @@ function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, on
       <p className="mt-0.5 text-sm text-muted wrap-anywhere" data-testid="assignment-current">
         {target.current ? <>Assigned <span className="font-mono text-mono">{target.current.provider} / {target.current.model}</span></> : target.fallback}
       </p>
+      {/* A saved assignment is in force only once the runners confirm it. A source that reports no state has no acknowledgements at all (the demo's seeded assignments), and those read as in force. */}
+      {target.state !== null ? <div className="mt-1"><StatusLine status={target.state === 'unknown' ? assignmentStatus(undefined) : assignmentStatus(target.state)} testId="assignment-status" /></div> : null}
       <div className="mt-2 flex flex-wrap items-end gap-3">
         <div className="min-w-0">
           <label htmlFor={`${ids}-provider`} className="mb-1 block text-sm text-muted">Provider<span className="sr-only"> for {noun}</span></label>

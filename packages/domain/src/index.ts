@@ -12,3 +12,4 @@ export * from './proposal.ts';
 export * from './assignment.ts';
 export * from './terminal.ts';
 export * from './onboarding.ts';
+export * from './settings.ts';

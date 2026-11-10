@@ -517,8 +517,9 @@ describe('model assignment commands', () => {
   it('matches the real route: applied, replayed, stale, refused', async () => {
     const { source, projectId } = await setup();
     const ok = await source.execute(set(projectId));
-    expect(ok).toMatchObject({ accepted: true, execution: 'applied', rejection: null, simulated: true });
-    expect((await source.getSnapshot(projectId)).modelAssignments).toMatchObject([{ scope: 'role', key: 'backend', model: 'claude-haiku-5-5', revision: 1 }]);
+    // Saved, not applied: the simulated runner has not acknowledged it yet.
+    expect(ok).toMatchObject({ accepted: true, execution: 'pending', rejection: null, simulated: true });
+    expect((await source.getSnapshot(projectId)).modelAssignments).toMatchObject([{ scope: 'role', key: 'backend', model: 'claude-haiku-5-5', revision: 1, state: 'applying' }]);
     expect(await source.execute(set(projectId))).toMatchObject({ accepted: true, replayed: true });
     expect(await source.execute(set(projectId, {}, 0, 'k2'))).toMatchObject({ accepted: false, rejection: 'stale_revision' });
     expect(await source.execute(set(projectId, { selection: { provider: 'codex', model: 'gpt-x' } }, 1, 'k3'))).toMatchObject({ rejection: 'unsupported_provider' });

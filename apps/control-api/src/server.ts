@@ -13,6 +13,7 @@ import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
+import { finishCancelledRuns } from './settings.ts';
 import { createFirebaseVerifier } from './firebase.ts';
 import { LocalDiskArtifactStore, resolveArtifactDir } from '../../../packages/artifacts/src/index.ts';
 import { dockerRunner, currentTrusted, loadValidRecord, LOCAL_DOCKER_HOST } from '../../../services/verifier/src/service.ts';
@@ -212,6 +213,7 @@ export async function startServer(options: {
     } : undefined });
   const driver = startLeaseExpiryDriver({
     scheduler, now, intervalMs: config.expireLeasesIntervalMs,
+    afterPass: () => finishCancelledRuns({ db, tenantId: config.tenantId, now }),
     ...(options.onError ? { onError: options.onError } : {}),
   });
   const reconciler = options.github?.port && options.github.pollIntervalMs

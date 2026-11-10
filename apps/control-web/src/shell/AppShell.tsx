@@ -3,6 +3,8 @@ import { useStore } from 'zustand';
 import { TONE_TEXT, buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
+import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
+import { autonomyModel } from '../features/settings/model.ts';
 import { buildOverview, type OverviewModel } from '../features/overview/model.ts';
 import { TeamView } from '../features/team/TeamView.tsx';
 import { buildTeam, type TeamModel } from '../features/team/model.ts';
@@ -185,6 +187,12 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     }
   }, [snapshot, state.nowMs, mode, connection]);
   const decisionCount = builtDecisions.decisions?.waiting ?? 0;
+  // The run's effective policy and its controls, from the server's snapshot. Null when the server reports none: nothing is invented in its place.
+  const autonomy = useMemo(() => {
+    if (!snapshot) return null;
+    try { return autonomyModel(snapshot, connection === 'live'); } catch { return null; }
+  }, [snapshot, connection]);
+  const autonomyPanel = autonomy ? <BoundedAutonomyPanel key={autonomy.runId} model={autonomy} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} /> : null;
   const opener = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const openWorker = (id: string): void => {
@@ -334,12 +342,12 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
-            <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} />
+            <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} autonomy={autonomyPanel} />
           </RouteBoundary>
         ) : null}
         {route === 'team' ? (
           <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`}>
-            <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenWorker={openWorker} />
+            <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenWorker={openWorker} autonomy={autonomyPanel} />
           </RouteBoundary>
         ) : null}
         {route === 'pipeline' ? (

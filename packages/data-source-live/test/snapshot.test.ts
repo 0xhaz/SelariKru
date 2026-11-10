@@ -149,3 +149,36 @@ describe('transport errors', () => {
     });
   });
 });
+
+describe('settings and run controls', () => {
+  const recording = (answer: Record<string, unknown>, status = 200) => {
+    const calls: { url: string; body: unknown }[] = [];
+    const source = createLiveDataSource({ baseUrl: 'http://x', getToken: async () => 't', fetch: (async (url: string, init: RequestInit) => { calls.push({ url: String(url), body: JSON.parse(String(init.body)) }); return new Response(JSON.stringify(answer), { status }); }) as unknown as typeof fetch });
+    return { source, calls };
+  };
+
+  it('a saved setting a runner must acknowledge is pending, never applied by the save', async () => {
+    const { source, calls } = recording({ state: 'applying' });
+    const r = await source.execute({ command: 'setting.set', expectedRevision: 0, idempotencyKey: 'k1', args: { projectId: 'p', key: 'r', change: { scope: 'run', field: 'paused', value: true } } });
+    expect(r).toMatchObject({ accepted: true, execution: 'pending' });
+    expect(calls[0]).toEqual({ url: 'http://x/v1/projects/p/settings', body: { key: 'r', change: { scope: 'run', field: 'paused', value: true }, expectedRevision: 0, idempotencyKey: 'k1' } });
+    expect((await recording({ state: 'applied' }).source.execute({ command: 'setting.set', expectedRevision: 0, idempotencyKey: 'k2', args: { projectId: 'p', key: 'r', change: { scope: 'run', field: 'cloud_eligible', value: false } } })).execution).toBe('applied');
+    expect((await recording({ state: 'applying' }).source.execute({ command: 'assignment.set', expectedRevision: 0, idempotencyKey: 'k3', args: { projectId: 'p', scope: 'role', key: 'backend', selection: null } })).execution).toBe('pending');
+  });
+
+  it('a run cancel is requested until the server says it is done, and a refusal keeps its name', async () => {
+    const { source, calls } = recording({ operationId: 'op_1', state: 'cancel_requested' });
+    expect(await source.execute({ command: 'run.cancel', expectedRevision: 2, idempotencyKey: 'c1', args: { runId: 'r' } })).toMatchObject({ execution: 'cancel_requested', operationId: 'op_1' });
+    expect(calls[0]).toEqual({ url: 'http://x/v1/runs/r/cancel', body: { expectedPlanRevision: 2, idempotencyKey: 'c1' } });
+    const refused = recording({ error: { code: 'resume_refused', message: 'no', details: { reason: 'budget:exhausted' } } }, 409);
+    expect(await refused.source.execute({ command: 'setting.set', expectedRevision: 1, idempotencyKey: 'k4', args: { projectId: 'p', key: 'r', change: { scope: 'run', field: 'paused', value: false } } })).toMatchObject({ accepted: false, rejection: 'resume_refused' });
+  });
+
+  it('carries settings, the run policy, a run cancel and why a task is stopping', () => {
+    const setting = { scope: 'run', key: 'r', field: 'paused', desired: true, effective: null, desiredRevision: 1, effectiveRevision: 0, enforcer: 'runner', state: 'applying', updatedBy: 'u', updatedAt: T, appliedAt: null };
+    const v = toViewSnapshot(raw({ settings: [setting], runs: [{ ...raw().runs[0]!, cancel: { requestedAt: T, requestedBy: 'u' } }], tasks: [task({ cancel: { operationId: 'op', requestedAt: T, reason: 'policy_revoked:allowed_paths' } })] }));
+    expect(v.settings).toEqual([setting]);
+    expect(v.runs['r']!.cancel).toEqual({ requestedAt: T, requestedBy: 'u' });
+    expect(v.tasks['t1']!.cancelRequested).toMatchObject({ reason: 'policy_revoked:allowed_paths' });
+  });
+});

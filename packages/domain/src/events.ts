@@ -11,6 +11,7 @@ export const EVENT_TYPES = [
   'change.proposed', 'change.merged',
   'candidate.assembled', 'candidate.failed',
   'attempt.human_intervened', 'terminal.control_ended',
+  'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -79,6 +80,13 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'attempt.human_intervened': [H],
   /** A control session ended. Human only, because the session was theirs even when a fence or timeout closed it. */
   'terminal.control_ended': [H],
+  /** The owner changed a setting: old and new values and who. Human only. Values are closed shapes (booleans, numbers, plan paths, model ids), never agent text or secrets. */
+  'settings.changed': [H],
+  /** The component that enforces a setting acknowledged it (a runner's poll or heartbeat). Never a person: a save is not an acknowledgement. */
+  'settings.applied': [S, Y],
+  /** The owner asked to cancel a run. Not confirmed termination: `run.cancelled` follows once every active attempt has ended or its lease expired. */
+  'run.cancel_requested': [H],
+  'run.cancelled': [S, Y],
 };
 
 export interface ActorNotPermitted {

@@ -6,6 +6,7 @@ import type { TeamModel } from '../features/team/model.ts';
 import { workerSettings } from '../features/team/settings.ts';
 import { WorkerDrawer, type TabId } from '../features/team/WorkerDrawer.tsx';
 import { WorkerSettings } from '../features/team/WorkerSettings.tsx';
+import { workerControls } from '../features/settings/model.ts';
 import type { ConnectionState } from './projection-store.ts';
 import { PANEL_WIDE, useMediaQuery } from './media.ts';
 
@@ -34,8 +35,10 @@ export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, con
   const panelBeside = useMediaQuery(PANEL_WIDE);
   const row = team.rows.find((r) => r.workerId === workerId);
   const settings = useMemo(() => (row ? workerSettings(snapshot, decisions, row) : null), [snapshot, decisions, row]);
-  if (!row || !settings) return null;
   const live = connection === 'live';
+  // A worker is a runner: the drawer shows its runner settings only for a real runner id, never for a placeholder made from an attempt.
+  const controls = useMemo(() => (row && !row.workerId.startsWith('attempt:') ? workerControls(snapshot, row.workerId, live) : null), [snapshot, row, live]);
+  if (!row || !settings) return null;
   const assign = { model: team.assignments, disabledReason: live ? null : ASSIGNMENTS_OFF, onExecute, onRefresh, onResync };
   return (
     <WorkerDrawer
@@ -49,7 +52,7 @@ export function WorkerDrawerHost({ workerId, tab, team, snapshot, decisions, con
       onClose={onClose}
       {...(tab ? { initialTab: tab } : {})}
       onTab={onTab}
-      settings={(openTerminal) => <WorkerSettings row={row} settings={settings} assign={assign} live={live} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} onTerminal={openTerminal} />}
+      settings={(openTerminal) => <WorkerSettings row={row} settings={settings} assign={assign} live={live} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} onTerminal={openTerminal} controls={controls} />}
       onOpenTerminal={onOpenTerminal}
       onOpenTerminalControl={onOpenTerminalControl}
     />

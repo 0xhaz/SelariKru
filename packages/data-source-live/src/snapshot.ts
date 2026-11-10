@@ -10,7 +10,7 @@ interface RawAttempt {
 interface RawTask {
   taskId: string; runId: string | null; revision: number; aggregateRevision: number; status: TaskView['status']; placementBlock: string | null; blockedReason: string | null;
   title: string | null; role: string | null; dependsOn: string[] | null; enteredStatusAt: string; latestEvidence: TaskView['latestEvidence']; attempts: RawAttempt[];
-  cancel: { operationId: string; requestedAt: string } | null;
+  cancel: { operationId: string; requestedAt: string; reason?: string } | null;
 }
 interface RawApproval {
   outcome: string; approvalId: string; runId: string; taskId: string | null; revision: number | null; requester: string | null; scopeHash: string | null;
@@ -20,8 +20,8 @@ interface RawHistory { approvalId: string; runId: string | null; taskId: string 
 interface RawUsage { entryId: string; runId: string; taskId: string | null; attemptId: string | null; metric: string; quantity: string | null; provenance: string; source: string }
 export interface RawSnapshot {
   projectId: string; cursor: number; generatedAt: string; modelCatalog: unknown; modelAssignments: unknown[];
-  limits: unknown; runners: unknown[]; checks: unknown[]; usage: RawUsage[];
-  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown; budget?: unknown }[];
+  limits: unknown; runners: unknown[]; checks: unknown[]; usage: RawUsage[]; settings?: unknown[];
+  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown; budget?: unknown; cancel?: unknown; policy?: unknown }[];
   tasks: RawTask[]; approvals: RawApproval[]; approvalHistory: RawHistory[]; changeRequests: unknown[];
   clientReports: { kind: string; payload: unknown; createdAt: string }[];
 }
@@ -100,7 +100,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
     }
     tasks[t.taskId] = {
       taskId: t.taskId, runId: t.runId, revision: t.revision, aggregateRevision: t.aggregateRevision, title: t.title, role: t.role, dependsOn: t.dependsOn, status: t.status, statusReason: t.blockedReason, placementBlock: t.placementBlock,
-      cancelRequested: t.cancel ? { at: t.cancel.requestedAt, operationId: t.cancel.operationId } : null, cancelReason: null, supersededByRevision: null,
+      cancelRequested: t.cancel ? { at: t.cancel.requestedAt, operationId: t.cancel.operationId, reason: t.cancel.reason ?? null } : null, cancelReason: null, supersededByRevision: null,
       attemptIds: started.map((a) => a.attemptId), activeAttemptId: started.find((a) => a.endedAt === null)?.attemptId ?? null, enteredStatusAt: t.enteredStatusAt, latestEvidence: t.latestEvidence,
     };
   }
@@ -117,12 +117,12 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
   return ProjectViewSnapshotSchema.parse({
     meta: { schemaVersion: 1, projectId: raw.projectId, cursor: String(raw.cursor), observedAt: raw.generatedAt, provenance: 'observed' },
     assistant: report ?? { mode: null, observedSource: 'unknown' },
-    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, budgetLimitUsd: limitOf(r.budget), ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}) }])),
+    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, budgetLimitUsd: limitOf(r.budget), cancel: r.cancel ?? null, policy: r.policy ?? null, ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}) }])),
     tasks, attempts, approvals,
     workers: buildWorkers(raw.tasks, raw.approvals),
     checks: Object.fromEntries((raw.checks as { checkId: string }[]).map((c) => [c.checkId, c])),
     usage: raw.usage.map((u) => ({ entryId: u.entryId, runId: u.runId, taskId: u.taskId, attemptId: u.attemptId, figure: { metric: u.metric, quantity: u.quantity, provenance: u.provenance, source: u.source } })),
     changeRequests: raw.changeRequests, approvalHistory: raw.approvalHistory.map(({ reason: _reason, ...h }) => h),
-    modelCatalog: raw.modelCatalog, modelAssignments: raw.modelAssignments, runners: raw.runners, limits: raw.limits,
+    modelCatalog: raw.modelCatalog, modelAssignments: raw.modelAssignments, runners: raw.runners, limits: raw.limits, settings: raw.settings ?? [],
   });
 }

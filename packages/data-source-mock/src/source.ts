@@ -3,9 +3,9 @@ import {
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type TaskView, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
+  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { approvalUnavailableReason, criterionDescription } from '@selarikru/domain';
+import { approvalUnavailableReason, criterionDescription, SETTING_ENFORCER, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -36,6 +36,10 @@ interface Project {
   modelAssignments: ModelAssignmentView[];
   /** Every assignment's revision, including removed ones: the real route's optimistic check never forgets. */
   readonly assignmentRevisions: Map<string, number>;
+  /** Saved run and worker settings, as the real tables would hold them. */
+  settings: SettingView[];
+  /** Run cancels requested and not yet confirmed. */
+  readonly cancels: Map<string, { readonly requestedAt: string }>;
 }
 
 export interface MockOptions {
@@ -55,6 +59,10 @@ export interface MockDataSource extends EngineeringDataSource {
 /** The same lists the real cancel route uses: a running task gets a cancel request, these cancel at once, anything else is refused. */
 const IMMEDIATE_CANCEL: readonly string[] = ['planned', 'ready', 'awaiting_approval', 'blocked', 'verifying'];
 const HEARTBEAT_STEP_MS = 10_000;
+/** The paths every demo plan lists. Simulated: a demo setting can only narrow these, as the real one can only narrow its plan's. */
+const DEMO_PLAN_PATHS: readonly string[] = ['src', 'tests'];
+/** How long a simulated running attempt takes to stop after a cancel. */
+const STOP_MS = 2_000;
 /** The route's `REVERIFY_LIMIT`: re-verifications per task revision. */
 const REVERIFY_LIMIT = 3;
 const NOT_OWED: readonly string[] = ['verified', 'merged', 'superseded'];
@@ -98,6 +106,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     projects.set(fixture.projectId, {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: [...(fixture.modelAssignments ?? [])], assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
+      settings: [], cancels: new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
   }
@@ -131,6 +140,26 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         meta: { ...snap.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt },
       };
       p.state = { snapshot: snap, recentEventIds: [...p.state.recentEventIds, event.eventId].slice(-512) };
+      return;
+    }
+
+    // What the real server reads from its own rows: the reducer asks for a snapshot on these, so the mock keeps them here and only moves its cursor.
+    if (event.type === 'settings.changed' || event.type === 'settings.applied' || event.type === 'run.cancel_requested' || event.type === 'run.cancelled') {
+      if (event.type === 'settings.applied') {
+        const key = event.payload['key'];
+        const field = event.payload['field'];
+        const revision = event.payload['revision'];
+        if (event.payload['scope'] === 'assignment') p.modelAssignments = p.modelAssignments.map((a) => (`${a.scope}:${a.key}` === key && a.revision === revision ? { ...a, state: 'applied' as const } : a));
+        else p.settings = p.settings.map((x) => (x.key === key && x.field === field && x.desiredRevision === revision ? { ...x, effective: x.desired, effectiveRevision: x.desiredRevision, state: 'applied' as const, appliedAt: event.occurredAt } : x));
+      }
+      let next = snap;
+      const run = snap.runs[event.runId];
+      if (event.type === 'run.cancel_requested' && run) next = { ...next, runs: { ...next.runs, [event.runId]: { ...run, cancel: { requestedAt: event.occurredAt, requestedBy: event.actor.id } } } };
+      if (event.type === 'run.cancelled' && run) {
+        p.cancels.delete(event.runId);
+        next = { ...next, runs: { ...next.runs, [event.runId]: { ...run, lifecycle: 'cancelled' } } };
+      }
+      p.state = { snapshot: { ...next, meta: { ...next.meta, cursor: sequenceToCursor(event.sequence), observedAt: event.receivedAt } }, recentEventIds: [...p.state.recentEventIds, event.eventId].slice(-512) };
       return;
     }
 
@@ -301,17 +330,40 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         return [id, { ...w, lastHeartbeatAt: a.lastHeartbeatAt, latestAction }];
       }),
     );
-    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id) }]));
-    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
+    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id), policy: policyOf(p, r, workers) }]));
+    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: p.settings.map((x) => ({ ...x })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
       runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
     };
   }
 
+  /** The demo run's effective policy, built the way the server builds it from its rows. Simulated; never a real limit. */
+  function policyOf(p: Project, r: RunView, workers: ProjectViewSnapshot['workers']): BoundedAutonomy {
+    const own = (field: string) => p.settings.find((x) => x.scope === 'run' && x.key === r.runId && x.field === field);
+    const cloud = Object.values(workers).some((w) => w.execution === 'cloud');
+    const narrowed = own('allowed_paths');
+    const cloudOff = own('cloud_eligible')?.effective === false;
+    const limit = own('budget_limit_usd')?.effective ?? r.budgetLimitUsd ?? null;
+    return {
+      allowedPaths: { value: narrowed && Array.isArray(narrowed.effective) ? (narrowed.effective as string[]) : [...DEMO_PLAN_PATHS], basis: 'configured' },
+      planPaths: [...DEMO_PLAN_PATHS],
+      cloudEligible: { value: cloud && !cloudOff, basis: 'configured' },
+      cloudDestination: { value: cloud ? 'cloud-sandbox-demo' : null, basis: 'configured' },
+      destinations: { value: [], basis: 'configured' },
+      maxConcurrentWorkers: { value: 2, basis: 'configured' },
+      repairAttempts: { value: 2, basis: 'configured' },
+      attemptTimeoutSeconds: { value: 1800, basis: 'configured' },
+      budgetLimitUsd: typeof limit === 'number' ? { value: limit, basis: 'configured' } : { value: 25, basis: 'recommended' },
+      merge: { value: 'human', basis: 'configured' },
+      schedulingPaused: { value: own('paused')?.desired === true, basis: 'configured' },
+    };
+  }
+
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created';
+  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled';
+  const RUN_ADDRESSED: readonly CommandEvent[] = ['run.created', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
   function appendCommandEvent(p: Project, taskId: string, type: CommandEvent, payload: Record<string, unknown>, o: { delayMs?: number; revisionStep?: number; attemptId?: string | null; system?: boolean } = {}): void {
     const task = p.state.snapshot.tasks[taskId];
-    const runId = type === 'run.created' ? taskId : task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
+    const runId = RUN_ADDRESSED.includes(type) ? taskId : task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
     const at = isoOf(timeOf(p) + (o.delayMs ?? 0));
     const event: ProjectViewEvent = {
       schemaVersion: 1, eventId: seededId(prng, 'evt'), projectId: p.fixture.projectId, runId, taskId, attemptId: o.attemptId ?? null, type, sequence: 0,
@@ -351,14 +403,80 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     }
     const revision = current + 1;
     p.assignmentRevisions.set(id, revision);
-    p.modelAssignments = [...p.modelAssignments.filter((a) => !(a.scope === scope && a.key === key)), { scope, key, provider: selection?.provider ?? null, model: selection?.model ?? null, revision, updatedBy: 'demo-operator', updatedAt: isoOf(timeOf(p)) }];
-    return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'applied' });
+    const previous = p.modelAssignments.find((a) => a.scope === scope && a.key === key);
+    p.modelAssignments = [...p.modelAssignments.filter((a) => !(a.scope === scope && a.key === key)), { scope, key, provider: selection?.provider ?? null, model: selection?.model ?? null, revision, updatedBy: 'demo-operator', updatedAt: isoOf(timeOf(p)), state: 'applying' }];
+    // As on the server: saved now, in force once the simulated runner acknowledges it on its next heartbeat.
+    const run = scope === 'task' ? p.state.snapshot.tasks[key]?.runId : Object.keys(p.state.snapshot.runs)[0];
+    if (run) {
+      appendCommandEvent(p, run, 'settings.changed', { scope: 'assignment', key: id, field: 'model', from: previous?.provider ? { provider: previous.provider, model: previous.model } : null, to: selection, revision, enforcer: 'runner' });
+      appendCommandEvent(p, run, 'settings.applied', { scope: 'assignment', key: id, revision }, { delayMs: HEARTBEAT_STEP_MS, system: true });
+    }
+    return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: 'pending' });
+  }
+
+  /** The same order of checks as `POST /v1/projects/:id/settings`. A field the server enforces is in force in the save; one a runner holds waits for its heartbeat. */
+  function setSetting(p: Project, c: Extract<AuthorizedViewCommand, { command: 'setting.set' }>, op: string): CommandReceipt {
+    const { key, change } = c.args;
+    const snap = p.state.snapshot;
+    let eventRun: string;
+    if (change.scope === 'run') {
+      const r = snap.runs[key];
+      if (!r) return rejected(c.idempotencyKey, 'unknown_target');
+      if (['merged', 'failed', 'cancelled'].includes(r.lifecycle) || r.cancel) return rejected(c.idempotencyKey, 'run_closed');
+      eventRun = key;
+    } else {
+      if (!snap.workers[key]) return rejected(c.idempotencyKey, 'unknown_target');
+      const first = Object.keys(snap.runs)[0];
+      if (!first) return rejected(c.idempotencyKey, 'unknown_target');
+      eventRun = first;
+    }
+    const row = p.settings.find((x) => x.scope === change.scope && x.key === key && x.field === change.field);
+    const current = row?.desiredRevision ?? 0;
+    if (c.expectedRevision !== current) return rejected(c.idempotencyKey, 'stale_revision');
+    if (change.field === 'allowed_paths' && change.value.some((x) => !DEMO_PLAN_PATHS.includes(x))) return rejected(c.idempotencyKey, 'outside_plan_scope');
+    if (change.field === 'slots' && change.value > 2) return rejected(c.idempotencyKey, 'outside_recorded_limits');
+    const enforcer = SETTING_ENFORCER[change.field];
+    const revision = current + 1;
+    const at = isoOf(timeOf(p));
+    const inForce = row ? (row.effectiveRevision >= row.desiredRevision ? row.desired : row.effective) : null;
+    const next: SettingView = {
+      scope: change.scope, key, field: change.field, desired: change.value, desiredRevision: revision, enforcer, updatedBy: 'demo-operator', updatedAt: at,
+      ...(enforcer === 'server'
+        ? { effective: change.value, effectiveRevision: revision, state: 'applied' as const, appliedAt: at }
+        : { effective: inForce, effectiveRevision: row?.effectiveRevision ?? 0, state: 'applying' as const, appliedAt: row?.appliedAt ?? null }),
+    };
+    p.settings = [...p.settings.filter((x) => x !== row), next];
+    appendCommandEvent(p, eventRun, 'settings.changed', { scope: change.scope, key, field: change.field, from: row?.desired ?? null, to: change.value as SettingChange['value'], revision, enforcer });
+    if (enforcer === 'runner') appendCommandEvent(p, eventRun, 'settings.applied', { scope: change.scope, key, field: change.field, revision }, { delayMs: HEARTBEAT_STEP_MS, system: true });
+    return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: enforcer === 'server' ? 'applied' : 'pending' });
+  }
+
+  /** The same rule as `POST /v1/runs/:id/cancel`: running work is asked to stop, the rest is cancelled at once, and the run is cancelled when the last attempt ends. */
+  function cancelRun(p: Project, c: Extract<AuthorizedViewCommand, { command: 'run.cancel' }>, op: string): CommandReceipt {
+    const r = p.state.snapshot.runs[c.args.runId];
+    if (!r) return rejected(c.idempotencyKey, 'unknown_target');
+    if (c.expectedRevision !== r.planRevision) return rejected(c.idempotencyKey, 'stale_revision');
+    if (['merged', 'failed', 'cancelled'].includes(r.lifecycle)) return rejected(c.idempotencyKey, 'run_closed');
+    if (r.cancel || p.cancels.has(r.runId)) return rejected(c.idempotencyKey, 'cancel_pending');
+    const tasks = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === r.runId);
+    const running = tasks.filter((t) => t.status === 'running');
+    p.cancels.set(r.runId, { requestedAt: isoOf(timeOf(p)) });
+    for (const t of running) {
+      appendCommandEvent(p, t.taskId, 'task.cancel_requested', { operationId: op, attemptIds: t.activeAttemptId ? [t.activeAttemptId] : [], runCancelled: true });
+      appendCommandEvent(p, t.taskId, 'task.cancelled', { reason: 'cancel_requested', operationId: op, runCancelled: true }, { delayMs: STOP_MS, revisionStep: 2, attemptId: t.activeAttemptId, system: true });
+    }
+    for (const t of tasks.filter((x) => IMMEDIATE_CANCEL.includes(x.status))) appendCommandEvent(p, t.taskId, 'task.cancelled', { operationId: op, runCancelled: true });
+    appendCommandEvent(p, r.runId, 'run.cancel_requested', { operationId: op, stopping: running.map((t) => t.taskId) });
+    appendCommandEvent(p, r.runId, 'run.cancelled', { operationId: op, lifecycle: 'cancelled' }, { delayMs: running.length > 0 ? STOP_MS : 0, system: true });
+    return receipt(c.idempotencyKey, { operationId: op, accepted: true, execution: running.length > 0 ? 'cancel_requested' : 'applied' });
   }
 
   function run(p: Project, c: AuthorizedViewCommand): CommandReceipt {
     const snap = p.state.snapshot;
     const op = `op_${seededId(prng, 'sim')}`;
     if (c.command === 'assignment.set') return setAssignment(p, c, op);
+    if (c.command === 'setting.set') return setSetting(p, c, op);
+    if (c.command === 'run.cancel') return cancelRun(p, c, op);
     // Mirrors the owner route: a new run, in planning, with no plan. The demo has no recorded ceiling to enforce.
     if (c.command === 'run.start_new') {
       const runId = `run_${seededId(prng, 'sim')}`;

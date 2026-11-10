@@ -16,7 +16,7 @@ export * from './placement.ts';
 export { retryTask } from './retry.ts';
 export { applyVerification, closePartsWithoutVerdict, closeVerificationWithoutVerdict, isReverifiableBlock, leaveReviewForPlan, markRunReadyForReview, lockPartsForClaims, releaseTaskClaims, lockBeforeRunRow, lockStaleCandidate, reopenBlockedVerification, reverifyRun, reopenStaleVerification, retireStaleCandidate, REVERIFY_LIMIT, type ReverifyOutcome, type StaleCandidate, type VerificationApplication, type VerificationVerdict } from './verification.ts';
 export { markTaskMerged } from './merge.ts';
-export { formatMicros, toMicros } from './reserve.ts';
+export { formatMicros, lockBudget, remainingMicros as remainingBudgetMicros, toMicros } from './reserve.ts';
 export { loadRunEvidence, type RunEvidence } from './evidence.ts';
 export { loadLatestAppliedRecord, RecordStoreUnavailableError, validRecordOf, type LatestAppliedRecord, type RecordBar, type RecordBytes, type TrustedVerifier } from './verification-record.ts';
 export { reconcileObservedCost, runUsageLines, stopForExhaustedBudget, type ObservedCost, type ReconcileResult, type RunUsageLine } from './usage.ts';
@@ -33,3 +33,5 @@ export function createScheduler(ctx: SchedulerContext): Scheduler {
     retry: (key, by, op = null, tx) => retryTask(ctx, key, by, op, tx),
   };
 }
+export { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, requestPolicyStop, type RunGate, type RunnerGate } from './settings.ts';
+export { cancelRequestReason } from './cancel.ts';

@@ -1,5 +1,5 @@
 import { boolean, jsonb, bigint, pgTable, primaryKey, text, unique, foreignKey, integer } from 'drizzle-orm/pg-core';
-import { createdAt, scope } from './common.ts';
+import { createdAt, scope, tstz } from './common.ts';
 
 export const projects = pgTable(
   'projects',
@@ -46,6 +46,9 @@ export const runs = pgTable(
     pinnedModel: jsonb('pinned_model').$type<{ provider: string; model: string }>(),
     /** For a run started from onboarding: the execution, inference, budget and connection that authorised it, frozen at activation. Null for any other run. */
     setupSnapshot: jsonb('setup_snapshot').$type<Record<string, unknown>>(),
+    /** Set when the owner asked to cancel the run. No claim is granted from then on; `lifecycle` becomes `cancelled` once every active attempt has ended or its lease expired. */
+    cancelRequestedAt: tstz('cancel_requested_at'),
+    cancelRequestedBy: text('cancel_requested_by'),
     createdAt: createdAt(),
   },
   (t) => [

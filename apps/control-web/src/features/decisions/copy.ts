@@ -54,6 +54,9 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   unsupported_model: { text: 'That model is not one the installed harness offers. Nothing was saved.', changed: false },
   model_not_allowed: { text: 'Policy does not allow that model, so it was not saved. No approval can override it.', changed: false },
   trial_model_pinned: { text: 'This run is a benchmark trial pinned to one model, so overrides are refused.', changed: false },
+  run_closed: { text: 'This run is finished or being cancelled, so its settings no longer change. Nothing was saved.', changed: true },
+  outside_plan_scope: { text: 'A setting can only narrow the paths the accepted plan lists. A new path needs a plan revision. Nothing was saved.', changed: false },
+  resume_refused: { text: 'Scheduling stays paused: the run has no budget left, no policy is loaded, or a lapsed lease is still being reconciled. Nothing was saved.', changed: false },
 };
 
 export const rejectionView = (rejection: CommandReceipt['rejection']): RejectionView => REJECTION[rejection ?? 'not_allowed'];

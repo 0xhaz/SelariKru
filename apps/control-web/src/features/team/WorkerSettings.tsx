@@ -11,6 +11,8 @@ import { RoleModelAssignment, TaskModelOverride } from './ModelAssignments.tsx';
 import type { TeamRow } from './model.ts';
 import { STOP_CARD, confirmationStale, currentAction, type CommandAction, type PendingConfirm, type WorkerSettingsModel } from './settings.ts';
 import { CHANGED_ON_SCREEN, holdActions, useChangedCards } from '../decisions/useChangedCards.ts';
+import type { WorkerControlsModel } from '../settings/model.ts';
+import { WorkerSettingControls } from '../settings/SettingsPanel.tsx';
 
 type AssignProps = Omit<Parameters<typeof TaskModelOverride>[0], 'target'>;
 
@@ -24,6 +26,8 @@ export interface WorkerSettingsProps {
   readonly onRefresh: () => void;
   readonly onResync: () => void;
   readonly onTerminal: () => void;
+  /** This worker's own settings: enabled and slots. Absent: not shown. */
+  readonly controls?: WorkerControlsModel | null;
 }
 
 function Section({ title, children, testId }: { title: string; children: ReactNode; testId?: string }) {
@@ -41,7 +45,7 @@ function Section({ title, children, testId }: { title: string; children: ReactNo
  * its confirmation naming the consequence, and stays off with a reason while the connection is not live. A Decisions card that changes while shown is held
  * until reviewed, by the same rule as on the Decisions screen.
  */
-export function WorkerSettings({ row, settings, assign, live, onExecute, onRefresh, onResync, onTerminal }: WorkerSettingsProps) {
+export function WorkerSettings({ row, settings, assign, live, onExecute, onRefresh, onResync, onTerminal, controls = null }: WorkerSettingsProps) {
   const reasonId = useId();
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ kind: 'ok' | 'refused'; text: string } | null>(null);
@@ -145,6 +149,12 @@ export function WorkerSettings({ row, settings, assign, live, onExecute, onRefre
         {row.overrideTarget ? <TaskModelOverride {...assign} target={row.overrideTarget} /> : <p className="text-sm text-muted">{row.task || row.lastTask ? 'This task can take no further attempt, so its model cannot change.' : 'No task, so there is no task model to change.'}</p>}
         {roleTarget && !row.overrideTarget?.pinned ? <RoleModelAssignment {...assign} target={roleTarget} /> : null}
       </Section>
+
+      {controls ? (
+        <Section title="Worker" testId="settings-worker">
+          <WorkerSettingControls model={controls} workerId={row.workerId} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} />
+        </Section>
+      ) : null}
 
       <Section title="Cancel this task" testId="settings-stop">
         {stop ? (

@@ -12,6 +12,7 @@ import { gitBackedProjects, parseSlots } from './repos.ts';
 import { wsControlConnector } from './control.ts';
 import { loadCredentials, pair } from './credentials.ts';
 import { RunnerLoop } from './loop.ts';
+import { RunnerSettings } from './settings.ts';
 
 const stateDir = process.env['SELARIKRU_RUNNER_HOME'] ?? join(homedir(), '.selarikru', 'runner');
 /** The SelariKru repository itself (apps/local-runner/src -> repo root): never mounted into a sandbox. */
@@ -57,7 +58,9 @@ async function main(): Promise<void> {
     const caps = await runtime.capabilities();
     if (caps.runtimeVersion === null) throw new Error('sbx is not available; install and sign in to Docker Sandboxes. There is no host-mode fallback.');
     log(`sbx ${caps.runtimeVersion}; ${Object.keys(repos).length} project source(s) configured; outbound connections only`);
-    const api = new HttpRunnerApi(creds.apiBaseUrl, creds.token);
+    // The owner's settings for this runner arrive with every claim and heartbeat; each request acknowledges the revision applied.
+    const settings = new RunnerSettings(slots, log);
+    const api = new HttpRunnerApi(creds.apiBaseUrl, creds.token, fetch, settings);
     const dialControl = wsControlConnector(creds.apiBaseUrl, creds.token);
     const ctl = new AbortController();
     // First signal: stop the running agent with a bounded stop, destroy its sandbox, exit. A second one exits at once.
@@ -76,6 +79,7 @@ async function main(): Promise<void> {
       harnessReport: cachedHarnessReport(),
       // Two by default, the pilot's coding limit. The server still decides: a one-slot placement mode simply gives the second slot nothing.
       slots,
+      settings,
       // A path that is not a git repository is not a checkout: say so here, and the server's readiness check will not count it.
       projects: await gitBackedProjects(repos, log),
       log,

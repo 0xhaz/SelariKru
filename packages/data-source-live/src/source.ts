@@ -27,7 +27,7 @@ const DEFAULT_IDLE_MS = 45_000;
 const CLOSED: DataSourceError = { code: 'disconnected', message: 'this data source was closed', retryable: false };
 const DROPPED: DataSourceError = { code: 'disconnected', message: 'the connection to the server dropped', retryable: true };
 const AUTH_CODES: readonly string[] = ['unauthenticated', 'invalid_token', 'not_owner', 'wrong_principal_type', 'origin_not_allowed', 'host_not_allowed'];
-const NOT_FOUND_CODES: readonly string[] = ['task_not_found', 'run_not_found', 'approval_not_found', 'not_found', 'project_not_found'];
+const NOT_FOUND_CODES: readonly string[] = ['task_not_found', 'run_not_found', 'approval_not_found', 'not_found', 'project_not_found', 'runner_not_found'];
 /** Reasons the route carries in `details.reason` on a 403, and the pull-request route's refusals. */
 const DETAIL_REASONS: readonly string[] = ['not_budget_stopped', 'already_accepted', 'nothing_to_reverify', 'reverify_limit_reached', 'resource_conflict', 'run_not_ready', 'reduced_scope_not_accepted', 'run_already_merged', 'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate'];
 
@@ -97,6 +97,8 @@ function routeOf(c: AuthorizedViewCommand): Route {
     // Needs the project's recorded setup first, so `execute` builds this route itself.
     case 'run.start_new': throw new Error('run.start_new is routed by execute');
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
+    case 'setting.set': return { path: `/v1/projects/${enc(c.args.projectId)}/settings`, body: { key: c.args.key, change: c.args.change, expectedRevision: c.expectedRevision, ...key } };
+    case 'run.cancel': return { path: `/v1/runs/${enc(c.args.runId)}/cancel`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
   }
 }
 
@@ -110,6 +112,9 @@ function acceptedOf(c: AuthorizedViewCommand, body: Record<string, unknown>): Ac
   if (c.command === 'task.cancel' || c.command === 'task.retry') return { operationId: op('operationId'), execution: body['state'] === 'cancel_requested' ? 'cancel_requested' : 'applied' };
   if (c.command === 'run.accept_reduced_scope') return { operationId: op('decisionId'), execution: 'applied' };
   if (c.command === 'run.start_new') return { operationId: op('runId'), execution: 'applied' };
+  // A saved setting or model is in force only once its enforcer says so: a runner-acknowledged one is pending until then, never applied by the save.
+  if (c.command === 'setting.set' || c.command === 'assignment.set') return { operationId: null, execution: body['state'] === 'applied' ? 'applied' : 'pending' };
+  if (c.command === 'run.cancel') return { operationId: op('operationId'), execution: body['state'] === 'applied' ? 'applied' : 'cancel_requested' };
   return { operationId: null, execution: 'applied' };
 }
 

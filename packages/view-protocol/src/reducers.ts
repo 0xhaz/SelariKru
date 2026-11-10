@@ -24,7 +24,7 @@ export interface ProjectionState {
   readonly recentEventIds: readonly string[];
 }
 
-export type ResyncReason = 'gap' | 'wrong_project' | 'provenance_mismatch' | 'unknown_task' | 'unknown_revision' | 'missing_approval_id' | 'plan_revision' | 'unreadable_reduced_scope';
+export type ResyncReason = 'gap' | 'wrong_project' | 'provenance_mismatch' | 'unknown_task' | 'unknown_revision' | 'missing_approval_id' | 'plan_revision' | 'unreadable_reduced_scope' | 'settings_changed' | 'run_cancel';
 export type ApplyResult =
   | { readonly outcome: 'applied' | 'ignored' | 'duplicate'; readonly state: ProjectionState }
   | { readonly outcome: 'resync'; readonly reason: ResyncReason; readonly state: ProjectionState };
@@ -147,6 +147,14 @@ function projectRun(snap0: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       };
       return setRun({ ...run, reducedScope });
     }
+    // Settings and run cancels are read from a snapshot: what is in force, which tasks a revoke blocked or stopped, and which a cancel closed are rows the event
+    // only names. A snapshot is never guessed from the event.
+    case 'settings.changed':
+    case 'settings.applied':
+      return needs('settings_changed');
+    case 'run.cancel_requested':
+    case 'run.cancelled':
+      return needs('run_cancel');
     default:
       return null; // a task-level type addressed to the run id: nothing to project, and never a phantom task
   }
@@ -389,14 +397,14 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.
-      const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' = e.type;
+      const _run: 'run.created' | 'plan.accepted' | 'run.reduced_scope_accepted' | 'run.reverted' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled' = e.type;
       void _run;
       return null;
     }
   }
 }
 
-const RUN_LEVEL_TYPES: readonly EventType[] = ['run.created', 'plan.accepted', 'run.reverted'];
+const RUN_LEVEL_TYPES: readonly EventType[] = ['run.created', 'plan.accepted', 'run.reverted', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
 
 function project(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected {
   // Run-level events, and events addressed to the run id (integration), are handled before any task lookup.

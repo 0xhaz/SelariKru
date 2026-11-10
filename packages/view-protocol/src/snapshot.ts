@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, RUN_STATUSES, TASK_STATUSES } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, RUN_SETTING_FIELDS, RUNNER_SETTING_FIELDS, RUN_STATUSES, SETTING_SCOPES, TASK_STATUSES } from '@selarikru/domain';
 import { INFERENCE_MODES } from '@selarikru/policy';
 import { CursorSchema, ProvenanceSchema, VIEW_SCHEMA_VERSION } from './common.ts';
 import { UsageEntrySchema } from './usage.ts';
@@ -39,11 +39,69 @@ export const ModelCatalogViewSchema = z
 export type ModelCatalogView = z.infer<typeof ModelCatalogViewSchema>;
 export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, projectDefault: null, providers: [] };
 
+/**
+ * Whether a saved change is in force. `applied`: its enforcer acknowledged it. `applying`: saved, and the server already gates claims on it, but the runner
+ * has not confirmed it yet. `waiting_for_runner`: no runner is connected to confirm it. A save is never `applied` by being saved.
+ */
+export const SETTING_STATES = ['applied', 'applying', 'waiting_for_runner'] as const;
+export type SettingState = (typeof SETTING_STATES)[number];
+
 /** The current assignment for a role or task. `revision` is what a change must send back. Null provider and model: removed, listed only for its revision. */
 export const ModelAssignmentViewSchema = z
-  .object({ scope: z.enum(ASSIGNMENT_SCOPES), key: Id, provider: Id.nullable(), model: Id.nullable(), revision: z.number().int().min(1), updatedBy: z.string().min(1), updatedAt: Iso })
+  .object({
+    scope: z.enum(ASSIGNMENT_SCOPES), key: Id, provider: Id.nullable(), model: Id.nullable(), revision: z.number().int().min(1), updatedBy: z.string().min(1), updatedAt: Iso,
+    /** Whether the runners have acknowledged this revision. Absent: the source has no acknowledgements at all (the demo's seeded assignments), and it reads as in force. */
+    state: z.enum(SETTING_STATES).optional(),
+  })
   .strict();
 export type ModelAssignmentView = z.infer<typeof ModelAssignmentViewSchema>;
+
+/** A setting the owner saved, for a run or a worker, with what is in force. Values are closed shapes: a boolean, a number, plan paths. */
+export const SettingViewSchema = z
+  .object({
+    scope: z.enum(SETTING_SCOPES),
+    /** The run id for a run setting, the runner id for a worker setting. */
+    key: Id,
+    field: z.enum([...RUN_SETTING_FIELDS, ...RUNNER_SETTING_FIELDS]),
+    desired: z.unknown(),
+    /** What is in force now. Null: nothing saved has been acknowledged yet, so the configured value still applies. */
+    effective: z.unknown(),
+    desiredRevision: z.number().int().min(1),
+    effectiveRevision: z.number().int().min(0),
+    enforcer: z.enum(['server', 'runner']),
+    state: z.enum(SETTING_STATES),
+    updatedBy: z.string().min(1),
+    updatedAt: Iso,
+    appliedAt: Iso.nullable(),
+  })
+  .strict();
+export type SettingView = z.infer<typeof SettingViewSchema>;
+
+export const POLICY_BASES = ['configured', 'recommended', 'unresolved'] as const;
+export type PolicyBasis = (typeof POLICY_BASES)[number];
+const policyValue = <T extends z.ZodTypeAny>(value: T) => z.object({ value: value.nullable(), basis: z.enum(POLICY_BASES) }).strict();
+
+/**
+ * A run's effective policy, from the server: what it may change, where it may run, its worker, repair and time limits, its budget, and how it merges. Each value
+ * says whether it is configured, only recommended, or unresolved. Nothing here is computed in the browser.
+ */
+export const BoundedAutonomySchema = z
+  .object({
+    allowedPaths: policyValue(z.array(z.string())),
+    /** Every path the accepted plan lists: the widest `allowedPaths` can be set to. A setting narrows the plan; it never widens it. */
+    planPaths: z.array(z.string()).default([]),
+    cloudEligible: policyValue(z.boolean()),
+    cloudDestination: policyValue(z.string()),
+    destinations: policyValue(z.array(z.object({ destination: z.string(), purpose: z.string() }).strict())),
+    maxConcurrentWorkers: policyValue(z.number()),
+    repairAttempts: policyValue(z.number()),
+    attemptTimeoutSeconds: policyValue(z.number()),
+    budgetLimitUsd: policyValue(z.number()),
+    merge: policyValue(z.literal('human')),
+    schedulingPaused: policyValue(z.boolean()),
+  })
+  .strict();
+export type BoundedAutonomy = z.infer<typeof BoundedAutonomySchema>;
 
 export const EvidenceRefSchema = z
   .object({ kind: z.string().min(1), ref: Id, at: Iso })
@@ -165,6 +223,10 @@ export const RunViewSchema = z
     pinnedModel: ModelSelectionSchema.nullable().default(null),
     /** The USD limit this run was created with. Absent or null: the source does not report it. */
     budgetLimitUsd: z.number().nullable().optional(),
+    /** Set once the owner asked to cancel the run. The run is cancelled only when `lifecycle` says so: until then, active attempts are still stopping. */
+    cancel: z.object({ requestedAt: Iso, requestedBy: z.string().nullable() }).strict().nullable().optional(),
+    /** The effective policy. Absent or null: the source does not report it, and nothing is shown in its place. */
+    policy: BoundedAutonomySchema.nullable().optional(),
     /** Every attempt of this run a person opened a shell in, older task revisions included. Absent: the source does not report it. */
     humanInterventions: z.array(z.object({ attemptId: Id, taskId: Id, at: Iso }).strict()).optional(),
   })
@@ -187,7 +249,8 @@ export const TaskViewSchema = z
     /** Permanent placement block (restricted data, missing grant or limit, approval required); null when none. */
     placementBlock: z.string().nullable(),
     /** Set once a cancel is requested; termination is not confirmed until the status is `cancelled`. */
-    cancelRequested: z.object({ at: Iso, operationId: z.string().nullable() }).strict().nullable(),
+    /** `reason` `policy_revoked:...`: the owner narrowed a grant; the attempt stops and the task goes back to ready, blocked by policy, rather than cancelled. */
+    cancelRequested: z.object({ at: Iso, operationId: z.string().nullable(), reason: z.string().nullable().optional() }).strict().nullable(),
     cancelReason: z.enum(['cancel_requested', 'budget_exhausted']).nullable(),
     supersededByRevision: z.number().int().min(1).nullable(),
     attemptIds: z.array(Id),
@@ -372,6 +435,8 @@ export const ProjectViewSnapshotSchema = z
     modelAssignments: z.array(ModelAssignmentViewSchema).default([]),
     runners: z.array(RunnerViewSchema).default([]),
     limits: LimitsViewSchema.default({ maxConcurrentTotal: null }),
+    /** Every run and worker setting the owner saved. Empty: none saved, so every configured value stands. */
+    settings: z.array(SettingViewSchema).default([]),
   })
   .strict();
 export type ProjectViewSnapshot = z.infer<typeof ProjectViewSnapshotSchema>;
@@ -380,6 +445,6 @@ export function emptySnapshot(init: { projectId: string; observedAt: string; pro
   return {
     meta: { schemaVersion: VIEW_SCHEMA_VERSION, projectId: init.projectId, cursor: '0', observedAt: init.observedAt, provenance: init.provenance },
     assistant: { mode: null, observedSource: 'unknown' },
-    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [], modelCatalog: UNKNOWN_MODEL_CATALOG, modelAssignments: [], runners: [], limits: { maxConcurrentTotal: null },
+    runs: {}, tasks: {}, attempts: {}, workers: {}, approvals: {}, checks: {}, usage: [], changeRequests: [], approvalHistory: [], modelCatalog: UNKNOWN_MODEL_CATALOG, modelAssignments: [], runners: [], limits: { maxConcurrentTotal: null }, settings: [],
   };
 }

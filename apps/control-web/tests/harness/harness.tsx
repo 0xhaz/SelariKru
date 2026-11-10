@@ -74,6 +74,7 @@ declare global {
     __scenario?: Scenario;
     __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[] };
     __spiedSource?: EngineeringDataSource;
+    __advance?: (ms: number) => void;
     __allowFailureLoads?: () => void;
     __releaseSnapshot?: () => void;
     __releaseDownload?: () => void;
@@ -261,6 +262,8 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
     },
   };
   window.__spiedSource = source;
+  // Moves the mock's virtual clock, so a test can let a simulated heartbeat acknowledge a saved setting.
+  window.__advance = (ms: number) => session.advance(ms);
   const spied = createProjectionStore({ source, projectId: project.projectId, clock: session.clockFor(project.projectId), every: session.every });
   spied.getState().start();
   window.__projection = spied;

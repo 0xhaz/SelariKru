@@ -190,6 +190,8 @@ export interface TeamViewProps {
   readonly onOpenWorker: (workerId: string) => void;
   /** A failure while deriving the view. Thrown here so the route's error boundary, not the shell, takes it. */
   readonly failure?: unknown;
+  /** The run's Bounded autonomy panel, beside the model assignments it is set up with. Absent when the server reports no policy. */
+  readonly autonomy?: ReactNode;
 }
 
 function Heading({ summary }: { summary?: string | null | undefined }) {
@@ -201,7 +203,7 @@ function Heading({ summary }: { summary?: string | null | undefined }) {
   );
 }
 
-export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, onExecute, onRefresh, onResync, onOpenWorker, failure }: TeamViewProps) {
+export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, onExecute, onRefresh, onResync, onOpenWorker, failure, autonomy = null }: TeamViewProps) {
   if (failure !== undefined) throw failure;
   const wide = useIsWide();
   const [sort, setSort] = useState<SortKey>('attention');
@@ -249,6 +251,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
         </Panel>
       )}
       {team.runners.length > 0 ? <div className="mt-4"><RunnersPanel runners={team.runners} summary={team.runnersSummary} simulated={team.simulated} /></div> : null}
+      {autonomy ? <div className="mt-4">{autonomy}</div> : null}
     </>
   );
 }

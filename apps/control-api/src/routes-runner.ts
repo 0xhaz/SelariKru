@@ -9,6 +9,7 @@ import { bearerToken, newSecret, PAIRING_CODE_PREFIX, RUNNER_TOKEN_PREFIX, sha25
 import { AppError } from './errors.ts';
 import { parseBody } from './routes-owner.ts';
 import { loadSpecRow, newId } from './store.ts';
+import { acknowledgeRunnerConfig, finishCancelledRuns, runnerConfigFor } from './settings.ts';
 import { attemptStreamable } from './terminal.ts';
 
 const runnerOf = (req: FastifyRequest): Runner => {
@@ -98,12 +99,16 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
       if (JSON.stringify(storedRow?.projects ?? null) !== JSON.stringify(next)) await db.update(schema.runners).set({ configuredProjects: next }).where(where);
     }
     const harnesses = body.harnesses ?? stored ?? [];
+    // The acknowledgement first, in its own transaction: what it puts in force is recorded whether or not this poll gets work.
+    if (body.config !== undefined) await acknowledgeRunnerConfig(db, runner.tenantId, runner.runnerId, body.config, now());
     const outcome = await scheduler.tryClaim({ ...runner, harnesses }, config.caps);
+    // Sent with every answer, so a runner learns a change on its next poll whether or not it got work.
+    const runnerConfig = await runnerConfigFor(db, runner.tenantId, runner.runnerId);
     if (outcome.ok) {
       const priorFailure = outcome.lease.attemptNumber > 1 ? await priorFailureOf(outcome.lease) : null;
-      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}) }, reason: null, skipped: outcome.skipped });
+      return reply.code(200).send({ lease: { ...outcome.lease, ...(priorFailure !== null ? { priorFailure } : {}) }, reason: null, skipped: outcome.skipped, config: runnerConfig });
     }
-    return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped });
+    return reply.code(200).send({ lease: null, reason: outcome.reason, skipped: outcome.skipped, config: runnerConfig });
   });
 
   /** The runner presents attempt, fence and token. Everything else in the lease is rebuilt from the database. */
@@ -129,7 +134,9 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     const body = parseBody(HeartbeatRequestSchema, req.body);
     const result = await scheduler.heartbeat(await leaseFor(runner, body.lease), body.activity, body.setupComplete === true ? { setupComplete: true } : {});
     if (!result.ok) throw conflict(result.error);
-    return reply.code(200).send(result.value);
+    // A busy runner's heartbeat is where it acknowledges: its slots may all be held, so it is not polling for claims.
+    if (body.config !== undefined) await acknowledgeRunnerConfig(db, runner.tenantId, runner.runnerId, body.config, now());
+    return reply.code(200).send({ ...result.value, config: await runnerConfigFor(db, runner.tenantId, runner.runnerId) });
   });
 
   /** The pinned task spec for a current lease: what to build, at which base, and the paths the attempt may touch. */
@@ -163,6 +170,8 @@ export function registerRunnerRoutes(app: FastifyInstance, ctx: AppContext): voi
     if (!published.ok) throw conflict(published.error);
     ctx.terminal.markEnded(body.lease.attemptId);
     ctx.control.endForAttempt(body.lease.attemptId, 'attempt_finished');
+    // The last attempt of a run being cancelled has ended: the run's cancel is confirmed now rather than on the next expiry pass.
+    await finishCancelledRuns({ db, tenantId: runner.tenantId, now }, { projectId: lease.projectId, runId: lease.runId });
     return reply.code(200).send(published.value);
   });
 

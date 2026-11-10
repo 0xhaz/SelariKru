@@ -3,6 +3,7 @@ import { NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, r
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { policyRevokedReason } from '@selarikru/domain';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
@@ -11,6 +12,7 @@ import { INFRASTRUCTURE_REASON_PREFIX, leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
+import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
 
 /** Allowlist: unknown lifecycle values do not dispatch. */
@@ -98,6 +100,15 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     // An expired lease not yet reaped still counts: its worker may be alive, so the slot is not free until reconciled.
     if ((active[0]?.n ?? 0) >= limits.maxConcurrentTotal) return { ok: false, reason: 'concurrency_limit_reached', skipped: [] };
 
+    // The owner's settings for this worker, as saved: a disabled worker or one at its slot limit gets nothing, whether or not it has acknowledged the change.
+    const own = await loadRunnerGate(tx, runner.tenantId, runner.runnerId);
+    if (!own.enabled) return { ok: false, reason: 'runner_disabled', skipped: [] };
+    if (own.slots !== null) {
+      const held = await tx.select({ n: sql<number>`count(*)::int` }).from(schema.attempts)
+        .where(and(eq(schema.attempts.tenantId, runner.tenantId), eq(schema.attempts.runner, runner.runnerId), isNotNull(schema.attempts.leaseToken), isNull(schema.attempts.endedAt)));
+      if ((held[0]?.n ?? 0) >= own.slots) return { ok: false, reason: 'runner_slots_full', skipped: [] };
+    }
+
     const candidates: Candidate[] = await tx
       .select({
         projectId: schema.taskStatus.projectId, taskId: schema.taskStatus.taskId, currentRevision: schema.taskStatus.currentRevision,
@@ -109,13 +120,15 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
         eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision),
       ))
       .innerJoin(schema.runs, and(eq(schema.runs.tenantId, schema.taskRevisions.tenantId), eq(schema.runs.projectId, schema.taskRevisions.projectId), eq(schema.runs.runId, schema.taskRevisions.runId)))
-      .where(and(eq(schema.taskStatus.tenantId, runner.tenantId), inArray(schema.taskStatus.status, CLAIMABLE_STATUSES), inArray(schema.runs.lifecycle, DISPATCHABLE_LIFECYCLES)))
+      // A run whose cancel was requested starts nothing more, while its running attempts are stopped.
+      .where(and(eq(schema.taskStatus.tenantId, runner.tenantId), inArray(schema.taskStatus.status, CLAIMABLE_STATUSES), inArray(schema.runs.lifecycle, DISPATCHABLE_LIFECYCLES), isNull(schema.runs.cancelRequestedAt)))
       .orderBy(asc(schema.taskStatus.updatedAt), asc(schema.taskStatus.projectId), asc(schema.taskStatus.taskId));
 
     const counts = await runningCounts(tx, runner.tenantId);
+    const gates = await loadRunGates(tx, runner.tenantId, candidates.map((c) => c.runId));
     const skipped: SkippedCandidate[] = [];
     for (const c of candidates) {
-      const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now);
+      const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now, gateFor(gates, c.projectId, c.runId));
       if ('lease' in r) return { ok: true, lease: r.lease, skipped };
       skipped.push({ taskId: c.taskId, reason: r.reason });
     }
@@ -370,7 +383,9 @@ async function requestGate(ctx: SchedulerContext, tx: Tx, key: TaskKey, c: Candi
   return { reason: `awaiting_approval:${gate.op.kind}` };
 }
 
-async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, counts: RunningCounts, now: Date): Promise<CandidateResult> {
+async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: Candidate, limits: ClaimLimits, counts: RunningCounts, now: Date, settings: RunGate): Promise<CandidateResult> {
+  // Paused scheduling stops new assignments and nothing else: no event, no block, and the task keeps its place in the queue.
+  if (settings.paused) return { reason: 'run_paused' };
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const statusRow = await lockStatusRow(tx, key);
   if (!statusRow || statusRow.currentRevision !== c.currentRevision || !CLAIMABLE_STATUSES.includes(statusRow.status)) return { reason: 'status_changed' };
@@ -384,6 +399,12 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   if (await hasOpenAttempt(tx, key)) return { reason: 'previous_attempt_active' };
   // A task the owner asked to cancel is never dispatched again.
   if (await hasCancelRequest(tx, key, spec.revision)) return { reason: 'cancel_requested' };
+  // A path the owner took away blocks every task that needs it, visibly and at once; the block clears when the path is given back and the task is placed.
+  if (pathsRevoked(spec, settings).length > 0) {
+    const reason = policyRevokedReason('allowed_paths');
+    await recordBlock(tx, key, c, statusRow, reason, null, now);
+    return { reason: `placement_blocked:${reason}` };
+  }
 
   if (!(await dependenciesReady(tx, key, spec))) {
     // Waiting on something that will not finish by itself is a stop, not a wait: say so once, instead of never being claimable with no reason shown.
@@ -414,7 +435,9 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     await recordBlock(tx, key, c, statusRow, refusedRoute, null, now);
     return { reason: `model_blocked:${refusedRoute}` };
   }
-  const capacity = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
+  const configured = cfg !== null && 'blocked' in cfg ? null : capacityFor(cfg as RunPlacement | null, limits, counts, c.runId);
+  // Cloud the owner took away is a disabled location, exactly as a mode without cloud slots: placement says so and never moves the task elsewhere silently.
+  const capacity = configured !== null && settings.cloudEligible === false ? { ...configured, cloud: { ...configured.cloud, limit: 0 } } : configured;
   const placeWith = (approved: boolean) => place({ ...spec, classification: resolved.classification }, capacity!, ctx.policy, {
     sources: resolved.sources, destination: (cfg as RunPlacement | null)?.cloudDestination ?? null, estimatedCost: amountMicros, remainingBudget: remainingMicros(position), approved,
   });
@@ -512,10 +535,12 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   const expiresAt = leaseDeadline(now);
   const deadlineAt = new Date(now.getTime() + timeoutSeconds * 1000);
 
+  // The settings revision this attempt starts under. It keeps them: a later change applies from the next attempt, except a revoke, which stops it.
+  const [config] = await tx.select({ revision: schema.runnerConfig.revision }).from(schema.runnerConfig).where(eq(schema.runnerConfig.tenantId, key.tenantId));
   await tx.insert(schema.attempts).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, revision: spec.revision, attemptNumber,
     runner: runner.runnerId, leaseFence: fence, leaseToken, lastHeartbeatAt: now, leaseExpiresAt: expiresAt, deadlineAt,
-    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable },
+    baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable, configRevision: config?.revision ?? 0 },
     modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
   });
   const claimed = new Map<string, 'shared' | 'exclusive'>();

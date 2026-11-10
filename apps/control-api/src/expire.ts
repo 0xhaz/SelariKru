@@ -18,6 +18,8 @@ export function startLeaseExpiryDriver(options: {
   now: () => Date;
   intervalMs: number;
   onError?: (error: unknown) => void;
+  /** Runs after both sweeps, as a third independent one: a run cancel waiting only for a lease that has now expired is confirmed here. */
+  afterPass?: (now: Date) => Promise<unknown>;
 }): LeaseExpiryDriver {
   let stopped = false;
   let count = 0;
@@ -31,6 +33,7 @@ export function startLeaseExpiryDriver(options: {
       let expired: readonly ExpiredLease[] = [];
       try { expired = await options.scheduler.expireLeases(options.now()); } catch (e) { failures.push(e); }
       try { await options.scheduler.expireApprovals(options.now()); } catch (e) { failures.push(e); }
+      if (options.afterPass) { try { await options.afterPass(options.now()); } catch (e) { failures.push(e); } }
       if (failures.length > 0) throw new AggregateError(failures, `lease expiry pass: ${failures.length} sweep(s) failed`);
       return expired;
     } finally {

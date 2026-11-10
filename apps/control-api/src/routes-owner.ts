@@ -11,7 +11,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
 import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
-import { assertRunAllowed, onboardingPlanSettings } from './routes-onboarding.ts';
+import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
+import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
 import {
   bumpStatus, fingerprint, idempotent, loadSpecRow, newId, requireProject, requireRun, requireTaskStatus, writeEvent,
 } from './store.ts';
@@ -165,11 +166,23 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           }
         }
         const revision = current + 1;
+        // The runner config revision that carries it: the assignment is in force once every recent runner acknowledges it (`acknowledgeRunnerConfig`).
+        // Lock order: this assignment's advisory lock, the runner config row, then the event sequence.
+        const configRevision = await bumpConfigRevision(tx, config.tenantId);
+        const previous = current > 0 ? (await tx.select().from(schema.modelAssignments).where(and(eq(schema.modelAssignments.tenantId, config.tenantId), eq(schema.modelAssignments.projectId, projectId), eq(schema.modelAssignments.scopeKind, body.scope), eq(schema.modelAssignments.scopeKey, body.key), eq(schema.modelAssignments.revision, current))))[0] : undefined;
         await tx.insert(schema.modelAssignments).values({
           tenantId: config.tenantId, projectId, scopeKind: body.scope, scopeKey: body.key, revision,
-          provider: body.selection?.provider ?? null, model: body.selection?.model ?? null, updatedBy: uid, updatedAt: at,
+          provider: body.selection?.provider ?? null, model: body.selection?.model ?? null, updatedBy: uid, updatedAt: at, configRevision,
         });
-        return { scope: body.scope, key: body.key, revision, selection: body.selection, appliesTo: 'next_attempt' as const };
+        const eventRun = await eventRunFor(tx, config.tenantId, projectId, body.scope === 'task' ? body.key : null);
+        // Identifiers only: a provider and a model id, both checked against the catalog above.
+        if (eventRun !== null) {
+          await writeEvent(tx, at, {
+            projectId, runId: eventRun, taskId: eventRun, aggregateRevision: revision, type: 'settings.changed', actor: { kind: 'human', id: uid },
+            payload: { scope: 'assignment', key: `${body.scope}:${body.key}`, field: 'model', from: previous?.provider ? { provider: previous.provider, model: previous.model } : null, to: body.selection, revision, enforcer: 'runner', configRevision, reduction: false },
+          });
+        }
+        return { scope: body.scope, key: body.key, revision, selection: body.selection, appliesTo: 'next_attempt' as const, state: 'applying' as const, configRevision };
       });
     });
     return reply.code(200).send(result);
@@ -358,7 +371,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId),
               eq(schema.taskCommands.taskId, taskId), eq(schema.taskCommands.command, 'cancel'), eq(schema.taskCommands.state, 'cancel_requested'),
               eq(schema.taskCommands.revision, row.currentRevision)));
-            if (pending[0]) return { operationId: pending[0].operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
+            if (pending[0]) {
+              // A stop the owner caused by narrowing a grant would leave the task blocked by policy. Asked to cancel now, it is a cancel: the task ends cancelled.
+              if (typeof pending[0].detail['reason'] === 'string' && pending[0].detail['reason'].startsWith('policy_revoked:')) {
+                await tx.update(schema.taskCommands).set({ detail: { ...pending[0].detail, reason: 'cancel_requested', narrowedBy: pending[0].detail['reason'] } }).where(and(eq(schema.taskCommands.tenantId, config.tenantId), eq(schema.taskCommands.projectId, row.projectId), eq(schema.taskCommands.operationId, pending[0].operationId)));
+              }
+              return { operationId: pending[0].operationId, command: 'cancel' as const, state: 'cancel_requested' as const, taskStatus: row.status };
+            }
             const open = await tx.select({ attemptId: schema.attempts.attemptId }).from(schema.attempts).where(and(
               eq(schema.attempts.tenantId, config.tenantId), eq(schema.attempts.projectId, row.projectId), eq(schema.attempts.taskId, taskId), isNull(schema.attempts.endedAt)));
             await tx.insert(schema.taskCommands).values({
@@ -681,6 +700,14 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const runners = await tx.select({ runnerId: schema.runners.runnerId, location: schema.runners.location, label: schema.runners.label, lastSeenAt: schema.runners.lastSeenAt }).from(schema.runners)
           .where(and(eq(schema.runners.tenantId, config.tenantId), isNull(schema.runners.revokedAt))).orderBy(asc(schema.runners.createdAt));
         const usage = (await Promise.all(runs.map((r) => readUsageEntries(tx, { tenantId: config.tenantId, projectId, runId: r.runId })))).flat();
+        const settingsView = await loadSettingsView(tx, config.tenantId, projectId, at);
+        const assignmentRows = await tx.select({ scopeKind: schema.modelAssignments.scopeKind, scopeKey: schema.modelAssignments.scopeKey, revision: schema.modelAssignments.revision, configRevision: schema.modelAssignments.configRevision, appliedAt: schema.modelAssignments.appliedAt }).from(schema.modelAssignments).where(scope(schema.modelAssignments));
+        const ceiling = await recordedBudgetCeiling(tx, config.tenantId, projectId);
+        const pathsOf = (runId: string): string[] => [...new Set(statuses.flatMap((st) => {
+          const row = revisions.find((r) => r.taskId === st.taskId && r.revision === st.currentRevision);
+          const paths = (row?.spec as { allowedPaths?: unknown } | undefined)?.allowedPaths;
+          return row?.runId === runId && Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : [];
+        }))].sort();
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
@@ -724,7 +751,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           /** The ledger's current figures. Unknown stays null; nothing is summed here. */
           usage: usage.map((u) => ({ entryId: u.entryId, runId: u.runId, taskId: u.taskId, attemptId: u.attemptId, metric: u.metric, quantity: u.quantity, provenance: u.provenance, source: u.source })),
           /** The current assignment per role and task; each carries the revision a change must send back. */
-          modelAssignments: await loadModelAssignments(tx, config.tenantId, projectId),
+          modelAssignments: (await loadModelAssignments(tx, config.tenantId, projectId)).map((a) => {
+            const row = assignmentRows.find((r) => r.scopeKind === a.scope && r.scopeKey === a.key && r.revision === a.revision);
+            /** Whether the runners have acknowledged it: `applying` until every recent runner has, `waiting_for_runner` with none connected. */
+            return { ...a, state: row ? assignmentState(row, settingsView.anyRecent) : 'applied' };
+          }),
+          /** Every run and worker setting the owner saved, with what is in force and whether its enforcer has acknowledged it. Closed values only. */
+          settings: settingsView.settings,
           runs: runs.map((r) => ({
             runId: r.runId, lifecycle: r.lifecycle, requestRevision: r.requestRevision, planRevision: r.planRevision ?? 0, budget: budgetStatus(r.budget), placement: r.placement ?? null, pinnedModel: r.pinnedModel ?? null,
             latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === r.runId && (RUN_EVIDENCE_EVENTS as readonly unknown[]).includes(e['type']))),
@@ -743,7 +776,11 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               const d = candidateRows.find((c) => c['run_id'] === r.runId && c['status'] === 'assembled')?.['deferred'] as { message?: unknown; at?: unknown } | null | undefined;
               return d && typeof d.message === 'string' && typeof d.at === 'string' ? { message: d.message, at: d.at } : null;
             })(),
-                        humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
+            /** Set once the owner asked to cancel the run; `lifecycle` becomes `cancelled` when every active attempt has ended or its lease expired. */
+            cancel: r.cancelRequestedAt !== null ? { requestedAt: r.cancelRequestedAt.toISOString(), requestedBy: r.cancelRequestedBy ?? null } : null,
+            /** The effective policy the run works within, each value labelled configured, recommended or unresolved. */
+            policy: boundedAutonomy({ run: r, planPaths: pathsOf(r.runId), settings: settingsView.settings, policy: ctx.policy, caps: config.caps, recordedCeilingUsd: ceiling }),
+            humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);
@@ -779,7 +816,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
                 leaseHealth: a.endedAt === null && a.lastHeartbeatAt ? leaseHealth(a.lastHeartbeatAt.toISOString(), at) : null,
               })),
               // "Cancel requested" is shown separately from the task status: termination is not confirmed until the runner stops.
-              cancel: cancel ? { state: 'cancel_requested', operationId: cancel.operationId, requestedAt: cancel.requestedAt.toISOString() } : null,
+              /** `reason`: why it was asked. `policy_revoked:` means the owner narrowed a grant, and the task goes back to ready, blocked by policy, rather than being cancelled. */
+              cancel: cancel ? { state: 'cancel_requested', operationId: cancel.operationId, requestedAt: cancel.requestedAt.toISOString(), reason: typeof cancel.detail['reason'] === 'string' ? cancel.detail['reason'] : 'cancel_requested' } : null,
             };
           }),
           // Open requests, and expired ones whose task is still blocked on them: those can still be denied.

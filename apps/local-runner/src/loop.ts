@@ -1,6 +1,7 @@
 import type { RunnerHarnessReport, RuntimeAdapter } from '@selarikru/protocol';
 import { runAttempt, type AttemptDeps } from './attempt.ts';
 import type { RunnerApi } from './api.ts';
+import type { RunnerSettings } from './settings.ts';
 
 export interface SweepingRuntime extends RuntimeAdapter {
   sweepOrphans(active: ReadonlySet<string>): Promise<string[]>;
@@ -19,6 +20,8 @@ export interface LoopDeps {
   readonly projects?: readonly string[];
   readonly sleep?: (ms: number) => Promise<void>;
   readonly log: (line: string) => void;
+  /** The owner's settings as the server last sent them. Absent: every slot claims. */
+  readonly settings?: RunnerSettings;
 }
 
 const sleepUnlessAborted = (ms: number, signal: AbortSignal): Promise<void> =>
@@ -48,13 +51,18 @@ export class RunnerLoop {
     }
     const slots = this.d.slots ?? 1;
     if (!Number.isInteger(slots) || slots < 1) throw new Error(`slots must be a whole number of at least 1, got ${String(slots)}`);
-    await Promise.all(Array.from({ length: slots }, () => this.worker(signal, sleep)));
+    await Promise.all(Array.from({ length: slots }, (_, i) => this.worker(signal, sleep, i)));
   }
 
   /** One slot: claim, run, repeat. The server's limits decide how many slots actually hold work. */
-  private async worker(signal: AbortSignal, sleep: (ms: number) => Promise<void>): Promise<void> {
+  private async worker(signal: AbortSignal, sleep: (ms: number) => Promise<void>, slot: number): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
+      // A slot the owner took away asks for nothing more; it comes back if the owner gives it back.
+      if (this.d.settings && !this.d.settings.mayClaim(slot)) {
+        await sleep(this.d.pollMs);
+        continue;
+      }
       try {
         const claim = await this.d.api.claim(await this.d.harnessReport?.(), this.d.projects ?? Object.keys(this.d.attempt.repos));
         failures = 0;

@@ -3,7 +3,7 @@ import type { Operation } from '@selarikru/policy';
 import { recordOperation, schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, eq, isNull } from 'drizzle-orm';
 import { openApproval } from './approval.ts';
-import { confirmCancel, hasCancelRequest } from './cancel.ts';
+import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAttemptUsage } from './usage.ts';
@@ -197,14 +197,17 @@ async function applyResult(ctx: SchedulerContext, tx: Tx, lease: Lease, sent: Pu
     await recordAttemptUsage(tx, { scope: runScope, role: spec.role, attempt: live, now }, result);
     // History is kept: the reported head commit (the only pointer to pushed work), the worker's own reason and its cost.
     const reportedReason = result.outcome === 'completed' ? null : result.reason;
+    // A stop for a narrowed grant interrupts the attempt and names the revoke; an owner's or a budget's cancel keeps the worker's own reason.
+    const stopReason = await cancelRequestReason(tx, key, lease.revision);
+    const outcome = stoppedOutcome(stopReason);
     await closeLease(tx, key, lease.attemptId, now, {
-      outcome: 'cancelled', exitReason: reportedReason ?? 'completed', headSha: result.outcome === 'completed' ? result.headSha : undefined,
+      outcome, exitReason: outcome === 'interrupted' ? stopReason! : reportedReason ?? 'completed', headSha: result.outcome === 'completed' ? result.headSha : undefined,
     });
     await tx.update(schema.attempts)
       .set({ detail: { ...(live.detail ?? {}), cancelRequested: true, reportedOutcome: result.outcome, reportedReason, reportedCostUsd: result.reportedCostUsd ?? null } })
       .where(and(eq(schema.attempts.tenantId, lease.tenantId), eq(schema.attempts.projectId, lease.projectId), eq(schema.attempts.attemptId, lease.attemptId)));
-    await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, lease.attemptId, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
-    return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: 'cancelled' };
+    const confirmed = await confirmCancel(tx, key, state, statusRow.rowRevision, { projectId: lease.projectId, runId: spec.runId, taskId: lease.taskId }, now, lease.attemptId, { attemptId: lease.attemptId, reportedOutcome: result.outcome });
+    return { attemptId: lease.attemptId, taskId: lease.taskId, fence: lease.fence, outcome: result.outcome, taskStatus: confirmed.status };
   }
   let event: { type: 'attempt.completed' | 'attempt.failed' | 'task.blocked' | 'approval.requested'; actor: typeof runner | typeof SCHEDULER_ACTOR; payload: Record<string, unknown> };
   let exitReason: string;

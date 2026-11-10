@@ -113,6 +113,7 @@ export function explain(code: string): string {
   if (head === 'no_model_recorded') return 'This attempt has no recorded model, so it could not run.';
   if (head === 'role_not_mapped') return `The ${arg || 'task\'s'} role is not mapped to a worker location.`;
   if (head === 'location_disabled') return `The ${arg || 'chosen'} location is disabled for this run.`;
+  if (head === 'policy_revoked') return arg === 'cloud_eligible' ? 'You took cloud away from this run, so this task cannot run in the cloud.' : 'You removed a path this task needs from the run\'s approved scope, so it cannot run until the path is given back.';
   if (head === 'budget') {
     if (arg === 'exceeds_limit') return 'This would exceed the run\'s budget limit.';
     if (arg === 'unknown_cost') return 'The cost of this work cannot be established, so it cannot be checked against the budget.';
@@ -147,6 +148,7 @@ export function classifyBlock(code: string): BlockClass {
   if (bare === 'repair_budget_exhausted' || bare === 'repair_limit_exhausted') return 'repair';
   if (bare === 'concurrency_limit_reached' || bare === 'no_free_slot') return 'wait';
   if (bare.startsWith('budget:') || bare.startsWith('missing_budget') || bare.startsWith('missing_limit:')) return 'budget';
+  if (bare.startsWith('policy_revoked:')) return 'policy';
   if (code.startsWith('policy_denied:') || code === 'classification_not_cloud_eligible' || bare.startsWith('model_not_allowed') || bare.startsWith(RESTRICTED_MODEL)) return 'policy';
   return 'blocked';
 }
@@ -226,7 +228,7 @@ export function blockItem(task: TaskView, code: string, hit: readonly string[], 
       });
     case 'blocked': {
       // A resource conflict is raised at integration and nothing unblocks the task afterwards, so it needs a person like the rest.
-      const nextAction = modelNextAction(code, task.status) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : 'Inspect why it is blocked.');
+      const nextAction = modelNextAction(code, task.status) ?? (code.startsWith('resource_conflict') ? 'Replan or cancel the task once the resource is free.' : code.startsWith('role_not_mapped') ? 'Map this role to a location in the run setup.' : code.startsWith('location_disabled') ? 'Enable the location or pin the task to another one.' : code.startsWith('policy_revoked') ? 'Give the grant back under Bounded autonomy, or replan the task.' : 'Inspect why it is blocked.');
       return make({
         ...base, kind: 'blocked', title: `${name}: blocked`, detail: code === INFRA_LIMIT && lastFailure ? `${explain(code)} The last attempt ended with: ${explain(lastFailure)}` : explain(code), consequence: `${whoWaits(hit)} It stays blocked until a person acts.`, nextAction: code === INFRA_LIMIT ? 'Check the runner\'s log and the sandbox\'s network access, then replan or cancel this task.' : nextAction,
       });

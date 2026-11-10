@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RunnerHarnessReportSchema, TaskSpecSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RunnerHarnessReportSchema, SettingChangeSchema, TaskSpecSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 
@@ -152,6 +152,21 @@ export const ModelAssignmentRequestSchema = z
   .strict()
   .refine((r) => redactSecrets(r.key) === r.key && (r.selection === null || (redactSecrets(r.selection.provider) === r.selection.provider && redactSecrets(r.selection.model) === r.selection.model)), { message: 'looks like a secret' });
 export type ModelAssignmentRequest = z.infer<typeof ModelAssignmentRequestSchema>;
+
+/**
+ * Changes one setting. `key` is the run id for a run setting and the runner id for a worker setting. `expectedRevision` is that setting's desired revision as
+ * the owner saw it, 0 when never set. Values are closed shapes, so no text reaches an event this way. The response says whether it is in force yet: it never is
+ * for a field a runner acknowledges.
+ */
+export const SettingRequestSchema = z
+  .object({ key: Key, change: SettingChangeSchema, expectedRevision: Revision, idempotencyKey: Key })
+  .strict()
+  .refine((r) => redactSecrets(r.key) === r.key && (r.change.field !== 'allowed_paths' || r.change.value.every((p) => redactSecrets(p) === p)), { message: 'looks like a secret' });
+export type SettingRequest = z.infer<typeof SettingRequestSchema>;
+
+/** Asks to cancel a whole run. `expectedPlanRevision` is the run's plan revision as the owner saw it. */
+export const RunCancelRequestSchema = z.object({ expectedPlanRevision: Revision, idempotencyKey: Key }).strict();
+export type RunCancelRequest = z.infer<typeof RunCancelRequestSchema>;
 
 export const INFERENCE_MODES = ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const;
 export const INFERENCE_SOURCES = ['on_device', 'in_cloud', 'unknown'] as const;

@@ -131,6 +131,10 @@ export const modelAssignments = pgTable(
     model: text('model'),
     updatedBy: text('updated_by').notNull(),
     updatedAt: tstz('updated_at').notNull().defaultNow(),
+    /** The runner config revision that carries this assignment. Null: saved before runners acknowledged config. */
+    configRevision: integer('config_revision'),
+    /** When every runner seen recently acknowledged `configRevision`. Null: not yet, so the screen says it is applying. */
+    appliedAt: tstz('applied_at'),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId, t.scopeKind, t.scopeKey, t.revision] }),

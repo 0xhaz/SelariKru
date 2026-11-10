@@ -39,6 +39,10 @@ export const runners = pgTable(
     configuredProjects: jsonb('configured_projects').$type<string[]>(),
     /** When this runner last reached the control plane, from any authenticated runner call. Null: not since this column existed. */
     lastSeenAt: tstz('last_seen_at'),
+    /** The runner config revision this runner last said it applied, the slots it says it runs, and when. Null: it has not acknowledged any. */
+    configAckRevision: integer('config_ack_revision'),
+    configAckSlots: integer('config_ack_slots'),
+    configAckAt: tstz('config_ack_at'),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.runnerId] }),

@@ -105,6 +105,13 @@ export async function assertRunAllowed(db: Executor, tenantId: string, projectId
   if (!allowed) throw new AppError(422, 'outside_recorded_limits', `This project was set up for ${snapshot.execution} execution, so a run cannot be placed elsewhere.`, { execution: snapshot.execution });
 }
 
+/** The budget ceiling recorded for a project at setup. Undefined: the project did not come through onboarding. Null: it did, but no ceiling is on record. */
+export async function recordedBudgetCeiling(db: Executor, tenantId: string, projectId: string): Promise<number | null | undefined> {
+  const row = (await db.select().from(schema.projectOnboardings).where(and(eq(schema.projectOnboardings.tenantId, tenantId), eq(schema.projectOnboardings.projectId, projectId))))[0];
+  if (!row) return undefined;
+  return (await loadSnapshot(db, row))?.agentBudgetUsd ?? null;
+}
+
 /** The frozen choices of the pass that currently stands. */
 async function loadSnapshot(db: Executor, row: Row): Promise<SetupSnapshot | null> {
   if (row.currentReadinessPass === null) return null;

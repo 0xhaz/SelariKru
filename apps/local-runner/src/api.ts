@@ -1,6 +1,7 @@
 import { TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
 import { LeaseGrantSchema, RecordedAssignmentSchema, type LeaseRef, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
+import type { RunnerSettings } from './settings.ts';
 
 export const ClaimedLeaseSchema = z
   .object({
@@ -24,8 +25,8 @@ export const ClaimedLeaseSchema = z
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
 
-const ClaimResponseSchema = z.object({ lease: ClaimedLeaseSchema.nullable(), reason: z.string().nullable().optional() }).passthrough();
-const HeartbeatResponseSchema = z.object({ cancelRequested: z.boolean() }).passthrough();
+const ClaimResponseSchema = z.object({ lease: ClaimedLeaseSchema.nullable(), reason: z.string().nullable().optional(), config: z.unknown().optional() }).passthrough();
+const HeartbeatResponseSchema = z.object({ cancelRequested: z.boolean(), config: z.unknown().optional() }).passthrough();
 const SetupCompleteResponseSchema = z.object({ deadlineAt: z.string() }).passthrough();
 const TaskResponseSchema = z.object({ task: TaskSpecSchema });
 
@@ -78,6 +79,8 @@ export class HttpRunnerApi implements RunnerApi {
     baseUrl: string,
     private readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    /** Present: every claim and heartbeat acknowledges the config revision applied, and applies the one the server answers with. */
+    private readonly settings?: RunnerSettings,
   ) {
     this.base = assertSafeApiUrl(baseUrl);
   }
@@ -95,14 +98,19 @@ export class HttpRunnerApi implements RunnerApi {
   }
 
   async claim(harnesses?: readonly RunnerHarnessReport[], projects?: readonly string[]) {
-    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', { ...(harnesses === undefined ? {} : { harnesses }), ...(projects === undefined ? {} : { projects }) }));
+    const r = ClaimResponseSchema.parse(await this.post('/v1/runners/claim', { ...(harnesses === undefined ? {} : { harnesses }), ...(projects === undefined ? {} : { projects }), ...this.ack() }));
+    this.settings?.apply(r.config);
     return { lease: r.lease, reason: r.reason ?? null };
+  }
+  private ack(): { config?: ReturnType<RunnerSettings['ack']> } {
+    return this.settings ? { config: this.settings.ack() } : {};
   }
   async task(lease: LeaseRef) {
     return TaskResponseSchema.parse(await this.post('/v1/runners/task', { lease })).task;
   }
   async heartbeat(lease: LeaseRef, activity?: string) {
-    const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', activity === undefined ? { lease } : { lease, activity }));
+    const r = HeartbeatResponseSchema.parse(await this.post('/v1/runners/heartbeat', { lease, ...(activity === undefined ? {} : { activity }), ...this.ack() }));
+    this.settings?.apply(r.config);
     return { cancelRequested: r.cancelRequested };
   }
   async setupComplete(lease: LeaseRef) {

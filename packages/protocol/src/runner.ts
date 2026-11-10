@@ -1,4 +1,4 @@
-import { ApprovalDestinationSchema, RunnerHarnessReportSchema, WorkerApprovalOperationSchema } from '@selarikru/domain';
+import { ApprovalDestinationSchema, RunnerConfigAckSchema, RunnerHarnessReportSchema, WorkerApprovalOperationSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 import { TERMINAL_MAX_BATCH_LINES, TERMINAL_MAX_WIRE_LINE_CHARS } from './terminal.ts';
@@ -31,6 +31,8 @@ export const ClaimRequestSchema = z.object({
   harnesses: z.array(RunnerHarnessReportSchema).max(20).optional(),
   /** Project ids this runner has a source checkout for. Ids only: a path is refused by the pattern. Absent: the last report stands. */
   projects: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, 'expected a project id')).max(500).optional(),
+  /** The runner config revision this runner has applied, and the slots it runs. Absent: it acknowledges nothing (an older runner). */
+  config: RunnerConfigAckSchema.optional(),
 }).strict();
 
 /** The name of the tool a worker last started. A name and nothing else: no arguments, paths or output can fit, and a credential-shaped one is refused. */
@@ -45,7 +47,7 @@ export const TerminalUploadRequestSchema = z.object({ lease: LeaseRefSchema, seq
 export type TerminalUploadRequest = z.infer<typeof TerminalUploadRequestSchema>;
 
 /** `setupComplete`: the sandbox is ready and the worker is about to start. */
-export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema, activity: ToolNameSchema.optional(), setupComplete: z.literal(true).optional() }).strict();
+export const HeartbeatRequestSchema = z.object({ lease: LeaseRefSchema, activity: ToolNameSchema.optional(), setupComplete: z.literal(true).optional(), config: RunnerConfigAckSchema.optional() }).strict();
 
 export const ResultRequestSchema = z
   .object({

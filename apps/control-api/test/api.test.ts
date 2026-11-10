@@ -28,6 +28,8 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', '/v1/onboarding'], ['POST', '/v1/onboarding'], ['POST', '/v1/onboarding/assist-review'], ['GET', '/v1/onboarding/proj_a'], ['POST', '/v1/onboarding/proj_a/answers'], ['POST', '/v1/onboarding/proj_a/blueprints'], ['POST', '/v1/onboarding/proj_a/blueprint/accept'], ['POST', '/v1/onboarding/proj_a/cost-plan'], ['POST', '/v1/onboarding/proj_a/execution'], ['POST', '/v1/onboarding/proj_a/connections'], ['POST', '/v1/onboarding/proj_a/readiness'], ['POST', '/v1/onboarding/proj_a/activate'], ['POST', '/v1/onboarding/proj_a/cancel'],
   ['POST', `/v1/projects/${PROJECT}/runs`],
   ['POST', `/v1/projects/${PROJECT}/model-assignments`],
+  ['POST', `/v1/projects/${PROJECT}/settings`],
+  ['POST', `/v1/runs/${RUN}/cancel`],
   ['POST', `/v1/projects/${PROJECT}/attempts/a1/terminal/control-tickets`],
   ['POST', `/v1/runs/${RUN}/plan-revisions`],
   ['POST', `/v1/runs/${RUN}/accept-reduced-scope`],

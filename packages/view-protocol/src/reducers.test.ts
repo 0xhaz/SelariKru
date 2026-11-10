@@ -96,8 +96,9 @@ describe('reducers', () => {
       const e = nx(s, type, Number(s.snapshot.meta.cursor), { attemptId: 'a1', payload: { approvalId: 'ap1' } });
       expect(ProjectViewEventSchema.safeParse(e).success, type).toBe(true);
       const r = applyEvent(s, e);
-      // plan.accepted on a run that has tasks needs a snapshot; every other type applies or is ignored.
-      expect(r.outcome === 'applied' || r.outcome === 'ignored' || (r.outcome === 'resync' && type === 'plan.accepted'), type).toBe(true);
+      // plan.accepted on a run that has tasks, a settings change and a run cancel need a snapshot; every other type applies or is ignored.
+      const snapshotOnly: readonly string[] = ['plan.accepted', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
+      expect(r.outcome === 'applied' || r.outcome === 'ignored' || (r.outcome === 'resync' && snapshotOnly.includes(type)), type).toBe(true);
       s = r.outcome === 'resync' ? s : r.state;
     }
   });
@@ -251,6 +252,25 @@ describe('plan revisions and run-level events', () => {
     expect(s.snapshot.checks['candidate:r1']).toMatchObject({ state: 'failed', taskId: null });
     expect(s.snapshot.approvals['apr_run']).toMatchObject({ state: 'granted', taskId: null });
     expect(s.snapshot.tasks['t1']!.status).toBe('verified'); // not merged by a run-level merge event
+  });
+
+  it('a settings change, its acknowledgement and a run cancel are read from a snapshot, never guessed from the event', () => {
+    const s = base();
+    expect(applyEvent(s, nx(s, 'settings.changed', 1, { taskId: 'r1', actor: HUMAN, payload: { field: 'paused', from: false, to: true } }))).toMatchObject({ outcome: 'resync', reason: 'settings_changed' });
+    expect(applyEvent(s, nx(s, 'settings.applied', 1, { taskId: 'r1', actor: { kind: 'system', id: 'x' }, payload: { field: 'paused', value: true } }))).toMatchObject({ outcome: 'resync', reason: 'settings_changed' });
+    expect(applyEvent(s, nx(s, 'run.cancel_requested', 1, { taskId: 'r1', actor: HUMAN, payload: {} }))).toMatchObject({ outcome: 'resync', reason: 'run_cancel' });
+    expect(applyEvent(s, nx(s, 'run.cancelled', 1, { taskId: 'r1', actor: { kind: 'system', id: 'x' }, payload: {} }))).toMatchObject({ outcome: 'resync', reason: 'run_cancel' });
+  });
+
+  it('a snapshot with settings and a run policy parses, and an unknown setting field does not', () => {
+    const s = emptySnapshot({ projectId: 'p1', observedAt: at(0), provenance: 'observed' });
+    const setting = { scope: 'run', key: 'r1', field: 'paused', desired: true, effective: null, desiredRevision: 1, effectiveRevision: 0, enforcer: 'runner', state: 'applying', updatedBy: 'u', updatedAt: at(0), appliedAt: null };
+    expect(ProjectViewSnapshotSchema.safeParse({ ...s, settings: [setting] }).success).toBe(true);
+    expect(ProjectViewSnapshotSchema.safeParse({ ...s, settings: [{ ...setting, field: 'made_up' }] }).success).toBe(false);
+    const v = (value: unknown, basis = 'configured') => ({ value, basis });
+    const policy = { allowedPaths: v(['src']), planPaths: ['src'], cloudEligible: v(false), cloudDestination: v(null), destinations: v([]), maxConcurrentWorkers: v(2), repairAttempts: v(2), attemptTimeoutSeconds: v(1800), budgetLimitUsd: v(null, 'unresolved'), merge: v('human'), schedulingPaused: v(false) };
+    expect(RunViewSchema.safeParse({ runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, policy, cancel: null }).success).toBe(true);
+    expect(RunViewSchema.safeParse({ runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null, policy: { ...policy, merge: v('agent') } }).success).toBe(false);
   });
 
   it('every event used in these tests passes the domain actor allowlist', () => {

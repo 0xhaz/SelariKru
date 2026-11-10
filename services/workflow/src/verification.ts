@@ -31,10 +31,24 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  * status rows, then the event sequence; a run in review leaves it there, on the run row it already holds (`leaveReviewForPlan`). A cancel: candidate and scheduler lock if
  * stale, the task's status row, this lock; only a stale exit takes the run row, last (below).
  *
+ * The owner's settings and run controls (apps/control-api/src/settings.ts), each a path that takes the scheduler lock first:
+ * - a run setting save: scheduler lock, run row (`lockBudget` re-takes it for a resume), the setting row, the runner config row, the run's status rows in task
+ *   order (only for a narrowed or widened path or cloud grant, `requestPolicyStop` included), then the event sequence. A worker setting save: scheduler lock,
+ *   the setting row, the runner config row, the event sequence. A budget lowered below what is committed is stopped after the commit, by `stopForExhaustedBudget`.
+ * - a run cancel, and finishing one (`finishCancelledRuns`): scheduler lock, run row, the run's open tasks' status rows in task order, this lock, the event
+ *   sequence, then the run's approval and reservation rows.
+ * - a model assignment: its own advisory lock, the runner config row, the event sequence.
+ * - a runner's config acknowledgement (`acknowledgeRunnerConfig`): the runner row, then every setting and assignment row it may put in force, all locked before
+ *   its first event, then the event sequence. It takes no scheduler lock, run row or status row. The claim poll reads settings rows after the scheduler lock
+ *   without locking them, so a save is either committed before the claim's reads or waits for the claim to finish.
+ *
  * Paths that still disagree, all at the run row, and how the loser of each recovers:
  * - The claim poll (`tryClaim`) takes the scheduler lock, a claimable task's status row, then the run row (`lockBudget`). Replan and re-verify hold the scheduler lock before
  *   their run row, so they wait for it rather than cross it. The verdict takes no scheduler lock, but its parts are `verifying` and the poll only locks claimable rows, so the
  *   two never want the same status row. No cycle.
+ * - A run setting save that touches status rows, and a run cancel, hold the scheduler lock and the run row and then want status rows, exactly as a replan does,
+ *   so they meet the lease paths below the same way and recover the same way: the owner's request gets the retryable 503 `transaction_conflict` with nothing
+ *   recorded; `finishCancelledRuns` is a background pass that logs the error and runs again on the next tick.
  * - The lease paths take a leased task's status row and then the run row with no scheduler lock: a runner's publish and the budget stop after a reconciled cost (`settle`,
  *   `lockBudget`), and lease expiry. Re-verify and the verdict lock only tasks with no live lease (verified, blocked, verifying), so they cannot meet these. A replan can: it
  *   locks the status row of any task it names, and a task whose attempt is still leased is one (it is refused, but only after the lock). Postgres breaks that cycle by rolling

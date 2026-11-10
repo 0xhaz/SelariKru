@@ -15,6 +15,7 @@ import { registerOnboardingRoutes } from './routes-onboarding.ts';
 import type { PipelineDrivers, ReadinessProbes } from './onboarding-readiness.ts';
 import type { PlanConfigSource } from './proposals.ts';
 import { registerRunnerRoutes } from './routes-runner.ts';
+import { registerSettingsRoutes } from './settings.ts';
 import { registerEventStream } from './sse.ts';
 import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
@@ -231,6 +232,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerProposalRoutes(app, ctx);
   registerOnboardingRoutes(app, ctx);
   registerRunnerRoutes(app, ctx);
+  registerSettingsRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
   registerControlRoutes(app, ctx);

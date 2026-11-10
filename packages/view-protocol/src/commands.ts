@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SCOPES, ModelSelectionSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, SettingChangeSchema } from '@selarikru/domain';
 import { z } from 'zod';
 
 const Id = z.string().min(1);
@@ -22,6 +22,11 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
   // Sets or removes one assignment; `expectedRevision` is that assignment's revision (0 if never set). It applies to the next attempt only, and has no secret fields.
   z.object({ command: z.literal('assignment.set'), ...base, args: z.object({ projectId: Id, scope: z.enum(ASSIGNMENT_SCOPES), key: Id, selection: ModelSelectionSchema.nullable() }).strict() }).strict(),
+  // Saves one setting; `expectedRevision` is its desired revision (0 if never saved). `key` is the run id or the runner id. A receipt's `applied` is the server's
+  // own enforcement; a field a runner acknowledges comes back `pending` until it does.
+  z.object({ command: z.literal('setting.set'), ...base, args: z.object({ projectId: Id, key: Id, change: SettingChangeSchema }).strict() }).strict(),
+  // Asks to cancel a whole run. `expectedRevision` is its plan revision. `cancel_requested` until every active attempt has ended.
+  z.object({ command: z.literal('run.cancel'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
 ]);
 export type AuthorizedViewCommand = z.infer<typeof AuthorizedViewCommandSchema>;
 
@@ -36,6 +41,8 @@ export const REJECTION_REASONS = [
   'candidate_changed', 'no_valid_record', 'record_not_passing', 'no_candidate', 'pull_request_refused',
   // Named refusals of the assignment route.
   'no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'trial_model_pinned',
+  // Named refusals of settings and run controls.
+  'run_closed', 'outside_plan_scope', 'resume_refused',
 ] as const;
 export type RejectionReason = (typeof REJECTION_REASONS)[number];
 

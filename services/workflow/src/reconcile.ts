@@ -1,7 +1,7 @@
 import { transition, TaskSpecSchema, type TaskStatus } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { and, asc, eq, isNull, lte, isNotNull, or } from 'drizzle-orm';
-import { confirmCancel, hasCancelRequest } from './cancel.ts';
+import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, SYSTEM_ACTOR } from './events.ts';
 import { closeLease, failAttempt } from './lease.ts';
 import { reservationIdFor, settle } from './reserve.ts';
@@ -91,7 +91,9 @@ async function expireOne(ctx: SchedulerContext, attemptId: string, key: TaskKey,
 
     // An open cancel request makes the end of this attempt final: the task is cancelled, never re-dispatched.
     if (await hasCancelRequest(tx, key, attempt.revision)) {
-      await closeLease(tx, key, attemptId, now, { outcome: 'cancelled', exitReason: reason });
+      const stopReason = await cancelRequestReason(tx, key, attempt.revision);
+      const outcome = stoppedOutcome(stopReason);
+      await closeLease(tx, key, attemptId, now, { outcome, exitReason: outcome === 'interrupted' ? stopReason! : reason });
       await confirmCancel(tx, key, state, statusRow.rowRevision, eventScope, now, attemptId, { attemptId, cause: reason });
       return reason;
     }

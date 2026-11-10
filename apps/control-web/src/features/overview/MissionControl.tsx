@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { AxisBadges, Chip, EmptyState, Panel, Timestamp, formatAge, formatClock, formatCount, formatDuration, formatExact, formatUsd, toneGlyph, type Tone } from '@selarikru/ui';
 import type { DataSourceError, ProjectViewSnapshot, UsageTotal } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
@@ -291,9 +292,11 @@ export interface MissionControlProps {
   readonly failure?: unknown;
   /** True while the team panel lists every worker beside the page, so the Fleet card keeps to a summary. */
   readonly fleetInPanel?: boolean;
+  /** The run's Bounded autonomy panel: its effective policy from the server and the run controls. Absent when the server reports no policy. */
+  readonly autonomy?: ReactNode;
 }
 
-export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure, fleetInPanel = false }: MissionControlProps) {
+export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure, fleetInPanel = false, autonomy = null }: MissionControlProps) {
   if (failure !== undefined) throw failure;
   if (!overview || !snapshot) {
     if (connection === 'unavailable' || connection === 'dead') {
@@ -349,6 +352,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
           <div className="grid gap-4">
             <FleetPanel model={overview.fleet} stale={stale} inPanel={fleetInPanel} />
             <ResourcesPanel model={overview.usage} />
+            {autonomy}
           </div>
         </div>
       </div>
