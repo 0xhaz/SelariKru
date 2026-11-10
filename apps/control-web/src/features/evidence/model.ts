@@ -96,11 +96,19 @@ export function verifiedState(run: RunView, evidence: RunEvidenceView | null): D
     const open = !isClosedRun(run);
     return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count.${open ? ' Re-verifying judges the same commit again and runs no worker.' : ''} 0 of ${total} approved criteria verified.`, established: false, link: open ? { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Decisions', external: false } : null };
   }
-  if (total > 0 && verified === total) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} approved criteria passed${at}.`, established: true };
+  // Verified is established only on a sound record: something passed, on a live candidate whose record stands, with one row per approved criterion.
+  // A count that disagrees with its rows, or that has no standing candidate behind it, is never read as verified.
+  if (evidence.criteria.length !== total) return { ...base, value: 'Not verified', tone: 'warning', detail: `The verification record lists ${evidence.criteria.length} of ${total} approved criteria, so none is counted as verified.`, established: false };
+  const standing = evidence.candidate !== null && evidence.candidate.live && evidence.candidate.recordValid;
+  const sound = standing && verified > 0;
+  if (total > 0 && verified === total) {
+    if (sound) return { ...base, value: 'Verified', tone: 'success', detail: `All ${total} approved criteria passed${at}.`, established: true };
+    return { ...base, value: 'Not verified', tone: 'warning', detail: `No candidate with a standing verification record is behind these passes, so they are not counted. 0 of ${total} approved criteria verified.`, established: false };
+  }
   const missing = evidence.criteria.filter((c) => c.state === 'not_delivered').map((c) => c.criterionId);
   const accepted = run.reducedScope?.notDelivered.requirementIds ?? [];
   // The only way to say Verified with a criterion missing: the owner accepted exactly that, and the words say so.
-  if (missing.length > 0 && verified === total - missing.length && missing.every((id) => accepted.includes(id))) return { ...base, value: 'Verified at reduced scope', tone: 'warning', detail: `${verified} of ${total} approved criteria passed${at}. ${missing.length} not delivered, as you accepted.`, established: true };
+  if (sound && missing.length > 0 && verified === total - missing.length && missing.every((id) => accepted.includes(id))) return { ...base, value: 'Verified at reduced scope', tone: 'warning', detail: `${verified} of ${total} approved criteria passed${at}. ${missing.length} not delivered, as you accepted.`, established: true };
   const shortfall = missing.length > 0 ? ` ${missing.length} not delivered.` : '';
   if (verified > 0) return { ...base, value: 'Partly verified', tone: 'warning', detail: `${verified} of ${total} approved criteria passed${at}.${shortfall}`, established: false };
   return { ...base, value: 'Not verified', tone: 'neutral', detail: `0 of ${total} approved criteria verified yet.${shortfall}`, established: false };

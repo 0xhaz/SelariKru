@@ -61,7 +61,7 @@ function prVerification(snapshot: ProjectViewSnapshot, c: ChangeRequestView): Of
   // Evidence's own rule (verified, or verified at reduced scope), and the pull request must hold the candidate that rule judged.
   const candidate = run.evidence?.candidate ?? null;
   const established = verifiedState(run, run.evidence).established;
-  return established && (candidate === null || candidate.sha === c.candidateSha) ? 'verified' : 'unverified';
+  return established && candidate !== null && candidate.sha === c.candidateSha ? 'verified' : 'unverified';
 }
 
 const DONE = new Set<TaskView['status']>(['verified', 'merged']);

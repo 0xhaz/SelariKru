@@ -160,3 +160,34 @@ describe('human intervention', () => {
     expect(buildEvidence(withOlder, 'r1')!.humanIntervened.map((h) => h.attemptId)).toEqual(['old', 'a1']);
   });
 });
+
+describe('verified is never established on an inconsistent record', () => {
+  const reduced = (ids: string[]) => ({ decisionId: 'd', runId: 'r1', planRevision: 1, notDelivered: { requirementIds: ids }, deliveredRequirementIds: [], acceptedAt: '2026-11-09T01:00:00.000Z', acceptedBy: 'owner', note: null }) as unknown as RunView['reducedScope'];
+
+  it('zero criteria rows with an invalid record, though the count says all passed, is not verified', () => {
+    const v = states(buildEvidence(snap({ criteria: { verified: 2, total: 2 }, evidence: evidence([], true, false) }), 'r1')!).verified!;
+    expect(v.established).toBe(false);
+    expect(v.value).not.toMatch(/^Verified/);
+  });
+
+  it('every criterion not delivered and all of them accepted is not verified at reduced scope: nothing passed', () => {
+    const rows = ['FB-01', 'FB-02'].map((id) => criterion(id, { state: 'not_delivered', verified: false }));
+    const v = states(buildEvidence(snap({ criteria: { verified: 0, total: 2 }, evidence: evidence(rows), reducedScope: reduced(['FB-01', 'FB-02']) }), 'r1')!).verified!;
+    expect(v.established).toBe(false);
+    expect(v.value).toBe('Not verified');
+  });
+
+  it('a count with no candidate, or with rows missing, is not verified either', () => {
+    const noCandidate = states(buildEvidence(snap({ criteria: { verified: 2, total: 2 }, evidence: { candidate: null, criteria: [criterion('FB-01'), criterion('FB-02')] } }), 'r1')!).verified!;
+    expect(noCandidate.established).toBe(false);
+    const short = states(buildEvidence(snap({ criteria: { verified: 2, total: 2 }, evidence: evidence([criterion('FB-01')]) }), 'r1')!).verified!;
+    expect(short).toMatchObject({ established: false, value: 'Not verified' });
+    expect(short.detail).toContain('lists 1 of 2 approved criteria');
+  });
+
+  it('a sound record still verifies, in full and at reduced scope', () => {
+    expect(states(buildEvidence(snap({ criteria: { verified: 2, total: 2 }, evidence: evidence([criterion('FB-01'), criterion('FB-02')]) }), 'r1')!).verified).toMatchObject({ value: 'Verified', established: true });
+    const rows = [criterion('FB-01'), criterion('FB-02', { state: 'not_delivered', verified: false })];
+    expect(states(buildEvidence(snap({ criteria: { verified: 1, total: 2 }, evidence: evidence(rows), reducedScope: reduced(['FB-02']) }), 'r1')!).verified).toMatchObject({ value: 'Verified at reduced scope', established: true });
+  });
+});

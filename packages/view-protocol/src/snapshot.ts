@@ -235,7 +235,18 @@ export const RunViewSchema = z
     /** Every attempt of this run a person opened a shell in, older task revisions included. Absent: the source does not report it. */
     humanInterventions: z.array(z.object({ attemptId: Id, taskId: Id, at: Iso }).strict()).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((run, ctx) => {
+    // The count and its rows travel together: both or neither, and one row per approved criterion. A record that disagrees with itself is refused,
+    // so no view can read a verified count that its own rows do not back.
+    if ((run.criteria === null) !== (run.evidence === null)) {
+      ctx.addIssue({ code: 'custom', path: [run.criteria === null ? 'criteria' : 'evidence'], message: 'criteria and evidence are both set or both null' });
+      return;
+    }
+    if (run.criteria !== null && run.evidence !== null && run.evidence.criteria.length !== run.criteria.total) {
+      ctx.addIssue({ code: 'custom', path: ['evidence', 'criteria'], message: `evidence lists ${run.evidence.criteria.length} criteria but the count says ${run.criteria.total}` });
+    }
+  });
 export type RunView = z.infer<typeof RunViewSchema>;
 
 export const TaskViewSchema = z

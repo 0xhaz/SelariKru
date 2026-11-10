@@ -699,7 +699,10 @@ describe('run lifecycle comes from the refresh, not from events', () => {
 });
 
 describe('run criteria schema', () => {
-  const run = (criteria: unknown) => RunViewSchema.safeParse({ runId: 'r', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria });
+  // A count travels with one evidence row per criterion (see snapshot.test.ts); the rows here only carry the count.
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ criterionId: `FB-${i}`, state: 'not_run', verified: false, taskIds: [], check: null, candidateSha: null }));
+  const run = (criteria: { verified: number; total: number } | null) =>
+    RunViewSchema.safeParse({ runId: 'r', lifecycle: 'running', planRevision: 1, latestEvidence: null, criteria, evidence: criteria ? { candidate: null, criteria: rows(criteria.total) } : null });
   it('accepts null, equal and partial counts', () => {
     expect(run(null).success).toBe(true);
     expect(run({ verified: 3, total: 3 }).success).toBe(true);
