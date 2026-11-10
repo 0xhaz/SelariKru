@@ -1,6 +1,6 @@
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
-  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, SkillsViewSchema, StackViewSchema,
+  AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
@@ -244,6 +244,20 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       return readJson(base, SkillsViewSchema, 'the skill library');
     },
     getAttemptSkills: (projectId, attemptId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/skills/attempts/${encodeURIComponent(attemptId)}`, AttemptSkillsViewSchema, 'an attempt\'s knowledge packs'),
+
+    getProduct: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/product`, ProductViewSchema, 'the product records'),
+    productAction(projectId, action) {
+      const base = `/v1/projects/${encodeURIComponent(projectId)}/product`;
+      // Every write answers with the view as it is afterwards.
+      const after = { parse: (v: unknown) => ProductViewSchema.parse((v as { product?: unknown } | null)?.product) };
+      const raise = action.classification !== undefined ? { classification: action.classification } : {};
+      switch (action.kind) {
+        case 'save_brief': return readJson(`${base}/brief`, after, 'the product records', false, { expectedRevision: action.expectedRevision, confirm: action.confirm, content: action.content, ...raise });
+        case 'save_plan': return readJson(`${base}/outcome-plans`, after, 'the product records', false, { recordId: action.recordId, expectedRevision: action.expectedRevision, content: action.content, ...raise });
+        case 'add_release': return readJson(`${base}/releases`, after, 'the product records', false, { content: action.content, ...raise });
+        case 'add_review': return readJson(`${base}/outcome-reviews`, after, 'the product records', false, { content: action.content, ...raise });
+      }
+    },
 
     getStack: (projectId) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings'),
     stackAction: (projectId, req) => readJson(`/v1/projects/${encodeURIComponent(projectId)}/stack`, StackViewSchema, 'the stack settings', false, { expectedRevision: req.expectedRevision, action: req.action }),

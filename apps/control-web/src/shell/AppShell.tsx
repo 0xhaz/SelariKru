@@ -23,6 +23,7 @@ import { EvidenceView } from '../features/evidence/EvidenceView.tsx';
 import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts';
 import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
 import { BrainConflicts, BrainView } from '../features/brain/BrainView.tsx';
+import { ProductFollowUps, ProductView } from '../features/product/ProductView.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
 import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute, type Route } from './route.ts';
@@ -54,6 +55,7 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'Pipeline', route: 'pipeline' },
   { label: 'Decisions', route: 'decisions' },
   { label: 'Evidence', route: 'evidence' },
+  { label: 'Product', route: 'product' },
   { label: 'Brain', route: 'brain' },
   { label: 'Benchmark', route: 'benchmark' },
   { label: 'Assistant', route: 'assistant' },
@@ -61,7 +63,7 @@ const NAV: readonly { label: string; route: Route | null }[] = [
   { label: 'New project', route: 'onboarding' },
 ];
 
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project' };
+const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', product: 'Product', brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project' };
 
 const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -367,7 +369,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
               elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
               counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
-              brain={<BrainConflicts port={state.brain} />}
+              brain={<><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /></>}
             />
           </RouteBoundary>
         ) : null}
@@ -377,6 +379,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
               connection={connection} error={state.error} model={builtEvidence.evidence} failure={builtEvidence.failure} hasSnapshot={snapshot !== null} confirmedAt={confirmedAt} mode={mode} leaveDemoHref={leaveDemoHref}
               checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onLoadFailures={state.loadFailures} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
             />
+          </RouteBoundary>
+        ) : null}
+        {route === 'product' ? (
+          <RouteBoundary resetKey="product">
+            <ProductView port={state.product} connection={connection} mode={mode} />
           </RouteBoundary>
         ) : null}
         {route === 'brain' ? (
