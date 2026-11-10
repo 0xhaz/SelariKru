@@ -8,10 +8,12 @@ Adapted files:
 
 - `src/theme/tokens.ts`, `src/theme/fonts.ts`
 - `src/index.css` (the pixel panel, button, chip, field and font-switch rules)
-- `src/office/**` (engine, layout, drawing, actors, scene, input)
+- `src/office/**` except `src/office/model.ts` (engine, layout, drawing, actors, scene, input; drawn on a 2D canvas instead of PixiJS)
 - `src/shell/ui-store.ts`, `src/shell/shortcuts.ts`
-- `src/shell/hud/*` (top bar, activity feed, connection banner, tooltip, view drawer)
+- `src/shell/hud/TopBar.tsx`, `ActivityFeed.tsx`, `ConnectionBanner.tsx`, `Tooltip.tsx`, `ViewDrawer.tsx`, `Portrait.tsx`
 - `src/features/settings/SettingsPage.tsx` (the settings tab layout)
+
+The office's data model (`src/office/model.ts`), the activity feed's model (`src/shell/hud/activity.ts`) and the office screen's text panel (`src/shell/hud/OfficeHome.tsx`) are SelariKru's own.
 
 ```
 MIT License

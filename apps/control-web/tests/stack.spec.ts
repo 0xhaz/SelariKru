@@ -31,7 +31,7 @@ async function open(page: Page, width = 1440): Promise<string[]> {
   page.on('request', (r) => requests.push(r.url()));
   await page.setViewportSize({ width, height: 900 });
   await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work' }; });
-  await page.goto('/tests/harness/index.html#/settings');
+  await page.goto('/tests/harness/index.html#/settings?section=stack');
   await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 2, name: 'Stack' })).toBeVisible();
   return requests;

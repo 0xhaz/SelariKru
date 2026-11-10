@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 import { TONE_TEXT, formatClock, type Tone } from '@selarikru/ui';
 import type { PresenceState } from './model.ts';
 import { unknownText, type PanelRow, type TeamPanelModel } from './panel.ts';
@@ -16,7 +16,7 @@ function since(row: PanelRow): string {
   return row.state === 'lost' || row.state === 'unknown' ? row.since : `for ${row.since}`;
 }
 
-function WorkerRow({ row, selected, onOpen }: { row: PanelRow; selected: boolean; onOpen: (id: string) => void }) {
+function WorkerRow({ row, selected, onOpen, mark }: { row: PanelRow; selected: boolean; onOpen: (id: string) => void; mark: ReactNode }) {
   const rail = RAIL[row.tone] ?? 'before:bg-transparent';
   return (
     <li>
@@ -30,7 +30,8 @@ function WorkerRow({ row, selected, onOpen }: { row: PanelRow; selected: boolean
         className={`relative block w-full overflow-hidden rounded-chip border bg-panel-2 py-2 pr-2.5 pl-3.5 text-left before:absolute before:inset-y-0 before:left-0 before:w-[3px] ${rail} ${selected ? 'border-active' : 'border-line hover:border-line-strong'}`}
       >
         <span className="flex items-baseline justify-between gap-2">
-          <span className="min-w-0 truncate font-semibold text-fg">{row.role}</span>
+          {mark ? <span aria-hidden="true" className="flex shrink-0 items-center gap-1.5 self-center">{mark}</span> : null}
+          <span className="min-w-0 flex-1 truncate font-semibold text-fg">{row.role}</span>
           <span className="shrink-0 text-sm text-muted tabular-nums" data-testid="team-panel-since">{since(row)}</span>
         </span>
         <span className={`mt-0.5 flex items-center gap-1.5 text-sm font-medium ${TONE_TEXT[row.tone]}`} data-testid="team-panel-state">
@@ -45,7 +46,10 @@ function WorkerRow({ row, selected, onOpen }: { row: PanelRow; selected: boolean
   );
 }
 
-function Rows({ status, selectedId, onOpen, grid }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; grid: boolean }) {
+/** Decoration before a row's role, such as the office robot and its number key. Hidden from assistive technology: the row already names the worker. */
+export type RowMark = (workerId: string, index: number) => ReactNode;
+
+function Rows({ status, selectedId, onOpen, grid, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; grid: boolean; mark?: RowMark | undefined }) {
   if (status.kind === 'loading') return <p className="px-1 py-2 text-sm text-muted">Loading workers</p>;
   if (status.kind === 'unavailable') return <p className="px-1 py-2 text-sm text-muted">No project data is connected, so no worker is shown.</p>;
   if (status.panel.rows.length === 0) return <p className="px-1 py-2 text-sm text-muted">No workers yet. They appear once a plan is accepted and a task starts.</p>;
@@ -53,7 +57,7 @@ function Rows({ status, selectedId, onOpen, grid }: { status: PanelStatus; selec
     <>
       {status.stale ? <p className="mb-2 px-1 text-sm text-muted" data-testid="team-panel-stale">The connection is not live, so states are the last confirmed and shown as unknown.</p> : null}
       <ul className={grid ? 'grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2'}>
-        {status.panel.rows.map((r) => <WorkerRow key={r.workerId} row={r} selected={r.workerId === selectedId} onOpen={onOpen} />)}
+        {status.panel.rows.map((r, i) => <WorkerRow key={r.workerId} row={r} selected={r.workerId === selectedId} onOpen={onOpen} mark={mark ? mark(r.workerId, i) : null} />)}
       </ul>
     </>
   );
@@ -97,7 +101,7 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 }
 
 /** The roster beside every page at wide widths. Selecting a worker opens its drawer over the page; nothing navigates. */
-export function TeamPanelSide({ status, selectedId, onOpen }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void }) {
+export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   return (
     <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="border-r border-line bg-panel xl:sticky xl:top-[var(--header-h,6rem)] xl:h-[calc(100dvh-var(--header-h,6rem))] xl:overflow-y-auto">
       <div className="px-3 pt-4 pb-6">
@@ -106,7 +110,7 @@ export function TeamPanelSide({ status, selectedId, onOpen }: { status: PanelSta
           <p id="team-panel-title" className="text-sm font-semibold tracking-wide text-fg">Team</p>
           <p className="text-sm" data-testid="team-panel-summary"><Count status={status} /></p>
         </div>
-        <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} />
+        <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} />
       </div>
     </aside>
   );
@@ -172,7 +176,7 @@ export function TeamFoldToggle({ status, open, onOpenChange, regionId }: FoldPro
 }
 
 /** The roster the toggle unfolds, under the header's rows. Escape or choosing a worker folds it again. */
-export function TeamFoldRegion({ status, open, onOpenChange, regionId, selectedId, onOpen }: FoldProps & { selectedId: string | null; onOpen: (id: string) => void }) {
+export function TeamFoldRegion({ status, open, onOpenChange, regionId, selectedId, onOpen, mark }: FoldProps & { selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   const onKey = (e: KeyboardEvent<HTMLElement>): void => {
     if (e.key !== 'Escape') return;
     e.stopPropagation();
@@ -183,7 +187,7 @@ export function TeamFoldRegion({ status, open, onOpenChange, regionId, selectedI
     <section id={regionId} aria-label="Team" data-testid="team-panel" data-variant="fold" hidden={!open} onKeyDown={onKey} className="max-h-[60dvh] overflow-y-auto border-t border-line bg-panel">
       <div className="mx-auto max-w-[1600px] px-4 py-3 sm:px-6">
         <p className="mb-2 px-1 text-sm" data-testid="team-panel-summary"><Count status={status} testId="team-fold-needs-you" /></p>
-        <Rows status={status} selectedId={selectedId} onOpen={(id) => { onOpenChange(false); onOpen(id); }} grid />
+        <Rows status={status} selectedId={selectedId} onOpen={(id) => { onOpenChange(false); onOpen(id); }} grid mark={mark} />
       </div>
     </section>
   );

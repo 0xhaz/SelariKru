@@ -1,7 +1,5 @@
-import { Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useStore } from 'zustand';
-import { TONE_TEXT, buttonQuiet, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
-import { DemoBadge } from '../data-source/DemoBadge.tsx';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
 import { SettingsPage } from '../features/settings/SettingsPage.tsx';
@@ -27,8 +25,22 @@ import { ProductFollowUps, ProductView } from '../features/product/ProductView.t
 import { HandoverDecisions } from '../features/handover/ContinueInCloud.tsx';
 import { RouteBoundary } from './ErrorBoundary.tsx';
 import { connectionOf, type ConnectionState, type ProjectionStore } from './projection-store.ts';
-import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute, type Route } from './route.ts';
+import { hashQuery, hrefFor, replaceHashQuery, useHashQuery, useRoute } from './route.ts';
 import { useTheme } from './theme.ts';
+import { applyFont, savedFont } from '../theme/fonts.ts';
+import { OfficeCanvas } from '../office/OfficeCanvas.tsx';
+import { buildOfficeWorld, type OfficeWorld } from '../office/model.ts';
+import { ActivityFeed } from './hud/ActivityFeed.tsx';
+import { recentActivity } from './hud/activity.ts';
+import { ConnectionBanner } from './hud/ConnectionBanner.tsx';
+import { OfficeHome } from './hud/OfficeHome.tsx';
+import { Tooltip } from './hud/Tooltip.tsx';
+import { Portrait } from './hud/Portrait.tsx';
+import { CONNECTION, TopBar } from './hud/TopBar.tsx';
+import { ViewDrawer } from './hud/ViewDrawer.tsx';
+import { shortcutFor } from './shortcuts.ts';
+import { ui } from './ui-store.ts';
+import { NAV_GROUPS, TITLES, frameOf } from './views.ts';
 
 export interface AccountInfo {
   readonly label: string;
@@ -48,54 +60,6 @@ export interface AppShellProps {
   readonly devPanel?: ReactNode;
   /** Link that leaves demo mode, for the assistant notice. */
   readonly leaveDemoHref?: string;
-}
-
-const NAV: readonly { label: string; route: Route | null }[] = [
-  { label: 'Overview', route: 'overview' },
-  { label: 'Team', route: 'team' },
-  { label: 'Pipeline', route: 'pipeline' },
-  { label: 'Decisions', route: 'decisions' },
-  { label: 'Evidence', route: 'evidence' },
-  { label: 'Product', route: 'product' },
-  { label: 'Brain', route: 'brain' },
-  { label: 'Benchmark', route: 'benchmark' },
-  { label: 'Assistant', route: 'assistant' },
-  { label: 'Settings', route: 'settings' },
-  { label: 'New project', route: 'onboarding' },
-];
-
-const TITLES: Readonly<Record<Route, string>> = { overview: 'Mission Control', team: 'Team', pipeline: 'Pipeline', decisions: 'Decisions', evidence: 'Evidence', product: 'Product', brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project' };
-
-const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
-  connecting: { label: 'Connecting', tone: 'neutral' },
-  live: { label: 'Live', tone: 'success' },
-  reconnecting: { label: 'Reconnecting', tone: 'warning' },
-  unavailable: { label: 'Unavailable', tone: 'neutral' },
-  dead: { label: 'Stream stopped', tone: 'danger' },
-};
-
-function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionState; confirmedAt: string | null; nowMs: number }) {
-  const c = CONNECTION[connection];
-  let detail: string | null = null;
-  // The narrow header keeps a short age; when stale, the banner in the page carries the exact time.
-  let compact: string | null = null;
-  if (confirmedAt !== null) {
-    if (connection === 'live') {
-      detail = `updated ${formatAge(nowMs - Date.parse(confirmedAt))} ago`;
-      compact = `${formatAge(nowMs - Date.parse(confirmedAt))} ago`;
-    }
-    else if (connection !== 'connecting') detail = `last confirmed ${formatClock(confirmedAt)}`;
-  }
-  return (
-    <span data-testid="freshness" className="inline-flex flex-wrap items-baseline gap-x-1.5 text-sm">
-      <span className={`inline-flex items-center gap-1.5 font-medium ${TONE_TEXT[c.tone]}`}>
-        <span aria-hidden="true" className="text-glyph">{toneGlyph(c.tone)}</span>
-        {c.label}
-      </span>
-      {detail ? <span className="hidden text-muted sm:inline">{detail}</span> : null}
-      {compact ? <span className="text-muted sm:hidden">{compact}</span> : null}
-    </span>
-  );
 }
 
 /** One polite announcement per change of connection state or attention count. Heartbeats and ticks say nothing. */
@@ -120,10 +84,15 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
   );
 }
 
-/** The workspace frame: identity, navigation, data freshness and the demo label. Monitoring views render inside it and read one projection store. */
+/**
+ * The workspace frame (T5.12, adapted from the reference layout): the office canvas in the centre, the top bar, the team panel, and each screen in a
+ * drawer over the office. Every screen reads one projection store.
+ */
 export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref }: AppShellProps) {
   const route = useRoute();
   const [theme, toggleTheme] = useTheme();
+  // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
+  useEffect(() => applyFont(savedFont()), []);
   const state = useStore(store);
   const connection = connectionOf(state);
   const liveness = state.livenessForHealth();
@@ -164,17 +133,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const [foldOpen, setFoldOpen] = useState(false);
   const foldId = useId();
   useEffect(() => { if (panelWide) setFoldOpen(false); }, [panelWide]);
-  // The side panel sticks below the header, whose height changes with the width and with the folded panel.
   const headerRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const header = headerRef.current;
-    if (!header) return;
-    const set = (): void => document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`);
-    set();
-    const observer = new ResizeObserver(set);
-    observer.observe(header);
-    return () => observer.disconnect();
-  }, []);
   const pipelineRunId = useStore(pipelinePresentation, (s) => s.runId);
   const builtPipeline = useMemo((): { pipeline: PipelineModel | null; failure?: unknown } => {
     if (route !== 'pipeline' || !snapshot) return { pipeline: null };
@@ -264,89 +223,71 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   useEffect(() => {
     document.title = `${TITLES[route]} · SelariKru`;
   }, [route]);
-  // The tab list scrolls on narrow screens: the current page must be in view, or the operator cannot tell where they are.
-  const navRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
-  }, [route]);
-
   const showCount = overview !== null && !overview.empty;
   const attentionCount = showCount ? overview.attentionCount : null;
   const attentionBadge = showCount ? overview.attentionBadge : null;
   // On Decisions the view speaks for itself, one line per decision; the shell keeps to the connection there, so a decision is not announced twice.
   const announcement = route === 'decisions' ? `${CONNECTION[connection].label}.` : `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
-  return (
-    <div className="min-h-screen">
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
-      <Announcer message={announcement} />
-      <header ref={headerRef} className="sticky top-0 z-40 border-b border-line bg-panel">
-        <div className="mx-auto flex max-w-[1600px] items-center gap-x-3 px-4 pt-2 sm:gap-x-4 sm:px-6">
-          <p className="flex min-w-0 flex-1 items-baseline gap-2">
-            {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
-            <span className="sr-only text-base font-semibold tracking-tight text-fg sm:not-sr-only">SelariKru</span>
-            <span aria-hidden="true" className="hidden text-muted sm:inline">/</span>
-            <span className="truncate text-sm font-medium text-fg sm:font-normal sm:text-muted" data-testid="project-label"><span className="sr-only">, project </span>{projectLabel}</span>
-          </p>
-          <div className="ml-auto flex shrink-0 items-center justify-end gap-x-2 sm:gap-x-3">
-            {panelWide ? null : <TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
-            <DemoBadge mode={mode} />
-            {/* Below the side panel's width the Team toggle carries the count beside this, so this one waits for the room. */}
-            {attentionCount && panelWide ? <a data-testid="attention-count" href={hrefFor('overview')} className={`hidden text-sm font-medium underline-offset-2 hover:underline sm:inline ${overview!.needsYou > 0 ? 'text-warning' : 'text-muted'}`}>{attentionCount}</a> : null}
-            <button type="button" aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} className="rounded-chip border border-line-strong px-2 py-1 text-sm text-fg hover:border-active" onClick={toggleTheme}>
-              <span aria-hidden="true" className="sm:hidden">◐</span>
-              <span className="hidden sm:inline">{theme === 'dark' ? 'Light theme' : 'Dark theme'}</span>
-            </button>
-            {account ? (
-              <span className="flex items-center gap-2 text-sm">
-                <span className="hidden max-w-[16rem] truncate font-mono text-mono text-muted lg:inline" title={account.label}>{account.label}</span>
-                <button type="button" className={buttonQuiet} onClick={account.onSignOut}>Sign out</button>
-              </span>
-            ) : null}
-          </div>
-        </div>
-        <div className="mx-auto flex max-w-[1600px] items-center gap-2 pr-4 sm:pr-6">
-          <nav ref={navRef} aria-label="Primary" className="flex min-w-0 flex-1 gap-1 overflow-x-auto px-1 pt-1 sm:px-5">
-            {NAV.map((item) =>
-              item.route ? (
-                <a
-                  key={item.label}
-                  href={hrefFor(item.route)}
-                  aria-current={route === item.route ? 'page' : undefined}
-                  className={`inline-flex items-baseline gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium ${route === item.route ? 'border-active text-fg' : 'border-transparent text-muted hover:text-fg'}`}
-                >
-                  {item.label}
-                  {item.route === 'overview' && attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="text-warning sm:hidden">{attentionBadge}</span> : null}
-                  {item.route === 'decisions' && decisionCount > 0 ? <span data-testid="decisions-count" className="text-warning"><span className="sr-only">, </span>{decisionCount}<span className="sr-only"> waiting</span></span> : null}
-                </a>
-              ) : (
-                <span key={item.label} className="hidden items-baseline gap-1.5 whitespace-nowrap border-b-2 border-transparent px-3 py-2 text-sm text-muted md:inline-flex">
-                  {item.label}
-                  <span className="text-xs">soon</span>
-                </span>
-              ),
-            )}
-          </nav>
-          <div className="shrink-0">
-            {/* Setting up a first project has no live data to be fresh about. */}
-            {route === 'onboarding' && connection === 'unavailable' ? null : <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} />}
-          </div>
-        </div>
-        {panelWide ? null : <TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} />}
-      </header>
+  // The office: a picture of the same team model the panel lists. Built only from facts in the snapshot; empty without one.
+  const world = useMemo((): OfficeWorld | null => {
+    if (!snapshot || !team) return null;
+    try { return buildOfficeWorld(snapshot, team, projectLabel); } catch { return null; }
+  }, [snapshot, team, projectLabel]);
+  const activity = useMemo(() => {
+    if (route !== 'office' || !snapshot) return [];
+    try { return recentActivity(snapshot, 7); } catch { return []; }
+  }, [route, snapshot]);
+  const frame = frameOf(route);
+  // Each panel row shows its office robot and, for the first nine, the number key that opens it.
+  const colorById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a.color]) ?? []), [world]);
+  const mark = (id: string, i: number): ReactNode => {
+    const color = colorById.get(id);
+    return <>{color ? <Portrait color={color} size={22} /> : null}{i < 9 ? <kbd className="kbd">{i + 1}</kbd> : null}</>;
+  };
+  const headerH = useHeaderHeight(headerRef);
+  // On the office screen its own panels sit at the left of the canvas; the camera keeps the office clear of them where there is room.
+  const officeWide = useMediaQuery('(min-width: 1024px)');
+  const insets = useMemo(() => ({ top: headerH + 8, left: (panelWide ? 280 : 0) + (frame === 'office' && officeWide ? 330 : 16), right: workerId !== null ? 584 : 16, bottom: 16 }), [headerH, panelWide, officeWide, frame, workerId]);
 
-      {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
-      {/* An inert region is not hit-tested, so the arrow comes from here; the scrim and the hint below say why it does not respond. */}
-      <div className={`mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''} ${drawerBeside ? 'cursor-default' : ''}`}>
-      {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} /> : null}
-      <div ref={contentRef} className={`relative min-w-0 ${drawerBeside ? 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:bg-bg/60 after:content-[\'\']' : ''}`} data-testid="page-content" data-paused={drawerBeside ? 'true' : undefined}>
-      {/* On the scrim, out of the flow, so pausing moves nothing on the page; sticky under the header, so it stays in view however far the page is scrolled. */}
-      {drawerBeside ? (
-        <div className="pointer-events-none absolute inset-0 z-20">
-          <p data-testid="page-paused-hint" className="sticky top-[calc(var(--header-h,6rem)+0.75rem)] mx-4 mt-3 max-w-[24rem] rounded-chip border border-line bg-panel px-3 py-2 text-sm text-fg shadow-sm sm:mx-6">The page is paused while a worker is open. Close the worker to use the page.</p>
-        </div>
-      ) : null}
-      <main id="main" tabIndex={-1} className="mx-auto max-w-[1320px] px-4 py-6 outline-none sm:px-6">
+  // Shortcuts: 1 to 9 open a worker in the panel's order, + and - zoom the office, Escape on the page goes back to the office. Never from text entry,
+  // a terminal, a dialog or the drawer (see shortcuts.ts).
+  const rowsRef = useRef<readonly string[]>([]);
+  rowsRef.current = panelStatus.kind === 'ready' ? panelStatus.panel.rows.map((r) => r.workerId) : [];
+  const routeRef = useRef(route);
+  routeRef.current = route;
+  const openRef = useRef(openWorker);
+  openRef.current = openWorker;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const target = e.target instanceof Element ? e.target : null;
+      const action = shortcutFor({ key: e.key, metaKey: e.metaKey, ctrlKey: e.ctrlKey, altKey: e.altKey, defaultPrevented: e.defaultPrevented, target });
+      if (!action) return;
+      // An open drawer or dialog owns Escape and the digits.
+      const open = hashQuery().get('worker') !== null || document.querySelector('dialog[open]') !== null;
+      if (action.kind === 'escape') {
+        if (open || routeRef.current === 'office') return;
+        e.preventDefault();
+        window.location.hash = hrefFor('office');
+      } else if (action.kind === 'open-worker') {
+        const id = rowsRef.current[action.index];
+        if (!id || open) return;
+        e.preventDefault();
+        openRef.current(id);
+        ui.focus({ kind: 'agent', id });
+      } else if (routeRef.current === 'office') {
+        e.preventDefault();
+        ui.zoom(action.delta);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const openPlace = (place: 'plan' | 'prs'): void => { window.location.hash = hrefFor(place === 'plan' ? 'pipeline' : 'evidence'); };
+  const group = NAV_GROUPS.find((g) => g.items.some((i) => i.route === route))?.label ?? null;
+
+  const views = (
+    <>
         {route === 'overview' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
             <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} autonomy={autonomyPanel} />
@@ -399,7 +340,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : null}
         {route === 'settings' ? (
           <RouteBoundary resetKey="settings">
-            <SettingsPage stack={state.stack} skills={state.skills} connection={connection} mode={mode} />
+            <SettingsPage
+              stack={state.stack} skills={state.skills} connection={connection} mode={mode} projectLabel={projectLabel} snapshot={snapshot} team={team} autonomy={autonomyPanel}
+              onOpenWorker={openWorker} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
+            />
           </RouteBoundary>
         ) : null}
         {route === 'onboarding' ? (
@@ -413,10 +357,44 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             </RouteBoundary>
           </div>
         ) : null}
-      </main>
-      {devPanel ? <div className="mx-auto max-w-[1320px] px-4 pb-8 sm:px-6">{devPanel}</div> : null}
+    </>
+  );
+
+  return (
+    <div className="relative min-h-screen">
+      <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} />
+      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:rounded-chip focus:bg-active focus:px-3 focus:py-2 focus:text-bg">Skip to content</a>
+      <Announcer message={announcement} />
+      <TopBar
+        ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} theme={theme} onToggleTheme={toggleTheme} account={account}
+        attentionCount={attentionCount} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
+        teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
+        teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
+      />
+
+      {/* Columns follow the same query as the panel itself, so the page never lays out for a panel that is not there yet. */}
+      {/* An inert region is not hit-tested, so the arrow comes from here; the scrim and the hint below say why it does not respond. */}
+      <div className={`relative z-10 mx-auto max-w-[1600px] ${panelWide ? 'grid grid-cols-[17.5rem_minmax(0,1fr)]' : ''} ${frame === 'office' ? 'pointer-events-none' : ''} ${drawerBeside ? 'cursor-default' : ''}`}>
+      {panelWide ? <div className="pointer-events-auto"><TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /></div> : null}
+      <div ref={contentRef} className={`relative min-w-0 ${drawerBeside ? 'after:pointer-events-none after:absolute after:inset-0 after:z-10 after:bg-bg/60 after:content-[\'\']' : ''}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
+      {/* On the scrim, out of the flow, so pausing moves nothing on the page; sticky under the header, so it stays in view however far the page is scrolled. */}
+      {drawerBeside ? (
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <p data-testid="page-paused-hint" className="sticky top-[calc(var(--header-h,6rem)+0.75rem)] mx-4 mt-3 max-w-[24rem] border-2 border-edge bg-panel px-3 py-2 text-sm text-fg shadow-sm sm:mx-6">The page is paused while a worker is open. Close the worker to use the page.</p>
+        </div>
+      ) : null}
+      {frame === 'office' ? (
+        <main id="main" tabIndex={-1} className="outline-none">
+          <OfficeHome world={world} banner={<ConnectionBanner connection={connection} />} activity={<ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} />} devPanel={devPanel} />
+        </main>
+      ) : (
+        <ViewDrawer view={route} group={group} title={TITLES[route]} after={devPanel ? <div className="mx-auto max-w-[1320px] px-4 pb-8 sm:px-6">{devPanel}</div> : null}>
+          {views}
+        </ViewDrawer>
+      )}
       </div>
       </div>
+      <Tooltip />
       {workerId !== null && team !== null && snapshot !== null ? (
         <WorkerDrawerHost
           workerId={workerId} tab={isTabId(workerTab) ? workerTab : undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
@@ -426,4 +404,22 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       ) : null}
     </div>
   );
+}
+
+/** The header's height, which changes with the width and the folded panel. The side panel sticks below it and the office camera keeps clear of it. */
+function useHeaderHeight(ref: RefObject<HTMLElement | null>): number {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    const header = ref.current;
+    if (!header) return;
+    const set = (): void => {
+      document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`);
+      setH(header.offsetHeight);
+    };
+    set();
+    const observer = new ResizeObserver(set);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [ref]);
+  return h;
 }

@@ -136,12 +136,6 @@ h1, h2 {
 
 /* ---- Pixel look, applied to the shared building blocks so every view takes it without a rewrite. ---- */
 
-/* Chunky game panel: thick edge, light bevel, hard drop shadow with no blur. */
-.panel {
-  background: var(--color-panel);
-  border: 3px solid var(--color-edge);
-  box-shadow: inset -3px -3px 0 var(--pixel-bevel-lo), inset 3px 3px 0 var(--pixel-bevel-hi), 0 4px 0 var(--pixel-drop);
-}
 .rounded-card.border {
   border-width: 3px;
   border-color: var(--color-edge);
@@ -168,6 +162,13 @@ button.rounded-chip:disabled {
   box-shadow: none;
 }
 
+@layer components {
+/* Chunky game panel: thick edge, light bevel, hard drop shadow with no blur. */
+.panel {
+  background: var(--color-panel);
+  border: 3px solid var(--color-edge);
+  box-shadow: inset -3px -3px 0 var(--pixel-bevel-lo), inset 3px 3px 0 var(--pixel-bevel-hi), 0 4px 0 var(--pixel-drop);
+}
 /* The reference's button, for the HUD. */
 .btn {
   cursor: pointer;
@@ -233,9 +234,6 @@ button.rounded-chip:disabled {
   border: 2px solid var(--color-edge);
 }
 
-@keyframes pixel-blink {
-  50% { opacity: 0.25; }
-}
 .led {
   display: inline-block;
   width: 8px;
@@ -249,6 +247,11 @@ button.rounded-chip:disabled {
   animation: none;
 }
 
+}
+
+@keyframes pixel-blink {
+  50% { opacity: 0.25; }
+}
 .progress-fill {
   transition: width 200ms ease-out;
 }

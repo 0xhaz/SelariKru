@@ -24,7 +24,7 @@ async function expectNoAxeViolations(page: Page): Promise<void> {
 }
 
 test('the Pipeline nav item is a real link and the page is titled', async ({ page }) => {
-  await page.goto('/?demo');
+  await page.goto('/?demo#/overview');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   await page.getByRole('link', { name: 'Pipeline' }).click();
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
@@ -294,7 +294,7 @@ test('axe finds no violations in the table, graph, inspector, narrow layout and 
   await expect(inspector(page)).toBeVisible();
   await expectNoAxeViolations(page);
   await inspector(page).getByRole('button', { name: 'Close' }).click();
-  await page.getByRole('button', { name: 'Light theme' }).click();
+  await page.getByRole('button', { name: 'Dark theme' }).click();
   await expectNoAxeViolations(page);
   await page.setViewportSize({ width: 375, height: 800 });
   await expect(page.getByTestId('pipeline-cards')).toBeVisible();

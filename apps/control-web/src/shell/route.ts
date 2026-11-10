@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding'] as const;
+export const ROUTES = ['office', 'overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding'] as const;
 export type Route = (typeof ROUTES)[number];
 
-/** A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */
+/** The office is the centre and the default; every other route opens over it. A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */
 const pathOf = (hash: string): string => hash.replace(/^#\/?/, '').split('?')[0]!;
-const parse = (hash: string): Route => ((ROUTES as readonly string[]).includes(pathOf(hash)) ? (pathOf(hash) as Route) : 'overview');
+const parse = (hash: string): Route => ((ROUTES as readonly string[]).includes(pathOf(hash)) ? (pathOf(hash) as Route) : 'office');
 
 export const hrefFor = (route: Route): string => `#/${route}`;
 /** A deep link to one card on the Decisions screen. */
@@ -43,7 +43,7 @@ export function hashWith(key: string, value: string | null, hash: string = windo
   if (value === null) params.delete(key);
   else params.set(key, value);
   const rest = params.toString();
-  return `#${path || '/overview'}${rest ? `?${rest}` : ''}`;
+  return `#${path || '/office'}${rest ? `?${rest}` : ''}`;
 }
 
 /**

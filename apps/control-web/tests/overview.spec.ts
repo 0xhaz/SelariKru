@@ -2,7 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
 async function open(page: Page, query = ''): Promise<void> {
-  await page.goto(`/?demo${query}`);
+  await page.goto(`/?demo${query}#/overview`);
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
 }
 const fixture = (id: string): string => `&fixture=${id}`;
@@ -134,7 +134,7 @@ test('a runner loss stays visible over stale data, labelled as of the last confi
 });
 
 test('a view that fails to render is contained: shell and badge stay, and the other tab works', async ({ page }) => {
-  await page.goto('/?demo&fault=corrupt');
+  await page.goto('/?demo&fault=corrupt#/overview');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toBeVisible();
   await page.getByRole('link', { name: 'Assistant' }).first().click();
@@ -143,7 +143,7 @@ test('a view that fails to render is contained: shell and badge stay, and the ot
 });
 
 test('a failed Overview recovers once the failure clears', async ({ page }) => {
-  await page.goto('/?demo&fault=corrupt');
+  await page.goto('/?demo&fault=corrupt#/overview');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await page.getByRole('button', { name: 'Restart projection' }).click();
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
@@ -248,8 +248,9 @@ for (const fault of ['reconnecting', 'unavailable', 'dead']) {
 
 test('axe pass: light theme', async ({ page }) => {
   await open(page, fixture('policy-block'));
-  await page.getByRole('button', { name: 'Light theme' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  // Light is the default since T5.12, so the toggle goes to dark; the light theme is covered by every other axe pass.
+  await page.getByRole('button', { name: 'Dark theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expectNoAxeViolations(page);
 });
 
@@ -265,7 +266,7 @@ test('with no live source the shell is honest and the assistant still works', as
   await page.addInitScript(() => {
     (window as unknown as { __scenario: unknown }).__scenario = { shell: true };
   });
-  await page.goto('/tests/harness/index.html');
+  await page.goto('/tests/harness/index.html#/overview');
   await expect(page.getByText('Project data is unavailable')).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toHaveCount(0);
   await expect(page.getByTestId('criteria')).toHaveCount(0);
@@ -287,8 +288,9 @@ test('with no live source the shell is honest and the assistant still works', as
 
   // Axe on the assistant inside the shell, in both themes.
   await expectNoAxeViolations(page);
-  await page.getByRole('button', { name: 'Light theme' }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  // Light is the default since T5.12, so the toggle goes to dark; the light theme is covered by every other axe pass.
+  await page.getByRole('button', { name: 'Dark theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expectNoAxeViolations(page);
 });
 

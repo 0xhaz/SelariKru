@@ -8,7 +8,7 @@ describe('hashWith', () => {
   it('removes a key and drops an empty query', () => {
     expect(hashWith('worker', null, '#/team?worker=w')).toBe('#/team');
   });
-  it('an empty hash is Mission Control', () => {
-    expect(hashWith('worker', 'w', '')).toBe('#/overview?worker=w');
+  it('an empty hash is the office', () => {
+    expect(hashWith('worker', 'w', '')).toBe('#/office?worker=w');
   });
 });
