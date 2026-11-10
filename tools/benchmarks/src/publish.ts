@@ -45,7 +45,11 @@ function redactRecord(r: BenchmarkRecord): BenchmarkRecord {
   const c = rest.configuration;
   const redacted = deepRedact({
     ...rest,
-    configuration: { ...c, providerAccountReference: withheld(c.providerAccountReference), localHost: withheld(c.localHost), cloudHost: withheld(c.cloudHost) },
+    configuration: {
+      ...c, providerAccountReference: withheld(c.providerAccountReference), localHost: withheld(c.localHost), cloudHost: withheld(c.cloudHost),
+      // An image reference can name a private registry or organisation: withheld like a host, keeping only that an override was set.
+      agentState: c.agentState === null ? null : c.agentState.replace(/kit\.shortcuts\.claude=[^,;]*/g, 'kit.shortcuts.claude set (withheld)'),
+    },
     failures: rest.failures.map((f) => ({ category: f.category, detail: null })),
   });
   return { ...redacted, resultSha256: null, publishedSha256: recordHash(redacted), measuredResultsPresent };

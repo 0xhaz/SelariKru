@@ -157,7 +157,7 @@ const COMMANDS: Readonly<Record<string, (ctx: Context) => number | Promise<numbe
     const url = ctx.io.env['DATABASE_URL'];
     if (!url) throw new UsageError('DATABASE_URL must name the PostgreSQL server');
     const hours = Number(required(ctx.flags, 'older-than-hours'));
-    if (!Number.isFinite(hours) || hours <= 0) throw new UsageError('--older-than-hours must be a positive number');
+    if (!Number.isFinite(hours) || hours < 2) throw new UsageError('--older-than-hours must be at least 2');
     const { sweepBenchSchemas } = await import('./workers/stack.ts');
     const dropped = await sweepBenchSchemas(url, { olderThanMs: hours * 3_600_000 });
     ctx.io.out(`Dropped ${dropped.length} stale bench_ schema(s) older than ${hours} h. Only bench_<time>_<random> schemas are ever dropped.`);

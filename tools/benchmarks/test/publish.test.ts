@@ -236,4 +236,13 @@ describe('the network watcher', () => {
     }
     expect(net.calls()).toEqual(['fetch']);
   });
+
+  it('m3: withholds the raw image reference in agentState, as it withholds hosts', () => {
+    const r = rawWorker({ mode: 'L1', block: 1 });
+    const file = exportResults({ manifest: cohort.manifest, starts: cohort.starts, generatedAtUtc: '2026-11-20T10:00:00.000Z', records: [{ ...r, configuration: { ...r.configuration, agentState: 'before: no sandbox in scope, kit.shortcuts.claude=registry.example/acme/claude:1.2; after: no sandbox in scope, kit.shortcuts.claude=registry.example/acme/claude:1.2' } }] });
+    const published = publish(file);
+    const text = JSON.stringify(published);
+    expect(text).not.toContain('registry.example');
+    expect(published.records[0]!.configuration.agentState).toBe('before: no sandbox in scope, kit.shortcuts.claude set (withheld); after: no sandbox in scope, kit.shortcuts.claude set (withheld)');
+  });
 });

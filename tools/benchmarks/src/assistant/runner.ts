@@ -117,7 +117,7 @@ async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResu
   const records: RawRecord[] = [];
   const ready = new Map<BenchRoute, BenchSetupResult>();
   const emit = (r: RawRecord) => { records.push(r); o.onRecord?.(r); };
-  /** I2: routes whose call never settled after timing out. Their remaining slots are not run; any later sample may overlap that call. */
+  /** I2 and N1: routes whose request or setup never settled after timing out. Their remaining slots are not run; any later sample may overlap that call. */
   const stalled = new Set<BenchRoute>();
   let transportFailed = false;
 
@@ -130,16 +130,31 @@ async function runCohort(o: AssistantCohortOptions): Promise<AssistantCohortResu
     const base = baseRecord(trial, slot, route, dataKind, fixtureId, environment.sdkVersion, req.payloadSha256);
     if (o.signal?.aborted || transportFailed) { emit(notRun(base, 'cohort_stopped')); continue; }
     if (stalled.has(route)) { emit({ ...notRun(base, 'route_stalled'), failures: [{ category: 'route_stalled', detail: 'an earlier request on this route never settled, so nothing more was sent on it' }] }); continue; }
-    const overlapNote = stalled.size > 0 ? [`overlapped_in_flight_call: a stalled ${[...stalled].join(', ')} call may still be running in the page`] : [];
+    const overlapNote = stalled.size > 0 ? [`overlapped_in_flight_call: a stalled ${[...stalled].join(', ')} call or setup may still be running in the page`] : [];
 
     try {
       // Setup before a route's first request, timed apart and ledgered, never on a record.
       let setup = ready.get(route);
       if (setup === undefined) {
-        setup = await transport(o.adapter.setup(route), setupTimeoutMs).catch((e: unknown) => {
-          if (e instanceof RequestTimeout) return { route, availability: 'unknown' as const, outcome: 'failed' as const, downloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' as const };
-          throw e;
-        });
+        const call = o.adapter.setup(route);
+        const done = await transport(call, setupTimeoutMs).catch((e: unknown) => { if (e instanceof RequestTimeout) return null; throw e; });
+        if (done === null) {
+          setupLedger.push({ route, at: wallNow().toISOString(), availability: 'unknown', outcome: 'failed', modelDownloadMs: null, errorCode: 'setup_timeout', clockDomain: 'browser-monotonic' });
+          emit({ ...base, status: 'denied_start', failures: [{ category: 'route_unavailable', detail: `${route} setup did not finish within ${setupTimeoutMs} ms` }], confounders: overlapNote });
+          // N1: never start setup again while this one may still be running (a download keeps going in the page). Wait for it, bounded.
+          const late = await Promise.race([
+            call.then((r): BenchSetupResult => r, (): BenchSetupResult => ({ route, availability: 'unknown', outcome: 'failed', downloadMs: null, errorCode: 'setup_failed_late', clockDomain: 'browser-monotonic' })),
+            new Promise<'pending'>((r) => setTimeout(() => r('pending'), 2 * setupTimeoutMs)),
+          ]);
+          if (late === 'pending') stalled.add(route);
+          else {
+            setupLedger.push({ route, at: wallNow().toISOString(), availability: late.availability, outcome: late.outcome, modelDownloadMs: late.downloadMs, errorCode: late.errorCode, clockDomain: late.clockDomain });
+            // Its result stands for the route from here on: setup is not run a second time.
+            ready.set(route, late);
+          }
+          continue;
+        }
+        setup = done;
         setupLedger.push({ route, at: wallNow().toISOString(), availability: setup.availability, outcome: setup.outcome, modelDownloadMs: setup.downloadMs, errorCode: setup.errorCode, clockDomain: setup.clockDomain });
         if (setup.outcome === 'ready') ready.set(route, setup);
       }

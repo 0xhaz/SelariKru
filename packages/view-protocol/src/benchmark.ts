@@ -59,7 +59,7 @@ const ConfigurationSchema = z.strictObject({
   /** Added to the template: where the coding model's inference ran, kept apart from where the worker ran. */
   inferenceDestination: z.enum(['device', 'cloud']).nullable(),
   providerAccountReference: nullableText,
-  /** Added to the template (D6): how the coding harness authenticated, the owner's CLI login or an API key. Every worker record carries it; the report names a difference between compared modes as an account confounder. */
+  /** Added to the template (D6): how the coding harness authenticates, the owner's CLI login or an API key, as the manifest declares it (not observed). Every worker record carries it; the report names a difference between compared modes as an account confounder. */
   credentialMode: z.enum(['cli_login', 'api_key']).nullable(),
   /** Added to the template: the provider account tier the attempt ran under, as the manifest records it. Never an account identity. */
   accountTier: nullableText,

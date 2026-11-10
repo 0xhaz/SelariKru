@@ -16,7 +16,7 @@ import type {
 import { redactSecrets } from '@selarikru/protocol';
 import { SbxControlShell, controlShellArgs } from './control-shell.ts';
 import { assertSafeWorkspace, auditMounts } from './guards.ts';
-import { inScope, isLegacySandbox, sandboxName, taskPrefix } from './names.ts';
+import { inScope, isLegacySandbox, OUR_SANDBOX, sandboxName, taskPrefix } from './names.ts';
 import type { SbxCommandRunner, SbxResult } from './sbx.ts';
 import { EXACT_VERSION, NODE_TARBALL_SHA256, PATH_EXPORT, PROVISION_DEPS_SCRIPT, PROVISION_NODE_SCRIPT, PROVISION_PNPM_SCRIPT } from './toolchain.ts';
 
@@ -340,6 +340,9 @@ export class SbxRuntimeAdapter implements RuntimeAdapter {
       if (isLegacySandbox(e.name) && !this.legacySeen.has(e.name)) {
         this.legacySeen.add(e.name);
         this.opts.log?.(`left legacy sandbox ${e.name} in place: it has no owner scope, so it is never swept automatically`);
+      } else if (OUR_SANDBOX.test(e.name) && !inScope(e.name, this.opts.scope) && !this.legacySeen.has(e.name)) {
+        this.legacySeen.add(e.name);
+        this.opts.log?.(`left sandbox ${e.name} in place: it belongs to another owner scope (another runner or a benchmark trial on this machine)`);
       }
       if (inScope(e.name, this.opts.scope) && !active.has(e.name)) {
         await this.removeByName(e.name);

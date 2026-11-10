@@ -35,6 +35,8 @@ export function benchSchemaName(createdAtMs: number = Date.now()): string {
   return `bench_${createdAtMs.toString(36)}_${randomBytes(4).toString('hex')}`;
 }
 
+export const SWEEP_FLOOR_MS = 2 * 3_600_000;
+
 const BENCH_SCHEMA = /^bench_([0-9a-z]{6,12})_[0-9a-f]{8}$/;
 
 /** A new, migrated schema named by `benchSchemaName`. Only this schema is ever written or dropped. */
@@ -91,7 +93,8 @@ export function injectFetch(app: FastifyInstance): typeof fetch {
  * `bench_<time>_<random>` name, including the default schema; a `bench_` name whose age it cannot read is left in place.
  */
 export async function sweepBenchSchemas(databaseUrl: string, o: { readonly olderThanMs: number; readonly now?: number }): Promise<string[]> {
-  if (!(o.olderThanMs > 0)) throw new Error('the threshold must be positive');
+  // m4: never younger than 2 h, so a schema whose trial could still be running (the 30 min deadline plus setup and teardown) is never dropped.
+  if (!(o.olderThanMs >= SWEEP_FLOOR_MS)) throw new Error('the threshold must be at least 2 h');
   const now = o.now ?? Date.now();
   const admin = createDb(databaseUrl, { max: 1 });
   try {

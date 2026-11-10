@@ -232,7 +232,7 @@
     },
     {
       "id": "cdp-profile",
-      "text": "Track A drives the owner's Chrome over CDP. Start a separate Chrome profile for it, never the owner's everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>. In that profile, sign in to the control web as the owner, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort (its download is per profile). The runner accepts only a loopback CDP endpoint, finds the already-open bench tab, never opens or navigates one, and disconnects when done."
+      "text": "Track A drives the owner's Chrome over CDP. Start a separate Chrome profile for it, never the owner's everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>. In that profile, sign in to the control web as the owner, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort (its download is per profile). The runner accepts only a loopback CDP endpoint, finds the already-open bench tab, never opens or navigates one, and disconnects when done. A VITE_BENCH_PAGE=1 build deployed to the origin is reachable by any signed-in user of that origin, so deploy it only for the cohort and redeploy the default build straight after."
     }
   ],
   "resultTemplate": "fixtures/benchmarks/result.template.json",

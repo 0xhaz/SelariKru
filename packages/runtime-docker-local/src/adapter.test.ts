@@ -271,9 +271,14 @@ describe('SbxRuntimeAdapter start/stop/inspect/destroy', () => {
     const sbx = new FakeSbx();
     const { rt } = make({}, sbx, SCOPE, (l) => logs.push(l));
     sbx.addForeign('selarikru-t12345678-a87654321');
+    const foreign = sandboxName('tenant_a:runner_2', 't9', 'a9');
+    sbx.addForeign(foreign);
     expect(await rt.sweepOrphans(new Set())).toEqual([]);
     expect(await rt.sweepOrphans(new Set())).toEqual([]);
     expect(sbx.sandboxes.has('selarikru-t12345678-a87654321')).toBe(true);
     expect(logs.filter((l) => l.includes('selarikru-t12345678-a87654321'))).toHaveLength(1);
+    // m5: another scope's sandbox is reported once too, and left alone.
+    expect(sbx.sandboxes.has(foreign)).toBe(true);
+    expect(logs.filter((l) => l.includes(foreign) && /another owner scope/.test(l))).toHaveLength(1);
   });
 });

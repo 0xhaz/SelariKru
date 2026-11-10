@@ -74,8 +74,8 @@ export interface WorkerEnvironment {
   readonly onTrialStart?: (state: TrialStartState) => void;
   readonly log?: (line: string) => void;
   /**
-   * I1: a trial whose claims are refused this many times in a row before any attempt starts, or that sees no start within `startWindowMs`, ends
-   * as a replaceable denied start naming the last refusal. Defaults 5 and 3 minutes.
+   * I1: a trial with no start once `startWindowMs` has passed, whose claims were refused at least this many times for a non-transient
+   * per-candidate reason, ends as a replaceable denied start naming that reason. Transient refusals only wait for the deadline. Defaults 5 and 3 minutes.
    */
   readonly maxStartRefusals?: number;
   readonly startWindowMs?: number;
@@ -97,10 +97,10 @@ export const SHARED_AGENT_STATE = 'shared_agent_state';
 
 /** How the credential reaches the worker's sandbox, as recorded on every live trial. Never the credential. */
 function credentialPathOf(m: Manifest, state: AgentState | null): string {
-  if (state === null) return `${m.credentials.mode}: not checked (dry run: no credential reaches the scripted worker)`;
-  const via = state.sandboxSecret === true ? 'the sbx global anthropic service secret (OAuth), injected by the sbx proxy; nothing is copied into the sandbox and no home directory is mounted'
-    : state.sandboxSecret === false ? 'no sbx anthropic service secret found, so the sandbox has no credential' : 'unknown: the sbx secret list could not be read';
-  return `${m.credentials.mode}: ${via}`;
+  if (state === null) return `declared credential mode ${m.credentials.mode}: not checked (dry run: no credential reaches the scripted worker)`;
+  const via = state.sandboxSecret === true ? 'sbx global anthropic service secret present (type not verified), injected by the sbx proxy; nothing is copied into the sandbox and no home directory is mounted'
+    : state.sandboxSecret === false ? 'no sbx global anthropic service secret listed, so the sandbox has no credential' : 'unknown: `sbx secret ls --json` could not be read';
+  return `declared credential mode ${m.credentials.mode}: ${via}`;
 }
 
 const describeState = (s: AgentState | null): string => (s === null ? 'not checked'
@@ -221,23 +221,44 @@ interface TrialInput {
 
 type Ending = 'delivered' | 'failed' | 'timed_out' | 'cancelled' | 'denied';
 
-/** I1: what the runner's claims answered before the trial's first start. */
-interface ClaimWatch { refusals: number; lastReason: string | null; leased: boolean }
+/** I1: what the runner's claims answered before the trial's first start. Only non-transient refusals count. */
+interface ClaimWatch { nonTransient: number; lastReason: string | null; leased: boolean }
 
-function watchClaims(api: HttpRunnerApi, watch: ClaimWatch): HttpRunnerApi {
-  return new Proxy(api, {
-    get(target, prop) {
-      if (prop === 'claim') {
-        return async (...args: Parameters<HttpRunnerApi['claim']>) => {
-          const r = await target.claim(...args);
-          if (r.lease) { watch.leased = true; watch.refusals = 0; } else { watch.refusals += 1; watch.lastReason = r.reason; }
-          return r;
-        };
-      }
-      const v = Reflect.get(target, prop) as unknown;
-      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
-    },
-  });
+/** Per-candidate refusals that clear by themselves: backoff, another attempt still closing, a conflict, budget headroom, a race. */
+const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set([
+  'infra_retry_backoff', 'previous_attempt_active', 'status_changed', 'stale_status', 'resource_conflict', 'dependencies_unsatisfied', 'illegal_transition',
+  'concurrency_limit_reached', 'runner_slots_full', 'run_paused',
+]);
+const isTransient = (reason: string): boolean => TRANSIENT_REFUSALS.has(reason) || /budget/.test(reason);
+
+/**
+ * m2: reads one claim answer. Null when it leased. Otherwise the refusal that matters: the first non-transient per-candidate reason, else the
+ * first transient one, else the summary reason, which is used only when no candidate was considered.
+ */
+export function refusalOf(body: { lease: unknown; reason?: string | null; skipped?: readonly { taskId: string; reason: string }[] }): { transient: boolean; reason: string } | null {
+  if (body.lease) return null;
+  const reasons = (body.skipped ?? []).map((s) => s.reason);
+  const hard = reasons.find((r) => !isTransient(r));
+  if (hard !== undefined) return { transient: false, reason: hard };
+  if (reasons.length > 0) return { transient: true, reason: reasons[0]! };
+  const summary = body.reason ?? 'unknown';
+  return { transient: isTransient(summary), reason: summary };
+}
+
+/** Watches the claim answers on the runner's own HTTP client: the per-candidate reasons the client itself does not keep. */
+function watchClaims(fetchImpl: typeof fetch, watch: ClaimWatch): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const res = await fetchImpl(input, init);
+    if (new URL(input instanceof Request ? input.url : String(input)).pathname === '/v1/runners/claim' && res.ok) {
+      try {
+        const refusal = refusalOf((await res.clone().json()) as Parameters<typeof refusalOf>[0]);
+        if (refusal === null) { watch.leased = true; watch.nonTransient = 0; }
+        else if (!refusal.transient) { watch.nonTransient += 1; watch.lastReason = refusal.reason; }
+        else if (watch.lastReason === null) watch.lastReason = refusal.reason;
+      } catch { /* an unreadable answer is the runner's to handle */ }
+    }
+    return res;
+  }) as typeof fetch;
 }
 
 const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_');
@@ -338,16 +359,16 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
   let ending: Ending = 'failed';
   let loop: Promise<void> = Promise.resolve();
   const failures: { category: string; detail: string | null }[] = [];
-  const watch: ClaimWatch = { refusals: 0, lastReason: null, leased: false };
+  const watch: ClaimWatch = { nonTransient: 0, lastReason: null, leased: false };
   if (accepted.status !== 201) {
     // M6: the run never got a plan to start from: an infrastructure outcome, so the slot may be retried.
     ending = 'denied';
     failures.push({ category: 'plan_refused', detail: String(accepted.body?.error?.code ?? accepted.status) });
   } else {
     stack.startDrivers();
-    const api = new HttpRunnerApi(stack.apiBase, runnerToken, stack.fetch);
+    const api = new HttpRunnerApi(stack.apiBase, runnerToken, watchClaims(stack.fetch, watch));
     const runner = new RunnerLoop({
-      api: watchClaims(api, watch), runtime: runtime!, pollMs: env.pollMs, slots: 1, log: (l) => log(l), projects: [stack.projectId],
+      api, runtime: runtime!, pollMs: env.pollMs, slots: 1, log: (l) => log(l), projects: [stack.projectId],
       harnessReport: async () => env.runnerReport,
       attempt: {
         api, runtime: runtime!, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot: join(trialRoot, 'runner'), repos: { [stack.projectId]: repoPath },
@@ -417,7 +438,8 @@ async function waitForEnding(stack: Stack, runId: string, w: {
       if (run?.['lifecycle'] === 'ready_for_review') return 'delivered';
       const tasks = await stack.db.execute(sql`SELECT status FROM task_status WHERE tenant_id = ${stack.tenantId} AND project_id = ${stack.projectId}`);
       if (tasks.some((r) => TERMINAL_TASK.has(String(r['status'])))) return 'failed';
-      if (!w.watch.leased && (w.watch.refusals >= w.maxRefusals || w.mono() - w.acceptedMono >= w.startWindowMs)) return 'denied';
+      // m2: a start denied for good is one refused for a non-transient reason, repeatedly, and still unstarted once the window has passed.
+      if (!w.watch.leased && w.watch.nonTransient >= w.maxRefusals && w.mono() - w.acceptedMono >= w.startWindowMs) return 'denied';
       const left = w.deadlineMs - (w.mono() - w.acceptedMono);
       if (left <= 0) return 'timed_out';
       await until(Math.min(w.pollMs, left), tick.signal);

@@ -156,12 +156,13 @@ function cliLogin(list: Checklist, status: CliLoginStatus | undefined): void {
           : status.sandboxSecret === undefined ? 'sbx_anthropic_secret_unchecked'
             : status.sandboxSecret === false ? 'sbx_anthropic_secret_missing'
               : status.sandboxSecret === null ? 'sbx_anthropic_secret_unknown' : null;
-  const detail = reason === null ? 'The claude CLI is present and logged in, and sbx holds the global anthropic service secret that carries the login into each sandbox. Checked read-only; no account details kept or printed.'
-    : reason.startsWith('sbx_') ? 'The claude CLI is logged in, but sbx\'s global anthropic service secret, which carries the login into each sandbox, is missing or unreadable.'
+  const detail = reason === null ? 'The host claude CLI is present and logged in (this checks the host catalog only, not the sandbox), and `sbx secret ls --json` lists the global anthropic service secret that carries a credential into each sandbox (its type is not verified). Checked read-only; no account details kept or printed.'
+    : reason === 'sbx_anthropic_secret_missing' ? 'The host claude CLI is logged in, but `sbx secret ls --json` lists no global anthropic service secret, so a sandbox would have no credential.'
+      : reason.startsWith('sbx_') ? 'The host claude CLI is logged in, but `sbx secret ls --json` could not be read or was not checked, so whether a sandbox gets a credential is unknown.'
     : reason === 'claude_cli_login_unchecked' ? 'The claude CLI login was not checked.'
       : reason === 'claude_cli_missing' ? 'The claude CLI was not found.'
         : reason === 'claude_cli_not_logged_in' ? 'The claude CLI is not logged in.' : 'The claude CLI login status could not be read.';
-  list.add({ id: 'cli_login', label: 'Claude CLI logged in (D6)', status: reason === null ? 'pass' : 'block', tracks: ['workers'], detail }, reason === null ? [] : [reason]);
+  list.add({ id: 'cli_login', label: 'Claude CLI logged in on the host, and sbx anthropic secret present (D6)', status: reason === null ? 'pass' : 'block', tracks: ['workers'], detail }, reason === null ? [] : [reason]);
 }
 
 function verifierHost(list: Checklist, m: Manifest): void {
@@ -253,6 +254,7 @@ export function preflight(input: PreflightInput): PreflightReport {
 const RUNBOOK: readonly string[] = [
   'Start a separate Chrome profile for CDP, never your everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>.',
   'In that profile, sign in to the control web, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort.',
+  'A VITE_BENCH_PAGE=1 build deployed to the origin is reachable by any signed-in user of that origin: deploy it only for the cohort, and redeploy the default build straight after.',
   'Then run: benchmark run-assistant --live --cdp http://127.0.0.1:9222 --bench-url <the bench page URL> --records <file>.',
 ];
 

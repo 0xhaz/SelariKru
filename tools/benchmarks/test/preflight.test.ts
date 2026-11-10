@@ -245,6 +245,9 @@ describe('T8.1 manifest loader and preflight', () => {
     expect(ok.liveDispatch.workers.allowed).toBe(true);
     expect(ok.checks.find((c) => c.id === 'api_key')).toBeUndefined();
     expect(ok.checks.find((c) => c.id === 'cli_login')).toMatchObject({ status: 'pass', tracks: ['workers'] });
+    // m1: the host check is labelled for what it is.
+    expect(ok.checks.find((c) => c.id === 'cli_login')!.label).toMatch(/host/);
+    expect(preflight(input(cli, { env: {}, cliLogin: { present: true, loggedIn: true, sandboxSecret: null } })).checks.find((c) => c.id === 'cli_login')!.detail).toMatch(/sbx secret ls --json/);
     const cases: [PreflightInput['cliLogin'], string][] = [
       [{ present: false, loggedIn: null }, 'claude_cli_missing'],
       [{ present: true, loggedIn: false }, 'claude_cli_not_logged_in'],
@@ -286,15 +289,20 @@ describe('T8.1 manifest loader and preflight', () => {
     const calls: string[][] = [];
     const exec = async (file: string, args: readonly string[]) => {
       calls.push([file, ...args]);
-      if (args[0] === 'secret') return { code: 0, stdout: 'SCOPE TYPE NAME\n(global) service github\n(global) service anthropic (oauth configured)\n' };
+      // m1: the JSON form; the secret value field is never read.
+      if (args[0] === 'secret') return { code: 0, stdout: JSON.stringify({ secrets: [{ scope: 'global', type: 'service', name: 'github', secret: 'xxx' }, { scope: 'global', type: 'service', name: 'anthropic', secret: 'sk-ant-oat01-NEVERREAD' }], custom_secrets: [] }) };
       if (args[0] === 'settings') return { code: 0, stdout: '\n' };
       return { code: 0, stdout: JSON.stringify([{ name: sandboxName('bench:c:t:1', 'x', 'y') }, { name: 'hq-askwell-jim' }, { name: sandboxName('owner:runner', 'x', 'y') }]) };
     };
     expect(await sbxAnthropicSecret(exec)).toBe(true);
     expect(await sbxAgentState(exec)('bench:c:t:1')).toEqual({ scopedSandboxes: [sandboxName('bench:c:t:1', 'x', 'y')], kitShortcut: null, sandboxSecret: true });
-    expect(new Set(calls.map((c) => c.slice(1, 3).join(' ')))).toEqual(new Set(['secret ls', 'ls --json', 'settings get']));
-    expect(await sbxAnthropicSecret(async () => ({ code: 0, stdout: '(global) service github\n' }))).toBe(false);
+    expect(new Set(calls.map((c) => c.slice(1).join(' ')))).toEqual(new Set(['secret ls --json', 'ls --json', 'settings get kit.shortcuts.claude']));
+    expect(await sbxAnthropicSecret(async () => ({ code: 0, stdout: JSON.stringify({ secrets: [{ scope: 'global', type: 'service', name: 'github' }] }) }))).toBe(false);
+    // A sandbox-scoped anthropic secret does not reach every trial's sandbox.
+    expect(await sbxAnthropicSecret(async () => ({ code: 0, stdout: JSON.stringify({ secrets: [{ scope: 'sandbox', type: 'service', name: 'anthropic' }] }) }))).toBe(false);
+    // Fail closed: unreadable or not JSON is unknown, never present.
     expect(await sbxAnthropicSecret(async () => ({ code: 1, stdout: '' }))).toBeNull();
+    expect(await sbxAnthropicSecret(async () => ({ code: 0, stdout: '(global) service anthropic' }))).toBeNull();
   });
 
   it('M8: the preflight output carries the T8.5 runbook notes: a separate Chrome profile for CDP, with the device model downloaded in it', () => {

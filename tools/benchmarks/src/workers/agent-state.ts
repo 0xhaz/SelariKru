@@ -17,17 +17,28 @@ import type { AgentState } from './runner.ts';
 
 export type ReadOnlyExec = (file: string, args: readonly string[]) => Promise<{ readonly stdout: string; readonly code: number }>;
 
-const READ_ONLY: readonly (readonly string[])[] = [['ls', '--json'], ['settings', 'get', 'kit.shortcuts.claude'], ['secret', 'ls']];
+const READ_ONLY: readonly (readonly string[])[] = [['ls', '--json'], ['settings', 'get', 'kit.shortcuts.claude'], ['secret', 'ls', '--json']];
 
 const defaultExec: ReadOnlyExec = (file, args) => new Promise((resolve) => {
   execFile(file, [...args], { timeout: 20_000, maxBuffer: 1024 * 1024 }, (err, stdout) => resolve({ stdout: String(stdout ?? ''), code: err ? 1 : 0 }));
 });
 
-/** True when sbx lists a global `anthropic` service secret. Null when the list cannot be read. */
+/**
+ * True when `sbx secret ls --json` lists a global `anthropic` service secret. Only `scope`, `type` and `name` are read;
+ * the entry's secret field is never touched. Fail-closed: anything that cannot be read as that JSON is null (unknown).
+ * The JSON does not say whether the secret is an OAuth login or a key, so its kind is never claimed.
+ */
 export async function sbxAnthropicSecret(exec: ReadOnlyExec = defaultExec): Promise<boolean | null> {
-  const r = await exec('sbx', ['secret', 'ls']).catch(() => null);
+  const r = await exec('sbx', READ_ONLY[2]!).catch(() => null);
   if (r === null || r.code !== 0) return null;
-  return r.stdout.split('\n').some((l) => /^\s*\(global\)\s+service\s+anthropic\b/.test(l));
+  let parsed: unknown;
+  try { parsed = JSON.parse(r.stdout); } catch { return null; }
+  const list = (parsed as { secrets?: unknown } | null)?.secrets;
+  if (!Array.isArray(list)) return null;
+  return list.some((e) => {
+    const o = e as { scope?: unknown; type?: unknown; name?: unknown } | null;
+    return o?.scope === 'global' && o?.type === 'service' && o?.name === 'anthropic';
+  });
 }
 
 export function sbxAgentState(exec: ReadOnlyExec = defaultExec): (scope: string) => Promise<AgentState> {

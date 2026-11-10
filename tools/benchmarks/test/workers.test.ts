@@ -10,7 +10,7 @@ import { DRY_RUN_WORKER, IN_REPO_STARTER, dryRunHarness, fakeRuntimeFactory, scr
 import { starterRepoFrom } from '../src/workers/isolation.ts';
 import { sandboxName } from '@selarikru/runtime-docker-local';
 import { FakeSbx } from '@selarikru/runtime-docker-local/fake-sbx';
-import { runWorkerCohort, type WorkerEnvironment } from '../src/workers/runner.ts';
+import { refusalOf, runWorkerCohort, type WorkerEnvironment } from '../src/workers/runner.ts';
 import { NO_STARTS } from '../src/manifest.ts';
 import { preflight } from '../src/preflight.ts';
 import { LiveRefusedError, plannedTrials } from '../src/trials.ts';
@@ -244,13 +244,16 @@ describe('T8.3 worker runner', () => {
     // Once the run exists, the runner stops offering the pinned model: every claim is refused and no task is blocked.
     const report = e.runnerReport.map((r) => ({ ...r, models: [...r.models] }));
     const runtimes = e.runtimes;
-    const refusing = { ...e, runnerReport: report, runtime: Object.assign((o: Parameters<typeof runtimes>[0]) => { for (const r of report) (r as { models: string[] }).models = ['claude-haiku-5-5']; return runtimes(o); }, { made: runtimes.made }) };
+    // m2: only non-transient refusals count, and only once the start window has passed.
+    const refusing = { ...e, startWindowMs: 300, runnerReport: report, runtime: Object.assign((o: Parameters<typeof runtimes>[0]) => { for (const r of report) (r as { models: string[] }).models = ['claude-haiku-5-5']; return runtimes(o); }, { made: runtimes.made }) };
     const started = Date.now();
     const { records } = await runWorkerCohort({ manifest: manifestFor(1), env: refusing, live: null });
     const [r] = workers(records, 'L1');
     expect(r!.status).toBe('denied_start');
     expect(r!.failures[0]).toMatchObject({ category: 'start_denied' });
+    // The per-candidate reason, not the summary `no_claimable_task`.
     expect(r!.failures[0]!.detail).toMatch(/\S/);
+    expect(r!.failures[0]!.detail).not.toMatch(/no_claimable_task/);
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(runtimes.made.flatMap((m) => m.sbx.calls.filter((c) => c[0] === 'create'))).toEqual([]);
     expect(plannedTrials(manifestFor(1), 'workers', records).filter((p) => p.slot.mode === 'L1').map((p) => p.slotAttempt)).toEqual([2]);
@@ -267,7 +270,8 @@ describe('T8.3 worker runner', () => {
     const e = { ...env(), agentState: async () => ({ scopedSandboxes: [] as string[], kitShortcut: null, sandboxSecret: true }) };
     const { records } = await runWorkerCohort({ manifest: manifestFor(1, (m) => { m.credentials.mode = 'cli_login'; }), env: e, live: null });
     const [r] = workers(records, 'L1');
-    expect(r!.configuration.credentialPath).toMatch(/^cli_login: .*sbx global anthropic service secret/);
+    // m3: the secret's presence is known, its type (OAuth or key) is not.
+    expect(r!.configuration.credentialPath).toMatch(/^declared credential mode cli_login: .*sbx global anthropic service secret present \(type not verified\)/);
     expect(r!.configuration.agentState).toMatch(/before: no sandbox in scope; after: no sandbox in scope/);
     expect(r!.confounders.join(' ')).not.toMatch(/shared_agent_state/);
     // A kit shortcut replaces the agent image for every sandbox on the machine: shared agent state, named as a confounder.
@@ -275,4 +279,13 @@ describe('T8.3 worker runner', () => {
     const again = await runWorkerCohort({ manifest: manifestFor(1), env: shared, live: null });
     expect(workers(again.records, 'L1')[0]!.confounders.join(' ')).toMatch(/shared_agent_state/);
   }, 60_000);
+
+  it('m2: a refusal is transient or not by its per-candidate reason', () => {
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'infra_retry_backoff' }] })).toEqual({ transient: true, reason: 'infra_retry_backoff' });
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'budget_exhausted' }] })).toEqual({ transient: true, reason: 'budget_exhausted' });
+    expect(refusalOf({ lease: null, reason: 'no_claimable_task', skipped: [{ taskId: 't', reason: 'resource_conflict' }, { taskId: 'u', reason: 'model_not_offered' }] })).toEqual({ transient: false, reason: 'model_not_offered' });
+    expect(refusalOf({ lease: null, reason: 'concurrency_limit_reached', skipped: [] })).toEqual({ transient: true, reason: 'concurrency_limit_reached' });
+    expect(refusalOf({ lease: null, reason: 'runner_disabled', skipped: [] })).toEqual({ transient: false, reason: 'runner_disabled' });
+    expect(refusalOf({ lease: { attemptId: 'a' }, reason: null })).toBeNull();
+  });
 });

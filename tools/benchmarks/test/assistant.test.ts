@@ -5,7 +5,7 @@ import { freezeOrder, NO_STARTS, type Manifest, type StartRecords } from '../src
 import { preflight } from '../src/preflight.ts';
 import { buildReport, exportResults, type RawRecord } from '../src/report.ts';
 import { composeRequest, loadBriefFixtures } from '../src/assistant/payload.ts';
-import { benchPageAdapter, connectBenchPage, type BrowserLike, type PageLike } from '../src/assistant/route.ts';
+import { benchPageAdapter, connectBenchPage, type BrowserLike, type PageLike, type RouteAdapter } from '../src/assistant/route.ts';
 import { runAssistantCohort } from '../src/assistant/runner.ts';
 import { LiveRefusedError, OrderError } from '../src/trials.ts';
 import { watchNetwork } from './network.ts';
@@ -364,5 +364,45 @@ describe('T8.2 assistant runner', () => {
     await expect(runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter: { ...adapter, close: async () => { closed += 1; } }, live: c.live }))
       .rejects.toThrow(/bench_environment_mismatch: cloudModel.*bench_environment_mismatch: origin|bench_environment_mismatch: cloudModel, bench_environment_mismatch: origin/);
     expect(closed).toBe(1);
+  });
+
+  it('N1: a setup that outlasts its bound is waited for, never run twice or overlapped; one that never settles stalls its route', async () => {
+    const c = liveCohort();
+    const run = async (downloadMs: number) => {
+      let setups = 0;
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const { adapter: inner } = bench();
+      const adapter: RouteAdapter = {
+        ...inner,
+        async setup(route) {
+          if (route === 'ONLY_IN_CLOUD') return inner.setup(route);
+          setups += 1; inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((r) => setTimeout(r, downloadMs));
+          inFlight -= 1;
+          return { route, availability: 'available', outcome: 'ready', downloadMs, errorCode: null, clockDomain: 'browser-monotonic' };
+        },
+      };
+      const out = await runAssistantCohort({ manifest: c.manifest, fixtures: fixturesFor(c.manifest), adapter, live: c.live, requestTimeoutMs: 100, setupTimeoutMs: 100 });
+      return { ...out, setups, maxInFlight };
+    };
+    // The reviewer's repro: a download that outlives both the bound and the wait for it.
+    const stalled = await run(1000);
+    expect(stalled.setups).toBe(1);
+    expect(stalled.maxInFlight).toBe(1);
+    const dev = stalled.records.filter((r) => r.mode === 'ONLY_ON_DEVICE');
+    expect(dev[0]).toMatchObject({ status: 'denied_start', failures: [expect.objectContaining({ category: 'route_unavailable' })] });
+    for (const r of dev.slice(1)) expect(r).toMatchObject({ status: 'not_run', failures: [{ category: 'route_stalled' }] });
+    const firstDevice = stalled.records.indexOf(dev[0]!);
+    for (const r of stalled.records.slice(firstDevice + 1).filter((x) => x.mode === 'ONLY_IN_CLOUD')) expect(r.confounders.join(' ')).toMatch(/overlapped_in_flight_call/);
+    expect(stalled.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => e.errorCode)).toEqual(['setup_timeout']);
+    // A download that outlives the bound but settles within the wait: its result is kept and setup is not run again.
+    const late = await run(150);
+    expect(late.setups).toBe(1);
+    expect(late.maxInFlight).toBe(1);
+    const lateDev = late.records.filter((r) => r.mode === 'ONLY_ON_DEVICE');
+    expect(lateDev[0]!.status).toBe('denied_start');
+    expect(lateDev.slice(1).every((r) => r.status === 'completed' && r.confounders.length === 0)).toBe(true);
+    expect(late.setupLedger.filter((e) => e.route === 'ONLY_ON_DEVICE').map((e) => [e.errorCode, e.outcome])).toEqual([['setup_timeout', 'failed'], [null, 'ready']]);
   });
 });

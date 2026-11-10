@@ -423,7 +423,7 @@ function accountConfounder(a: string, b: string, blocks: readonly string[], slot
   if (sa.length === 0 || sb.length === 0 || (sa.length === 1 && sb.length === 1 && sa[0] === sb[0])) return [];
   const side = (mode: string, s: readonly string[]): string => `${mode} ran with ${s.map((x) => {
     const [credential, tier] = x.split('|');
-    return `credential mode ${credential} on account tier ${tier} (declared)`;
+    return `credential mode ${credential} (declared) on account tier ${tier} (declared)`;
   }).join(' and ')}`;
   return [`account confounder: ${side(a, sa)}; ${side(b, sb)}. Not an isolated placement comparison.`];
 }

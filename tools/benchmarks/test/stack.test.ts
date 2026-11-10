@@ -52,6 +52,9 @@ describe('M1 bench schemas', () => {
       expect(lines.join('\n')).toMatch(/Dropped \d+ stale bench_ schema/);
       expect(lines.join('\n')).not.toContain('selarikru_test:');
       expect(await main(['sweep-schemas', '--older-than-hours', '1'], { ...io, env: {} })).toBe(2);
+      // m4: a floor of 2 hours, so no schema of a trial that could still be running is ever dropped.
+      expect(await main(['sweep-schemas', '--older-than-hours', '1.5'], io)).toBe(2);
+      await expect(sweepBenchSchemas(DATABASE_URL, { olderThanMs: 3_600_000 })).rejects.toThrow(/2 h/);
     } finally {
       for (const s of [old, fresh, unreadable, other]) await exec(`DROP SCHEMA IF EXISTS ${s} CASCADE`);
     }
