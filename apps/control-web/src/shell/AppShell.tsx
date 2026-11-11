@@ -274,7 +274,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // Development only: the reference's debug panel.
   // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
   const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);
-  // The task agents, and their calls in flight for the office's desk marks and CLOUD rack.
+  // The task agents, and their calls in flight for the office's desk marks and rooftop cloud deck.
   const agents = useMemo(() => (agentRuntime && state.agentSource ? createAgents({
     projectId: state.projectId, source: state.agentSource, ...agentRuntime,
     execute: (c) => store.getState().execute(c), snapshot: () => store.getState().projection?.snapshot ?? null,

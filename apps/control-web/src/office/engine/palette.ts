@@ -39,10 +39,6 @@ export const C = {
   shadow: colors.ink,
   // Where AI runs (H4): device green and cloud blue-teal, always with a word or shape beside them.
   device: '#2f7a3a', deviceL: '#c9efc0', cloudMark: '#1f5f8a', cloudMarkL: '#d6ecf7',
-  // Older drawing names, until the room is redrawn.
-  grass: '#5b5048', grassD: '#4a413a', grassL: '#6c6158', path: '#d8c3a0', pathD: '#bda57e', wallSrv: '#344a52', wallSrvD: '#2a3d44',
-  carpetJ: '#8f3519', carpetJD: '#6f2810', rugP: '#56609e', rugPD: '#434c85', grate: '#4a423c', grateD: '#38312c', grateL: '#5c534b',
-  part: '#b98a5a', partD: '#8f6640', partCap: '#dcb98a', couch: '#2a9d8f', couchD: '#176b66', navy: '#173d3a',
 } as const;
 
 /** Batik rug colours under each desk, cycled by desk index. */

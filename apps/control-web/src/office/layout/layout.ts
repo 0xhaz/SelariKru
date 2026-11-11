@@ -1,10 +1,12 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 //
 // Turns the team into an office: room modules on a tile grid. SelariKru's mapping: the desks are our workers, the lead corner is the
-// plan desk (no robot sits there: there is no lead agent), the review column is our verifier, and the server room has one rack per worker's sandbox.
+// plan table (no robot sits there: there is no lead agent), the review column is our verifier, and the rack room has one rack per worker's sandbox.
+// H7: the building is a kedai (shophouse). Its ground floor is "On this device"; above it sits an open rooftop deck, "Cloud", with the uplink.
 //
-//   ┌ back wall: plan board · sign · shelf · clock · window ─┬ server ┐
-//   │ Lead corner (20 wide)          │ Lounge (≥ 9 wide)      │  room  │
+//   ┌ rooftop deck: CLOUD sign · uplink dish ─────────────────────────┐
+//   ├ back wall: plan board · sign · shelf · clock · louvres ─┬ racks  ┐
+//   │ Lead corner (20 wide)          │ Kopi corner (≥ 9 wide) │  room  │
 //   │ ─────────────── corridor ───────────────────────────── │ racks  │
 //   │ Desk grid (7×7 cubicles, pitch 8)   │ Review column     │        │
 //   │ ════════════════ PR belt ═══════════╪═ gate ══════════════╗     │
@@ -29,6 +31,8 @@ export interface LayoutInput {
 
 export const TS = 16;
 export const MARGIN = 3;
+/** Tiles of open rooftop deck above the building (H7): where cloud calls go. */
+export const ROOF = 4;
 
 const LEAD_W = 20;
 const MIN_LOUNGE_W = 9;
@@ -88,6 +92,8 @@ export interface OfficeLayout {
   gate: PxRect | null;
   prBoard: PxRect | null;
   serverRoom: { glassX: number; x0: number; w: number } | null; // tiles
+  /** The rooftop deck above the building, in world px. */
+  roof: PxRect;
   racks: Rack[];
   mailbox: PxRect | null;
   cables: { agentId: string; pts: [number, number][] }[];
@@ -128,7 +134,7 @@ export function generateLayout(input: LayoutInput): OfficeLayout {
   const W = 1 + mainW + (hasServer ? 1 + srW : 0) + 1;
 
   const ox = MARGIN * TS;
-  const oy = MARGIN * TS;
+  const oy = (MARGIN + ROOF) * TS;
   const px = (tx: number) => ox + tx * TS;
   const py = (ty: number) => oy + ty * TS;
 
@@ -237,7 +243,7 @@ export function generateLayout(input: LayoutInput): OfficeLayout {
     ox,
     oy,
     worldW: (W + MARGIN * 2) * TS,
-    worldH: (H + MARGIN * 2) * TS,
+    worldH: (H + MARGIN * 2 + ROOF) * TS,
     mainW,
     grid,
     lead: { agentId: null, seat: [15, 7], rect: { x: px(12), y: oy + 64, w: 6 * TS, h: 3 * TS } },
@@ -248,6 +254,7 @@ export function generateLayout(input: LayoutInput): OfficeLayout {
     gate,
     prBoard,
     serverRoom: hasServer ? { glassX, x0: glassX + 1, w: srW } : null,
+    roof: { x: ox, y: MARGIN * TS, w: W * TS, h: ROOF * TS },
     racks,
     mailbox,
     cables,

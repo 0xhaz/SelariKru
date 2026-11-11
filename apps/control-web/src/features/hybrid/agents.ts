@@ -5,7 +5,7 @@ import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from 
 import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
 
-/** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the server room's CLOUD rack. */
+/** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the rooftop cloud deck. */
 export interface InFlightCall {
   readonly callId: number;
   readonly taskId: string;

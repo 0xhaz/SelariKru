@@ -141,7 +141,7 @@ export class OfficeScene {
   }
 
   colorOf(id: string | null): string {
-    return this.world?.agents.find((a) => a.id === id)?.color ?? '#ffe9a8'; // no owner: a plain yellow note
+    return this.world?.agents.find((a) => a.id === id)?.color ?? C.cream; // no owner: a plain cream note
   }
 
   botRect(b: Bot): PxRect {
@@ -279,7 +279,7 @@ export class OfficeScene {
     const g = this.ctx;
     const dpr = window.devicePixelRatio || 1;
     g.setTransform(1, 0, 0, 1, 0, 0);
-    g.fillStyle = C.grass;
+    g.fillStyle = C.street;
     g.fillRect(0, 0, this.canvas.width, this.canvas.height);
     if (!l || !world || !this.staticCanvas) return;
     if (this.reducedMotion) this.settle();
@@ -295,8 +295,8 @@ export class OfficeScene {
     for (const d of l.desks) live.drawScreen(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 12, this.stateOf(d.agentId), this.colorOf(d.agentId), slow, d.index);
     // The plan desk's screens: busy while any task is in progress on the plan wall, resting otherwise.
     const planState = world.notes.some((n) => n.column === 1 || n.column === 2) ? 'working' : 'idle';
-    live.drawScreen(p, l.ox + 224, l.oy + 72, planState, C.blue, slow, 0);
-    live.drawScreen(p, l.ox + 250, l.oy + 72, planState, C.blue, slow, 1);
+    live.drawScreen(p, l.ox + 224, l.oy + 72, planState, C.teal, slow, 0);
+    live.drawScreen(p, l.ox + 250, l.oy + 72, planState, C.teal, slow, 1);
     live.drawLeadLamp(p, l.ox, l.oy, planState, this.reducedMotion ? 0 : t);
     if (l.prBoard) live.drawPrBoard(p, l.prBoard, [...world.prs].filter((x) => !x.closed).sort((a, b) => a.num - b.num));
     live.drawRacks(p, l.racks, world.racks, (id) => (id ? this.stateOf(id) : null), (n) => this.pulses.get(n) ?? 0, slow);
@@ -310,7 +310,8 @@ export class OfficeScene {
       const ai = world.agents.find((a) => a.id === d.agentId)?.ai ?? null;
       if (ai) live.drawAiMark(p, d, l.ox, l.oy, ai, this.reducedMotion ? 0 : t);
     }
-    live.drawCloudRack(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
+    live.drawCloudDeck(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
+    live.drawFallbacks(p, l, world.agents, this.reducedMotion ? 0 : t);
     live.drawBelt(p, l, t);
     for (const parcel of this.parcels) {
       if (parcel.mode === 'gone') continue;
@@ -356,9 +357,9 @@ export class OfficeScene {
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
     if (kind === 'env') {
       const r = w.racks.find((x) => x.agentId === id);
-      return { title: `Sandbox: ${r?.name ?? id}`, sub: r?.running ? 'Running an attempt' : 'Not running' };
+      return { title: `Sandbox rack: ${r?.name ?? id}`, sub: r?.running ? 'Running an attempt' : 'Not running' };
     }
-    if (kind === 'lead') return { title: 'Plan desk', sub: `${w.banner ?? 'No run yet'}. Opens Pipeline.` };
+    if (kind === 'lead') return { title: 'Plan table', sub: `${w.banner ?? 'No run yet'}. Opens Pipeline.` };
     const open = w.prs.filter((x) => !x.merged && !x.closed).length;
     if (kind === 'gate') return { title: 'Verifier', sub: `${w.verifying ? 'A task is verifying' : 'Nothing is verifying'}. Opens Evidence and PR.` };
     const verified = w.prs.filter((x) => !x.merged && !x.closed && x.verification === 'verified').length;

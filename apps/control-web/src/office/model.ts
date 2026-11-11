@@ -19,9 +19,10 @@ export interface OfficeAgent {
   readonly taskTitle: string | null;
   /**
    * The desk's mark. `expected`: a call is in flight and this is where its route sends it first, a prediction until its record lands. `observed`: where the task's
-   * last call ran, as reported. Null: no call yet, the last one was blocked, or its source was not shown.
+   * last call ran, as reported. Null: no call yet, the last one was blocked, or its source was not shown. `fellBack` (observed only, from the record's
+   * server-derived flag): the call ran on the other side from where its route sent it first.
    */
-  readonly ai: { readonly place: 'device' | 'cloud'; readonly state: 'expected' | 'observed' } | null;
+  readonly ai: { readonly place: 'device' | 'cloud'; readonly state: 'expected' | 'observed'; readonly fellBack?: true } | null;
 }
 
 /** A task's AI call in flight in this browser, and where it is meant to run first. */
@@ -91,7 +92,7 @@ export interface OfficeWorld {
   readonly parcels: readonly OfficeParcel[];
   /** True while any task is verifying: the gate scans. */
   readonly verifying: boolean;
-  /** True while a cloud AI call is in flight: the server room's CLOUD rack is lit. */
+  /** True while a cloud AI call is in flight: the rooftop cloud deck (its uplink and CLOUD sign) is lit. */
   readonly cloudCall: boolean;
   /** The canvas's text equivalent. */
   readonly summary: string;
@@ -148,7 +149,9 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     if (live) return { place: live.place!, state: 'expected' };
     const last = snapshot.tasks[taskId]?.route?.lastObserved;
     if (!last || last.status === 'blocked' || last.status === 'error') return null;
-    return last.observedSource === 'ON_DEVICE' ? { place: 'device', state: 'observed' } : last.observedSource === 'IN_CLOUD' ? { place: 'cloud', state: 'observed' } : null;
+    const place = last.observedSource === 'ON_DEVICE' ? 'device' : last.observedSource === 'IN_CLOUD' ? 'cloud' : null;
+    if (place === null) return null;
+    return last.fellBack === true ? { place, state: 'observed', fellBack: true } : { place, state: 'observed' };
   };
   const agents = team.rows.map((r): OfficeAgent => {
     const base = roleName(r.role);
@@ -202,8 +205,8 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
   // The desk marks in words: a call in flight is where its route sends it, expected until its record says where it ran.
   const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'expected'
     ? `${a.name} ${a.ai.place === 'cloud' ? 'headed to the cloud (expected)' : 'expected on this device'}`
-    : `${a.name} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}`]));
+    : `${a.name} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
   if (marks.length > 0) summary += ` Desk marks: ${marks.join('; ')}.`;
-  if (cloudCall) summary += ' The cloud rack is lit: a call is headed to the cloud.';
+  if (cloudCall) summary += ' The rooftop cloud deck is lit: a call is headed to the cloud.';
   return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary };
 }

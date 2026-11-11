@@ -169,16 +169,16 @@ test('the run default is set in Settings › Workflow, seeded from setup', async
   await expect(panel).toContainText('Saved: new tasks run Cloud first.');
 });
 
-test('the office marks a desk with where its call runs, expected while in flight and observed after, and lights the CLOUD rack while a cloud call is in flight', async ({ page }) => {
+test('the office marks a desk with where its call runs, expected while in flight and observed after, and lights the rooftop cloud deck while a cloud call is in flight', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, `#/pipeline?task=${T('web')}`, { holdAgents: true });
-  type World = { cloudCall: boolean; agents: { id: string; ai: { place: string; state: string } | null }[] };
+  type World = { cloudCall: boolean; agents: { id: string; ai: { place: string; state: string; fellBack?: true } | null }[] };
   const world = () => page.evaluate(() => (window as unknown as { __selarikruOffice?: { world: World } }).__selarikruOffice?.world ?? null);
   const frontend = async () => (await world())?.agents.find((a) => a.id === 'runner_local_2')?.ai ?? null;
   const canvas = page.getByTestId('office-canvas');
-  // The list UI fell back to the cloud last time: an observed mark.
-  await expect.poll(frontend).toEqual({ place: 'cloud', state: 'observed' });
-  await expect(canvas).toHaveAttribute('aria-label', /Frontend last AI call ran in the cloud/);
+  // The list UI fell back to the cloud last time: an observed mark that says so (H7).
+  await expect.poll(frontend).toEqual({ place: 'cloud', state: 'observed', fellBack: true });
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend last AI call ran in the cloud \(fell back from this device\)/);
   await row(page, T('web')).getByRole('button', { name: 'Feedback list UI', exact: true }).click();
   // Its route is Local first: held in flight, the desk shows where the call is expected to run.
   await action(page, 'criteria').getByRole('button', { name: 'Draft criteria' }).click();
@@ -189,14 +189,14 @@ test('the office marks a desk with where its call runs, expected while in flight
   await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran on this device');
   await expect.poll(frontend).toEqual({ place: 'device', state: 'observed' });
   await expect(canvas).toHaveAttribute('aria-label', /Frontend last AI call ran on this device/);
-  // A one-call cloud override, held: headed to the cloud, and the CLOUD rack is lit until it lands.
+  // A one-call cloud override, held: headed to the cloud, and the rooftop cloud deck is lit until it lands.
   await page.evaluate(() => { (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain(); });
   const breakdown = action(page, 'breakdown');
   await breakdown.getByLabel('Use cloud for this call').check();
   await breakdown.getByRole('button', { name: 'Break down' }).click();
   await expect.poll(frontend).toEqual({ place: 'cloud', state: 'expected' });
   await expect.poll(async () => (await world())?.cloudCall).toBe(true);
-  await expect(canvas).toHaveAttribute('aria-label', /Frontend headed to the cloud \(expected\)\. The cloud rack is lit: a call is headed to the cloud\./);
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend headed to the cloud \(expected\)\. The rooftop cloud deck is lit: a call is headed to the cloud\./);
   await page.evaluate(() => window.__releaseAgents!());
   await expect(breakdown.getByTestId('agent-result')).toContainText('Ran in the cloud');
   await expect.poll(async () => (await world())?.cloudCall).toBe(false);

@@ -193,12 +193,23 @@ describe('where each robot\'s AI call runs (H4)', () => {
     expect(w.cloudCall).toBe(false);
   });
 
-  it('a call in flight marks its desk with where it is going, and a cloud call lights the CLOUD rack', () => {
+  it('a call that fell back is an observed cloud mark that says so, from the record only (H7)', () => {
+    const fell = (r: ReturnType<typeof route>) => { const x = r as unknown as { lastObserved: Record<string, unknown> }; x.lastObserved = { ...x.lastObserved, fellBack: true }; return r; };
+    const f = snapshotOf({ tasks: [task('a', { route: fell(route('IN_CLOUD')) })], workers: [worker('w1', { taskId: 'a' })] });
+    const w = buildOfficeWorld(f, buildTeam(f, NOW, NOW, {}), 'P');
+    expect(w.agents[0]!.ai).toEqual({ place: 'cloud', state: 'observed', fellBack: true });
+    expect(w.summary).toMatch(/last AI call ran in the cloud \(fell back from this device\)/i);
+    // A call in flight is a prediction: it never claims a fallback.
+    const inFlight = buildOfficeWorld(f, buildTeam(f, NOW, NOW, {}), 'P', null, [{ taskId: 'a', place: 'device' }]);
+    expect(inFlight.agents[0]!.ai).toEqual({ place: 'device', state: 'expected' });
+  });
+
+  it('a call in flight marks its desk with where it is going, and a cloud call lights the rooftop cloud deck', () => {
     const w = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'b', place: 'cloud' }]);
     expect(w.agents.find((a) => a.id === 'w2')!.ai).toEqual({ place: 'cloud', state: 'expected' });
     expect(w.summary).toMatch(/headed to the cloud \(expected\)/i);
     expect(w.cloudCall).toBe(true);
-    expect(w.summary).toMatch(/cloud rack is lit/i);
+    expect(w.summary).toMatch(/rooftop cloud deck is lit/i);
     expect(w.summary).not.toMatch(/AI calls in flight: .* in the cloud/i);
     const device = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'a', place: 'device' }]);
     expect(device.cloudCall).toBe(false);
