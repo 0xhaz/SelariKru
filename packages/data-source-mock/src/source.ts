@@ -75,6 +75,8 @@ export interface MockDataSource extends EngineeringDataSource {
   /** The clock a project's UI should read: the shared virtual clock shifted to that fixture's start time. */
   clockFor(projectId: string): Clock;
   listProjects(): readonly { projectId: string; fixtureId: Fixture['id']; name: string; description: string }[];
+  /** How many scripted events of a project are still to come (H7 fix: the demo's playback loops when this reaches zero). */
+  pendingCount(projectId: string): number;
 }
 
 /** The same lists the real cancel route uses: a running task gets a cancel request, these cancel at once, anything else is refused. */
@@ -671,6 +673,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (!p) throw fail('unknown_project', `no mock project ${projectId}`);
       return { nowMs: () => timeOf(p) };
     },
+    pendingCount: (projectId) => projects.get(projectId)?.pending.length ?? 0,
     listProjects: () => [...projects.values()].map(({ fixture }) => ({ projectId: fixture.projectId, fixtureId: fixture.id, name: fixture.name, description: fixture.description })),
 
     async getSnapshot(projectId) {

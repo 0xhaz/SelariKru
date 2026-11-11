@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PLAYBACK_SPEEDS, createPlayback, usePlayback, type Playback } from './playback.ts';
 import { buttonQuiet } from '@selarikru/ui';
 import { DEMO_FAULTS, loadDemoSession, type DemoFault, type DemoSession } from '../data-source/demo.ts';
 import { AppShell } from './AppShell.tsx';
@@ -9,7 +10,20 @@ import { createDemoSdk } from '../features/hybrid/demo-sdk.ts';
 
 const params = (): URLSearchParams => new URLSearchParams(window.location.search);
 
-function DevPanel({ session, fixtureId, onFixture, onRestart }: { session: DemoSession; fixtureId: string; onFixture: (id: string) => void; onRestart: () => void }) {
+/** Play/Pause and 1x/2x/4x for the demo's scripted timeline (the top bar's speed buttons drive the same control). Demo data only. */
+function PlaybackControls({ playback }: { playback: Playback }) {
+  const state = usePlayback(playback);
+  if (!state) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Demo playback">
+      <button type="button" className={buttonQuiet} aria-pressed={state.playing} onClick={() => (state.playing ? playback.pause() : playback.play())} data-testid="demo-play">{state.playing ? 'Pause' : 'Play'}</button>
+      {PLAYBACK_SPEEDS.map((s) => <button key={s} type="button" className={buttonQuiet} aria-pressed={state.speed === s} onClick={() => playback.setSpeed(s)}>{s}x</button>)}
+      <span className="text-sm text-muted">{state.playing ? `Playing the demo script at ${state.speed}x; it loops at the end.` : 'Paused.'} Demo data, never evidence.</span>
+    </div>
+  );
+}
+
+function DevPanel({ session, fixtureId, onFixture, onRestart, playback }: { session: DemoSession; fixtureId: string; onFixture: (id: string) => void; onRestart: () => void; playback: Playback | null }) {
   const current = session.projects.find((p) => p.fixtureId === fixtureId);
   return (
     <aside aria-label="Demo controls" className="rounded-card border border-dashed border-line-strong p-3">
@@ -24,6 +38,7 @@ function DevPanel({ session, fixtureId, onFixture, onRestart }: { session: DemoS
         <button type="button" className={buttonQuiet} onClick={() => session.advance(10_000)}>Advance 10 s</button>
         <button type="button" className={buttonQuiet} onClick={onRestart}>Restart projection</button>
       </div>
+      {playback ? <div className="mt-2"><PlaybackControls playback={playback} /></div> : null}
       {current ? <p className="mt-2 max-w-prose text-sm text-muted">{current.description}</p> : null}
     </aside>
   );
@@ -36,23 +51,39 @@ export default function DemoRoot() {
   // The task agents run through the real adapter over a stand-in SDK: no model and no network, and every answer is labelled demo data.
   const agentRuntime = useMemo(() => ({ sdk: createDemoSdk(), simulated: true }), []);
   const [fixtureId, setFixtureId] = useState(() => params().get('fixture') ?? 'healthy-parallel-work');
+  // Loops the script: a new key loads a fresh session, which starts the fixture over. The old one stays on screen until the new one is ready.
+  const [round, setRound] = useState(0);
+  const live = useRef<{ session: DemoSession | null; projectId: string | null }>({ session: null, projectId: null });
+  // Created in an effect, so a development double mount stops the extra one cleanly.
+  const [playback, setPlayback] = useState<Playback | null>(null);
+  useEffect(() => {
+    const pb = createPlayback({
+      advance: (ms) => live.current.session?.advance(ms),
+      remaining: () => (live.current.session && live.current.projectId ? live.current.session.remaining(live.current.projectId) : 1),
+      restart: () => setRound((r) => r + 1),
+      every: (fn, ms) => { const id = window.setInterval(fn, ms); return () => window.clearInterval(id); },
+      now: () => performance.now(),
+      // Playing at 1x by default; paused under reduced motion (and so in the test suite).
+      playing: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    });
+    setPlayback(pb);
+    return () => pb.stop();
+  }, []);
   useEffect(() => {
     const raw = params().get('fault');
     const fault = (DEMO_FAULTS as readonly string[]).includes(raw ?? '') ? (raw as DemoFault) : null;
     let cancelled = false;
-    let loaded: DemoSession | null = null;
     void loadDemoSession(fault).then((s) => {
       if (cancelled) return s?.close();
-      loaded = s;
-      setSession(s);
+      // The previous round's session closes only once the new one is on screen.
+      setSession((prev) => { prev?.close(); return s; });
     });
-    return () => {
-      cancelled = true;
-      loaded?.close();
-    };
-  }, []);
+    return () => { cancelled = true; };
+  }, [round]);
+  useEffect(() => () => live.current.session?.close(), []);
 
   const project = session ? (session.projects.find((p) => p.fixtureId === fixtureId) ?? session.projects[0]!) : null;
+  live.current = { session, projectId: project?.projectId ?? null };
   const store = useMemo(() => (session && project ? createProjectionStore({ source: session.source, projectId: project.projectId, clock: session.clockFor(project.projectId), every: session.every }) : null), [session, project?.projectId]);
   useEffect(() => {
     if (!store) return;
@@ -70,6 +101,6 @@ export default function DemoRoot() {
   const leave = new URL(window.location.href);
   leave.search = '';
   return (
-    <AppShell store={store} mode="mock" agentRuntime={agentRuntime} projectLabel={project.name} assistant={null} onboarding={<OnboardingView api={demoOnboarding} adapter={null} hold={null} mode="mock" leaveDemoHref={leave.href} />} leaveDemoHref={leave.href} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} onRestart={store.getState().restart} />} />
+    <AppShell store={store} mode="mock" agentRuntime={agentRuntime} projectLabel={project.name} assistant={null} onboarding={<OnboardingView api={demoOnboarding} adapter={null} hold={null} mode="mock" leaveDemoHref={leave.href} />} leaveDemoHref={leave.href} playback={playback} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} onRestart={store.getState().restart} playback={playback} />} />
   );
 }

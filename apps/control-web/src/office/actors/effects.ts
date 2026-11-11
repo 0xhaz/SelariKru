@@ -10,7 +10,17 @@ interface Envelope {
   kind: 'env';
   fromX: number;
   fromY: number;
-  toId: string;
+  /** A robot (followed as it moves) or a fixed point. */
+  to: string | { x: number; y: number };
+  t: number;
+}
+/** A tiffin flying back from the gate to where it came from (H7 fix). */
+interface Fly {
+  kind: 'fly';
+  fromX: number;
+  fromY: number;
+  to: string | { x: number; y: number };
+  label: string;
   t: number;
 }
 interface FloatText {
@@ -31,13 +41,22 @@ interface Pixel {
   color: string;
 }
 
-type Effect = Envelope | FloatText | Pixel;
+type Effect = Envelope | FloatText | Pixel | Fly;
 
 export class Effects {
   private list: Effect[] = [];
 
-  envelope(fromX: number, fromY: number, toId: string) {
-    this.list.push({ kind: 'env', fromX, fromY, toId, t: 0 });
+  envelope(fromX: number, fromY: number, to: string | { x: number; y: number }) {
+    this.list.push({ kind: 'env', fromX, fromY, to, t: 0 });
+  }
+
+  fly(fromX: number, fromY: number, to: string | { x: number; y: number }, label: string) {
+    this.list.push({ kind: 'fly', fromX, fromY, to, label, t: 0 });
+  }
+
+  /** How many effects are showing: for the development test hook. */
+  get count(): number {
+    return this.list.length;
   }
 
   text(str: string, x: number, y: number, color: string = C.yellow) {
@@ -55,7 +74,7 @@ export class Effects {
 
   update(dt: number) {
     for (const e of this.list) {
-      if (e.kind === 'env') e.t += dt / 1.1;
+      if (e.kind === 'env' || e.kind === 'fly') e.t += dt / 1.1;
       else if (e.kind === 'text') {
         e.life -= dt;
         e.y -= 12 * dt;
@@ -66,13 +85,25 @@ export class Effects {
         e.y += e.vy * dt;
       }
     }
-    this.list = this.list.filter((e) => (e.kind === 'env' ? e.t < 1 : e.life > 0));
+    this.list = this.list.filter((e) => (e.kind === 'env' || e.kind === 'fly' ? e.t < 1 : e.life > 0));
   }
 
   draw(p: Pen, posOf: (id: string) => { x: number; y: number } | null) {
     for (const e of this.list) {
+      if (e.kind === 'fly') {
+        const to = typeof e.to === 'string' ? posOf(e.to) : e.to;
+        if (!to) continue;
+        const k = e.t;
+        const x = Math.round(e.fromX + (to.x - e.fromX) * k) - 4;
+        const y = Math.round(e.fromY + (to.y - 10 - e.fromY) * k - Math.sin(k * Math.PI) * 40) - 4;
+        p.rect(x, y, 9, 9, C.ink);
+        p.rect(x + 1, y + 1, 7, 2, C.teal);
+        p.rect(x + 1, y + 4, 7, 2, C.terracotta);
+        p.rect(x + 1, y + 7, 7, 1, C.gold);
+        continue;
+      }
       if (e.kind === 'env') {
-        const to = posOf(e.toId);
+        const to = typeof e.to === 'string' ? posOf(e.to) : e.to;
         if (!to) continue;
         const k = e.t < 0.5 ? 2 * e.t * e.t : 1 - Math.pow(-2 * e.t + 2, 2) / 2;
         const x = Math.round(e.fromX + (to.x - e.fromX) * k) - 4;

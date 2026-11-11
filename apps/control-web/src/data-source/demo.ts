@@ -24,6 +24,8 @@ export interface DemoSession {
   /** The virtual clock's scheduler. The mock's time only moves when `advance` is called, so a fixture stays on the state it demonstrates. */
   readonly every: Scheduler;
   advance(ms: number): void;
+  /** How many of a project's scripted events are still to come (H7 fix: playback loops at zero). */
+  remaining(projectId: string): number;
   close(): void;
 }
 
@@ -88,6 +90,7 @@ export async function loadDemoSession(fault: DemoFault | null): Promise<DemoSess
     clockFor: (projectId) => mock.clockFor(projectId),
     every,
     advance: (ms) => mock.clock.advance(ms),
+    remaining: (projectId) => mock.pendingCount(projectId),
     close: () => mock.disconnect(),
   };
 }

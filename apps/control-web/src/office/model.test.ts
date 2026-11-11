@@ -84,7 +84,7 @@ describe('the office world', () => {
   it('turns each pull request into a parcel, and the gate scans while a task verifies', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
     // No per-criterion evidence is connected for this run, so nothing says its candidate is verified: never inferred from the PR being open.
-    expect(world.prs).toEqual([{ num: 12, authorId: null, verification: 'unverified', merged: false, closed: false }]);
+    expect(world.prs).toEqual([{ num: 12, runId: 'run', authorId: null, verification: 'unverified', merged: false, closed: false }]);
     expect(world.verifying).toBe(true);
   });
 

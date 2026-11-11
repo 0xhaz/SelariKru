@@ -424,3 +424,38 @@ test('"Cancel task…" in the session bar says where it leads, and lands on the 
   const cancel = d.getByTestId('settings-stop').locator('[data-action]');
   if (await cancel.count()) await expect(cancel).toHaveAccessibleDescription(/Cancelling stops the running attempt/);
 });
+
+test.describe('H7 fix: errands and effects follow real events, with motion allowed', () => {
+  test.use({ reducedMotion: 'no-preference' });
+  type Live = { world: { cues: { agentId: string; needsYou: boolean }[]; agents: { id: string; state: string }[] }; recentEvents: { kind: string; agentId?: string }[]; bots: Map<string, { x: number; y: number; queue: { current(): unknown } }>; effectCount: number; setWorld(w: unknown): void };
+
+  test('a claim in the demo script sends that worker to the PLAN table: it walks, and only after the event', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'human-wait');
+    await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
+    let claimed: string | null = null;
+    for (let i = 0; i < 12 && claimed === null; i++) {
+      await page.evaluate(() => (window as unknown as { __advance: (ms: number) => void }).__advance(15_000));
+      claimed = await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.recentEvents.find((e) => e.kind === 'claimed')?.agentId ?? null);
+    }
+    expect(claimed).not.toBeNull();
+    const where = () => page.evaluate((id) => { const b = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(id!)!; return { x: Math.round(b.x), y: Math.round(b.y), errand: b.queue.current() !== null }; }, claimed);
+    const start = await where();
+    await expect.poll(async () => { const now = await where(); return now.x !== start.x || now.y !== start.y; }, { timeout: 10_000 }).toBe(true);
+  });
+
+  test('a worker that starts needing you sends an envelope to the shop front', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
+    expect(await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.effectCount)).toBe(0);
+    await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+      const w = s.world;
+      const id = w.cues[0]!.agentId;
+      s.setWorld({ ...w, cues: w.cues.map((c) => (c.agentId === id ? { ...c, needsYou: true } : c)), agents: w.agents.map((a) => (a.id === id ? { ...a, state: 'needs_input' } : a)) });
+    });
+    expect(await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.recentEvents.map((e) => e.kind))).toContain('needsYou');
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.effectCount)).toBeGreaterThan(0);
+  });
+});

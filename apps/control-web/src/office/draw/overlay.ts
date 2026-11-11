@@ -110,6 +110,13 @@ export function drawEmote(p: Pen, bot: Bot, state: RobotState, t: number, simT: 
   if (type === 'talk') for (let i = 0; i < 3; i++) p.rect(x + 3 + i * 3, y + 4, 2, 1, Math.floor(t * 6) % 3 >= i ? C.ink : C.lav);
   if (type === 'hold') { p.rect(x + 4, y + 2, 2, 5, C.indigo); p.rect(x + 7, y + 2, 2, 5, C.indigo); }
   if (type === 'ask') text(p, '?', x + 5, y + 2, C.ink);
+  if (type === 'ok') { text(p, 'OK', x + 3, y + 2, C.leafD); }
+  if (type === 'heart') {
+    for (const [dx, dy, w] of [[3, 2, 2], [7, 2, 2], [2, 3, 8], [3, 4, 6], [4, 5, 4], [5, 6, 2]] as const) p.rect(x + dx + 1, y + dy, w - (dx === 2 ? -1 : 0), 1, C.terracotta);
+  }
+  if (type === 'mail') {
+    p.rect(x + 3, y + 2, 7, 5, C.ink); p.rect(x + 4, y + 3, 5, 3, C.white); p.rect(x + 5, y + 4, 3, 1, C.terracotta);
+  }
   if (type === 'coffee') {
     // A kopi cup with steam.
     p.rect(x + 4, y + 3, 4, 4, C.ink); p.rect(x + 5, y + 4, 2, 2, C.kopiL); p.rect(x + 8, y + 4, 1, 2, C.ink);

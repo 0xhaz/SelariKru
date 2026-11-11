@@ -208,7 +208,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         </label>
       ) : null}
       {mode === 'mock' ? (
-        <span className="hidden gap-1.5 2xl:flex" role="group" aria-label="Office animation speed (demo)" title="Demo only: how fast the office animates. It does not change any data.">
+        <span className="hidden gap-1.5 2xl:flex" role="group" aria-label="Office animation speed (demo)" title="Demo only: how fast the demo script plays and the office animates. Demo data, never evidence.">
           {SPEEDS.map((x) => <button key={x} type="button" className="btn px-2 text-[14px]" aria-pressed={speed === x} onClick={() => onSpeed(x)}>{x}x</button>)}
         </span>
       ) : null}

@@ -35,6 +35,7 @@ import { OfficeCanvas } from '../office/OfficeCanvas.tsx';
 import { buildOfficeWorld, type OfficeWorld } from '../office/model.ts';
 import { ActivityFeed } from './hud/ActivityFeed.tsx';
 import { aiRunCounts, latestFallback, recentActivity } from './hud/activity.ts';
+import { usePlayback, type Playback } from './playback.ts';
 import { ConnectionBanner } from './hud/ConnectionBanner.tsx';
 import { OfficeHome } from './hud/OfficeHome.tsx';
 import { Tooltip } from './hud/Tooltip.tsx';
@@ -67,6 +68,8 @@ export interface AppShellProps {
   readonly onboarding?: ReactNode;
   /** Development controls, rendered below the page content under demo data only. */
   readonly devPanel?: ReactNode;
+  /** Demo only (H7 fix): the scripted timeline's playback. The top bar's speed buttons drive it, and the office animates at its speed. */
+  readonly playback?: Playback | null;
   /** Link that leaves demo mode, for the assistant notice. */
   readonly leaveDemoHref?: string;
   /**
@@ -103,7 +106,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
  * the floating top bar, team cards and activity feed, each screen in a side drawer over the office, and Settings as a modal. Every screen reads
  * one projection store.
  */
-export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
@@ -270,7 +273,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // The plan wall's run (the top bar's Plan wall select): the current run unless one is chosen.
   const [planRunId, setPlanRunId] = useState<string | null>(null);
   // Demo only: the office animation speed. Never touches data.
-  const [speed, setSpeed] = useState(1);
+  const [localSpeed, setLocalSpeed] = useState(1);
+  const played = usePlayback(playback);
+  const speed = played?.speed ?? localSpeed;
+  const setSpeed = (s: number): void => { if (playback) playback.setSpeed(s); else setLocalSpeed(s); };
   // Development only: the reference's debug panel.
   // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
   const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);

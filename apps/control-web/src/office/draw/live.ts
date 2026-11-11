@@ -364,3 +364,12 @@ export function deviceGlow(p: Pen, d: DeskSpot, ox: number, oy: number, time: nu
   const strength = time > 0 ? 0.35 + 0.25 * Math.sin(time * 5) : 0.5;
   for (const [x, y, w, h] of [[sx - 4, sy - 4, 26, 2], [sx - 4, sy + 13, 26, 2], [sx - 4, sy - 4, 2, 19], [sx + 20, sy - 4, 2, 19]] as const) p.rect(x, y, w, h, C.leafL, strength);
 }
+
+/** The small tiffin a robot carries over its head on the way to the lane (H7 fix: only after its attempt really published a change). */
+export function carriedTiffin(p: Pen, cx: number, top: number) {
+  const x = Math.round(cx) - 3;
+  const y = Math.round(top) - 6;
+  p.rect(x + 2, y - 1, 3, 1, C.ink);
+  p.rect(x, y, 7, 7, C.ink);
+  [C.teal, C.terracotta, C.gold].forEach((tier, k) => p.rect(x + 1, y + 1 + k * 2, 5, 1, tier));
+}

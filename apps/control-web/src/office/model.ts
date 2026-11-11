@@ -39,9 +39,31 @@ export interface OfficeNote {
   readonly ownerId: string | null;
 }
 
+/**
+ * What the office's errands and effects are read from (H7 fix): per worker, the facts whose changes are real events (office/events.ts). Never a
+ * prediction, except `cloudCall`, which is a call this browser has in flight and is shown as one.
+ */
+export interface OfficeCue {
+  readonly agentId: string;
+  readonly taskId: string | null;
+  readonly taskRevision: number | null;
+  readonly runId: string | null;
+  readonly attemptId: string | null;
+  readonly attemptRunning: boolean;
+  readonly attemptOutcome: string | null;
+  /** The task's last route record, and whether it was a conforming fallback to the cloud. */
+  readonly recordId: string | null;
+  readonly fellBackToCloud: boolean;
+  /** A cloud AI call for its task is in flight in this browser. */
+  readonly cloudCall: boolean;
+  readonly needsYou: boolean;
+}
+
 /** A pull request on the PR board. A run's change has no single author, so none is named. */
 export interface OfficePr {
   readonly num: number;
+  /** The run it belongs to: the workers on that run walk to the board when it opens. */
+  readonly runId: string;
   readonly authorId: string | null;
   /**
    * From the run's own verification record, never from the pull request being open. `verified`: its candidate is the run's live candidate,
@@ -96,6 +118,10 @@ export interface OfficeWorld {
   readonly cloudCall: boolean;
   /** The canvas's text equivalent. */
   readonly summary: string;
+  /** Per worker, what errands are read from. */
+  readonly cues: readonly OfficeCue[];
+  /** Approvals a person has answered, by task. */
+  readonly resolvedApprovals: readonly { readonly approvalId: string; readonly taskId: string | null }[];
 }
 
 /** Only a recorded merge is a merge. `merged_sha_mismatch` merged a commit that is not the verified one, and a stale PR's merge commit is not this run's. */
@@ -176,7 +202,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
 
   const prs = snapshot.changeRequests.map((c): OfficePr => {
     const merged = isRecordedMerge(c);
-    return { num: c.prNumber, authorId: null, verification: prVerification(snapshot, c), merged, closed: !merged && c.status === 'closed' };
+    return { num: c.prNumber, runId: c.runId, authorId: null, verification: prVerification(snapshot, c), merged, closed: !merged && c.status === 'closed' };
   });
   const parcels = Object.values(snapshot.runs).flatMap((r): OfficeParcel[] => {
     const candidate = r.evidence?.candidate ?? null;
@@ -209,5 +235,20 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     : `${a.name} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
   if (marks.length > 0) summary += ` Desk marks: ${marks.join('; ')}.`;
   if (cloudCall) summary += ' The rooftop cloud deck is lit: a call is headed to the cloud.';
-  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary };
+  const cues = team.rows.map((r): OfficeCue => {
+    const taskId = r.task?.taskId ?? null;
+    const t = taskId ? snapshot.tasks[taskId] : undefined;
+    const attemptId = snapshot.workers[r.workerId]?.attemptId ?? null;
+    const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
+    const last = t?.route?.lastObserved ?? null;
+    return {
+      agentId: r.workerId, taskId, taskRevision: t?.revision ?? null, runId: t?.runId ?? null, attemptId,
+      attemptRunning: attempt !== undefined && attempt.endedAt === null, attemptOutcome: attempt?.endedAt ? attempt.outcome : null,
+      recordId: last?.recordId ?? null, fellBackToCloud: last !== null && last.fellBack === true && last.conformance === 'conforms' && last.status === 'ok' && last.observedSource === 'IN_CLOUD',
+      cloudCall: taskId !== null && calls.some((c) => c.taskId === taskId && c.place === 'cloud'),
+      needsYou: agents.find((a) => a.id === r.workerId)?.state === 'needs_input',
+    };
+  });
+  const resolvedApprovals = snapshot.approvalHistory.filter((h) => h.resolvedAt !== null).map((h) => ({ approvalId: h.approvalId, taskId: h.taskId }));
+  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals };
 }

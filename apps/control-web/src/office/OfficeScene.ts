@@ -18,6 +18,8 @@ import { mulberry32 } from './engine/random.ts';
 import { generateLayout, layoutKey, tileCentre, type LayoutInput, type OfficeLayout, type PxRect } from './layout/layout.ts';
 import type { OfficeParcel, OfficeWorld } from './model.ts';
 import { attachInput, type SceneHooks } from './sceneInput.ts';
+import { effectsFor, errandFor, officeEvents, type EffectPoint, type OfficeEvent } from './events.ts';
+import { placeTile } from './actors/bots.ts';
 
 export class OfficeScene {
   readonly canvas: HTMLCanvasElement;
@@ -150,7 +152,16 @@ export class OfficeScene {
 
   // ------------------------------------------------------------ sync
 
+  /** The last events read from the world, newest last (development test hook). */
+  readonly recentEvents: OfficeEvent[] = [];
+
+  /** How many effects are showing (development test hook). */
+  get effectCount(): number {
+    return this.effects.count;
+  }
+
   setWorld(world: OfficeWorld): void {
+    const before = this.world;
     this.world = world;
     const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color })), projectName: world.projectName, leadLabel: world.leadLabel };
     const key = layoutKey(input);
@@ -197,13 +208,11 @@ export class OfficeScene {
       this.parcels.push({ id: c.id, label: c.label, mode: 'belt', s: fresh ? restingPlace(c, belt, false) : 0 });
     }
     for (const c of this.stages.values()) {
-      const before = prev.get(c.id);
-      if (before && before.stage === 'to_gate' && c.stage === 'verified') {
-        this.gateMode = { mode: 'passed', at: this.t };
-        const g = l.gate;
-        if (g) this.effects.text('VERIFIED', g.x + g.w / 2, g.y - 20, C.green);
-      }
+      const was = prev.get(c.id);
+      if (was && was.stage === 'to_gate' && c.stage === 'verified') this.gateMode = { mode: 'passed', at: this.t };
     }
+    // Errands and effects, each from a real change between the last world and this one (H7 fix).
+    if (!first) this.dispatch(officeEvents(before, world), l);
     if (this.reducedMotion) {
       for (const p of this.parcels) {
         const c = this.stages.get(p.id)!;
@@ -255,12 +264,59 @@ export class OfficeScene {
     if (this.gateMode.mode === 'reviewing' && !verifying) this.gateMode = { mode: 'idle', at: t };
   }
 
-  /** Under reduced motion: robots sit where their state puts them, without walking, and nothing blinks. */
+  /** Sends each event's robots on their errand and shows its effects. Under reduced motion the effects are skipped: their end state is already drawn. */
+  private dispatch(events: readonly OfficeEvent[], l: OfficeLayout): void {
+    for (const e of events) {
+      this.recentEvents.push(e);
+      if (this.recentEvents.length > 20) this.recentEvents.shift();
+      const who = 'agentId' in e ? [e.agentId] : 'agentIds' in e ? e.agentIds : [];
+      for (const id of who) {
+        const bot = this.bots.get(id);
+        if (!bot) continue;
+        if (e.kind === 'cloudCallEnded') { bot.queue.release('cloud'); continue; }
+        if (e.kind === 'needsYou') { bot.queue.needsYou(); bot.errand = null; }
+        // A worker that needs you stays at its desk: only a gesture where it stands, no walk.
+        const steps = errandFor(e);
+        if (this.stateOf(id) === 'needs_input' && steps.some((s) => s.to !== 'here' && s.to !== 'seat')) continue;
+        if (steps.length > 0 && e.kind !== 'needsYou') { bot.errand = null; bot.queue.push(steps); }
+      }
+      if (this.reducedMotion) continue;
+      const point = (at: EffectPoint): { x: number; y: number } | string => {
+        if (typeof at !== 'string') return at.agent;
+        if (at === 'plan') return { x: l.lead.rect.x + l.lead.rect.w / 2, y: l.lead.rect.y + 10 };
+        if (at === 'actions') return tileCentre(l, l.door);
+        const g = l.gate;
+        return g ? { x: g.x + g.w / 2, y: g.y } : tileCentre(l, l.door);
+      };
+      const xy = (at: EffectPoint): { x: number; y: number } => { const v = point(at); if (typeof v !== 'string') return v; const b = this.bots.get(v); return b ? { x: b.x, y: b.headY } : tileCentre(l, l.door); };
+      for (const fx of effectsFor(e)) {
+        if (fx.kind === 'envelope') { const from = xy(fx.from); this.effects.envelope(from.x, from.y, point(fx.to)); }
+        else if (fx.kind === 'burst') { const g = xy('gate'); this.effects.burst(g.x, g.y + 10, [C.green, C.gold, C.leafL, C.white], 22); }
+        else if (fx.kind === 'text') { const g = xy('gate'); this.effects.text(fx.text, g.x, g.y - 20, fx.tone === 'pass' ? C.green : C.red); }
+        else if (fx.kind === 'gate') this.gateMode = { mode: 'changes', at: this.t };
+        else if (fx.kind === 'flyBack') {
+          const g = xy('gate');
+          const to = point(fx.to);
+          const desk = typeof to === 'string' ? l.desks.find((d) => d.agentId === to) : undefined;
+          this.effects.fly(g.x, g.y + 20, desk ? tileCentre(l, desk.seat) : to, fx.label);
+        }
+      }
+    }
+  }
+
+  /** Under reduced motion: robots sit where their state (or a held errand, the roof during a cloud call) puts them, without walking, and nothing blinks. */
   private settle(): void {
     const l = this.layout;
     if (!l) return;
     for (const bot of this.bots.values()) {
       const state = this.stateOf(bot.config.id);
+      if (bot.queue.settle() === 'roof') {
+        Object.assign(bot, tileCentre(l, placeTile(bot, l, 'roof')));
+        bot.path = [];
+        bot.seated = false;
+        bot.face = 'down';
+        continue;
+      }
       bot.errand = null;
       bot.pause = 0;
       think(bot, l, state === 'idle' ? 'working' : state, 0, () => 0);
@@ -331,7 +387,8 @@ export class OfficeScene {
       drawFace(p, bot, state, t);
       const ai = world.agents.find((a) => a.id === bot.config.id)?.ai ?? null;
       if (ai) drawBadge(p, bot, ai);
-      drawEmote(p, bot, state, t, t);
+      drawEmote(p, bot, state, t, this.reducedMotion ? 0 : this.t);
+      if (bot.carry !== null) live.carriedTiffin(p, bot.x, bot.headY - 4);
     }
     // Under reduced motion every name shows, so no robot has to be hovered to be told apart.
     for (const bot of bots) if (this.reducedMotion || bot.path.length || this.hover?.agentId === bot.config.id) drawNameTag(p, bot);
