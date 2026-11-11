@@ -115,6 +115,7 @@ function RunsOnControl({ h, task, route, compact }: { h: HybridValue; task: Task
       <div className="flex flex-wrap items-center gap-2" data-testid="runs-on-observed">
         <span className="text-sm text-muted">Last call</span><Chip tone={m.observed.tone}>{m.observed.label}</Chip>
         {m.observed.detail ? <span className="text-sm text-fg">{m.observed.detail}</span> : null}
+        <span className="text-sm text-muted">Observed, as the browser reported it. The suggestion above is a prediction.</span>
       </div>
       {m.status ? <p className="text-sm" data-testid="runs-on-status"><span className="font-medium text-fg">{m.status.label}.</span> <span className="text-muted">{m.status.detail}</span></p> : null}
       {status}

@@ -2,6 +2,7 @@ import type { ProposalData, ProposalValidation } from '@selarikru/domain';
 import { blockedExplanation } from './labels.ts';
 import type { ResultMeta } from './store.ts';
 import { Chip, btnQuiet, mono } from './ui.tsx';
+import { PERSON_ACCEPTS, proposalAttribution } from '../hybrid/model.ts';
 
 function Data({ data }: { data: ProposalData }) {
   return (
@@ -69,7 +70,7 @@ export function OutputView({ result, semantic, onDiscard }: { result: ResultMeta
     body = (
       <div className="rounded-chip border border-warning p-3">
         <p className="font-medium text-warning">The model output did not match the required shape</p>
-        <p className="mt-1 text-muted">This is a quality failure, shown as is. It was not retried in the cloud.</p>
+        <p className="mt-1 text-muted">This is a quality failure, shown as is. It was not retried in the cloud. {result.schemaErrors.length} schema issue{result.schemaErrors.length === 1 ? '' : 's'}:</p>
         <ul className="mt-2 list-disc pl-5 text-sm">{result.schemaErrors.map((m, i) => <li key={i} className={mono}>{m}</li>)}</ul>
       </div>
     );
@@ -80,7 +81,9 @@ export function OutputView({ result, semantic, onDiscard }: { result: ResultMeta
           {result.demo ? <Chip tone="warning">Demo data</Chip> : null}
           {result.restricted ? <Chip tone="warning">Restricted draft</Chip> : null}
         </div>
-        {result.demo ? <p className="text-sm text-muted">Not evidence. No model ran, and nothing here is reported as a live result.</p> : null}
+        {result.demo ? <p className="text-sm text-muted">Not evidence. No model ran, and nothing here is reported as a live result.</p> : (
+          <p className="text-sm text-fg" data-testid="output-attribution"><span className="font-medium">{proposalAttribution(result.observedSource, null)}.</span> <span className="text-muted">{semantic ? `${semantic.issues.length} finding${semantic.issues.length === 1 ? '' : 's'} from the proposal checks. ` : ''}{PERSON_ACCEPTS}</span></p>
+        )}
         {result.restricted ? <p className="text-sm text-muted">Held in memory on this device only. Nothing posts it, and it is gone when you reload.</p> : null}
         {semantic && semantic.issues.length > 0 ? (
           <div className="rounded-chip border border-warning p-3 text-sm">

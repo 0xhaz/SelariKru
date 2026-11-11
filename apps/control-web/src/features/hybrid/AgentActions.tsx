@@ -5,7 +5,7 @@ import { DataSourceException, type ProposalAcceptReceipt, type TaskRouteView, ty
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
-import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, acceptRoundFor, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
+import { AGENT_ACTIONS, PERSON_ACCEPTS, omissionText, proposalAttribution, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, acceptRoundFor, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
 import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
@@ -164,6 +164,12 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
         {ran ? <Chip tone={src.tone}>{src.label}</Chip> : null}
         {ran ? <span className="text-sm text-muted" data-testid="result-timing">{seconds(p.timing.totalMs)}</span> : null}
       </div>
+      {ran ? (
+        <p className="text-sm text-fg" data-testid="proposal-attribution">
+          <span className="font-medium">{proposalAttribution(p.observedSource, p.route?.fellBack)}.</span>{' '}
+          <span className="text-muted">{ok ? `Checks: passed, ${p.validation.errors.length} schema issue${p.validation.errors.length === 1 ? '' : 's'}. ` : ''}{PERSON_ACCEPTS}</span>
+        </p>
+      ) : null}
       {!ok ? (
         <p className="text-fg" data-testid="result-refusal">{p.status === 'blocked' ? refusalText(p.blockedReason) : p.blockedReason ? refusalText(p.blockedReason) : STATUS_TEXT[p.status] ?? 'Not usable.'}</p>
       ) : null}
@@ -172,7 +178,7 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
       {ok ? <ProposalBody h={h} task={task} kind={kind} outcome={outcome} /> : null}
       <p className="text-sm text-muted">
         {outcome.result.locked ? 'Restricted data: this result stays in this tab and is not stored. ' : ''}
-        {outcome.result.omissions.length > 0 ? `${outcome.result.omissions.length} item${outcome.result.omissions.length === 1 ? ' was' : 's were'} left out of the context. ` : ''}
+        {omissionText(outcome.result.omissions) ? <span data-testid="result-omissions">{omissionText(outcome.result.omissions)} </span> : <span data-testid="result-omissions">Nothing was left out of what the AI saw. </span>}
         {outcome.result.reported === 'sent' ? 'Where it ran was recorded as an untrusted browser report, with no prompt or output.' : outcome.result.reported === 'failed' ? 'Where it ran could not be recorded. Nothing else changed.' : ''}
       </p>
       <button type="button" className={buttonQuiet} onClick={onDiscard}>Discard</button>

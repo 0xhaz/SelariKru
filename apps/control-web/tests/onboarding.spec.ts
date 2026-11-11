@@ -312,3 +312,15 @@ test.describe('behaviour', () => {
     await expect(page.getByText('not counted as zero').first()).toBeVisible();
   });
 });
+
+test('H7: where the assistant runs is disclosed progressively: the suggestion and one sentence first, the details behind Why?', async ({ page }) => {
+  await open(page, { ...configured, execution: null, connection: null }, '#/onboarding?id=proj_1');
+  await expect(page.getByRole('heading', { name: 'Where should work happen?' })).toBeVisible();
+  await expect(page.getByTestId('inference-suggestion')).toHaveText('Suggested: Device preferred. Your text stays on this device while Gemini Nano is ready here.');
+  const why = page.getByTestId('inference-why');
+  await expect(why).not.toHaveAttribute('open');
+  await expect(why.getByText('Restricted text never goes to the cloud', { exact: false })).toBeHidden();
+  await why.getByText('Why?').click();
+  await expect(why.getByText('Restricted text never goes to the cloud', { exact: false })).toBeVisible();
+  await expect(page.getByRole('radio', { name: 'Device preferred' })).toBeVisible();
+});

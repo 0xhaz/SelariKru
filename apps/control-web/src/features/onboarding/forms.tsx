@@ -447,12 +447,12 @@ export function ExecutionStep(p: StepProps) {
   const save = async (): Promise<void> => {
     if (await run(() => api.saveExecution(view.projectId, { idempotencyKey: keys.keyFor('execution'), expectedRevision: view.revision, execution, inference }), (v) => (v.costPlan && !v.costPlan.confirmed ? 'feasibility' : 'connections'))) keys.settle('execution');
   };
-  const group = <T extends string>(name: string, value: T, set: (v: T) => void, options: readonly T[], text: Readonly<Record<T, { label: string; hint: string }>>) => (
+  const group = <T extends string>(name: string, value: T, set: (v: T) => void, options: readonly T[], text: Readonly<Record<T, { label: string; hint: string }>>, hints = true) => (
     <div className="space-y-2">
       {options.map((o) => (
         <label key={o} className={`flex cursor-pointer items-start gap-2 rounded-card border p-3 text-sm ${value === o ? 'border-active bg-active-tint' : 'border-line bg-panel hover:border-line-strong'}`}>
           <input type="radio" className="mt-0.5" name={name} checked={value === o} onChange={() => set(o)} />
-          <span><span className="block font-medium">{text[o].label}</span><span className="text-muted">{text[o].hint}</span></span>
+          <span><span className="block font-medium">{text[o].label}</span>{hints ? <span className="text-muted">{text[o].hint}</span> : null}</span>
         </label>
       ))}
     </div>
@@ -471,7 +471,17 @@ export function ExecutionStep(p: StepProps) {
         <fieldset>
           <legend className="text-sm font-semibold">Assistant inference</legend>
           <p className="mb-2 text-sm text-muted">Where the browser assistant&apos;s model runs. It never starts work.</p>
-          {group('inference', inference, setInference, ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const, INFERENCE_TEXT)}
+          {/* H7: progressive disclosure. The suggestion and one sentence first; what each choice means sits behind "Why?". */}
+          <p className="mb-2 text-sm text-fg" data-testid="inference-suggestion"><span className="font-medium">Suggested: {INFERENCE_TEXT.PREFER_ON_DEVICE.label}.</span> Your text stays on this device while Gemini Nano is ready here.</p>
+          {group('inference', inference, setInference, ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const, INFERENCE_TEXT, false)}
+          <details className="mt-2 text-sm" data-testid="inference-why">
+            <summary className="cursor-pointer font-medium text-active">Why?</summary>
+            <div className="mt-1 space-y-1 text-muted">
+              <p>This is SelariKru&apos;s suggestion, not Firebase&apos;s: Firebase only reports whether the device model is ready. Restricted text never goes to the cloud, whatever you choose.</p>
+              <ul className="list-disc space-y-0.5 pl-5">{(['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const).map((m) => <li key={m}><span className="font-medium text-fg">{INFERENCE_TEXT[m].label}:</span> {INFERENCE_TEXT[m].hint}</li>)}</ul>
+              <p>Each task can be changed later in Pipeline, under Runs on.</p>
+            </div>
+          </details>
         </fieldset>
       </div>
     </StepFrame>

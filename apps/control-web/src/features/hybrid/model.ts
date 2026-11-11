@@ -375,3 +375,32 @@ export const STATUS_TEXT: Readonly<Record<string, string>> = {
   unverified_source: 'Thrown away: where it ran could not be confirmed',
   error: 'The model call failed. Nothing was kept.',
 };
+
+/**
+ * Who suggested a proposal and where it ran (H7), shown until it is accepted. From the SDK's reported source and the server-derived fallback flag; an
+ * unknown source is said, never shown as either side.
+ */
+export function proposalAttribution(source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN', fellBack: boolean | null | undefined): string {
+  if (source === 'ON_DEVICE') return `Suggested by Gemini Nano on this device${fellBack === true ? ', after falling back from the cloud' : ''}`;
+  if (source === 'IN_CLOUD') return `Suggested by Gemini (cloud)${fellBack === true ? ', after falling back from this device' : ''}`;
+  return 'Suggested by Gemini; where it ran was not shown';
+}
+
+/** A person accepts every proposal: the line every AI proposal carries until then. */
+export const PERSON_ACCEPTS = 'A person accepts every proposal. Until then it changes nothing and is not verified.';
+
+const OMISSION_WORDS: Readonly<Record<string, string>> = {
+  restricted_for_destination: 'restricted', too_large: 'too large', revoked: 'revoked', stale: 'out of date', out_of_scope: 'outside the task\'s scope',
+  accepted_source_revoked: 'source revoked', not_a_claim: 'not a claim',
+};
+
+/** What the AI did not see (H7): the count of omissions with their reasons, and restricted files as a count of their own. Null when nothing was left out. */
+export function omissionText(omissions: readonly { readonly kind: string; readonly id?: string; readonly reason: string }[]): string | null {
+  if (omissions.length === 0) return null;
+  const by = new Map<string, number>();
+  for (const o of omissions) { const w = OMISSION_WORDS[o.reason] ?? 'withheld'; by.set(w, (by.get(w) ?? 0) + 1); }
+  const reasons = [...by].map(([w, n]) => `${n} ${w}`).join(', ');
+  const files = omissions.filter((o) => o.kind === 'file' && o.reason === 'restricted_for_destination').length;
+  const fileLine = files > 0 ? ` Left out: ${files} restricted file${files === 1 ? '' : 's'}.` : '';
+  return `Left out of what the AI saw: ${omissions.length} item${omissions.length === 1 ? '' : 's'} (${reasons}).${fileLine}`;
+}

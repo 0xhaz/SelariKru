@@ -4,6 +4,7 @@ import { errorCodeOf, type AssistantProposal, type RestrictedDraftHold } from '@
 import type { AssistReviewResponse, GoalAssist } from '@selarikru/domain';
 import { Chip, buttonQuiet } from '@selarikru/ui';
 import { POLICY_HINT, POLICY_LABEL, MODES } from '../assistant/labels.ts';
+import { proposalAttribution } from '../hybrid/model.ts';
 import type { AssistantPort } from '../assistant/types.ts';
 import type { OnboardingApi } from './api.ts';
 import { Notice } from './ui.tsx';
@@ -88,6 +89,7 @@ export function AssistPanel({ adapter, hold, api, mode, goal, restricted, record
         {review ? (
           <div className="rounded-card border border-line p-3" data-testid="assist-suggestion">
             <p className="text-sm font-semibold">Suggestion, not saved</p>
+            <p className="mt-0.5 text-sm text-muted" data-testid="assist-attribution">{proposalAttribution(proposal?.observedSource ?? 'UNKNOWN', null)}. Nothing is saved until you use it and save the step.</p>
             {review.summary ? <p className="mt-1 wrap-anywhere text-sm">{review.summary}</p> : null}
             <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">{review.acceptanceCriteria.map((c) => <li key={c.id}>{c.text}</li>)}</ul>
             <button type="button" className={`${buttonQuiet} mt-3`} onClick={() => onApply({ ...(review.summary ? { idea: review.summary } : {}), ...(review.acceptanceCriteria[0] ? { firstOutcome: review.acceptanceCriteria[0].text } : {}) }, { observedSource: proposal?.observedSource ?? 'UNKNOWN', requestedMode: proposal?.requestedMode ?? null, provenance: 'assistant_proposal_reviewed' })}>Use this wording</button>

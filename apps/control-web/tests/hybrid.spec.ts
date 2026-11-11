@@ -272,3 +272,20 @@ test('H7: the top bar counts the run\'s AI calls from route records only, and th
   await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran on this device');
   await expect(counter).toContainText(`${deviceBefore + 1} on device`);
 });
+
+test('H7: a proposal says who suggested it and where, how sure the checks are, that a person accepts it, and what the AI did not see', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  await row(page, T('search')).getByRole('button', { name: 'Search index' }).click();
+  const criteria = action(page, 'criteria');
+  await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+  const device = criteria.getByTestId('proposal-attribution');
+  await expect(device).toContainText('Suggested by Gemini Nano on this device.');
+  await expect(device).toContainText('Checks: passed, 0 schema issues.');
+  await expect(device).toContainText('A person accepts every proposal. Until then it changes nothing and is not verified.');
+  await expect(criteria.getByTestId('result-omissions')).toHaveText(/^(Left out of what the AI saw: \d+ items? \(.+\)\.( Left out: \d+ restricted files?\.)?|Nothing was left out of what the AI saw\.) $/);
+  const breakdown = action(page, 'breakdown');
+  await breakdown.getByLabel('Use cloud for this call').check();
+  await breakdown.getByRole('button', { name: 'Break down' }).click();
+  await expect(breakdown.getByTestId('proposal-attribution')).toContainText('Suggested by Gemini (cloud).');
+});

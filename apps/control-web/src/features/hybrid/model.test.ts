@@ -3,7 +3,7 @@ import type { RouteRecord } from '@selarikru/domain';
 import type { SettingView, TaskRouteView } from '@selarikru/view-protocol';
 import { iso, task } from '../overview/testing.ts';
 import { settingStatus } from '../settings/model.ts';
-import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, filesNoteText, acceptRoundFor, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
+import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, filesNoteText, acceptRoundFor, reaskNote, effectiveStep, observedChip, omissionText, proposalAttribution, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
 
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null,
@@ -260,5 +260,24 @@ describe('fix round 2: the accept round comes from the server (m6)', () => {
     expect(acceptRoundFor(r('superseded', 1))).toBe(2);
     expect(acceptRoundFor(r('accepted', 2))).toBe(2);
     expect(acceptRoundFor(r('applying', 1))).toBe(1);
+  });
+});
+
+describe('trust and transparency on a proposal (H7)', () => {
+  it('names where a proposal came from, never as fact: device, cloud, a fallback, or unknown', () => {
+    expect(proposalAttribution('ON_DEVICE', false)).toBe('Suggested by Gemini Nano on this device');
+    expect(proposalAttribution('IN_CLOUD', false)).toBe('Suggested by Gemini (cloud)');
+    expect(proposalAttribution('IN_CLOUD', true)).toBe('Suggested by Gemini (cloud), after falling back from this device');
+    expect(proposalAttribution('ON_DEVICE', true)).toBe('Suggested by Gemini Nano on this device, after falling back from the cloud');
+    expect(proposalAttribution('UNKNOWN', null)).toBe('Suggested by Gemini; where it ran was not shown');
+  });
+
+  it('says what the AI did not see: a count with reasons, and withheld files as a count', () => {
+    expect(omissionText([])).toBeNull();
+    expect(omissionText([
+      { kind: 'claim', id: 'c1', reason: 'restricted_for_destination' }, { kind: 'claim', id: 'c2', reason: 'restricted_for_destination' }, { kind: 'source', id: 's', reason: 'revoked' },
+    ])).toBe('Left out of what the AI saw: 3 items (2 restricted, 1 revoked).');
+    expect(omissionText([{ kind: 'file', id: 'src/a.ts', reason: 'restricted_for_destination' }, { kind: 'file', id: 'src/b.ts', reason: 'too_large' }]))
+      .toBe('Left out of what the AI saw: 2 items (1 restricted, 1 too large). Left out: 1 restricted file.');
   });
 });
