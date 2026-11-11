@@ -152,6 +152,20 @@ export class OfficeScene {
 
   // ------------------------------------------------------------ sync
 
+  /** Until when each roof box shows its newest answer or discard (round 4). Under reduced motion it stays until the next world, since nothing is timed. */
+  private freshUntil = { device: { observed: -1, violation: -1 }, cloud: { observed: -1, violation: -1 } };
+
+  private roofFresh(): { device: { observed: boolean; violation: boolean }; cloud: { observed: boolean; violation: boolean } } {
+    const now = this.t;
+    const f = (u: { observed: number; violation: number }) => ({ observed: u.observed >= now, violation: u.violation >= now });
+    return { device: f(this.freshUntil.device), cloud: f(this.freshUntil.cloud) };
+  }
+
+  /** How a roof box looks right now (development test hook). */
+  roofLook(place: 'device' | 'cloud'): live.RoofLook {
+    return this.world ? live.roofLook(this.world.roof[place], this.roofFresh()[place]) : 'idle';
+  }
+
   /** The last events read from the world, newest last (development test hook). */
   readonly recentEvents: OfficeEvent[] = [];
 
@@ -167,6 +181,16 @@ export class OfficeScene {
     const key = layoutKey(input);
     const first = this.layout === null;
     const newEpoch = before !== null && before.epoch !== world.epoch;
+    // A new answer or discard on a roof box shows for a moment: only a record id that changed within this epoch, never the first world's.
+    if (before && !newEpoch) {
+      const hold = this.reducedMotion ? Number.POSITIVE_INFINITY : this.t + 2.5;
+      for (const place of ['device', 'cloud'] as const) {
+        const was = before.roof[place];
+        const now = world.roof[place];
+        if (now.observed && now.observed.recordId !== was.observed?.recordId) this.freshUntil[place].observed = hold;
+        if (now.violation && now.violation.recordId !== was.violation?.recordId) this.freshUntil[place].violation = hold;
+      }
+    } else this.freshUntil = { device: { observed: -1, violation: -1 }, cloud: { observed: -1, violation: -1 } };
     if (!this.layout || this.layout.key !== key) {
       const l = generateLayout(input);
       this.layout = l;
@@ -289,7 +313,7 @@ export class OfficeScene {
       for (const id of who) {
         const bot = this.bots.get(id);
         if (!bot) continue;
-        if (e.kind === 'cloudCallEnded') { bot.queue.release('cloud'); continue; }
+        if (e.kind === 'cloudCallEnded' || e.kind === 'deviceCallEnded') { bot.queue.release('call'); continue; }
         if (e.kind === 'needsYou') { bot.queue.needsYou(); bot.errand = null; }
         // A worker that needs you stays at its desk: only a gesture where it stands, no walk.
         const steps = errandFor(e);
@@ -326,8 +350,9 @@ export class OfficeScene {
     if (!l) return;
     for (const bot of this.bots.values()) {
       const state = this.stateOf(bot.config.id);
-      if (bot.queue.settle() === 'roof') {
-        Object.assign(bot, tileCentre(l, placeTile(bot, l, 'roof')));
+      const end = bot.queue.settle();
+      if (end === 'roofDevice' || end === 'roofCloud') {
+        Object.assign(bot, tileCentre(l, placeTile(bot, l, end)));
         bot.path = [];
         bot.seated = false;
         bot.face = 'down';
@@ -383,8 +408,7 @@ export class OfficeScene {
       if (ai) live.aiPlate(p, d, l.ox, l.oy, ai, this.reducedMotion ? 0 : t);
       if (ai?.state === 'expected' && ai.place === 'device') live.deviceGlow(p, d, l.ox, l.oy, this.reducedMotion ? 0 : t);
     }
-    live.cloudDeck(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
-    live.fallbackRoutes(p, l, world.agents, this.reducedMotion ? 0 : t);
+    live.roofDeck(p, l, world.roof, this.roofFresh(), this.reducedMotion ? 0 : t);
     live.deliveryLane(p, l, t);
     for (const parcel of this.parcels) {
       if (parcel.mode === 'gone') continue;

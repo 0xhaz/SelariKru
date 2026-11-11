@@ -508,7 +508,7 @@ test.describe('H7 fix round 3: a loop never strands a robot', () => {
       return who;
     });
     // It heads up the stair and holds there while the call is in flight.
-    await expect.poll(() => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(who)!.queue.current(), id), { timeout: 5000 }).toEqual({ to: 'roof', hold: 'cloud' });
+    await expect.poll(() => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(who)!.queue.current(), id), { timeout: 5000 }).toEqual({ to: 'roofCloud', hold: 'call' });
     const after = await page.evaluate((who) => {
       const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
       const w = s.world;
@@ -522,4 +522,31 @@ test.describe('H7 fix round 3: a loop never strands a robot', () => {
     expect(after.walking).toBe(0);
     expect([after.x, after.y]).toEqual([after.seatX, after.seatY]);
   });
+});
+
+test('H7 fix round 4: the roof\'s device box lights on a device record and its cloud box on a cloud record, expected while in flight', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'feature-delivery', holdAgents: true }; });
+  await page.goto('/tests/harness/index.html#/pipeline');
+  type Roof = { roofLook(place: 'device' | 'cloud'): string; world: { summary: string } };
+  const look = (place: 'device' | 'cloud') => page.evaluate((p) => (window as unknown as { __selarikruOffice: Roof }).__selarikruOffice.roofLook(p), place);
+  await page.locator('[data-testid="pipeline-row"][data-task-id="feature-delivery.search"]').getByRole('button', { name: 'Search index' }).click();
+  const inspector = page.getByTestId('task-inspector');
+  const criteria = inspector.locator('[data-testid="agent-action"][data-kind="criteria"]');
+  await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+  await expect.poll(() => look('device')).toBe('expected');
+  await expect(page.getByTestId('office-canvas')).toHaveAttribute('aria-label', /Roof: .* In flight: 1 expected on this device\./);
+  await page.evaluate(() => window.__releaseAgents!());
+  await expect(criteria.getByTestId('agent-result')).toContainText('Ran on this device');
+  await expect.poll(() => look('device')).toBe('observed');
+  expect(await look('cloud')).not.toBe('observed');
+  await page.evaluate(() => { (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain(); });
+  const breakdown = inspector.locator('[data-testid="agent-action"][data-kind="breakdown"]');
+  await breakdown.getByLabel('Use cloud for this call').check();
+  await breakdown.getByRole('button', { name: 'Break down' }).click();
+  await expect.poll(() => look('cloud')).toBe('expected');
+  await page.evaluate(() => window.__releaseAgents!());
+  await expect(breakdown.getByTestId('agent-result')).toContainText('Ran in the cloud');
+  await expect.poll(() => look('cloud')).toBe('observed');
+  await expect(page.getByTestId('office-canvas')).toHaveAttribute('aria-label', /Roof: \d+ tasks? on this device, \d+ in the cloud, \d+ fell back\./);
 });

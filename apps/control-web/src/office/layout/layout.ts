@@ -100,7 +100,9 @@ export interface OfficeLayout {
    * The way up (H7 fix): `foot` is the floor tile at the bottom of the stair, `top` the deck tile at its head, and `spots` where robots stand by
    * the uplink dish (one per worker, in tile coordinates; a negative row is on the roof). The roof is outside the walk grid, so a robot climbs in a straight line.
    */
-  roofWalk: { foot: Tile; top: Tile; spots: Tile[] };
+  roofWalk: { foot: Tile; top: Tile; spots: Tile[]; deviceSpots: Tile[]; cloudSpots: Tile[] };
+  /** The rooftop's two inference boxes (round 4), in building px: ON THIS DEVICE on the left, CLOUD on the right. */
+  roofBoxes: { device: PxRect; cloud: PxRect };
   racks: Rack[];
   mailbox: PxRect | null;
   cables: { agentId: string; pts: [number, number][] }[];
@@ -262,7 +264,17 @@ export function generateLayout(input: LayoutInput): OfficeLayout {
     prBoard,
     serverRoom: hasServer ? { glassX, x0: glassX + 1, w: srW } : null,
     roof: { x: ox, y: MARGIN * TS, w: W * TS, h: ROOF * TS },
-    roofWalk: { foot: [STAIR_X, TOP_Y], top: [STAIR_X, -2], spots: workers.map((_, i): Tile => [Math.max(STAIR_X + 2, W - 8 - (i % 6) * 2), -2 - (Math.floor(i / 6) % 2)]) },
+    roofWalk: (() => {
+      const devLeft = Math.ceil((STAIR_X * TS + 28) / TS);
+      const mid = Math.floor(W / 2) + Math.floor(STAIR_X / 2);
+      const spots = (from: number, to: number): Tile[] => workers.map((_, i): Tile => [Math.min(to, from + (i % Math.max(1, to - from + 1))), -2]);
+      return { foot: [STAIR_X, TOP_Y] as Tile, top: [STAIR_X, -2] as Tile, spots: spots(devLeft + 1, mid - 2), deviceSpots: spots(devLeft + 1, mid - 2), cloudSpots: spots(mid + 1, W - 6) };
+    })(),
+    roofBoxes: (() => {
+      const left = STAIR_X * TS + 28;
+      const mid = (Math.floor(W / 2) + Math.floor(STAIR_X / 2)) * TS;
+      return { device: { x: left, y: -ROOF * TS + 12, w: mid - 6 - left, h: ROOF * TS - 20 }, cloud: { x: mid + 6, y: -ROOF * TS + 12, w: W * TS - 12 - mid - 6, h: ROOF * TS - 20 } };
+    })(),
     racks,
     mailbox,
     cables,

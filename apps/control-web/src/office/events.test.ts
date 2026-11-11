@@ -7,8 +7,9 @@ function world(over: Partial<OfficeWorld> = {}, cues: Partial<OfficeCue>[] = [{}
   return {
     projectName: 'P', agents: cues.map((c, i) => ({ id: c.agentId ?? `w${i + 1}`, name: `W${i + 1}`, color: '#2fa39a', state: 'working', label: 'Working', taskTitle: null, ai: null })),
     planRunId: 'run', banner: null, runs: [], notes: [], leadLabel: 'PLAN', racks: [], running: 0, prs: [], parcels: [], verifying: false, cloudCall: false, summary: '',
-    cues: cues.map((c, i) => ({ agentId: `w${i + 1}`, taskId: 't1', taskRevision: 1, runId: 'run', attemptId: null, attemptRunning: false, attemptOutcome: null, recordId: null, fellBackToCloud: false, cloudCall: false, needsYou: false, ...c })),
+    cues: cues.map((c, i) => ({ agentId: `w${i + 1}`, taskId: 't1', taskRevision: 1, runId: 'run', attemptId: null, attemptRunning: false, attemptOutcome: null, recordId: null, fellBackToCloud: false, cloudCall: false, deviceCall: false, needsYou: false, ...c })),
     resolvedApprovals: [], verdicts: [], epoch: 'p#1',
+    roof: { device: { place: 'device', count: 0, expected: [], observed: null, violation: null, locked: false }, cloud: { place: 'cloud', count: 0, expected: [], observed: null, violation: null, locked: false }, fellBack: null, fellBackCount: 0, summary: '' },
     ...over,
   };
 }
@@ -31,6 +32,8 @@ describe('office events, read from two worlds in a row (H7 fix: errands follow r
     expect(officeEvents(running, world({}, [{ attemptId: 'a1', attemptOutcome: 'failed' }]))).toEqual([]);
     expect(officeEvents(world(), world({}, [{ cloudCall: true }]))).toEqual([{ kind: 'cloudCallStarted', agentId: 'w1' }]);
     expect(officeEvents(world({}, [{ cloudCall: true }]), world())).toEqual([{ kind: 'cloudCallEnded', agentId: 'w1' }]);
+    expect(officeEvents(world(), world({}, [{ deviceCall: true }]))).toEqual([{ kind: 'deviceCallStarted', agentId: 'w1' }]);
+    expect(officeEvents(world({}, [{ deviceCall: true }]), world())).toEqual([{ kind: 'deviceCallEnded', agentId: 'w1' }]);
     expect(officeEvents(world(), world({}, [{ recordId: 'r1', fellBackToCloud: true }]))).toEqual([{ kind: 'fellBackToCloud', agentId: 'w1' }]);
     // A record that did not fall back is not a fallback.
     expect(officeEvents(world(), world({}, [{ recordId: 'r1' }]))).toEqual([]);
@@ -56,8 +59,10 @@ describe('each event\'s errand and effect', () => {
   it('maps every event to its walk, one errand of steps per event', () => {
     expect(errandFor({ kind: 'claimed', agentId: 'w1' }).map((s) => s.to)).toEqual(['plan', 'seat']);
     expect(errandFor({ kind: 'replanned', agentId: 'w1' }).map((s) => s.to)).toEqual(['plan', 'seat']);
-    expect(errandFor({ kind: 'cloudCallStarted', agentId: 'w1' })).toEqual([{ to: 'roof', hold: 'cloud' }]);
-    expect(errandFor({ kind: 'fellBackToCloud', agentId: 'w1' }).map((s) => s.to)).toEqual(['roof', 'seat']);
+    // Round 4: the roof errand goes to the box of the call; a fallback walks from the device box to the cloud box.
+    expect(errandFor({ kind: 'cloudCallStarted', agentId: 'w1' })).toEqual([{ to: 'roofCloud', hold: 'call' }]);
+    expect(errandFor({ kind: 'deviceCallStarted', agentId: 'w1' })).toEqual([{ to: 'roofDevice', hold: 'call' }]);
+    expect(errandFor({ kind: 'fellBackToCloud', agentId: 'w1' }).map((s) => s.to)).toEqual(['roofDevice', 'roofCloud', 'seat']);
     expect(errandFor({ kind: 'published', agentId: 'w1' })).toEqual([{ to: 'drop', carry: true, linger: 0.6, emote: 'ok' }, { to: 'seat' }]);
     expect(errandFor({ kind: 'prOpened', agentIds: ['w1'], num: 7 }).map((s) => s.to)).toEqual(['prs', 'seat']);
     expect(errandFor({ kind: 'prMerged', agentIds: ['w1'], num: 7 })).toEqual([{ to: 'here', emote: 'heart', linger: 2 }]);

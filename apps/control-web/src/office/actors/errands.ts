@@ -1,10 +1,10 @@
 // A robot's errands (H7 fix): walks that follow real events only (office/events.ts says which). SelariKru's own.
 //
 // An errand is a list of steps. A robot runs one errand at a time, one step at a time: it walks to the step's place, lingers there (showing an emote
-// or carrying a tiffin if the step says so), then takes the next step. A held step (the roof during a cloud call) waits until it is released.
+// or carrying a tiffin if the step says so), then takes the next step. A held step (a roof box while the worker's AI call is in flight) waits until it is released.
 
 /** Where a step goes. `here` stays put; the scene turns the rest into tiles. */
-export type ErrandPlace = 'plan' | 'seat' | 'roof' | 'drop' | 'prs' | 'here';
+export type ErrandPlace = 'plan' | 'seat' | 'roofDevice' | 'roofCloud' | 'drop' | 'prs' | 'here';
 export type ErrandEmote = 'talk' | 'mail' | 'ok' | 'heart';
 
 export interface ErrandStep {
@@ -14,8 +14,8 @@ export interface ErrandStep {
   readonly emote?: ErrandEmote;
   /** Carries a tiffin while walking to this step. */
   readonly carry?: boolean;
-  /** Waits here until `release(hold)`. */
-  readonly hold?: 'cloud';
+  /** Waits here until `release(hold)`: on the roof while the worker's AI call is in flight. */
+  readonly hold?: 'call';
 }
 
 export class ErrandQueue {
@@ -48,7 +48,7 @@ export class ErrandQueue {
   }
 
   /** Lets a held step go: the robot comes back to its seat, then carries on with what is queued. */
-  release(hold: 'cloud'): void {
+  release(hold: 'call'): void {
     const first = this.errands[0];
     if (first) {
       const at = first.findIndex((s) => s.hold === hold);
@@ -67,9 +67,9 @@ export class ErrandQueue {
     this.arrivedAt = null;
   }
 
-  /** Follows the world: a held roof step whose cloud call is no longer in flight is released (round 3), so no robot is left on the roof. */
-  follow(world: { readonly cloudCall: boolean }): void {
-    if (!world.cloudCall && this.errands.some((e) => e.some((s) => s.hold === 'cloud'))) this.release('cloud');
+  /** Follows the world: a held roof step whose call is no longer in flight is released (round 3), so no robot is left on the roof. */
+  follow(world: { readonly cloudCall: boolean; readonly deviceCall?: boolean }): void {
+    if (!world.cloudCall && !world.deviceCall && this.errands.some((e) => e.some((s) => s.hold === 'call'))) this.release('call');
   }
 
   /** A worker that needs you stops its walks and goes back to its desk. A held roof visit is dropped too: the call ended or will be released. */

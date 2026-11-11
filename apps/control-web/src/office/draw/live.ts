@@ -8,9 +8,10 @@ import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { disc, drawRows, line, type Pen } from '../engine/pen.ts';
 import { STAIR_X, type DeskSpot, type OfficeLayout, type PxRect, type Rack } from '../layout/layout.ts';
-import { framed } from './furniture.ts';
+import { framed, uplinkDish } from './furniture.ts';
 import { VERIFIER, VERIFIER_BLINK, VERIFIER_PAL } from './robots.ts';
-import { cloudSignSpot, dishSpot } from './static.ts';
+import { dishSpot } from './static.ts';
+import type { OfficeRoof, RoofBox } from '../roof.ts';
 
 /** True on the second half of each period of `rate` per second. */
 const pulseOn = (time: number, rate: number): boolean => ((time * rate) | 0) % 2 === 1;
@@ -285,78 +286,91 @@ export function aiPlate(p: Pen, d: DeskSpot, ox: number, oy: number, ai: NonNull
   if (expected) text(p, '?', x + 19 + textW(word) + 2, y + 4, C.ink);
 }
 
-/**
- * The rooftop: the CLOUD sign and the uplink dish's lamp and beam. While a cloud call is in flight the sign lights gold and the dish sends a beam to
- * the sky; otherwise both are dark. The word is always drawn, so the state never rests on colour alone.
- */
-export function cloudDeck(p: Pen, l: OfficeLayout, lit: boolean, time: number) {
-  const s = cloudSignSpot(l);
-  const sx = l.ox + s.x;
-  const sy = l.oy + s.y;
-  framed(p, sx, sy, 60, 18, C.ink, lit ? C.cloudMark : C.deep2, 1);
-  const icon = lit ? C.cloudMarkL : C.metalDD;
-  p.rect(sx + 4, sy + 7, 12, 6, icon);
-  p.rect(sx + 6, sy + 4, 5, 3, icon);
-  p.rect(sx + 10, sy + 5, 4, 2, icon);
-  text(p, 'CLOUD', sx + 22, sy + 7, lit ? C.gold : C.metalD, 1);
-  const d = dishSpot(l);
-  const tipX = l.ox + d.x + 17;
-  const tipY = l.oy + d.y + 1;
-  p.rect(tipX, tipY, 1, 1, lit ? C.gold : C.metalDD);
-  if (!lit) return;
-  p.rect(tipX - 1, tipY - 1, 3, 3, C.gold);
-  const ring = ((time * 6) | 0) % 4;
-  for (let k = 0; k < 4; k++) {
-    const r = 5 + k * 5;
-    const strength = k === ring ? 1 : 0.4;
-    p.rect(tipX + r, tipY - r, 3, 1, C.gold, strength);
-    p.rect(tipX + r + 2, tipY - r + 1, 1, 2, C.gold, strength);
-  }
+/** How a roof box looks right now: a fresh discard, a fresh answer, a call expected here, or resting. */
+export type RoofLook = 'violation' | 'observed' | 'expected' | 'idle';
+
+/** Which look a box shows: a new discard first, then a new answer, then a call in flight. */
+export function roofLook(box: RoofBox, fresh: { observed: boolean; violation: boolean }): RoofLook {
+  if (fresh.violation && box.violation) return 'violation';
+  if (fresh.observed && box.observed) return 'observed';
+  if (box.expected.length > 0) return 'expected';
+  return 'idle';
+}
+
+/** A small padlock: restricted work, kept on this device. */
+function padlock(p: Pen, x: number, y: number) {
+  p.rect(x + 1, y, 5, 1, C.ink); p.rect(x + 1, y, 1, 4, C.ink); p.rect(x + 5, y, 1, 4, C.ink);
+  framed(p, x, y + 3, 7, 6, C.ink, C.gold, 1);
+  p.rect(x + 3, y + 5, 1, 2, C.ink);
 }
 
 /**
- * A fallback, from a desk's observed and conforming record: a dashed route from the desk along the floor to the stair, up through the back wall, and
- * across the roof to the dish (fell back to the cloud), or the same route downwards (fell back to this device). Its words sit beside the CLOUD sign.
- * When motion is allowed one gold dot travels along it.
+ * The rooftop inference deck (round 4): ON THIS DEVICE · GEMINI NANO on the left and CLOUD · GEMINI on the right, with the uplink dish. Each box shows its
+ * count (each task's last call in the run, as the top-bar counter counts), a dashed gold outline while a call is expected there (it pulses when motion
+ * is allowed; the dashes and the EXPECTED words carry it without motion), a solid fill and "<task> · RAN HERE" when a conforming answer has just
+ * landed, a red flash and DISCARDED for a route violation from that side, and a padlock on the device box while a restricted task's call runs. A
+ * conforming fallback draws an arrow from the device box to the cloud box labelled FELL BACK.
  */
-export function fallbackRoutes(p: Pen, l: OfficeLayout, agents: readonly OfficeAgent[], time: number) {
+export function roofDeck(p: Pen, l: OfficeLayout, roof: OfficeRoof, fresh: { device: { observed: boolean; violation: boolean }; cloud: { observed: boolean; violation: boolean } }, time: number) {
+  const boxes = [
+    { box: roof.device, rect: l.roofBoxes.device, title: 'ON THIS DEVICE · GEMINI NANO', solid: C.device, pale: C.deviceL },
+    { box: roof.cloud, rect: l.roofBoxes.cloud, title: 'CLOUD · GEMINI', solid: C.cloudMark, pale: C.cloudMarkL },
+  ] as const;
+  for (const { box, rect, title, solid, pale } of boxes) {
+    const x = l.ox + rect.x;
+    const y = l.oy + rect.y;
+    const look = roofLook(box, fresh[box.place]);
+    const fill = look === 'violation' ? (pulseOn(time, 6) ? C.red : C.roofD) : look === 'observed' ? solid : C.deep2;
+    framed(p, x, y, rect.w, rect.h, C.ink, fill, 1);
+    // Title plate.
+    framed(p, x + 3, y + 3, Math.min(rect.w - 6, textW(title) + 6), 9, C.ink, look === 'observed' ? pale : C.deep, 1);
+    text(p, title, x + 6, y + 5, look === 'observed' ? C.ink : C.gold);
+    // Expected: a dashed gold outline (pulsing when motion is allowed).
+    if (box.expected.length > 0) {
+      const on = time === 0 || pulseOn(time, 3);
+      for (let dx = 0; dx < rect.w; dx += 6) { p.rect(x + dx, y - 2, 3, 2, on ? C.gold : C.goldDark); p.rect(x + dx, y + rect.h, 3, 2, on ? C.gold : C.goldDark); }
+      for (let dy = 0; dy < rect.h; dy += 6) { p.rect(x - 2, y + dy, 2, 3, on ? C.gold : C.goldDark); p.rect(x + rect.w, y + dy, 2, 3, on ? C.gold : C.goldDark); }
+      text(p, fit(`EXPECTED: ${box.expected.join(', ')}`, rect.w - 10), x + 5, y + 16, C.gold);
+    }
+    // What last ran here, or what was discarded.
+    if (look === 'violation' && box.violation) tag(p, fit(`DISCARDED: ${box.violation.task.toUpperCase()}`, rect.w - 12), x + rect.w / 2, y + rect.h - 22, C.ink, C.red);
+    else if (box.violation) text(p, fit(`DISCARDED: ${box.violation.task.toUpperCase()}`, rect.w - 10), x + 5, y + rect.h - 22, C.red);
+    else if (box.observed && look !== 'observed') text(p, fit(`LAST: ${box.observed.task.toUpperCase()}`, rect.w - 70), x + 5, y + rect.h - 22, C.metalL);
+    if (look === 'observed' && box.observed) tag(p, fit(`${box.observed.task.toUpperCase()} · RAN HERE`, rect.w - 12), x + rect.w / 2, y + rect.h - 30, C.ink, C.white);
+    // The count.
+    const count = `${box.count} TASK${box.count === 1 ? '' : 'S'}`;
+    framed(p, x + 3, y + rect.h - 12, textW(count) + 6, 9, C.ink, C.cream, 1);
+    text(p, count, x + 6, y + rect.h - 10, C.ink);
+    if (box.place === 'device' && box.locked) padlock(p, x + rect.w - 12, y + 3);
+  }
+  // The uplink dish, in the cloud box; it lights and beams while a cloud call is in flight.
   const d = dishSpot(l);
-  const s = cloudSignSpot(l);
-  const stairX = l.ox + STAIR_X * 16 + 8;
-  const corridorY = l.oy + 12 * 16 + 8;
-  const roofY = l.oy - 2 * 16 + 8;
-  let labelled = 0;
-  for (const a of agents) {
-    if (a.ai?.state !== 'observed' || !a.ai.fellBack) continue;
-    const desk = l.desks.find((x) => x.agentId === a.id);
-    if (!desk) continue;
-    const fromX = l.ox + desk.x0 * 16 + 40;
-    const fromY = l.oy + desk.y0 * 16 - 2;
-    const route: (readonly [number, number])[] = [[fromX, fromY], [fromX, corridorY], [stairX, corridorY], [stairX, roofY], [l.ox + d.x + 6, roofY]];
-    const up = a.ai.place === 'cloud';
-    const legs = route.slice(1).map((to, k) => ({ from: route[k]!, to, len: Math.abs(to[0] - route[k]![0]) + Math.abs(to[1] - route[k]![1]) }));
-    for (const leg of legs) {
-      const steps = Math.max(1, Math.floor(leg.len / 4));
-      for (let k = 0; k <= steps; k += 2) {
-        const f = k / steps;
-        p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f), Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f), 2, 2, C.cloudMark);
-      }
+  uplinkDish(p, l.ox + d.x, l.oy + d.y);
+  const tipX = l.ox + d.x + 17;
+  const tipY = l.oy + d.y + 1;
+  const lit = roof.cloud.expected.length > 0;
+  framed(p, tipX - 1, tipY - 1, 3, 3, C.ink, lit ? C.gold : C.metalDD, 1);
+  if (lit) {
+    const ring = time === 0 ? 3 : ((time * 6) | 0) % 4;
+    for (let k = 0; k < 4; k++) {
+      const r = 4 + k * 4;
+      const strength = k === ring ? 1 : 0.45;
+      p.rect(tipX + r, tipY - r, 3, 1, C.gold, strength);
+      p.rect(tipX + r + 2, tipY - r + 1, 1, 2, C.gold, strength);
     }
-    if (time > 0) {
-      const total = legs.reduce((sum, leg) => sum + leg.len, 0);
-      let at = (time * 50) % total;
-      if (!up) at = total - at;
-      for (const leg of legs) {
-        if (at > leg.len) { at -= leg.len; continue; }
-        const f = at / leg.len;
-        p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f) - 1, Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f) - 1, 4, 4, C.gold);
-        break;
-      }
-    }
-    const end = up ? route[route.length - 1]! : route[0]!;
-    for (let k = 0; k < 3; k++) p.rect(end[0] - k, end[1] + (up ? -k - 2 : k + 2), 2 + k * 2, 1, C.cloudMark);
-    if (labelled === 0) tag(p, up ? `${a.name.toUpperCase().slice(0, 10)} FELL BACK TO CLOUD` : `${a.name.toUpperCase().slice(0, 10)} FELL BACK TO DEVICE`, l.ox + s.x - 4 - 50, l.oy + s.y + 26, C.cloudMark, C.white);
-    labelled += 1;
+  }
+  // A conforming fallback: an arrow from the device box to the cloud box.
+  if (roof.fellBack) {
+    const dev = l.roofBoxes.device;
+    const cloud = l.roofBoxes.cloud;
+    const ay = l.oy + dev.y + dev.h / 2;
+    const ax0 = l.ox + dev.x + dev.w - 30;
+    const ax1 = l.ox + cloud.x + 18;
+    p.rect(ax0, ay - 1, ax1 - ax0, 3, C.ink);
+    p.rect(ax0, ay, ax1 - ax0, 1, C.gold);
+    for (let k = 0; k < 4; k++) p.rect(ax1 - k, ay - k, 1, k * 2 + 1, C.gold);
+    if (time > 0) p.rect(ax0 + ((time * 40) % (ax1 - ax0)), ay - 1, 3, 3, C.white);
+    tag(p, fit(`FELL BACK: ${roof.fellBack.task.toUpperCase()}`, 120), (ax0 + ax1) / 2, ay - 12, C.ink, C.gold);
   }
 }
 

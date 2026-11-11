@@ -7,7 +7,7 @@ import { C } from '../engine/palette.ts';
 import { CanvasPen, disc, ellipse, makeCanvas, type Pen } from '../engine/pen.ts';
 import { MARGIN, ROOF, STAIR_X, TS, type LayoutInput, type OfficeLayout } from '../layout/layout.ts';
 import {
-  almariRack, batikCloth, framed, kedaiDesk, louvreScreens, louvreWindow, nameCard, pandanJar, prShelves, rattanStool, signboard, slab, stair, streetJar, uplinkDish, walkArch,
+  almariRack, batikCloth, framed, kedaiDesk, louvreScreens, louvreWindow, nameCard, pandanJar, prShelves, rattanStool, signboard, slab, stair, streetJar, walkArch,
 } from './furniture.ts';
 
 /** The sign on the shop front: the project's name, or the product's when there is none. Never another product's name. */
@@ -15,15 +15,10 @@ export function officeSign(name: string): string {
   return name.trim().slice(0, 19).toUpperCase() || 'SELARIKRU';
 }
 
-/** Where the uplink dish stands, in building px. Shared with the live layer, which lights it. */
+/** Where the uplink dish stands, in building px: inside the roof's CLOUD box, at its right (round 4). Shared with the live layer, which lights it. */
 export function dishSpot(l: OfficeLayout): { x: number; y: number } {
-  return { x: l.W * 16 - 56, y: -ROOF * 16 + 22 };
-}
-
-/** Where the CLOUD sign hangs on the rooftop, in building px. */
-export function cloudSignSpot(l: OfficeLayout): { x: number; y: number } {
-  const d = dishSpot(l);
-  return { x: d.x - 70, y: d.y + 6 };
+  const box = l.roofBoxes.cloud;
+  return { x: box.x + box.w - 30, y: box.y + 26 };
 }
 
 /** One floor tile. Terracotta plain, or a Peranakan teal tile with a four-petal flower, by a fixed pattern. */
@@ -109,16 +104,9 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
       p.rect(lx, deckTop + 10 + sag, 1, 1, C.ink);
       if (lx % 15 === 0) { p.rect(lx - 1, deckTop + 11 + sag, 3, 3, C.ink); p.rect(lx, deckTop + 12 + sag, 1, 1, C.gold); }
     }
-    // The hatch at the head of the stair, a water tank, pots and a bench.
+    // The hatch at the head of the stair. The two inference boxes are drawn live (round 4); only the cloud box's dish is part of the building.
     framed(p, STAIR_X * TS - 2, -TS * 2 + 2, TS + 4, TS * 2 - 2, C.roofD, C.deskD, 2);
     text(p, 'UP', STAIR_X * TS + 4, -TS * 2 + 6, C.cream);
-    slab(p, 24, deckTop + 30, 26, 34, C.metalL, C.white, C.metalD);
-    for (const band of [40, 52]) p.rect(25, deckTop + band, 24, 1, C.metalD);
-    pandanJar(p, 70, deckTop + 74);
-    pandanJar(p, width - 22, deckTop + 74, false);
-    slab(p, 100, deckTop + 56, 40, 8, C.wood, C.woodL, C.woodD);
-    const d = dishSpot(l);
-    uplinkDish(p, d.x, d.y);
   }
 
   // ------------------------------------------------ the ground floor: Peranakan tiles, with an entrance mat that carries the name
@@ -192,7 +180,9 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   if (racks) {
     p.rect(hall, 16, width - hall - TS, 44, C.wallD);
     for (let plank = hall; plank < width - TS; plank += 6) p.rect(plank, 16, 1, 44, C.wall);
-    signboard(p, racks.x0 * TS + 4, 2, racks.w * TS - 8, 'ON THIS DEVICE', C.deep, C.gold);
+    // The racks are where code runs (sandboxes), not where AI runs: that is the roof's ON THIS DEVICE box (round 4).
+    signboard(p, racks.x0 * TS + 4, 2, racks.w * TS - 8, 'SANDBOXES', C.kopi, C.cream);
+    text(p, 'ON THIS DEVICE', racks.x0 * TS + (racks.w * TS - textW('ON THIS DEVICE')) / 2, 18, C.ink);
     // The rack room's timber screen, slatted.
     const screenX = racks.glassX * TS;
     framed(p, screenX, 64, TS, depth - 80, C.wood, C.wood, 1);

@@ -20,12 +20,12 @@ describe('a robot\'s errands run one at a time (H7 fix)', () => {
 
   it('a held step waits on the roof until it is released, then the next errand runs', () => {
     const q = new ErrandQueue();
-    q.push([{ to: 'roof', hold: 'cloud' }]);
+    q.push([{ to: 'roofCloud', hold: 'call' }]);
     q.push([{ to: 'prs' }]);
     q.arrived(0);
     q.tick(60);
-    expect(q.current()).toEqual({ to: 'roof', hold: 'cloud' });
-    q.release('cloud');
+    expect(q.current()).toEqual({ to: 'roofCloud', hold: 'call' });
+    q.release('call');
     expect(q.current()?.to).toBe('seat');
     q.arrived(61); q.tick(61);
     expect(q.current()?.to).toBe('prs');
@@ -45,14 +45,14 @@ describe('a robot\'s errands run one at a time (H7 fix)', () => {
     q.push([{ to: 'plan', linger: 1 }, { to: 'seat' }]);
     expect(q.settle()).toBe('seat');
     expect(q.current()).toBeNull();
-    q.push([{ to: 'roof', hold: 'cloud' }]);
-    expect(q.settle()).toBe('roof');
-    expect(q.current()).toEqual({ to: 'roof', hold: 'cloud' });
+    q.push([{ to: 'roofCloud', hold: 'call' }]);
+    expect(q.settle()).toBe('roofCloud');
+    expect(q.current()).toEqual({ to: 'roofCloud', hold: 'call' });
   });
 
   it('round 3: clear() drops everything, held roof steps included, so a loop never leaves a robot on the roof', () => {
     const q = new ErrandQueue();
-    q.push([{ to: 'roof', hold: 'cloud' }]);
+    q.push([{ to: 'roofCloud', hold: 'call' }]);
     q.push([{ to: 'prs' }]);
     q.arrived(0);
     q.clear();
@@ -62,13 +62,13 @@ describe('a robot\'s errands run one at a time (H7 fix)', () => {
 
   it('round 3: a held roof step is released when the world says the worker has no cloud call', () => {
     const q = new ErrandQueue();
-    q.push([{ to: 'roof', hold: 'cloud' }]);
+    q.push([{ to: 'roofCloud', hold: 'call' }]);
     q.arrived(0);
     q.follow({ cloudCall: false });
     expect(q.current()?.to).toBe('seat');
     const kept = new ErrandQueue();
-    kept.push([{ to: 'roof', hold: 'cloud' }]);
+    kept.push([{ to: 'roofCloud', hold: 'call' }]);
     kept.follow({ cloudCall: true });
-    expect(kept.current()).toEqual({ to: 'roof', hold: 'cloud' });
+    expect(kept.current()).toEqual({ to: 'roofCloud', hold: 'call' });
   });
 });

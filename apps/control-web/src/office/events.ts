@@ -14,6 +14,9 @@ export type OfficeEvent =
   /** A cloud AI call for its task is in flight; it ends when the record lands. */
   | { readonly kind: 'cloudCallStarted'; readonly agentId: string }
   | { readonly kind: 'cloudCallEnded'; readonly agentId: string }
+  /** A device AI call for its task is in flight (round 4: the robot waits at the roof's device box). */
+  | { readonly kind: 'deviceCallStarted'; readonly agentId: string }
+  | { readonly kind: 'deviceCallEnded'; readonly agentId: string }
   /** A new conforming record says the call fell back from this device to the cloud. */
   | { readonly kind: 'fellBackToCloud'; readonly agentId: string }
   /** The worker's attempt ended well: its change set is published. */
@@ -43,6 +46,8 @@ export function officeEvents(prev: OfficeWorld | null, next: OfficeWorld): Offic
     if (c.attemptId !== null && c.attemptId === b.attemptId && b.attemptRunning && !c.attemptRunning && c.attemptOutcome === 'succeeded') out.push({ kind: 'published', agentId: id });
     if (c.cloudCall && !b.cloudCall) out.push({ kind: 'cloudCallStarted', agentId: id });
     if (!c.cloudCall && b.cloudCall) out.push({ kind: 'cloudCallEnded', agentId: id });
+    if (c.deviceCall && !b.deviceCall) out.push({ kind: 'deviceCallStarted', agentId: id });
+    if (!c.deviceCall && b.deviceCall) out.push({ kind: 'deviceCallEnded', agentId: id });
     if (c.recordId !== null && c.recordId !== b.recordId && c.fellBackToCloud) out.push({ kind: 'fellBackToCloud', agentId: id });
     if (c.needsYou && !b.needsYou) out.push({ kind: 'needsYou', agentId: id });
   }
@@ -79,8 +84,9 @@ export function errandFor(e: OfficeEvent): ErrandStep[] {
   switch (e.kind) {
     case 'claimed':
     case 'replanned': return [{ to: 'plan', linger: 1.2, emote: 'talk' }, { to: 'seat' }];
-    case 'cloudCallStarted': return [{ to: 'roof', hold: 'cloud' }];
-    case 'fellBackToCloud': return [{ to: 'roof', linger: 2 }, { to: 'seat' }];
+    case 'cloudCallStarted': return [{ to: 'roofCloud', hold: 'call' }];
+    case 'deviceCallStarted': return [{ to: 'roofDevice', hold: 'call' }];
+    case 'fellBackToCloud': return [{ to: 'roofDevice', linger: 1 }, { to: 'roofCloud', linger: 2 }, { to: 'seat' }];
     case 'published': return [{ to: 'drop', carry: true, linger: 0.6, emote: 'ok' }, { to: 'seat' }];
     case 'prOpened': return [{ to: 'prs', linger: 1.5 }, { to: 'seat' }];
     case 'prMerged': return [{ to: 'here', emote: 'heart', linger: 2 }];

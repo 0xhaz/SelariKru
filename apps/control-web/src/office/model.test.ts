@@ -160,12 +160,12 @@ describe('the office world', () => {
 
   it('says what it shows in words, for the canvas label', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker.');
+    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
   });
 
   it('says so when there are no workers', () => {
     const s = snapshotOf({});
-    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').summary).toBe('Office for Clinic queue: no workers yet.');
+    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue').summary).toBe('Office for Clinic queue: no workers yet. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
   });
 
   it('a demo fixture drives the office', async () => {

@@ -3,6 +3,7 @@ import { verifiedState } from '../features/evidence/model.ts';
 import { currentRun } from '../features/settings/model.ts';
 import type { TeamModel, TeamRow } from '../features/team/model.ts';
 import { workerAccents, stateStyle, type RobotState } from '../theme/tokens.ts';
+import { roofState, type OfficeRoof } from './roof.ts';
 
 /**
  * What the office canvas shows, read from SelariKru's own snapshot and team model. It is a picture of the same facts the team panel
@@ -56,6 +57,8 @@ export interface OfficeCue {
   readonly fellBackToCloud: boolean;
   /** A cloud AI call for its task is in flight in this browser. */
   readonly cloudCall: boolean;
+  /** A device AI call for its task is in flight in this browser (round 4). */
+  readonly deviceCall: boolean;
   readonly needsYou: boolean;
 }
 
@@ -127,6 +130,8 @@ export interface OfficeWorld {
    * (replaced or otherwise no longer live), or `pending`. Only a change to failed or rejected raises CHANGES.
    */
   readonly verdicts: readonly OfficeVerdict[];
+  /** The rooftop inference deck (round 4): its two boxes' state, from records and calls in flight. */
+  readonly roof: OfficeRoof;
   /** Which projection this world belongs to (the project and the data source session). A world from another epoch is never compared with this one. */
   readonly epoch: string;
 }
@@ -248,6 +253,8 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     : `${a.name} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
   if (marks.length > 0) summary += ` Desk marks: ${marks.join('; ')}.`;
   if (cloudCall) summary += ' The rooftop cloud deck is lit: a call is headed to the cloud.';
+  const roof = roofState(snapshot, run?.runId ?? null, calls);
+  summary += ` ${roof.summary}`;
   const cues = team.rows.map((r): OfficeCue => {
     const taskId = r.task?.taskId ?? null;
     const t = taskId ? snapshot.tasks[taskId] : undefined;
@@ -259,6 +266,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       attemptRunning: attempt !== undefined && attempt.endedAt === null, attemptOutcome: attempt?.endedAt ? attempt.outcome : null,
       recordId: last?.recordId ?? null, fellBackToCloud: last !== null && last.fellBack === true && last.conformance === 'conforms' && last.status === 'ok' && last.observedSource === 'IN_CLOUD',
       cloudCall: taskId !== null && calls.some((c) => c.taskId === taskId && c.place === 'cloud'),
+      deviceCall: taskId !== null && calls.some((c) => c.taskId === taskId && c.place === 'device'),
       needsYou: agents.find((a) => a.id === r.workerId)?.state === 'needs_input',
     };
   });
@@ -273,5 +281,5 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       : failed ? 'failed' : verifiedState(r, r.evidence).established ? 'passed' : 'pending';
     return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), outcome }];
   });
-  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, epoch: epoch || snapshot.meta.projectId };
+  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, epoch: epoch || snapshot.meta.projectId };
 }

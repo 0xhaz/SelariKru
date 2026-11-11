@@ -111,7 +111,8 @@ export function placeTile(bot: Bot, l: OfficeLayout, place: ErrandPlace): Tile {
     case 'plan': return l.lead.seat;
     case 'drop': return l.desks.find((d) => d.agentId === bot.config.id)?.drop ?? l.door;
     case 'prs': return l.prBoard ? l.grid.nearest(Math.floor((l.prBoard.x - l.ox) / 16) + 1, Math.floor((l.prBoard.y - l.oy + l.prBoard.h) / 16) + 2) : l.door;
-    case 'roof': return l.roofWalk.spots[bot.index % Math.max(1, l.roofWalk.spots.length)] ?? l.roofWalk.top;
+    case 'roofDevice': return l.roofWalk.deviceSpots[bot.index % Math.max(1, l.roofWalk.deviceSpots.length)] ?? l.roofWalk.top;
+    case 'roofCloud': return l.roofWalk.cloudSpots[bot.index % Math.max(1, l.roofWalk.cloudSpots.length)] ?? l.roofWalk.top;
     case 'here': return bot.tile(l);
     default: return seatOf(bot, l) ?? l.door;
   }
