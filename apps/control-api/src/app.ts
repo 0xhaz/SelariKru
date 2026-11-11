@@ -23,6 +23,7 @@ import { registerProductRoutes } from './product.ts';
 import { registerHandoverRoutes } from './handover.ts';
 import { FileRelay, registerApplyRoutes } from './apply.ts';
 import { registerDelegationRoutes } from './delegation.ts';
+import { registerAiCheckpointRoutes } from './ai-checkpoints.ts';
 import { registerEventStream } from './sse.ts';
 import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
@@ -251,6 +252,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerHandoverRoutes(app, ctx);
   registerApplyRoutes(app, ctx, deps.fileRelay ?? new FileRelay());
   registerDelegationRoutes(app, ctx);
+  registerAiCheckpointRoutes(app, ctx);
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
   registerControlRoutes(app, ctx);

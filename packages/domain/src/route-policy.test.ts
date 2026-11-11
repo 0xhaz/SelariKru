@@ -131,6 +131,12 @@ describe('route record report: metadata only', () => {
     expect(RouteRecordReportSchema.safeParse({ ...report, model: { cloudModel: 'a model with words', sdkVersion: '12.5.0' } }).success).toBe(false);
     expect(RouteRecordReportSchema.safeParse({ ...report, requestId: 'has spaces in it' }).success).toBe(false);
   });
+  it('H12: a resumed call says how it was resumed, and which checkpoint it continues; nothing else', () => {
+    expect(RouteRecordReportSchema.safeParse({ ...report, resumed: 'after_reconnect', checkpointId: 'ckp_0123456789' }).success).toBe(true);
+    expect(RouteRecordReportSchema.safeParse({ ...report, resumed: 'escalated', checkpointId: 'ckp_0123456789' }).success).toBe(true);
+    expect(RouteRecordReportSchema.safeParse({ ...report, resumed: 'fallback' }).success).toBe(false);
+    expect(RouteRecordReportSchema.safeParse({ ...report, resumed: 'after_reconnect', checkpointId: 'ckp with words' }).success).toBe(false);
+  });
 });
 
 describe('route policy as settings', () => {

@@ -88,6 +88,8 @@ export const ERROR_CODES = [
   'name_empty', 'name_too_long', 'name_invalid', 'name_secret', 'name_taken',
   // H11 fix round 1: a Project Manager delegation bound to its call, and a worker role from the project's roles.
   'delegation_output_mismatch', 'plan_revision_changed', 'route_record_used', 'role_unknown', 'role_pm_taken', 'pm_plan_refused', 'plan_output_mismatch',
+  // H12: AI step checkpoints.
+  'checkpoint_secret', 'checkpoint_project_mismatch', 'checkpoint_not_found', 'checkpoint_closed', 'escalation_refused',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

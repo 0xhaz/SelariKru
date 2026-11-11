@@ -532,6 +532,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
               validation: body.validation, blockedReason: body.blockedReason, ...(body.outputSha256 !== undefined ? { outputSha256: body.outputSha256 } : {}), ...(body.contextId !== undefined ? { contextId: body.contextId } : {}),
               ...(body.inputLabel !== undefined ? { inputLabel: body.inputLabel } : {}), ...(body.planRevision !== undefined ? { planRevision: body.planRevision } : {}),
+              // H12: a call that continued a paused step says how; the fallback above is still the server's own judgement.
+              ...(body.resumed !== undefined ? { resumed: body.resumed } : {}), ...(body.checkpointId !== undefined ? { checkpointId: body.checkpointId } : {}),
             };
             const [inserted] = await tx.insert(schema.clientReports).values({
               tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,

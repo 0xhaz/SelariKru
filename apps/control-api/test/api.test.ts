@@ -77,6 +77,9 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/tasks/t1/proposals/a1`],
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/files`],
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/files/list`],
+  ['GET', `/v1/projects/${PROJECT}/ai-checkpoints`],
+  ['POST', `/v1/projects/${PROJECT}/ai-checkpoints`],
+  ['POST', `/v1/projects/${PROJECT}/ai-checkpoints/a1/escalation`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],

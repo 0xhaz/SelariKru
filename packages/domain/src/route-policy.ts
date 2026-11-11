@@ -178,6 +178,10 @@ export function routeOutcome(mode: RoutePolicyMode | null, observed: RouteObserv
   return { fellBack, conformance: wideRequest || sourceViolation ? 'violation' : 'conforms', requestModeMismatch };
 }
 
+/** H12: how a resumed call continued a paused step (see ai-checkpoint.ts). */
+export const ROUTE_RESUMES = ['after_reconnect', 'escalated', 'device_only'] as const;
+const CheckpointId = z.string().regex(/^ckp_[A-Za-z0-9_-]{8,80}$/);
+
 export const ROUTE_CALL_STATUSES = ['ok', 'invalid', 'blocked', 'route_violation', 'unverified_source', 'error'] as const;
 /** A code the adapter writes: lowercase words and colon-separated arguments. Never a sentence. */
 const RouteCode = z.string().max(120).regex(/^[a-z][a-z0-9_]*(?::[a-z0-9_.-]+)*$/);
@@ -213,6 +217,9 @@ export const RouteRecordReportSchema = z.strictObject({
   inputLabel: z.enum(['public', 'internal', 'restricted', 'secret']).optional(),
   /** A Project Manager delegation call only (H11 fix round 1): the accepted plan revision its prompt listed. The server applies its output only under that revision. */
   planRevision: z.number().int().min(1).optional(),
+  /** H12: a call that continues a paused step: sent after reconnecting, escalated after a local result failed its checks, or moved to device only. Never a fallback. */
+  resumed: z.enum(ROUTE_RESUMES).optional(),
+  checkpointId: CheckpointId.optional(),
 });
 export type RouteRecordReport = z.infer<typeof RouteRecordReportSchema>;
 
@@ -245,6 +252,9 @@ export const RouteRecordSchema = z.strictObject({
   /** H11 fix round 1: as reported (stricter only), and the plan revision a delegation call used. */
   inputLabel: z.enum(['public', 'internal', 'restricted', 'secret']).optional(),
   planRevision: z.number().int().min(1).optional(),
+  /** H12: as reported. */
+  resumed: z.enum(ROUTE_RESUMES).optional(),
+  checkpointId: CheckpointId.optional(),
   reportedBy: z.literal('browser'),
   trust: z.literal('untrusted'),
   reportedAt: z.string(),

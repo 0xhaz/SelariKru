@@ -24,3 +24,4 @@ export * from './agents.ts';
 export * from './apply.ts';
 export * from './team.ts';
 export * from './pm-plan.ts';
+export * from './ai-checkpoint.ts';

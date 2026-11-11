@@ -274,6 +274,13 @@
       "when": 1794412741648,
       "tag": "0038_pm_research_and_name",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794423020976,
+      "tag": "0039_ai_checkpoints",
+      "breakpoints": true
     }
   ]
 }

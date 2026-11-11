@@ -255,3 +255,16 @@ describe('route records: fix round 1', () => {
     expect(Number(e!['aggregate_revision'])).toBe(7);
   });
 });
+
+describe('H12: a resumed call is recorded as resumed, never as a fallback', () => {
+  it('keeps how the call was resumed and which checkpoint it continues, on the record and the event', async () => {
+    await onboardingChoice('ONLY_IN_CLOUD');
+    await seedTask(t.db, specFor('t1'));
+    const r = await sendReport('t1', report({ requestedMode: 'ONLY_IN_CLOUD', resumed: 'after_reconnect', checkpointId: 'ckp_0123456789abcdef' }));
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const read = await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`);
+    expect(read.body.records[0]).toMatchObject({ resumed: 'after_reconnect', checkpointId: 'ckp_0123456789abcdef', fellBack: false });
+    const [ev] = await events('inference.reported');
+    expect((ev!['payload'] as { record: Record<string, unknown> }).record).toMatchObject({ resumed: 'after_reconnect', checkpointId: 'ckp_0123456789abcdef' });
+  });
+});
