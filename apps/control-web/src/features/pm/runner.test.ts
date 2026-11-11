@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectViewSnapshot, TaskRouteRead } from '@selarikru/view-protocol';
 import { snapshotOf, task } from '../overview/testing.ts';
-import { planScopeFor, questionLabelFor, runPmStep, type PmDeps, type PmRequest } from './runner.ts';
+import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, runPmStep, type PmDeps, type PmRequest } from './runner.ts';
 
 const lock = { label: 'restricted' as const, reason: 'x' };
 const route = (over: Partial<TaskRouteRead['route']> = {}) => ({ effective: 'PREFER_IN_CLOUD', source: 'run', runDefault: 'PREFER_IN_CLOUD', override: null, overrideRevision: 0, lock: null, suggestion: null, lastObserved: null, ...over }) as never;
@@ -52,5 +52,35 @@ describe('the Project Manager runner (H11 fix round 1)', () => {
     expect((d.calls['pmResearch']![0] as { history: unknown[] }).history).toEqual([]);
     expect(await runPmStep(deps({ webResearch: () => false }), req({ kind: 'pmResearch' }))).toEqual({ kind: 'refused', code: 'research_not_granted' });
     expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), req({ kind: 'pmResearch' }))).toEqual({ kind: 'refused', code: 'research_device_only' });
+  });
+
+  it('fix round 2 (I5): research is refused when the route without the call override is device only, whether set on the task or as the run default', async () => {
+    expect(await runPmStep(deps({}, route({ effective: 'ONLY_ON_DEVICE', source: 'run', runDefault: 'ONLY_ON_DEVICE' })), req({ kind: 'pmResearch' }))).toEqual({ kind: 'refused', code: 'research_device_only' });
+  });
+
+  it('fix round 2 (I2): the plan scope resolves roles with workerRoleOf: a saved role wins, else the last claimed task\'s role', () => {
+    const s = snap();
+    s.workers = { w1: { workerId: 'w1', taskId: null } as never, w2: { workerId: 'w2', taskId: null } as never };
+    s.attempts = { a1: { attemptId: 'a1', taskId: 't1', runnerId: 'w1', startedAt: '2026-11-10T00:00:00Z' } as never };
+    s.settings = [{ scope: 'runner', key: 'w2', field: 'role', desired: 'frontend', effective: 'frontend' } as never];
+    const w = planScopeFor(s, 'run').workers;
+    expect(w.find((x) => x.workerId === 'w1')!.role).toBe('backend');
+    expect(w.find((x) => x.workerId === 'w2')!.role).toBe('frontend');
+  });
+
+  it('fix round 2 (M-b): a question whose call came back locked is relabelled restricted, even when the snapshot did not yet show the lock', () => {
+    expect(ownerTurnLabelAfter('internal', { kind: 'result', result: { locked: true } } as never)).toBe('restricted');
+    expect(ownerTurnLabelAfter('internal', { kind: 'result', result: { locked: false } } as never)).toBe('internal');
+    expect(ownerTurnLabelAfter('internal', { kind: 'refused', code: 'x' })).toBe('internal');
+  });
+
+  it('fix round 2 (M-c): the delegation POST carries no reasons', () => {
+    expect(delegationAssignments([{ taskId: 't1', workerId: 'w1', why: 'x' }, { taskId: 't2', workerId: 'w2', allowedPaths: ['/'] }])).toEqual([{ taskId: 't1', workerId: 'w1' }, { taskId: 't2', workerId: 'w2', allowedPaths: ['/'] }]);
+  });
+
+  it('fix round 2 (I4): a plan call is given the run\'s current tasks', async () => {
+    const d = deps();
+    await runPmStep(d, req({ kind: 'pmPlan' }));
+    expect((d.calls['pmPlan']![0] as { plan: { tasks: { taskId: string }[] } }).plan.tasks.map((t) => t.taskId)).toEqual(['t1', 't2']);
   });
 });

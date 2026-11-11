@@ -67,8 +67,17 @@ function answer(kind: string, prompt: string): unknown {
     }
     case 'pmResearch':
       return { answer: 'Demo research: no web search ran in the demo. A real research call is cloud only and lists its web sources.', findings: [{ point: 'Simulated: shown so the panel can be seen. Not evidence.' }] };
-    case 'pmPlan':
-      return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: ids.slice(0, 1), paths: [root], dependsOn: [] }] };
+    case 'pmPlan': {
+      // Fix round 2 (I4): revise the first task the prompt lists (by id, keeping its role), and add one that follows it.
+      const listed = section(prompt, `Current plan, revision ${/# Current plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^\s:]+): .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]! }] : []; });
+      const first = listed[0];
+      const req = ids.slice(0, 1);
+      if (!first) return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: req, paths: [root], dependsOn: [] }] };
+      return { tasks: [
+        { key: 'T1', title: 'Demo plan step (revised)', description: 'Demo data: this task again, narrowed.', role: first.role, requirementIds: req, paths: [root], dependsOn: [], revises: first.taskId },
+        { key: 'T2', title: 'Demo follow-up', description: 'Demo data: a new task after it.', role: first.role, requirementIds: req, paths: [root], dependsOn: ['T1'] },
+      ] };
+    }
     case 'pmDelegate': {
       const tasks = section(prompt, `Accepted plan, revision ${/# Accepted plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^\s:]+)(?::| ·) .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]!, status: m[3]! }] : []; });
       const workers = section(prompt, 'Workers').flatMap((l) => { const m = /^- ([^:]+): .*, role (.+)$/.exec(l); return m ? [{ workerId: m[1]!, role: m[2]!.toLowerCase().replace(/ /g, '_') }] : []; });

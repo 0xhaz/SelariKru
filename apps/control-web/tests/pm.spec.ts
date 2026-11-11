@@ -84,6 +84,9 @@ test('I4: the PM drafts a plan, the owner accepts it, and the PM then assigns in
   const reply = page.getByTestId('pm-turn-reply').first();
   await reply.getByRole('button', { name: 'Accept plan' }).click();
   await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Accepted as plan rev 2');
+  // Fix round 2 (I4): the plan revised an existing task (same id, the PM's title) and added one; it did not only bump the revision.
+  await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo plan step (revised)' })).toHaveCount(1);
+  await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo follow-up' })).toHaveCount(1);
   // With auto-delegation on, the PM assigns under the new revision.
   await expect(page.getByTestId('pm-applied').first()).toContainText('under your accepted plan rev 2');
   await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.recentEvents.map((e) => e.kind))).toContain('delegated');
@@ -101,6 +104,7 @@ test('I3: with auto-delegate off the PM\'s assignments wait in Action items, and
   await page.evaluate(() => { window.location.hash = '#/actions'; });
   const row = page.getByTestId('pm-proposal').first();
   await expect(row).toContainText(/^Assign .+ to .+ · .+\? \(proposed by the PM\)/);
+  await expect(page.getByTestId('pm-proposals-tab-only')).toHaveText(/^Kept for this tab only/);
   await row.getByRole('button', { name: 'Assign' }).click();
   await expect(page.getByTestId('pm-proposal')).toHaveCount(0);
 });
@@ -147,4 +151,11 @@ test('M11: Search Suggestions keep their markup but nothing that runs', async ({
   expect(out).toContain('<style>.c{color:red}</style>');
   expect(out).toContain('href="https://www.google.com/search?q=x"');
   expect(out).not.toMatch(/onerror|javascript:|<script/i);
+  // Fix round 2: SVG animation that can set an attribute, and inert containers whose content is parsed later, are removed too.
+  const svg = await page.evaluate(async () => {
+    const m = await import('/src/features/pm/suggestions.ts' as string) as { sanitizeSuggestions: (h: string) => string };
+    return m.sanitizeSuggestions('<svg><a><animate attributeName="href" values="javascript:alert(1)"/><set attributeName="href" to="javascript:alert(1)"/><text>x</text></a></svg><noscript><img src=x onerror=alert(1)></noscript><template><img src=x onerror=alert(1)></template><b>kept</b>');
+  });
+  expect(svg).toContain('<b>kept</b>');
+  expect(svg).not.toMatch(/<animate|<set|<noscript|<template/i);
 });

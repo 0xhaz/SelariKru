@@ -35,6 +35,7 @@ export function PmProposals() {
   return (
     <section aria-labelledby="pm-proposals-title" data-testid="pm-proposals" className="mb-6">
       <h2 id="pm-proposals-title" className="mb-2 text-[13px] font-semibold uppercase tracking-[0.12em] text-muted">From the Project Manager</h2>
+      <p className="mb-2 text-sm text-muted" data-testid="pm-proposals-tab-only">Kept for this tab only: these proposals are not saved, and closing the tab drops them.</p>
       <ol className="space-y-2">
         {rows.map((r) => (
           <li key={r.id} className="rounded-card border-2 border-line bg-panel p-3" data-testid="pm-proposal">

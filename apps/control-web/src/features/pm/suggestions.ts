@@ -1,10 +1,11 @@
 /**
  * H11 fix round 1 (M11): the Search Suggestions markup keeps its content, links and styles, but nothing that runs: no script, no inline event handler, no
- * javascript: link, no frame or object. A shadow root keeps its styles from leaking; innerHTML never runs a script, but an on* attribute would.
+ * javascript: link, no frame or object, no SVG animation, noscript or template. A shadow root keeps its styles from leaking; innerHTML never runs a script, but an on* attribute would.
  */
 export function sanitizeSuggestions(html: string): string {
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
-  doc.querySelectorAll('script, iframe, object, embed, base, meta, link[rel="import"]').forEach((n) => n.remove());
+  // Fix round 2: SVG animation (animate, set and friends can write an attribute such as href), and inert containers whose content is parsed later.
+  doc.querySelectorAll('script, iframe, object, embed, base, meta, link[rel="import"], noscript, template, animate, set, animateMotion, animateTransform, discard').forEach((n) => n.remove());
   doc.querySelectorAll('*').forEach((el) => {
     for (const a of [...el.attributes]) {
       const v = a.value.replace(/[\u0000-\u0020]+/g, '').toLowerCase();

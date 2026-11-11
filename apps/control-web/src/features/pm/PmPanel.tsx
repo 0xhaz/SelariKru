@@ -13,7 +13,7 @@ import { pmProposals } from './proposals.ts';
 import { sanitizeSuggestions } from './suggestions.ts';
 import { workerIdentity } from '../team/identity.ts';
 import { currentRun } from '../settings/model.ts';
-import { planScopeFor, questionLabelFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
+import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
 
 /**
  * H11: Talk to the Project Manager. One single-turn Firebase AI Logic call per question, about one task of the run (its route, lock and context apply), with a
@@ -32,6 +32,8 @@ interface PmStore {
   readonly turns: readonly Turn[];
   add(turn: NewTurn): number;
   update(id: number, reply: Reply): void;
+  /** Fix round 2 (M-b): marks an owner turn restricted after the fact (its call came back locked). */
+  restrict(id: number): void;
 }
 let seq = 1;
 /** Kept for this tab's session only, in memory. */
@@ -39,6 +41,7 @@ export const pmConversation = create<PmStore>((set) => ({
   turns: [],
   add: (turn) => { const id = seq++; set((s) => ({ turns: [...s.turns, { ...turn, id } as Turn] })); return id; },
   update: (id, reply) => set((s) => ({ turns: s.turns.map((t) => (t.id === id && t.who === 'pm' ? { ...t, reply } : t)) })),
+  restrict: (id) => set((s) => ({ turns: s.turns.map((t) => (t.id === id && t.who === 'owner' ? { ...t, restricted: true } : t)) })),
 }));
 
 const ASKS: readonly { kind: PmKind; label: string; what: string }[] = [
@@ -100,7 +103,7 @@ function ReplyView({ reply, snap, onAcceptPlan }: { reply: Reply; snap: ProjectV
           ) : null}
           {Array.isArray(data['tasks']) ? (
             <div>
-              <ol className="list-decimal pl-5 text-fg">{(data['tasks'] as { key: string; title: string; role: string }[]).map((t) => <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role})</span></li>)}</ol>
+              <ol className="list-decimal pl-5 text-fg">{(data['tasks'] as { key: string; title: string; role: string; revises?: string }[]).map((t) => <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role}{t.revises ? `; revises ${snap?.tasks[t.revises]?.title ?? t.revises}` : '; new task'})</span></li>)}</ol>
               <p className="text-sm text-muted">Until you accept it, it changes nothing. Accepting records it as the next plan revision; the server checks the call it came from first.</p>
               {reply.accepted === undefined ? (
                 o.result.locked ? <p className="text-sm text-muted" data-testid="pm-plan-locked">This plan came from restricted data. It stays on this device, so it cannot become the run\'s plan.</p>
@@ -167,10 +170,12 @@ export function PmPanel() {
       : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []);
     // A question about a locked task is restricted, whatever the checkbox says.
     const label = questionLabelFor(task, restricted);
-    add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
+    const ownerId = add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
     setBusy(true);
     try {
       const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question: asked, questionClassification: label, history, callOverride: override });
+      // The call came back locked (its route said so, whatever this tab's snapshot showed): the question was restricted, and is kept as such.
+      if (ownerTurnLabelAfter(label, outcome) === 'restricted' && label !== 'restricted') pmConversation.getState().restrict(ownerId);
       const rid = add({ who: 'pm', reply: { kind, subjectTaskId: subjectId, outcome } });
       // H11: the PM's assignments apply on their own, inside the accepted plan only; the server re-checks them and refuses anything else, for you.
       if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && !h.agents.delegate) {
@@ -178,7 +183,8 @@ export function PmPanel() {
       } else if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && !outcome.result.report) {
         pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: { error: 'Where this call ran was not recorded, so its assignments cannot be applied.' } });
       } else if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && outcome.result.report && h.agents.delegate) {
-        const assignments = (outcome.result.proposal.data as { assignments: Record<string, unknown>[] }).assignments;
+        // Without the reasons (fix round 2, M-c): the hash the call reported leaves them out, and the prose stays in this tab.
+        const assignments = delegationAssignments((outcome.result.proposal.data as { assignments: Record<string, unknown>[] }).assignments);
         try {
           const receipt = await h.agents.delegate(outcome.runId, { planRevision: outcome.planRevision ?? 0, subjectTaskId: subjectId, routeRecordId: outcome.result.report.requestId, assignments });
           pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: receipt });

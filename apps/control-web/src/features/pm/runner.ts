@@ -1,4 +1,4 @@
-import { PROJECT_MANAGER_ROLE, type RoutePolicyMode } from '@selarikru/domain';
+import { PROJECT_MANAGER_ROLE, workerRoleOf, type RoutePolicyMode } from '@selarikru/domain';
 import type { AgentCatalog, AgentResult, PmTurn } from '@selarikru/inference-firebase-web';
 import type { ProjectViewSnapshot, TaskAgentContext, TaskRouteRead, TaskView } from '@selarikru/view-protocol';
 import { destinationFor, taskAgentPolicy } from '../hybrid/runner.ts';
@@ -53,19 +53,17 @@ export function planScopeFor(snap: ProjectViewSnapshot, runId: string) {
   const run = snap.runs[runId];
   // A locked task (or one whose route is not known) is restricted: a cloud-capable prompt lists only its id, role and status (H11 fix round 1, H1).
   const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => ({ taskId: t.taskId, title: t.title ?? t.taskId, role: t.role ?? 'worker', status: t.status, restricted: !t.route || t.route.lock !== null }));
+  // One role rule with the server and the demo (fix round 2, I2): a saved role, else the role of the task the worker last claimed.
+  const settings = snap.settings.filter((s) => s.scope === 'runner').map((s) => ({ workerId: s.key, field: s.field, value: s.desired }));
+  const history = Object.values(snap.attempts).map((a) => ({ workerId: a.runnerId ?? '', role: snap.tasks[a.taskId]?.role ?? null, at: a.startedAt }));
   const workers = Object.keys(snap.workers).map((id) => {
-    const held = snap.workers[id]?.taskId;
-    const ident = workerIdentity(snap, id, held ? snap.tasks[held]?.role ?? null : lastRole(snap, id));
+    const ident = workerIdentity(snap, id, workerRoleOf(id, settings, history));
     const enabled = !snap.settings.some((s) => s.scope === 'runner' && s.key === id && s.field === 'enabled' && s.desired === false);
     return { workerId: id, name: ident.name, role: ident.role, enabled: enabled && ident.role !== PROJECT_MANAGER_ROLE };
   });
   return { planRevision: run?.planRevision ?? 0, tasks, workers };
 }
 
-const lastRole = (snap: ProjectViewSnapshot, workerId: string): string | null => {
-  const a = Object.values(snap.attempts).filter((x) => x.runnerId === workerId).sort((x, y) => Date.parse(y.startedAt ?? '0') - Date.parse(x.startedAt ?? '0'))[0];
-  return a ? snap.tasks[a.taskId]?.role ?? null : null;
-};
 
 export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
   if (!req.question.trim()) return { kind: 'refused', code: 'question_empty' };
@@ -79,7 +77,8 @@ export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome
   // Research on a locked task never asks for cloud context: it is refused, in plain words, before any read. It needs the owner's own grant, and never overrides a
   // task the owner set to device only (H11 fix round 1, I5).
   if (req.kind === 'pmResearch' && read.route.lock !== null) return { kind: 'refused', code: 'research_locked' };
-  if (req.kind === 'pmResearch' && read.route.override === 'ONLY_ON_DEVICE') return { kind: 'refused', code: 'research_device_only' };
+  // The route without this call's override: the task's own, else the run default or the seed (fix round 2).
+  if (req.kind === 'pmResearch' && (read.route.override === 'ONLY_ON_DEVICE' || read.route.effective === 'ONLY_ON_DEVICE')) return { kind: 'refused', code: 'research_device_only' };
   if (req.kind === 'pmResearch' && !(deps.webResearch?.() ?? false)) return { kind: 'refused', code: 'research_not_granted' };
   // A question about a locked task is restricted, whatever the request says.
   const questionClassification = read.route.lock !== null ? 'restricted' : req.questionClassification;
@@ -118,10 +117,21 @@ export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome
   const done = (result: AgentResult): PmOutcome => ({ kind: 'result', result, context, planRevision, runId });
   switch (req.kind) {
     case 'pmAnswer': return done(await deps.catalog.pmAnswer(base));
-    case 'pmPlan': return done(await deps.catalog.pmPlan(base));
+    // The run's current tasks, so the plan can revise them by id (fix round 2, I4).
+    case 'pmPlan': return done(await deps.catalog.pmPlan(snap ? { ...base, plan: planScopeFor(snap, runId) } : base));
     case 'pmDelegate': {
       if (!snap) return { kind: 'refused', code: 'no_snapshot' };
       return done(await deps.catalog.pmDelegate({ ...base, plan: planScopeFor(snap, runId) }));
     }
   }
+}
+
+/** Fix round 2 (M-b): an owner's question whose call came back locked read restricted data, so the stored turn is restricted too, whatever the snapshot said. */
+export function ownerTurnLabelAfter(label: 'internal' | 'restricted', outcome: PmOutcome): 'internal' | 'restricted' {
+  return outcome.kind === 'result' && outcome.result.locked ? 'restricted' : label;
+}
+
+/** Fix round 2 (M-c): what the delegation POST carries: each assignment as the call gave it, without its reason (the prose stays in this tab). */
+export function delegationAssignments(items: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  return items.map((a) => Object.fromEntries(Object.entries(a).filter(([k]) => k !== 'why')));
 }
