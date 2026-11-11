@@ -24,3 +24,11 @@ describe('the office layout grows with the team', () => {
     expect(a.key).not.toBe(b.key);
   });
 });
+
+describe('M10: a not-started desk', () => {
+  it('has a desk but no sandbox rack', () => {
+    const l = generateLayout({ agents: [{ id: 'w1', name: 'A', color: '#000' }, { id: 'role:qa', name: 'Qa', color: '#000', active: false, notStarted: true }], projectName: 'P', leadLabel: 'PLAN' });
+    expect(l.desks.map((d) => d.agentId)).toEqual(['w1', 'role:qa']);
+    expect(l.racks.map((r) => r.agentId)).toEqual(['w1']);
+  });
+});

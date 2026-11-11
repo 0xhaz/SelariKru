@@ -126,7 +126,8 @@ export function deskColumns(n: number): number {
 
 export function generateLayout(input: LayoutInput): OfficeLayout {
   const workers = input.agents;
-  const envs = workers.map((a) => ({ name: a.name, agentId: a.id }));
+  // A "not started" desk (a role no worker holds) has no sandbox yet (H11 fix round 1, M10).
+  const envs = workers.filter((a) => !a.notStarted).map((a) => ({ name: a.name, agentId: a.id }));
   const review = true;
   const hasServer = envs.length > 0;
 
