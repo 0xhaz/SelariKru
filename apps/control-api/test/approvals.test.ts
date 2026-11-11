@@ -17,7 +17,7 @@ let h: Harness;
 let s: Scheduler;
 
 function setup(policy: Policy): void {
-  s = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: makeHarness(t, {}, policy).clock.now, policy });
+  s = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: makeHarness(t, {}, policy).clock.now, policy });
   h = makeHarness(t, {}, policy, { scheduler: s });
 }
 

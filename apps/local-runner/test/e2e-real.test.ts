@@ -40,7 +40,7 @@ describe.skipIf(!enabled)('real end-to-end attempt', () => {
     const t = await setupTestDb();
     await resetDb(t.db);
     const config = testConfig();
-    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy: POLICY }) });
+    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy: POLICY }) });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -71,7 +71,7 @@ describe.skipIf(!enabled)('real end-to-end attempt', () => {
       expect(claim.lease?.taskId).toBe(taskId);
       const t0 = Date.now();
       const report = await runAttempt(
-        { api, runtime, artifacts: new LocalDiskArtifactStore(join(workRoot, 'artifacts')), workRoot, repos: { [PROJECT]: spikeRepo }, heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => (logs.push(l), void note(l)) },
+        { api, runtime, artifacts: new LocalDiskArtifactStore(join(workRoot, 'artifacts')), workRoot, repos: { [PROJECT]: spikeRepo }, codingWorkers: 'claude_code', heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => (logs.push(l), void note(l)) },
         claim.lease!,
       );
       await note(`wall ms ${Date.now() - t0} ${JSON.stringify(report)}`);

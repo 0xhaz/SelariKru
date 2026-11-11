@@ -350,3 +350,6 @@ export function repairStart(manifest: Manifest, track: Track, file: StartRecord 
   });
   return { start, manifest };
 }
+
+/** Benchmarks measure coding workers, so they run with Claude Code workers on: outside the hackathon build's AI path (Firebase AI Logic). See the `coding-workers` protocol note. */
+export const BENCH_CODING_WORKERS = 'claude_code' as const;

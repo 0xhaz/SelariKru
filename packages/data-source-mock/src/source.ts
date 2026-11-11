@@ -3,7 +3,7 @@ import {
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
-  type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
+  type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
 import { RoutePolicyModeSchema, approvalUnavailableReason, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
@@ -15,7 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
-import { acceptDemoProposal, checkDestination, demoBaseFiles, demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
+import { acceptDemoProposal, checkDestination, demoBaseFiles, demoFileListing, demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
 import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, withRouteLocks, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
@@ -54,6 +54,8 @@ interface Project {
   readonly routeRecords: Map<string, RouteRecord[]>;
   /** Criteria reworded by an accepted proposal, by task. Simulated. */
   readonly criteria: Map<string, { id: string; text: string }[]>;
+  /** Proposals accepted in the demo, by proposal id, with the key that accepted them. Nothing is applied. */
+  readonly acceptedProposals: Map<string, { key: string; receipt: ProposalAcceptReceipt }>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -124,6 +126,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
       criteria: new Map(),
+      acceptedProposals: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -732,12 +735,25 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return demoBaseFiles(contextState(p, t.runId), t);
     },
 
+    /** The demo's listing of a task's files. Simulated. */
+    async listTaskFiles(projectId, taskId) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[taskId];
+      if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      return demoFileListing(contextState(p, t.runId), t);
+    },
+
     /** The demo's accept: the server's checks and a simulated `proposal.accepted` with ids and hashes. The demo has no runner, so nothing is applied and the task has no new change. */
-    async acceptPatchProposal(projectId, proposal) {
+    async acceptPatchProposal(projectId, proposal, idempotencyKey) {
       const p = project(projectId);
       const t = p.state.snapshot.tasks[proposal.taskId];
       if (!t) throw fail('unavailable', `no task ${proposal.taskId} in this project`);
+      // As the server: the same key reads the proposal as it is now; another key for a proposal still waiting is refused (the demo has no runner, so it never fails).
+      const prior = p.acceptedProposals.get(proposal.proposalId);
+      if (prior && prior.key === idempotencyKey) return prior.receipt;
+      if (prior) throw fail('unavailable', 'proposal_already_accepted: this proposal is already waiting for the runner');
       const receipt = acceptDemoProposal(contextState(p, t.runId), t, proposal);
+      p.acceptedProposals.set(proposal.proposalId, { key: idempotencyKey, receipt });
       appendCommandEvent(p, t.taskId, 'proposal.accepted', { proposalId: receipt.proposalId, routeRecordId: proposal.routeRecordId, revision: t.revision, baseSha: proposal.baseSha, digest: receipt.digest, fileCount: receipt.fileCount }, { revisionStep: 0 });
       return receipt;
     },

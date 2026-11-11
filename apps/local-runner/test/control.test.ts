@@ -159,7 +159,7 @@ describe('the control bridge', () => {
 });
 
 describe('an attempt with control enabled', () => {
-  const deps = (w: Awaited<ReturnType<typeof makeWorld>>, connect: NonNullable<AttemptDeps['control']>): AttemptDeps => ({ api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo }, heartbeatMs: 20, maxMissedHeartbeats: 3, cpus: 2, memoryMiB: 4096, log: () => undefined, control: connect, terminalFeedLimits: { maxLines: 500, maxBytes: 262144, batchLines: 100, flushMs: 1, keepaliveMs: 60000, closeMs: 100 } });
+  const deps = (w: Awaited<ReturnType<typeof makeWorld>>, connect: NonNullable<AttemptDeps['control']>): AttemptDeps => ({ api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo }, codingWorkers: 'claude_code', heartbeatMs: 20, maxMissedHeartbeats: 3, cpus: 2, memoryMiB: 4096, log: () => undefined, control: connect, terminalFeedLimits: { maxLines: 500, maxBytes: 262144, batchLines: 100, flushMs: 1, keepaliveMs: 60000, closeMs: 100 } });
 
   it('dials out only when the lease says the attempt can host control mode', async () => {
     const connect = vi.fn(async () => ({ send: () => undefined, sendable: true, close: () => undefined }));

@@ -18,7 +18,7 @@ describe('model assignments', () => {
   beforeEach(async () => {
     await resetDb(t.db);
     clock = testClock();
-    sched = createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG });
+    sched = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG });
   });
 
   const assign = async (scope: 'role' | 'task', key: string, s: { provider: string; model: string } | null, revision = 1): Promise<void> => {
@@ -103,7 +103,7 @@ describe('model assignments', () => {
     expect(await countRows(t.db, 'attempts')).toBe(0);
 
     // Nothing detected means nothing launches, and the screen is told why.
-    const none = createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: { status: 'none', detail: 'not installed', providers: [] } });
+    const none = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: POLICY, catalog: { status: 'none', detail: 'not installed', providers: [] } });
     await assign('role', 'codex-role', OPUS, 4);
     const refused = await none.tryClaim(runner('r1'), CAPS);
     expect(refused.skipped[0]!.reason).toBe('model_blocked:no_provider_detected:anthropic/claude-opus-5-5');
@@ -118,9 +118,9 @@ describe('model assignments', () => {
   it('no assignment and no default blocks with the role named, and an absent catalog blocks too', async () => {
     await seedTask(t.db, specFor('a'));
     const noDefault: Policy = { ...POLICY, models: { allowed: POLICY.models.allowed } };
-    const s1 = createScheduler({ db: t.db, now: clock.now, policy: noDefault, catalog: TEST_CATALOG });
+    const s1 = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: noDefault, catalog: TEST_CATALOG });
     expect((await s1.tryClaim(runner('r1'), CAPS)).skipped[0]!.reason).toBe('model_blocked:model_not_assigned:backend');
-    const noCatalog = createScheduler({ db: t.db, now: clock.now, policy: POLICY });
+    const noCatalog = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: POLICY });
     expect((await noCatalog.tryClaim(runner('r1'), CAPS)).skipped[0]!.reason).toBe('model_blocked:no_provider_detected:anthropic/claude-sonnet-5-5');
     expect(await countRows(t.db, 'attempts')).toBe(0);
   });
@@ -181,7 +181,7 @@ describe('model assignments', () => {
       await t.db.update(schema.runs).set({ budget: { limitUsd: 2 } }).where(eq(schema.runs.runId, RUN));
       for (let i = 0; i < 10; i += 1) await seedTask(t.db, specFor(`t${i}`, { maxCostUsd: 1 }));
       await assign('role', 'backend', HAIKU);
-      const cheap = createScheduler({ db: t.db, now: clock.now, policy: { ...POLICY, models: { ...POLICY.models, allowed: [...POLICY.models.allowed, HAIKU] } }, catalog: priced });
+      const cheap = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: { ...POLICY, models: { ...POLICY.models, allowed: [...POLICY.models.allowed, HAIKU] } }, catalog: priced });
       let started = 0;
       for (let i = 0; i < 10; i += 1) if ((await cheap.tryClaim(runner(`r${i}`), capsWith(20))).ok) started += 1;
       expect(started).toBe(2);
@@ -294,7 +294,7 @@ describe('model assignments', () => {
     it('a model whose route is unknown is refused for any data', async () => {
       const unknownRoute = { ...TEST_CATALOG, providers: [{ ...TEST_CATALOG.providers[0]!, models: TEST_CATALOG.providers[0]!.models.map((m) => ({ ...m, route: 'unknown' as const })) }] };
       await seedTask(t.db, specFor('t1', { classification: 'public' }));
-      const s = createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: unknownRoute });
+      const s = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: POLICY, catalog: unknownRoute });
       expect((await s.tryClaim(runner('r1'), CAPS)).skipped[0]!.reason).toBe('model_blocked:model_route_unknown:anthropic/claude-sonnet-5-5');
       expect(await countRows(t.db, 'attempts')).toBe(0);
     });

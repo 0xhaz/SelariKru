@@ -80,7 +80,7 @@ export function registerHandoverRoutes(app: FastifyInstance, ctx: AppContext): v
   const { db, config, now } = ctx;
   const tenantId = config.tenantId;
   const auth = { onRequest: [ctx.owner] };
-  const sched = { db, now, policy: ctx.policy, catalog: ctx.catalog };
+  const sched = { db, now, policy: ctx.policy, catalog: ctx.catalog, codingWorkers: config.codingWorkers };
 
   const ownerOf = async (req: FastifyRequest) => {
     if (req.principal?.kind !== 'owner') throw new AppError(403, 'wrong_principal_type', 'owner credentials required');

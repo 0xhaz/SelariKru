@@ -3,7 +3,7 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
-import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -273,6 +273,17 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
           return f;
         },
       }, 'a task\'s files', false, paths !== undefined ? { paths: [...paths] } : {}, true);
+    },
+
+    /** What is under the task's allowed paths, relayed from the local runner: paths and sizes only. */
+    listTaskFiles(projectId, taskId): Promise<TaskFileListing> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/files/list`, {
+        parse: (v: unknown) => {
+          const f = TaskFileListingSchema.parse(v);
+          if (f.taskId !== taskId) throw new Error('a listing for another task');
+          return f;
+        },
+      }, 'a task\'s file listing', false, {}, true);
     },
 
     /**

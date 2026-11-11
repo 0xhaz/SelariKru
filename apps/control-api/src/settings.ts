@@ -124,7 +124,7 @@ const runnerOwnerOf = (req: FastifyRequest): string => {
 export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
   const auth = { onRequest: [ctx.owner] };
-  const schedulerCtx = (): SchedulerContext => ({ db, now, policy: ctx.policy, catalog: ctx.catalog });
+  const schedulerCtx = (): SchedulerContext => ({ db, now, policy: ctx.policy, catalog: ctx.catalog, codingWorkers: config.codingWorkers });
 
   app.post('/v1/projects/:id/settings', auth, async (req, reply) => {
     const uid = runnerOwnerOf(req);

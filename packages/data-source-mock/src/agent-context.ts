@@ -1,5 +1,5 @@
 import { AcceptedProposalSchema, RESTRICTED_APPLY_REFUSAL, buildContextBundle, checkAcceptedProposal, effectiveRoutePolicy, isCloudCapable, type BrainDestination, type RoutePolicyMode, type RouteLock } from '@selarikru/domain';
-import { DataSourceException, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskView } from '@selarikru/view-protocol';
+import { DataSourceException, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskFileListing, type TaskView } from '@selarikru/view-protocol';
 import type { FixtureRoutes } from './routes.ts';
 
 /**
@@ -48,6 +48,12 @@ export function demoBaseFiles(state: DemoContextState, task: TaskView): TaskBase
   return { taskId: task.taskId, revision: task.revision, baseSha: DEMO_BASE_SHA, files: [{ path: `${root}/index.ts`, content: `// ${task.title ?? task.taskId} (demo base file)\nexport const ENABLED = true;\n` }], omitted: [] };
 }
 
+/** The demo's listing of a task's files: its one demo base file, paths and sizes only. Restricted tasks are refused, as on the server. */
+export function demoFileListing(state: DemoContextState, task: TaskView): TaskFileListing {
+  const f = demoBaseFiles(state, task);
+  return { taskId: f.taskId, revision: f.revision, baseSha: f.baseSha, entries: f.files.map((x) => ({ path: x.path, size: x.content.length })), truncated: false };
+}
+
 /** The statuses the server takes an accepted proposal in. */
 const ACCEPTING_STATUSES: readonly string[] = ['planned', 'ready'];
 
@@ -63,7 +69,7 @@ export function acceptDemoProposal(state: DemoContextState, task: TaskView, raw:
   const checked = checkAcceptedProposal(p, { taskId: task.taskId, revision: task.revision, baseSha: DEMO_BASE_SHA, allowedPaths: demoAllowedPaths(task.taskId) });
   if (!checked.ok) throw refused(`proposal_refused: ${checked.code}`);
   if (!ACCEPTING_STATUSES.includes(task.status)) throw refused(`task_not_applicable: a ${task.status} task is not waiting to start, so a change cannot be applied to it now`);
-  return { proposalId: p.proposalId, taskId: task.taskId, revision: task.revision, digest: checked.digest, fileCount: p.results.length, state: 'accepted', simulated: true };
+  return { proposalId: p.proposalId, taskId: task.taskId, revision: task.revision, digest: checked.digest, fileCount: p.results.length, state: 'accepted', round: 1, lastFailure: null, simulated: true };
 }
 
 export function demoTaskContext(state: DemoContextState, task: TaskView, destination: BrainDestination): TaskAgentContext {

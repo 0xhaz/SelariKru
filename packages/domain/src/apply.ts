@@ -34,6 +34,13 @@ export const DEFAULT_CODING_WORKERS: CodingWorkers = 'off';
 export const CODING_WORKERS_OFF_LABEL = 'Not used in the hackathon build (outside Firebase AI Logic)';
 export const parseCodingWorkers = (raw: string | undefined): CodingWorkers | null => (raw === undefined || raw.trim() === '' ? DEFAULT_CODING_WORKERS : (CODING_WORKERS as readonly string[]).includes(raw.trim()) ? (raw.trim() as CodingWorkers) : null);
 
+/**
+ * Apply attempt reasons that are about the proposal itself, not the project: it could not be read, its base no longer reproduces it, or the workspace did not end up with
+ * exactly its results. The attempt ends `blocked` with the reason and spends no repair; the owner proposes again. A build or test failure is the project's, and is a `failed`.
+ */
+export const APPLY_INPUT_REASONS = ['proposal_invalid', 'proposal_base_mismatch', 'proposal_changes_mismatch'] as const;
+export const isApplyInputReason = (reason: string | null | undefined): boolean => APPLY_INPUT_REASONS.some((r) => reason === r || (reason ?? '').startsWith(`${r}:`));
+
 /** The refusal for a restricted task's proposal: its content never goes to the server. */
 export const RESTRICTED_APPLY_REFUSAL = 'Restricted work is applied by the local runner on this device';
 
@@ -175,21 +182,39 @@ export function ownerPrDescription(raw: string | null | undefined): string | nul
  * The patch agent reads the task's files at the base commit. The local runner reads them with git (`git cat-file` at the base, never the working tree), and they reach
  * the owner's browser only through the owner-authenticated API relay, which keeps nothing. Restricted tasks are never served. Counts are the patch agent's own limits.
  */
-export const BASE_FILE_LIMITS = { requestPaths: AGENT_LIMITS.patchFiles, files: AGENT_LIMITS.patchFiles, fileChars: AGENT_LIMITS.fileChars, totalChars: AGENT_LIMITS.filesTotalChars } as const;
+export const BASE_FILE_LIMITS = {
+  /** Files one read may name: the patch agent's own limit. */
+  requestPaths: AGENT_LIMITS.patchFiles, files: AGENT_LIMITS.patchFiles, fileChars: AGENT_LIMITS.fileChars, totalChars: AGENT_LIMITS.filesTotalChars,
+  /** A listing's entries (paths and sizes only), across every allowed path. */
+  listEntries: 500,
+  /** Allowed paths a listing covers: any number a task has, up to this. */
+  allowedPaths: 200,
+} as const;
 export const BASE_FILE_OMISSIONS = ['too_large', 'too_many', 'not_found', 'not_text', 'secret_content', 'reserved', 'secret_file_name', 'outside_allowed'] as const;
 export type BaseFileOmission = (typeof BASE_FILE_OMISSIONS)[number];
 
 const RelayPath = z.string().min(1).max(200);
-/** What the server asks a runner for: files under these paths (each inside the task's allowed paths) at this base. */
+/**
+ * What the server asks a runner for, at this base. `list`: the regular files under the task's allowed paths, paths and sizes only. `read`: the contents of these files
+ * (each inside the allowed paths), at most `requestPaths` of them.
+ */
 export const BaseFileRequestSchema = z.strictObject({
   requestId: RefId, projectId: RefId, baseSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
-  paths: z.array(RelayPath).min(1).max(BASE_FILE_LIMITS.requestPaths), allowedPaths: z.array(RelayPath).max(64),
-});
+  mode: z.enum(['list', 'read']),
+  paths: z.array(RelayPath).min(1).max(BASE_FILE_LIMITS.allowedPaths), allowedPaths: z.array(RelayPath).max(BASE_FILE_LIMITS.allowedPaths),
+}).refine((r) => r.mode === 'list' || r.paths.length <= BASE_FILE_LIMITS.requestPaths, { message: 'a read names at most the patch agent\'s file limit' });
 export type BaseFileRequest = z.infer<typeof BaseFileRequestSchema>;
+export const BaseFileEntrySchema = z.strictObject({ path: RelayPath, size: z.number().int().min(0) });
+export type BaseFileEntry = z.infer<typeof BaseFileEntrySchema>;
 export const BaseFileAnswerSchema = z.strictObject({
   requestId: RefId,
   files: z.array(z.strictObject({ path: RelayPath, content: z.string().max(BASE_FILE_LIMITS.fileChars) })).max(BASE_FILE_LIMITS.files),
   omitted: z.array(z.strictObject({ path: RelayPath, reason: z.enum(BASE_FILE_OMISSIONS) })).max(200),
+  /** A listing's answer: paths and sizes, capped, and whether the cap cut it. */
+  entries: z.array(BaseFileEntrySchema).max(BASE_FILE_LIMITS.listEntries).optional(),
+  truncated: z.boolean().optional(),
+  /** The runner that took the read has no copy of this project. */
+  noCheckout: z.boolean().optional(),
 });
 export type BaseFileAnswer = z.infer<typeof BaseFileAnswerSchema>;
 
@@ -224,4 +249,30 @@ export function screenBaseFiles(answer: Pick<BaseFileAnswer, 'files' | 'omitted'
   }
   // A withheld path is never named to the browser unless it is inside the task's scope and was only too large or too many.
   return { files, omitted: omitted.filter((o) => baseFileIssue(o.path, allowed) === null) };
+}
+
+/** A listing as it may be relayed: only paths a read could serve, sorted, capped. */
+export function screenBaseListing(entries: readonly BaseFileEntry[], allowed: readonly string[]): { readonly entries: BaseFileEntry[]; readonly truncated: boolean } {
+  const kept = [...new Map(entries.filter((e) => baseFileIssue(e.path, allowed) === null).map((e) => [e.path, e])).values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { entries: kept.slice(0, BASE_FILE_LIMITS.listEntries), truncated: kept.length > BASE_FILE_LIMITS.listEntries };
+}
+
+/** Words of three or more letters or digits, lowercased: what a file name is matched on. */
+const words = (text: string): string[] => (text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
+const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'are', 'can', 'not', 'when', 'into', 'each', 'should', 'must', 'test', 'tests', 'src', 'index', 'file', 'files', 'works', 'user']);
+
+/**
+ * The deterministic first step of the patch agent's file choice (H5): rank the listed files by how many words of the task's text (title, description, criteria and the
+ * person's request) their path segments and base name contain, and keep up to `limit` with any match, best first. Splits camelCase and kebab-case. Empty when nothing
+ * matches: the caller then asks the patch agent to choose.
+ */
+export function selectFilesByName(entries: readonly BaseFileEntry[], text: readonly string[], limit: number = BASE_FILE_LIMITS.files): string[] {
+  const wanted = new Set(text.flatMap((t) => words(t.replace(/([a-z0-9])([A-Z])/g, '$1 $2'))).filter((w) => !STOP.has(w)));
+  if (wanted.size === 0) return [];
+  const scored = entries.map((e) => {
+    const parts = new Set(words(e.path.replace(/\.[a-z0-9]+$/i, '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[-_./]/g, ' ')));
+    const hits = [...parts].filter((p) => wanted.has(p) || [...wanted].some((w) => w.length >= 4 && (p.startsWith(w) || w.startsWith(p)) && p.length >= 4)).length;
+    return { path: e.path, hits };
+  }).filter((x) => x.hits > 0);
+  return scored.sort((a, b) => b.hits - a.hits || a.path.length - b.path.length || (a.path < b.path ? -1 : 1)).slice(0, Math.max(0, limit)).map((x) => x.path);
 }

@@ -3,7 +3,7 @@ import type { RouteRecord } from '@selarikru/domain';
 import type { SettingView, TaskRouteView } from '@selarikru/view-protocol';
 import { iso, task } from '../overview/testing.ts';
 import { settingStatus } from '../settings/model.ts';
-import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
+import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, filesNoteText, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
 
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null,
@@ -231,5 +231,23 @@ describe('accepting a patch for the apply worker (H5)', () => {
   it('names the re-ask in plain words', () => {
     expect(reaskNote(0)).toBeNull();
     expect(reaskNote(1)).toBe('The first diff did not apply to the files, so the agent was asked once more with what was wrong. This is its second answer.');
+  });
+});
+
+describe('fix round 1: what an accept says, by where the proposal is now (I1, M3)', () => {
+  const r = (state: string, over: Record<string, unknown> = {}) => ({ proposalId: 'p', taskId: 't', revision: 1, digest: 'a'.repeat(64), fileCount: 2, state, round: 1, lastFailure: null, simulated: false, ...over }) as never;
+  it('a failed apply says why and offers to accept again; a waiting or applied one says so and offers nothing', () => {
+    expect(patchReceiptText(r('failed', { lastFailure: 'tests_failed: pnpm run test exited with code 1' }))).toEqual({ text: 'The last apply failed: tests failed (pnpm run test exited with code 1). Accept again to retry.', again: true });
+    expect(patchReceiptText(r('superseded'))).toMatchObject({ again: true });
+    expect(patchReceiptText(r('accepted'))).toEqual({ text: 'Accepted: 2 files. The task waits for the runner, which applies them with no model, then builds, tests and verifies the result.', again: false });
+    expect(patchReceiptText(r('accepted', { round: 2 }))).toMatchObject({ text: expect.stringMatching(/^Accepted again \(round 2\)/) });
+    expect(patchReceiptText(r('applying'))).toMatchObject({ text: 'The runner is applying it now.', again: false });
+    expect(patchReceiptText(r('applied'))).toMatchObject({ again: false });
+    expect(patchReceiptText(r('accepted', { simulated: true }))).toMatchObject({ text: expect.stringMatching(/^Accepted in the demo: 2 files/) });
+  });
+  it('says when the agent read no files, and why', () => {
+    expect(filesNoteText('no_checkout')).toBe('This runner has no copy of the project; the proposal can only add new files.');
+    expect(filesNoteText('restricted')).toMatch(/stay on this device/);
+    expect(filesNoteText(null)).toBeNull();
   });
 });

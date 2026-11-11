@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CODING_WORKERS } from '@selarikru/domain';
 
 /**
  * Benchmark results file, as `tools/benchmarks` exports it and the web panel reads it. Strict on purpose: a field the
@@ -68,6 +69,8 @@ const ConfigurationSchema = z.strictObject({
   /** Added to the template: the worker agent's state checked before and after the trial (sandboxes in the trial's scope, image overrides). Null when not checked. */
   agentState: nullableText,
   cacheCondition: z.enum(['warm', 'cold']).nullable(),
+  /** Added for H5: which coding workers ran. Benchmarks measure coding workers, so a worker record says `claude_code`: outside the hackathon build's AI path. Absent on older records. */
+  codingWorkers: z.enum(CODING_WORKERS).nullable().optional(),
   localHost: nullableText,
   cloudHost: nullableText,
 });

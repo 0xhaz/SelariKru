@@ -1,7 +1,7 @@
-import { parseUnifiedDiff, type RoutePolicyMode } from '@selarikru/domain';
-import type { AgentInputs, AgentResult } from '@selarikru/inference-firebase-web';
+import { parseUnifiedDiff, selectFilesByName, type RoutePolicyMode } from '@selarikru/domain';
+import type { AgentCatalog, AgentInputs, AgentResult } from '@selarikru/inference-firebase-web';
 import { FIREBASE_CLOUD_ROUTE, type Policy } from '@selarikru/policy';
-import type { TaskAgentContext, TaskBaseFiles, TaskRouteRead } from '@selarikru/view-protocol';
+import type { TaskAgentContext, TaskBaseFiles, TaskFileListing, TaskRouteRead } from '@selarikru/view-protocol';
 import { effectiveStep, type AgentActionKind } from './model.ts';
 
 /**
@@ -14,11 +14,17 @@ export interface AgentRunnerDeps {
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   /** The server checks the destination against the route with this call's override, and refuses `cloud` when the route keeps the task on the device. */
   readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null) => Promise<TaskAgentContext>;
-  readonly catalog: { run<K extends AgentActionKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>> };
+  readonly catalog: {
+    run<K extends AgentActionKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>>;
+    /** The patch agent's file choice from a listing, when no name matched. */
+    pickFiles?: AgentCatalog['pickFiles'];
+  };
   /** The task's latest failed check, from the snapshot. Untrusted text. */
   readonly failedCheck: (taskId: string) => { readonly checkId: string; readonly output: string } | null;
   /** The task's files at its base commit, for the patch agent (H5): read by the local runner and relayed. Absent: the agent gets none and can only create files. */
   readonly getTaskFiles?: (taskId: string, paths: readonly string[]) => Promise<TaskBaseFiles>;
+  /** What is under the task's allowed paths (paths and sizes), to choose which files to read. */
+  readonly listTaskFiles?: (taskId: string) => Promise<TaskFileListing>;
   /** How many times Propose change asks again after the check refuses a patch for line drift. Default 1. */
   readonly reaskLimit?: number;
 }
@@ -27,6 +33,8 @@ export interface AgentRunnerDeps {
 const REASKABLE: readonly string[] = ['diff_does_not_apply', 'diff_file_not_provided', 'diff_file_exists', 'diff_unparseable', 'diff_header_mismatch', 'diff_empty'];
 export const DEFAULT_REASK_LIMIT = 1;
 const codeOf = (issue: string): string => issue.trim().split(/\s+/).at(-1) ?? '';
+/** The code a source's refusal leads its message with. */
+const codeIn = (e: unknown): string | undefined => /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1];
 
 /** Context refusals the screen says in their own words. */
 const PASSED_THROUGH: readonly string[] = ['context_destination_refused', 'task_spec_unreadable'];
@@ -39,7 +47,7 @@ export interface AgentRunRequest {
 
 export type AgentRunOutcome =
   /** `base`: the commit and revision a patch was proposed against, for its accept. `reasked`: how many times Propose change asked again. */
-  | { readonly kind: 'result'; readonly result: AgentResult; readonly context: TaskAgentContext; readonly base?: { readonly sha: string; readonly revision: number } | null; readonly reasked?: number }
+  | { readonly kind: 'result'; readonly result: AgentResult; readonly context: TaskAgentContext; readonly base?: { readonly sha: string; readonly revision: number } | null; readonly reasked?: number; readonly filesNote?: 'restricted' | 'no_checkout' | null }
   | { readonly kind: 'refused'; readonly code: string };
 
 /**
@@ -85,29 +93,52 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
     case 'criteria': return done(await deps.catalog.run('criteria', base));
     case 'breakdown': return done(await deps.catalog.run('breakdown', base));
     case 'patch': {
-      // The task's base files, read by the local runner with git and relayed (never stored). A restricted task's files stay on the device, so it gets none and can only
-      // create files; a read that failed refuses the step rather than propose blind.
-      let given: TaskBaseFiles | null = null;
-      if (deps.getTaskFiles && t.allowedPaths.length > 0) {
+      // The task's base files, chosen in two steps and read by the local runner with git, relayed and never stored: list what is under the allowed paths (paths and
+      // sizes), choose by name against the task's words, else ask the agent to choose from the list, then read only those. A restricted task's files stay on this
+      // device, and a runner with no copy of the project has none: either way the agent gets none and can only add files. Any other failed read refuses the step.
+      let listing: TaskFileListing | null = null;
+      let filesNote: 'restricted' | 'no_checkout' | null = null;
+      if (deps.listTaskFiles && deps.getTaskFiles && t.allowedPaths.length > 0) {
         try {
-          given = await deps.getTaskFiles(req.taskId, t.allowedPaths);
+          listing = await deps.listTaskFiles(req.taskId);
         } catch (e) {
-          const code = /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1];
-          if (code !== 'files_restricted') return { kind: 'refused', code: 'files_unavailable' };
+          const code = codeIn(e);
+          if (code === 'files_restricted') filesNote = 'restricted';
+          else if (code === 'no_checkout') filesNote = 'no_checkout';
+          else return { kind: 'refused', code: 'files_unavailable' };
         }
       }
-      const files = (given?.files ?? []).map((f) => ({ path: f.path, content: f.content, classification: t.classification }));
+      const words = [t.title, t.description ?? '', ...t.criteria.map((c) => c.text)];
+      const choose = async (prior?: readonly string[]): Promise<string[]> => {
+        if (listing === null || listing.entries.length === 0) return [];
+        const byName = prior ? [] : selectFilesByName(listing.entries, words);
+        if (byName.length > 0 || !deps.catalog.pickFiles) return byName;
+        return (await deps.catalog.pickFiles({ ...base, listing: listing.entries, ...(prior ? { priorIssues: prior } : {}) })).paths;
+      };
+      const read = async (paths: readonly string[]): Promise<TaskBaseFiles | 'failed' | null> => {
+        if (paths.length === 0 || !deps.getTaskFiles) return null;
+        try { return await deps.getTaskFiles(req.taskId, paths); } catch { return 'failed'; }
+      };
+      const asFiles = (f: TaskBaseFiles | null) => (f?.files ?? []).map((x) => ({ path: x.path, content: x.content, classification: t.classification }));
+      let given = await read(await choose());
+      if (given === 'failed') return { kind: 'refused', code: 'files_unavailable' };
       const specBase = typeof context.spec?.['baseSha'] === 'string' ? { sha: context.spec['baseSha'], revision: context.revision } : null;
-      const at = given !== null ? { sha: given.baseSha, revision: given.revision } : specBase;
-      let result = await deps.catalog.run('patch', { ...base, files });
+      const at = listing !== null ? { sha: listing.baseSha, revision: listing.revision } : given !== null ? { sha: given.baseSha, revision: given.revision } : specBase;
+      let result = await deps.catalog.run('patch', { ...base, files: asFiles(given) });
       let reasked = 0;
       const limit = Math.max(0, Math.floor(deps.reaskLimit ?? DEFAULT_REASK_LIMIT));
-      // A bounded re-ask: once by default, a new call (its own route record) with the refusal codes and the same files, then it stops and shows the result.
+      // A bounded re-ask: once by default, a new call (its own route record) with the refusal codes, then it stops and shows the result. When the diff needed a file
+      // it was not given (or created one that exists), the files are chosen again for the re-ask.
       while (reasked < limit && result.proposal.status === 'invalid' && result.proposal.validation.errors.some((x) => REASKABLE.includes(codeOf(x)))) {
         reasked += 1;
-        result = await deps.catalog.run('patch', { ...base, files, priorIssues: result.proposal.validation.errors });
+        const codes = result.proposal.validation.errors;
+        if (codes.some((x) => ['diff_file_not_provided', 'diff_file_exists'].includes(codeOf(x)))) {
+          const again = await read(await choose(codes));
+          if (again !== 'failed' && again !== null) given = again;
+        }
+        result = await deps.catalog.run('patch', { ...base, files: asFiles(given), priorIssues: codes });
       }
-      return { kind: 'result', result, context, base: at, reasked };
+      return { kind: 'result', result, context, base: at, reasked, filesNote };
     }
     case 'review': {
       if (!context.change) return { kind: 'refused', code: 'no_change' };

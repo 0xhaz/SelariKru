@@ -294,7 +294,7 @@ describe('verification driver', () => {
     expect(await taskStatus('t1')).toBe('verifying');
     const failedEvent = await q(`SELECT actor_kind, payload FROM events WHERE type = 'candidate.failed'`);
     expect(failedEvent[0]).toMatchObject({ actor_kind: 'integration', payload: { reason: 'candidate_part_not_live', sha } });
-    const dep = createScheduler({ catalog: TEST_CATALOG, db, now: () => new Date(), policy: POLICY });
+    const dep = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db, now: () => new Date(), policy: POLICY });
     expect(await dep.claimNext(workerRunner('r1'), CAPS)).toBeNull();
     expect(await taskStatus('dep')).toBe('planned');
   });

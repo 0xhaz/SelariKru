@@ -182,7 +182,7 @@ describe('M5: giving a grant back is recorded', () => {
 
 describe('cloud revoke of a running cloud attempt, through the route', () => {
   it('stops it and leaves the task ready, blocked by policy', async () => {
-    const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => h.clock.now(), policy: CLOUD_POLICY });
+    const scheduler = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: () => h.clock.now(), policy: CLOUD_POLICY });
     h = makeHarness(t, {}, { ...CLOUD_POLICY, operations: { assign_replan_tasks: 'allow' } } as never, { scheduler });
     await t.db.update(schema.runs).set({ placement: { mode: 'C1', cloudDestination: 'cloud-sandbox-eu' } });
     const c = await enrolRunner(h.app, 'cloud');

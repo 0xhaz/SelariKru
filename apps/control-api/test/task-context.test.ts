@@ -99,3 +99,16 @@ describe('a task context for its agents (H4)', () => {
     expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/locked/context-size?destination=local`)).status).toBe(200);
   });
 });
+
+describe('fix round 1: a restricted predecessor locks its successors (H5 M4)', () => {
+  it('a task downstream of a restricted task is locked for routing, the relay and accept, as the claim judges it', async () => {
+    await seedTask(t.db, specFor('up', { classification: 'restricted' }), 'verified');
+    await seedTask(t.db, specFor('down', { dependencies: [{ taskId: 'up', revision: 1, condition: 'artifact_verified' }], allowedPaths: ['src'] }));
+    const route = await get(h.app, `/v1/projects/${PROJECT}/tasks/down/route`);
+    expect(route.body.route.lock).toMatchObject({ label: 'restricted' });
+    expect((await post(h.app, `/v1/projects/${PROJECT}/tasks/down/files/list`, {})).body.error.code).toBe('files_restricted');
+    expect((await post(h.app, `/v1/projects/${PROJECT}/tasks/down/proposals/accept`, { idempotencyKey: 'k', proposal: {} })).body.error.code).toBe('proposal_restricted');
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.body.tasks.find((x: { taskId: string }) => x.taskId === 'down').route.lock).toMatchObject({ label: 'restricted' });
+  });
+});

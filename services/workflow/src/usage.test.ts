@@ -159,7 +159,7 @@ describe('usage ledger', () => {
     await seedTask(t.db, specFor('d'));
     const running = (await s.claimNext(runner('r3'), capsWith(5)))!;
 
-    const reconciled = await reconcileObservedCost({ db: t.db, now: clock.now }, { ...scope, attemptId: done.attemptId, costUsd: '1.500000', operationId: 'bill-1' });
+    const reconciled = await reconcileObservedCost({ codingWorkers: 'claude_code', db: t.db, now: clock.now }, { ...scope, attemptId: done.attemptId, costUsd: '1.500000', operationId: 'bill-1' });
     expect(reconciled).toMatchObject({ reconciled: true, amountUsd: '1.500000' });
 
     await seedTask(t.db, specFor('e', { maxCostUsd: 0.01 }));
@@ -168,7 +168,7 @@ describe('usage ledger', () => {
     const beat = await s.heartbeat(running);
     expect(beat).toMatchObject({ ok: true, value: { cancelRequested: true } });
     expect(await countRows(t.db, 'task_commands', `command = 'cancel' AND state = 'cancel_requested'`)).toBe(1);
-    expect(await stopForExhaustedBudget({ db: t.db, now: clock.now }, scope)).toEqual([]);
+    expect(await stopForExhaustedBudget({ codingWorkers: 'claude_code', db: t.db, now: clock.now }, scope)).toEqual([]);
     expect(await countRows(t.db, 'task_commands')).toBe(1);
 
     // Nothing was deleted or invalidated.
@@ -188,7 +188,7 @@ describe('usage ledger', () => {
     await resetDb(t.db, { limitUsd: 1 });
     await seedTask(t.db, specFor('a'));
     const lease = (await s.claimNext(runner('r1'), CAPS))!;
-    expect(await stopForExhaustedBudget({ db: t.db, now: clock.now }, scope)).toEqual([]);
+    expect(await stopForExhaustedBudget({ codingWorkers: 'claude_code', db: t.db, now: clock.now }, scope)).toEqual([]);
     expect(await s.heartbeat(lease)).toMatchObject({ ok: true, value: { cancelRequested: false } });
   });
 
@@ -249,7 +249,7 @@ describe('usage ledger', () => {
   it('a trusted bill reconciles a settled hold; a running or lost attempt stays held', async () => {
     await resetDb(t.db, { limitUsd: 2 });
     const done = await claimAndPublish('a', 'backend', { outcome: 'completed', reportedCostUsd: 0.9 });
-    const ctx = { db: t.db, now: clock.now };
+    const ctx = { db: t.db, now: clock.now, codingWorkers: 'claude_code' as const };
     const input = { ...scope, attemptId: done.attemptId, costUsd: '0.250000', operationId: 'bill-1' };
     expect(await reconcileObservedCost(ctx, input)).toEqual({ reconciled: true, amountUsd: '0.250000' });
     // Replays the receipt.

@@ -14,7 +14,7 @@ import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
-import { loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
+import { inheritedLabels, loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
 import { skillRunnerWaits } from './skills.ts';
 import { serveBundle } from './brain.ts';
 import {
@@ -485,7 +485,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource,
               fellBack: ran ? outcome.fellBack : null, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
               status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
-              validation: body.validation, blockedReason: body.blockedReason,
+              validation: body.validation, blockedReason: body.blockedReason, ...(body.outputSha256 !== undefined ? { outputSha256: body.outputSha256 } : {}),
             };
             const [inserted] = await tx.insert(schema.clientReports).values({
               tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,
@@ -835,6 +835,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         }))].sort();
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
+        // What each task inherits from its predecessors, as the claim judges it: a task downstream of restricted work shows the same lock it routes by.
+        const inheritedByTask = new Map<string, unknown[]>();
+        for (const s of statuses) {
+          const parsed = TaskSpecSchema.safeParse(specOf(s.taskId, s.currentRevision)?.spec);
+          inheritedByTask.set(s.taskId, await inheritedLabels(tx, config.tenantId, projectId, parsed.success ? parsed.data : null));
+        }
         // Derived on read, never recorded: tasks waiting for a runner that can deliver their knowledge packs.
         const skillWaits = await skillRunnerWaits(tx, config.tenantId, projectId, statuses.map((s) => ({ taskId: s.taskId, status: s.status, spec: specOf(s.taskId, s.currentRevision)?.spec })), at);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.
@@ -939,7 +945,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
                 return taskRouteView({
                   spec: parsed.success ? parsed.data : null, projectLabel: routeInputs.projectLabel, brainLabels: routeInputs.brainLabels.get(s.taskId) ?? [],
                   runDefault: spec ? routeInputs.runDefaults.get(spec.runId)?.value ?? null : null, override: routeInputs.overrides.get(s.taskId),
-                  lastObserved: routeInputs.lastObserved.get(s.taskId) ?? null, nanoBudgetChars: config.nanoInputBudgetChars,
+                  lastObserved: routeInputs.lastObserved.get(s.taskId) ?? null, nanoBudgetChars: config.nanoInputBudgetChars, inherited: inheritedByTask.get(s.taskId) ?? [],
                 });
               })(),
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({

@@ -27,6 +27,10 @@ describe('config', () => {
     expect(c.caps).toEqual({ maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 });
     expect(c.host).toBe('127.0.0.1');
     expect(c.mode).toBe('local');
+    // H5/H6: coding workers are off unless the environment turns them on, and nothing else is accepted.
+    expect(c.codingWorkers).toBe('off');
+    expect(loadConfigFromEnv({ ...ENV, SELARIKRU_CODING_WORKERS: 'claude_code' }).codingWorkers).toBe('claude_code');
+    expect(() => loadConfigFromEnv({ ...ENV, SELARIKRU_CODING_WORKERS: 'on' })).toThrow(ConfigError);
   });
 
   it.each([

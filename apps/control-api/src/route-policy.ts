@@ -2,7 +2,8 @@ import {
   RoutePolicyModeSchema, RouteRecordSchema, TaskSpecSchema, effectiveRoutePolicy, routeLockFor, suggestRoute,
   type RouteLock, type RoutePolicyMode, type RouteRecord, type TaskSpec,
 } from '@selarikru/domain';
-import { schema, type Executor } from '@selarikru/persistence';
+import { schema, type Executor, type Tx } from '@selarikru/persistence';
+import { resolveSources } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 
 /**
@@ -28,7 +29,20 @@ export function runRouteDefault(run: { setupSnapshot: Record<string, unknown> | 
 }
 
 /** The labels that decide a task's lock. An unreadable spec contributes `undefined`, which the fold reads as `secret`. */
-export const lockLabels = (projectLabel: unknown, spec: TaskSpec | null, brainLabels: readonly unknown[]): unknown[] => [projectLabel, spec ? spec.classification : undefined, ...brainLabels];
+export const lockLabels = (projectLabel: unknown, spec: TaskSpec | null, brainLabels: readonly unknown[], inherited: readonly unknown[] = []): unknown[] => [projectLabel, spec ? spec.classification : undefined, ...brainLabels, ...inherited];
+
+/**
+ * What a task inherits from its transitive predecessors and their contract artifacts, judged exactly as the claim judges it (`resolveSources`, fail closed): a task
+ * downstream of a restricted one stays locked for routing, the base-file relay and accepting a proposal. Unreadable: secret.
+ */
+export async function inheritedLabels(db: Executor, tenantId: string, projectId: string, spec: TaskSpec | null): Promise<unknown[]> {
+  if (spec === null) return [];
+  try {
+    return [(await resolveSources(db as unknown as Tx, { tenantId, projectId, taskId: spec.taskId }, spec)).routeClassification];
+  } catch {
+    return ['secret'];
+  }
+}
 
 /** What the suggestion measures: the task's own words that a change proposal reads. Paths and file contents are not known here, and the reason says only this. */
 export const estimatedInputChars = (spec: TaskSpec | null): number | null =>
@@ -53,8 +67,10 @@ export function taskRouteView(input: {
   readonly override: { readonly value: RoutePolicyMode | null; readonly revision: number } | undefined;
   readonly lastObserved: RouteRecord | null;
   readonly nanoBudgetChars: number;
+  /** From the task's predecessors (`inheritedLabels`). */
+  readonly inherited?: readonly unknown[];
 }): TaskRouteView {
-  const lock = routeLockFor(lockLabels(input.projectLabel, input.spec, input.brainLabels));
+  const lock = routeLockFor(lockLabels(input.projectLabel, input.spec, input.brainLabels, input.inherited ?? []));
   const override = input.override?.value ?? null;
   const effective = effectiveRoutePolicy({ task: override, run: input.runDefault, lock });
   return {
@@ -129,11 +145,12 @@ export async function loadTaskRoute(db: Executor, tenantId: string, projectId: s
   const spec = parsed.success ? parsed.data : null;
   const inputs = await loadProjectRouteInputs(db, tenantId, projectId, [taskId]);
   const brainLabels = inputs.brainLabels.get(taskId) ?? [];
+  const inherited = await inheritedLabels(db, tenantId, projectId, spec);
   const route = taskRouteView({
     spec, projectLabel: inputs.projectLabel, brainLabels, runDefault: inputs.runDefaults.get(row.runId)?.value ?? null, override: inputs.overrides.get(taskId),
-    lastObserved: inputs.lastObserved.get(taskId) ?? null, nanoBudgetChars,
+    lastObserved: inputs.lastObserved.get(taskId) ?? null, nanoBudgetChars, inherited,
   });
-  const labels = lockLabels(inputs.projectLabel, spec, brainLabels);
+  const labels = lockLabels(inputs.projectLabel, spec, brainLabels, inherited);
   return { runId: row.runId, revision: row.revision, rowRevision: row.rowRevision, spec, lock: routeLockFor(labels), route, labels };
 }
 
@@ -160,7 +177,8 @@ export async function taskRouteLocks(db: Executor, tenantId: string, projectId: 
   for (const id of ids) {
     const row = rows.find((r) => r.taskId === id);
     const parsed = TaskSpecSchema.safeParse(row?.spec);
-    out.set(id, routeLockFor(lockLabels(inputs.projectLabel, parsed.success ? parsed.data : null, inputs.brainLabels.get(id) ?? [])));
+    const spec = parsed.success ? parsed.data : null;
+    out.set(id, routeLockFor(lockLabels(inputs.projectLabel, spec, inputs.brainLabels.get(id) ?? [], await inheritedLabels(db, tenantId, projectId, spec))));
   }
   return out;
 }

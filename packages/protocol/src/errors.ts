@@ -83,7 +83,7 @@ export const ERROR_CODES = [
    * a proposal with no route record of its patch call; a task that is not waiting to start; a proposal already accepted; no proposal for this apply attempt. */
   'proposal_restricted', 'proposal_refused', 'route_record_missing', 'task_not_applicable', 'proposal_already_accepted', 'no_proposal',
   /** Base files for the patch agent: restricted tasks are never served; no runner with the project's checkout answered in time; no such file request. */
-  'files_restricted', 'files_unavailable', 'file_request_not_found',
+  'files_restricted', 'files_unavailable', 'file_request_not_found', 'no_checkout', 'too_many_file_requests',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

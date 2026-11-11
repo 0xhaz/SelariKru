@@ -6,7 +6,7 @@ import {
 } from '@selarikru/view-protocol';
 import { canonicalSha256 } from './canonical.ts';
 import { checkResults, cohortIdFor, manifestConfiguration, orderLabel } from './checks.ts';
-import { parseSlot, startIssues, TRACKS, type Manifest, type StartRecords, type Track } from './manifest.ts';
+import { BENCH_CODING_WORKERS, parseSlot, startIssues, TRACKS, type Manifest, type StartRecords, type Track } from './manifest.ts';
 
 /**
  * Export and report. Export turns raw per-trial records into the results file the web panel reads
@@ -99,6 +99,8 @@ function toRecord(m: Manifest, r: RawRecord): BenchmarkRecord {
       verifierSha: fromManifest.verifierSha, candidateSha: c.candidateSha, harness: fromManifest.harness, harnessVersion: fromManifest.harnessVersion,
       codingModel: fromManifest.codingModel, inferenceDestination: c.inferenceDestination, providerAccountReference: c.providerAccountReference, credentialMode: c.credentialMode, accountTier: c.accountTier, credentialPath: c.credentialPath, agentState: c.agentState,
       cacheCondition: c.cacheCondition, localHost: c.localHost, cloudHost: c.cloudHost,
+      // A worker trial runs Claude Code workers: recorded, since the hackathon build runs none (BENCH_CODING_WORKERS).
+      codingWorkers: r.track === 'workers' ? BENCH_CODING_WORKERS : null,
     },
     assistant: r.assistant, timings: r.timings, resources: r.resources, cost: r.cost, humanMinutes: r.humanMinutes, quality: r.quality,
     operations: r.operations, failures: r.failures, confounders: r.confounders, artifactReferences: r.artifactReferences,

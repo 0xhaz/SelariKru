@@ -1,6 +1,6 @@
 import { AcceptedProposalSchema, checkAcceptedProposal, isApplyAssignment, reproduceProposal, type AcceptedProposal, type CodingWorkers, DeliveredSkillsSchema, PILOT_ROLE_PATHS, SKILL_NOTES_RELATIVE_PATH, SKILL_WORKSPACE_ROOT, verifyDeliveredPack, WORKER_TOOLS, type BrainBundle, type DeliveredSkillPack, restrictedApproval, restrictedDiffReason, restrictedReason, type RestrictedOutcome, type RestrictedReason } from '@selarikru/domain';
-import { mkdir, rm, rmdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, rm, rmdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
 import type { TaskSpec } from '@selarikru/domain';
 import { CLAUDE_MODELS, CLAUDE_PROVIDER_ID, ClaudeHarnessAdapter, type HarnessLauncher } from '@selarikru/harness-claude';
@@ -55,10 +55,10 @@ export interface AttemptDeps {
   /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
   readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
   /**
-   * Which coding workers this runner launches. `off`: only the no-model apply worker; a lease for any model harness is refused before a sandbox exists, so no worker
-   * that calls a model API starts. Absent: `claude_code`, for callers built before the setting; the runner binary always passes its own, which defaults to `off`.
+   * Which coding workers this runner launches. Required, so no caller launches model workers by leaving it out. `off` (the binary's default): only the no-model apply
+   * worker; a lease for any model harness is refused before a sandbox exists, so no worker that calls a model API starts.
    */
-  readonly codingWorkers?: CodingWorkers;
+  readonly codingWorkers: CodingWorkers;
 }
 
 export interface AttemptReport {
@@ -386,7 +386,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The apply worker (H5) runs no model: it writes the accepted results and runs the project's own build and tests. Every other worker is a model harness, which
     // this runner launches only when coding workers are on.
     const applying = isApplyAssignment(assignment);
-    if (!applying && (deps.codingWorkers ?? 'claude_code') === 'off') return await finish('blocked', why('coding_workers_off', `coding_workers_off: ${assignment.provider}/${assignment.model} calls a model API, and this runner launches no such worker`), null);
+    if (!applying && deps.codingWorkers !== 'claude_code') return await finish('blocked', why('coding_workers_off', `coding_workers_off: ${assignment.provider}/${assignment.model} calls a model API, and this runner launches no such worker`), null);
     const harnessEntry = applying ? null : (deps.harnesses ?? DEFAULT_HARNESSES).find((h) => h.provider === assignment.provider);
     if (harnessEntry === undefined) return await finish('blocked', why('unsupported_provider', `unsupported_provider:${assignment.provider}/${assignment.model}`), null);
     if (harnessEntry !== null && !harnessEntry.models.includes(assignment.model)) return await finish('blocked', why('unsupported_model', `unsupported_model:${assignment.provider}/${assignment.model}`), null);
@@ -504,7 +504,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
 
     // An apply attempt (H5): the accepted proposal, fetched with this lease and checked again here (ids, hashes, paths, sizes), then reproduced from the base files read with
-    // git, and only then its results written: never the diff. Any mismatch writes nothing and starts no sandbox.
+    // git. Any mismatch starts no sandbox, and ends the attempt `blocked` with its reason: it is the proposal's fault, so no repair is spent and the owner proposes again.
+    // The results (never the diff) are written only after the setup ack, so the toolchain is set up on the base.
     let accepted: AcceptedProposal | null = null;
     if (applying) {
       if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
@@ -518,12 +519,12 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
         return await finish('infrastructure_failed', why('provisioning_failed', `provisioning_failed: the accepted proposal could not be fetched: ${err instanceof Error ? err.message : 'error'}`), null);
       }
       const parsed = AcceptedProposalSchema.safeParse(raw);
-      if (!parsed.success) return await finish('failed', why('proposal_invalid', 'proposal_invalid: the accepted proposal could not be read'), null);
+      if (!parsed.success) return await finish('blocked', why('proposal_invalid', 'proposal_invalid: the accepted proposal could not be read'), null);
       const p = parsed.data;
       const checked = checkAcceptedProposal(p, { taskId: task.taskId, revision: task.revision, baseSha: task.baseSha, allowedPaths: allowed.normalized });
-      if (!checked.ok) return await finish('failed', why('proposal_invalid', `proposal_invalid: ${checked.code}`), null);
+      if (!checked.ok) return await finish('blocked', why('proposal_invalid', `proposal_invalid: ${checked.code}`), null);
       if (lease.proposal === undefined || p.proposalId !== lease.proposal.proposalId || checked.digest !== lease.proposal.digest) {
-        return await finish('failed', why('proposal_invalid', 'proposal_invalid: the fetched proposal is not the one the lease names'), null);
+        return await finish('blocked', why('proposal_invalid', 'proposal_invalid: the fetched proposal is not the one the lease names'), null);
       }
       const readBase = gitBaseReader(repo, task.baseSha);
       const base = new Map<string, string>();
@@ -532,14 +533,15 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
         if (bytes === null) continue;
         const text = bytes.toString('utf8');
         // A file that is not UTF-8 text cannot be the base a text patch was made against.
-        if (bytes.includes(0) || !Buffer.from(text, 'utf8').equals(bytes)) return await finish('failed', why('proposal_base_mismatch', `proposal_base_mismatch: ${r.path} is not text at the base`), null);
+        if (bytes.includes(0) || !Buffer.from(text, 'utf8').equals(bytes)) return await finish('blocked', why('proposal_base_mismatch', `proposal_base_mismatch: ${r.path} is not text at the base`), null);
         base.set(r.path, text);
       }
-      if (!reproduceProposal(p, base, allowed.normalized).ok) return await finish('failed', why('proposal_base_mismatch', 'proposal_base_mismatch: the diff applied to the base files does not give the accepted results'), null);
-      const written = await writeCheckedFiles(workspace, p.results.map((r) => ({ path: r.path, bytes: r.content === null ? null : Buffer.from(r.content, 'utf8'), mode: 'keep' as const })));
-      if (!written.ok) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${written.detail}`), null);
+      if (!reproduceProposal(p, base, allowed.normalized).ok) return await finish('blocked', why('proposal_base_mismatch', 'proposal_base_mismatch: the diff applied to the base files does not give the accepted results'), null);
+      // Every target is checked now, before any sandbox exists, so an unsafe path starts nothing; the write itself waits for the setup ack.
+      const safe = await checkWritable(workspace, p.results.map((r) => r.path));
+      if (safe !== null) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${safe}`), null);
       accepted = p;
-      log(`accepted proposal ${p.proposalId} applied: ${p.results.length} file(s), digest ${checked.digest}`);
+      log(`accepted proposal ${p.proposalId} checked: ${p.results.length} file(s), digest ${checked.digest}`);
     }
 
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
@@ -639,6 +641,20 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     }
     // The apply worker: the project's own build and test scripts, in the sandbox, one after the other. No model and no harness.
     let commandFault: Why<'failed'> | null = null;
+    // The accepted change set, pinned right after the results are written: what is published, whatever else a build leaves behind.
+    let pinned: FileChange[] | null = null;
+    if (accepted !== null) {
+      const written = await writeCheckedFiles(workspace, accepted.results.map((r) => ({ path: r.path, bytes: r.content === null ? null : Buffer.from(r.content, 'utf8'), mode: 'keep' as const })));
+      if (!written.ok) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${written.detail}`), null);
+      try {
+        pinned = await (deps.computeChanges ?? computeChanges)(baseline, workspace, baseIgnores);
+      } catch (err) {
+        return await finish('failed', why('diff_failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`), null);
+      }
+      const off = changesMismatch(pinned, accepted);
+      if (off !== null) return await finish('blocked', why('proposal_changes_mismatch', `proposal_changes_mismatch: ${off}`), null);
+      log(`accepted proposal ${accepted.proposalId} applied: ${accepted.results.length} file(s)`);
+    }
     if (applying) {
       initSeen = true;
       const ran = await runProjectChecks(launcher, lease.attemptId, workspace, toolchainSpec !== null ? await readScripts(repo, task.baseSha) : null, log, aborted);
@@ -796,10 +812,13 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       return await finish('failed', why('diff_failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`), cost);
     }
     if (changes.some((c) => c.path === RESERVED_DIR || c.path.startsWith(`${RESERVED_DIR}/`))) return await finish('failed', why('reserved_path_changed', 'a change touches the reserved .selarikru directory'), cost);
-    // An apply attempt publishes exactly what the owner accepted: the same paths, the same contents, nothing a build left behind. So the diff a review reads is this change set.
-    if (accepted !== null) {
-      const off = changesMismatch(changes, accepted);
-      if (off !== null) return await finish('failed', why('proposal_changes_mismatch', `proposal_changes_mismatch: ${off}`), cost);
+    // An apply attempt publishes exactly what the owner accepted: the change set pinned after the write. The build and tests may leave other output, which is not the
+    // change; but an accepted path they changed is.
+    if (accepted !== null && pinned !== null) {
+      const now = new Map(changes.map((c) => [c.path, c]));
+      const moved = pinned.filter((c) => { const n = now.get(c.path); return n === undefined || n.status !== c.status || n.kind !== c.kind || n.sha256 !== c.sha256; });
+      if (moved.length > 0) return await finish('blocked', why('proposal_changes_mismatch', `proposal_changes_mismatch: ${moved.length} accepted file(s) changed during build or test`), cost);
+      changes = pinned;
     }
     // A pack is never changed by the worker that reads it, whatever the allowed paths say.
     if (packs.length > 0 && changes.some((c) => c.path.startsWith(`${SKILL_WORKSPACE_ROOT}/`))) return await finish('failed', why('skill_pack_changed', `skill_pack_changed: ${changes.filter((c) => c.path.startsWith(`${SKILL_WORKSPACE_ROOT}/`)).length} change(s) under ${SKILL_WORKSPACE_ROOT}`), cost);
@@ -906,4 +925,21 @@ export function changesMismatch(changes: readonly FileChange[], accepted: Pick<A
   }
   const extra = changes.filter((c) => !want.has(c.path));
   return extra.length > 0 ? `${extra.length} change(s) the proposal does not contain` : null;
+}
+
+/** Why one of these paths cannot be written in the workspace without going through a link or over a non-regular file, or null. The same guard the writer applies. */
+async function checkWritable(workspace: string, paths: readonly string[]): Promise<string | null> {
+  const root = resolve(workspace);
+  for (const path of paths) {
+    const segs = path.split('/');
+    if (segs.some((x) => x === '' || x === '.' || x === '..') || path.startsWith('/')) return `${path} is not a plain path`;
+    for (let i = 1; i < segs.length; i++) {
+      const st = await lstat(join(root, ...segs.slice(0, i))).catch(() => null);
+      if (st?.isSymbolicLink()) return `${path} would be written through a link`;
+      if (st !== null && !st.isDirectory()) return `${path} has a file where a directory is needed`;
+    }
+    const existing = await lstat(join(root, path)).catch(() => null);
+    if (existing !== null && !existing.isFile()) return `${path} is not a regular file in the base`;
+  }
+  return null;
 }

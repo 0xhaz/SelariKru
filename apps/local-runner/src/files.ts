@@ -14,27 +14,39 @@ const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOS
 /** How many paths one answer lists at most, served or not. */
 const MAX_LISTED = 200;
 
-/** Regular files under `prefix` at `baseSha`, sorted. Links and submodules are not files. */
-async function listFiles(repo: string, baseSha: string, prefix: string): Promise<string[]> {
+/** Regular files under `prefix` at `baseSha` with their sizes, sorted. Links and submodules are not files. The path is literal: no glob or magic pathspec applies. */
+export async function listEntries(repo: string, baseSha: string, prefix: string): Promise<{ path: string; size: number }[]> {
   try {
-    const { stdout } = await execFileP('git', ['-C', repo, 'ls-tree', '-r', '-z', '--full-tree', baseSha, '--', prefix], { env: GIT_ENV, maxBuffer: 8 * 1024 * 1024 });
+    const { stdout } = await execFileP('git', ['--literal-pathspecs', '-C', repo, 'ls-tree', '-r', '-l', '-z', '--full-tree', baseSha, '--', prefix], { env: GIT_ENV, maxBuffer: 8 * 1024 * 1024 });
     return stdout.split('\0').filter(Boolean).flatMap((line) => {
       const tab = line.indexOf('\t');
-      const [mode, type] = line.slice(0, tab).split(' ');
-      return type === 'blob' && (mode === '100644' || mode === '100755') ? [line.slice(tab + 1)] : [];
-    }).sort();
+      const [mode, type, , size] = line.slice(0, tab).trim().split(/\s+/);
+      return type === 'blob' && (mode === '100644' || mode === '100755') ? [{ path: line.slice(tab + 1), size: Number(size) || 0 }] : [];
+    }).sort((a, b) => (a.path < b.path ? -1 : 1));
   } catch {
     return [];
   }
 }
+const listFiles = async (repo: string, baseSha: string, prefix: string): Promise<string[]> => (await listEntries(repo, baseSha, prefix)).map((e) => e.path);
 
 export async function answerFileRequest(repo: string | undefined, req: BaseFileRequest): Promise<BaseFileAnswer> {
   const files: { path: string; content: string }[] = [];
   const omitted: { path: string; reason: BaseFileOmission }[] = [];
   const omit = (path: string, reason: BaseFileOmission) => { if (omitted.length < MAX_LISTED) omitted.push({ path, reason }); };
-  if (repo === undefined) {
-    for (const p of req.paths) omit(p, 'not_found');
-    return { requestId: req.requestId, files, omitted };
+  // No copy of the project here: said so, so the browser can say a proposal can only add files.
+  if (repo === undefined) return { requestId: req.requestId, files, omitted, noCheckout: true };
+  if (req.mode === 'list') {
+    const entries: { path: string; size: number }[] = [];
+    let truncated = false;
+    for (const prefix of req.paths) {
+      if (baseFileIssue(prefix, req.allowedPaths) !== null) continue;
+      for (const e of await listEntries(repo, req.baseSha, prefix)) {
+        if (baseFileIssue(e.path, req.allowedPaths) !== null || entries.some((x) => x.path === e.path)) continue;
+        if (entries.length >= BASE_FILE_LIMITS.listEntries) { truncated = true; break; }
+        entries.push(e);
+      }
+    }
+    return { requestId: req.requestId, files, omitted, entries, truncated };
   }
   const read = gitBaseReader(repo, req.baseSha);
   const seen = new Set<string>();

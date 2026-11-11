@@ -23,15 +23,15 @@ const proposal = (over: Partial<AcceptedProposal> = {}): AcceptedProposal => ({
   ...over,
 });
 const spec = () => specFor('t1', { baseSha: BASE, allowedPaths: ['src'] });
-const sched = (codingWorkers?: 'off' | 'claude_code'): Scheduler => createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG, ...(codingWorkers ? { codingWorkers } : {}) });
-const ctx = () => ({ db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG });
+const sched = (codingWorkers?: 'off' | 'claude_code'): Scheduler => createScheduler({ db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG, codingWorkers: codingWorkers ?? 'claude_code' });
+const ctx = () => ({ db: t.db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG, codingWorkers: 'off' as const });
 const key = { tenantId: 'tenant_a', projectId: 'proj_a', taskId: 't1' };
 const applyRunner = (id: string) => ({ ...runner(id), harnesses: [...(runner(id).harnesses ?? []), APPLY_HARNESS_REPORT] });
 
 describe('accepting a patch proposal', () => {
   it('records the proposal and an owner event with ids and hashes only', async () => {
     await seedTask(t.db, spec());
-    const r = await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'owner_1' });
+    const r = await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'owner_1', idempotencyKey: 'k' });
     expect(r).toMatchObject({ ok: true, value: { proposalId: 'req_1', state: 'accepted', fileCount: 1 } });
     expect(await eventTypes(t.db)).toEqual(['proposal.accepted']);
     const [ev] = await t.db.execute(sql`SELECT payload::text AS p, actor_kind AS a FROM events`);
@@ -41,23 +41,23 @@ describe('accepting a patch proposal', () => {
 
   it('re-checks the proposal against the stored task: a mismatched base, a stale revision and an outside path are refused', async () => {
     await seedTask(t.db, spec());
-    expect(await acceptProposal(ctx(), key, { proposal: proposal({ baseSha: 'd'.repeat(40) }), acceptedBy: 'o' })).toMatchObject({ ok: false, error: { reason: 'base_mismatch' } });
-    expect(await acceptProposal(ctx(), key, { proposal: proposal({ taskRevision: 2 }), acceptedBy: 'o' })).toMatchObject({ ok: false, error: { reason: 'stale_revision' } });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal({ baseSha: 'd'.repeat(40) }), acceptedBy: 'o', idempotencyKey: 'k' })).toMatchObject({ ok: false, error: { reason: 'base_mismatch' } });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal({ taskRevision: 2 }), acceptedBy: 'o', idempotencyKey: 'k' })).toMatchObject({ ok: false, error: { reason: 'stale_revision' } });
     const outside = proposal({ diff: '--- /dev/null\n+++ b/docs/x.md\n@@ -0,0 +1 @@\n+x\n', results: [{ path: 'docs/x.md', sha256: sha256Hex('x\n'), content: 'x\n' }] });
-    expect(await acceptProposal(ctx(), key, { proposal: outside, acceptedBy: 'o' })).toMatchObject({ ok: false, error: { reason: 'path_outside_allowed' } });
+    expect(await acceptProposal(ctx(), key, { proposal: outside, acceptedBy: 'o', idempotencyKey: 'k' })).toMatchObject({ ok: false, error: { reason: 'path_outside_allowed' } });
     expect(await countRows(t.db, 'accepted_proposals')).toBe(0);
     expect(await eventTypes(t.db)).toEqual([]);
   });
 
   it('refuses a task that is not waiting to start', async () => {
     await seedTask(t.db, spec(), 'verified');
-    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o' })).toMatchObject({ ok: false, error: { reason: 'task_not_applicable' } });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k' })).toMatchObject({ ok: false, error: { reason: 'task_not_applicable' } });
   });
 
   it('a later accept replaces one still waiting', async () => {
     await seedTask(t.db, spec());
-    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o' });
-    await acceptProposal(ctx(), key, { proposal: proposal({ proposalId: 'req_2' }), acceptedBy: 'o' });
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k' });
+    await acceptProposal(ctx(), key, { proposal: proposal({ proposalId: 'req_2' }), acceptedBy: 'o', idempotencyKey: 'k' });
     const rows = await t.db.execute(sql`SELECT proposal_id, state FROM accepted_proposals ORDER BY proposal_id`);
     expect(rows.map((r) => [r['proposal_id'], r['state']])).toEqual([['req_1', 'superseded'], ['req_2', 'accepted']]);
   });
@@ -74,7 +74,7 @@ describe('claiming an apply attempt', () => {
 
   it('an accepted proposal is claimed by the apply worker: no model, route none, the proposal named on the lease', async () => {
     await seedTask(t.db, spec());
-    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o' });
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k' });
     const out = await sched('off').tryClaim(applyRunner('r1'), CAPS);
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -92,7 +92,7 @@ describe('claiming an apply attempt', () => {
 
   it('a runner that cannot apply proposals is not given one, and nothing is recorded about the task', async () => {
     await seedTask(t.db, spec());
-    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o' });
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k' });
     const out = await sched('off').tryClaim(runner('r1'), CAPS);
     expect(out).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'apply_runner_update_required' }] });
     expect(await eventTypes(t.db)).toEqual(['proposal.accepted']);
@@ -102,5 +102,83 @@ describe('claiming an apply attempt', () => {
     await seedTask(t.db, spec());
     const out = await sched('claude_code').tryClaim(runner('r1'), CAPS);
     expect(out.ok && out.lease.assignment?.provider).toBe('anthropic');
+  });
+});
+
+describe('fix round 1: an apply that does not stand, re-accepting, and the hold', () => {
+  const claimApply = async (s: Scheduler) => {
+    const out = await s.tryClaim(applyRunner('r1'), CAPS);
+    if (!out.ok) throw new Error(`no claim: ${out.reason} ${JSON.stringify(out.skipped)}`);
+    return out.lease;
+  };
+  const row = async () => (await t.db.execute(sql`SELECT state, failure_reason, round, attempt_id FROM accepted_proposals WHERE proposal_id = 'req_1'`))[0]!;
+
+  it('a failed apply moves the proposal to failed with its reason; the same key reads that state, a new key queues it again, and the next claim applies it', async () => {
+    await seedTask(t.db, spec());
+    const s = sched('off');
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' })).toMatchObject({ ok: true, value: { state: 'accepted', round: 1 } });
+    const lease = await claimApply(s);
+    expect((await s.publishResult(lease, { outcome: 'failed', reason: 'tests_failed: pnpm run test exited with code 1' })).ok).toBe(true);
+    expect(await row()).toMatchObject({ state: 'failed', failure_reason: 'tests_failed: pnpm run test exited with code 1' });
+    const before = (await eventTypes(t.db)).length;
+    // The same key never replays the old receipt: it reads the proposal as it is now.
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' })).toMatchObject({ ok: true, value: { state: 'failed', lastFailure: 'tests_failed: pnpm run test exited with code 1', round: 1 } });
+    expect((await eventTypes(t.db)).length).toBe(before);
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k2' })).toMatchObject({ ok: true, value: { state: 'accepted', round: 2, lastFailure: null } });
+    const second = await claimApply(s);
+    expect(second.attemptId).not.toBe(lease.attemptId);
+    expect(await row()).toMatchObject({ state: 'applying', attempt_id: second.attemptId, round: 2 });
+  });
+
+  it('a waiting or applying proposal is not queued twice', async () => {
+    await seedTask(t.db, spec());
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k2' })).toMatchObject({ ok: false, error: { reason: 'proposal_already_accepted', state: 'accepted' } });
+  });
+
+  it('a completed apply marks the proposal applied', async () => {
+    await seedTask(t.db, spec());
+    const s = sched('off');
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    const lease = await claimApply(s);
+    await s.publishResult(lease, { outcome: 'completed', changeManifestSha256: 'a'.repeat(64) });
+    expect(await row()).toMatchObject({ state: 'applied' });
+  });
+
+  it('an input error blocks the task with its reason and uses no repair; accepting a new proposal makes it ready and applies it', async () => {
+    await seedTask(t.db, spec());
+    const s = sched('off');
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    const lease = await claimApply(s);
+    await s.publishResult(lease, { outcome: 'blocked', reason: 'proposal_base_mismatch: the diff applied to the base files does not give the accepted results' });
+    expect((await statusOf(t.db, 't1')).status).toBe('blocked');
+    expect(await row()).toMatchObject({ state: 'failed' });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal({ proposalId: 'req_2' }), acceptedBy: 'o', idempotencyKey: 'k3' })).toMatchObject({ ok: true, value: { state: 'accepted' } });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    expect((await claimApply(s)).proposal?.proposalId).toBe('req_2');
+  });
+
+  it('a blocked task whose block is not an apply input error takes no proposal', async () => {
+    await seedTask(t.db, spec(), 'blocked');
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' })).toMatchObject({ ok: false, error: { reason: 'task_not_applicable' } });
+  });
+
+  it('a no-model apply holds no model budget', async () => {
+    await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'], maxCostUsd: 5 }));
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    const lease = await claimApply(sched('off'));
+    const [r] = await t.db.execute(sql`SELECT amount_usd::float AS amount FROM budget_reservations WHERE detail ->> 'attemptId' = ${lease.attemptId}`);
+    expect(Number(r!['amount'])).toBe(0);
+  });
+
+  it('with Claude Code on, a task whose last apply failed does not fall through to a model worker: it says why and waits for the owner', async () => {
+    await seedTask(t.db, spec());
+    const s = sched('claude_code');
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    const lease = await claimApply(s);
+    await s.publishResult(lease, { outcome: 'failed', reason: 'build_failed: pnpm run build exited with code 2' });
+    expect((await statusOf(t.db, 't1')).status).toBe('ready');
+    const out = await s.tryClaim(applyRunner('r1'), CAPS);
+    expect(out).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'last_apply_failed' }] });
   });
 });

@@ -213,7 +213,7 @@ describe('Project Brain: the task context bundle at claim', () => {
   });
 
   it('restricted sources are omitted for a cloud destination', async () => {
-    const cloud = makeHarness(t, {}, CLOUD_POLICY as Policy, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date('2026-11-08T06:00:00.000Z'), policy: CLOUD_POLICY as Policy }) });
+    const cloud = makeHarness(t, {}, CLOUD_POLICY as Policy, { scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: () => new Date('2026-11-08T06:00:00.000Z'), policy: CLOUD_POLICY as Policy }) });
     await cloud.app.ready();
     try {
       await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'C1', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);
@@ -409,7 +409,7 @@ describe('Project Brain: fix round 1', () => {
 
   it('an approval resolved through its route is compiled before the answer is sent, with no owner read of the Brain', async () => {
     const policy = { ...(CLOUD_POLICY as Policy), operations: { start_cloud_worker: 'require_approval' } } as Policy;
-    const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date('2026-11-08T06:00:00.000Z'), policy });
+    const scheduler = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: () => new Date('2026-11-08T06:00:00.000Z'), policy });
     const app = makeHarness(t, {}, policy, { scheduler });
     await app.app.ready();
     try {

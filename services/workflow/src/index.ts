@@ -7,7 +7,7 @@ import type { Scheduler, SchedulerContext } from './types.ts';
 
 export * from './types.ts';
 export { asClaimReason, classifyClaimReason, CLAIM_REASONS, type ClaimReason, type ClaimReasonCode } from './claim-reasons.ts';
-export { claimNext, tryClaim } from './claim.ts';
+export { claimNext, resolveSources, tryClaim } from './claim.ts';
 export { holdMultiplier, modelOverRunBudget, planCapMicros, roleAttemptShares, sizeCapMicros, assignmentRevision, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunnerReports, resolveAssignment, routeRefusal, validateSelection, worstCaseHold, type ResolvedAssignment, type SelectionVerdict, type WorstCaseHold } from './assignment.ts';
 export { INFRASTRUCTURE_REASON_PREFIX, heartbeat, publishResult, leaseHealth, leaseDeadline, LEASE_EXPIRY_SECONDS, LEASE_SUSPECT_SECONDS, HEARTBEAT_INTERVAL_SECONDS, type LeaseHealth } from './lease.ts';
 export { expireLeases } from './reconcile.ts';
@@ -39,4 +39,4 @@ export { cancelRequestReason } from './cancel.ts';
 export { buildTaskState, loadAttempts } from './taskstate.ts';
 export { bindingOf, loadBindings, loadKnownVersions, resolveTaskSkills } from './skills.ts';
 export { assessHandover, closeHandovers, CLOUD_RUNNER_FRESH_SECONDS, decideHandover, openHandover, recordCheckpoint, requestHandover, reviewHandovers, successorCheckpoint, VISIBLE_HOLDS, type CheckpointCheck, type CheckpointReceipt, type CheckpointRow, type HandoverAssessment, type HandoverEstimate, type HandoverFigure, type HandoverReceipt, type HandoverRefusal, type LeaseHandover } from './handover.ts';
-export { acceptProposal, appliedProposalFor, APPLY_ASSIGNMENT, fetchProposalForLease, markApplying, pendingProposal, type AcceptInput, type AcceptReceipt, type AcceptRefusal } from './proposal.ts';
+export { acceptProposal, appliedProposalFor, APPLY_ASSIGNMENT, fetchProposalForLease, markApplying, pendingProposal, proposalAttemptEnded, proposalStateFor, PROPOSAL_STATES, type AcceptInput, type AcceptReceipt, type AcceptRefusal, type ProposalState } from './proposal.ts';

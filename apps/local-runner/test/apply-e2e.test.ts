@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { checkPatch, sha256Hex, type AcceptedProposal } from '@selarikru/domain';
+import { checkPatch, selectFilesByName, sha256Hex, type AcceptedProposal } from '@selarikru/domain';
 import { buildApp } from '@selarikru/control-api';
 import { OWNER_TOKEN, PROJECT, enrolRunner, fakeVerifier, resetDb, seedTask, setupTestDb, specFor, testConfig, type TestDb } from '@selarikru/control-api/test-helpers';
 import { applyVerification, createScheduler } from '@selarikru/workflow';
@@ -69,8 +69,15 @@ describe('a proposal accepted in the browser becomes a verified candidate, with 
       running = loop.run(stop.signal);
       const owner = { authorization: `Bearer ${OWNER_TOKEN}` };
 
-      // 1. The patch agent's input: the task's files at its base, read by the runner with git and relayed. Nothing is kept.
-      const files = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/files`, headers: owner, payload: { paths: ['src'] } });
+      // 1. The patch agent's input, in two steps: list what is under the allowed paths (paths and sizes), choose by name, then read only those, by the runner with git,
+      // relayed. Nothing is kept.
+      const listed = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/files/list`, headers: owner, payload: {} });
+      expect(listed.statusCode).toBe(200);
+      const entries = (listed.json() as { entries: { path: string; size: number }[] }).entries;
+      expect(entries).toEqual([{ path: 'src/app.ts', size: 20 }]);
+      const chosen = selectFilesByName(entries, ['Change the app constant']);
+      expect(chosen).toEqual(['src/app.ts']);
+      const files = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/files`, headers: owner, payload: { paths: chosen } });
       expect(files.statusCode).toBe(200);
       const given = (files.json() as { files: { path: string; content: string }[]; baseSha: string }).files;
       expect(given).toEqual([{ path: 'src/app.ts', content: 'export const a = 1;\n' }]);
@@ -80,12 +87,12 @@ describe('a proposal accepted in the browser becomes a verified candidate, with 
       expect(checked.ok).toBe(true);
       if (!checked.ok) return;
       const proposal: AcceptedProposal = {
-        proposalId: 'req_e2e', taskId: 'T1', taskRevision: 1, baseSha: w.sha, routeRecordId: 'rr_e2e', diff: DIFF,
+        proposalId: 'req_e2e', taskId: 'T1', taskRevision: 1, baseSha: w.sha, routeRecordId: 'req_e2e', diff: DIFF,
         results: [...checked.results].map(([path, content]) => ({ path, sha256: content === null ? null : sha256Hex(content), content })),
       };
       // The browser's route record of the patch call (route.report).
       await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by)
-        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'rr_e2e', stepKind: 'patch', status: 'ok' })}::jsonb, 'owner')`);
+        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_e2e', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(DIFF) })}::jsonb, 'owner')`);
 
       // 3. Accept.
       const accepted = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, headers: owner, payload: { idempotencyKey: 'e2e', proposal } });

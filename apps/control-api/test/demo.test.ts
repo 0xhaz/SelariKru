@@ -107,7 +107,7 @@ describe.skipIf(!external && !hasCli)('demo smoke (Auth Emulator)', () => {
     const policy = loadPolicyFile(files.policyFile);
     const app = buildApp({
       config: testConfig({ tenantId: 'tenant_local', ownerUid: DEMO.ownerUid }), db: t.db, verifier: createFirebaseVerifier({ projectId: PROJECT_ID }),
-      now: clock.now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), policy, planConfig: loadPlanConfigFile(files.planConfigFile),
+      now: clock.now, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), policy, planConfig: loadPlanConfigFile(files.planConfigFile),
     });
     const headers = { authorization: `Bearer ${idToken}` };
     const review = await app.inject({

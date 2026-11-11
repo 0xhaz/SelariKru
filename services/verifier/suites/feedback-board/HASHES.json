@@ -2,10 +2,10 @@
   "description": "verifierSha256 = sha256 over the other verifier hashes: manifest.json, the suite directory (excluding HASHES.json), services/verifier/src, the Dockerfile, package.json and the root pnpm-lock.yaml. The runner refuses to run if any differs. contractSha256 = tree hash of examples/feedback-board-starter/contract.",
   "manifestSha256": "4e84dcf5cdc06b0111c73832aa1154120e3a720041835e48e1e7d3b9720cb201",
   "suiteSha256": "ae1943832872744de49a7b4fc8dd0d9636aefe4e8e56a8a5c2e50974fbff806e",
-  "runnerSha256": "7db1d43871af53af0159518d66813f0a7e04295ca67b83782930e04e68144ca9",
+  "runnerSha256": "51483a8cd80683d24b7e209d7530c5cb0e7677eafdd34073848082ef9574a815",
   "dockerfileSha256": "2b0fbbd0ffd07db965f7421445c0c32c8a876b937323ed3e7bd4962e84da6201",
   "packageJsonSha256": "98c8fcc3c42b7316c782a65e06282a254585e6cc8ea717869a82b905a3c51d39",
   "lockfileSha256": "5448781579ae36917c65c94bb212791509c2fbd69ae3aedc0af23c88b41ca9ec",
-  "verifierSha256": "235c52e21821f09c40c9faf9422947cc3b8d240df443b690559f18232f285369",
+  "verifierSha256": "bc6be7945410b79abf82368dd6e0a47e8999b7fcff3b765a497bb3452c7a0cd0",
   "contractSha256": "e8d35bb31fd93c8912ca8898403d601d2f7022968ccc95a4aa860b069e8929d5"
 }

@@ -7,12 +7,13 @@ import { FakeGitHub } from '@selarikru/integrations-github/testing';
 import { schema } from '@selarikru/persistence';
 import { TEST_DATABASE_URL } from '@selarikru/workflow/test-helpers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { evaluate, parsePolicy } from '@selarikru/policy';
 import { ProjectPlanSettingsSchema } from '../src/index.ts';
 import { readRealRunConfig, realOwnerAccount, seedRealRun, writeRealRunFiles } from '../src/real-run.ts';
 import { githubOptionsFromEnv, startServer, type RunningServer } from '../src/server.ts';
-import { OWNER_TOKEN, RUN, fakeVerifier, resetDb, setupTestDb, testConfig, type TestDb } from './helpers.ts';
+import { OWNER_TOKEN, RUN, TENANT, TEST_RUNNER_REPORT, fakeVerifier, resetDb, seedTask, setupTestDb, specFor, testConfig, type TestDb } from './helpers.ts';
+import { loadConfigFromEnv } from '../src/config.ts';
 
 let t: TestDb;
 let root: string;
@@ -56,6 +57,31 @@ describe('the pull request route through startServer', () => {
     await withServer({ SELARIKRU_SOURCE_REPO: repo, SELARIKRU_ARTIFACT_DIR: join(root, 'artifacts') }, async (address) => {
       expect((await openPr(address)).status).toBe(404);
     });
+  });
+});
+
+describe('coding workers through startServer (H5/H6)', () => {
+  it('the documented environment, with no SELARIKRU_CODING_WORKERS, dispatches no model worker: a ready task waits for an accepted proposal', async () => {
+    await resetDb(t.db);
+    const config = loadConfigFromEnv({
+      SELARIKRU_TENANT_ID: TENANT, SELARIKRU_OWNER_UID: 'owner_uid_1', FIREBASE_PROJECT_ID: 'selarikru', SELARIKRU_API_PORT: '0', SELARIKRU_MAX_CONCURRENT_TOTAL: '2', SELARIKRU_ATTEMPT_TIMEOUT_SECONDS: '1800',
+      SELARIKRU_MAX_INFRA_RETRIES: '3', SELARIKRU_INFRA_RETRY_BACKOFF_SECONDS: '10', SELARIKRU_INFRA_RETRY_BACKOFF_MAX_SECONDS: '40', SELARIKRU_PAIRING_CODE_TTL_SECONDS: '600', SELARIKRU_EXPIRE_LEASES_INTERVAL_MS: '60000',
+    });
+    expect(config.codingWorkers).toBe('off');
+    await seedTask(t.db, specFor('t1'));
+    const server: RunningServer = await startServer({ config, databaseUrl: `${TEST_DATABASE_URL}?search_path=${t.schema}`, verifier: fakeVerifier });
+    try {
+      const json = async (path: string, body: unknown, token: string) => (await (await fetch(`${server.address}${path}`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()) as Record<string, any>;
+      const code = await json('/v1/runners/pairing-codes', { location: 'local' }, OWNER_TOKEN);
+      const enrolled = await json('/v1/runners/enroll', { harnesses: TEST_RUNNER_REPORT }, code['pairingCode']);
+      const claim = await json('/v1/runners/claim', { harnesses: TEST_RUNNER_REPORT, projects: ['proj_a'] }, enrolled['token']);
+      expect(claim['lease']).toBeNull();
+      expect(claim['skipped']).toEqual([{ taskId: 't1', reason: 'awaiting_accepted_proposal' }]);
+    } finally {
+      await server.stop();
+      // The enrolment's harness report would read as an installed harness to the tests after this one.
+      await t.db.execute(sql`DELETE FROM runners`);
+    }
   });
 });
 

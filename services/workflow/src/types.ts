@@ -52,10 +52,10 @@ export interface SchedulerContext {
   /** How long an approval request stays grantable. Default `APPROVAL_TTL_SECONDS`. */
   readonly approvalTtlSeconds?: number | undefined;
   /**
-   * Which coding workers may be dispatched to. `off`: only the no-model apply worker, so a task waits for an accepted proposal. Absent: `claude_code`, for callers
-   * built before the setting; the control API always passes its configuration, which defaults to `off`.
+   * Which coding workers may be dispatched to. Required, so no caller gets model workers by leaving it out. `off`, the hackathon build: only the no-model apply worker,
+   * and a task waits for an accepted proposal. `claude_code`: model workers too.
    */
-  readonly codingWorkers?: CodingWorkers | undefined;
+  readonly codingWorkers: CodingWorkers;
 }
 
 /** What a worker holds. `leaseToken` is a credential: it never appears in events or logs. */

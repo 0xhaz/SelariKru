@@ -5,6 +5,7 @@ import type { HarnessCatalog, RunnerHarnessReport } from '@selarikru/protocol';
 import { createDb, migrate, schema, sql, type Db } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
 import { createScheduler } from '@selarikru/workflow';
+import { BENCH_CODING_WORKERS } from '../manifest.ts';
 import { startAssemblyDriver, type AssemblyDriver } from '../../../../services/verifier/src/assembly-driver.ts';
 import { startVerificationDriver, type VerificationDriver } from '../../../../services/verifier/src/driver.ts';
 import type { VerifierRunner } from '../../../../services/verifier/src/service.ts';
@@ -170,9 +171,11 @@ async function stackOn(fresh: FreshSchema, o: StackOptions): Promise<Stack> {
     mode: 'local', host: '127.0.0.1', port: 0, tenantId: BENCH_TENANT, ownerUid, firebaseProjectId: 'selarikru', allowedOrigins: [],
     caps: { maxConcurrentTotal: 2, attemptTimeoutSeconds: o.attemptTimeoutSeconds, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 },
     pairingCodeTtlSeconds: 600, reclassificationGrantTtlSeconds: 86_400, expireLeasesIntervalMs: 1000, sse: { pollIntervalMs: 500, keepAliveMs: 15_000 },
+    // Benchmarks measure coding workers, so they run with Claude Code on: outside the hackathon's AI path (Firebase AI Logic).
+    codingWorkers: BENCH_CODING_WORKERS,
   });
   const verifier = { async verifyToken(token: string) { if (token === ownerToken) return { uid: ownerUid }; throw new Error('bad token'); } };
-  const scheduler = createScheduler({ catalog: o.catalog, db, now: o.now, policy: o.policy });
+  const scheduler = createScheduler({ catalog: o.catalog, db, now: o.now, policy: o.policy, codingWorkers: BENCH_CODING_WORKERS });
   const app = buildApp({ config, db, verifier, now: o.now, scheduler, policy: o.policy, catalog: o.catalog });
   try {
     await app.ready();

@@ -476,3 +476,29 @@ describe('fix round 2', () => {
     expect(reports[0]!.report).toMatchObject({ requestedMode: 'ONLY_IN_CLOUD', blockedReason: 'cloud_not_granted_for_label' });
   });
 });
+
+describe('fix round 1: the patch agent chooses files from a listing (I4)', () => {
+  const listing = [{ path: 'src/app.ts', size: 30 }, { path: 'src/other.ts', size: 10 }];
+  it('picks listed paths only, on the patch step\'s route, reading names and sizes, never contents; and records where it ran', async () => {
+    const { sdk, calls, reports, catalog } = setup();
+    sdk.result = { text: JSON.stringify({ paths: ['src/app.ts'] }), inferenceSource: 'on_device' };
+    const r = await catalog.pickFiles({ ...common, listing });
+    expect(r.paths).toEqual(['src/app.ts']);
+    expect(calls[0]!.route).toEqual({ taskId: 't1', stepKind: 'patch', callOverride: null });
+    expect(sdk.prompts[0]).toContain('- src/other.ts (10 bytes)');
+    expect(reports).toHaveLength(1);
+  });
+  it('a path that was not listed makes the answer unusable, and nothing is chosen', async () => {
+    const { sdk, catalog } = setup();
+    sdk.result = { text: JSON.stringify({ paths: ['src/app.ts', '../etc/passwd'] }), inferenceSource: 'on_device' };
+    expect((await catalog.pickFiles({ ...common, listing })).paths).toEqual([]);
+  });
+  it('an ok patch\'s route report carries the hash of its diff, never the diff', async () => {
+    const { sdk, reports, catalog } = setup();
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    await catalog.patch(INPUTS.patch);
+    const { sha256Hex } = await import('@selarikru/domain');
+    expect(reports[0]!.report.outputSha256).toBe(sha256Hex(DIFF));
+    expect(JSON.stringify(reports[0]!.report)).not.toContain('line 2');
+  });
+});

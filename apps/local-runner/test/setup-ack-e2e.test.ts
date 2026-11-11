@@ -24,7 +24,7 @@ describe('a setup the server never acknowledged (T7.6)', () => {
     await resetDb(t.db);
     await t.db.execute(sql`DELETE FROM runners`);
     const now = () => new Date();
-    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now, policy: POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy: POLICY }), catalog: TEST_CATALOG });
+    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now, policy: POLICY, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now, policy: POLICY }), catalog: TEST_CATALOG });
     const base = await app.listen({ host: '127.0.0.1', port: 0 });
     // A worker that would run silently past the deadline, if it were ever launched.
     const w = await makeWorld({ agent: async () => { await new Promise((r) => setTimeout(r, 1500)); return false; } });
@@ -41,7 +41,7 @@ describe('a setup the server never acknowledged (T7.6)', () => {
         },
       }) as RunnerApi;
       const claimed = await api.claim();
-      const report = await runAttempt({ api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { [PROJECT]: w.repo }, heartbeatMs: 50, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => w.logs.push(l) }, claimed.lease!);
+      const report = await runAttempt({ api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { [PROJECT]: w.repo }, codingWorkers: 'claude_code', heartbeatMs: 50, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => w.logs.push(l) }, claimed.lease!);
       // Fail closed: no worker stream was ever opened.
       expect(w.sbx.streams).toHaveLength(0);
       expect(w.logs.join('\n')).toMatch(/setup could not be confirmed/);
@@ -50,7 +50,7 @@ describe('a setup the server never acknowledged (T7.6)', () => {
       expect(before!['ended_at']).toBeNull();
       expect((before!['detail'] as { setupCompletedAt?: unknown }).setupCompletedAt).toBeUndefined();
       // The server's deadline passes and its reaper decides.
-      await createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy: POLICY }).expireLeases(new Date(Date.now() + 6_000));
+      await createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now, policy: POLICY }).expireLeases(new Date(Date.now() + 6_000));
       expect((await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`))[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:attempt timeout reached during setup' });
       expect((await t.db.execute(sql`SELECT status FROM task_status`))[0]).toMatchObject({ status: 'ready' });
       expect((await t.db.execute(sql`SELECT state FROM budget_reservations`))[0]).toMatchObject({ state: 'released' });

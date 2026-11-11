@@ -8,7 +8,9 @@ import { projects } from './projects.ts';
  * the diff for review, and the ids and hashes that tie them to the browser's route record. Restricted work never has a row: the route refuses before the body is read.
  *
  * `results` holds the contents for the apply attempt and for the owner's review read; it is never put in an event or a log. `state`: `accepted` until an apply attempt
- * claims it (`applying`, with that attempt's id); `superseded` when a later accept for the same task replaced it first, or the task moved on.
+ * claims it (`applying`, with that attempt's id); then `applied` when that attempt
+ * completed, or `failed` when it ended any other way (failed, blocked, lost, interrupted), with its reason; `superseded` when a later accept for the same task replaced it
+ * first. A `failed` or `superseded` proposal may be accepted again, which queues it for a new apply attempt (`round` + 1).
  *
  * Every write takes the scheduler lock, then the task's status row, then this row, then the event sequence: the claim's order (see services/workflow verification.ts).
  */
@@ -31,6 +33,12 @@ export const acceptedProposals = pgTable(
     diff: text('diff').notNull(),
     state: text('state').notNull(),
     attemptId: text('attempt_id'),
+    /** Why the last apply attempt did not stand (its exit reason), when the row is `failed`. */
+    failureReason: text('failure_reason'),
+    /** The idempotency key of the accept that last queued this proposal. The same key again reads the current state; a new key re-queues a failed one. */
+    acceptKey: text('accept_key'),
+    /** How many times this proposal was queued for an apply attempt. */
+    round: integer('round').notNull().default(1),
     acceptedBy: text('accepted_by').notNull(),
     acceptedAt: tstz('accepted_at').notNull(),
     updatedAt: tstz('updated_at').notNull(),
@@ -40,6 +48,6 @@ export const acceptedProposals = pgTable(
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     // One proposal waiting for an apply attempt per task.
     uniqueIndex('accepted_proposals_one_waiting').on(t.tenantId, t.projectId, t.taskId).where(sql`${t.state} = 'accepted'`),
-    check('accepted_proposals_state', sql`${t.state} IN ('accepted', 'applying', 'superseded')`),
+    check('accepted_proposals_state', sql`${t.state} IN ('accepted', 'applying', 'applied', 'failed', 'superseded')`),
   ],
 );

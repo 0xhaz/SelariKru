@@ -18,7 +18,7 @@ async function setup(o: WorldOptions = {}) {
   w = await makeWorld(o);
   const deps: AttemptDeps = {
     api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo },
-    heartbeatMs: 20, maxMissedHeartbeats: 3, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => w!.logs.push(l),
+    codingWorkers: 'claude_code', heartbeatMs: 20, maxMissedHeartbeats: 3, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => w!.logs.push(l),
   };
   return { w, deps };
 }

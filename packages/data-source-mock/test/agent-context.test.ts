@@ -126,10 +126,33 @@ describe('mock accepted proposals and base files (H5)', () => {
     expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toMatchObject({ proposalId: 'req_demo', state: 'accepted', fileCount: 1, simulated: true });
     await vi.waitFor(() => expect(seen).toContain('proposal.accepted'));
     stop();
-    await expect(ds.acceptPatchProposal!(projectId, { ...p, results: [{ ...p.results[0]!, sha256: 'f'.repeat(64) }] }, 'k2')).rejects.toThrow(/^proposal_refused: hash_mismatch/);
-    await expect(ds.acceptPatchProposal!(projectId, { ...p, taskId: id('e2e') }, 'k3')).rejects.toThrow(/^proposal_restricted:/);
+    await expect(ds.acceptPatchProposal!(projectId, { ...p, proposalId: 'req_t', results: [{ ...p.results[0]!, sha256: 'f'.repeat(64) }] }, 'k2')).rejects.toThrow(/^proposal_refused: hash_mismatch/);
+    await expect(ds.acceptPatchProposal!(projectId, { ...p, proposalId: 'req_r', taskId: id('e2e') }, 'k3')).rejects.toThrow(/^proposal_restricted:/);
     const verified = Object.values(snap.tasks).find((t) => t.status === 'verified')!;
-    const pv = await demoProposal(ds, projectId, verified.taskId);
+    const pv = { ...(await demoProposal(ds, projectId, verified.taskId)), proposalId: 'req_v' };
     await expect(ds.acceptPatchProposal!(projectId, pv, 'k4')).rejects.toThrow(/^task_not_applicable:/);
+  });
+});
+
+describe('fix round 1: mock listing and repeated accepts (H5)', () => {
+  it('lists a task\'s files, paths and sizes only, and none for a restricted task', async () => {
+    const { ds, projectId } = await setup();
+    const l = await ds.listTaskFiles!(projectId, id('search'));
+    expect(l.entries.length).toBeGreaterThan(0);
+    expect(Object.keys(l.entries[0]!).sort()).toEqual(['path', 'size']);
+    await expect(ds.listTaskFiles!(projectId, id('e2e'))).rejects.toThrow(/^files_restricted:/);
+  });
+  it('the same key reads the proposal as it is; another key for one still waiting is refused', async () => {
+    const { ds, projectId } = await setup();
+    const snap = await ds.getSnapshot(projectId);
+    const waiting = Object.values(snap.tasks).find((t) => (t.status === 'ready' || t.status === 'planned') && t.taskId !== id('e2e'))!;
+    const { sha256Hex } = await import('@selarikru/domain');
+    const files = await ds.getTaskFiles!(projectId, waiting.taskId);
+    const ctx = await ds.getTaskContext!(projectId, waiting.taskId, 'local');
+    const path = `${ctx.task.allowedPaths[0]}/x.ts`;
+    const p = { proposalId: 'req_x', taskId: waiting.taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'req_x', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+x\n`, results: [{ path, sha256: sha256Hex('x\n'), content: 'x\n' }] };
+    const first = await ds.acceptPatchProposal!(projectId, p, 'k1');
+    expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toEqual(first);
+    await expect(ds.acceptPatchProposal!(projectId, p, 'k2')).rejects.toThrow(/^proposal_already_accepted:/);
   });
 });

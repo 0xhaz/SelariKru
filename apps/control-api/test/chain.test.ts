@@ -75,7 +75,7 @@ beforeAll(async () => {
   // The verifier reads the store through its own instance: the handoff is the shared location, not a shared object.
   const apiStore = new LocalDiskArtifactStore(artifactDir);
   app = buildApp({
-    config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
+    config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
     github: { pullRequests: { port: gh, repoPath: repo, loadRecord: (key) => loadValidRecord(t.db, apiStore, key) } },
   });
   await app.listen({ host: '127.0.0.1', port: 0 });
@@ -120,7 +120,7 @@ async function runWorker(lease: ClaimedLease, script: Script): Promise<{ report:
   const runtime = new SbxRuntimeAdapter(sbx, { scope: 'chain:runner', home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
   const report = await runAttempt({
     api: new HttpRunnerApi(`http://127.0.0.1:${port}`, token), runtime, artifacts: new LocalDiskArtifactStore(resolveArtifactDir({ SELARIKRU_ARTIFACT_DIR: artifactDir })), workRoot: join(root, 'work'),
-    repos: { [PROJECT]: repo }, heartbeatMs: 50, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => logs.push(l),
+    repos: { [PROJECT]: repo }, codingWorkers: 'claude_code', heartbeatMs: 50, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => logs.push(l),
   }, lease);
   if (report.outcome === 'failed') logs.push(`REPORT ${JSON.stringify(report)}`);
   return { report, sbx };
@@ -420,7 +420,7 @@ describe('run orchestration chain', () => {
         const store = new LocalDiskArtifactStore(artifactDir);
         const now = () => new Date();
         evApp = buildApp({
-          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
+          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
           evidence: { trusted: () => trustedNow, artifacts: store, loadRecord: (key) => loadValidRecord(t.db, store, key, { trusted: trustedNow }) },
         });
         await evApp.ready();
@@ -611,7 +611,7 @@ describe('run orchestration chain', () => {
         const sick = new Proxy(store, { get: (o, k) => (k === 'get' ? async () => { throw Object.assign(new Error('EIO: read failed'), { code: 'EIO' }); } : Reflect.get(o, k)) });
         const now = () => new Date();
         const sickApp = buildApp({
-          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
+          config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now, policy }), policy,
           evidence: { trusted: () => trustedNow, artifacts: sick, loadRecord: (key) => loadValidRecord(t.db, sick, key, { trusted: trustedNow }) },
         });
         await sickApp.ready();
@@ -725,7 +725,7 @@ describe('run orchestration chain', () => {
         const { runId } = await verifiedRun('t_stale_a');
         trustedNow = STALE;
         expect((await post(evApp, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'a1' }, { authorization: `Bearer ${INTRUDER_TOKEN}` })).status).toBe(403);
-        const denied = buildApp({ config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now: () => new Date(), scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy }), policy: { ...policy, operations: { ...policy.operations, assign_replan_tasks: 'deny' } }, evidence: { trusted: () => trustedNow, artifacts: new LocalDiskArtifactStore(artifactDir), loadRecord: async () => null } });
+        const denied = buildApp({ config: testConfig({ allowedOrigins: [] }), db: t.db, verifier: fakeVerifier, now: () => new Date(), scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: () => new Date(), policy }), policy: { ...policy, operations: { ...policy.operations, assign_replan_tasks: 'deny' } }, evidence: { trusted: () => trustedNow, artifacts: new LocalDiskArtifactStore(artifactDir), loadRecord: async () => null } });
         await denied.ready();
         const r = await post(denied, `/v1/runs/${runId}/reverify`, { expectedPlanRevision: 1, idempotencyKey: 'a2' });
         await denied.close();

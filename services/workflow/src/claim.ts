@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { APPLY_MODEL, APPLY_PROVIDER, harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
-import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { policyRevokedReason } from '@selarikru/domain';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
@@ -74,6 +74,14 @@ function infraRetryDecision(attempts: readonly AttemptRow[], limits: ClaimLimits
   if (!last || !isInfraInterruption(last) || last.endedAt === null) return 'allowed';
   const delaySeconds = Math.min(limits.infraRetryBackoffMaxSeconds, limits.infraRetryBackoffSeconds * 2 ** (expiries - 1));
   return now.getTime() < last.endedAt.getTime() + delaySeconds * 1000 ? 'backoff' : 'allowed';
+}
+
+/** The latest attempt on this revision was an apply that did not complete. */
+async function lastApplyFailed(tx: Tx, key: TaskKey, revision: number): Promise<boolean> {
+  const [last] = await tx.select({ provider: schema.attempts.modelProvider, model: schema.attempts.modelId, exitReason: schema.attempts.exitReason, endedAt: schema.attempts.endedAt }).from(schema.attempts)
+    .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.taskId, key.taskId), eq(schema.attempts.revision, revision)))
+    .orderBy(desc(schema.attempts.attemptNumber)).limit(1);
+  return last !== undefined && last.endedAt !== null && last.provider === APPLY_PROVIDER && last.model === APPLY_MODEL && last.exitReason !== 'completed';
 }
 
 async function hasOpenAttempt(tx: Tx, key: TaskKey): Promise<boolean> {
@@ -450,9 +458,14 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     // A fact about the poller, not the task: a runner that can apply it takes it.
     if (!(runner.harnesses ?? []).some((h) => h.provider === APPLY_PROVIDER && h.models.includes(APPLY_MODEL))) return { reason: 'apply_runner_update_required' };
     assigned = { ok: true, assignment: APPLY_ASSIGNMENT };
-  } else if ((ctx.codingWorkers ?? 'claude_code') === 'off') {
+  } else if (ctx.codingWorkers === 'off') {
     await recordBlock(tx, key, c, statusRow, 'awaiting_accepted_proposal', null, now);
     return { reason: 'awaiting_accepted_proposal' };
+  } else if (await lastApplyFailed(tx, key, spec.revision)) {
+    // Coding workers are on, but the owner's accepted change did not stand. A model worker never takes the task over silently: it waits, saying why, for the owner to
+    // accept a change again.
+    await recordBlock(tx, key, c, statusRow, 'last_apply_failed', null, now);
+    return { reason: 'last_apply_failed' };
   } else {
     // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
     assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);
@@ -462,7 +475,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     if (!assigned.runnerOnly) await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
     return { reason: `model_blocked:${assigned.reason}` };
   }
-  const hold = worstCaseHold(toMicros(spec.limits.maxCostUsd), assigned.assignment, ctx.catalog ?? NO_HARNESS_CATALOG, ctx.policy);
+  // A no-model apply holds no model budget: it makes no model call (route `none`).
+  const hold: WorstCaseHold = assigned.assignment.route === 'none' ? { amountMicros: 0, basis: 'no_model', rateSource: null } : worstCaseHold(toMicros(spec.limits.maxCostUsd), assigned.assignment, ctx.catalog ?? NO_HARNESS_CATALOG, ctx.policy);
   const amountMicros = hold.amountMicros;
 
   // Placement decides the one location this task may run in; a runner elsewhere never receives it.
@@ -565,7 +579,8 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
     }
   }
 
-  const fits = checkFits(position, amountMicros);
+  // A no-model apply spends no model budget, so there is nothing to fit (a zero cap otherwise reads as an unknown cost).
+  const fits = hold.basis === 'no_model' ? ({ ok: true } as const) : checkFits(position, amountMicros);
   if (!fits.ok) {
     // Holds are never handed back, so this will not clear by itself: the owner has to see it. Recorded once per reason, not per poll.
     await recordBlock(tx, key, c, statusRow, fits.reason, null, now);

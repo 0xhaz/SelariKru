@@ -6,7 +6,7 @@ import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
 import type { HandoverAction, HandoverDiffView, HandoversView } from './handover.ts';
-import type { CriteriaRevisionRequest, CriteriaRevisionResult, ProposalAcceptReceipt, TaskAgentContext, TaskBaseFiles, TaskContextSize } from './agent-context.ts';
+import type { CriteriaRevisionRequest, CriteriaRevisionResult, ProposalAcceptReceipt, TaskAgentContext, TaskBaseFiles, TaskContextSize, TaskFileListing } from './agent-context.ts';
 import type { AcceptedProposal } from '@selarikru/domain';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
@@ -83,6 +83,8 @@ export interface EngineeringDataSource {
   acceptPatchProposal?(projectId: string, proposal: AcceptedProposal, idempotencyKey: string): Promise<ProposalAcceptReceipt>;
   /** The task's files at its base commit for the patch agent, read by the local runner and relayed. Never for a restricted task. Absent: no file contents are available. */
   getTaskFiles?(projectId: string, taskId: string, paths?: readonly string[]): Promise<TaskBaseFiles>;
+  /** What is under the task's allowed paths at its base: paths and sizes only, for choosing which files to read. Absent: none can be chosen. */
+  listTaskFiles?(projectId: string, taskId: string): Promise<TaskFileListing>;
   disconnect(): void;
 }
 

@@ -5,7 +5,7 @@ import { DataSourceException, type TaskRouteView, type TaskView } from '@selarik
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
-import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, patchAcceptBlocker, patchAcceptRefusal, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
+import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
 import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
@@ -270,30 +270,40 @@ function CriteriaProposal({ h, task, data, outcome }: { h: HybridValue; task: Ta
 
 function PatchProposal({ h, task, data, outcome }: { h: HybridValue; task: TaskView; data: Record<string, unknown>; outcome: Extract<AgentsOutcome, { kind: 'result' }> }) {
   const id = useId();
-  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'done' | 'failed'; text: string }>({ phase: 'idle' });
+  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'done'; text: string; again: boolean } | { phase: 'failed'; text: string }>({ phase: 'idle' });
+  // The accept round: a new key only to accept again after a failed apply; the same key reads where the proposal is now.
+  const [round, setRound] = useState(1);
   const accept = h.agents?.acceptPatch ?? null;
   const r = outcome.result;
   const reason = patchAcceptBlocker({ status: task.status, locked: r.locked, canAccept: accept !== null, live: h.live, recorded: r.reported === 'sent' && r.report !== null, checked: r.patch !== undefined && (outcome.base ?? null) !== null });
-  async function send(): Promise<void> {
+  async function send(next: number): Promise<void> {
     if (!accept) return;
     setState({ phase: 'working' });
     try {
-      const receipt = await accept(outcome);
+      const receipt = await accept(outcome, next);
+      setRound(next);
       h.refresh();
-      setState({ phase: 'done', text: receipt.simulated
-        ? `Accepted in the demo: ${receipt.fileCount} file${receipt.fileCount === 1 ? '' : 's'}. The demo has no runner, so nothing is applied. Demo data, not evidence.`
-        : `Accepted: ${receipt.fileCount} file${receipt.fileCount === 1 ? '' : 's'}. The task waits for the runner, which applies them with no model, then builds, tests and verifies the result.` });
+      setState({ phase: 'done', ...patchReceiptText(receipt) });
     } catch (e) {
       setState({ phase: 'failed', text: patchAcceptRefusal(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '') });
     }
   }
+  const filesNote = filesNoteText(outcome.filesNote);
   return (
     <div className="space-y-1.5">
       <p className="text-fg">{String(data['summary'] ?? '')}</p>
+      {filesNote ? <p className="text-sm text-muted" data-testid="patch-files-unread">{filesNote}</p> : null}
       <pre className="max-h-48 overflow-auto rounded-chip border border-line bg-bg p-2 font-mono text-mono whitespace-pre text-fg" tabIndex={0} aria-label="Proposed diff">{String(data['diff'] ?? '')}</pre>
-      {state.phase === 'done' ? <p className="text-sm font-medium text-fg" data-testid="patch-accepted">{state.text}</p> : (
+      {state.phase === 'done' ? (
         <>
-          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} aria-describedby={`${id}-apply`} onClick={() => void send()}>{state.phase === 'working' ? 'Accepting' : 'Accept and apply'}</button>
+          <p className="text-sm font-medium text-fg" data-testid="patch-accepted">{state.text}</p>
+          {state.again
+            ? <button type="button" className={buttonPrimary} disabled={reason !== null} onClick={() => void send(round + 1)}>Accept again</button>
+            : <button type="button" className={buttonQuiet} disabled={!h.live} onClick={() => void send(round)}>Check where it is</button>}
+        </>
+      ) : (
+        <>
+          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} aria-describedby={`${id}-apply`} onClick={() => void send(round)}>{state.phase === 'working' ? 'Accepting' : 'Accept and apply'}</button>
           <p id={`${id}-apply`} className="text-sm text-muted" data-testid="patch-accept-note">{reason ?? PATCH_ACCEPT_CONSEQUENCE}</p>
           {state.phase === 'failed' ? <p className="text-sm text-danger" data-testid="patch-accept-refused">{state.text}</p> : null}
         </>

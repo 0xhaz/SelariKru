@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles'>;
+export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -226,6 +226,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
           return source.acceptPatchProposal!(p, proposal, key);
         } } : {}),
         ...(source.getTaskFiles ? { getTaskFiles: source.getTaskFiles.bind(source) } : {}),
+        ...(source.listTaskFiles ? { listTaskFiles: source.listTaskFiles.bind(source) } : {}),
       } : null,
       stack: source?.getStack && source.stackAction ? {
         load: () => source.getStack!(projectId),

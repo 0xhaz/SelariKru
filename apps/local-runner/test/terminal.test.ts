@@ -95,7 +95,7 @@ describe('the terminal feed', () => {
 describe('the attempt path', () => {
   let world: World;
   afterEach(() => world?.cleanup());
-  const deps = (w: World, extra: Partial<AttemptDeps> = {}): AttemptDeps => ({ api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo }, heartbeatMs: 25, maxMissedHeartbeats: 3, cpus: 1, memoryMiB: 512, log: (l) => w.logs.push(l), timeoutScale: 0.2, terminalFeedLimits: limits({ flushMs: 1 }), ...extra });
+  const deps = (w: World, extra: Partial<AttemptDeps> = {}): AttemptDeps => ({ api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo }, codingWorkers: 'claude_code', heartbeatMs: 25, maxMissedHeartbeats: 3, cpus: 1, memoryMiB: 512, log: (l) => w.logs.push(l), timeoutScale: 0.2, terminalFeedLimits: limits({ flushMs: 1 }), ...extra });
   const secretAssistant = (s: string) => ({ type: 'assistant', message: { content: [{ type: 'text', text: s }] } });
 
   it('a secret split across two raw output chunks is redacted on the runner: nothing unredacted is ever uploaded', async () => {

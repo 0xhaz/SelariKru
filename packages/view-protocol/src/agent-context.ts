@@ -64,7 +64,11 @@ export type TaskContextSize = z.infer<typeof TaskContextSizeSchema>;
 
 /** An accepted patch proposal (H5), as the server records it: ids and hashes. The apply worker picks it up on the task's next claim. */
 export const ProposalAcceptReceiptSchema = z.strictObject({
-  proposalId: Id, taskId: Id, revision: z.number().int().min(1), digest: z.string().regex(/^[0-9a-f]{64}$/), fileCount: z.number().int().min(1), state: z.literal('accepted'),
+  proposalId: Id, taskId: Id, revision: z.number().int().min(1), digest: z.string().regex(/^[0-9a-f]{64}$/), fileCount: z.number().int().min(1),
+  /** Where the proposal is now: waiting for the runner, being applied, applied, or failed (with why), or replaced. A repeated accept reads this; it never replays an old receipt. */
+  state: z.enum(['accepted', 'applying', 'applied', 'failed', 'superseded']),
+  round: z.number().int().min(1),
+  lastFailure: z.string().nullable(),
   /** Demo data: nothing is applied and nothing is evidence. */
   simulated: z.boolean(),
 });
@@ -82,3 +86,13 @@ export const TaskBaseFilesSchema = z.strictObject({
   omitted: z.array(z.strictObject({ path: z.string().min(1), reason: z.string().min(1) })),
 });
 export type TaskBaseFiles = z.infer<typeof TaskBaseFilesSchema>;
+
+/** What is under a task's allowed paths at its base (H5): paths and sizes only, capped at 500, for choosing which files the patch agent reads. Never for a restricted task. */
+export const TaskFileListingSchema = z.strictObject({
+  taskId: Id,
+  revision: z.number().int().min(1),
+  baseSha: z.string().min(1),
+  entries: z.array(z.strictObject({ path: z.string().min(1), size: z.number().int().min(0) })).max(500),
+  truncated: z.boolean(),
+});
+export type TaskFileListing = z.infer<typeof TaskFileListingSchema>;

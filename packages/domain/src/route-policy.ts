@@ -198,6 +198,8 @@ export const RouteRecordReportSchema = z.strictObject({
   timing: z.strictObject({ totalMs: Ms, firstOutputMs: Ms.nullable() }),
   validation: z.enum(['passed', 'failed', 'not_run']),
   blockedReason: RouteCode.nullable(),
+  /** An ok patch call only (H5): the sha256 of its diff, so an accepted proposal can be tied to the output this call produced. A hash, never the output. */
+  outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 });
 export type RouteRecordReport = z.infer<typeof RouteRecordReportSchema>;
 
@@ -225,6 +227,7 @@ export const RouteRecordSchema = z.strictObject({
   timing: z.strictObject({ totalMs: z.number().int().min(0), firstOutputMs: z.number().int().min(0).nullable() }),
   validation: z.enum(['passed', 'failed', 'not_run']),
   blockedReason: z.string().nullable(),
+  outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   reportedBy: z.literal('browser'),
   trust: z.literal('untrusted'),
   reportedAt: z.string(),

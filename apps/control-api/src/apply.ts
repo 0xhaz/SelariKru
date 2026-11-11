@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  AcceptedProposalSchema, BASE_FILE_LIMITS, BaseFileAnswerSchema, RESTRICTED_APPLY_REFUSAL, baseFileIssue, screenBaseFiles, type BaseFileAnswer, type BaseFileRequest,
+  AcceptedProposalSchema, BASE_FILE_LIMITS, checkAcceptedProposal, sha256Hex, BaseFileAnswerSchema, RESTRICTED_APPLY_REFUSAL, baseFileIssue, screenBaseFiles, screenBaseListing, type BaseFileAnswer, type BaseFileRequest,
 } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { LeaseRefSchema } from '@selarikru/protocol';
@@ -12,7 +12,7 @@ import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
 import { loadTaskRoute } from './route-policy.ts';
 import { parseBody } from './routes-owner.ts';
-import { fingerprint, idempotent, requireProject } from './store.ts';
+import { requireProject } from './store.ts';
 
 /**
  * Accepted patch proposals and the base files the patch agent reads (H5, plan.md §3 Option A). Every AI step runs in the owner's browser; these routes carry its
@@ -34,48 +34,46 @@ interface Waiting {
   readonly request: BaseFileRequest;
   readonly tenantId: string;
   readonly createdAt: number;
-  taken: boolean;
+  /** The runner that took it: only that runner may answer. */
+  takenBy: string | null;
   readonly settle: (answer: BaseFileAnswer | null) => void;
 }
 
 /** One process's waiting file reads. Never persisted: a restart drops them, and the owner's read times out and says so. */
 export class FileRelay {
   private readonly waiting = new Map<string, Waiting>();
-  constructor(readonly timeoutMs = 15_000) {}
+  constructor(readonly timeoutMs = 15_000, readonly maxPending = 8) {}
 
-  /** Waits for a runner's answer, or null after the timeout. The entry is gone either way. */
-  ask(tenantId: string, request: Omit<BaseFileRequest, 'requestId'>): Promise<BaseFileAnswer | null> {
+  /** Waits for a runner's answer, or null after the timeout; `busy` when this owner already has `maxPending` reads waiting. The entry is gone either way. */
+  ask(tenantId: string, request: Omit<BaseFileRequest, 'requestId'>): Promise<BaseFileAnswer | null> | 'busy' {
+    if ([...this.waiting.values()].filter((w) => w.tenantId === tenantId).length >= this.maxPending) return 'busy';
     const requestId = `frq_${randomUUID()}`;
     return new Promise((resolve) => {
       const timer = setTimeout(() => { this.waiting.delete(requestId); resolve(null); }, this.timeoutMs);
       this.waiting.set(requestId, {
-        request: { ...request, requestId }, tenantId, createdAt: Date.now(), taken: false,
+        request: { ...request, requestId }, tenantId, createdAt: Date.now(), takenBy: null,
         settle: (a) => { clearTimeout(timer); this.waiting.delete(requestId); resolve(a); },
       });
     });
   }
 
-  /** Requests for these projects that no runner took yet. Each goes to one runner. */
-  take(tenantId: string, projects: readonly string[]): BaseFileRequest[] {
+  /** Requests for these projects that no runner took yet. Each goes to one runner, which alone may answer it. */
+  take(tenantId: string, runnerId: string, projects: readonly string[]): BaseFileRequest[] {
     const out: BaseFileRequest[] = [];
     for (const w of this.waiting.values()) {
-      if (w.taken || w.tenantId !== tenantId || !projects.includes(w.request.projectId)) continue;
-      w.taken = true;
+      if (w.takenBy !== null || w.tenantId !== tenantId || !projects.includes(w.request.projectId)) continue;
+      w.takenBy = runnerId;
       out.push(w.request);
     }
     return out;
   }
 
-  answer(tenantId: string, answer: BaseFileAnswer): boolean {
+  /** False when nothing is waiting under this id, or another runner took it. */
+  answer(tenantId: string, runnerId: string, answer: BaseFileAnswer): boolean {
     const w = this.waiting.get(answer.requestId);
-    if (!w || w.tenantId !== tenantId || !w.taken) return false;
+    if (!w || w.tenantId !== tenantId || w.takenBy !== runnerId) return false;
     w.settle(answer);
     return true;
-  }
-
-  /** For a request that names the waiting entry's own allowed paths: the server screens the runner's answer against these, not the runner's. */
-  allowedFor(requestId: string): readonly string[] | null {
-    return this.waiting.get(requestId)?.request.allowedPaths ?? null;
   }
 
   get size(): number { return this.waiting.size; }
@@ -102,23 +100,31 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
     const body = parseBody(AcceptProposalRequestSchema, req.body);
     const p = body.proposal;
     if (p.taskId !== taskId) throw new AppError(422, 'proposal_refused', 'the proposal is for another task', { reason: 'task_mismatch' });
-    // The route record of the patch call that produced it: this task's, a patch step, and a call that ran and passed its checks.
+    // The route record of the patch call that produced it: the same request (its id is the proposal's), this task's, a patch step that ran and passed its checks, and
+    // reporting the hash of this very diff. Anything else is not the output that call produced.
+    // The server's own checks against the stored task first, so a refusal names what is wrong with the proposal; the workflow runs them again under its locks.
+    const pre = checkAcceptedProposal(p, { taskId, revision: task.revision, baseSha: task.spec.baseSha, allowedPaths: task.spec.allowedPaths });
+    if (!pre.ok) {
+      if (pre.code === 'stale_revision') throw new AppError(409, 'stale_revision', 'the task has a newer revision; propose the change again', { reason: pre.code });
+      throw new AppError(pre.code === 'base_mismatch' ? 409 : 422, 'proposal_refused', `the proposal did not pass the server's checks: ${pre.code}`, { reason: pre.code });
+    }
+    if (p.routeRecordId !== p.proposalId) throw new AppError(409, 'route_record_missing', 'the proposal does not name the route record of the call that produced it', { reason: 'route_record_mismatch' });
     const [record] = await db.select({ payload: schema.clientReports.payload }).from(schema.clientReports).where(and(
       eq(schema.clientReports.tenantId, tenantId), eq(schema.clientReports.projectId, projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
       eq(schema.clientReports.subjectId, taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${p.routeRecordId}`,
     )).limit(1);
-    const rec = record?.payload as { stepKind?: unknown; status?: unknown } | undefined;
+    const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown } | undefined;
     if (!rec || rec.stepKind !== 'patch' || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', 'there is no record of where the patch call that produced this proposal ran, so it cannot be accepted');
-    const receipt = await withTx(db, (tx) => idempotent(tx, { tenantId, projectId, key: `proposal.accept:${taskId}:${body.idempotencyKey}` }, fingerprint(body), async () => {
-      const r = await acceptProposal({ db, now }, { tenantId, projectId, taskId }, { proposal: p, acceptedBy: uid }, tx);
-      if (r.ok) return r.value;
-      if (r.error.reason === 'task_not_found') throw new AppError(404, 'task_not_found', 'no such task');
-      if (r.error.reason === 'task_not_applicable') throw new AppError(409, 'task_not_applicable', 'the task is not waiting to start, so a change cannot be applied to it now', { reason: r.error.reason });
-      if (r.error.reason === 'proposal_already_accepted') throw new AppError(409, 'proposal_already_accepted', 'this proposal was already accepted', { reason: r.error.reason });
-      if (r.error.reason === 'stale_revision') throw new AppError(409, 'stale_revision', 'the task has a newer revision; propose the change again', { reason: r.error.reason });
-      throw new AppError(r.error.status, 'proposal_refused', `the proposal did not pass the server's checks: ${r.error.reason}`, { reason: r.error.reason });
-    }));
-    return reply.code(201).send(receipt);
+    if (rec.outputSha256 !== sha256Hex(p.diff)) throw new AppError(409, 'route_record_missing', 'the route record of this call names another output, so this proposal is not what that call produced', { reason: 'route_record_output_mismatch' });
+    // Not wrapped in a stored receipt: the proposal's own row holds the key that last queued it, and the same key again reads the proposal as it is now (never an
+    // earlier receipt); a new key queues a proposal whose apply failed.
+    const r = await withTx(db, (tx) => acceptProposal({ db, now }, { tenantId, projectId, taskId }, { proposal: p, acceptedBy: uid, idempotencyKey: body.idempotencyKey }, tx));
+    if (r.ok) return reply.code(r.value.state === 'accepted' ? 201 : 200).send(r.value);
+    if (r.error.reason === 'task_not_found') throw new AppError(404, 'task_not_found', 'no such task');
+    if (r.error.reason === 'task_not_applicable') throw new AppError(409, 'task_not_applicable', 'the task is not waiting to start, so a change cannot be applied to it now', { reason: r.error.reason });
+    if (r.error.reason === 'proposal_already_accepted') throw new AppError(409, 'proposal_already_accepted', `this proposal is already ${r.error.state === 'applying' ? 'being applied' : r.error.state === 'applied' ? 'applied' : 'waiting for the runner'}`, { reason: r.error.reason, state: r.error.state });
+    if (r.error.reason === 'stale_revision') throw new AppError(409, 'stale_revision', 'the task has a newer revision; propose the change again', { reason: r.error.reason });
+    throw new AppError(r.error.status, 'proposal_refused', `the proposal did not pass the server's checks: ${r.error.reason}`, { reason: r.error.reason });
   });
 
   // ---- runner side ----------------------------------------------------------------------------------------------------------------
@@ -148,29 +154,49 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
     if (task.lock !== null || task.spec === null) throw new AppError(403, 'files_restricted', 'this task\'s files stay on this device, so they are not read here', { reason: task.spec === null ? 'task_spec_unreadable' : 'restricted' });
     const body = parseBody(FileReadRequestSchema, req.body);
     const spec = task.spec;
-    const paths = (body.paths ?? spec.allowedPaths).map((p) => p.replace(/\/+$/, ''));
+    const paths = (body.paths ?? []).map((p) => p.replace(/\/+$/, ''));
     if (paths.length === 0) return { taskId, revision: task.revision, baseSha: spec.baseSha, files: [], omitted: [] };
-    if (paths.length > BASE_FILE_LIMITS.requestPaths) throw new AppError(400, 'invalid_request', `at most ${BASE_FILE_LIMITS.requestPaths} paths`);
     const outside = paths.find((p) => baseFileIssue(p, spec.allowedPaths) !== null);
     if (outside !== undefined) throw new AppError(422, 'invalid_request', 'a path is outside the task\'s allowed paths, reserved, or a credentials file', { reason: baseFileIssue(outside, spec.allowedPaths) });
-    const answer = await relay.ask(tenantId, { projectId, baseSha: spec.baseSha, paths, allowedPaths: [...spec.allowedPaths] });
-    if (answer === null) throw new AppError(504, 'files_unavailable', 'no runner with this project\'s checkout answered in time, so the files could not be read');
+    const answer = await relayed({ projectId, baseSha: spec.baseSha, mode: 'read', paths, allowedPaths: [...spec.allowedPaths] });
     return { taskId, revision: task.revision, baseSha: spec.baseSha, ...screenBaseFiles(answer, spec.allowedPaths) };
   });
+
+  // The first step of the patch agent's file choice: what is under the task's allowed paths, paths and sizes only, capped. Any number of allowed paths.
+  app.post('/v1/projects/:id/tasks/:taskId/files/list', auth, async (req) => {
+    const { projectId, taskId, task } = await ownerTask(req);
+    if (task.lock !== null || task.spec === null) throw new AppError(403, 'files_restricted', 'this task\'s files stay on this device, so they are not read here', { reason: task.spec === null ? 'task_spec_unreadable' : 'restricted' });
+    parseBody(FilePollSchema, req.body);
+    const spec = task.spec;
+    const roots = spec.allowedPaths.map((p) => p.replace(/\/+$/, '')).filter((p) => baseFileIssue(p, spec.allowedPaths) === null).slice(0, BASE_FILE_LIMITS.allowedPaths);
+    if (roots.length === 0) return { taskId, revision: task.revision, baseSha: spec.baseSha, entries: [], truncated: false };
+    const answer = await relayed({ projectId, baseSha: spec.baseSha, mode: 'list', paths: roots, allowedPaths: [...spec.allowedPaths].slice(0, BASE_FILE_LIMITS.allowedPaths) });
+    const listed = screenBaseListing(answer.entries ?? [], spec.allowedPaths);
+    return { taskId, revision: task.revision, baseSha: spec.baseSha, entries: listed.entries, truncated: listed.truncated || answer.truncated === true };
+  });
+
+  /** One relayed read: refused when too many are waiting, timed out when no runner answers, and said plainly when the runner has no copy of the project. */
+  async function relayed(request: Omit<BaseFileRequest, 'requestId'>): Promise<BaseFileAnswer> {
+    const waiting = relay.ask(tenantId, request);
+    if (waiting === 'busy') throw new AppError(429, 'too_many_file_requests', 'too many file reads are waiting for a runner; try again when they finish');
+    const answer = await waiting;
+    if (answer === null) throw new AppError(504, 'files_unavailable', 'no runner with this project\'s checkout answered in time, so the files could not be read');
+    if (answer.noCheckout === true) throw new AppError(409, 'no_checkout', 'This runner has no copy of the project; the proposal can only add new files');
+    return answer;
+  }
 
   app.post('/v1/runners/files/poll', { onRequest: [ctx.runner] }, async (req) => {
     const runner = runnerOf(req);
     parseBody(FilePollSchema, req.body);
     if (relay.size === 0) return { requests: [] };
     const [row] = await db.select({ projects: schema.runners.configuredProjects }).from(schema.runners).where(and(eq(schema.runners.tenantId, runner.tenantId), eq(schema.runners.runnerId, runner.runnerId)));
-    return { requests: relay.take(runner.tenantId, (row?.projects as string[] | null) ?? []) };
+    return { requests: relay.take(runner.tenantId, runner.runnerId, (row?.projects as string[] | null) ?? []) };
   });
 
   app.post('/v1/runners/files/answer', { onRequest: [ctx.runner], bodyLimit: 2 * 1024 * 1024 }, async (req) => {
     const runner = runnerOf(req);
     const answer = parseBody(BaseFileAnswerSchema, req.body);
-    const allowed = relay.allowedFor(answer.requestId);
-    if (allowed === null || !relay.answer(runner.tenantId, answer)) throw new AppError(404, 'file_request_not_found', 'no such file request is waiting');
+    if (!relay.answer(runner.tenantId, runner.runnerId, answer)) throw new AppError(404, 'file_request_not_found', 'no such file request is waiting for this runner');
     return { accepted: true };
   });
 }

@@ -122,7 +122,7 @@ export class World {
 
   private build(db: TestDb['db']) {
     const store = new LocalDiskArtifactStore(this.artifactDir);
-    this.scheduler = createScheduler({ catalog: TEST_CATALOG, db, now: this.now, policy: this.policy });
+    this.scheduler = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db, now: this.now, policy: this.policy });
     return buildApp({
       logger: { level: 'trace', stream: { write: (line: string) => { this.apiLog.push(line); } } },
       tipOf: (p) => this.tipSource(p),
@@ -223,7 +223,7 @@ export class World {
     const runtime = new SbxRuntimeAdapter(sbx, { scope: 'security:runner', home: '/Users/nobody', forbidden: ['/repo/selarikru'], attemptsRoot: join(this.root, 'work', 'attempts'), timeouts: { signalMs: 100, graceMs: 150, stopMs: 150, lsMs: 100, createMs: 1000, rmMs: 100 } });
     const report = await runAttempt({
       api: this.api(opts.token), runtime, artifacts: new LocalDiskArtifactStore(this.artifactDir), workRoot: join(this.root, 'work'),
-      repos: { [PROJECT]: this.repo }, heartbeatMs: opts.heartbeatMs ?? 40, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => this.logs.push(l),
+      repos: { [PROJECT]: this.repo }, codingWorkers: 'claude_code', heartbeatMs: opts.heartbeatMs ?? 40, maxMissedHeartbeats: 3, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: (l) => this.logs.push(l),
     }, lease);
     return { report, sbx };
   }

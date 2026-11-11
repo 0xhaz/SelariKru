@@ -20,7 +20,7 @@ describe('assigned model reaches the harness', () => {
   afterEach(async () => { await w?.cleanup(); w = undefined; });
 
   const apiFor = async () => {
-    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, catalog: TEST_CATALOG, scheduler: createScheduler({ db: t.db, now: () => new Date(), policy: POLICY, catalog: TEST_CATALOG }) });
+    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now: () => new Date(), policy: API_POLICY, catalog: TEST_CATALOG, scheduler: createScheduler({ codingWorkers: 'claude_code', db: t.db, now: () => new Date(), policy: POLICY, catalog: TEST_CATALOG }) });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const addr = app.server.address();
     const port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -28,7 +28,7 @@ describe('assigned model reaches the harness', () => {
     return { app, runnerId, api: new HttpRunnerApi(`http://127.0.0.1:${port}`, token) };
   };
   const deps = (world: World, api: AttemptDeps['api'], over: Partial<AttemptDeps> = {}): AttemptDeps => ({
-    api, runtime: world.runtime, artifacts: world.artifacts, workRoot: world.workRoot, repos: { [PROJECT]: world.repo, [world.task.projectId]: world.repo }, heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: () => undefined, ...over,
+    api, runtime: world.runtime, artifacts: world.artifacts, workRoot: world.workRoot, repos: { [PROJECT]: world.repo, [world.task.projectId]: world.repo }, codingWorkers: 'claude_code', heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 4, cpus: 2, memoryMiB: 4096, log: () => undefined, ...over,
   });
   const launchArgs = (world: World): string[] => world.sbx.calls.find((c) => c[0] === 'exec' && c.includes('claude'))!;
 

@@ -42,7 +42,7 @@ describe('continue in cloud, two real runner enrolments', () => {
     await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);
     // Lease deadlines are real time here: the runner arms its own timer from them.
     const clock = testClock(new Date().toISOString());
-    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now: clock.now, policy: POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), catalog: TEST_CATALOG });
+    const app = buildApp({ config: testConfig(), db: t.db, verifier: fakeVerifier, now: clock.now, policy: POLICY, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), catalog: TEST_CATALOG });
     const base = await app.listen({ host: '127.0.0.1', port: 0 });
     try {
       let streams = 0;
@@ -68,7 +68,7 @@ describe('continue in cloud, two real runner enrolments', () => {
       const cloud = await enrolRunner(app, 'cloud');
       const deps = (api: HttpRunnerApi): AttemptDeps => ({
         api, runtime: w!.runtime, artifacts: w!.artifacts, workRoot: w!.workRoot, repos: { [PROJECT]: w!.repo },
-        heartbeatMs: 20, maxMissedHeartbeats: 3, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => w!.logs.push(l),
+        codingWorkers: 'claude_code', heartbeatMs: 20, maxMissedHeartbeats: 3, maxTurns: 8, cpus: 2, memoryMiB: 4096, log: (l) => w!.logs.push(l),
       });
       const localApi = new HttpRunnerApi(base, local.token);
       const cloudApi = new HttpRunnerApi(base, cloud.token);

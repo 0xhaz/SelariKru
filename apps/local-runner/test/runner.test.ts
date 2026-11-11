@@ -23,7 +23,7 @@ afterEach(async () => {
 
 const deps = (w: World): AttemptDeps => ({
   api: w.api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { proj1: w.repo },
-  heartbeatMs: 20, maxMissedHeartbeats: 3, cpus: 2, memoryMiB: 4096, log: (l) => w.logs.push(l),
+  codingWorkers: 'claude_code', heartbeatMs: 20, maxMissedHeartbeats: 3, cpus: 2, memoryMiB: 4096, log: (l) => w.logs.push(l),
 });
 
 describe('outbound-only', () => {

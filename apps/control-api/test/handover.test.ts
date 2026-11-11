@@ -29,7 +29,7 @@ beforeEach(async () => {
   await t.db.execute(sql`DELETE FROM runners`);
   await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);
   const clock = testClock();
-  h = { ...makeHarness(t, {}, POLICY, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), now: clock.now }), clock };
+  h = { ...makeHarness(t, {}, POLICY, { scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), now: clock.now }), clock };
   await h.app.ready();
   local = await enrolRunner(h.app, 'local');
   cloud = await enrolRunner(h.app, 'cloud');
@@ -312,7 +312,7 @@ describe('continue in cloud', () => {
   it('a blocked task\'s handover offers only declining: a release or a restart is refused with handover_task_blocked (INFRA=1)', async () => {
     await h.app.close();
     const clock = testClock();
-    h = { ...makeHarness(t, { caps: { ...CAPS, maxInfraRetries: 1 } }, POLICY, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), now: clock.now }), clock };
+    h = { ...makeHarness(t, { caps: { ...CAPS, maxInfraRetries: 1 } }, POLICY, { scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }), now: clock.now }), clock };
     await h.app.ready();
     const prior = await localRunning();
     await post(h.app, url(), { mode: 'resume', idempotencyKey: 'k1' });
@@ -323,7 +323,7 @@ describe('continue in cloud', () => {
     for (let i = 0; i < 2; i++) {
       expect((await claim(cloud.token)).lease).not.toBeNull();
       clock.advance(70);
-      await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }).expireLeases(clock.now());
+      await createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY }).expireLeases(clock.now());
       clock.advance(60);
       await t.db.execute(sql`UPDATE runners SET last_seen_at = ${clock.now().toISOString()}::timestamptz`);
     }

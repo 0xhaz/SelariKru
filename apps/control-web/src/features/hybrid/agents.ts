@@ -27,7 +27,7 @@ export interface AgentsPort {
   /** Whether the task has a change and its input size, for the destination its fresh route allows. Counts only: no context or bundle comes into the tab. */
   facts(taskId: string): Promise<TaskFacts>;
   /** Accepts a checked patch proposal for the no-model apply worker (H5). Absent: the source cannot apply a change. */
-  readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt>) | null;
+  readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>, round: number) => Promise<ProposalAcceptReceipt>) | null;
 }
 
 /**
@@ -46,7 +46,7 @@ export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -102,10 +102,11 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       return () => void listeners.delete(fn);
     },
     reviseCriteria: source.reviseTaskCriteria ? (request) => source.reviseTaskCriteria!(projectId, request) : null,
-    acceptPatch: source.acceptPatchProposal ? async (outcome) => {
+    // `round`: 1 for the first accept; each accept again after a failed apply is the next round, with its own key. The same round's key again reads the proposal as it is now.
+    acceptPatch: source.acceptPatchProposal ? async (outcome, round) => {
       const proposal = acceptedFrom(outcome);
       if (proposal === null) throw new Error('proposal_not_acceptable: this result cannot be accepted');
-      return source.acceptPatchProposal!(projectId, proposal, `accept-${proposal.proposalId}`);
+      return source.acceptPatchProposal!(projectId, proposal, `accept-${proposal.proposalId}-${round}`);
     } : null,
     async facts(taskId) {
       if (!source.getTaskContextSize) throw new Error('this source cannot size a task\'s input');
@@ -125,6 +126,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           },
           getTaskContext: (taskId, destination, callOverride) => getTaskContext(projectId, taskId, destination, callOverride),
           ...(source.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => source.getTaskFiles!(projectId, taskId, paths) } : {}),
+          ...(source.listTaskFiles ? { listTaskFiles: (taskId: string) => source.listTaskFiles!(projectId, taskId) } : {}),
         }, req);
         return { ...out, simulated: opts.simulated };
       } finally {

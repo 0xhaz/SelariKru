@@ -6,6 +6,7 @@ import { openApproval } from './approval.ts';
 import { cancelRequestReason, confirmCancel, hasCancelRequest, stoppedOutcome } from './cancel.ts';
 import { emit, SCHEDULER_ACTOR, type EventScope } from './events.ts';
 import { createHash } from 'node:crypto';
+import { proposalAttemptEnded } from './proposal.ts';
 import { handoverStopFor, heldTaskBlocked, markSuccessorRunning, recordLatePublish, successorEnded } from './handover.ts';
 import { reservationIdFor, settle } from './reserve.ts';
 import { recordAttemptUsage } from './usage.ts';
@@ -96,6 +97,8 @@ export async function closeLease(tx: Tx, key: TaskKey, attemptId: string, now: D
     .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.attemptId, attemptId)));
   // A handover's successor that ended: the handover is offered again, offered to the owner, or closed (handover.ts).
   await successorEnded(tx, key, attemptId, close.outcome, close.exitReason, now);
+  // An apply attempt that ended: its proposal is applied, or failed with this reason so the owner can accept it again (H5).
+  await proposalAttemptEnded(tx, key, attemptId, close.exitReason, now);
   // A completed attempt moves to `verifying` and keeps its exclusive claims: verification releases them (applyVerification).
   if (close.keepClaims) return;
   await tx

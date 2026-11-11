@@ -108,7 +108,7 @@ describe('runner routes', () => {
 describe('cancel request is honoured by the scheduler', () => {
   const cancel = (taskId: string, rev: number, key: string) => post(h.app, `/v1/tasks/${taskId}/commands`, { command: 'cancel', expectedRevision: rev, idempotencyKey: key });
   const taskRow = async () => (await t.db.execute(sql`SELECT status, row_revision FROM task_status WHERE task_id = 't1'`))[0]!;
-  const sched = () => createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
+  const sched = () => createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
 
   it('a cancel request writes task.cancel_requested as the human owner and bumps the aggregate revision', async () => {
     await seedTask(t.db, specFor('t1'), 'ready');
@@ -232,7 +232,7 @@ describe('lease expiry driver', () => {
     const claim = await post(h.app, '/v1/runners/claim', {}, bearer(token));
     expect(claim.body.lease).not.toBeNull();
 
-    const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
+    const scheduler = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY });
     const driver = startLeaseExpiryDriver({ scheduler, now: h.clock.now, intervalMs: 10 });
     h.clock.advance(61);
     await waitFor(async () => {
@@ -477,7 +477,7 @@ describe('an attempt deadline that runs out during setup (T7.6)', () => {
     expect(late.status).toBe(409);
     expect(late.body.error.details).toMatchObject({ reason: 'attempt_timeout' });
     // The reaper decides: setup's interruption, not the work's failure.
-    await createScheduler({ catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY }).expireLeases(h.clock.now());
+    await createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: h.clock.now, policy: POLICY }).expireLeases(h.clock.now());
     expect((await t.db.execute(sql`SELECT outcome, exit_reason FROM attempts`))[0]).toMatchObject({ outcome: 'interrupted', exit_reason: 'infrastructure:attempt timeout reached during setup' });
     expect((await t.db.execute(sql`SELECT status FROM task_status`))[0]).toMatchObject({ status: 'ready' });
     expect((await t.db.execute(sql`SELECT state FROM budget_reservations`))[0]).toMatchObject({ state: 'released' });

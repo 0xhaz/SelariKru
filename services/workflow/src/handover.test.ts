@@ -25,7 +25,7 @@ beforeEach(async () => {
   clock = testClock();
   await resetDb(t.db);
   await t.db.execute(sql`DELETE FROM runners`);
-  ctx = { db: t.db, now: clock.now, policy: CLOUD_POLICY as Policy, catalog: TEST_CATALOG };
+  ctx = { codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: CLOUD_POLICY as Policy, catalog: TEST_CATALOG };
   s = createScheduler(ctx);
   // H2: one local slot, one cloud slot, the backend role pinned local. The owner's explicit handover is the only way this backend task reaches cloud.
   await t.db.execute(sql`UPDATE runs SET placement = ${JSON.stringify({ mode: 'H2', cloudDestination: 'cloud-sandbox-eu' })}::jsonb`);

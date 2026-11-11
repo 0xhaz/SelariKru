@@ -9,7 +9,7 @@ export const MODEL_METADATA = { cloudModel: CLOUD_MODEL, sdkVersion: SDK_VERSION
 export const OPERATIONS = ['draftBrief', 'suggestCriteria', 'draftTaskPlan'] as const;
 export type OnboardingOperation = (typeof OPERATIONS)[number];
 /** The catalog agents that have no onboarding twin. The brief and criteria agents reuse `draftBrief` and `suggestCriteria`. */
-export const AGENT_ONLY_OPERATIONS = ['planTasks', 'breakDownTask', 'proposePatch', 'reviewChange', 'triageFailure', 'describePullRequest'] as const;
+export const AGENT_ONLY_OPERATIONS = ['planTasks', 'breakDownTask', 'proposePatch', 'selectFiles', 'reviewChange', 'triageFailure', 'describePullRequest'] as const;
 export type Operation = OnboardingOperation | (typeof AGENT_ONLY_OPERATIONS)[number];
 
 type Schema = Record<string, unknown>;

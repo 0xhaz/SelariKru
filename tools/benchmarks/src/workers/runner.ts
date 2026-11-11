@@ -12,7 +12,7 @@ import { classifyClaimReason } from '@selarikru/workflow';
 import { allCriteriaPassed, FEEDBACK_CRITERIA } from '@selarikru/view-protocol';
 import type { VerifierRunner } from '../../../../services/verifier/src/service.ts';
 import { monotonicDateClock, performanceClock, type Monotonic } from '../clock.ts';
-import type { Manifest, Slot } from '../manifest.ts';
+import { BENCH_CODING_WORKERS, type Manifest, type Slot } from '../manifest.ts';
 import type { RawRecord } from '../report.ts';
 import { assertLive, LiveRefusedError, NO_COST, NO_HUMAN_MINUTES, NO_OPERATIONS, NO_RESOURCES, NO_TIMINGS, plannedTrials, type LiveAuthorization, type PlannedTrial } from '../trials.ts';
 import { collectTrial, type TrialEvidence } from './collect.ts';
@@ -370,7 +370,7 @@ async function runLocalTrial(t: TrialInput): Promise<{ record: RawRecord; spentU
       harnessReport: async () => env.runnerReport,
       attempt: {
         api, runtime: runtime!, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot: join(trialRoot, 'runner'), repos: { [stack.projectId]: repoPath },
-        heartbeatMs: env.heartbeatMs, maxMissedHeartbeats: 6, cpus: 2, memoryMiB: 4096, log: (l) => log(l), timeoutScale: 1,
+        codingWorkers: BENCH_CODING_WORKERS, heartbeatMs: env.heartbeatMs, maxMissedHeartbeats: 6, cpus: 2, memoryMiB: 4096, log: (l) => log(l), timeoutScale: 1,
       },
     });
     loop = runner.run(loopAbort.signal).catch((e) => log(`runner loop ended with an error: ${e instanceof Error ? e.message : String(e)}`));

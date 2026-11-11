@@ -114,3 +114,25 @@ describe('base files relayed for the patch agent', () => {
     expect(JSON.stringify(out)).not.toMatch(/\.env|docs\/x|id_rsa/);
   });
 });
+
+describe('fix round 1: listing and choosing base files (I4)', () => {
+  it('a listing keeps only servable paths, sorted and capped at 500 entries', async () => {
+    const { screenBaseListing } = await import('./index.ts');
+    const many = Array.from({ length: 600 }, (_, i) => ({ path: `src/f${String(i).padStart(3, '0')}.ts`, size: i }));
+    const out = screenBaseListing([...many, { path: 'src/.env', size: 1 }, { path: 'docs/x.md', size: 1 }], ['src']);
+    expect(out.entries).toHaveLength(500);
+    expect(out.truncated).toBe(true);
+    expect(out.entries.some((e) => e.path === 'src/.env' || e.path === 'docs/x.md')).toBe(false);
+  });
+
+  it('a choice over 30 files picks the relevant one by name, and finds nothing when no name matches', async () => {
+    const { selectFilesByName } = await import('./index.ts');
+    const entries = [
+      ...Array.from({ length: 29 }, (_, i) => ({ path: `src/components/widget${i}.tsx`, size: 100 })),
+      { path: 'src/feedback/postStore.ts', size: 300 },
+    ];
+    expect(selectFilesByName(entries, ['Store new feedback posts', 'A post appears in the list'])).toEqual(['src/feedback/postStore.ts']);
+    expect(selectFilesByName(entries, ['Make it faster'])).toEqual([]);
+    expect(selectFilesByName(entries, ['widget'], 3)).toHaveLength(3);
+  });
+});

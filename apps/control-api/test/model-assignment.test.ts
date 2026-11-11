@@ -144,7 +144,7 @@ describe('POST /v1/projects/:id/model-assignments', () => {
   it('snapshot reports the catalog, the current assignments and each attempt\'s record', async () => {
     await post(h.app, url, body());
     await seedTask(t.db, specFor('t1'));
-    const scheduler = createScheduler({ db: t.db, now: h.clock.now, policy: POLICY, catalog: TEST_CATALOG });
+    const scheduler = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: h.clock.now, policy: POLICY, catalog: TEST_CATALOG });
     const out = await scheduler.tryClaim({ runnerId: 'r1', tenantId: 'tenant_a', location: 'local', harnesses: TEST_RUNNER_REPORT }, CAPS);
     expect(out.ok).toBe(true);
     const snap = (await h.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() })).json();

@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, checkPatch, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, reservedPath, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -179,6 +179,9 @@ interface At { readonly cloudCapable: boolean }
 
 /** Missing information never counts as allowed: an input with no label is restricted, so it can only run on the device. */
 const labelOf = (l: unknown): unknown => (l === undefined || l === null ? 'restricted' : l);
+
+/** At most this many listed files are shown to the file choice; the rest are counted. */
+const PICK_LISTED_MAX = 200;
 
 /** At most this many changed paths are named in a PR description prompt; the rest are counted. */
 export const PR_SUMMARY_MAX_PATHS = 20;
@@ -426,6 +429,52 @@ export class AgentCatalog {
   triage(input: AgentInputs['triage']): Promise<AgentResult<'triage'>> { return this.run('triage', input); }
   prDescription(input: AgentInputs['prDescription']): Promise<AgentResult<'prDescription'>> { return this.run('prDescription', input); }
 
+  /**
+   * The patch agent's file choice, when matching names found nothing (H5): one small call, on the patch step's route, that picks up to the patch file limit from the
+   * listing (paths and sizes only, never contents). Only listed paths are kept. A call that does not answer usably chooses nothing.
+   */
+  async pickFiles(input: AgentBaseInput & { readonly listing: readonly { readonly path: string; readonly size: number }[]; readonly priorIssues?: readonly string[] }): Promise<{ readonly paths: string[]; readonly result: AgentResult<'patch'> }> {
+    const listed = input.listing.slice(0, PICK_LISTED_MAX);
+    const known = new Set(listed.map((e) => e.path));
+    let omissions: AgentOmission[] = [];
+    const schema = { type: 'object', properties: { paths: { type: 'array', items: { type: 'string' }, maxItems: AGENT_LIMITS.patchFiles } }, required: ['paths'] };
+    const spec: CallSpec = {
+      op: 'selectFiles', schema, schemaKey: 'selectFiles', citesCriteria: false,
+      systemInstruction: [
+        'You choose which existing files a developer must read and change to do one task. You are given the task and a list of the files under its allowed paths, with sizes.',
+        `Return JSON matching the schema: "paths", at most ${AGENT_LIMITS.patchFiles} paths copied exactly from the list, most relevant first. Choose none if the task only adds new files.`,
+        NO_AUTHORITY,
+      ].join(' '),
+      prompt: () => {
+        omissions = [];
+        const head = header(input, omissions);
+        if ('refused' in head) return { refused: head.refused };
+        const prior = priorCodes(input.priorIssues);
+        return { prompt: [...head.lines, '', '# Files under the allowed paths', ...(listed.length > 0 ? listed.map((e) => `- ${e.path} (${e.size} bytes)`) : ['(none)']),
+          ...(input.listing.length > listed.length ? [`- and ${input.listing.length - listed.length} more not listed`] : []),
+          ...(prior.length > 0 ? ['', '# The last diff was refused', `The checks refused it with: ${prior.join(', ')}. Choose the files it needed.`] : []),
+          '', '# What to do', 'Choose the files whose current contents are needed to make this change.'].join('\n') };
+      },
+      check: (data) => {
+        const paths = (data as { paths?: unknown } | null)?.paths;
+        if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string' || !known.has(p))) return ['/paths path_not_listed'];
+        return [];
+      },
+    };
+    const proposal = await this.adapter.runAgent(spec, {
+      projectId: input.projectId, allowedRequirementIds: [], sources: input.sources, policy: input.policy,
+      route: { taskId: input.task.taskId, stepKind: 'patch', callOverride: input.callOverride ?? null },
+      labels: [labelOf(input.task.classification), ...bundleLabels(input.bundle)],
+    });
+    const report = routeReportOf(proposal);
+    let reported: AgentResult['reported'] = 'not_sent';
+    if (report && this.opts.reportRoute) {
+      try { await this.opts.reportRoute(input.projectId, input.task.taskId, report); reported = 'sent'; } catch { reported = 'failed'; }
+    }
+    const chosen = proposal.status === 'ok' ? [...new Set(((proposal.data as { paths: string[] }).paths))].filter((p) => known.has(p)).slice(0, AGENT_LIMITS.patchFiles) : [];
+    return { paths: chosen, result: { kind: 'patch', proposal, report, reported, omissions, locked: proposal.route?.locked ?? false } };
+  }
+
   async run<K extends AgentKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>> {
     const def = AGENT_CATALOG[kind];
     const ids = input.task.criteria.map((c) => c.id);
@@ -457,7 +506,10 @@ export class AgentCatalog {
       route: { taskId: input.task.taskId, stepKind: kind, callOverride: input.callOverride ?? null },
       labels: labelsFor(kind, input),
     });
-    const report = routeReportOf(proposal);
+    const base = routeReportOf(proposal);
+    // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output.
+    const diff = kind === 'patch' && proposal.status === 'ok' ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
+    const report = base !== null && typeof diff === 'string' ? { ...base, outputSha256: sha256Hex(diff) } : base;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try {

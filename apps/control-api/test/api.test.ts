@@ -73,6 +73,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/tasks/t1/handover/diff?checkpointId=a1&path=a1`],
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`],
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/files`],
+  ['POST', `/v1/projects/${PROJECT}/tasks/t1/files/list`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],

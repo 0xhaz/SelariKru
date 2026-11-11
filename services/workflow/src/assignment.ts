@@ -97,7 +97,7 @@ export interface WorstCaseHold {
    * How the hold was derived. `known_rate`: the model's list price against the reference. `conservative`: this model has no rate, so the dearest known one is used.
    * `no_reference`: there is no reference rate to compare against, so the hold is the cap, unscaled. That is a gap, not a safety margin.
    */
-  readonly basis: 'known_rate' | 'conservative' | 'no_reference';
+  readonly basis: 'known_rate' | 'conservative' | 'no_reference' | 'no_model';
   readonly rateSource: string | null;
 }
 

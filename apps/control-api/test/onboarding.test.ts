@@ -1148,7 +1148,7 @@ describe('controller', () => {
     it('a model with no known rate never holds less than the cap, and still fits', async () => {
       const policy = { ...POLICY_WITH_PR, models: { ...POLICY_WITH_PR.models, allowed: [...POLICY_WITH_PR.models.allowed, { provider: 'anthropic', model: 'claude-haiku-5-5' }] } };
       const clock = testClock();
-      const h = makeHarness(t, {}, policy, { scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), readiness: goodProbes(), drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
+      const h = makeHarness(t, {}, policy, { scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now, policy }), readiness: goodProbes(), drivers: DRIVERS_ON, github: { pullRequests: { port: {} as never, repoPath: CHECKOUT, loadRecord: async () => null } } });
       const { claim, holds, capOf } = await runWithRoleModel(h, 25, 'frontend', { provider: 'anthropic', model: 'claude-haiku-5-5' });
       const [a, b] = [await claim(), await claim()];
       expect(a.lease, JSON.stringify(a)).not.toBeNull();

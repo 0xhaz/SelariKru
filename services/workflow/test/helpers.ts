@@ -105,7 +105,7 @@ export const runner = (id: string, location: Runner['location'] = 'local'): Runn
 export const CAPS = { maxConcurrentTotal: 2, attemptTimeoutSeconds: 1800, maxInfraRetries: 3, infraRetryBackoffSeconds: 10, infraRetryBackoffMaxSeconds: 40 } satisfies Caps;
 export const capsWith = (maxConcurrentTotal: number) => ({ ...CAPS, maxConcurrentTotal });
 
-export const makeScheduler = (db: Db, clock: TestClock): Scheduler => createScheduler({ db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG });
+export const makeScheduler = (db: Db, clock: TestClock): Scheduler => createScheduler({ codingWorkers: 'claude_code', db, now: clock.now, policy: POLICY, catalog: TEST_CATALOG });
 
 export async function statusOf(db: Db, taskId: string): Promise<{ status: string; revision: number; rowRevision: number }> {
   const rows = await db.execute(sql`SELECT status, current_revision, row_revision FROM task_status WHERE task_id = ${taskId}`);

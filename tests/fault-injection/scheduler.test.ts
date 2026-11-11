@@ -293,7 +293,7 @@ describe('scheduler fault injection', () => {
     // A fresh instance on a fresh connection pool: nothing of the first instance survives except the database.
     const { db: db2, close: close2 } = createDb(TEST_DATABASE_URL, { max: 5, searchPath: t.schema });
     try {
-      const restarted = createScheduler({ catalog: TEST_CATALOG, db: db2, now: clock.now, policy: POLICY });
+      const restarted = createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: db2, now: clock.now, policy: POLICY });
       expect(await restarted.claimNext(runner('r3'), CAPS)).toBeNull();
       expect(await restarted.expireLeases(clock.now())).toEqual([]);
       expect((await restarted.heartbeat(lease)).ok).toBe(true);

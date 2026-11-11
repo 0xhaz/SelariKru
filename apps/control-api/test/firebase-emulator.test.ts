@@ -69,7 +69,7 @@ describe.skipIf(!runnable)('Firebase Auth Emulator', () => {
     const clock = testClock();
     const app = buildApp({
       config: testConfig({ ownerUid: alice.uid }), db: t.db, verifier, now: clock.now,
-      scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now }), policy: API_POLICY,
+      scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: t.db, now: clock.now }), policy: API_POLICY,
     });
     const url = `/v1/projects/${PROJECT}/snapshot`;
     expect((await app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${alice.idToken}` } })).statusCode).toBe(200);

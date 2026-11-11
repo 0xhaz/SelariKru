@@ -246,6 +246,13 @@
       "when": 1794389162004,
       "tag": "0034_accepted_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794391881357,
+      "tag": "0035_accepted_proposal_rounds",
+      "breakpoints": true
     }
   ]
 }

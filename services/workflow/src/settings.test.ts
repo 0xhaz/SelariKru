@@ -84,7 +84,7 @@ describe('settings gate every claim on the server', () => {
   });
 
   it('a run no longer cloud-eligible gives a cloud runner nothing', async () => {
-    const cloud = createScheduler({ db: t.db, now: clock.now, policy: CLOUD_POLICY, catalog: TEST_CATALOG });
+    const cloud = createScheduler({ codingWorkers: 'claude_code', db: t.db, now: clock.now, policy: CLOUD_POLICY, catalog: TEST_CATALOG });
     await t.db.update(schema.runs).set({ placement: { mode: 'C1', cloudDestination: 'cloud-sandbox-eu' } });
     await seedTask(t.db, specFor('t1', { execution: 'cloud' }));
     await setRun('cloud_eligible', false);

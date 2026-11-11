@@ -3,7 +3,7 @@ import {
   type RoutePolicyMode, type RoutePolicySource, type RouteRecord, type RouteStepKind,
 } from '@selarikru/domain';
 import type { Tone } from '@selarikru/ui';
-import type { AuthorizedViewCommand, SettingView, TaskRouteView, TaskView } from '@selarikru/view-protocol';
+import type { AuthorizedViewCommand, ProposalAcceptReceipt, SettingView, TaskRouteView, TaskView } from '@selarikru/view-protocol';
 import { SETTINGS_OFF, settingStatus, type FieldStatus } from '../settings/model.ts';
 
 /**
@@ -212,7 +212,8 @@ const PATCH_ACCEPT_REFUSALS: Readonly<Record<string, string>> = {
   route_record_missing: 'The server has no record of where this call ran, so the proposal was not accepted. Propose the change again.',
   task_not_applicable: 'The task is not waiting to start, so the change was not accepted.',
   stale_revision: 'The task has a newer revision. Propose the change again against it.',
-  proposal_already_accepted: 'This proposal was already accepted.',
+  proposal_already_accepted: 'This proposal was already accepted and has not failed, so it is not queued again.',
+  too_many_file_requests: 'Too many file reads are waiting. Try again in a moment.',
   proposal_not_acceptable: 'This result cannot be accepted.',
 };
 const PROPOSAL_CHECK_TEXT: Readonly<Record<string, string>> = {
@@ -237,6 +238,39 @@ export function patchAcceptRefusal(message: string): string {
   }
   return PATCH_ACCEPT_REFUSALS[code] ?? 'The change was not accepted.';
 }
+
+const APPLY_FAILURE_TEXT: Readonly<Record<string, string>> = {
+  tests_failed: 'tests failed', build_failed: 'the build failed', proposal_base_mismatch: 'the task\'s base no longer gives these contents', proposal_invalid: 'the proposal did not pass the runner\'s checks',
+  proposal_changes_mismatch: 'the build changed an accepted file', proposal_apply_failed: 'the files could not be written safely',
+};
+
+/** Where an accepted proposal is now, in words, and whether to offer accepting it again. A failed apply says why. */
+export function patchReceiptText(r: ProposalAcceptReceipt): { readonly text: string; readonly again: boolean } {
+  const files = `${r.fileCount} file${r.fileCount === 1 ? '' : 's'}`;
+  switch (r.state) {
+    case 'failed': {
+      const raw = r.lastFailure ?? '';
+      const code = /^(?:infrastructure:)?([a-z_]+)/.exec(raw)?.[1] ?? '';
+      const detail = raw.includes(': ') ? raw.slice(raw.indexOf(': ') + 2) : '';
+      const why = APPLY_FAILURE_TEXT[code] ? `${APPLY_FAILURE_TEXT[code]}${detail ? ` (${detail})` : ''}` : (raw.replace(/_/g, ' ') || 'the runner did not finish');
+      return { text: `The last apply failed: ${why}. Accept again to retry.`, again: true };
+    }
+    case 'superseded': return { text: 'Another accepted change replaced this one before it was applied. Accept again to apply this one instead.', again: true };
+    case 'applying': return { text: 'The runner is applying it now.', again: false };
+    case 'applied': return { text: 'Applied by the runner. Verification judges the result.', again: false };
+    case 'accepted': return {
+      text: r.simulated
+        ? `Accepted in the demo: ${files}. The demo has no runner, so nothing is applied. Demo data, not evidence.`
+        : `${r.round > 1 ? `Accepted again (round ${r.round})` : 'Accepted'}: ${files}. The task waits for the runner, which applies them with no model, then builds, tests and verifies the result.`,
+      again: false,
+    };
+  }
+}
+
+/** Why the patch agent read no files, or null. */
+export const filesNoteText = (note: 'restricted' | 'no_checkout' | null | undefined): string | null =>
+  note === 'no_checkout' ? 'This runner has no copy of the project; the proposal can only add new files.'
+    : note === 'restricted' ? 'This task\'s files stay on this device, so the proposal can only add new files.' : null;
 
 /** Says when Propose change asked the agent again. */
 export const reaskNote = (reasked: number | undefined): string | null =>

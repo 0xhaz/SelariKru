@@ -20,15 +20,15 @@ const BASE = 'e'.repeat(40);
 const CONTENT = 'export const posts = [];\n';
 const DIFF = '--- /dev/null\n+++ b/src/posts.ts\n@@ -0,0 +1 @@\n+export const posts = [];\n';
 const proposal = (over: Partial<AcceptedProposal> = {}): AcceptedProposal => ({
-  proposalId: 'req_1', taskId: 't1', taskRevision: 1, baseSha: BASE, routeRecordId: 'rr_1', diff: DIFF,
+  proposalId: 'req_1', taskId: 't1', taskRevision: 1, baseSha: BASE, routeRecordId: 'req_1', diff: DIFF,
   results: [{ path: 'src/posts.ts', sha256: sha256Hex(CONTENT), content: CONTENT }], ...over,
 });
 const URL = `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`;
 const accept = (p: unknown, key = `k-${Math.random()}`) => post(h.app, URL, { idempotencyKey: key, proposal: p });
 let rid = 0;
-const routeRecord = (requestId = 'rr_1', over: Record<string, unknown> = {}) => t.db.insert(schema.clientReports).values({
+const routeRecord = (requestId = 'req_1', over: Record<string, unknown> = {}, diff = DIFF) => t.db.insert(schema.clientReports).values({
   tenantId: TENANT, projectId: PROJECT, reportId: `rpt_${(rid += 1)}`, subjectKind: 'task', subjectId: 't1', kind: 'route', trust: 'untrusted',
-  payload: { requestId, stepKind: 'patch', status: 'ok', ...over }, reportedBy: 'owner_uid_1',
+  payload: { requestId, stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(diff), ...over }, reportedBy: 'owner_uid_1',
 });
 
 describe('accepting a patch proposal (H5)', () => {
@@ -40,7 +40,7 @@ describe('accepting a patch proposal (H5)', () => {
   it('records it, with an owner event of ids and hashes, and an apply runner claims it with the proposal on its lease', async () => {
     const res = await accept(proposal());
     expect(res.status).toBe(201);
-    expect(res.body).toMatchObject({ proposalId: 'req_1', taskId: 't1', revision: 1, fileCount: 1, state: 'accepted' });
+    expect(res.body).toMatchObject({ proposalId: 'req_1', taskId: 't1', revision: 1, fileCount: 1, state: 'accepted', round: 1, lastFailure: null });
     const events = await t.db.execute(sql`SELECT type, actor_kind, payload::text AS p FROM events`);
     expect(events.map((e) => [e['type'], e['actor_kind']])).toEqual([['proposal.accepted', 'human']]);
     expect(String(events[0]!['p'])).not.toContain('posts = []');
@@ -77,17 +77,39 @@ describe('accepting a patch proposal (H5)', () => {
     expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM accepted_proposals`))[0]!['n'])).toBe(0);
   });
 
-  it('needs the route record of the patch call that produced it', async () => {
-    const res = await accept(proposal({ routeRecordId: 'rr_none' }));
-    expect([res.status, res.body.error.code]).toEqual([409, 'route_record_missing']);
-    await routeRecord('rr_blocked', { status: 'blocked' });
-    expect((await accept(proposal({ routeRecordId: 'rr_blocked' }))).body.error.code).toBe('route_record_missing');
+  it('needs the route record of the very call that produced it: the same request, an ok patch, and the hash of this diff', async () => {
+    const other = await accept(proposal({ routeRecordId: 'req_other' }));
+    expect([other.status, other.body.error.code, other.body.error.details.reason]).toEqual([409, 'route_record_missing', 'route_record_mismatch']);
+    expect((await accept(proposal({ proposalId: 'req_none', routeRecordId: 'req_none' }))).body.error.code).toBe('route_record_missing');
+    await routeRecord('req_blocked', { status: 'blocked' });
+    expect((await accept(proposal({ proposalId: 'req_blocked', routeRecordId: 'req_blocked' }))).body.error.code).toBe('route_record_missing');
+    // A recorded call whose output was another diff.
+    await routeRecord('req_swap', {}, 'some other diff');
+    const swapped = await accept(proposal({ proposalId: 'req_swap', routeRecordId: 'req_swap' }));
+    expect(swapped.body.error.details.reason).toBe('route_record_output_mismatch');
   });
 
-  it('a replay with the same key gives the same receipt, and the same proposal twice is refused', async () => {
+  it('the same key reads the proposal as it is now; a proposal still waiting is not queued twice', async () => {
     const first = await accept(proposal(), 'same');
     expect((await accept(proposal(), 'same')).body).toEqual(first.body);
-    expect((await accept(proposal(), 'other')).body.error.code).toBe('proposal_already_accepted');
+    const again = await accept(proposal(), 'other');
+    expect([again.body.error.code, again.body.error.details.state]).toEqual(['proposal_already_accepted', 'accepted']);
+  });
+
+  it('after a failed apply, the same key says why, and accepting again queues a new apply (I1)', async () => {
+    expect((await accept(proposal(), 'k1')).status).toBe(201);
+    const { token } = await enrolRunner(h.app, 'local', [...TEST_RUNNER_REPORT, APPLY_HARNESS_REPORT]);
+    const claim = async () => (await post(h.app, '/v1/runners/claim', { harnesses: [...TEST_RUNNER_REPORT, APPLY_HARNESS_REPORT], projects: [PROJECT] }, bearer(token))).body.lease;
+    const first = await claim();
+    const lease = { attemptId: first.attemptId, fence: first.fence, leaseToken: first.leaseToken };
+    expect((await post(h.app, '/v1/runners/result', { lease, result: { outcome: 'failed', reason: 'tests_failed: pnpm run test exited with code 1' } }, bearer(token))).status).toBe(200);
+    const read = await accept(proposal(), 'k1');
+    expect([read.status, read.body.state, read.body.lastFailure]).toEqual([200, 'failed', 'tests_failed: pnpm run test exited with code 1']);
+    const queued = await accept(proposal(), 'k2');
+    expect([queued.status, queued.body.state, queued.body.round]).toEqual([201, 'accepted', 2]);
+    const second = await claim();
+    expect(second).toMatchObject({ proposal: { proposalId: 'req_1' } });
+    expect(second.attemptId).not.toBe(first.attemptId);
   });
 });
 
@@ -159,15 +181,71 @@ describe('base files for the patch agent, relayed from the runner (H5)', () => {
 
   it('a path outside the task is refused, and no runner answering is a timeout that says so', async () => {
     expect((await post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, { paths: ['docs'] })).status).toBe(422);
-    const res = await post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, {});
+    const res = await post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, { paths: ['src/a.ts'] });
     expect([res.status, res.body.error.code]).toEqual([504, 'files_unavailable']);
   });
 
   it('a runner without the project is never asked', async () => {
     const { token } = await enrolRunner(h.app);
     await post(h.app, '/v1/runners/claim', { harnesses: TEST_RUNNER_REPORT, projects: ['other_project'] }, bearer(token));
-    const read = post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, {});
+    const read = post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, { paths: ['src/a.ts'] });
     await vi.waitFor(async () => { expect((await post(h.app, '/v1/runners/files/poll', {}, bearer(token))).body.requests).toEqual([]); }, { timeout: 1_000, interval: 50 });
     expect((await read).status).toBe(504);
+  });
+});
+
+describe('fix round 1: the relay (I4, M3)', () => {
+  const owner = () => ({ authorization: 'Bearer firebase-owner-token' });
+  const allowed = Array.from({ length: 12 }, (_, i) => `src/m${i}`);
+  beforeEach(async () => { await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: allowed })); });
+  const takeOne = async (token: string) => {
+    let requests: { requestId: string; mode: string; paths: string[] }[] = [];
+    await vi.waitFor(async () => { requests = (await post(h.app, '/v1/runners/files/poll', {}, bearer(token))).body.requests; expect(requests).toHaveLength(1); }, { timeout: 2_500, interval: 20 });
+    return requests[0]!;
+  };
+
+  it('lists the files under more than 8 allowed paths, paths and sizes only, screened again', async () => {
+    const { token } = await enrolRunner(h.app);
+    await post(h.app, '/v1/runners/claim', { harnesses: TEST_RUNNER_REPORT, projects: [PROJECT] }, bearer(token));
+    const listing = post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files/list`, {});
+    const req = await takeOne(token);
+    expect(req).toMatchObject({ mode: 'list', paths: allowed });
+    await post(h.app, '/v1/runners/files/answer', { requestId: req.requestId, files: [], omitted: [], entries: [{ path: 'src/m11/a.ts', size: 3 }, { path: 'src/m1/.env', size: 1 }, { path: 'docs/x.md', size: 1 }], truncated: false }, bearer(token));
+    const res = await listing;
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ taskId: 't1', revision: 1, baseSha: BASE, entries: [{ path: 'src/m11/a.ts', size: 3 }], truncated: false });
+    void owner;
+  });
+
+  it('only the runner that took a read may answer it', async () => {
+    const a = await enrolRunner(h.app);
+    const b = await enrolRunner(h.app);
+    for (const r of [a, b]) await post(h.app, '/v1/runners/claim', { harnesses: TEST_RUNNER_REPORT, projects: [PROJECT] }, bearer(r.token));
+    const read = post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files`, { paths: ['src/m1/a.ts'] });
+    const req = await takeOne(a.token);
+    expect((await post(h.app, '/v1/runners/files/answer', { requestId: req.requestId, files: [{ path: 'src/m1/a.ts', content: 'forged' }], omitted: [] }, bearer(b.token))).status).toBe(404);
+    await post(h.app, '/v1/runners/files/answer', { requestId: req.requestId, files: [{ path: 'src/m1/a.ts', content: 'a' }], omitted: [] }, bearer(a.token));
+    expect((await read).body.files).toEqual([{ path: 'src/m1/a.ts', content: 'a' }]);
+  });
+
+  it('a runner with no copy of the project says so, in the words the browser shows', async () => {
+    const { token } = await enrolRunner(h.app);
+    await post(h.app, '/v1/runners/claim', { harnesses: TEST_RUNNER_REPORT, projects: [PROJECT] }, bearer(token));
+    const read = post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files/list`, {});
+    const req = await takeOne(token);
+    await post(h.app, '/v1/runners/files/answer', { requestId: req.requestId, files: [], omitted: [], noCheckout: true }, bearer(token));
+    const res = await read;
+    expect([res.status, res.body.error.code, res.body.error.message]).toEqual([409, 'no_checkout', 'This runner has no copy of the project; the proposal can only add new files']);
+  });
+
+  it('caps the reads waiting per owner', async () => {
+    await h.app.close();
+    h = makeHarness(t, { codingWorkers: 'off' }, undefined, { fileRelay: new FileRelay(400, 2) });
+    const waiting = [post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files/list`, {}), post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files/list`, {})];
+    await vi.waitFor(async () => {
+      const third = await post(h.app, `/v1/projects/${PROJECT}/tasks/t1/files/list`, {});
+      expect([third.status, third.body.error.code]).toEqual([429, 'too_many_file_requests']);
+    }, { timeout: 300, interval: 20 });
+    await Promise.all(waiting);
   });
 });

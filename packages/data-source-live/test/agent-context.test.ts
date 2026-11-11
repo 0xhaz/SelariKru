@@ -84,7 +84,7 @@ describe('live task context and criteria revisions (H4)', () => {
 
 describe('live accepted proposals, base files and the PR body (H5)', () => {
   const proposal = { proposalId: 'req_1', taskId: 't1', taskRevision: 1, baseSha: 'a'.repeat(40), routeRecordId: 'rr_1', diff: '--- /dev/null\n+++ b/src/x.ts\n@@ -0,0 +1 @@\n+x\n', results: [{ path: 'src/x.ts', sha256: 'b'.repeat(64), content: 'x\n' }] };
-  const receipt = { proposalId: 'req_1', taskId: 't1', revision: 1, digest: 'c'.repeat(64), fileCount: 1, state: 'accepted' };
+  const receipt = { proposalId: 'req_1', taskId: 't1', revision: 1, digest: 'c'.repeat(64), fileCount: 1, state: 'accepted', round: 1, lastFailure: null };
 
   it('posts the accepted proposal to the owner route and reads the receipt; a refusal keeps its code', async () => {
     const live = source([() => ({ status: 201, body: receipt })]);
@@ -101,6 +101,15 @@ describe('live accepted proposals, base files and the PR body (H5)', () => {
     expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/tasks/t1/files', method: 'POST', body: { paths: ['src'] } });
     const wrong = source([() => ({ status: 200, body: { ...files, taskId: 't2' } })]);
     await expect(wrong.s.getTaskFiles!('p', 't1')).rejects.toBeInstanceOf(DataSourceException);
+  });
+
+  it('lists a task\'s files from the relay, paths and sizes only, and keeps a refusal\'s code', async () => {
+    const listing = { taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), entries: [{ path: 'src/a.ts', size: 2 }], truncated: false };
+    const live = source([() => ({ status: 200, body: listing })]);
+    expect(await live.s.listTaskFiles!('p', 't1')).toEqual(listing);
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/tasks/t1/files/list', method: 'POST' });
+    const none = source([() => ({ status: 409, body: { error: { code: 'no_checkout', message: 'This runner has no copy of the project; the proposal can only add new files' } } })]);
+    await expect(none.s.listTaskFiles!('p', 't1')).rejects.toThrow(/^no_checkout:/);
   });
 
   it('sends the PR description with the open request', async () => {

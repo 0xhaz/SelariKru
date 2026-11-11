@@ -26,6 +26,7 @@
     "credentialPath": null,
     "agentState": null,
     "cacheCondition": null,
+    "codingWorkers": null,
     "localHost": null,
     "cloudHost": null
   },

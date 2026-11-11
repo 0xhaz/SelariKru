@@ -152,7 +152,7 @@ describe('the one path that pushes, with real git against a protected bare remot
     });
     const store = w.store();
     const app = buildApp({
-      config: testConfig({ allowedOrigins: [] }), db: w.t.db, verifier: fakeVerifier, now: w.now, scheduler: createScheduler({ catalog: TEST_CATALOG, db: w.t.db, now: w.now, policy: w.policy }), policy: w.policy, catalog: TEST_CATALOG,
+      config: testConfig({ allowedOrigins: [] }), db: w.t.db, verifier: fakeVerifier, now: w.now, scheduler: createScheduler({ codingWorkers: 'claude_code', catalog: TEST_CATALOG, db: w.t.db, now: w.now, policy: w.policy }), policy: w.policy, catalog: TEST_CATALOG,
       github: { pullRequests: { port, repoPath: w.repo, loadRecord: (key) => loadValidRecord(w.t.db, store, key) } },
     });
     await app.ready();
