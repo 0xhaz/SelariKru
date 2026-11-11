@@ -21,3 +21,4 @@ export * from './product.ts';
 export * from './checkpoint.ts';
 export * from './redact.ts';
 export * from './agents.ts';
+export * from './apply.ts';

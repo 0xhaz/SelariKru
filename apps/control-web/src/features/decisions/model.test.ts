@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { NOW, approval, fixtureSnapshot, iso, snapshotOf, task } from '../overview/testing.ts';
-import { buildDecisions, confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionOptions } from './model.ts';
+import { buildDecisions, confirmIsStale, withPrBody, type DecisionAction, type DecisionCardModel, type DecisionOptions } from './model.ts';
 
 const live = { mode: 'live' as const, connection: 'live' as const };
 const build = (s: ReturnType<typeof snapshotOf>, over: Partial<DecisionOptions> = {}) => buildDecisions(s, NOW, { ...live, ...over });
@@ -610,3 +610,15 @@ describe('after the run budget is spent', () => {
   });
 });
 
+
+describe('the PR description goes with the open request (H5)', () => {
+  const open = { command: 'run.open_pull_request' as const, expectedRevision: 2, idempotencyKey: 'k', args: { runId: 'r1' } };
+  it('adds the run\'s description from this tab, trimmed and capped, and nothing when there is none', () => {
+    expect(withPrBody(open, { r1: '  Add posting\n\nAdds the route.  ' })).toEqual({ ...open, args: { runId: 'r1', body: 'Add posting\n\nAdds the route.' } });
+    expect(withPrBody(open, { r1: '   ' })).toEqual(open);
+    expect(withPrBody(open, { other: 'x' })).toEqual(open);
+    expect((withPrBody(open, { r1: 'y'.repeat(30_000) }) as typeof open & { args: { body: string } }).args.body).toHaveLength(20_000);
+    const other = { command: 'run.reverify' as const, expectedRevision: 2, idempotencyKey: 'k', args: { runId: 'r1' } };
+    expect(withPrBody(other, { r1: 'x' })).toEqual(other);
+  });
+});

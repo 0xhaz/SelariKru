@@ -61,3 +61,24 @@ export const TaskContextSizeSchema = z.strictObject({
   inputChars: z.number().int().min(0),
 });
 export type TaskContextSize = z.infer<typeof TaskContextSizeSchema>;
+
+/** An accepted patch proposal (H5), as the server records it: ids and hashes. The apply worker picks it up on the task's next claim. */
+export const ProposalAcceptReceiptSchema = z.strictObject({
+  proposalId: Id, taskId: Id, revision: z.number().int().min(1), digest: z.string().regex(/^[0-9a-f]{64}$/), fileCount: z.number().int().min(1), state: z.literal('accepted'),
+  /** Demo data: nothing is applied and nothing is evidence. */
+  simulated: z.boolean(),
+});
+export type ProposalAcceptReceipt = z.infer<typeof ProposalAcceptReceiptSchema>;
+
+/**
+ * A task's files at its base commit, for the patch agent (H5): read by the local runner with git and relayed by the server, which keeps nothing. Restricted tasks are
+ * never served. `omitted` lists a path only when it is inside the task's scope.
+ */
+export const TaskBaseFilesSchema = z.strictObject({
+  taskId: Id,
+  revision: z.number().int().min(1),
+  baseSha: z.string().min(1),
+  files: z.array(z.strictObject({ path: z.string().min(1), content: z.string() })),
+  omitted: z.array(z.strictObject({ path: z.string().min(1), reason: z.string().min(1) })),
+});
+export type TaskBaseFiles = z.infer<typeof TaskBaseFilesSchema>;

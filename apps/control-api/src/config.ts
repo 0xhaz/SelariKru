@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DEFAULT_NANO_INPUT_BUDGET_CHARS } from '@selarikru/domain';
+import { CODING_WORKERS, DEFAULT_CODING_WORKERS, DEFAULT_NANO_INPUT_BUDGET_CHARS, parseCodingWorkers } from '@selarikru/domain';
 
 /** Thrown at startup when configuration is missing or invalid. `missing` names the absent settings. */
 export class ConfigError extends Error {
@@ -46,6 +46,8 @@ export const ControlApiConfigSchema = z
     /** The device model's input budget, in characters, that the route suggestion measures a task's estimated input against. Default `DEFAULT_NANO_INPUT_BUDGET_CHARS`. */
     nanoInputBudgetChars: posInt.default(DEFAULT_NANO_INPUT_BUDGET_CHARS),
     expireLeasesIntervalMs: posInt,
+    /** Which coding workers are dispatched to. Default `off`, the hackathon build: only the no-model apply worker, so no worker calls a model API. */
+    codingWorkers: z.enum(CODING_WORKERS).default(DEFAULT_CODING_WORKERS),
     sse: z.object({ pollIntervalMs: posInt, keepAliveMs: posInt }).strict(),
   })
   .strict()
@@ -125,6 +127,8 @@ export function loadConfigFromEnv(env: Env): ControlApiConfig {
     ...(env['SELARIKRU_RECLASSIFICATION_GRANT_TTL_SECONDS'] ? { reclassificationGrantTtlSeconds: int(env, 'SELARIKRU_RECLASSIFICATION_GRANT_TTL_SECONDS') } : {}),
     ...(env['SELARIKRU_NANO_INPUT_BUDGET_CHARS'] ? { nanoInputBudgetChars: int(env, 'SELARIKRU_NANO_INPUT_BUDGET_CHARS') } : {}),
     expireLeasesIntervalMs: int(env, 'SELARIKRU_EXPIRE_LEASES_INTERVAL_MS'),
+    // Absent: `off`. Anything else but `claude_code` is refused at startup.
+    codingWorkers: parseCodingWorkers(env['SELARIKRU_CODING_WORKERS']) ?? env['SELARIKRU_CODING_WORKERS'],
     sse: { pollIntervalMs: 250, keepAliveMs: 15_000 },
   });
 }

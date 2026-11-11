@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_LIMITS, BrainBundleSchema, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, checkPatch, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, reservedPath, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -59,6 +59,11 @@ export interface AgentInputs {
     readonly request?: string | undefined;
     /** The request text's label. Missing: restricted, so the call stays on the device. */
     readonly requestClassification?: unknown;
+    /**
+     * A re-ask (H5): the check's refusals of the last answer, as `<json path> <code>`. Only entries whose code is a known patch check code are used; the last answer's
+     * own text is never sent back.
+     */
+    readonly priorIssues?: readonly string[];
   };
   /** `files`: the changed files before the change, with their labels. Every path the diff touches takes its label from here; a path not here counts as restricted. */
   readonly review: AgentBaseInput & { readonly diff: string; readonly files: readonly AgentFile[] };
@@ -85,6 +90,8 @@ export interface AgentResult<K extends AgentKind = AgentKind> {
   readonly omissions: readonly AgentOmission[];
   /** The task was locked to the device: hold the result on the device (RestrictedDraftHold). */
   readonly locked: boolean;
+  /** An ok patch only: the checked results of `checkPatch`, each changed file in full after the patch (null: deleted). What an accept sends; the diff is for review. */
+  readonly patch?: { readonly results: readonly { readonly path: string; readonly content: string | null }[] };
 }
 
 export interface AgentDefinition {
@@ -313,6 +320,10 @@ function leftOut(omissions: readonly AgentOmission[]): string[] {
   ];
 }
 
+/** The codes of a re-ask's refusals, known ones only, in order and once each. Never the answer's own words. */
+const PATCH_CODES = new Set<string>(AGENT_ISSUE_CODES);
+const priorCodes = (issues: readonly string[] | undefined): string[] => [...new Set((issues ?? []).map((x) => x.trim().split(/\s+/).at(-1) ?? '').filter((c) => PATCH_CODES.has(c)))];
+
 const idsLine = (ids: readonly string[]): string => `Allowed criterion IDs: ${ids.join(', ')}. Use only these IDs.`;
 
 /** Everything the prompt fences, so a nonce found in any of it is drawn again. */
@@ -347,6 +358,11 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
       const sel = selectFiles(i.files, t.allowedPaths, at.cloudCapable);
       omissions.push(...sel.omitted);
       out.push('', '# Files you may change', ...(sel.included.length > 0 ? sel.included.map((f) => block('FILE', f.path, f.content, nonce)) : ['(none)']));
+      const prior = priorCodes(i.priorIssues);
+      if (prior.length > 0) {
+        out.push('', '# Your last diff was refused', `The checks refused it with: ${prior.join(', ')}.`,
+          'Start again from the file contents above. Copy every context and removed line exactly, and give each hunk header the line numbers where those lines are in the file now.');
+      }
       return finish(['Propose the change for this task as a unified diff.', ...(i.request?.trim() ? [`The person asked: ${i.request.trim()}`] : [])], { ...base, files: new Map(sel.included.map((f) => [f.path, f.content])) });
     }
     case 'review': {
@@ -451,6 +467,10 @@ export class AgentCatalog {
         reported = 'failed';
       }
     }
-    return { kind, proposal, report, reported, omissions, locked: proposal.route?.locked ?? false };
+    // The checked results of an ok patch, from the same check that passed it, against the same files.
+    const ctx = checkCtx as AgentCheckContext | null;
+    const checked = kind === 'patch' && proposal.status === 'ok' && ctx !== null ? checkPatch(String((proposal.data as { diff?: unknown } | null)?.diff ?? ''), ctx) : null;
+    const patch = checked?.ok ? { patch: { results: [...checked.results].map(([path, content]) => ({ path, content })) } } : {};
+    return { kind, proposal, report, reported, omissions, locked: proposal.route?.locked ?? false, ...patch };
   }
 }

@@ -11,7 +11,9 @@ import { HttpRunnerApi } from './api.ts';
 import { gitBackedProjects, parseSlots } from './repos.ts';
 import { wsControlConnector } from './control.ts';
 import { loadCredentials, pair } from './credentials.ts';
-import { RunnerLoop } from './loop.ts';
+import { harnessReportFor, RunnerLoop } from './loop.ts';
+import { DEFAULT_HARNESSES } from './attempt.ts';
+import { CODING_WORKERS_OFF_LABEL, parseCodingWorkers } from '@selarikru/domain';
 import { RunnerSettings } from './settings.ts';
 
 const stateDir = process.env['SELARIKRU_RUNNER_HOME'] ?? join(homedir(), '.selarikru', 'runner');
@@ -49,6 +51,9 @@ async function main(): Promise<void> {
   if (cmd === 'run') {
     const { values } = parseArgs({ args: rest, options: { repo: { type: 'string', multiple: true }, poll: { type: 'string' }, slots: { type: 'string' } } });
     const slots = parseSlots(values.slots);
+    // Which coding workers this machine launches. Default `off`, the hackathon build: only the no-model apply worker, so no worker here calls a model API.
+    const codingWorkers = parseCodingWorkers(process.env['SELARIKRU_CODING_WORKERS']);
+    if (codingWorkers === null) throw new Error('SELARIKRU_CODING_WORKERS must be "off" or "claude_code"');
     const creds = await loadCredentials(stateDir);
     if (!creds) throw new Error('not paired: run `pair` first');
     const repos = await loadRepos(values.repo ?? []);
@@ -59,6 +64,7 @@ async function main(): Promise<void> {
     const caps = await runtime.capabilities();
     if (caps.runtimeVersion === null) throw new Error('sbx is not available; install and sign in to Docker Sandboxes. There is no host-mode fallback.');
     log(`sbx ${caps.runtimeVersion}; ${Object.keys(repos).length} project source(s) configured; outbound connections only`);
+    log(codingWorkers === 'off' ? `coding workers off: accepted changes are applied with no model; Claude Code is ${CODING_WORKERS_OFF_LABEL.toLowerCase()}` : 'coding workers: Claude Code on (an integration outside Firebase AI Logic)');
     // The owner's settings for this runner arrive with every claim and heartbeat; each request acknowledges the revision applied.
     const settings = new RunnerSettings(slots, log);
     const api = new HttpRunnerApi(creds.apiBaseUrl, creds.token, fetch, settings);
@@ -77,7 +83,9 @@ async function main(): Promise<void> {
       runtime,
       pollMs: Number(values.poll ?? 5000),
       // Probed on this machine's host. The CLI inside the sandbox image can differ; the init-event check is what proves the model that actually ran.
-      harnessReport: cachedHarnessReport(),
+      harnessReport: harnessReportFor(codingWorkers, cachedHarnessReport()),
+      // Base files for the browser's patch agent, read with git at the task's base and relayed by the API.
+      fileRequestMs: 2_000,
       // Two by default, the pilot's coding limit. The server still decides: a one-slot placement mode simply gives the second slot nothing.
       slots,
       settings,
@@ -87,6 +95,7 @@ async function main(): Promise<void> {
       attempt: {
         api, runtime, artifacts: new LocalDiskArtifactStore(artifactDir), workRoot, repos,
         heartbeatMs: 10_000, maxMissedHeartbeats: 6, maxTurns: 40, cpus: 2, memoryMiB: 4096, log, control: { connectorFor: dialControl },
+        codingWorkers, harnesses: codingWorkers === 'off' ? [] : DEFAULT_HARNESSES,
       },
     });
     await loop.run(ctl.signal);

@@ -367,6 +367,16 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
   };
 }
 
+/** The longest description the open request carries; the server redacts and caps it again. */
+const PR_BODY_MAX = 20_000;
+
+/** The open request with the run's description from this tab (H5), trimmed and capped. Any other command, or no description, is unchanged. */
+export function withPrBody(command: AuthorizedViewCommand, bodies: Readonly<Record<string, string>>): AuthorizedViewCommand {
+  if (command.command !== 'run.open_pull_request') return command;
+  const body = bodies[command.args.runId]?.trim() ?? '';
+  return body === '' ? command : { ...command, args: { ...command.args, body: body.slice(0, PR_BODY_MAX) } };
+}
+
 const openPrAction = (run: RunView, paused: string | null, uncovered: boolean): DecisionAction => ({
   kind: 'command', id: 'open-pr', label: 'Open draft pull request', style: 'primary', disabledReason: paused ?? (uncovered ? 'Accept the reduced scope first: a pull request cannot open while budget-stopped work is undecided.' : null),
   intent: { command: 'run.open_pull_request', expectedRevision: run.planRevision, args: { runId: run.runId } }, confirm: null,

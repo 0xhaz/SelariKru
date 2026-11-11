@@ -218,7 +218,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       const w = workerFor(snap, e.attemptId);
       if (!w || !attempt || attempt.outcome !== 'running') return commit(task);
       const target = oneOf(p, 'target', ['local', 'cloud'] as const);
-      const route = oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const);
+      const route = oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown', 'none'] as const);
       return commit(task, { ...snap, workers: put(snap.workers, w.workerId, { ...w, execution: target ?? w.execution, modelRoute: route ?? w.modelRoute }) });
     }
 
@@ -241,7 +241,7 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
         // What the worker is doing is unknown until something reports it. Never defaulted.
         activity: null, health: 'healthy', leaseHeld: true,
         stateReason: null, enteredStateAt: at, latestAction: null, latestEvidence: null, lastHeartbeatAt: at,
-        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown'] as const) ?? 'unknown', assignment: next.assignment,
+        execution: location ?? prior?.execution ?? 'unknown', modelRoute: oneOf(p, 'modelRoute', ['device', 'cloud', 'unknown', 'none'] as const) ?? 'unknown', assignment: next.assignment,
         blockedByTaskIds: [], blockedByApprovalId: null,
       };
       const t = withEvidence({ ...moveTask(task, 'running', null, at), placementBlock: null, activeAttemptId: attemptId, attemptIds: [...task.attemptIds, attemptId] }, 'attempt.started');
@@ -413,6 +413,10 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'attempt.route_changed':
     case 'attempt.publish_refused':
     case 'handover.decided':
+      return commit(task);
+
+    // An accepted patch proposal is ids and hashes: the apply attempt it queues arrives as `attempt.started`.
+    case 'proposal.accepted':
       return commit(task);
 
 

@@ -12,4 +12,4 @@ export const INFERENCE_LABELS: Readonly<Record<InferenceMode, string>> = {
 };
 export const EXECUTION_LABELS = { local: 'Local sandbox', cloud: 'Cloud sandbox', unknown: 'Execution unknown' } as const;
 export const OBSERVED_SOURCE_LABELS = { on_device: 'Observed on device', in_cloud: 'Observed in cloud', unknown: 'Source unknown' } as const;
-export const MODEL_ROUTE_LABELS = { device: 'Model on device', cloud: 'Model in cloud', unknown: 'Model route unknown' } as const;
+export const MODEL_ROUTE_LABELS = { device: 'Model on device', cloud: 'Model in cloud', unknown: 'Model route unknown', none: 'No model' } as const;

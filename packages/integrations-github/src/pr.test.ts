@@ -403,4 +403,15 @@ describe('buildPrBody', () => {
     expect(body).toMatch(/FB-01 is skipped; a skipped check is not a pass/);
     expect(body).toContain('No usage recorded.');
   });
+
+  it('puts the owner\'s description first, redacted, and keeps the recorded sections after it', () => {
+    const rec = record({});
+    const body = buildPrBody({ runId: RUN, candidateSha: SHA, baseSha: rec.baseSha, record: rec, limitations: [], usage: [], description: 'Add posting\n\nUses token ghp_abcdefghijklmnopqrstuvwxyz0123456789 here.' });
+    expect(body.indexOf('## Description')).toBeGreaterThan(-1);
+    expect(body.indexOf('## Description')).toBeLessThan(body.indexOf('## Candidate'));
+    expect(body).toContain('Add posting');
+    expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(body).toContain('Written by the owner from a browser proposal');
+    expect(buildPrBody({ runId: RUN, candidateSha: SHA, baseSha: rec.baseSha, record: rec, limitations: [], usage: [] })).not.toContain('## Description');
+  });
 });

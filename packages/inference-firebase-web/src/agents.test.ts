@@ -174,6 +174,28 @@ describe('patch proposals', () => {
   });
 });
 
+describe('patch proposals for the apply worker (H5)', () => {
+  it('an ok patch carries the checked results: each changed file in full after the patch', async () => {
+    const { sdk, catalog } = setup();
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    const r = await catalog.patch(INPUTS.patch);
+    expect(r.proposal.status).toBe('ok');
+    expect(r.patch).toEqual({ results: [{ path: 'src/app.ts', content: 'line one\nline 2\nline three\n' }] });
+    sdk.result = { text: JSON.stringify({ summary: 's', diff: DIFF.replace('-line two', '-line TWO') }), inferenceSource: 'on_device' };
+    expect((await catalog.patch(INPUTS.patch)).patch).toBeUndefined();
+  });
+
+  it('a re-ask names the refusal codes from the last answer and nothing else of it', async () => {
+    const { sdk, catalog } = setup();
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    await catalog.patch({ ...INPUTS.patch, priorIssues: ['/files/0 diff_does_not_apply', 'MODEL-TEXT-CANARY not a code'] });
+    const prompt = sdk.prompts[0]!;
+    expect(prompt).toContain('# Your last diff was refused');
+    expect(prompt).toContain('diff_does_not_apply');
+    expect(prompt).not.toContain('MODEL-TEXT-CANARY');
+  });
+});
+
 describe('context bundle and omissions', () => {
   it('builds the prompt from the served claims and lists what the bundle left out', async () => {
     const { sdk, catalog } = setup();

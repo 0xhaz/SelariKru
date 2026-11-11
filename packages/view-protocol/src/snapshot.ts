@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, ROUTE_POLICY_SOURCES, ROUTE_SUGGESTION_RULES, RoutePolicyModeSchema, RouteRecordSchema,
+  ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CODING_WORKERS, DEFAULT_CODING_WORKERS, CheckStatusSchema, ModelSelectionSchema, ROUTE_POLICY_SOURCES, ROUTE_SUGGESTION_RULES, RoutePolicyModeSchema, RouteRecordSchema,
   RUN_SETTING_FIELDS, RUNNER_SETTING_FIELDS, RUN_STATUSES, SETTING_SCOPES, TASK_SETTING_FIELDS, TASK_STATUSES,
 } from '@selarikru/domain';
 import { INFERENCE_MODES } from '@selarikru/policy';
@@ -19,7 +19,8 @@ export type WorkerActivity = (typeof WORKER_ACTIVITY)[number];
 export type WorkerHealth = (typeof WORKER_HEALTH)[number];
 
 export const ExecutionLocationSchema = z.enum(['local', 'cloud', 'unknown']);
-export const ModelRouteSchema = z.enum(['device', 'cloud', 'unknown']);
+/** `none`: the worker makes no model call (the apply worker). */
+export const ModelRouteSchema = z.enum(['device', 'cloud', 'unknown', 'none']);
 export const ObservedSourceSchema = z.enum(['on_device', 'in_cloud', 'unknown']);
 
 /** The model an attempt was launched with, as recorded at claim. It never changes afterwards. Null means no record exists, and the route stays unknown. */
@@ -33,6 +34,8 @@ export const ModelCatalogViewSchema = z
     detail: z.string().nullable(),
     /** What a role with no assignment runs. Null: the project has no default. */
     projectDefault: ModelSelectionSchema.nullable().default(null),
+    /** Which coding workers this build launches. `off`, the hackathon build's default: only the no-model apply worker, so Claude Code is not used. */
+    codingWorkers: z.enum(CODING_WORKERS).default(DEFAULT_CODING_WORKERS),
     providers: z.array(z.object({
       provider: Id, label: z.string().min(1), harnessVersion: z.string().nullable(),
       models: z.array(z.object({ modelId: Id, label: z.string().min(1), route: ModelRouteSchema, allowedByPolicy: z.boolean(), policyReason: z.string().nullable() }).strict()),
@@ -40,7 +43,7 @@ export const ModelCatalogViewSchema = z
   })
   .strict();
 export type ModelCatalogView = z.infer<typeof ModelCatalogViewSchema>;
-export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, projectDefault: null, providers: [] };
+export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', detail: null, projectDefault: null, codingWorkers: DEFAULT_CODING_WORKERS, providers: [] };
 
 /**
  * Whether a saved change is in force. `applied`: its enforcer acknowledged it. `applying`: saved, and the server already gates claims on it, but the runner

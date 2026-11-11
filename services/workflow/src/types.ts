@@ -1,7 +1,7 @@
 import type { ClaimReason } from './claim-reasons.ts';
 import type { Db, Tx } from '@selarikru/persistence';
 import type { Policy } from '@selarikru/policy';
-import type { ApprovalDestination, HarnessCatalog, LeaseGrant, RecordedAssignment, ResolvedSkill, Result, RunnerHarnessReport } from '@selarikru/domain';
+import type { ApprovalDestination, CodingWorkers, HarnessCatalog, LeaseGrant, RecordedAssignment, ResolvedSkill, Result, RunnerHarnessReport } from '@selarikru/domain';
 import type { PlacementMode } from './placement.ts';
 import type { LeaseHandover } from './handover.ts';
 
@@ -51,6 +51,11 @@ export interface SchedulerContext {
   readonly catalog?: HarnessCatalog | undefined;
   /** How long an approval request stays grantable. Default `APPROVAL_TTL_SECONDS`. */
   readonly approvalTtlSeconds?: number | undefined;
+  /**
+   * Which coding workers may be dispatched to. `off`: only the no-model apply worker, so a task waits for an accepted proposal. Absent: `claude_code`, for callers
+   * built before the setting; the control API always passes its configuration, which defaults to `off`.
+   */
+  readonly codingWorkers?: CodingWorkers | undefined;
 }
 
 /** What a worker holds. `leaseToken` is a credential: it never appears in events or logs. */
@@ -84,6 +89,8 @@ export interface Lease {
   readonly skills?: readonly ResolvedSkill[];
   /** Set on a handover's successor: the checkpoint it starts from (ids and hashes), or a restart from the persisted input. Absent on any other lease. */
   readonly handover?: LeaseHandover;
+  /** Set on an apply attempt: the accepted proposal it applies, by id and hashes. The runner fetches the results with its lease and checks them against these. */
+  readonly proposal?: { readonly proposalId: string; readonly digest: string; readonly fileCount: number; readonly baseSha: string };
 }
 
 export interface SkippedCandidate {

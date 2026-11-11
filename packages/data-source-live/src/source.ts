@@ -3,7 +3,7 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
-import { CriteriaRevisionRequestSchema, TaskAgentContextSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type TaskAgentContext, type TaskContextSize } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -107,7 +107,7 @@ function routeOf(c: AuthorizedViewCommand): Route {
     case 'approval.deny': return { path: `/v1/approvals/${enc(c.args.approvalId)}/resolve`, body: { decision: 'deny', scopeHash: c.args.scopeHash, expectedRevision: c.expectedRevision, ...key } };
     case 'run.accept_reduced_scope': return { path: `/v1/runs/${enc(c.args.runId)}/accept-reduced-scope`, body: { expectedPlanRevision: c.expectedRevision, notDeliveredHash: c.args.notDeliveredHash, ...(c.args.note !== undefined ? { note: c.args.note } : {}), ...key } };
     case 'run.reverify': return { path: `/v1/runs/${enc(c.args.runId)}/reverify`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
-    case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: {} };
+    case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: c.args.body !== undefined && c.args.body.trim() !== '' ? { body: c.args.body } : {} };
     // Needs the project's recorded setup first, so `execute` builds this route itself.
     case 'run.start_new': throw new Error('run.start_new is routed by execute');
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
@@ -255,6 +255,24 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
           return c;
         },
       }, 'a task context size', false, undefined, true);
+    },
+
+    /** An accepted patch proposal (H5). The server checks it again; a refusal's code leads the message. */
+    acceptPatchProposal(projectId, proposal, idempotencyKey): Promise<ProposalAcceptReceipt> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(proposal.taskId)}/proposals/accept`, {
+        parse: (v: unknown) => ProposalAcceptReceiptSchema.parse({ ...(v as object), simulated: false }),
+      }, 'a proposal receipt', false, { idempotencyKey, proposal }, true);
+    },
+
+    /** The task's base files for the patch agent, relayed from the local runner. Nothing is kept here either. */
+    getTaskFiles(projectId, taskId, paths): Promise<TaskBaseFiles> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/files`, {
+        parse: (v: unknown) => {
+          const f = TaskBaseFilesSchema.parse(v);
+          if (f.taskId !== taskId) throw new Error('files for another task');
+          return f;
+        },
+      }, 'a task\'s files', false, paths !== undefined ? { paths: [...paths] } : {}, true);
     },
 
     /**

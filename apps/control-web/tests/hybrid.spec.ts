@@ -100,9 +100,13 @@ test('run an agent on demo data, see its proposal with checks, source and timing
   // The override was for that call only.
   await expect(breakdown.getByLabel('Use cloud for this call')).not.toBeChecked();
   await expect(breakdown.getByTestId('agent-route')).toContainText('(Run default)');
-  // A proposed change is shown, never applied.
-  await action(page, 'patch').getByRole('button', { name: 'Propose change' }).click();
-  await expect(action(page, 'patch').getByRole('button', { name: 'Apply comes next' })).toBeDisabled();
+  // A proposed change, made from the task's base files, is accepted for the no-model apply worker (H5). The demo has no runner, so nothing is applied.
+  const patch = action(page, 'patch');
+  await patch.getByRole('button', { name: 'Propose change' }).click();
+  await expect(patch.getByTestId('agent-result')).toHaveAttribute('data-status', 'ok');
+  await expect(patch.getByTestId('patch-accept-note')).toContainText('with no model');
+  await patch.getByRole('button', { name: 'Accept and apply' }).click();
+  await expect(patch.getByTestId('patch-accepted')).toContainText('Accepted in the demo: 1 file. The demo has no runner, so nothing is applied.');
   // No change to review on this task yet, and no failed check to explain: said, not hidden.
   await expect(action(page, 'review').getByRole('button', { name: 'Review change' })).toBeDisabled();
   await expect(action(page, 'triage')).toContainText('no failed check');
@@ -121,7 +125,20 @@ test('explain a failure and write a PR description from the worker drawer\'s Tas
   await pr.getByRole('button', { name: 'Write PR description' }).click();
   await pr.getByRole('button', { name: 'Use as PR description' }).click();
   await expect(pr.getByTestId('pr-body')).toHaveValue(/^Demo: the change for this task/);
+  await expect(pr.getByTestId('pr-body-note')).toContainText('sends it as the description');
   await expect(page.locator('[data-testid="team-panel-row"][data-panel-worker="runner_local_2"] [data-testid="team-panel-route"]')).toHaveText(/AI: Local first/);
+});
+
+test('a restricted task\'s proposed change is never accepted: it is applied by the local runner on this device (H5)', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  await row(page, T('e2e')).getByRole('button', { name: 'End-to-end checks' }).click();
+  const patch = action(page, 'patch');
+  await patch.getByRole('button', { name: 'Propose change' }).click();
+  await expect(patch.getByTestId('agent-result')).toHaveAttribute('data-status', 'ok');
+  await expect(patch.getByRole('button', { name: 'Accept and apply' })).toBeDisabled();
+  await expect(patch.getByTestId('patch-accept-note')).toHaveText('Restricted work is applied by the local runner on this device. This proposal stays here and is not sent.');
+  await axe(page);
 });
 
 test('the run default is set in Settings › Workflow, seeded from setup', async ({ page }) => {

@@ -8,7 +8,8 @@ import { ConfirmDialog } from './ConfirmDialog.tsx';
 import { ActionControl, DecisionCard } from './DecisionCard.tsx';
 import { CHANGED_NOT_SENT_MESSAGE, GONE_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
 import { CHANGED_ON_SCREEN, holdActions, useChangedCards } from './useChangedCards.ts';
-import { confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionsModel } from './model.ts';
+import { confirmIsStale, withPrBody, type DecisionAction, type DecisionCardModel, type DecisionsModel } from './model.ts';
+import { hybridResults } from '../hybrid/context.tsx';
 
 type CommandAction = Extract<DecisionAction, { kind: 'command' }>;
 
@@ -161,7 +162,8 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     const keyId = `${card.id}:${action.id}:${card.fingerprint}`;
     const idempotencyKey = keys.current.get(keyId) ?? `decision-${crypto.randomUUID()}`;
     keys.current.set(keyId, idempotencyKey);
-    const command = { ...action.intent, idempotencyKey } as AuthorizedViewCommand;
+    // The pull request description chosen in a task's AI actions goes with the open request (H5).
+    const command = withPrBody({ ...action.intent, idempotencyKey } as AuthorizedViewCommand, hybridResults.getState().prBody);
     // The next item in the order shown: what workers ask first, then the rest.
     const shown = cards ? [...cards.filter((c) => FROM_WORKERS.has(c.kind)), ...cards.filter((c) => !FROM_WORKERS.has(c.kind))] : [];
     const index = shown.findIndex((c) => c.id === card.id);

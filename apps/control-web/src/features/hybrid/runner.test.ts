@@ -95,3 +95,46 @@ describe('a step that cannot run is refused before any model call', () => {
     expect(none.adapter.runAgent).not.toHaveBeenCalled();
   });
 });
+
+describe('Propose change reads base files and re-asks once (H5)', () => {
+  const invalid = (errors: string[]) => ({ ...blocked, status: 'invalid', blockedReason: null, validation: { status: 'failed', errors } }) as unknown as AssistantProposal;
+  const files = { taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), files: [{ path: 'src/t1/a.ts', content: 'export const A = 1;\n' }], omitted: [] };
+
+  it('gives the patch agent the base files read for the task, labelled with the task\'s label', async () => {
+    const h = harness(route(), { getTaskFiles: vi.fn(async () => files) });
+    const out = await runAgentStep(h.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(out).toMatchObject({ kind: 'result', base: { sha: 'a'.repeat(40), revision: 1 } });
+    expect(h.deps.getTaskFiles).toHaveBeenCalledWith('t1', ['src/t1']);
+    // The prompt is built inside the adapter call; the file content is in it.
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it('a restricted task gets no files (they stay on the device), and a read that fails refuses the step', async () => {
+    const restricted = harness(route(), { getTaskFiles: async () => { throw new DataSourceException({ code: 'unavailable', message: 'files_restricted: stays here', retryable: false }); } });
+    expect((await runAgentStep(restricted.deps, { taskId: 't1', kind: 'patch', callOverride: null })).kind).toBe('result');
+    const down = harness(route(), { getTaskFiles: async () => { throw new DataSourceException({ code: 'unavailable', message: 'files_unavailable: no runner', retryable: true }); } });
+    expect(await runAgentStep(down.deps, { taskId: 't1', kind: 'patch', callOverride: null })).toEqual({ kind: 'refused', code: 'files_unavailable' });
+    expect(down.adapter.runAgent).not.toHaveBeenCalled();
+  });
+
+  it('a patch the check refuses for line drift is asked again once, with the codes, as a new call; then it stops', async () => {
+    const h = harness(route(), { getTaskFiles: async () => files });
+    h.adapter.runAgent.mockImplementation(async (spec: CallSpec, req: AgentCallRequest) => { h.calls.push({ spec, req }); return { ...invalid(['/files/0 diff_does_not_apply']), operation: spec.op } as never; });
+    const out = await runAgentStep(h.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(h.calls).toHaveLength(2);
+    expect(out).toMatchObject({ kind: 'result', reasked: 1 });
+    const second = h.calls[1]!.spec.prompt({ cloudCapable: false } as never) as { prompt: string };
+    expect(second.prompt).toContain('diff_does_not_apply');
+  });
+
+  it('the limit is configurable: 0 never re-asks, and a refusal that is not line drift is not re-asked', async () => {
+    const zero = harness(route(), { getTaskFiles: async () => files, reaskLimit: 0 });
+    zero.adapter.runAgent.mockImplementation(async (spec: CallSpec) => ({ ...invalid(['/files/0 diff_does_not_apply']), operation: spec.op }) as never);
+    await runAgentStep(zero.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(zero.adapter.runAgent).toHaveBeenCalledTimes(1);
+    const outside = harness(route(), { getTaskFiles: async () => files });
+    outside.adapter.runAgent.mockImplementation(async (spec: CallSpec) => ({ ...invalid(['/files/0 path_outside_allowed']), operation: spec.op }) as never);
+    await runAgentStep(outside.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(outside.adapter.runAgent).toHaveBeenCalledTimes(1);
+  });
+});

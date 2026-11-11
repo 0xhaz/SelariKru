@@ -84,6 +84,8 @@ export async function resolveAssignment(ctx: SchedulerContext, db: Executor, key
  * Returns the block code, or null when the route is acceptable.
  */
 export function routeRefusal(assignment: Pick<RecordedAssignment, 'provider' | 'model' | 'route'>, classification: string): string | null {
+  // No model call at all: nothing goes anywhere.
+  if (assignment.route === 'none') return null;
   if (assignment.route === 'unknown') return blockCode('model_route_unknown', assignment);
   if ((classification === 'restricted' || classification === 'secret') && assignment.route !== 'device') return blockCode('restricted_requires_device_model', assignment);
   return null;

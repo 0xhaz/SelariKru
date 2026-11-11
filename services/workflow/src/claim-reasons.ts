@@ -25,6 +25,9 @@ const exact = {
   resource_conflict: true,
   skill_runner_update_required: false,
   location_mismatch: false,
+  // Coding workers are off: a task waits for the owner to accept a patch proposal. And an accepted proposal waits for a runner that can apply it.
+  awaiting_accepted_proposal: false,
+  apply_runner_update_required: false,
   infra_retry_backoff: true,
   reservation_not_settled: true,
   no_free_slot: true,

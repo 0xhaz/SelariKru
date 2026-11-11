@@ -13,3 +13,4 @@ export * from './stack.ts';
 export * from './skills.ts';
 export * from './product.ts';
 export * from './checkpoints.ts';
+export * from './proposals.ts';

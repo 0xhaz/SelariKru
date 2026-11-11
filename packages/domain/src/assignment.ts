@@ -9,15 +9,15 @@ const Ident = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, 'expected 
 export const ModelSelectionSchema = z.object({ provider: Ident, model: Ident }).strict();
 export type ModelSelection = z.infer<typeof ModelSelectionSchema>;
 
-/** Where a worker's model calls go: the attempt's recorded inference route. `unknown` stays unknown and never reads as device. */
-export const MODEL_ROUTES = ['device', 'cloud', 'unknown'] as const;
+/** Where a worker's model calls go: the attempt's recorded inference route. `unknown` stays unknown and never reads as device. `none`: the worker makes no model call (apply_proposal). */
+export const MODEL_ROUTES = ['device', 'cloud', 'unknown', 'none'] as const;
 export type ModelRoute = (typeof MODEL_ROUTES)[number];
 
 export const ASSIGNMENT_SCOPES = ['role', 'task'] as const;
 export type AssignmentScope = (typeof ASSIGNMENT_SCOPES)[number];
 
-/** How an attempt came to use a model. `trial_pin`: a benchmark trial's single pinned model, which refuses overrides. */
-export const ASSIGNMENT_SOURCES = ['task', 'role', 'default', 'trial_pin'] as const;
+/** How an attempt came to use a model. `trial_pin`: a benchmark trial's single pinned model, which refuses overrides. `proposal`: the owner accepted a patch proposal, applied with no model. */
+export const ASSIGNMENT_SOURCES = ['task', 'role', 'default', 'trial_pin', 'proposal'] as const;
 export type AssignmentSource = (typeof ASSIGNMENT_SOURCES)[number];
 
 /** The assignment as recorded on an attempt. */

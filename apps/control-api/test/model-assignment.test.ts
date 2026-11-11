@@ -63,7 +63,7 @@ describe('POST /v1/projects/:id/model-assignments', () => {
     expect(r.status).toBe(422);
     expect(r.body.error.code).toBe('no_provider_detected');
     const snap = await none.app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/snapshot`, headers: owner() });
-    expect(snap.json().modelCatalog).toEqual({ status: 'none', detail: 'not installed here', projectDefault: API_POLICY.models.default, providers: [] });
+    expect(snap.json().modelCatalog).toEqual({ status: 'none', detail: 'not installed here', projectDefault: API_POLICY.models.default, codingWorkers: 'claude_code', providers: [] });
   });
 
   it('offers only what enrolled runners report, and no report means nothing is offered', async () => {

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { codingAgentLabel } from '@selarikru/domain';
 import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, ProjectViewSnapshot, TerminalChannel, TerminalControlChannel } from '@selarikru/view-protocol';
 import type { DecisionsModel } from '../features/decisions/model.ts';
 import { ASSIGNMENTS_OFF } from '../features/team/ModelAssignments.tsx';
@@ -64,7 +65,8 @@ export function WorkerDrawerHost({ look = null, workerId, tab, team, snapshot, d
     const attempt = w?.attemptId ? snapshot.attempts[w.attemptId] : undefined;
     const rec = row.assignment;
     const harness = rec ? snapshot.modelCatalog.providers.find((p) => p.provider === rec.provider) : undefined;
-    const agent = rec ? `${harness?.label ?? rec.provider}${harness?.harnessVersion ? ` ${harness.harnessVersion}` : ''} ${rec.model}` : 'Coding agent not recorded';
+    // The apply worker has no model: it says what it does (H5).
+    const agent = rec ? codingAgentLabel(rec, harness) : 'Coding agent not recorded';
     const runtime = row.execution === 'local' ? 'Local sandbox' : row.execution === 'cloud' ? 'Cloud sandbox' : 'Runtime unknown';
     const running = attempt !== undefined && attempt.endedAt === null && attempt.outcome === 'running';
     const session = running

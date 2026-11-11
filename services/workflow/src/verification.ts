@@ -104,6 +104,12 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   takes the status row before the `checkpoints` row and the run row (when it takes one) before it too, no path holds a `checkpoints` row and waits for a status row,
  *   the scheduler lock or a run row, and none takes the candidate row, the claim lock, the brain lock or `product_heads`. The verdict, re-verify and settle never touch
  *   a running task's handover, and a replan meets the request exactly as it meets the claim poll (the scheduler lock serialises them).
+ * - accepted patch proposals (services/workflow/src/proposal.ts, H5): the owner's accept (`acceptProposal`, `POST /v1/projects/:id/tasks/:taskId/proposals/accept`)
+ *   takes the scheduler lock, the task's status row, then the task's `accepted_proposals` rows (a waiting one superseded, the new one inserted), then the event sequence
+ *   (`proposal.accepted`, the owner as actor). The claim reads the waiting row after it locked the status row and, when it starts the apply attempt, moves that row
+ *   to `applying` right after its attempt row, inside its own order (`markApplying`), before its first event; the scheduler lock serialises it with an accept, and
+ *   no other path writes the row. The runner's fetch (`fetchProposalForLease`) and the owner's context and change reads (`appliedProposalFor`) lock nothing. No
+ *   proposal path takes a run row, the candidate row, this lock, the brain lock or `product_heads`.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

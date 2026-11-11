@@ -1,4 +1,4 @@
-import { DeliveredSkillsSchema, PILOT_ROLE_PATHS, SKILL_NOTES_RELATIVE_PATH, SKILL_WORKSPACE_ROOT, verifyDeliveredPack, WORKER_TOOLS, type BrainBundle, type DeliveredSkillPack, restrictedApproval, restrictedDiffReason, restrictedReason, type RestrictedOutcome, type RestrictedReason } from '@selarikru/domain';
+import { AcceptedProposalSchema, checkAcceptedProposal, isApplyAssignment, reproduceProposal, type AcceptedProposal, type CodingWorkers, DeliveredSkillsSchema, PILOT_ROLE_PATHS, SKILL_NOTES_RELATIVE_PATH, SKILL_WORKSPACE_ROOT, verifyDeliveredPack, WORKER_TOOLS, type BrainBundle, type DeliveredSkillPack, restrictedApproval, restrictedDiffReason, restrictedReason, type RestrictedOutcome, type RestrictedReason } from '@selarikru/domain';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ArtifactStore } from '@selarikru/artifacts';
@@ -8,7 +8,7 @@ import { approvalUnavailableReason, ADVISORY_APPROVAL_OPERATIONS, redactSecrets,
 import { buildTaskBundle, checkAllowedPaths, computeChanges, readRegularFile, readRepoManifest, readStackDetection, resolveToolchain, RuntimeHarnessLauncher, unlockTree, validateAllowedPaths, type FileChange } from '@selarikru/runtime-docker-local';
 import { createHash } from 'node:crypto';
 import { ApiStatusError, FetchedCheckpointSchema, LeaseLostError, leaseRef, type ClaimedLease, type HandoverStop, type RunnerApi, type RunnerResult } from './api.ts';
-import { applyCheckpoint, buildCheckpoint, gitBaseReader } from './checkpoint.ts';
+import { applyCheckpoint, buildCheckpoint, gitBaseReader, writeCheckedFiles } from './checkpoint.ts';
 import { ControlBridge, type ControlDeps } from './control.ts';
 import { TERMINAL_PREVIEW_CHARS, TerminalFeed } from './terminal.ts';
 
@@ -54,6 +54,11 @@ export interface AttemptDeps {
   readonly buildTaskBundle?: typeof buildTaskBundle;
   /** Output retained and uploaded for the Terminal tab. Default limits suit production; tests shrink them. */
   readonly terminalFeedLimits?: ConstructorParameters<typeof TerminalFeed>[3];
+  /**
+   * Which coding workers this runner launches. `off`: only the no-model apply worker; a lease for any model harness is refused before a sandbox exists, so no worker
+   * that calls a model API starts. Absent: `claude_code`, for callers built before the setting; the runner binary always passes its own, which defaults to `off`.
+   */
+  readonly codingWorkers?: CodingWorkers;
 }
 
 export interface AttemptReport {
@@ -378,14 +383,19 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     // The recorded model is what launches, or nothing does. These checks sit before the sandbox: an unsupported model must fail with no sandbox created.
     const assignment = lease.assignment;
     if (assignment === null) return await finish('blocked', why('no_model_recorded', 'no_model_recorded: this attempt carries no recorded model, so it cannot run'), null);
-    const harnessEntry = (deps.harnesses ?? DEFAULT_HARNESSES).find((h) => h.provider === assignment.provider);
+    // The apply worker (H5) runs no model: it writes the accepted results and runs the project's own build and tests. Every other worker is a model harness, which
+    // this runner launches only when coding workers are on.
+    const applying = isApplyAssignment(assignment);
+    if (!applying && (deps.codingWorkers ?? 'claude_code') === 'off') return await finish('blocked', why('coding_workers_off', `coding_workers_off: ${assignment.provider}/${assignment.model} calls a model API, and this runner launches no such worker`), null);
+    const harnessEntry = applying ? null : (deps.harnesses ?? DEFAULT_HARNESSES).find((h) => h.provider === assignment.provider);
     if (harnessEntry === undefined) return await finish('blocked', why('unsupported_provider', `unsupported_provider:${assignment.provider}/${assignment.model}`), null);
-    if (!harnessEntry.models.includes(assignment.model)) return await finish('blocked', why('unsupported_model', `unsupported_model:${assignment.provider}/${assignment.model}`), null);
+    if (harnessEntry !== null && !harnessEntry.models.includes(assignment.model)) return await finish('blocked', why('unsupported_model', `unsupported_model:${assignment.provider}/${assignment.model}`), null);
 
     // Knowledge packs, checked before any sandbox exists: exactly what the claim recorded, each file hashed here and the list matched against the recorded digest. A delivery
     // that cannot be read, or one byte off, starts nothing.
     let packs: DeliveredSkillPack[] = [];
-    if (lease.skills !== undefined) {
+    // The apply worker reads no pack.
+    if (lease.skills !== undefined && !applying) {
       const parsed = DeliveredSkillsSchema.safeParse(lease.skills);
       if (!parsed.success) return await finish('blocked', why('skill_delivery_invalid', 'skill_delivery_invalid: the knowledge packs for this attempt could not be read'), null);
       packs = parsed.data.packs;
@@ -419,7 +429,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       manifestSent = Promise.all([before, sent]);
     }
     const taskFile = renderTaskFile(task, { signalPath, grants, context: lease.context ?? null, skills: packs.map((p) => ({ name: p.skillId, version: p.version, dir: p.dir, digest: p.digest })), ...(lease.priorFailure ? { priorFailure: redactSecrets(lease.priorFailure).slice(0, 1000) } : {}), ...(toolchainSpec !== null ? { toolchain: toolchainSpec } : {}) });
-    if (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT) {
+    if (!applying && (redactSecrets(taskFile) !== taskFile || redactSecrets(AGENT_PROMPT) !== AGENT_PROMPT)) {
       return await finish('blocked', why('secret_in_task_text', 'task text contains a secret-shaped value; it was not sent to the agent'), null);
     }
 
@@ -441,7 +451,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let baseIgnores;
     try {
       // The repository's own skills directory never ships: a pack reaches a worker only by review, binding and digest. Recorded as an omission.
-      const b = await (deps.buildTaskBundle ?? buildTaskBundle)({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs, extraExclude: [SKILL_WORKSPACE_ROOT] });
+      const b = await (deps.buildTaskBundle ?? buildTaskBundle)({ repoPath: repo, baseSha: task.baseSha, destDir: workspace, taskFiles: applying ? {} : { 'TASK.md': taskFile }, readOnlyFiles: packFiles, readOnlyDirs: packDirs, extraExclude: [SKILL_WORKSPACE_ROOT] });
       const ownSkills = b.excluded.filter((p) => p.startsWith(`${SKILL_WORKSPACE_ROOT}/`)).length;
       baseline = b.baseline;
       baseIgnores = b.baseIgnores;
@@ -491,6 +501,45 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       const applied = await applyCheckpoint(workspace, fetched.data, { baseSha: task.baseSha, patchSha256: lease.handover.patchSha256, allowedPaths: allowed.normalized });
       if (!applied.ok) return await refuse(`${applied.reason}: ${applied.detail}`);
       log(`checkpoint ${lease.handover.checkpointId} applied: ${applied.files} file(s), patch ${lease.handover.patchSha256}`);
+    }
+
+    // An apply attempt (H5): the accepted proposal, fetched with this lease and checked again here (ids, hashes, paths, sizes), then reproduced from the base files read with
+    // git, and only then its results written: never the diff. Any mismatch writes nothing and starts no sandbox.
+    let accepted: AcceptedProposal | null = null;
+    if (applying) {
+      if (flags.timedOut) return await finish('infrastructure_failed', why('provisioning_failed: the attempt timeout was reached during setup'), null);
+      if (deps.api.fetchProposal === undefined) return await finish('blocked', why('proposal_unavailable', 'proposal_unavailable: this runner cannot fetch an accepted proposal'), null);
+      let raw: unknown;
+      try {
+        raw = await deps.api.fetchProposal(ref);
+      } catch (err) {
+        if (err instanceof LeaseLostError) return { outcome: 'lease_lost', reason: null, changeManifest: null };
+        if (err instanceof ApiStatusError && err.permanent) return await finish('blocked', why('proposal_unavailable', `proposal_unavailable: ${err.message}`), null);
+        return await finish('infrastructure_failed', why('provisioning_failed', `provisioning_failed: the accepted proposal could not be fetched: ${err instanceof Error ? err.message : 'error'}`), null);
+      }
+      const parsed = AcceptedProposalSchema.safeParse(raw);
+      if (!parsed.success) return await finish('failed', why('proposal_invalid', 'proposal_invalid: the accepted proposal could not be read'), null);
+      const p = parsed.data;
+      const checked = checkAcceptedProposal(p, { taskId: task.taskId, revision: task.revision, baseSha: task.baseSha, allowedPaths: allowed.normalized });
+      if (!checked.ok) return await finish('failed', why('proposal_invalid', `proposal_invalid: ${checked.code}`), null);
+      if (lease.proposal === undefined || p.proposalId !== lease.proposal.proposalId || checked.digest !== lease.proposal.digest) {
+        return await finish('failed', why('proposal_invalid', 'proposal_invalid: the fetched proposal is not the one the lease names'), null);
+      }
+      const readBase = gitBaseReader(repo, task.baseSha);
+      const base = new Map<string, string>();
+      for (const r of p.results) {
+        const bytes = await readBase(r.path);
+        if (bytes === null) continue;
+        const text = bytes.toString('utf8');
+        // A file that is not UTF-8 text cannot be the base a text patch was made against.
+        if (bytes.includes(0) || !Buffer.from(text, 'utf8').equals(bytes)) return await finish('failed', why('proposal_base_mismatch', `proposal_base_mismatch: ${r.path} is not text at the base`), null);
+        base.set(r.path, text);
+      }
+      if (!reproduceProposal(p, base, allowed.normalized).ok) return await finish('failed', why('proposal_base_mismatch', 'proposal_base_mismatch: the diff applied to the base files does not give the accepted results'), null);
+      const written = await writeCheckedFiles(workspace, p.results.map((r) => ({ path: r.path, bytes: r.content === null ? null : Buffer.from(r.content, 'utf8'), mode: 'keep' as const })));
+      if (!written.ok) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${written.detail}`), null);
+      accepted = p;
+      log(`accepted proposal ${p.proposalId} applied: ${p.results.length} file(s), digest ${checked.digest}`);
     }
 
     if (flags.aborted) return { outcome: 'aborted', reason: 'runner shutting down', changeManifest: null };
@@ -562,7 +611,6 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (!acknowledged) return await finish('infrastructure_failed', why('provisioning_failed: setup could not be confirmed', 'provisioning_failed: setup could not be confirmed with the control plane, so no worker was started'), null);
     armDeadline(workMs);
     launcher = new RuntimeHarnessLauncher(deps.runtime, handle, Math.max(1, Math.ceil(workMs / 1000)));
-    const harness = harnessEntry.create(launcher);
     let resultOk = false;
     let resultNote = 'the agent produced no result';
     let exitFailed = false;
@@ -589,7 +637,16 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       control = new ControlBridge({ connect: deps.control.connectorFor(ref), runtime: deps.runtime, handle, log, ...(deps.control.limits !== undefined ? { limits: deps.control.limits } : {}) });
       control.start();
     }
-    for await (const ev of harness.run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath, ...(feed !== null ? { previews: { enabled: true, maxChars: TERMINAL_PREVIEW_CHARS, raw: true } } : {}) })) {
+    // The apply worker: the project's own build and test scripts, in the sandbox, one after the other. No model and no harness.
+    let commandFault: Why<'failed'> | null = null;
+    if (applying) {
+      initSeen = true;
+      const ran = await runProjectChecks(launcher, lease.attemptId, workspace, toolchainSpec !== null ? await readScripts(repo, task.baseSha) : null, log, aborted);
+      if (ran.fault !== null) commandFault = why(ran.fault, `${ran.fault}: ${ran.detail}`);
+      resultOk = true;
+      resultNote = ran.detail;
+    }
+    for await (const ev of applying || harnessEntry === null ? [] : harnessEntry.create(launcher).run({ attemptId: lease.attemptId, prompt: AGENT_PROMPT, workspacePath: workspace, model: { provider: assignment.provider, model: assignment.model }, ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}), mcp: 'none', tools: deps.tools ?? DEFAULT_TOOLS, approvalSignalPath: signalPath, ...(feed !== null ? { previews: { enabled: true, maxChars: TERMINAL_PREVIEW_CHARS, raw: true } } : {}) })) {
       feed?.onEvent(ev);
       if (aborted()) requestStop();
       switch (ev.type) {
@@ -705,6 +762,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     if (approvalRefused !== null) return await finish('blocked', why('approval_signal_refused', `approval_signal_refused: ${approvalRefused}`), cost);
     if (approvalUnavailable !== null) return await finish('blocked', why(approvalUnavailable), cost);
     if (approvalRequest !== null) return await finishApproval(approvalRequest, cost);
+    if (commandFault !== null) return await finish('failed', commandFault, cost);
     if (!resultOk) return await finish('failed', why('agent_result_failed', exitFailed && exitNote ? `${resultNote}; ${exitNote}` : resultNote), cost);
     if (exitFailed) return await finish('failed', why('agent_exit_failed', exitNote || 'agent exited with an error'), cost);
     if (!initSeen) return await finish('blocked', why('model_unverified', `model_unverified: recorded ${assignment.model}, the stream never reported a model`), cost);
@@ -738,6 +796,11 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       return await finish('failed', why('diff_failed', `could not compute the diff: ${err instanceof Error ? err.message : 'error'}`), cost);
     }
     if (changes.some((c) => c.path === RESERVED_DIR || c.path.startsWith(`${RESERVED_DIR}/`))) return await finish('failed', why('reserved_path_changed', 'a change touches the reserved .selarikru directory'), cost);
+    // An apply attempt publishes exactly what the owner accepted: the same paths, the same contents, nothing a build left behind. So the diff a review reads is this change set.
+    if (accepted !== null) {
+      const off = changesMismatch(changes, accepted);
+      if (off !== null) return await finish('failed', why('proposal_changes_mismatch', `proposal_changes_mismatch: ${off}`), cost);
+    }
     // A pack is never changed by the worker that reads it, whatever the allowed paths say.
     if (packs.length > 0 && changes.some((c) => c.path.startsWith(`${SKILL_WORKSPACE_ROOT}/`))) return await finish('failed', why('skill_pack_changed', `skill_pack_changed: ${changes.filter((c) => c.path.startsWith(`${SKILL_WORKSPACE_ROOT}/`)).length} change(s) under ${SKILL_WORKSPACE_ROOT}`), cost);
     let check: ReturnType<typeof checkAllowedPaths>;
@@ -793,4 +856,54 @@ export async function storeChanges(store: ArtifactStore, workspace: string, chan
   }
   const body = JSON.stringify({ schema: 1, taskId: task.taskId, revision: task.revision, baseSha: task.baseSha, changes: entries });
   return (await store.put(Buffer.from(body))).sha256;
+}
+
+/** The base commit's package.json scripts, read with git. Null when there is none or it cannot be read. */
+async function readScripts(repo: string, baseSha: string): Promise<Readonly<Record<string, unknown>> | null> {
+  const bytes = await gitBaseReader(repo, baseSha)('package.json');
+  if (bytes === null) return null;
+  try {
+    const scripts = (JSON.parse(bytes.toString('utf8')) as { scripts?: unknown } | null)?.scripts;
+    return scripts !== null && typeof scripts === 'object' ? (scripts as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The apply worker's checks: `pnpm run build` and `pnpm run test`, when the base names them and a Node toolchain is set up, in the sandbox, in that order, stopping at the first
+ * failure. Their output stays in this runner's log, redacted and clipped. A project with neither runs nothing here: verification still runs the acceptance checks.
+ */
+export async function runProjectChecks(
+  launcher: RuntimeHarnessLauncher, attemptId: string, cwd: string, scripts: Readonly<Record<string, unknown>> | null, log: (line: string) => void, stopping: () => boolean,
+): Promise<{ readonly fault: 'build_failed' | 'tests_failed' | null; readonly detail: string }> {
+  if (scripts === null) {
+    log('no Node toolchain or package.json scripts at the base: build and test are left to verification');
+    return { fault: null, detail: 'no project scripts to run' };
+  }
+  const steps = (['build', 'test'] as const).filter((name) => typeof scripts[name] === 'string');
+  for (const name of steps) {
+    if (stopping()) break;
+    log(`running pnpm run ${name}`);
+    const proc = await launcher.launch({ attemptId, command: ['pnpm', 'run', name], cwd });
+    let tail: string[] = [];
+    for await (const chunk of proc.lines) tail = [...tail, ...String(chunk).split('\n')].slice(-40);
+    const exit = await proc.exited;
+    for (const line of tail.map((l) => l.trim()).filter(Boolean)) log(`${name} output: ${line}`);
+    if (exit.code !== 0) return { fault: name === 'build' ? 'build_failed' : 'tests_failed', detail: `pnpm run ${name} exited with code ${exit.code ?? 'none'}${exit.signal ? ` signal ${exit.signal}` : ''}` };
+  }
+  return { fault: null, detail: steps.length === 0 ? 'the base names no build or test script' : `${steps.map((n) => `pnpm run ${n}`).join(' and ')} passed` };
+}
+
+/** Why the workspace's changes are not exactly the accepted results, or null. Paths and contents only; a link, a mode-only change or an extra file is a mismatch. */
+export function changesMismatch(changes: readonly FileChange[], accepted: Pick<AcceptedProposal, 'results'>): string | null {
+  const want = new Map(accepted.results.map((r) => [r.path, r.sha256]));
+  const got = new Map(changes.map((c) => [c.path, c]));
+  for (const [path, sha] of want) {
+    const c = got.get(path);
+    if (c === undefined) return `${path} did not change`;
+    if (sha === null ? c.status !== 'deleted' : c.status === 'deleted' || c.kind !== 'file' || c.sha256 !== sha) return `${path} is not the accepted content`;
+  }
+  const extra = changes.filter((c) => !want.has(c.path));
+  return extra.length > 0 ? `${extra.length} change(s) the proposal does not contain` : null;
 }

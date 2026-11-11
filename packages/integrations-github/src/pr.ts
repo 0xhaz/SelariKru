@@ -33,6 +33,8 @@ export interface OpenPrDeps {
   readonly loadUsage?: (runId: string) => Promise<readonly UsageLine[]>;
   /** Recorded limitations beyond those derived from the verification record. */
   readonly limitations?: readonly string[];
+  /** The owner's description for the body, already redacted and capped (`ownerPrDescription`). */
+  readonly description?: string | null;
   readonly now?: () => Date;
 }
 
@@ -152,7 +154,7 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       .where(and(eq(schema.taskRevisions.tenantId, run.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
     const tested = new Set(record.results.map((r) => r.checkId));
     const untested = [...new Set(carried.flatMap((c) => { const ids = (c.spec as { requirementIds?: unknown }).requirementIds; return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []; }))].filter((id) => !tested.has(id)).sort();
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, humanIntervention, skills, untested, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, description: deps.description ?? null, humanIntervention, skills, untested, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {

@@ -26,6 +26,8 @@ export interface ReviewPackage {
   readonly humanIntervention?: readonly { readonly attemptId: string; readonly taskId: string; readonly at: string }[];
   /** The knowledge packs each attempt of this run received, by version and digest, from the attempt's execution record. */
   readonly skills?: readonly { readonly attemptId: string; readonly taskId: string; readonly confirmed: boolean; readonly packs: readonly { readonly versionId: string; readonly digest: string }[] }[];
+  /** The owner's description, sent with the open request (H5): a browser proposal the owner chose and edited. Untrusted text, redacted and capped before it gets here. */
+  readonly description?: string | null;
   /** Present after the owner accepted a budget stop: what the run does not deliver. */
   readonly notDelivered?: { readonly tasks: readonly { readonly taskId: string; readonly status: string; readonly budgetStopped: boolean }[]; readonly requirementIds: readonly string[]; readonly acceptanceCheckIds: readonly string[] };
 }
@@ -41,6 +43,9 @@ export function buildPrBody(p: ReviewPackage): string {
   const r = p.record;
   const lines: string[] = [];
   lines.push('This draft pull request was opened by SelariKru for human review. SelariKru does not merge: a person merges on GitHub.', '');
+  if (p.description) {
+    lines.push('## Description', '', '_Written by the owner from a browser proposal. It is not a check result: the sections after it are what was recorded and verified._', '', p.description.trim(), '');
+  }
   lines.push('## Candidate', '', `- Run: \`${p.runId}\``, `- Candidate commit: \`${p.candidateSha}\``, `- Base commit: \`${p.baseSha}\``, `- Verification record: \`${r.recordId}\` (verifier \`${r.verifier.id}\`, host \`${r.host}\`)`, '');
   lines.push('## Requirements', '', '| Requirement | Result | Checks |', '| --- | --- | --- |');
   for (const c of r.results) {

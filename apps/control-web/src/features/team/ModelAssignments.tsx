@@ -125,6 +125,7 @@ export function ModelAssignmentsPanel(props: AssignProps) {
   const { model } = props;
   return (
     <Panel title="Model assignments" labelId="team-assignments-title" aside={model.available ? APPLIES : null} className="mb-6">
+      {model.codingWorkersNote ? <p className="mb-3 rounded-chip border border-line bg-panel-2 p-2.5 text-sm text-fg" data-testid="coding-workers-off">{model.codingWorkersNote}</p> : null}
       {!model.available ? (
         <p className="text-fg" data-testid="assignment-unavailable">{model.statusText}</p>
       ) : model.roles.length === 0 ? (

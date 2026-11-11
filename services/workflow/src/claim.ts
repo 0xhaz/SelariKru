@@ -1,6 +1,6 @@
 import { asClaimReason, type ClaimReason } from './claim-reasons.ts';
 import { randomUUID } from 'node:crypto';
-import { harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
+import { APPLY_MODEL, APPLY_PROVIDER, harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
 import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
@@ -8,7 +8,8 @@ import { policyRevokedReason } from '@selarikru/domain';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
 import { hasCancelRequest } from './cancel.ts';
 import { deferEvents, emit, flushEvents, SCHEDULER_ACTOR, type EventScope } from './events.ts';
-import { resolveAssignment, routeRefusal, worstCaseHold, type WorstCaseHold } from './assignment.ts';
+import { resolveAssignment, routeRefusal, worstCaseHold, type ResolvedAssignment, type WorstCaseHold } from './assignment.ts';
+import { APPLY_ASSIGNMENT, markApplying, pendingProposal } from './proposal.ts';
 import { INFRASTRUCTURE_REASON_PREFIX, leaseDeadline } from './lease.ts';
 import { capacityForMode, isBlocked, place, PLACEMENT_MODES, type Blocked, type Capacity, type Placement, type PlacementMode } from './placement.ts';
 import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMicros, type BudgetPosition } from './reserve.ts';
@@ -441,8 +442,21 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   }
   if (await resourceConflict(tx, key, spec)) return { reason: 'resource_conflict' };
 
-  // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
-  const assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);
+  // An accepted patch proposal is applied by the no-model worker (H5): it takes precedence over any model assignment. With coding workers off, that is the only worker a task
+  // is dispatched to, so a task with no accepted proposal waits for the owner, visibly, and no worker that calls a model API is assigned.
+  const proposal = await pendingProposal(tx, key, spec.revision, spec.baseSha);
+  let assigned: ResolvedAssignment;
+  if (proposal !== null) {
+    // A fact about the poller, not the task: a runner that can apply it takes it.
+    if (!(runner.harnesses ?? []).some((h) => h.provider === APPLY_PROVIDER && h.models.includes(APPLY_MODEL))) return { reason: 'apply_runner_update_required' };
+    assigned = { ok: true, assignment: APPLY_ASSIGNMENT };
+  } else if ((ctx.codingWorkers ?? 'claude_code') === 'off') {
+    await recordBlock(tx, key, c, statusRow, 'awaiting_accepted_proposal', null, now);
+    return { reason: 'awaiting_accepted_proposal' };
+  } else {
+    // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
+    assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);
+  }
   if (!assigned.ok) {
     // Only a fact about the task is recorded. "This runner lacks it" while another has it is about the poller, and recording it would grow the log at poll rate.
     if (!assigned.runnerOnly) await recordBlock(tx, key, c, statusRow, assigned.reason, null, now);
@@ -466,7 +480,10 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   // unreviewed, blocked or unknown) refuses the claim visibly, before placement can clear a block, rather than starting the task without it.
   // Where pack content would go: a cloud runner, or a model that runs in the cloud, is a cloud destination whatever the runner's location.
   const contentDestination = runner.location === 'cloud' || assigned.assignment.route !== 'device' ? 'cloud' : 'local';
-  const skills = await resolveTaskSkills(tx, key, spec, contentDestination, assigned.assignment.provider);
+  // The apply worker reads no pack: it writes the accepted results and runs the project's own scripts.
+  const skills: SkillResolution = proposal !== null
+    ? { delivered: [], omitted: [], refused: [], context: { entries: [], actions: [] }, destination: contentDestination }
+    : await resolveTaskSkills(tx, key, spec, contentDestination, assigned.assignment.provider);
   const refusedSkill = skills.refused[0];
   if (refusedSkill !== undefined) {
     const reason = `${refusedSkill.reason}:${refusedSkill.skillId}`;
@@ -556,7 +573,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   }
   if (statusRow.placementBlock?.startsWith('budget:')) await clearBlock(tx, key);
 
-  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification), skills, handover);
+  const lease = await writeClaim(tx, runner, c, spec, statusRow.rowRevision, started.value, attemptId, amountMicros, position, promoted, placed as Placement, capacity?.modeId ?? null, (cfg as RunPlacement | null)?.cloudDestination ?? null, Math.min(spec.limits.timeoutSeconds, limits.attemptTimeoutSeconds), now, assigned.assignment, hold, isTerminalStreamable(resolved.routeClassification), skills, handover, proposal);
   // Every grant waiting on this revision is spent on this attempt: a grant releases work once. The attempt receives what it is granted with its lease.
   const grants = await loadWorkerGrants(tx, key, spec.revision, now);
   await consumeGrants(tx, key, spec.revision, lease.attemptId, now);
@@ -564,7 +581,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
 }
 
 /** Writes every claim record. The attempt row comes first: the events FK to attempts is immediate. */
-async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean, skills: SkillResolution, handover: CheckpointRow | null): Promise<Lease> {
+async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, rowRevision: number, state: TaskState, attemptId: string, amountMicros: number, position: BudgetPosition, promoted: boolean, placed: Placement, modeId: string | null, cloudDestination: string | null, timeoutSeconds: number, now: Date, assignment: RecordedAssignment, hold: WorstCaseHold, streamable: boolean, skills: SkillResolution, handover: CheckpointRow | null, proposal: { proposalId: string; digest: string; fileCount: number; baseSha: string } | null): Promise<Lease> {
   const key: TaskKey = { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId };
   const fenceRows = await tx
     .select({ top: sql<number | null>`max(${schema.attempts.leaseFence})` })
@@ -585,6 +602,8 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
     baseSha: spec.baseSha, startedAt: now, outcome: 'running', detail: { location: runner.location, terminalStreamable: streamable, configRevision: config?.revision ?? 0, ...(handover ? { handover: { checkpointId: handover.checkpointId, mode: handover.mode, priorAttemptId: handover.priorAttemptId } } : {}) },
     modelRoute: assignment.route, modelProvider: assignment.provider, modelId: assignment.model, assignmentSource: assignment.source,
   });
+  // The accepted proposal now belongs to this attempt: no other claim can take it.
+  if (proposal !== null) await markApplying(tx, key, proposal.proposalId, attemptId, now);
   // What this attempt receives, by version and digest, in the claim's own transaction: provenance for the attempt and its evidence. Metadata only.
   await tx.insert(schema.skillExecutionRecords).values({
     tenantId: key.tenantId, projectId: key.projectId, attemptId, taskId: key.taskId, recordedAt: now,
@@ -624,6 +643,7 @@ async function writeClaim(tx: Tx, runner: Runner, c: Candidate, spec: TaskSpec, 
   return {
     tenantId: key.tenantId, projectId: key.projectId, runId: c.runId, taskId: key.taskId, revision: spec.revision,
     attemptId, attemptNumber, fence, leaseToken, runnerId: runner.runnerId, location: runner.location, reservationId, assignment, streamable, controllable: streamable && !c.trial, skills: skills.delivered, ...(handed ? { handover: handed } : {}),
+    ...(proposal !== null ? { proposal: { proposalId: proposal.proposalId, digest: proposal.digest, fileCount: proposal.fileCount, baseSha: proposal.baseSha } } : {}),
     acquiredAt: now.toISOString(), lastHeartbeatAt: now.toISOString(), expiresAt: expiresAt.toISOString(), deadlineAt: deadlineAt.toISOString(),
   };
 }

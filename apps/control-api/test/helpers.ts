@@ -35,6 +35,8 @@ export function testConfig(over: Partial<ControlApiConfig> = {}): ControlApiConf
     reclassificationGrantTtlSeconds: 86_400,
     nanoInputBudgetChars: 6000,
     expireLeasesIntervalMs: 1000,
+    // The tests written before H5 dispatch to Claude Code workers; the apply tests set `off`, the production default.
+    codingWorkers: 'claude_code',
     sse: { pollIntervalMs: 20, keepAliveMs: 5000 },
     ...over,
   };
@@ -51,7 +53,7 @@ export const API_POLICY = { ...POLICY, operations: { assign_replan_tasks: 'allow
 export function makeHarness(t: TestDb, over: Partial<ControlApiConfig> = {}, policy: Policy | null = API_POLICY, extra: Partial<AppDeps> = {}): Harness {
   const clock = testClock();
   const config = testConfig(over);
-  const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY });
+  const scheduler = createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY, codingWorkers: config.codingWorkers });
   const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: clock.now, scheduler, policy: policy ?? undefined, catalog: TEST_CATALOG, ...extra });
   return { app, clock, config };
 }

@@ -1,5 +1,5 @@
 import {
-  DEFAULT_NANO_INPUT_BUDGET_CHARS, ROUTE_POLICY_LABELS, effectiveRoutePolicy, isCloudCapable, routeLockFor, suggestRoute,
+  DEFAULT_NANO_INPUT_BUDGET_CHARS, RESTRICTED_APPLY_REFUSAL, ROUTE_POLICY_LABELS, effectiveRoutePolicy, isCloudCapable, routeLockFor, suggestRoute,
   type RoutePolicyMode, type RoutePolicySource, type RouteRecord, type RouteStepKind,
 } from '@selarikru/domain';
 import type { Tone } from '@selarikru/ui';
@@ -192,6 +192,55 @@ export function acceptBlocker(f: { readonly status: TaskView['status']; readonly
   if (!f.live) return 'Accepting is off until the connection is live.';
   return null;
 }
+
+/** Why "Accept and apply" is off for a patch proposal (H5), or null. Restricted first: a locked result never leaves this device. */
+export function patchAcceptBlocker(f: { readonly status: TaskView['status']; readonly locked: boolean; readonly canAccept: boolean; readonly live: boolean; readonly recorded: boolean; readonly checked: boolean }): string | null {
+  if (f.locked) return `${RESTRICTED_APPLY_REFUSAL}. This proposal stays here and is not sent.`;
+  if (!f.canAccept) return 'This source cannot apply a change.';
+  if (!f.checked) return 'This proposal has no checked file contents to apply.';
+  if (!f.recorded) return 'Where this call ran was not recorded, so the proposal cannot be accepted. Propose the change again.';
+  if (!['planned', 'ready'].includes(f.status)) return `A ${f.status.replace(/_/g, ' ')} task is not waiting to start, so a change cannot be applied to it now.`;
+  if (!f.live) return 'Accepting is off until the connection is live.';
+  return null;
+}
+
+/** What accepting a patch does. */
+export const PATCH_ACCEPT_CONSEQUENCE = 'The server checks the change again. Then the runner applies these exact file contents in a clean sandbox, with no model, and builds, tests and verifies the result. Nothing merges.';
+
+const PATCH_ACCEPT_REFUSALS: Readonly<Record<string, string>> = {
+  proposal_restricted: `${RESTRICTED_APPLY_REFUSAL}. Nothing was sent.`,
+  route_record_missing: 'The server has no record of where this call ran, so the proposal was not accepted. Propose the change again.',
+  task_not_applicable: 'The task is not waiting to start, so the change was not accepted.',
+  stale_revision: 'The task has a newer revision. Propose the change again against it.',
+  proposal_already_accepted: 'This proposal was already accepted.',
+  proposal_not_acceptable: 'This result cannot be accepted.',
+};
+const PROPOSAL_CHECK_TEXT: Readonly<Record<string, string>> = {
+  base_mismatch: 'it was made against another base commit than the task\'s',
+  hash_mismatch: 'a file\'s contents do not match their hash',
+  path_outside_allowed: 'it changes a file outside the task\'s allowed paths',
+  path_reserved: 'it changes a reserved path',
+  path_secret: 'it changes a credentials file',
+  path_invalid: 'a path is not a plain file path',
+  result_too_large: 'it is larger than a change may be',
+  secret_content: 'a file holds something shaped like a secret',
+  diff_results_mismatch: 'its diff and its file contents disagree',
+  diff_unreadable: 'its diff could not be read',
+};
+
+/** A refused accept in plain words. The fallback does not promise a retry will work. */
+export function patchAcceptRefusal(message: string): string {
+  const code = /^([a-z_]+):/.exec(message)?.[1] ?? '';
+  if (code === 'proposal_refused') {
+    const check = /([a-z_]+)\s*$/.exec(message)?.[1] ?? '';
+    return `The server refused the change: ${PROPOSAL_CHECK_TEXT[check] ?? 'it did not pass the server\'s checks'}. Nothing was applied.`;
+  }
+  return PATCH_ACCEPT_REFUSALS[code] ?? 'The change was not accepted.';
+}
+
+/** Says when Propose change asked the agent again. */
+export const reaskNote = (reasked: number | undefined): string | null =>
+  !reasked ? null : `The first diff did not apply to the files, so the agent was asked ${reasked === 1 ? 'once more' : `${reasked} more times`} with what was wrong. This is its ${reasked === 1 ? 'second' : 'last'} answer.`;
 
 const REPLAN_CONSEQUENCE = 'Accepting makes a new revision of this task through the replan path, with these criteria. The task goes back to planned, pending approvals for it are withdrawn, an open handover for it closes, and its cost cap may be set again.';
 

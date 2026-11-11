@@ -1,5 +1,7 @@
+import { APPLY_HARNESS_REPORT, BaseFileRequestSchema, type CodingWorkers } from '@selarikru/domain';
 import type { RunnerHarnessReport, RuntimeAdapter } from '@selarikru/protocol';
 import { runAttempt, type AttemptDeps } from './attempt.ts';
+import { answerFileRequest } from './files.ts';
 import type { RunnerApi } from './api.ts';
 import type { RunnerSettings } from './settings.ts';
 
@@ -22,7 +24,16 @@ export interface LoopDeps {
   readonly log: (line: string) => void;
   /** The owner's settings as the server last sent them. Absent: every slot claims. */
   readonly settings?: RunnerSettings;
+  /** How often to ask for base file reads waiting for this runner's checkouts (H5). Absent: this runner serves none. */
+  readonly fileRequestMs?: number;
 }
+
+/**
+ * What this runner reports it can launch. The no-model apply worker always; a model harness only when coding workers are on, and only then is it probed, so with
+ * coding workers off no model CLI is ever started on this machine, not even for its version.
+ */
+export const harnessReportFor = (codingWorkers: CodingWorkers, probe: () => Promise<readonly RunnerHarnessReport[]>) => async (): Promise<readonly RunnerHarnessReport[]> =>
+  (codingWorkers === 'off' ? [APPLY_HARNESS_REPORT] : [...(await probe()), APPLY_HARNESS_REPORT]);
 
 const sleepUnlessAborted = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -51,7 +62,30 @@ export class RunnerLoop {
     }
     const slots = this.d.slots ?? 1;
     if (!Number.isInteger(slots) || slots < 1) throw new Error(`slots must be a whole number of at least 1, got ${String(slots)}`);
-    await Promise.all(Array.from({ length: slots }, (_, i) => this.worker(signal, sleep, i)));
+    await Promise.all([...Array.from({ length: slots }, (_, i) => this.worker(signal, sleep, i)), this.serveFiles(signal, sleep)]);
+  }
+
+  /** Answers base file reads for the patch agent from this runner's checkouts, git at the base only. Never blocks a slot. */
+  private async serveFiles(signal: AbortSignal, sleep: (ms: number) => Promise<void>): Promise<void> {
+    const every = this.d.fileRequestMs;
+    const api = this.d.api;
+    if (every === undefined || api.fileRequests === undefined || api.answerFiles === undefined) return;
+    while (!signal.aborted) {
+      try {
+        const raw = await api.fileRequests();
+        for (const r of Array.isArray(raw) ? raw : []) {
+          const req = BaseFileRequestSchema.safeParse(r);
+          if (!req.success) continue;
+          const answer = await answerFileRequest(this.d.attempt.repos[req.data.projectId], req.data);
+          await api.answerFiles(answer);
+          // Counts only: no path or content reaches the log.
+          this.d.log(`answered a base file read: ${answer.files.length} file(s), ${answer.omitted.length} left out`);
+        }
+      } catch (err) {
+        this.d.log(`base file read not answered: ${err instanceof Error ? err.message : 'error'}`);
+      }
+      await sleep(every);
+    }
   }
 
   /** One slot: claim, run, repeat. The server's limits decide how many slots actually hold work. */

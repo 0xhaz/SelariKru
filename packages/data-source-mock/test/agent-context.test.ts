@@ -97,3 +97,39 @@ describe('mock task context for the agents (H4)', () => {
     expect((await ds.getTaskContextSize!(projectId, id('api'), 'cloud')).hasChange).toBe(true);
   });
 });
+
+describe('mock accepted proposals and base files (H5)', () => {
+  const demoProposal = async (ds: Awaited<ReturnType<typeof setup>>['ds'], projectId: string, taskId: string) => {
+    const { sha256Hex } = await import('@selarikru/domain');
+    const files = await ds.getTaskFiles!(projectId, taskId);
+    const ctx = await ds.getTaskContext!(projectId, taskId, 'local');
+    const path = `${ctx.task.allowedPaths[0]}/demo-proposal.ts`;
+    const content = 'export const DEMO_LIMIT = 50;\n';
+    return { proposalId: 'req_demo', taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'rr_demo', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+export const DEMO_LIMIT = 50;\n`, results: [{ path, sha256: sha256Hex(content), content }] };
+  };
+
+  it('serves demo base files for a task, and none for a restricted one', async () => {
+    const { ds, projectId } = await setup();
+    const f = await ds.getTaskFiles!(projectId, id('search'));
+    expect(f.files.length).toBeGreaterThan(0);
+    expect(f.files.every((x) => x.path.startsWith('src/search'))).toBe(true);
+    await expect(ds.getTaskFiles!(projectId, id('e2e'))).rejects.toThrow(/^files_restricted:/);
+  });
+
+  it('accepts a checked proposal for a waiting task with a simulated event, and refuses what the server would refuse', async () => {
+    const { ds, projectId } = await setup();
+    const snap = await ds.getSnapshot(projectId);
+    const waiting = Object.values(snap.tasks).find((t) => (t.status === 'ready' || t.status === 'planned') && t.taskId !== id('e2e'))!;
+    const p = await demoProposal(ds, projectId, waiting.taskId);
+    const seen: string[] = [];
+    const stop = ds.subscribe(projectId, snap.meta.cursor, (e) => seen.push(e.type), () => {});
+    expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toMatchObject({ proposalId: 'req_demo', state: 'accepted', fileCount: 1, simulated: true });
+    await vi.waitFor(() => expect(seen).toContain('proposal.accepted'));
+    stop();
+    await expect(ds.acceptPatchProposal!(projectId, { ...p, results: [{ ...p.results[0]!, sha256: 'f'.repeat(64) }] }, 'k2')).rejects.toThrow(/^proposal_refused: hash_mismatch/);
+    await expect(ds.acceptPatchProposal!(projectId, { ...p, taskId: id('e2e') }, 'k3')).rejects.toThrow(/^proposal_restricted:/);
+    const verified = Object.values(snap.tasks).find((t) => t.status === 'verified')!;
+    const pv = await demoProposal(ds, projectId, verified.taskId);
+    await expect(ds.acceptPatchProposal!(projectId, pv, 'k4')).rejects.toThrow(/^task_not_applicable:/);
+  });
+});

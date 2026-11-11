@@ -245,6 +245,8 @@ test('selecting text in a row does not open the drawer, and a plain click still 
   // The fleet table needs the room: the drawer is maximised over the office.
   await page.getByRole('button', { name: 'Maximize' }).click();
   const text = rowOf(page, 'runner_local_1').getByText('Feedback API');
+  // The panels above the fleet can push the row below the fold (H5 added the coding-workers note): the drag happens where the row is on screen.
+  await text.scrollIntoViewIfNeeded();
   const box = (await text.boundingBox())!;
   await page.mouse.move(box.x + 1, box.y + box.height / 2);
   await page.mouse.down();

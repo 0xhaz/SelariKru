@@ -1,4 +1,4 @@
-import { BrainBundleSchema, TaskSpecSchema, type TaskSpec } from '@selarikru/domain';
+import { BrainBundleSchema, TaskSpecSchema, type BaseFileAnswer, type TaskSpec } from '@selarikru/domain';
 import { LeaseGrantSchema, RecordedAssignmentSchema, type CheckpointUpload, type LeaseRef, type RepoManifest, type StackDetectionReport, type ResultRequest, type RunnerHarnessReport, type TerminalUploadRequest } from '@selarikru/protocol';
 import { z } from 'zod';
 import type { RunnerSettings } from './settings.ts';
@@ -30,6 +30,8 @@ export const ClaimedLeaseSchema = z
       checkpointId: z.string().min(1), mode: z.enum(['resume', 'restart']), priorAttemptId: z.string().min(1), baseSha: z.string().min(1),
       patchSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(), fileCount: z.number().int().min(0).nullable(),
     }).optional(),
+    /** Set on an apply attempt (H5): the accepted proposal it applies, by id and hashes. The results are fetched with the lease and checked against these. */
+    proposal: z.object({ proposalId: z.string().min(1), digest: z.string().regex(/^[0-9a-f]{64}$/), fileCount: z.number().int().min(1), baseSha: z.string().min(1) }).optional(),
   })
   .passthrough();
 export type ClaimedLease = z.infer<typeof ClaimedLeaseSchema>;
@@ -89,6 +91,12 @@ export interface RunnerApi {
   checkpoint?(lease: LeaseRef, body: Omit<CheckpointUpload, 'lease'>): Promise<void>;
   /** A handover's successor: the checkpoint its lease names, before the worker starts. Absent: this runner cannot resume one. */
   fetchCheckpoint?(lease: LeaseRef): Promise<unknown>;
+  /** An apply attempt: the accepted proposal its lease names. Absent: this runner cannot apply one. */
+  fetchProposal?(lease: LeaseRef): Promise<unknown>;
+  /** Base file reads waiting for a runner with one of these checkouts. Absent: this runner serves none. */
+  fileRequests?(): Promise<unknown>;
+  /** The answer to one base file read. */
+  answerFiles?(answer: BaseFileAnswer): Promise<void>;
 }
 
 export const leaseRef = (l: ClaimedLease): LeaseRef => ({ attemptId: l.attemptId, fence: l.fence, leaseToken: l.leaseToken });
@@ -166,5 +174,14 @@ export class HttpRunnerApi implements RunnerApi {
   }
   async fetchCheckpoint(lease: LeaseRef) {
     return this.post('/v1/runners/checkpoint/fetch', { lease }, 60_000);
+  }
+  async fetchProposal(lease: LeaseRef) {
+    return ((await this.post('/v1/runners/proposal/fetch', { lease }, 30_000)) as { proposal?: unknown }).proposal;
+  }
+  async fileRequests() {
+    return ((await this.post('/v1/runners/files/poll', {}, 10_000)) as { requests?: unknown }).requests;
+  }
+  async answerFiles(answer: BaseFileAnswer) {
+    await this.post('/v1/runners/files/answer', answer, 30_000);
   }
 }

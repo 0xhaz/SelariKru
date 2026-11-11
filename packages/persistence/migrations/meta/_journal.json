@@ -239,6 +239,13 @@
       "when": 1794377423663,
       "tag": "0033_client_reports_route_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794389162004,
+      "tag": "0034_accepted_proposals",
+      "breakpoints": true
     }
   ]
 }

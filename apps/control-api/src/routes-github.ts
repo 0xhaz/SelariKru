@@ -1,5 +1,8 @@
 import { handleGithubWebhook, openReviewablePr, PrNotAllowed } from '@selarikru/integrations-github';
+import { ownerPrDescription } from '@selarikru/domain';
 import { evaluate } from '@selarikru/policy';
+import { z } from 'zod';
+import { parseBody } from './routes-owner.ts';
 import { runUsageLines } from '@selarikru/workflow';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext, GithubDeps } from './app.ts';
@@ -14,6 +17,8 @@ import { requireRun } from './store.ts';
  * - `POST /v1/runs/:id/pull-request` (owner, gated by the `create_draft_pr` policy) pushes the run's verified candidate and opens the draft PR. The repository comes from the
  *   project row; the request carries no target.
  */
+const PullRequestBodySchema = z.object({ body: z.string().max(20_000).optional() });
+
 export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, github: GithubDeps): void {
   const secret = github.webhookSecret;
   if (secret) {
@@ -33,13 +38,15 @@ export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, gith
     app.post('/v1/runs/:id/pull-request', { onRequest: [ctx.owner] }, async (req, reply) => {
       if (req.principal?.kind !== 'owner') throw new AppError(403, 'wrong_principal_type', 'owner credentials required');
       const run = await requireRun(ctx.db, ctx.config.tenantId, (req.params as { id: string }).id);
+      // The owner's description (H5): untrusted text, redacted and capped, placed ahead of the recorded sections. Any other field is ignored: the target comes from the project.
+      const description = ownerPrDescription(parseBody(PullRequestBodySchema, req.body).body);
       // Evaluated right before the push and PR creation. An absent policy denies.
       const gate = evaluate({ kind: 'create_draft_pr' }, ctx.policy);
       if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow opening a draft pull request', { reason: gate.reason, decision: gate.decision });
       try {
         const result = await openReviewablePr(
           { tenantId: run.tenantId, projectId: run.projectId, runId: run.runId, repoPath: pr.repoPath },
-          { db: ctx.db, port: pr.port, now: ctx.now, loadRecord: (sha) => pr.loadRecord({ tenantId: run.tenantId, projectId: run.projectId, sha }), loadUsage: (runId) => runUsageLines(ctx.db, { tenantId: run.tenantId, projectId: run.projectId, runId }) },
+          { db: ctx.db, port: pr.port, now: ctx.now, description, loadRecord: (sha) => pr.loadRecord({ tenantId: run.tenantId, projectId: run.projectId, sha }), loadUsage: (runId) => runUsageLines(ctx.db, { tenantId: run.tenantId, projectId: run.projectId, runId }) },
         );
         return reply.code(200).send(result);
       } catch (e) {

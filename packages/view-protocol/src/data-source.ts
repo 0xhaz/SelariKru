@@ -6,7 +6,8 @@ import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
 import type { HandoverAction, HandoverDiffView, HandoversView } from './handover.ts';
-import type { CriteriaRevisionRequest, CriteriaRevisionResult, TaskAgentContext, TaskContextSize } from './agent-context.ts';
+import type { CriteriaRevisionRequest, CriteriaRevisionResult, ProposalAcceptReceipt, TaskAgentContext, TaskBaseFiles, TaskContextSize } from './agent-context.ts';
+import type { AcceptedProposal } from '@selarikru/domain';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -75,6 +76,13 @@ export interface EngineeringDataSource {
   getTaskContextSize?(projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskContextSize>;
   /** An accepted criteria proposal, through the replan path: a new revision of the task with its criteria reworded. Absent: this source cannot replan. */
   reviseTaskCriteria?(projectId: string, request: CriteriaRevisionRequest): Promise<CriteriaRevisionResult>;
+  /**
+   * Accepts a checked patch proposal (H5): the server checks it again and the no-model apply worker writes its results on the task's next claim. A restricted task's
+   * proposal is refused before its content is read (`proposal_restricted`). Absent: this source cannot apply a change.
+   */
+  acceptPatchProposal?(projectId: string, proposal: AcceptedProposal, idempotencyKey: string): Promise<ProposalAcceptReceipt>;
+  /** The task's files at its base commit for the patch agent, read by the local runner and relayed. Never for a restricted task. Absent: no file contents are available. */
+  getTaskFiles?(projectId: string, taskId: string, paths?: readonly string[]): Promise<TaskBaseFiles>;
   disconnect(): void;
 }
 

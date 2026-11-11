@@ -21,6 +21,7 @@ import { registerStackRoutes } from './stack.ts';
 import { registerSkillRoutes } from './skills.ts';
 import { registerProductRoutes } from './product.ts';
 import { registerHandoverRoutes } from './handover.ts';
+import { FileRelay, registerApplyRoutes } from './apply.ts';
 import { registerEventStream } from './sse.ts';
 import { ControlHub, DEFAULT_CONTROL_LIMITS, registerControlRoutes, type ControlLimits } from './control.ts';
 import { registerTerminalRoutes, TerminalHub } from './terminal.ts';
@@ -84,6 +85,8 @@ export interface AppDeps {
   readonly terminal?: TerminalHub | undefined;
   /** Shrunk by tests. */
   readonly controlLimits?: ControlLimits | undefined;
+  /** The in-memory relay for base files the patch agent reads. Injected by tests to shrink its timeout; otherwise one is created here. */
+  readonly fileRelay?: FileRelay | undefined;
 }
 
 export type Guard = (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -245,6 +248,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   registerSkillRoutes(app, ctx);
   registerProductRoutes(app, ctx);
   registerHandoverRoutes(app, ctx);
+  registerApplyRoutes(app, ctx, deps.fileRelay ?? new FileRelay());
   registerEventStream(app, ctx);
   registerTerminalRoutes(app, ctx);
   registerControlRoutes(app, ctx);

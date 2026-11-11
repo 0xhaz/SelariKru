@@ -123,31 +123,55 @@ export async function applyCheckpoint(workspace: string, fetched: FetchedCheckpo
     if (sha256(bytes) !== f.sha256) return tampered(`${f.path} does not match its hash`);
     decoded.push({ path: f.path, status: f.status, executable: f.executable, bytes });
   }
+  const written = await writeCheckedFiles(workspace, decoded.map((f) => ({ path: f.path, bytes: f.bytes, mode: f.executable ? 0o755 : 0o644 })));
+  if (!written.ok) return { ok: false, reason: 'checkpoint_apply_failed', detail: written.detail };
+  return { ok: true, files: decoded.length };
+}
+
+/** One file to write: its bytes, or null to delete it. `mode` `keep` keeps a file's existing mode (a new file gets 0644). */
+export interface CheckedFile {
+  readonly path: string;
+  readonly bytes: Buffer | null;
+  readonly mode: number | 'keep';
+}
+
+/**
+ * Writes checked files into a workspace that holds the base: only inside it, never through a link on the way (every ancestor is `lstat`ed, T6.5), and only over a regular
+ * file. The caller has checked every path and hash first. Used by checkpoint continuation and by the apply worker (H5).
+ */
+export async function writeCheckedFiles(workspace: string, files: readonly CheckedFile[]): Promise<{ readonly ok: true } | { readonly ok: false; readonly detail: string }> {
   const root = resolve(workspace);
   try {
-    for (const f of decoded) {
+    // Every target is checked before the first write, so a refusal leaves the workspace at the base.
+    for (const f of files) {
+      if (!plainPath(f.path)) return { ok: false, detail: `${f.path} is not a plain path` };
       const target = resolve(root, f.path);
-      if (!target.startsWith(`${root}${sep}`)) return { ok: false, reason: 'checkpoint_apply_failed', detail: `${f.path} is outside the workspace` };
+      if (!target.startsWith(`${root}${sep}`)) return { ok: false, detail: `${f.path} is outside the workspace` };
       // No directory on the way may be a link: the base was checked out here, so a link would be the base's own, and writing through it could leave the workspace.
       const segs = f.path.split('/');
       for (let i = 1; i < segs.length; i++) {
         const st = await lstat(join(root, ...segs.slice(0, i))).catch(() => null);
-        if (st?.isSymbolicLink()) return { ok: false, reason: 'checkpoint_apply_failed', detail: `${f.path} would be written through a link` };
+        if (st?.isSymbolicLink()) return { ok: false, detail: `${f.path} would be written through a link` };
+        if (st !== null && !st.isDirectory()) return { ok: false, detail: `${f.path} has a file where a directory is needed` };
       }
       const existing = await lstat(target).catch(() => null);
-      if (existing !== null && !existing.isFile()) return { ok: false, reason: 'checkpoint_apply_failed', detail: `${f.path} is not a regular file in the base` };
+      if (existing !== null && !existing.isFile()) return { ok: false, detail: `${f.path} is not a regular file in the base` };
+    }
+    for (const f of files) {
+      const target = resolve(root, f.path);
       if (f.bytes === null) {
         await rm(target, { force: true });
         continue;
       }
+      const existing = await lstat(target).catch(() => null);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, f.bytes);
-      await chmod(target, f.executable ? 0o755 : 0o644);
+      await chmod(target, f.mode === 'keep' ? (existing !== null ? existing.mode & 0o777 : 0o644) : f.mode);
     }
   } catch (err) {
-    return { ok: false, reason: 'checkpoint_apply_failed', detail: err instanceof Error ? err.message : 'error' };
+    return { ok: false, detail: err instanceof Error ? err.message : 'error' };
   }
-  return { ok: true, files: decoded.length };
+  return { ok: true };
 }
 
 const execFileP = promisify(execFile);

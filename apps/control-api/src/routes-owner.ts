@@ -6,7 +6,7 @@ import {
   AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
-import { assignmentRevision, closeHandovers, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
+import { appliedProposalFor, assignmentRevision, closeHandovers, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { z } from 'zod';
@@ -546,25 +546,30 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       throw new AppError(409, 'context_destination_refused', 'this task\'s route keeps its AI steps on the device, so no cloud context is served', { effective: mode, locked: task.lock !== null });
     }
     const bundle = await serveBundle(db, { tenantId: config.tenantId, projectId, spec, destination, streamable: destination === 'cloud' });
-    return { projectId, taskId, task, spec, destination, bundle };
+    // The task's change (H5): the accepted proposal its apply attempt applied and published as a change set. The runner checked that the published change set is
+    // exactly these results, so this diff is that change. Never for a restricted task: its proposals never reach the server.
+    const applied = task.lock === null ? await appliedProposalFor(db, { tenantId: config.tenantId, projectId, taskId }, task.revision) : null;
+    const change = applied !== null && applied.ended && applied.changeManifestSha256 !== null ? { diff: applied.diff, paths: applied.paths } : null;
+    return { projectId, taskId, task, spec, destination, bundle, change };
   }
 
   app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
-    const { taskId, task, spec, destination, bundle } = await agentContext(req);
+    const { taskId, task, spec, destination, bundle, change } = await agentContext(req);
     const classification = task.labels.reduce<string>((acc, l) => strongerLabel(acc, l), 'public');
     const [run] = await db.select({ planRevision: schema.runs.planRevision }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, task.runId)));
     return {
       taskId, revision: task.revision, runId: task.runId, planRevision: run?.planRevision ?? 0, destination,
       task: { title: spec.title, description: spec.description ?? null, criteria: (spec.criteria ?? []).map((c) => ({ id: c.id, text: c.text })), allowedPaths: [...spec.allowedPaths], classification },
-      bundle, change: null, spec, simulated: false,
+      // Each changed path takes the task's label: the change was proposed from the task's own files.
+      bundle, change: change === null ? null : { diff: change.diff, files: change.paths.map((path) => ({ path, classification })) }, spec, simulated: false,
     };
   });
 
   // The same read, as counts only: what a step's suggestion and the offered actions need, without sending the task's text or bundle to the tab.
   app.get('/v1/projects/:id/tasks/:taskId/context-size', auth, async (req) => {
-    const { taskId, spec, destination, bundle } = await agentContext(req);
+    const { taskId, spec, destination, bundle, change } = await agentContext(req);
     const inputChars = spec.title.length + (spec.description?.length ?? 0) + (spec.criteria ?? []).reduce((n, c) => n + c.text.length, 0) + bundle.claims.reduce((n, c) => n + c.text.length + c.heading.length, 0);
-    return { taskId, destination, hasChange: false, inputChars };
+    return { taskId, destination, hasChange: change !== null, inputChars };
   });
 
   // ---- approvals ---------------------------------------------------------------------------------------------
@@ -855,7 +860,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           cursor,
           generatedAt: at.toISOString(),
           /** What this machine's harness adapters declare, and what policy says about each model. Identifiers only. */
-          modelCatalog: catalogView(await liveCatalog(tx), ctx.policy),
+          modelCatalog: { ...catalogView(await liveCatalog(tx), ctx.policy), codingWorkers: config.codingWorkers },
           /** Scheduler limits, so a screen can state the slot limit rather than saying it was not reported. */
           limits: { maxConcurrentTotal: config.caps.maxConcurrentTotal },
           /** Enrolled, unrevoked runners with when each last called in. Never a token. */

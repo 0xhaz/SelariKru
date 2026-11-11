@@ -845,7 +845,7 @@ describe('model assignments on the projection', () => {
   it('the refresh brings in a changed catalog and assignments', () => {
     const s = base();
     const a = { scope: 'role' as const, key: 'backend', provider: 'anthropic', model: 'claude-sonnet-5-5', revision: 1, updatedBy: 'owner', updatedAt: at(4) };
-    const fresh = { ...s.snapshot, modelAssignments: [a], modelCatalog: { status: 'detected' as const, detail: null, projectDefault: null, providers: [] } };
+    const fresh = { ...s.snapshot, modelAssignments: [a], modelCatalog: { status: 'detected' as const, detail: null, projectDefault: null, codingWorkers: 'off' as const, providers: [] } };
     const merged = mergeDecisionFacts(s, fresh);
     expect(merged.snapshot.modelAssignments).toEqual([a]);
     expect(merged.snapshot.modelCatalog.status).toBe('detected');

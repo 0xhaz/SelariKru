@@ -1,8 +1,8 @@
-import type { RouteRecordReport } from '@selarikru/domain';
+import { sha256Hex, type AcceptedProposal, type RouteRecordReport } from '@selarikru/domain';
 import { effectiveStep } from './model.ts';
 import type { TaskFacts } from './facts.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
-import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
+import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
 
 /** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the server room's CLOUD rack. */
@@ -26,11 +26,27 @@ export interface AgentsPort {
   readonly reviseCriteria: ((request: CriteriaRevisionRequest) => Promise<CriteriaRevisionResult>) | null;
   /** Whether the task has a change and its input size, for the destination its fresh route allows. Counts only: no context or bundle comes into the tab. */
   facts(taskId: string): Promise<TaskFacts>;
+  /** Accepts a checked patch proposal for the no-model apply worker (H5). Absent: the source cannot apply a change. */
+  readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt>) | null;
+}
+
+/**
+ * The accepted proposal from a patch result: the checked results with their hashes, the diff for review, the call's request id and its route record. Null when the result
+ * has no checked results, no recorded route, or no known base. A locked result never becomes one: restricted work is applied by the local runner on this device.
+ */
+export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>): AcceptedProposal | null {
+  const r = outcome.result;
+  const diff = (r.proposal.data as { diff?: unknown } | null)?.diff;
+  if (r.kind !== 'patch' || r.locked || !r.patch || r.report === null || r.reported !== 'sent' || !outcome.base || typeof diff !== 'string') return null;
+  return {
+    proposalId: r.proposal.requestId, taskId: outcome.context.taskId, taskRevision: outcome.base.revision, baseSha: outcome.base.sha, routeRecordId: r.report.requestId, diff,
+    results: r.patch.results.map((f) => ({ path: f.path, sha256: f.content === null ? null : sha256Hex(f.content), content: f.content })),
+  };
 }
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -39,6 +55,8 @@ export interface CreateAgentsOptions {
   /** Sends `route.report`. A refusal is a failed report and changes nothing else. */
   readonly execute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly snapshot: () => ProjectViewSnapshot | null;
+  /** How many times Propose change asks again after a patch fails its check for line drift. Default 1 (`DEFAULT_REASK_LIMIT`). */
+  readonly reaskLimit?: number;
 }
 
 /** The route read the adapter routes from: the data source's `getTaskRoute`, fresh each time. */
@@ -84,6 +102,11 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       return () => void listeners.delete(fn);
     },
     reviseCriteria: source.reviseTaskCriteria ? (request) => source.reviseTaskCriteria!(projectId, request) : null,
+    acceptPatch: source.acceptPatchProposal ? async (outcome) => {
+      const proposal = acceptedFrom(outcome);
+      if (proposal === null) throw new Error('proposal_not_acceptable: this result cannot be accepted');
+      return source.acceptPatchProposal!(projectId, proposal, `accept-${proposal.proposalId}`);
+    } : null,
     async facts(taskId) {
       if (!source.getTaskContextSize) throw new Error('this source cannot size a task\'s input');
       const read = await getTaskRoute(projectId, taskId);
@@ -94,13 +117,14 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       const callId = next++;
       try {
         const out = await runAgentStep({
-          projectId, catalog, failedCheck,
+          projectId, catalog, failedCheck, ...(opts.reaskLimit !== undefined ? { reaskLimit: opts.reaskLimit } : {}),
           getTaskRoute: async (taskId) => {
             const read = await getTaskRoute(projectId, taskId);
             publish([...calls, { callId, taskId: req.taskId, kind: req.kind, place: placeOf(read, req.callOverride) }]);
             return read;
           },
           getTaskContext: (taskId, destination, callOverride) => getTaskContext(projectId, taskId, destination, callOverride),
+          ...(source.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => source.getTaskFiles!(projectId, taskId, paths) } : {}),
         }, req);
         return { ...out, simulated: opts.simulated };
       } finally {

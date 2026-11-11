@@ -378,7 +378,7 @@ describe('fix round 1: wording and scope', () => {
 });
 
 describe('model assignment', () => {
-  const emptyCatalog = { status: 'none' as const, detail: 'No runner has reported an installed harness.', projectDefault: null, providers: [] };
+  const emptyCatalog = { status: 'none' as const, detail: 'No runner has reported an installed harness.', projectDefault: null, codingWorkers: 'off' as const, providers: [] };
 
   it('assignment is recorded on the attempt and shown on the inference badge', () => {
     const w = worker('w', { taskId: 'a', attemptId: 'att', assignment: { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' }, modelRoute: 'cloud', execution: 'local' });
@@ -417,6 +417,13 @@ describe('model assignment', () => {
     expect(filterRows(model.rows, NO_FILTER)).toHaveLength(2);
   });
 
+  it('labels Claude Code as not used when coding workers are off (H5/H6), and says nothing when they are on', () => {
+    const base = snapshotOf({ tasks: [task('a', { role: 'backend' })] });
+    const off = buildTeam({ ...base, modelCatalog: { ...base.modelCatalog, codingWorkers: 'off' as const } }, NOW, NOW).assignments;
+    expect(off.codingWorkersNote).toBe('Claude Code: Not used in the hackathon build (outside Firebase AI Logic). Every AI step runs in the browser through Firebase AI Logic, and an accepted change is applied with no model. These assignments take effect only if Claude Code workers are turned on.');
+    expect(buildTeam({ ...base, modelCatalog: { ...base.modelCatalog, codingWorkers: 'claude_code' as const } }, NOW, NOW).assignments.codingWorkersNote).toBeNull();
+  });
+
   it('says so when no provider can be detected, and offers nothing', () => {
     const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: emptyCatalog };
     const { assignments } = buildTeam(snap, NOW, NOW);
@@ -424,7 +431,7 @@ describe('model assignment', () => {
   });
 
   it('never offers a provider the adapter did not declare, and marks policy refusals', () => {
-    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: { status: 'detected' as const, detail: null, projectDefault: { provider: 'anthropic', model: 'claude-sonnet-5-5' }, providers: [{ provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316', models: [{ modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud' as const, allowedByPolicy: true, policyReason: null }, { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud' as const, allowedByPolicy: false, policyReason: 'model_not_allowed' }] }] } };
+    const snap = { ...snapshotOf({ tasks: [task('a', { role: 'backend' })] }), modelCatalog: { status: 'detected' as const, detail: null, projectDefault: { provider: 'anthropic', model: 'claude-sonnet-5-5' }, codingWorkers: 'off' as const, providers: [{ provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316', models: [{ modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud' as const, allowedByPolicy: true, policyReason: null }, { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud' as const, allowedByPolicy: false, policyReason: 'model_not_allowed' }] }] } };
     const { assignments } = buildTeam(snap, NOW, NOW);
     expect(assignments.available).toBe(true);
     expect(assignments.providers.map((p) => p.provider)).toEqual(['anthropic']);

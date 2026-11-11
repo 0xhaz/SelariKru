@@ -91,6 +91,19 @@ describe('POST /v1/runs/:id/pull-request', () => {
     expect(gh.prs).toHaveLength(1);
   });
 
+  it('sends the owner\'s description as the body, redacted and capped, ahead of the recorded sections (H5)', async () => {
+    const text = `Add posting\n\nkey ghp_abcdefghijklmnopqrstuvwxyz0123456789\n${'y'.repeat(9000)}`;
+    const res = await h.app.inject({ method: 'POST', url: URL, payload: { body: text }, headers: owner() });
+    expect(res.statusCode).toBe(200);
+    const body = gh.prs[0]!.body;
+    expect(body).toContain('## Description');
+    expect(body).toContain('Add posting');
+    expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(body).not.toContain('y'.repeat(6001));
+    expect(body.indexOf('## Description')).toBeLessThan(body.indexOf('## Candidate'));
+    expect((await h.app.inject({ method: 'POST', url: URL, payload: { body: 42 }, headers: owner() })).statusCode).toBe(400);
+  });
+
   it('prints the run usage from the ledger, and absent usage as unavailable', async () => {
     await seedVerified();
     await withTx(t.db, (tx) => appendUsage(tx, { tenantId: TENANT, projectId: PROJECT, runId: RUN, dedupeKey: 'k1', role: 'backend', metric: 'input_tokens', quantity: '42', provenance: 'estimated', source: 'worker_report', recordedAt: new Date() }));

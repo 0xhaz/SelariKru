@@ -15,7 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
-import { checkDestination, demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
+import { acceptDemoProposal, checkDestination, demoBaseFiles, demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
 import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, withRouteLocks, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
@@ -419,7 +419,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'plan.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
+  type CommandEvent = 'plan.accepted' | 'proposal.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
     | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided' | 'inference.reported';
   /** Who the services record as the actor of each simulated type that is not a person's. */
   const SCHEDULER_TYPES: readonly CommandEvent[] = ['task.ready', 'attempt.started', 'attempt.route_changed', 'checkpoint.recorded'];
@@ -722,6 +722,24 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const planRevision = state.planRevision + 1;
       appendCommandEvent(p, t.runId, 'plan.accepted', { planRevision, taskIds: [t.taskId], acceptedFor: 'demo-operator', replanned: [t.taskId] }, { revisionStep: planRevision, system: true });
       return { planRevision, taskIds: [t.taskId], simulated: true };
+    },
+
+    /** The demo's base files for the patch agent. Simulated. */
+    async getTaskFiles(projectId, taskId) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[taskId];
+      if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      return demoBaseFiles(contextState(p, t.runId), t);
+    },
+
+    /** The demo's accept: the server's checks and a simulated `proposal.accepted` with ids and hashes. The demo has no runner, so nothing is applied and the task has no new change. */
+    async acceptPatchProposal(projectId, proposal) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[proposal.taskId];
+      if (!t) throw fail('unavailable', `no task ${proposal.taskId} in this project`);
+      const receipt = acceptDemoProposal(contextState(p, t.runId), t, proposal);
+      appendCommandEvent(p, t.taskId, 'proposal.accepted', { proposalId: receipt.proposalId, routeRecordId: proposal.routeRecordId, revision: t.revision, baseSha: proposal.baseSha, digest: receipt.digest, fileCount: receipt.fileCount }, { revisionStep: 0 });
+      return receipt;
     },
 
     async getRunFailures(projectId, runId) {

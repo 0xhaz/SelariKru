@@ -5,7 +5,7 @@ import { DataSourceException, type TaskRouteView, type TaskView } from '@selarik
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
-import { AGENT_ACTIONS, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
+import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, patchAcceptBlocker, patchAcceptRefusal, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
 import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
@@ -133,7 +133,7 @@ function ActionRow({ h, task, route, kind, label, what, unavailable, inputChars 
       ) : null}
       {sr.needsDefault ? <p className="mt-1 text-sm text-fg" data-testid="needs-default">Choose where new tasks run first, in <a className="font-medium text-active underline underline-offset-2" href="#/settings?section=workflow">Settings › Workflow</a>, or set this task&apos;s route above.</p> : null}
       {off && !sr.needsDefault ? <p className="mt-1 text-sm text-muted">{off}</p> : null}
-      {kind === 'patch' && h.agents && !h.agents.simulated ? <p className="mt-1 text-sm text-muted" data-testid="patch-new-files-only">Until file contents can be read here, a proposal can only add new files.</p> : null}
+      {kind === 'patch' ? <p className="mt-1 text-sm text-muted" data-testid="patch-files-note">The agent reads this task&apos;s files at its base commit, from the local runner. A restricted task&apos;s files stay on this device, so its proposals can only add files.</p> : null}
       {running ? <p role="status" className="mt-2 text-sm text-fg">Running {where}.</p> : null}
       {result?.phase === 'done' ? <ProposalCard h={h} task={task} kind={kind} outcome={result.outcome} onDiscard={() => hybridResults.getState().set(key, null)} /> : null}
     </li>
@@ -167,6 +167,7 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
       {!ok ? (
         <p className="text-fg" data-testid="result-refusal">{p.status === 'blocked' ? refusalText(p.blockedReason) : p.blockedReason ? refusalText(p.blockedReason) : STATUS_TEXT[p.status] ?? 'Not usable.'}</p>
       ) : null}
+      {outcome.kind === 'result' && reaskNote(outcome.reasked) ? <p className="text-sm text-fg" data-testid="reask-note">{reaskNote(outcome.reasked)}</p> : null}
       {p.status === 'invalid' ? <p className="text-sm text-muted">The answer did not pass its checks ({p.validation.errors.length} problem{p.validation.errors.length === 1 ? '' : 's'}), so it is not shown.</p> : null}
       {ok ? <ProposalBody h={h} task={task} kind={kind} outcome={outcome} /> : null}
       <p className="text-sm text-muted">
@@ -194,15 +195,7 @@ function ProposalBody({ h, task, kind, outcome }: { h: HybridValue; task: TaskVi
         </div>
       );
     }
-    case 'patch':
-      return (
-        <div className="space-y-1.5">
-          <p className="text-fg">{String(data['summary'] ?? '')}</p>
-          <pre className="max-h-48 overflow-auto rounded-chip border border-line bg-bg p-2 font-mono text-mono whitespace-pre text-fg" tabIndex={0} aria-label="Proposed diff">{String(data['diff'] ?? '')}</pre>
-          <button type="button" className={buttonQuiet} disabled aria-describedby={`apply-${task.taskId}`}>Apply comes next</button>
-          <p id={`apply-${task.taskId}`} className="text-sm text-muted">Applying a proposed change in the sandbox is the next step to be built. Nothing was applied.</p>
-        </div>
-      );
+    case 'patch': return <PatchProposal h={h} task={task} data={data} outcome={outcome} />;
     case 'review': {
       const findings = (data['findings'] as { file: string; line: number; severity: string; message: string }[]) ?? [];
       return (
@@ -275,6 +268,40 @@ function CriteriaProposal({ h, task, data, outcome }: { h: HybridValue; task: Ta
   );
 }
 
+function PatchProposal({ h, task, data, outcome }: { h: HybridValue; task: TaskView; data: Record<string, unknown>; outcome: Extract<AgentsOutcome, { kind: 'result' }> }) {
+  const id = useId();
+  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'done' | 'failed'; text: string }>({ phase: 'idle' });
+  const accept = h.agents?.acceptPatch ?? null;
+  const r = outcome.result;
+  const reason = patchAcceptBlocker({ status: task.status, locked: r.locked, canAccept: accept !== null, live: h.live, recorded: r.reported === 'sent' && r.report !== null, checked: r.patch !== undefined && (outcome.base ?? null) !== null });
+  async function send(): Promise<void> {
+    if (!accept) return;
+    setState({ phase: 'working' });
+    try {
+      const receipt = await accept(outcome);
+      h.refresh();
+      setState({ phase: 'done', text: receipt.simulated
+        ? `Accepted in the demo: ${receipt.fileCount} file${receipt.fileCount === 1 ? '' : 's'}. The demo has no runner, so nothing is applied. Demo data, not evidence.`
+        : `Accepted: ${receipt.fileCount} file${receipt.fileCount === 1 ? '' : 's'}. The task waits for the runner, which applies them with no model, then builds, tests and verifies the result.` });
+    } catch (e) {
+      setState({ phase: 'failed', text: patchAcceptRefusal(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '') });
+    }
+  }
+  return (
+    <div className="space-y-1.5">
+      <p className="text-fg">{String(data['summary'] ?? '')}</p>
+      <pre className="max-h-48 overflow-auto rounded-chip border border-line bg-bg p-2 font-mono text-mono whitespace-pre text-fg" tabIndex={0} aria-label="Proposed diff">{String(data['diff'] ?? '')}</pre>
+      {state.phase === 'done' ? <p className="text-sm font-medium text-fg" data-testid="patch-accepted">{state.text}</p> : (
+        <>
+          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} aria-describedby={`${id}-apply`} onClick={() => void send()}>{state.phase === 'working' ? 'Accepting' : 'Accept and apply'}</button>
+          <p id={`${id}-apply`} className="text-sm text-muted" data-testid="patch-accept-note">{reason ?? PATCH_ACCEPT_CONSEQUENCE}</p>
+          {state.phase === 'failed' ? <p className="text-sm text-danger" data-testid="patch-accept-refused">{state.text}</p> : null}
+        </>
+      )}
+    </div>
+  );
+}
+
 function PrProposal({ task, title, body, locked }: { task: TaskView; title: string; body: string; locked: boolean }) {
   const id = useId();
   const field = useHybridResults((s) => s.prBody[task.runId]);
@@ -288,7 +315,7 @@ function PrProposal({ task, title, body, locked }: { task: TaskView; title: stri
         <div>
           <label htmlFor={`${id}-pr`} className="block text-sm font-medium text-fg">Pull request description</label>
           <textarea id={`${id}-pr`} data-testid="pr-body" className="mt-1 w-full rounded-chip border border-line-strong bg-bg p-2 text-fg" rows={5} value={field} onChange={(e) => hybridResults.getState().setPrBody(task.runId, e.target.value)} />
-          <p className="text-sm text-muted">Kept in this tab for run {task.runId}. Opening the draft pull request does not send it yet.</p>
+          <p className="text-sm text-muted" data-testid="pr-body-note">Kept in this tab for run {task.runId}. Opening the draft pull request from Action items sends it as the description, with secrets removed, ahead of the verified results.</p>
         </div>
       ) : null}
     </div>

@@ -39,3 +39,4 @@ export { cancelRequestReason } from './cancel.ts';
 export { buildTaskState, loadAttempts } from './taskstate.ts';
 export { bindingOf, loadBindings, loadKnownVersions, resolveTaskSkills } from './skills.ts';
 export { assessHandover, closeHandovers, CLOUD_RUNNER_FRESH_SECONDS, decideHandover, openHandover, recordCheckpoint, requestHandover, reviewHandovers, successorCheckpoint, VISIBLE_HOLDS, type CheckpointCheck, type CheckpointReceipt, type CheckpointRow, type HandoverAssessment, type HandoverEstimate, type HandoverFigure, type HandoverReceipt, type HandoverRefusal, type LeaseHandover } from './handover.ts';
+export { acceptProposal, appliedProposalFor, APPLY_ASSIGNMENT, fetchProposalForLease, markApplying, pendingProposal, type AcceptInput, type AcceptReceipt, type AcceptRefusal } from './proposal.ts';

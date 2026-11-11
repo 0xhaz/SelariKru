@@ -199,7 +199,7 @@ export async function startServer(options: {
   const { db, close } = createDb(options.databaseUrl);
   const policy = options.policyFile ? loadPolicyFile(options.policyFile) : loadDefaultPolicy();
   const catalog = options.harnessCatalog ?? declaredHarnessCatalog();
-  const scheduler = createScheduler({ db, now, policy, catalog });
+  const scheduler = createScheduler({ db, now, policy, catalog, codingWorkers: config.codingWorkers });
   const verifier = options.verifier ?? createFirebaseVerifier({ projectId: config.firebaseProjectId });
   // With GitHub on, merges land only there: the local branch says nothing about main.
   const remote = options.github?.port;

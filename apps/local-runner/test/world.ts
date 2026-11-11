@@ -74,6 +74,12 @@ export interface WorldOptions {
   brainManifest?: () => Promise<void>;
   /** What the stack detection upload does. Default: succeeds. */
   stackDetection?: () => Promise<void>;
+  /** What an apply attempt's proposal fetch answers. Default: none (the API has no fetch). */
+  fetchProposal?: () => Promise<unknown>;
+  /** The exit code of each sandbox stream. Default 0. */
+  streamExit?: (args: readonly string[]) => number;
+  /** The lease's proposal (an apply attempt). */
+  proposal?: ClaimedLease['proposal'];
 }
 
 export async function makeWorld(o: WorldOptions = {}): Promise<World> {
@@ -109,7 +115,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
         const keepOpen = o.agent ? (await o.agent({ stream, cwd, write })) === false : false;
         if (keepOpen) return;
         stream.push(`${resultLine()}\n`);
-        stream.end(0);
+        stream.end(o.streamExit?.(args) ?? 0);
       })();
     },
   };
@@ -129,7 +135,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
     baseSha: sha, requirementIds: ['R1'], dependencies: [], contractRefs: [], allowedPaths: ['src'], resourceClaims: [], acceptanceCheckIds: [],
     classification: 'internal', policyVersion: 'v1', execution: 'local', inferencePolicyId: 'p1', limits: { maxAttempts: 3, timeoutSeconds: 30, maxCostUsd: 1 }, ...o.task,
   } as TaskSpec;
-  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment, context: o.context ?? null, ...(o.skills !== undefined ? { skills: o.skills } : {}), ...(o.handover !== undefined ? { handover: o.handover } : {}) } as ClaimedLease;
+  const lease: ClaimedLease = { streamable: o.streamable ?? true, controllable: o.controllable ?? false, attemptId: 'att_1', fence: 1, leaseToken: 'tok', taskId: 'task1', projectId: 'proj1', deadlineAt: new Date(Date.now() + 3_600_000).toISOString(), grants: o.grants ?? [], assignment: o.assignment === undefined ? { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role', route: 'cloud' } : o.assignment, context: o.context ?? null, ...(o.skills !== undefined ? { skills: o.skills } : {}), ...(o.handover !== undefined ? { handover: o.handover } : {}), ...(o.proposal !== undefined ? { proposal: o.proposal } : {}) } as ClaimedLease;
 
   let hb = 0;
   const published: RunnerResult[] = [];
@@ -160,6 +166,7 @@ export async function makeWorld(o: WorldOptions = {}): Promise<World> {
       return o.checkpoint ? o.checkpoint(body) : undefined;
     }),
     fetchCheckpoint: vi.fn(async () => (o.fetchCheckpoint ? o.fetchCheckpoint() : null)),
+    ...(o.fetchProposal ? { fetchProposal: vi.fn(async () => o.fetchProposal!()) } : {}),
   } as unknown as World['api'];
 
   return {

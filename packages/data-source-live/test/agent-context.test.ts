@@ -81,3 +81,31 @@ describe('live task context and criteria revisions (H4)', () => {
     await expect(refused.s.getTaskContextSize!('p', 't1', 'cloud')).rejects.toThrow(/^context_destination_refused:/);
   });
 });
+
+describe('live accepted proposals, base files and the PR body (H5)', () => {
+  const proposal = { proposalId: 'req_1', taskId: 't1', taskRevision: 1, baseSha: 'a'.repeat(40), routeRecordId: 'rr_1', diff: '--- /dev/null\n+++ b/src/x.ts\n@@ -0,0 +1 @@\n+x\n', results: [{ path: 'src/x.ts', sha256: 'b'.repeat(64), content: 'x\n' }] };
+  const receipt = { proposalId: 'req_1', taskId: 't1', revision: 1, digest: 'c'.repeat(64), fileCount: 1, state: 'accepted' };
+
+  it('posts the accepted proposal to the owner route and reads the receipt; a refusal keeps its code', async () => {
+    const live = source([() => ({ status: 201, body: receipt })]);
+    expect(await live.s.acceptPatchProposal!('p', proposal, 'k1')).toEqual({ ...receipt, simulated: false });
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/tasks/t1/proposals/accept', method: 'POST', body: { idempotencyKey: 'k1', proposal } });
+    const refused = source([() => ({ status: 403, body: { error: { code: 'proposal_restricted', message: 'Restricted work is applied by the local runner on this device' } } })]);
+    await expect(refused.s.acceptPatchProposal!('p', proposal, 'k1')).rejects.toThrow(/^proposal_restricted:/);
+  });
+
+  it('reads base files for the patch agent from the relay', async () => {
+    const files = { taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), files: [{ path: 'src/a.ts', content: 'a\n' }], omitted: [] };
+    const live = source([() => ({ status: 200, body: files })]);
+    expect(await live.s.getTaskFiles!('p', 't1', ['src'])).toEqual(files);
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/tasks/t1/files', method: 'POST', body: { paths: ['src'] } });
+    const wrong = source([() => ({ status: 200, body: { ...files, taskId: 't2' } })]);
+    await expect(wrong.s.getTaskFiles!('p', 't1')).rejects.toBeInstanceOf(DataSourceException);
+  });
+
+  it('sends the PR description with the open request', async () => {
+    const live = source([() => ({ status: 200, body: { status: 'opened' } })]);
+    await live.s.execute({ command: 'run.open_pull_request', expectedRevision: 1, idempotencyKey: 'k', args: { runId: 'r1', body: 'Add posting' } });
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/runs/r1/pull-request', body: { body: 'Add posting' } });
+  });
+});

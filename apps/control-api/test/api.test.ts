@@ -71,6 +71,8 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/handover`],
   ['POST', `/v1/projects/${PROJECT}/tasks/t1/handover/decision`],
   ['GET', `/v1/projects/${PROJECT}/tasks/t1/handover/diff?checkpointId=a1&path=a1`],
+  ['POST', `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`],
+  ['POST', `/v1/projects/${PROJECT}/tasks/t1/files`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],
@@ -84,6 +86,9 @@ const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/product/brief-proposal'],
   ['POST', '/v1/runners/checkpoint'],
   ['POST', '/v1/runners/checkpoint/fetch'],
+  ['POST', '/v1/runners/proposal/fetch'],
+  ['POST', '/v1/runners/files/poll'],
+  ['POST', '/v1/runners/files/answer'],
 ];
 const ENROLL: [string, string] = ['POST', '/v1/runners/enroll'];
 

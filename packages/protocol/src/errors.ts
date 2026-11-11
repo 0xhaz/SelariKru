@@ -79,6 +79,11 @@ export const ERROR_CODES = [
   'task_spec_unreadable',
   /** A cloud context asked for a task whose route keeps its AI steps on the device. */
   'context_destination_refused',
+  /** Accepted patch proposals (H5): a restricted task's proposal (its content stays on the device); a proposal the server's checks refuse (the issue code is in details);
+   * a proposal with no route record of its patch call; a task that is not waiting to start; a proposal already accepted; no proposal for this apply attempt. */
+  'proposal_restricted', 'proposal_refused', 'route_record_missing', 'task_not_applicable', 'proposal_already_accepted', 'no_proposal',
+  /** Base files for the patch agent: restricted tasks are never served; no runner with the project's checkout answered in time; no such file request. */
+  'files_restricted', 'files_unavailable', 'file_request_not_found',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

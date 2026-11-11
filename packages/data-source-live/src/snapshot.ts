@@ -48,7 +48,7 @@ const recordedModel = (a: RawAttempt): AttemptView['assignment'] => {
   return { provider, model, source } as AttemptView['assignment'];
 };
 
-const routeOf = (a: RawAttempt): WorkerView['modelRoute'] => (a.assignment?.route === 'device' || a.assignment?.route === 'cloud' ? a.assignment.route : 'unknown');
+const routeOf = (a: RawAttempt): WorkerView['modelRoute'] => (a.assignment?.route === 'device' || a.assignment?.route === 'cloud' || a.assignment?.route === 'none' ? a.assignment.route : 'unknown');
 
 /**
  * Builds the worker views the snapshot route does not return. One worker per runner, in the state its latest attempt leaves it, matching what the event fold reaches.

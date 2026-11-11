@@ -1,5 +1,5 @@
-import { buildContextBundle, effectiveRoutePolicy, isCloudCapable, type BrainDestination, type RoutePolicyMode, type RouteLock } from '@selarikru/domain';
-import { DataSourceException, type TaskAgentContext, type TaskView } from '@selarikru/view-protocol';
+import { AcceptedProposalSchema, RESTRICTED_APPLY_REFUSAL, buildContextBundle, checkAcceptedProposal, effectiveRoutePolicy, isCloudCapable, type BrainDestination, type RoutePolicyMode, type RouteLock } from '@selarikru/domain';
+import { DataSourceException, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskView } from '@selarikru/view-protocol';
 import type { FixtureRoutes } from './routes.ts';
 
 /**
@@ -34,6 +34,36 @@ export interface DemoContextState {
   /** Criteria reworded through `reviseTaskCriteria`, by task. */
   readonly criteria: Map<string, { id: string; text: string }[]>;
   readonly planRevision: number;
+}
+
+/** The demo's base commit. Simulated: there is no repository behind it. */
+export const DEMO_BASE_SHA = 'd'.repeat(40);
+
+const restrictedLabel = (state: DemoContextState, taskId: string): boolean => ['restricted', 'secret'].includes(state.routes?.tasks[taskId]?.label ?? 'internal');
+
+/** The demo's base files for the patch agent: one small file in the task's allowed path. A restricted task's files are never served, as on the server. */
+export function demoBaseFiles(state: DemoContextState, task: TaskView): TaskBaseFiles {
+  if (restrictedLabel(state, task.taskId)) throw refused('files_restricted: this task\'s files stay on this device, so they are not read here');
+  const root = demoAllowedPaths(task.taskId)[0]!;
+  return { taskId: task.taskId, revision: task.revision, baseSha: DEMO_BASE_SHA, files: [{ path: `${root}/index.ts`, content: `// ${task.title ?? task.taskId} (demo base file)\nexport const ENABLED = true;\n` }], omitted: [] };
+}
+
+/** The statuses the server takes an accepted proposal in. */
+const ACCEPTING_STATUSES: readonly string[] = ['planned', 'ready'];
+
+/**
+ * The demo's accept, in the server's order: a restricted task is refused before the proposal is read, then the same checks (`checkAcceptedProposal`) against the demo task,
+ * then the task's state. Nothing is applied: the demo has no runner.
+ */
+export function acceptDemoProposal(state: DemoContextState, task: TaskView, raw: unknown): ProposalAcceptReceipt {
+  if (restrictedLabel(state, task.taskId)) throw refused(`proposal_restricted: ${RESTRICTED_APPLY_REFUSAL}`);
+  const parsed = AcceptedProposalSchema.safeParse(raw);
+  if (!parsed.success) throw refused('proposal_refused: the proposal could not be read');
+  const p = parsed.data;
+  const checked = checkAcceptedProposal(p, { taskId: task.taskId, revision: task.revision, baseSha: DEMO_BASE_SHA, allowedPaths: demoAllowedPaths(task.taskId) });
+  if (!checked.ok) throw refused(`proposal_refused: ${checked.code}`);
+  if (!ACCEPTING_STATUSES.includes(task.status)) throw refused(`task_not_applicable: a ${task.status} task is not waiting to start, so a change cannot be applied to it now`);
+  return { proposalId: p.proposalId, taskId: task.taskId, revision: task.revision, digest: checked.digest, fileCount: p.results.length, state: 'accepted', simulated: true };
 }
 
 export function demoTaskContext(state: DemoContextState, task: TaskView, destination: BrainDestination): TaskAgentContext {

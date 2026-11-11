@@ -1,3 +1,4 @@
+import { CODING_WORKERS_OFF_LABEL } from '@selarikru/domain';
 import type { ModelAssignmentView, ProjectViewSnapshot, SettingState, TaskView } from '@selarikru/view-protocol';
 import { explain } from '../overview/attention.ts';
 
@@ -43,6 +44,8 @@ export interface AssignmentsModel {
   readonly statusText: string | null;
   readonly providers: readonly ProviderChoice[];
   readonly roles: readonly AssignmentTarget[];
+  /** Set when coding workers are off (the hackathon build): Claude Code is not used, and says why. */
+  readonly codingWorkersNote: string | null;
 }
 
 const entryFor = (snapshot: ProjectViewSnapshot, scope: 'role' | 'task', key: string): ModelAssignmentView | undefined => snapshot.modelAssignments.find((a) => a.scope === scope && a.key === key);
@@ -83,5 +86,8 @@ export function buildAssignments(snapshot: ProjectViewSnapshot): AssignmentsMode
     const inherited = catalog.projectDefault;
     return { scope: 'role', key: role, label: role, current: selectionOf(entry), revision: entry?.revision ?? 0, fallback: inherited ? `Using the project default: ${modelLabel(snapshot, inherited)}` : 'No model is assigned, and this project has no default', inherited, pinned: null, state: entry ? entry.state ?? 'unknown' : null, waitingOn: entry?.waitingOn ?? [] };
   });
-  return { projectId: snapshot.meta.projectId, available, statusText, providers, roles };
+  const codingWorkersNote = catalog.codingWorkers === 'off'
+    ? `Claude Code: ${CODING_WORKERS_OFF_LABEL}. Every AI step runs in the browser through Firebase AI Logic, and an accepted change is applied with no model. These assignments take effect only if Claude Code workers are turned on.`
+    : null;
+  return { projectId: snapshot.meta.projectId, available, statusText, providers, roles, codingWorkersNote };
 }

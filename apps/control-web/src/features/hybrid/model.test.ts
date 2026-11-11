@@ -3,7 +3,7 @@ import type { RouteRecord } from '@selarikru/domain';
 import type { SettingView, TaskRouteView } from '@selarikru/view-protocol';
 import { iso, task } from '../overview/testing.ts';
 import { settingStatus } from '../settings/model.ts';
-import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
+import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
 
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null,
@@ -207,5 +207,29 @@ describe('fix round 1', () => {
     expect(new Set(['plan_invalid', 'path_not_allowed', 'criteria_not_covered', 'roles_not_covered', 'plan_over_run_budget', 'policy_denied'].map((c) => revisionRefusal(`${c}: x`))).size).toBe(6);
     expect(revisionRefusal('something odd')).toMatch(/not recorded/i);
     expect(revisionRefusal('something odd')).not.toMatch(/safe|will work/i);
+  });
+});
+
+describe('accepting a patch for the apply worker (H5)', () => {
+  const base = { status: 'ready' as const, locked: false, canAccept: true, live: true, recorded: true, checked: true };
+  it('says why Accept and apply is off, restricted first', () => {
+    expect(patchAcceptBlocker(base)).toBeNull();
+    expect(patchAcceptBlocker({ ...base, locked: true })).toBe('Restricted work is applied by the local runner on this device. This proposal stays here and is not sent.');
+    expect(patchAcceptBlocker({ ...base, recorded: false })).toMatch(/not recorded/);
+    expect(patchAcceptBlocker({ ...base, status: 'verified' })).toMatch(/A verified task is not waiting to start/);
+    expect(patchAcceptBlocker({ ...base, canAccept: false })).toMatch(/cannot apply/);
+    expect(patchAcceptBlocker({ ...base, live: false })).toMatch(/live/);
+  });
+  it('reads each refusal in its own words, and the fallback promises no retry', () => {
+    expect(patchAcceptRefusal('proposal_restricted: x')).toBe('Restricted work is applied by the local runner on this device. Nothing was sent.');
+    expect(patchAcceptRefusal('proposal_refused: the proposal did not pass the server\'s checks: base_mismatch')).toMatch(/base commit/);
+    expect(patchAcceptRefusal('route_record_missing: x')).toMatch(/where this call ran/);
+    expect(patchAcceptRefusal('task_not_applicable: x')).toMatch(/not waiting to start/);
+    expect(patchAcceptRefusal('stale_revision: x')).toMatch(/newer revision/);
+    expect(patchAcceptRefusal('something else')).toBe('The change was not accepted.');
+  });
+  it('names the re-ask in plain words', () => {
+    expect(reaskNote(0)).toBeNull();
+    expect(reaskNote(1)).toBe('The first diff did not apply to the files, so the agent was asked once more with what was wrong. This is its second answer.');
   });
 });
