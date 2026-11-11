@@ -151,8 +151,10 @@ describe('fix round 1: mock listing and repeated accepts (H5)', () => {
     const ctx = await ds.getTaskContext!(projectId, waiting.taskId, 'local');
     const path = `${ctx.task.allowedPaths[0]}/x.ts`;
     const p = { proposalId: 'req_x', taskId: waiting.taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'req_x', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+x\n`, results: [{ path, sha256: sha256Hex('x\n'), content: 'x\n' }] };
+    expect(await ds.getProposalState!(projectId, waiting.taskId, 'req_x')).toBeNull();
     const first = await ds.acceptPatchProposal!(projectId, p, 'k1');
     expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toEqual(first);
+    expect(await ds.getProposalState!(projectId, waiting.taskId, 'req_x')).toEqual(first);
     await expect(ds.acceptPatchProposal!(projectId, p, 'k2')).rejects.toThrow(/^proposal_already_accepted:/);
   });
 });

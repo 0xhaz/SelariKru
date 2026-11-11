@@ -110,8 +110,9 @@ describe('the apply worker (H5): no model, checked results only', () => {
     vi.mocked(w.api.task).mockResolvedValue({ ...w.task, baseSha: sha });
     vi.mocked(w.api.fetchProposal!).mockResolvedValue(p);
     w.lease = { ...w.lease, proposal: { proposalId: p.proposalId, digest: acceptedProposalDigest(p), fileCount: 1, baseSha: sha } };
-    expect((await runAttempt(deps, w.lease)).outcome).toBe('failed');
-    expect(reasonOf(w)).toMatch(/^proposal_apply_failed: src\/link\/evil\.ts would be written through a link/);
+    // The base, not the project, refuses it: blocked with a base reason, no repair spent (m4).
+    expect((await runAttempt(deps, w.lease)).outcome).toBe('blocked');
+    expect(reasonOf(w)).toMatch(/^proposal_base_mismatch: src\/link\/evil\.ts would be written through a link/);
     expect(created(w)).toBe(false);
   });
 

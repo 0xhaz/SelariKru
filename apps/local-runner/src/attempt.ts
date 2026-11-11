@@ -539,7 +539,8 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
       if (!reproduceProposal(p, base, allowed.normalized).ok) return await finish('blocked', why('proposal_base_mismatch', 'proposal_base_mismatch: the diff applied to the base files does not give the accepted results'), null);
       // Every target is checked now, before any sandbox exists, so an unsafe path starts nothing; the write itself waits for the setup ack.
       const safe = await checkWritable(workspace, p.results.map((r) => r.path));
-      if (safe !== null) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${safe}`), null);
+      // A link or a file where the results go is the base's shape, not the project's failure: blocked with a base reason, no repair spent; the owner proposes again.
+      if (safe !== null) return await finish('blocked', why('proposal_base_mismatch', `proposal_base_mismatch: ${safe}`), null);
       accepted = p;
       log(`accepted proposal ${p.proposalId} checked: ${p.results.length} file(s), digest ${checked.digest}`);
     }
@@ -645,7 +646,7 @@ export async function runAttempt(deps: AttemptDeps, lease: ClaimedLease): Promis
     let pinned: FileChange[] | null = null;
     if (accepted !== null) {
       const written = await writeCheckedFiles(workspace, accepted.results.map((r) => ({ path: r.path, bytes: r.content === null ? null : Buffer.from(r.content, 'utf8'), mode: 'keep' as const })));
-      if (!written.ok) return await finish('failed', why('proposal_apply_failed', `proposal_apply_failed: ${written.detail}`), null);
+      if (!written.ok) return await finish('blocked', why('proposal_base_mismatch', `proposal_base_mismatch: ${written.detail}`), null);
       try {
         pinned = await (deps.computeChanges ?? computeChanges)(baseline, workspace, baseIgnores);
       } catch (err) {

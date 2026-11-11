@@ -89,6 +89,13 @@ describe('accepting a patch proposal (H5)', () => {
     expect(swapped.body.error.details.reason).toBe('route_record_output_mismatch');
   });
 
+  it('refuses a proposal whose call was locked to the device, even after the task is no longer locked (m2)', async () => {
+    await routeRecord('req_locked', { locked: true });
+    const res = await accept(proposal({ proposalId: 'req_locked', routeRecordId: 'req_locked' }));
+    expect([res.status, res.body.error.code]).toEqual([409, 'proposal_from_restricted_call']);
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM accepted_proposals`))[0]!['n'])).toBe(0);
+  });
+
   it('the same key reads the proposal as it is now; a proposal still waiting is not queued twice', async () => {
     const first = await accept(proposal(), 'same');
     expect((await accept(proposal(), 'same')).body).toEqual(first.body);
@@ -107,6 +114,9 @@ describe('accepting a patch proposal (H5)', () => {
     expect([read.status, read.body.state, read.body.lastFailure]).toEqual([200, 'failed', 'tests_failed: pnpm run test exited with code 1']);
     const queued = await accept(proposal(), 'k2');
     expect([queued.status, queued.body.state, queued.body.round]).toEqual([201, 'accepted', 2]);
+    // The owner's screen reads the round from the server.
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/proposals/req_1`)).body).toMatchObject({ state: 'accepted', round: 2, lastFailure: null });
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/proposals/req_none`)).status).toBe(404);
     const second = await claim();
     expect(second).toMatchObject({ proposal: { proposalId: 'req_1' } });
     expect(second.attemptId).not.toBe(first.attemptId);

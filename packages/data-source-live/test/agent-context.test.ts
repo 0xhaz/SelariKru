@@ -112,6 +112,13 @@ describe('live accepted proposals, base files and the PR body (H5)', () => {
     await expect(none.s.listTaskFiles!('p', 't1')).rejects.toThrow(/^no_checkout:/);
   });
 
+  it('reads an accepted proposal as it is now, and null when it was never accepted (m6)', async () => {
+    const live = source([() => ({ status: 200, body: { ...receipt, state: 'failed', round: 2, lastFailure: 'tests_failed: x' } }), () => ({ status: 404, body: { error: { code: 'no_proposal', message: 'no such accepted proposal' } } })]);
+    expect(await live.s.getProposalState!('p', 't1', 'req_1')).toMatchObject({ state: 'failed', round: 2, simulated: false });
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/tasks/t1/proposals/req_1', method: 'GET' });
+    expect(await live.s.getProposalState!('p', 't1', 'req_x')).toBeNull();
+  });
+
   it('sends the PR description with the open request', async () => {
     const live = source([() => ({ status: 200, body: { status: 'opened' } })]);
     await live.s.execute({ command: 'run.open_pull_request', expectedRevision: 1, idempotencyKey: 'k', args: { runId: 'r1', body: 'Add posting' } });

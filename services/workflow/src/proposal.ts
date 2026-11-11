@@ -52,9 +52,18 @@ export interface AcceptInput {
 
 const rowKey = (k: TaskKey) => and(eq(schema.acceptedProposals.tenantId, k.tenantId), eq(schema.acceptedProposals.projectId, k.projectId), eq(schema.acceptedProposals.taskId, k.taskId));
 type Row = typeof schema.acceptedProposals.$inferSelect;
-const receiptOf = (r: Row): AcceptReceipt => ({
-  proposalId: r.proposalId, taskId: r.taskId, revision: r.revision, digest: r.digest, fileCount: r.fileCount, state: r.state as ProposalState, round: r.round, lastFailure: r.state === 'failed' ? r.failureReason : null,
-});
+/**
+ * The proposal as the owner reads it. An `applied` proposal whose task is waiting to start again on the same revision did not stand in verification: it reads as
+ * `failed` with `verification_failed`, and may be accepted again.
+ */
+const receiptOf = (r: Row, taskStatus: string | null): AcceptReceipt => {
+  const unverified = r.state === 'applied' && taskStatus !== null && ACCEPTING_STATUSES.includes(taskStatus);
+  const state = (unverified ? 'failed' : r.state) as ProposalState;
+  return {
+    proposalId: r.proposalId, taskId: r.taskId, revision: r.revision, digest: r.digest, fileCount: r.fileCount, state, round: r.round,
+    lastFailure: unverified ? 'verification_failed' : state === 'failed' ? r.failureReason : null,
+  };
+};
 
 /**
  * Records an accepted proposal for the task's current revision, after the same checks the browser ran, against the stored spec, and queues it for an apply attempt.
@@ -72,8 +81,9 @@ export async function acceptProposal(ctx: Pick<SchedulerContext, 'db' | 'now'>, 
       .where(and(eq(schema.acceptedProposals.tenantId, key.tenantId), eq(schema.acceptedProposals.projectId, key.projectId), eq(schema.acceptedProposals.proposalId, p.proposalId)));
     if (existing && existing.taskId !== key.taskId) return err({ reason: 'task_mismatch', status: 422 });
     // The same request again: the proposal as it is now, never the receipt it got then.
-    if (existing && existing.acceptKey === input.idempotencyKey) return ok(receiptOf(existing));
-    if (existing && !['failed', 'superseded'].includes(existing.state)) return err({ reason: 'proposal_already_accepted', status: 409, state: existing.state as ProposalState });
+    const current = existing ? receiptOf(existing, status.status) : null;
+    if (existing && existing.acceptKey === input.idempotencyKey) return ok(current!);
+    if (current && !['failed', 'superseded'].includes(current.state)) return err({ reason: 'proposal_already_accepted', status: 409, state: current.state });
     const attempts = await loadAttempts(tx, key, status.currentRevision);
     const last = attempts[attempts.length - 1];
     const unblock = status.status === 'blocked' && last !== undefined && isApplyInputReason(last.exitReason);
@@ -117,7 +127,7 @@ export async function acceptProposal(ctx: Pick<SchedulerContext, 'db' | 'now'>, 
       type: 'proposal.accepted', attemptId: null, actor: { kind: 'human', id: input.acceptedBy },
       payload: { proposalId: p.proposalId, routeRecordId: p.routeRecordId, revision: spec.data.revision, baseSha: p.baseSha, digest: checked.digest, fileCount: p.results.length, round: saved.round },
     });
-    return ok(receiptOf(saved));
+    return ok(receiptOf(saved, null));
   };
   return outer ? run(outer) : withTx(ctx.db, run);
 }
@@ -132,7 +142,19 @@ export async function proposalAttemptEnded(tx: Tx, key: TaskKey, attemptId: stri
 /** The latest proposal for this task revision, as it is now, for the owner's view. Null when none was accepted. */
 export async function proposalStateFor(db: Executor, key: TaskKey, revision: number): Promise<AcceptReceipt | null> {
   const [row] = await db.select().from(schema.acceptedProposals).where(and(rowKey(key), eq(schema.acceptedProposals.revision, revision))).orderBy(desc(schema.acceptedProposals.updatedAt)).limit(1);
-  return row ? receiptOf(row) : null;
+  if (!row) return null;
+  const [status] = await db.select({ status: schema.taskStatus.status, revision: schema.taskStatus.currentRevision }).from(schema.taskStatus)
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
+  return receiptOf(row, status?.revision === row.revision ? status.status : null);
+}
+
+/** One proposal as it is now, for the owner's view: its state, its round and why its last apply did not stand. Null when this task has no such proposal. */
+export async function proposalReceipt(db: Executor, key: TaskKey, proposalId: string): Promise<AcceptReceipt | null> {
+  const [row] = await db.select().from(schema.acceptedProposals).where(and(rowKey(key), eq(schema.acceptedProposals.proposalId, proposalId)));
+  if (!row) return null;
+  const [status] = await db.select({ status: schema.taskStatus.status, revision: schema.taskStatus.currentRevision }).from(schema.taskStatus)
+    .where(and(eq(schema.taskStatus.tenantId, key.tenantId), eq(schema.taskStatus.projectId, key.projectId), eq(schema.taskStatus.taskId, key.taskId)));
+  return receiptOf(row, status?.revision === row.revision ? status.status : null);
 }
 
 /** The proposal waiting for an apply attempt on this revision and base, if any. Read after the claim locked the task's status row. */

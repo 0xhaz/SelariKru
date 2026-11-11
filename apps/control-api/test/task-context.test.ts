@@ -112,3 +112,18 @@ describe('fix round 1: a restricted predecessor locks its successors (H5 M4)', (
     expect(snap.body.tasks.find((x: { taskId: string }) => x.taskId === 'down').route.lock).toMatchObject({ label: 'restricted' });
   });
 });
+
+describe('fix round 2: predecessor labels in one pass, failing closed without aborting the read (m3)', () => {
+  it('an unreadable predecessor spec locks its successor as secret, and the snapshot and the lock list still answer', async () => {
+    await seedTask(t.db, specFor('up'), 'verified');
+    await seedTask(t.db, specFor('down', { dependencies: [{ taskId: 'up', revision: 1, condition: 'artifact_verified' }] }));
+    await seedTask(t.db, specFor('free'));
+    await t.db.execute(sql`UPDATE task_revisions SET spec = '{"broken": true}'::jsonb WHERE task_id = 'up'`);
+    const snap = await get(h.app, `/v1/projects/${PROJECT}/snapshot`);
+    expect(snap.status).toBe(200);
+    const lockOf = (id: string) => snap.body.tasks.find((x: { taskId: string }) => x.taskId === id).route.lock;
+    expect(lockOf('down')).toMatchObject({ label: 'secret' });
+    expect(lockOf('free')).toBeNull();
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/down/route`)).body.route.lock).toMatchObject({ label: 'secret' });
+  });
+});

@@ -264,6 +264,18 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       }, 'a proposal receipt', false, { idempotencyKey, proposal }, true);
     },
 
+    /** An accepted proposal as it is now. Null when it was never accepted. */
+    async getProposalState(projectId, taskId, proposalId): Promise<ProposalAcceptReceipt | null> {
+      try {
+        return await readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/proposals/${encodeURIComponent(proposalId)}`, {
+          parse: (v: unknown) => ProposalAcceptReceiptSchema.parse({ ...(v as object), simulated: false }),
+        }, 'a proposal\'s state', true, undefined, true);
+      } catch (e) {
+        if (e === NOT_RECORDED) return null;
+        throw e;
+      }
+    },
+
     /** The task's base files for the patch agent, relayed from the local runner. Nothing is kept here either. */
     getTaskFiles(projectId, taskId, paths): Promise<TaskBaseFiles> {
       return readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/files`, {

@@ -209,6 +209,7 @@ export const PATCH_ACCEPT_CONSEQUENCE = 'The server checks the change again. The
 
 const PATCH_ACCEPT_REFUSALS: Readonly<Record<string, string>> = {
   proposal_restricted: `${RESTRICTED_APPLY_REFUSAL}. Nothing was sent.`,
+  proposal_from_restricted_call: `This change came from a call that read restricted data. ${RESTRICTED_APPLY_REFUSAL}.`,
   route_record_missing: 'The server has no record of where this call ran, so the proposal was not accepted. Propose the change again.',
   task_not_applicable: 'The task is not waiting to start, so the change was not accepted.',
   stale_revision: 'The task has a newer revision. Propose the change again against it.',
@@ -242,6 +243,7 @@ export function patchAcceptRefusal(message: string): string {
 const APPLY_FAILURE_TEXT: Readonly<Record<string, string>> = {
   tests_failed: 'tests failed', build_failed: 'the build failed', proposal_base_mismatch: 'the task\'s base no longer gives these contents', proposal_invalid: 'the proposal did not pass the runner\'s checks',
   proposal_changes_mismatch: 'the build changed an accepted file', proposal_apply_failed: 'the files could not be written safely',
+  verification_failed: 'it applied, but did not pass verification',
 };
 
 /** Where an accepted proposal is now, in words, and whether to offer accepting it again. A failed apply says why. */
@@ -266,6 +268,12 @@ export function patchReceiptText(r: ProposalAcceptReceipt): { readonly text: str
     };
   }
 }
+
+/**
+ * The round an accept sends, from the proposal as the server last said it is (null: never accepted). Accepting again after a failed apply, a replacement or a failed
+ * verification is the next round; otherwise the current one, whose key reads the proposal as it is now. Kept on the server, so a remounted card sends the right one.
+ */
+export const acceptRoundFor = (r: ProposalAcceptReceipt | null): number => (r === null ? 1 : r.state === 'failed' || r.state === 'superseded' ? r.round + 1 : r.round);
 
 /** Why the patch agent read no files, or null. */
 export const filesNoteText = (note: 'restricted' | 'no_checkout' | null | undefined): string | null =>

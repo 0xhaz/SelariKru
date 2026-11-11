@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { APPLY_HARNESS_REPORT, APPLY_MODEL, APPLY_PROVIDER, sha256Hex, type AcceptedProposal } from '@selarikru/domain';
 import { sql } from 'drizzle-orm';
-import { acceptProposal, appliedProposalFor, createScheduler, fetchProposalForLease, type Scheduler } from './index.ts';
+import { withTx } from '@selarikru/persistence';
+import { acceptProposal, appliedProposalFor, applyVerification, createScheduler, fetchProposalForLease, proposalStateFor, type Scheduler } from './index.ts';
 import { CAPS, POLICY, TEST_CATALOG, countRows, eventTypes, resetDb, runner, seedTask, setupTestDb, specFor, statusOf, testClock, type TestClock, type TestDb } from '../test/helpers.ts';
 
 let t: TestDb;
@@ -180,5 +181,52 @@ describe('fix round 1: an apply that does not stand, re-accepting, and the hold'
     expect((await statusOf(t.db, 't1')).status).toBe('ready');
     const out = await s.tryClaim(applyRunner('r1'), CAPS);
     expect(out).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'last_apply_failed' }] });
+  });
+});
+
+describe('fix round 2: an applied change that did not verify (m5)', () => {
+  const claimApply = async (s: Scheduler) => {
+    const out = await s.tryClaim(applyRunner('r1'), CAPS);
+    if (!out.ok) throw new Error(`no claim: ${out.reason} ${JSON.stringify(out.skipped)}`);
+    return out.lease;
+  };
+  const appliedThenFailedVerification = async (s: Scheduler) => {
+    await seedTask(t.db, spec());
+    await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k1' });
+    const lease = await claimApply(s);
+    await s.publishResult(lease, { outcome: 'completed', changeManifestSha256: 'a'.repeat(64) });
+    const v = await applyVerification({ db: t.db, now: clock.now }, key, { actor: { kind: 'verifier', id: 'v1' }, outcome: 'failed', detail: { failedChecks: ['FB-1'] }, expect: { revision: 1, attemptId: lease.attemptId } });
+    expect(v.taskStatus).toBe('ready');
+  };
+
+  it('with Claude Code on, the next claim does not go to a model worker: it waits, saying the last apply did not verify', async () => {
+    const s = sched('claude_code');
+    await appliedThenFailedVerification(s);
+    expect(await s.tryClaim(applyRunner('r1'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'last_apply_unverified' }] });
+  });
+
+  it('the applied proposal reads as failed verification and can be accepted again, as the next round', async () => {
+    const s = sched('off');
+    await appliedThenFailedVerification(s);
+    expect(await proposalStateFor(t.db, key, 1)).toMatchObject({ proposalId: 'req_1', state: 'failed', lastFailure: 'verification_failed', round: 1 });
+    expect(await acceptProposal(ctx(), key, { proposal: proposal(), acceptedBy: 'o', idempotencyKey: 'k2' })).toMatchObject({ ok: true, value: { state: 'accepted', round: 2 } });
+    expect((await claimApply(s)).proposal?.proposalId).toBe('req_1');
+  });
+});
+
+describe('fix round 2: one project read judges every task as the claim does (m3)', () => {
+  it('the preloaded reader gives the same labels as the claim\'s per-query walk, restricted predecessors included', async () => {
+    const { projectSourceReader, resolveSources, resolveSourcesWith } = await import('./index.ts');
+    await seedTask(t.db, specFor('a', { classification: 'restricted' }), 'verified');
+    await seedTask(t.db, specFor('b', { dependencies: [{ taskId: 'a', revision: 1, condition: 'artifact_verified' }] }), 'verified');
+    await seedTask(t.db, specFor('c', { dependencies: [{ taskId: 'b', revision: 1, condition: 'artifact_verified' }] }));
+    await seedTask(t.db, specFor('d'));
+    const read = await projectSourceReader(t.db, { tenantId: 'tenant_a', projectId: 'proj_a' });
+    for (const id of ['a', 'b', 'c', 'd']) {
+      const spec = specFor(id, id === 'a' ? { classification: 'restricted' } : id === 'b' ? { dependencies: [{ taskId: 'a', revision: 1, condition: 'artifact_verified' }] } : id === 'c' ? { dependencies: [{ taskId: 'b', revision: 1, condition: 'artifact_verified' }] } : {});
+      const viaClaim = await withTx(t.db, (tx) => resolveSources(tx, { tenantId: 'tenant_a', projectId: 'proj_a', taskId: id }, spec));
+      expect(await resolveSourcesWith(read, spec), id).toEqual(viaClaim);
+    }
+    expect((await resolveSourcesWith(read, specFor('c', { dependencies: [{ taskId: 'b', revision: 1, condition: 'artifact_verified' }] }))).routeClassification).toBe('restricted');
   });
 });

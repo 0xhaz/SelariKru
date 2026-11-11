@@ -1,11 +1,11 @@
 import { useEffect, useId, useState } from 'react';
 import { OPEN_HANDOVER_STATES, type RoutePolicyMode } from '@selarikru/domain';
 import { Chip, buttonPrimary, buttonQuiet, type Tone } from '@selarikru/ui';
-import { DataSourceException, type TaskRouteView, type TaskView } from '@selarikru/view-protocol';
+import { DataSourceException, type ProposalAcceptReceipt, type TaskRouteView, type TaskView } from '@selarikru/view-protocol';
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
-import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
+import { AGENT_ACTIONS, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, acceptRoundFor, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
 import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
@@ -270,44 +270,55 @@ function CriteriaProposal({ h, task, data, outcome }: { h: HybridValue; task: Ta
 
 function PatchProposal({ h, task, data, outcome }: { h: HybridValue; task: TaskView; data: Record<string, unknown>; outcome: Extract<AgentsOutcome, { kind: 'result' }> }) {
   const id = useId();
-  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'done'; text: string; again: boolean } | { phase: 'failed'; text: string }>({ phase: 'idle' });
-  // The accept round: a new key only to accept again after a failed apply; the same key reads where the proposal is now.
-  const [round, setRound] = useState(1);
+  // Where the proposal is, as the server last said: the round an accept sends and the words shown both come from it, so a remounted card is right.
+  const [server, setServer] = useState<ProposalAcceptReceipt | null>(null);
+  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'failed'; text: string }>({ phase: 'idle' });
   const accept = h.agents?.acceptPatch ?? null;
+  const read = h.agents?.proposalState ?? null;
   const r = outcome.result;
   const reason = patchAcceptBlocker({ status: task.status, locked: r.locked, canAccept: accept !== null, live: h.live, recorded: r.reported === 'sent' && r.report !== null, checked: r.patch !== undefined && (outcome.base ?? null) !== null });
-  async function send(next: number): Promise<void> {
+  useEffect(() => {
+    if (!read || r.locked) return;
+    let live = true;
+    void read(outcome).then((x) => { if (live) setServer(x); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [read, outcome, r.locked]);
+  async function send(): Promise<void> {
     if (!accept) return;
     setState({ phase: 'working' });
     try {
-      const receipt = await accept(outcome, next);
-      setRound(next);
+      setServer(await accept(outcome, acceptRoundFor(server)));
       h.refresh();
-      setState({ phase: 'done', ...patchReceiptText(receipt) });
+      setState({ phase: 'idle' });
     } catch (e) {
       setState({ phase: 'failed', text: patchAcceptRefusal(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '') });
     }
   }
+  async function check(): Promise<void> {
+    if (!read) return;
+    try { setServer(await read(outcome)); } catch { setState({ phase: 'failed', text: 'Where this proposal is could not be read. Nothing changed.' }); }
+  }
   const filesNote = filesNoteText(outcome.filesNote);
+  const shown = server !== null ? patchReceiptText(server) : null;
   return (
     <div className="space-y-1.5">
       <p className="text-fg">{String(data['summary'] ?? '')}</p>
       {filesNote ? <p className="text-sm text-muted" data-testid="patch-files-unread">{filesNote}</p> : null}
       <pre className="max-h-48 overflow-auto rounded-chip border border-line bg-bg p-2 font-mono text-mono whitespace-pre text-fg" tabIndex={0} aria-label="Proposed diff">{String(data['diff'] ?? '')}</pre>
-      {state.phase === 'done' ? (
+      {shown !== null ? (
         <>
-          <p className="text-sm font-medium text-fg" data-testid="patch-accepted">{state.text}</p>
-          {state.again
-            ? <button type="button" className={buttonPrimary} disabled={reason !== null} onClick={() => void send(round + 1)}>Accept again</button>
-            : <button type="button" className={buttonQuiet} disabled={!h.live} onClick={() => void send(round)}>Check where it is</button>}
+          <p className="text-sm font-medium text-fg" data-testid="patch-accepted">{shown.text}</p>
+          {shown.again
+            ? <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} onClick={() => void send()}>Accept again</button>
+            : <button type="button" className={buttonQuiet} disabled={!h.live || read === null} onClick={() => void check()}>Check where it is</button>}
         </>
       ) : (
         <>
-          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} aria-describedby={`${id}-apply`} onClick={() => void send(round)}>{state.phase === 'working' ? 'Accepting' : 'Accept and apply'}</button>
+          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} aria-describedby={`${id}-apply`} onClick={() => void send()}>{state.phase === 'working' ? 'Accepting' : 'Accept and apply'}</button>
           <p id={`${id}-apply`} className="text-sm text-muted" data-testid="patch-accept-note">{reason ?? PATCH_ACCEPT_CONSEQUENCE}</p>
-          {state.phase === 'failed' ? <p className="text-sm text-danger" data-testid="patch-accept-refused">{state.text}</p> : null}
         </>
       )}
+      {state.phase === 'failed' ? <p className="text-sm text-danger" data-testid="patch-accept-refused">{state.text}</p> : null}
     </div>
   );
 }

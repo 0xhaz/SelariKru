@@ -14,7 +14,7 @@ import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
-import { inheritedLabels, loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
+import { inheritedLabelsFor, loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
 import { skillRunnerWaits } from './skills.ts';
 import { serveBundle } from './brain.ts';
 import {
@@ -836,11 +836,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
 
         const specOf = (taskId: string, revision: number) => revisions.find((r) => r.taskId === taskId && r.revision === revision);
         // What each task inherits from its predecessors, as the claim judges it: a task downstream of restricted work shows the same lock it routes by.
-        const inheritedByTask = new Map<string, unknown[]>();
-        for (const s of statuses) {
-          const parsed = TaskSpecSchema.safeParse(specOf(s.taskId, s.currentRevision)?.spec);
-          inheritedByTask.set(s.taskId, await inheritedLabels(tx, config.tenantId, projectId, parsed.success ? parsed.data : null));
-        }
+        const inheritedByTask = await inheritedLabelsFor(tx, config.tenantId, projectId, statuses.map((s) => { const parsed = TaskSpecSchema.safeParse(specOf(s.taskId, s.currentRevision)?.spec); return parsed.success ? parsed.data : null; }));
         // Derived on read, never recorded: tasks waiting for a runner that can deliver their knowledge packs.
         const skillWaits = await skillRunnerWaits(tx, config.tenantId, projectId, statuses.map((s) => ({ taskId: s.taskId, status: s.status, spec: specOf(s.taskId, s.currentRevision)?.spec })), at);
         // What a budget stop left undelivered, so the owner can read it before accepting. A spec that no longer parses leaves it null: unknown, never empty.

@@ -107,6 +107,12 @@ test('run an agent on demo data, see its proposal with checks, source and timing
   await expect(patch.getByTestId('patch-accept-note')).toContainText('with no model');
   await patch.getByRole('button', { name: 'Accept and apply' }).click();
   await expect(patch.getByTestId('patch-accepted')).toContainText('Accepted in the demo: 1 file. The demo has no runner, so nothing is applied.');
+  // Closed and opened again, the card reads where the proposal is from the source, not from its own memory (m6).
+  await page.keyboard.press('Escape');
+  await expect(inspector(page)).toHaveCount(0);
+  await row(page, T('search')).getByRole('button', { name: 'Search index' }).click();
+  await expect(action(page, 'patch').getByTestId('patch-accepted')).toContainText('Accepted in the demo: 1 file.');
+  await expect(action(page, 'patch').getByRole('button', { name: 'Accept and apply' })).toHaveCount(0);
   // No change to review on this task yet, and no failed check to explain: said, not hidden.
   await expect(action(page, 'review').getByRole('button', { name: 'Review change' })).toBeDisabled();
   await expect(action(page, 'triage')).toContainText('no failed check');

@@ -4,7 +4,7 @@ import {
 } from '@selarikru/domain';
 import { schema, withTx } from '@selarikru/persistence';
 import { LeaseRefSchema } from '@selarikru/protocol';
-import { acceptProposal, fetchProposalForLease, type Runner } from '@selarikru/workflow';
+import { acceptProposal, fetchProposalForLease, proposalReceipt, type Runner } from '@selarikru/workflow';
 import { and, eq, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -113,8 +113,10 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
       eq(schema.clientReports.tenantId, tenantId), eq(schema.clientReports.projectId, projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
       eq(schema.clientReports.subjectId, taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${p.routeRecordId}`,
     )).limit(1);
-    const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown } | undefined;
+    const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown } | undefined;
     if (!rec || rec.stepKind !== 'patch' || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', 'there is no record of where the patch call that produced this proposal ran, so it cannot be accepted');
+    // A call that ran locked to the device read restricted data: its output stays on the device, whatever the task's label says now.
+    if (rec.locked === true) throw new AppError(409, 'proposal_from_restricted_call', RESTRICTED_APPLY_REFUSAL, { reason: 'locked_call' });
     if (rec.outputSha256 !== sha256Hex(p.diff)) throw new AppError(409, 'route_record_missing', 'the route record of this call names another output, so this proposal is not what that call produced', { reason: 'route_record_output_mismatch' });
     // Not wrapped in a stored receipt: the proposal's own row holds the key that last queued it, and the same key again reads the proposal as it is now (never an
     // earlier receipt); a new key queues a proposal whose apply failed.
@@ -125,6 +127,15 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
     if (r.error.reason === 'proposal_already_accepted') throw new AppError(409, 'proposal_already_accepted', `this proposal is already ${r.error.state === 'applying' ? 'being applied' : r.error.state === 'applied' ? 'applied' : 'waiting for the runner'}`, { reason: r.error.reason, state: r.error.state });
     if (r.error.reason === 'stale_revision') throw new AppError(409, 'stale_revision', 'the task has a newer revision; propose the change again', { reason: r.error.reason });
     throw new AppError(r.error.status, 'proposal_refused', `the proposal did not pass the server's checks: ${r.error.reason}`, { reason: r.error.reason });
+  });
+
+  // One proposal as it is now (ids, hashes, state, round and why the last apply did not stand), so the owner's screen reads the round from the server, not from memory.
+  app.get('/v1/projects/:id/tasks/:taskId/proposals/:proposalId', auth, async (req) => {
+    const { projectId, taskId } = await ownerTask(req);
+    const { proposalId } = req.params as { proposalId: string };
+    const receipt = await proposalReceipt(db, { tenantId, projectId, taskId }, proposalId);
+    if (receipt === null) throw new AppError(404, 'no_proposal', 'no such accepted proposal for this task');
+    return receipt;
   });
 
   // ---- runner side ----------------------------------------------------------------------------------------------------------------

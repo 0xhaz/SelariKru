@@ -28,6 +28,8 @@ export interface AgentsPort {
   facts(taskId: string): Promise<TaskFacts>;
   /** Accepts a checked patch proposal for the no-model apply worker (H5). Absent: the source cannot apply a change. */
   readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>, round: number) => Promise<ProposalAcceptReceipt>) | null;
+  /** Where an accepted patch proposal is now, read from the server. Null: never accepted, or the source cannot say. */
+  readonly proposalState: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt | null>) | null;
 }
 
 /**
@@ -46,7 +48,7 @@ export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -108,6 +110,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       if (proposal === null) throw new Error('proposal_not_acceptable: this result cannot be accepted');
       return source.acceptPatchProposal!(projectId, proposal, `accept-${proposal.proposalId}-${round}`);
     } : null,
+    proposalState: source.getProposalState ? (outcome) => source.getProposalState!(projectId, outcome.context.taskId, outcome.result.proposal.requestId) : null,
     async facts(taskId) {
       if (!source.getTaskContextSize) throw new Error('this source cannot size a task\'s input');
       const read = await getTaskRoute(projectId, taskId);

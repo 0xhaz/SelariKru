@@ -29,6 +29,7 @@ const exact = {
   awaiting_accepted_proposal: false,
   apply_runner_update_required: false,
   last_apply_failed: false,
+  last_apply_unverified: false,
   infra_retry_backoff: true,
   reservation_not_settled: true,
   no_free_slot: true,

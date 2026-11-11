@@ -507,8 +507,9 @@ export class AgentCatalog {
       labels: labelsFor(kind, input),
     });
     const base = routeReportOf(proposal);
-    // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output.
-    const diff = kind === 'patch' && proposal.status === 'ok' ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
+    // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output. Never for a locked call: a
+    // restricted result stays on the device, and even its hash is not sent.
+    const diff = kind === 'patch' && proposal.status === 'ok' && proposal.route?.locked !== true ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
     const report = base !== null && typeof diff === 'string' ? { ...base, outputSha256: sha256Hex(diff) } : base;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {

@@ -81,6 +81,8 @@ export interface EngineeringDataSource {
    * proposal is refused before its content is read (`proposal_restricted`). Absent: this source cannot apply a change.
    */
   acceptPatchProposal?(projectId: string, proposal: AcceptedProposal, idempotencyKey: string): Promise<ProposalAcceptReceipt>;
+  /** An accepted proposal as it is now (state, round, why its last apply did not stand). Null: never accepted. */
+  getProposalState?(projectId: string, taskId: string, proposalId: string): Promise<ProposalAcceptReceipt | null>;
   /** The task's files at its base commit for the patch agent, read by the local runner and relayed. Never for a restricted task. Absent: no file contents are available. */
   getTaskFiles?(projectId: string, taskId: string, paths?: readonly string[]): Promise<TaskBaseFiles>;
   /** What is under the task's allowed paths at its base: paths and sizes only, for choosing which files to read. Absent: none can be chosen. */

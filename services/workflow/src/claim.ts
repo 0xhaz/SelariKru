@@ -2,7 +2,7 @@ import { asClaimReason, type ClaimReason } from './claim-reasons.ts';
 import { randomUUID } from 'node:crypto';
 import { APPLY_MODEL, APPLY_PROVIDER, harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
-import { schema, withTx, type Tx } from '@selarikru/persistence';
+import { schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from 'drizzle-orm';
 import { policyRevokedReason } from '@selarikru/domain';
 import { approvalScopeHash, consumeGrants, findUsableGrant, loadWorkerGrants, openApproval, type ApprovalGate } from './approval.ts';
@@ -76,12 +76,13 @@ function infraRetryDecision(attempts: readonly AttemptRow[], limits: ClaimLimits
   return now.getTime() < last.endedAt.getTime() + delaySeconds * 1000 ? 'backoff' : 'allowed';
 }
 
-/** The latest attempt on this revision was an apply that did not complete. */
-async function lastApplyFailed(tx: Tx, key: TaskKey, revision: number): Promise<boolean> {
+/** How the latest attempt on this revision ended, when it was an apply: `failed` (it did not complete) or `unverified` (it completed, and the task is claimable again). */
+async function lastApplyOutcome(tx: Tx, key: TaskKey, revision: number): Promise<'failed' | 'unverified' | null> {
   const [last] = await tx.select({ provider: schema.attempts.modelProvider, model: schema.attempts.modelId, exitReason: schema.attempts.exitReason, endedAt: schema.attempts.endedAt }).from(schema.attempts)
     .where(and(eq(schema.attempts.tenantId, key.tenantId), eq(schema.attempts.projectId, key.projectId), eq(schema.attempts.taskId, key.taskId), eq(schema.attempts.revision, revision)))
     .orderBy(desc(schema.attempts.attemptNumber)).limit(1);
-  return last !== undefined && last.endedAt !== null && last.provider === APPLY_PROVIDER && last.model === APPLY_MODEL && last.exitReason !== 'completed';
+  if (last === undefined || last.endedAt === null || last.provider !== APPLY_PROVIDER || last.model !== APPLY_MODEL) return null;
+  return last.exitReason === 'completed' ? 'unverified' : 'failed';
 }
 
 async function hasOpenAttempt(tx: Tx, key: TaskKey): Promise<boolean> {
@@ -226,14 +227,51 @@ interface ResolvedSources {
 
 const MAX_PREDECESSORS = 500;
 
-/** Relational dependency edges for the given task revisions, in one query. */
-async function edgeRowsFor(tx: Tx, key: TaskKey, nodes: readonly { taskId: string; revision: number }[]): Promise<{ taskId: string; revision: number }[]> {
-  if (nodes.length === 0) return [];
-  const rows = await tx
-    .select({ owner: schema.dependencies.taskId, ownerRevision: schema.dependencies.revision, taskId: schema.dependencies.dependsOnTaskId, revision: schema.dependencies.dependsOnRevision })
-    .from(schema.dependencies)
-    .where(and(eq(schema.dependencies.tenantId, key.tenantId), eq(schema.dependencies.projectId, key.projectId), inArray(schema.dependencies.taskId, [...new Set(nodes.map((n) => n.taskId))])));
-  return rows.filter((r) => nodes.some((n) => n.taskId === r.owner && n.revision === r.ownerRevision)).map((r) => ({ taskId: r.taskId, revision: r.revision }));
+/** What the label walk reads. The claim reads it from the database as it goes; a view reading many tasks preloads the project once (`projectSourceReader`). */
+export interface SourceReader {
+  projectLabel(): Promise<string | undefined>;
+  /** Relational dependency edges for these task revisions. */
+  edges(nodes: readonly { taskId: string; revision: number }[]): Promise<{ taskId: string; revision: number }[]>;
+  /** Stored task revisions of these tasks. */
+  revisions(taskIds: readonly string[]): Promise<readonly { taskId: string; revision: number; spec: unknown }[]>;
+  /** Stored artifacts with these ids: id, sha256 and label. */
+  artifacts(ids: readonly string[]): Promise<readonly { id: string; sha: string; label: string }[]>;
+}
+
+const edgesOf = (rows: readonly { owner: string; ownerRevision: number; taskId: string; revision: number }[], nodes: readonly { taskId: string; revision: number }[]) =>
+  rows.filter((r) => nodes.some((n) => n.taskId === r.owner && n.revision === r.ownerRevision)).map((r) => ({ taskId: r.taskId, revision: r.revision }));
+const depCols = { owner: schema.dependencies.taskId, ownerRevision: schema.dependencies.revision, taskId: schema.dependencies.dependsOnTaskId, revision: schema.dependencies.dependsOnRevision };
+const revCols = { taskId: schema.taskRevisions.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec };
+const artCols = { id: schema.artifacts.artifactId, sha: schema.artifacts.sha256, label: schema.artifacts.classification };
+
+/** The claim's reader: each read is one query, as the walk needs it. */
+function queryReader(tx: Executor, key: { tenantId: string; projectId: string }): SourceReader {
+  return {
+    projectLabel: async () => (await tx.select({ c: schema.projects.classification }).from(schema.projects).where(and(eq(schema.projects.tenantId, key.tenantId), eq(schema.projects.projectId, key.projectId))).limit(1))[0]?.c,
+    edges: async (nodes) => (nodes.length === 0 ? [] : edgesOf(await tx.select(depCols).from(schema.dependencies)
+      .where(and(eq(schema.dependencies.tenantId, key.tenantId), eq(schema.dependencies.projectId, key.projectId), inArray(schema.dependencies.taskId, [...new Set(nodes.map((n) => n.taskId))]))), nodes)),
+    revisions: async (ids) => (ids.length === 0 ? [] : tx.select(revCols).from(schema.taskRevisions)
+      .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), inArray(schema.taskRevisions.taskId, [...ids])))),
+    artifacts: async (ids) => (ids.length === 0 ? [] : tx.select(artCols).from(schema.artifacts)
+      .where(and(eq(schema.artifacts.tenantId, key.tenantId), eq(schema.artifacts.projectId, key.projectId), inArray(schema.artifacts.artifactId, [...ids])))),
+  };
+}
+
+/**
+ * A reader over one project, loaded once with four plain reads (the project's label, every dependency edge, every task revision, every artifact's label), for a view
+ * that judges many tasks at once. It locks nothing and catches nothing: a failed read fails the caller's request, never its transaction silently.
+ */
+export async function projectSourceReader(db: Executor, key: { tenantId: string; projectId: string }): Promise<SourceReader> {
+  const label = (await db.select({ c: schema.projects.classification }).from(schema.projects).where(and(eq(schema.projects.tenantId, key.tenantId), eq(schema.projects.projectId, key.projectId))).limit(1))[0]?.c;
+  const deps = await db.select(depCols).from(schema.dependencies).where(and(eq(schema.dependencies.tenantId, key.tenantId), eq(schema.dependencies.projectId, key.projectId)));
+  const revs = await db.select(revCols).from(schema.taskRevisions).where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId)));
+  const arts = await db.select(artCols).from(schema.artifacts).where(and(eq(schema.artifacts.tenantId, key.tenantId), eq(schema.artifacts.projectId, key.projectId)));
+  return {
+    projectLabel: async () => label,
+    edges: async (nodes) => edgesOf(deps, nodes),
+    revisions: async (ids) => revs.filter((r) => ids.includes(r.taskId)),
+    artifacts: async (ids) => arts.filter((a) => ids.includes(a.id)),
+  };
 }
 
 /**
@@ -241,9 +279,12 @@ async function edgeRowsFor(tx: Tx, key: TaskKey, nodes: readonly { taskId: strin
  * label (matched by id and sha256; no match is unlabelled, which the policy denies), and the labels feeding from predecessors.
  */
 export async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Promise<ResolvedSources> {
-  const project = (await tx.select({ c: schema.projects.classification }).from(schema.projects)
-    .where(and(eq(schema.projects.tenantId, key.tenantId), eq(schema.projects.projectId, key.projectId))).limit(1))[0];
-  let repo = strongest(spec.classification, (project?.c ?? 'secret') as Classification);
+  return resolveSourcesWith(queryReader(tx, key), spec);
+}
+
+/** The same walk over any reader: the claim's and every view's labels cannot disagree. */
+export async function resolveSourcesWith(read: SourceReader, spec: TaskSpec): Promise<ResolvedSources> {
+  let repo = strongest(spec.classification, ((await read.projectLabel()) ?? 'secret') as Classification);
 
   // Walk every transitive predecessor, level by level, so a label cannot be laundered through a middle task.
   // A visited set guards cycles, and the walk is bounded: exceeding the bound or an unreadable predecessor fails closed.
@@ -251,7 +292,7 @@ export async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Prom
   const visited = new Set<string>([`${spec.taskId}`]);
   let frontier = [
     ...spec.dependencies.map((d) => ({ taskId: d.taskId, revision: d.revision })),
-    ...(await edgeRowsFor(tx, key, [{ taskId: spec.taskId, revision: spec.revision }])),
+    ...(await read.edges([{ taskId: spec.taskId, revision: spec.revision }])),
   ];
   while (frontier.length > 0) {
     const level = frontier.filter((e, i) => frontier.findIndex((o) => o.taskId === e.taskId && o.revision === e.revision) === i && !visited.has(`${e.taskId}@${e.revision}`));
@@ -259,8 +300,7 @@ export async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Prom
     if (level.length === 0) break;
     for (const e of level) visited.add(`${e.taskId}@${e.revision}`);
     if (visited.size > MAX_PREDECESSORS) { repo = 'secret'; break; }
-    const rows = await tx.select({ taskId: schema.taskRevisions.taskId, revision: schema.taskRevisions.revision, spec: schema.taskRevisions.spec }).from(schema.taskRevisions)
-      .where(and(eq(schema.taskRevisions.tenantId, key.tenantId), eq(schema.taskRevisions.projectId, key.projectId), inArray(schema.taskRevisions.taskId, [...new Set(level.map((e) => e.taskId))])));
+    const rows = await read.revisions([...new Set(level.map((e) => e.taskId))]);
     const found: TaskSpec[] = [];
     for (const e of level) {
       const row = rows.find((r) => r.taskId === e.taskId && r.revision === e.revision);
@@ -272,15 +312,12 @@ export async function resolveSources(tx: Tx, key: TaskKey, spec: TaskSpec): Prom
       preds.push(p.data.contractRefs);
       frontier.push(...p.data.dependencies.map((d) => ({ taskId: d.taskId, revision: d.revision })));
     }
-    frontier.push(...(await edgeRowsFor(tx, key, found.map((f) => ({ taskId: f.taskId, revision: f.revision })))));
+    frontier.push(...(await read.edges(found.map((f) => ({ taskId: f.taskId, revision: f.revision })))));
   }
 
   const refs = [...spec.contractRefs, ...preds.flat()];
   const ids = [...new Set(refs.map((r) => r.artifactId))];
-  const stored = ids.length === 0 ? [] : await tx
-    .select({ id: schema.artifacts.artifactId, sha: schema.artifacts.sha256, label: schema.artifacts.classification })
-    .from(schema.artifacts)
-    .where(and(eq(schema.artifacts.tenantId, key.tenantId), eq(schema.artifacts.projectId, key.projectId), inArray(schema.artifacts.artifactId, ids)));
+  const stored = await read.artifacts(ids);
   const labelOf = (r: { artifactId: string; sha256: string }): string | undefined => stored.find((a) => a.id === r.artifactId && a.sha === r.sha256)?.label;
 
   let classification = repo;
@@ -454,6 +491,7 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   // is dispatched to, so a task with no accepted proposal waits for the owner, visibly, and no worker that calls a model API is assigned.
   const proposal = await pendingProposal(tx, key, spec.revision, spec.baseSha);
   let assigned: ResolvedAssignment;
+  let lastApply: 'failed' | 'unverified' | null = null;
   if (proposal !== null) {
     // A fact about the poller, not the task: a runner that can apply it takes it.
     if (!(runner.harnesses ?? []).some((h) => h.provider === APPLY_PROVIDER && h.models.includes(APPLY_MODEL))) return { reason: 'apply_runner_update_required' };
@@ -461,11 +499,12 @@ async function claimCandidate(ctx: SchedulerContext, tx: Tx, runner: Runner, c: 
   } else if (ctx.codingWorkers === 'off') {
     await recordBlock(tx, key, c, statusRow, 'awaiting_accepted_proposal', null, now);
     return { reason: 'awaiting_accepted_proposal' };
-  } else if (await lastApplyFailed(tx, key, spec.revision)) {
-    // Coding workers are on, but the owner's accepted change did not stand. A model worker never takes the task over silently: it waits, saying why, for the owner to
-    // accept a change again.
-    await recordBlock(tx, key, c, statusRow, 'last_apply_failed', null, now);
-    return { reason: 'last_apply_failed' };
+  } else if ((lastApply = await lastApplyOutcome(tx, key, spec.revision)) !== null) {
+    // Coding workers are on, but the owner's accepted change did not stand: its apply failed, or it applied and did not verify. A model worker never takes the task over
+    // silently: it waits, saying why, for the owner to accept a change again.
+    const reason = lastApply === 'unverified' ? 'last_apply_unverified' : 'last_apply_failed';
+    await recordBlock(tx, key, c, statusRow, reason, null, now);
+    return { reason };
   } else {
     // Which model this attempt runs is decided here, once. A refusal blocks the claim: no attempt, no reservation, no sandbox. The hold then follows the assigned model.
     assigned = await resolveAssignment(ctx, tx, key, spec, { trial: c.trial, pinnedModel: c.pinnedModel }, runner.harnesses ?? []);

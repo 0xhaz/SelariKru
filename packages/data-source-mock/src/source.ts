@@ -735,6 +735,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return demoBaseFiles(contextState(p, t.runId), t);
     },
 
+    /** A demo proposal as it is now: the demo has no runner, so an accepted one stays waiting. */
+    async getProposalState(projectId, _taskId, proposalId) {
+      return project(projectId).acceptedProposals.get(proposalId)?.receipt ?? null;
+    },
+
     /** The demo's listing of a task's files. Simulated. */
     async listTaskFiles(projectId, taskId) {
       const p = project(projectId);

@@ -496,9 +496,22 @@ describe('fix round 1: the patch agent chooses files from a listing (I4)', () =>
   it('an ok patch\'s route report carries the hash of its diff, never the diff', async () => {
     const { sdk, reports, catalog } = setup();
     sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
-    await catalog.patch(INPUTS.patch);
+    // Labelled request text, so the call is not locked to the device (a locked call reports no hash).
+    await catalog.patch({ ...INPUTS.patch, requestClassification: 'internal' });
     const { sha256Hex } = await import('@selarikru/domain');
     expect(reports[0]!.report.outputSha256).toBe(sha256Hex(DIFF));
     expect(JSON.stringify(reports[0]!.report)).not.toContain('line 2');
+  });
+});
+
+describe('fix round 2: a locked call reports no output hash (m1)', () => {
+  it('a patch locked to the device sends a route report without outputSha256, and no telemetry carries it', async () => {
+    const { sdk, reports, events, catalog } = setup({ runDefault: 'ONLY_ON_DEVICE', override: null, lock: { label: 'restricted', reason: 'restricted data' } });
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    const r = await catalog.patch(INPUTS.patch);
+    expect(r.locked).toBe(true);
+    expect(r.report).not.toHaveProperty('outputSha256');
+    expect(reports[0]!.report).not.toHaveProperty('outputSha256');
+    expect(JSON.stringify(events)).not.toContain('outputSha256');
   });
 });

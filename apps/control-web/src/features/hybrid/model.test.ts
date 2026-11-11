@@ -3,7 +3,7 @@ import type { RouteRecord } from '@selarikru/domain';
 import type { SettingView, TaskRouteView } from '@selarikru/view-protocol';
 import { iso, task } from '../overview/testing.ts';
 import { settingStatus } from '../settings/model.ts';
-import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, filesNoteText, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
+import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, filesNoteText, acceptRoundFor, reaskNote, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
 
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null,
@@ -249,5 +249,16 @@ describe('fix round 1: what an accept says, by where the proposal is now (I1, M3
     expect(filesNoteText('no_checkout')).toBe('This runner has no copy of the project; the proposal can only add new files.');
     expect(filesNoteText('restricted')).toMatch(/stay on this device/);
     expect(filesNoteText(null)).toBeNull();
+  });
+});
+
+describe('fix round 2: the accept round comes from the server (m6)', () => {
+  const r = (state: string, round: number) => ({ proposalId: 'p', taskId: 't', revision: 1, digest: 'a'.repeat(64), fileCount: 1, state, round, lastFailure: null, simulated: false }) as never;
+  it('a first accept is round 1; accepting again after a failure or a replacement is the next round; anything else reads the current round', () => {
+    expect(acceptRoundFor(null)).toBe(1);
+    expect(acceptRoundFor(r('failed', 2))).toBe(3);
+    expect(acceptRoundFor(r('superseded', 1))).toBe(2);
+    expect(acceptRoundFor(r('accepted', 2))).toBe(2);
+    expect(acceptRoundFor(r('applying', 1))).toBe(1);
   });
 });
