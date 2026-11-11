@@ -248,9 +248,10 @@ export function tiffin(p: Pen, cx: number, cy: number, label: string) {
 /** The run's name on a gold-lettered strip over the plan board. */
 export function planBanner(p: Pen, l: OfficeLayout, title: string) {
   const board = l.plan.board;
-  // Kept clear of the stair at the board's right (round 2): the title is centred on, and fitted to, the board's left part.
-  const room = board.w - 40;
-  tag(p, fit(title.toUpperCase(), room), board.x + room / 2 + 2, board.y - 11, C.deep, C.gold);
+  // Kept clear of the stair (round 2): the title uses the wall from the left beam to just before the stair, so the plan revision still shows.
+  const left = l.ox + 18;
+  const room = l.ox + STAIR_X * 16 - 4 - left;
+  tag(p, fit(title.toUpperCase(), room), left + room / 2, board.y - 11, C.deep, C.gold);
 }
 
 /**
