@@ -87,6 +87,11 @@ export interface EngineeringDataSource {
   getTaskFiles?(projectId: string, taskId: string, paths?: readonly string[]): Promise<TaskBaseFiles>;
   /** What is under the task's allowed paths at its base: paths and sizes only, for choosing which files to read. Absent: none can be chosen. */
   listTaskFiles?(projectId: string, taskId: string): Promise<TaskFileListing>;
+  /**
+   * H11: the Project Manager's delegation proposal for a run. The server applies only what the accepted plan covers (from a recorded pmDelegate call) and returns
+   * what it refused, for the owner. Absent: this source cannot delegate.
+   */
+  delegate?(projectId: string, runId: string, request: DelegationRequest): Promise<DelegationReceipt>;
   disconnect(): void;
 }
 
@@ -96,4 +101,18 @@ export class DataSourceException extends Error {
     super(detail.message);
     this.name = 'DataSourceException';
   }
+}
+
+/** H11: what the browser sends for the Project Manager's delegation. Items are passed as the model gave them, so a field the plan cannot authorise is refused. */
+export interface DelegationRequest {
+  readonly planRevision: number;
+  readonly subjectTaskId: string;
+  readonly routeRecordId: string;
+  readonly assignments: readonly Record<string, unknown>[];
+}
+export interface DelegationReceipt {
+  readonly applied: readonly { readonly taskId: string; readonly workerId: string }[];
+  readonly refused: readonly { readonly taskId: string; readonly workerId: string; readonly reason: string }[];
+  readonly autoDelegate: boolean;
+  readonly simulated: boolean;
 }

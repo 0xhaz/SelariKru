@@ -50,6 +50,8 @@ export const REJECTION_REASONS = [
   'run_closed', 'outside_plan_scope', 'resume_refused',
   // A cloud-capable route asked for a task whose data is restricted or secret.
   'route_locked_restricted',
+  // H11: a worker name that cannot be used.
+  'name_empty', 'name_too_long', 'name_invalid', 'name_secret', 'name_taken',
 ] as const;
 export type RejectionReason = (typeof REJECTION_REASONS)[number];
 

@@ -1,7 +1,7 @@
-import { SkillExecutionRecordSchema, type VerificationRecord } from '@selarikru/domain';
+import { SkillExecutionRecordSchema, workerLabel, type VerificationRecord } from '@selarikru/domain';
 import { recordOperation, schema, sql, withTx, type Db, type Tx } from '@selarikru/persistence';
 import { acceptanceCovers, assessRunScope, loadAcceptedReducedScope, type AcceptedReducedScope } from '@selarikru/workflow';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { buildPrBody, type UsageLine } from './body.ts';
 import { emitIntegration } from './events.ts';
 import { PushRejectedError, type GitHubPort, type PullRequestInfo } from './port.ts';
@@ -138,6 +138,26 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
     const intervened = await tx.select({ attemptId: schema.attempts.attemptId, taskId: schema.attempts.taskId, at: schema.attempts.humanIntervenedAt, runId: schema.taskRevisions.runId }).from(schema.attempts).innerJoin(schema.taskRevisions, and(
       eq(schema.taskRevisions.tenantId, schema.attempts.tenantId), eq(schema.taskRevisions.projectId, schema.attempts.projectId), eq(schema.taskRevisions.taskId, schema.attempts.taskId), eq(schema.taskRevisions.revision, schema.attempts.revision)))
       .where(and(eq(schema.attempts.tenantId, run.tenantId), eq(schema.attempts.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.attempts.humanIntervenedAt} IS NOT NULL`)).orderBy(schema.attempts.humanIntervenedAt, schema.attempts.attemptId);
+    // H11: who worked on each task (the runner of its attempts, and the Project Manager's assignment if it made one), named as the owner named them.
+    const ran = await tx.select({ taskId: schema.attempts.taskId, runner: schema.attempts.runner }).from(schema.attempts).innerJoin(schema.taskRevisions, and(
+      eq(schema.taskRevisions.tenantId, schema.attempts.tenantId), eq(schema.taskRevisions.projectId, schema.attempts.projectId), eq(schema.taskRevisions.taskId, schema.attempts.taskId), eq(schema.taskRevisions.revision, schema.attempts.revision)))
+      .where(and(eq(schema.attempts.tenantId, run.tenantId), eq(schema.attempts.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId))).orderBy(schema.attempts.taskId, schema.attempts.attemptId);
+    const delegated = await tx.select({ taskId: schema.taskDelegations.taskId, workerId: schema.taskDelegations.workerId, planRevision: schema.taskDelegations.planRevision, actorKind: schema.taskDelegations.actorKind }).from(schema.taskDelegations)
+      .where(and(eq(schema.taskDelegations.tenantId, run.tenantId), eq(schema.taskDelegations.projectId, run.projectId), eq(schema.taskDelegations.runId, run.runId)));
+    const workerIds = [...new Set([...ran.flatMap((r) => (r.runner ? [r.runner] : [])), ...delegated.map((d) => d.workerId)])];
+    const named = workerIds.length === 0 ? [] : await tx.select({ runnerId: schema.runnerSettings.runnerId, field: schema.runnerSettings.field, desired: schema.runnerSettings.desired }).from(schema.runnerSettings)
+      .where(and(eq(schema.runnerSettings.tenantId, run.tenantId), inArray(schema.runnerSettings.runnerId, workerIds)));
+    const specs = await tx.select({ taskId: schema.taskRevisions.taskId, spec: schema.taskRevisions.spec }).from(schema.taskRevisions)
+      .where(and(eq(schema.taskRevisions.tenantId, run.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId)));
+    const specRole = new Map(specs.map((c) => [c.taskId, String((c.spec as { role?: unknown }).role ?? '')]));
+    const labelOf = (workerId: string, taskId: string): string => {
+      const v = (f: string) => { const d = named.find((n) => n.runnerId === workerId && n.field === f)?.desired; return typeof d === 'string' ? d : null; };
+      return workerLabel(v('display_name'), v('role') ?? (specRole.get(taskId) || null));
+    };
+    const pairs = new Map<string, { taskId: string; worker: string; assignedUnderPlanRevision: number | null }>();
+    for (const r of ran) if (r.runner) pairs.set(`${r.taskId}|${r.runner}`, { taskId: r.taskId, worker: labelOf(r.runner, r.taskId), assignedUnderPlanRevision: null });
+    for (const d of delegated) pairs.set(`${d.taskId}|${d.workerId}`, { taskId: d.taskId, worker: labelOf(d.workerId, d.taskId), assignedUnderPlanRevision: d.actorKind === 'agent' ? d.planRevision : null });
+    const workers = [...pairs.values()].sort((a, b) => a.taskId.localeCompare(b.taskId) || a.worker.localeCompare(b.worker));
     const humanIntervention = intervened.map((h) => ({ attemptId: h.attemptId, taskId: h.taskId, at: h.at!.toISOString() }));
     // What each attempt of this run received from the skill library, from its execution record: ids and digests, never content.
     const packRows = await tx.select({ attemptId: schema.skillExecutionRecords.attemptId, taskId: schema.skillExecutionRecords.taskId, record: schema.skillExecutionRecords.record, confirmedAt: schema.skillExecutionRecords.confirmedAt }).from(schema.skillExecutionRecords)
@@ -154,7 +174,7 @@ async function openUnderLock(run: OpenPrRun, deps: OpenPrDeps, now: () => Date, 
       .where(and(eq(schema.taskRevisions.tenantId, run.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
     const tested = new Set(record.results.map((r) => r.checkId));
     const untested = [...new Set(carried.flatMap((c) => { const ids = (c.spec as { requirementIds?: unknown }).requirementIds; return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : []; }))].filter((id) => !tested.has(id)).sort();
-    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, description: deps.description ?? null, humanIntervention, skills, untested, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
+    const body = buildPrBody({ runId: run.runId, candidateSha: sha, baseSha: record.baseSha, record, limitations: deps.limitations ?? [], usage, grants, description: deps.description ?? null, humanIntervention, workers, skills, untested, ...(state.accepted ? { notDelivered: state.notDelivered } : {}) });
     const title = `SelariKru: ${run.runId} (candidate ${sha.slice(0, 12)})`;
 
     const result = await recordOperation<Extract<OpenPrResult, { status: 'opened' }>>(tx, { tenantId: run.tenantId, projectId: run.projectId, key: `github.pr:${run.runId}:${sha}` }, async () => {

@@ -3,7 +3,7 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
-import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing, type DelegationReceipt } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -255,6 +255,13 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
           return c;
         },
       }, 'a task context size', false, undefined, true);
+    },
+
+    /** H11: the Project Manager's delegation. The server applies only what the accepted plan covers; a refusal's code leads the message. */
+    delegate(projectId, runId, request): Promise<DelegationReceipt> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/delegations`, {
+        parse: (v: unknown) => ({ ...(v as { applied: DelegationReceipt['applied']; refused: DelegationReceipt['refused']; autoDelegate: boolean }), simulated: false }),
+      }, 'a delegation receipt', false, request, true);
     },
 
     /** An accepted patch proposal (H5). The server checks it again; a refusal's code leads the message. */

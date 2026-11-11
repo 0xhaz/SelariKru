@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { checkDelegation, workerNameProblem, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -393,7 +393,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       ...(routes ? { routePolicy: runRouteDefaultOf(routes, p.settings, id) } : {}),
     }]));
     const tasks = routes ? Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, route: routeViewOf(p, t) }])) : s.tasks;
-    return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: withRouteLocks(p.fixture.routes ?? NO_ROUTES, p.settings), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
+    return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: [...withRouteLocks(p.fixture.routes ?? NO_ROUTES, p.settings), ...demoNames(Object.keys(workers), p.settings, DEMO_NAMED_AT)], meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
       runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
     };
   }
@@ -429,7 +429,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'plan.accepted' | 'proposal.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
+  type CommandEvent = 'task.delegated' | 'plan.accepted' | 'proposal.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
     | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided' | 'inference.reported';
   /** Who the services record as the actor of each simulated type that is not a person's. */
   const SCHEDULER_TYPES: readonly CommandEvent[] = ['task.ready', 'attempt.started', 'attempt.route_changed', 'checkpoint.recorded'];
@@ -441,7 +441,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const at = isoOf(timeOf(p) + (o.delayMs ?? 0));
     const event: ProjectViewEvent = {
       schemaVersion: 1, eventId: seededId(prng, 'evt'), projectId: p.fixture.projectId, runId, taskId, attemptId: o.attemptId ?? null, type, sequence: 0,
-      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: o.system || SYSTEM_TYPES.includes(type) ? REAPER : SCHEDULER_TYPES.includes(type) ? SCHEDULER : type === 'task.reopened' || type === 'change.proposed' ? INTEGRATION : HUMAN,
+      aggregateRevision: (task?.aggregateRevision ?? 0) + (o.revisionStep ?? 1), actor: type === 'task.delegated' ? PM_AGENT : o.system || SYSTEM_TYPES.includes(type) ? REAPER : SCHEDULER_TYPES.includes(type) ? SCHEDULER : type === 'task.reopened' || type === 'change.proposed' ? INTEGRATION : HUMAN,
       occurredAt: at, receivedAt: at, causationId: null, traceId: `trace_${p.fixture.projectId}`, payload, provenance: 'simulated',
     };
     p.pending.push(event);
@@ -508,8 +508,15 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (!first) return rejected(c.idempotencyKey, 'unknown_target');
       eventRun = first;
     }
+    // H11: a worker name follows the server's rules: 1-24 characters in any script, no control characters or secret shapes, unique among the workers.
+    if (change.field === 'display_name' && change.value !== null) {
+      const shown = [...p.settings, ...demoNames(Object.keys(snap.workers), p.settings, DEMO_NAMED_AT)].filter((x) => x.scope === 'runner' && x.field === 'display_name' && x.key !== key);
+      const problem = workerNameProblem(change.value, shown.map((x) => String(x.desired)));
+      if (problem) return rejected(c.idempotencyKey, problem);
+    }
     const row = p.settings.find((x) => x.scope === change.scope && x.key === key && x.field === change.field);
-    const current = row?.desiredRevision ?? 0;
+    // A demo name is shown as saved at revision 1, so a rename builds on it.
+    const current = row?.desiredRevision ?? (change.field === 'display_name' && snap.workers[key] ? 1 : 0);
     if (c.expectedRevision !== current) return rejected(c.idempotencyKey, 'stale_revision');
     if (change.field === 'allowed_paths' && change.value.some((x) => !DEMO_PLAN_PATHS.includes(x))) return rejected(c.idempotencyKey, 'outside_plan_scope');
     if (change.field === 'slots' && change.value > 2) return rejected(c.idempotencyKey, 'outside_recorded_limits');
@@ -728,6 +735,27 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     },
 
     /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and a simulated `plan.accepted` moves the plan. */
+    /**
+     * H11: the Project Manager's delegation, simulated with the server's rule (`checkDelegation`): only the accepted plan's tasks, to enabled workers of the task's
+     * role, from a recorded pmDelegate call. Applied ones are recorded as `task.delegated` by agent:pm. Demo data, never evidence.
+     */
+    async delegate(projectId, runId, request) {
+      const p = project(projectId);
+      const snap = p.state.snapshot;
+      const run = snap.runs[runId];
+      if (!run) throw fail('unavailable', `run_not_found: no run ${runId}`);
+      const rec = (p.routeRecords.get(request.subjectTaskId) ?? []).find((r) => r.requestId === request.routeRecordId);
+      if (!rec || rec.stepKind !== 'pmDelegate' || rec.status !== 'ok') throw fail('unavailable', 'route_record_missing: there is no record of the delegation call');
+      const off = p.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'auto_delegate' && x.desired === false);
+      const all = request.assignments.map((a) => ({ taskId: String(a['taskId'] ?? ''), workerId: String(a['workerId'] ?? '') }));
+      if (off) return { applied: [], refused: all.map((a) => ({ ...a, reason: 'auto_delegate_off' })), autoDelegate: false, simulated: true };
+      const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => ({ taskId: t.taskId, role: t.role ?? '', status: t.status, repairsUsed: Math.max(0, t.attemptIds.length - 1) }));
+      const workers = Object.keys(snap.workers).map((id) => ({ workerId: id, role: demoRoleOf(snap, p.settings, id), enabled: !p.settings.some((x) => x.scope === 'runner' && x.key === id && x.field === 'enabled' && x.desired === false) }));
+      const checked = checkDelegation({ planRevision: run.planRevision, tasks, workers, repairLimit: 2 }, { planRevision: request.planRevision, assignments: request.assignments as never });
+      for (const a of checked.apply) appendCommandEvent(p, a.taskId, 'task.delegated', { workerId: a.workerId, planRevision: request.planRevision, revision: snap.tasks[a.taskId]?.revision ?? 1 });
+      return { applied: checked.apply, refused: checked.refuse, autoDelegate: true, simulated: true };
+    },
+
     async reviseTaskCriteria(projectId, request) {
       const p = project(projectId);
       const r = CriteriaRevisionRequestSchema.parse(request);
@@ -891,4 +919,27 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       }
     },
   };
+}
+
+/** H11: the demo's workers have names, as an owner would give them. Shown as saved settings until the owner renames one (their own setting then wins). Demo data. */
+const DEMO_NAMED_AT = new Date(FIXTURE_T0_MS).toISOString();
+const DEMO_NAMES = ['Aisyah', 'Ravi', 'Mei Ling', 'Daniel', 'Siti', 'Arif', 'Kavitha', 'Hafiz'] as const;
+function demoNames(workerIds: readonly string[], saved: readonly SettingView[], at: string): SettingView[] {
+  return [...workerIds].sort().flatMap((key, i) => saved.some((x) => x.scope === 'runner' && x.key === key && x.field === 'display_name') ? [] : [{
+    scope: 'runner' as const, key, field: 'display_name' as const, desired: DEMO_NAMES[i % DEMO_NAMES.length]!, effective: DEMO_NAMES[i % DEMO_NAMES.length]!, desiredRevision: 1, effectiveRevision: 1,
+    enforcer: 'server' as const, state: 'applied' as const, updatedBy: 'demo-operator', updatedAt: at, appliedAt: at,
+  }]);
+}
+
+/** H11: the Project Manager's actor on its own delegations. */
+const PM_AGENT = { kind: 'agent', id: 'pm' } as const;
+
+/** A demo worker's role: its role setting, else the role of the task it holds or last ran. */
+function demoRoleOf(snap: ProjectViewSnapshot, settings: readonly SettingView[], workerId: string): string | null {
+  const set = settings.find((x) => x.scope === 'runner' && x.key === workerId && x.field === 'role');
+  if (typeof set?.desired === 'string') return set.desired;
+  const held = snap.workers[workerId]?.taskId;
+  if (held && snap.tasks[held]?.role) return snap.tasks[held]!.role;
+  const last = Object.values(snap.attempts).filter((a) => a.runnerId === workerId).sort((a, b) => Date.parse(b.startedAt ?? '0') - Date.parse(a.startedAt ?? '0'))[0];
+  return last ? snap.tasks[last.taskId]?.role ?? null : null;
 }

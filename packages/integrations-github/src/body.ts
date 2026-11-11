@@ -26,6 +26,11 @@ export interface ReviewPackage {
   readonly humanIntervention?: readonly { readonly attemptId: string; readonly taskId: string; readonly at: string }[];
   /** The knowledge packs each attempt of this run received, by version and digest, from the attempt's execution record. */
   readonly skills?: readonly { readonly attemptId: string; readonly taskId: string; readonly confirmed: boolean; readonly packs: readonly { readonly versionId: string; readonly digest: string }[] }[];
+  /**
+   * H11: who worked on each task, "<Name> · <Role>" from the workers' settings (owner-given names, shown as data), and for an assignment the Project Manager made,
+   * the accepted plan revision it was made under.
+   */
+  readonly workers?: readonly { readonly taskId: string; readonly worker: string; readonly assignedUnderPlanRevision: number | null }[];
   /** The owner's description, sent with the open request (H5): a browser proposal the owner chose and edited. Untrusted text, redacted and capped before it gets here. */
   readonly description?: string | null;
   /** Present after the owner accepted a budget stop: what the run does not deliver. */
@@ -64,6 +69,10 @@ export function buildPrBody(p: ReviewPackage): string {
   if (p.grants && p.grants.length > 0) {
     lines.push('', '## Approvals granted', '', 'A person granted these during the run. They are advisory: the sandbox did not enforce them, so check the diff for what they allowed.', '');
     for (const g of p.grants) lines.push(`- \`${cell(g.operation)}\`${g.taskId !== null ? ` for task \`${cell(g.taskId)}\`` : ''}${g.approver !== null ? `, granted by ${cell(g.approver)}` : ''}`);
+  }
+  if (p.workers && p.workers.length > 0) {
+    lines.push('', '## Who worked on it', '', 'Worker names are labels the owner gave; they describe, they do not vouch for anything. The checks above are the verifier\'s.', '');
+    for (const w of p.workers) lines.push(`- Task \`${cell(w.taskId)}\`: ${cell(w.worker).replace(/[`*_[\]<>]/g, '')}${w.assignedUnderPlanRevision !== null ? `, assigned by the Project Manager under the accepted plan rev ${w.assignedUnderPlanRevision}` : ''}`);
   }
   if (p.humanIntervention && p.humanIntervention.length > 0) {
     lines.push('', '## Human intervention', '', 'A person opened a shell in these attempts\' sandboxes. The recorded model cannot vouch for what was run. Any change it made was still judged by the diff gate and the verifier.', '');

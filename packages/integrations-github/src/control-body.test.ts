@@ -29,4 +29,11 @@ describe('the PR body: knowledge packs', () => {
   it('is absent when no attempt received a pack', () => {
     expect(buildPrBody({ ...pkg, skills: [{ attemptId: 'a1', taskId: 't1', confirmed: false, packs: [] }] })).not.toContain('Knowledge packs');
   });
+  it('names who worked on each task, as data, with the plan revision of a Project Manager assignment (H11)', () => {
+    const body = buildPrBody({ ...pkg, workers: [{ taskId: 't1', worker: 'Aisyah · Backend', assignedUnderPlanRevision: 2 }, { taskId: 't2', worker: '`rm` **Ravi** · Frontend', assignedUnderPlanRevision: null }] });
+    expect(body).toContain('## Who worked on it');
+    expect(body).toContain('- Task `t1`: Aisyah · Backend, assigned by the Project Manager under the accepted plan rev 2');
+    expect(body).toContain('- Task `t2`: rm Ravi · Frontend');
+    expect(buildPrBody(pkg)).not.toContain('Who worked on it');
+  });
 });
