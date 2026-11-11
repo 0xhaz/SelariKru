@@ -458,7 +458,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
 
   const pausedHint = drawerBeside ? (
     <div className="pointer-events-none absolute inset-0 z-20 bg-paper/60">
-      <p data-testid="page-paused-hint" className="sticky top-3 mx-4 mt-3 max-w-[24rem] border-2 border-ink bg-paper px-3 py-2 text-sm text-fg rounded-[4px] shadow-[2px_3px_0_rgba(43,29,20,0.22)]">The page is paused while a worker is open. Close the worker to use the page.</p>
+      <p data-testid="page-paused-hint" className="absolute bottom-3 left-4 right-4 mx-auto max-w-[24rem] border-2 border-ink bg-paper px-3 py-2 text-sm text-fg rounded-[4px] shadow-[2px_3px_0_rgba(43,29,20,0.22)]">The page is paused while a worker is open. Close the worker to use the page.</p>
     </div>
   ) : null;
 

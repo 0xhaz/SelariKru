@@ -104,6 +104,11 @@ h1, h2 {
   outline-offset: 2px;
 }
 
+/* On the deep green panels the ring is gold, well over 3:1 against them (H7 fix M6). Unlayered, like the ring it recolours. */
+.panel-dark :focus-visible {
+  outline-color: var(--color-gold);
+}
+
 /* Focus lands on the main region after a route change. It is a landing point, not a control, so it draws no ring. */
 #main:focus-visible,
 [data-focus-landing]:focus-visible {

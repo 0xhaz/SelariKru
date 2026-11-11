@@ -20,7 +20,7 @@ export function ActivityFeed({ items, fallback = null, nowMs, stale }: { items: 
       {/* H7: the latest fallback, from its route record, in one plain line with its reason. */}
       {fallback ? (
         <p data-testid="activity-fallback" className="mb-1 rounded-[4px] border-2 border-gold bg-deep-2 px-1.5 py-0.5 text-[12px] leading-snug text-paper" title={`${fallback.title}: ${fallback.task}. ${fallback.reason}`}>
-          <b className="text-gold"><span aria-hidden="true">↷ </span>{fallback.title}</b> · {fallback.task} · <time dateTime={fallback.at}>{formatAge(nowMs - Date.parse(fallback.at))}<span className="sr-only"> ago</span></time>
+          <b className="text-gold"><span aria-hidden="true">↷ </span>{fallback.title}</b> · {fallback.task} · <time dateTime={fallback.at} className="whitespace-nowrap">{formatAge(nowMs - Date.parse(fallback.at))}<span className="sr-only"> ago</span></time>
           <span className="block">{fallback.reason}</span>
         </p>
       ) : null}
@@ -30,7 +30,7 @@ export function ActivityFeed({ items, fallback = null, nowMs, stale }: { items: 
             <li key={e.id} data-testid="activity-item" className="flex gap-1.5 border-t border-dashed border-[rgba(201,221,214,0.18)] py-[3px] first:border-t-0">
               <span aria-hidden="true" className="w-3 shrink-0 text-center" style={{ color: ICON[e.tone] }}>{e.glyph}</span>
               <span className="min-w-0 flex-1 truncate text-paper" title={e.text}>{e.text}</span>
-              <time dateTime={e.at} className="shrink-0 text-feed-time"><span className="sr-only">, </span>{formatAge(nowMs - Date.parse(e.at))}<span className="sr-only"> ago</span></time>
+              <time dateTime={e.at} className="shrink-0 whitespace-nowrap text-feed-time"><span className="sr-only">, </span>{formatAge(nowMs - Date.parse(e.at))}<span className="sr-only"> ago</span></time>
             </li>
           ))}
         </ul>

@@ -253,7 +253,8 @@ export function PipelineView({ connection, error, pipeline, confirmedAt, mode, o
                 </div>
               </>
             ) : tableFits ? (
-              <PipelineTable groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} handovers={handovers} live={connection === 'live'} />
+              // H7 fix: the table keeps a minimum width and scrolls sideways inside the Pipeline when its drawer is narrow, so no word is broken mid-way.
+              <div className="scroll-thin overflow-x-auto" data-testid="pipeline-table-scroll"><PipelineTable groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} handovers={handovers} live={connection === 'live'} /></div>
             ) : (
               <PipelineCards groups={flat ? flatGroups : groups} flat={flat} selectedId={selectedTaskId} onOpen={open} handovers={handovers} live={connection === 'live'} />
             )}

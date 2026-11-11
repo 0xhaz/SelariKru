@@ -69,7 +69,7 @@ function TaskIdentity({ row, showStage, onOpen }: { row: PipelineRow; showStage:
 function Row({ row, selected, showStage, onOpen, handovers, live }: { row: PipelineRow; selected: boolean; showStage: boolean; onOpen: (id: string) => void } & Handovers) {
   const selectedRail = selected ? 'shadow-[inset_3px_0_0_var(--color-active)]' : row.rail ? RAIL_SHADOW[row.rail] : '';
   return (
-    <tr data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} data-rail={row.rail ?? 'none'} onClick={() => { if (!hasTextSelection()) onOpen(row.taskId); }} className={`cursor-pointer wrap-anywhere border-b border-line align-top hover:bg-panel-2 ${selected ? 'bg-panel-2' : ''}`}>
+    <tr data-testid="pipeline-row" data-task-id={row.taskId} data-selected={selected} data-rail={row.rail ?? 'none'} onClick={() => { if (!hasTextSelection()) onOpen(row.taskId); }} className={`cursor-pointer break-words border-b border-line align-top hover:bg-panel-2 ${selected ? 'bg-panel-2' : ''}`}>
       <td className={`px-3 py-3 ${selectedRail}`}><TaskIdentity row={row} showStage={showStage} onOpen={onOpen} /></td>
       <td className="px-3 py-3"><span className="block text-fg">{roleName(row.owner.role)}</span>{row.owner.workerId ? <span className="block break-all font-mono text-mono text-muted">{row.owner.workerId}</span> : <span className="block text-sm text-muted">No worker</span>}</td>
       <td className="px-3 py-3"><StateCell row={row} onOpen={onOpen} handovers={handovers ?? null} live={live ?? false} /></td>
@@ -87,7 +87,7 @@ const WIDTHS = ['w-[15%]', 'w-[11%]', 'w-[18%]', 'w-[13%]', 'w-[8%]', 'w-[8%]', 
 
 export function PipelineTable({ groups, flat, selectedId, onOpen, handovers = null, live = false }: { groups: readonly StageGroup[]; flat: boolean; selectedId: string | null; onOpen: (id: string) => void } & Handovers) {
   return (
-    <table className="w-full table-fixed border-collapse" data-testid="pipeline-table">
+    <table className="w-full min-w-[1040px] table-fixed border-collapse" data-testid="pipeline-table">
       <caption className="sr-only">Tasks in this run, {flat ? 'in attention order' : 'grouped by stage'}. Choose a task to inspect it. Inspecting is read-only.</caption>
       <thead>
         <tr className="border-b border-line-strong">

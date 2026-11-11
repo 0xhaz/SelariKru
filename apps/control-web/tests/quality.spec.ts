@@ -470,3 +470,21 @@ test.describe('where AI runs (H4)', () => {
     expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
   });
 });
+
+test('H7 fix M6: a focused control on a deep green panel draws a gold ring, at least 3:1 against the panel', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
+  await page.goto('/tests/harness/index.html#/office');
+  const button = page.locator('.panel-dark').getByRole('link', { name: 'Team settings' });
+  await tabTo(page, button);
+  await expectVisibleFocus(page);
+  const ring = await button.evaluate((el) => {
+    const parse = (c: string) => (c.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const lum = (rgb: number[]) => { const [r, g, b] = rgb.map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!; };
+    const panel = getComputedStyle(el.closest('.panel-dark')!).backgroundColor;
+    const a = lum(parse(getComputedStyle(el).outlineColor));
+    const b = lum(parse(panel));
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  });
+  expect(ring).toBeGreaterThanOrEqual(3);
+});

@@ -170,7 +170,7 @@ export function aiCounterText(c: AiRunCounts): string {
 function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | null }) {
   const why = `Counted from each task's last route record${runId ? ` in ${runId}` : ''}, as reported by the browser. Calls still in flight are not counted.`;
   return (
-    <span data-testid="ai-counter" className="chip shrink-0 justify-center whitespace-normal text-[11px] leading-[15px]" title={why}>
+    <span data-testid="ai-counter" className="chip shrink-0 justify-center whitespace-normal text-[12px] leading-[16px] xl:rounded-t-none xl:border-t-0 xl:bg-paper" title={why}>
       <span aria-hidden="true">{aiCounterText(counts)}</span>
       <span className="sr-only">{`${aiCounterText(counts)}. ${why}`}</span>
     </span>
@@ -196,7 +196,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
         <span className="contents" data-testid="top-bar-demo-chip">{mode === 'mock' ? <span role="status" data-testid="demo-badge" className="chip shrink-0 text-[12px]" style={{ background: 'var(--color-gold)' }}>Demo data</span> : null}</span>
-        <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[7rem] 2xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
+        <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
       {runs.length > 0 ? (
         <label className="hidden items-center gap-2 text-[14px] 2xl:flex">
@@ -216,16 +216,21 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom out" onClick={() => ui.zoom(-1)}>−</button>
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom in" onClick={() => ui.zoom(1)}>+</button>
       </span>
-      {/* The sandbox count and, under it, where the run's AI calls ran (H7), stacked so both fit the bar. At phone width the header keeps to two rows, so the counter shows from 640 px. */}
-      <span className="order-5 hidden w-full shrink-0 flex-col justify-center gap-0.5 pb-1 sm:flex xl:order-none xl:w-auto xl:pb-0">
-        {running !== null ? (
-          <span data-testid="sandbox-chip" className="hidden items-center justify-between gap-2 whitespace-nowrap rounded-[3px] border-2 border-ink bg-deep px-2 text-[13px] leading-[18px] text-paper lg:flex" title="Each worker runs in its own sandbox">
-            <span>Sandbox · <b>{running}</b> running</span>
-            <i aria-hidden="true" className="led" data-off={running === 0 ? '' : undefined} />
-          </span>
-        ) : null}
-        {aiCounts !== null ? <AiCounter counts={aiCounts} runId={planRunId} /> : null}
-      </span>
+      {running !== null ? (
+        <span data-testid="sandbox-chip" className="hidden shrink-0 items-center gap-2 whitespace-nowrap rounded-[3px] border-2 border-ink bg-deep px-2.5 py-0.5 text-[15px] text-paper lg:flex" title="Each worker runs in its own sandbox">
+          <span>Sandbox · <b>{running}</b> running</span>
+          <i aria-hidden="true" className="led" data-off={running === 0 ? '' : undefined} />
+        </span>
+      ) : null}
+      {/*
+        Where the run's AI calls ran (H7). From 1280 px it hangs from the bar's lower edge like a tab over the office, because the bar's row is full; below
+        that it takes its own row; below 640 px the header must stay at two rows, so the same counts head the Boards menu instead.
+      */}
+      {aiCounts !== null ? (
+        <span className="order-5 hidden w-full pb-1 sm:flex xl:absolute xl:left-[296px] xl:top-full xl:w-auto xl:pb-0">
+          <AiCounter counts={aiCounts} runId={planRunId} />
+        </span>
+      ) : null}
       <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:w-auto xl:flex-1 xl:justify-end xl:overflow-visible xl:p-0">
         {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
         <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-gold)' } : undefined}>

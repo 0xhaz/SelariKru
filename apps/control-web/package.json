@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run && playwright test",
     "test:install": "playwright install chromium",
-    "screens": "playwright test tests/screens.spec.ts && node -e \"console.log('Screenshots: ' + require('node:path').resolve('test-results/screens'))\""
+    "screens": "playwright test tests/screens.spec.ts; code=$?; node -e \"console.log('Screenshots: ' + require('node:path').resolve('test-results-screens'))\"; exit $code"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",

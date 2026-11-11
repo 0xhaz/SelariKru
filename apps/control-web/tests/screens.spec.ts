@@ -6,11 +6,13 @@
  * Run alone with `pnpm --filter @selarikru/control-web screens`.
  */
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { benchmarkFile, completeAssistant, completeWorkers } from '../src/features/benchmark/testing.ts';
 
-const DIR = join(import.meta.dirname, '..', 'test-results', 'screens');
+// Outside test-results/, which every Playwright run clears, so other specs never wipe the screenshots (H7 fix M8). Git-ignored.
+const DIR = join(import.meta.dirname, '..', 'test-results-screens');
 const FIXED = new Date('2026-11-11T02:00:00Z');
 const SIZES = [{ name: 'desktop', width: 1440, height: 900 }, { name: 'phone', width: 390, height: 844 }] as const;
 const T = (local: string) => `feature-delivery.${local}`;
@@ -70,14 +72,19 @@ for (const size of SIZES) {
 
     test('worker drawer, each tab', async ({ page }) => {
       await open(page, '#/office');
-      const id = await page.getByTestId('team-panel-row').first().getAttribute('data-panel-worker').catch(() => null)
-        ?? await page.evaluate(() => (window as unknown as { __selarikruOffice: { world: { agents: { id: string }[] } } }).__selarikruOffice.world.agents[0]!.id);
-      for (const tab of ['terminal', 'shell', 'task', 'sandbox', 'messages', 'settings'] as const) {
-        await open(page, `#/office?worker=${encodeURIComponent(id!)}&wtab=${tab}`);
-        const drawer = page.getByTestId('worker-drawer');
-        await expect(drawer.getByRole('tab', { selected: true })).toBeVisible();
-        await shot(page, `04-worker-${tab}`, size, drawer);
+      const id = await page.evaluate(() => (window as unknown as { __selarikruOffice: { world: { agents: { id: string }[] } } }).__selarikruOffice.world.agents[0]!.id)
+        .catch(() => null) ?? await page.getByTestId('team-panel-row').first().getAttribute('data-panel-worker');
+      await open(page, `#/office?worker=${encodeURIComponent(id!)}`);
+      const drawer = page.getByTestId('worker-drawer');
+      const hashes = new Set<string>();
+      // Each tab is chosen by clicking it, and is the selected tab before its capture (H7 fix I4).
+      for (const [tab, name] of [['terminal', 'Terminal'], ['shell', 'Shell'], ['task', 'Task'], ['sandbox', 'Sandbox'], ['messages', 'Messages'], ['settings', 'Settings']] as const) {
+        await drawer.getByRole('tab', { name, exact: true }).click();
+        await expect(drawer.getByRole('tab', { name, exact: true, selected: true })).toBeVisible();
+        await shot(page, `04-worker-${tab}`, size, drawer.getByRole('tabpanel'));
+        hashes.add(createHash('sha256').update(readFileSync(join(DIR, `04-worker-${tab}-${size.name}.png`))).digest('hex'));
       }
+      expect(hashes.size, 'the six worker tab captures differ').toBe(6);
     });
 
     test('Pipeline with a task\'s Runs on control', async ({ page }) => {
