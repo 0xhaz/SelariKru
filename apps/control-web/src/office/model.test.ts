@@ -187,22 +187,35 @@ describe('where each robot\'s AI call runs (H4)', () => {
 
   it('a desk shows the device or cloud mark of its task\'s last call, and none before any call', () => {
     const w = buildOfficeWorld(s, team, 'P');
-    expect(w.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', live: false });
+    expect(w.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', state: 'observed' });
+    expect(w.summary).toMatch(/last AI call ran on this device/i);
     expect(w.agents.find((a) => a.id === 'w2')!.ai).toBeNull();
     expect(w.cloudCall).toBe(false);
   });
 
   it('a call in flight marks its desk with where it is going, and a cloud call lights the CLOUD rack', () => {
     const w = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'b', place: 'cloud' }]);
-    expect(w.agents.find((a) => a.id === 'w2')!.ai).toEqual({ place: 'cloud', live: true });
+    expect(w.agents.find((a) => a.id === 'w2')!.ai).toEqual({ place: 'cloud', state: 'expected' });
+    expect(w.summary).toMatch(/headed to the cloud \(expected\)/i);
     expect(w.cloudCall).toBe(true);
     expect(w.summary).toMatch(/cloud rack is lit/i);
+    expect(w.summary).not.toMatch(/AI calls in flight: .* in the cloud/i);
     const device = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'a', place: 'device' }]);
     expect(device.cloudCall).toBe(false);
-    expect(device.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', live: true });
+    expect(device.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', state: 'expected' });
+    expect(device.summary).toMatch(/expected on this device/i);
   });
 
   it('a cloud call for a task no robot holds still lights the rack', () => {
     expect(buildOfficeWorld(s, team, 'P', null, [{ taskId: 'zzz', place: 'cloud' }]).cloudCall).toBe(true);
+  });
+});
+
+describe('a desk mark whose call was blocked is cleared', () => {
+  it('a blocked last record shows no mark, never the expected one', () => {
+    const r = { effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null, suggestion: { mode: 'PREFER_ON_DEVICE', rule: 'bounded_step', reason: 'r', locked: false },
+      lastObserved: { recordId: 'r', taskId: 'a', taskRevision: 1, requestId: 'q', stepKind: 'patch', callOverride: null, requestedMode: null, effectiveMode: 'PREFER_ON_DEVICE', policySource: 'run', locked: false, observedSource: 'UNKNOWN', fellBack: null, conformance: 'unverified', requestModeMismatch: false, status: 'blocked', model: { cloudModel: 'm', sdkVersion: '1.0.0' }, timing: { totalMs: 1, firstOutputMs: null }, validation: 'not_run', blockedReason: 'device_unavailable', reportedBy: 'browser', trust: 'untrusted', reportedAt: iso(1) } } as never;
+    const s = snapshotOf({ tasks: [task('a', { route: r })], workers: [worker('w1', { taskId: 'a' })] });
+    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').agents[0]!.ai).toBeNull();
   });
 });

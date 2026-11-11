@@ -42,8 +42,8 @@ export function RunsOn({ taskId, compact = false }: { taskId: string; compact?: 
 function RunsOnControl({ h, task, route, compact }: { h: HybridValue; task: TaskView; route: TaskRouteView; compact: boolean }) {
   const id = useId();
   const setting = h.snapshot?.settings.find((s) => s.scope === 'task' && s.key === task.taskId && s.field === 'route_override');
-  const facts = useTaskFacts(compact ? null : h, task.taskId, task.revision);
-  const m = runsOnModel({ projectId: h.projectId, task, route, setting, live: h.live, browser: h.browser, inputChars: facts?.inputChars ?? null });
+  const facts = useTaskFacts(compact ? null : h, task);
+  const m = runsOnModel({ projectId: h.projectId, task, route, setting, live: h.live, browser: h.browser, inputChars: facts.phase === 'ready' ? facts.facts.inputChars : null });
   const saved = route.override ?? '';
   const [choice, setChoice] = useState<string>(saved);
   const [busy, setBusy] = useState(false);
@@ -64,7 +64,7 @@ function RunsOnControl({ h, task, route, compact }: { h: HybridValue; task: Task
 
   const select = (
     <select
-      id={`${id}-select`} value={choice} disabled={offReason !== null || busy} onChange={(e) => setChoice(e.target.value)} aria-describedby={`${id}-now`}
+      id={`${id}-select`} value={choice} disabled={offReason !== null || busy} onChange={(e) => setChoice(e.target.value)} aria-describedby={`${id}-now ${id}-options`}
       className={`max-w-full rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-fg ${compact ? 'w-full text-sm' : ''}`}
     >
       <option value="">{m.clear.label}</option>
@@ -84,6 +84,7 @@ function RunsOnControl({ h, task, route, compact }: { h: HybridValue; task: Task
           {saveButton}
         </div>
         <p className="text-sm text-muted">{now}</p>
+        <p id={`${id}-options`} className="sr-only">{m.options.map((o) => `${o.label}: ${o.description}`).join(' ')}</p>
         {m.lock ? <LockNote lock={m.lock} compact /> : null}
         <Chip tone={m.observed.tone}>{m.observed.label}</Chip>
         {status}
@@ -102,7 +103,7 @@ function RunsOnControl({ h, task, route, compact }: { h: HybridValue; task: Task
         {saveButton}
       </div>
       {offReason ? <p className="text-sm text-muted">{offReason}</p> : null}
-      <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(6rem,auto)_minmax(0,1fr)]">
+      <dl id={`${id}-options`} className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(6rem,auto)_minmax(0,1fr)]">
         {m.options.map((o) => (
           <div key={o.mode} className="contents">
             <dt className={o.disabledReason !== null && m.lock ? 'text-muted' : 'font-medium text-fg'}>{o.label}</dt>

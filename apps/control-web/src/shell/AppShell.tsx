@@ -49,7 +49,7 @@ import { useUi } from './ui-store.ts';
 import type { AssistantSdk, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
 import { createAgents } from '../features/hybrid/agents.ts';
 import { HybridProvider, useInFlight, useOnline, type HybridValue } from '../features/hybrid/context.tsx';
-import { DEFAULT_BROWSER, modeLabel } from '../features/hybrid/model.ts';
+import { DEFAULT_BROWSER, workerRouteText } from '../features/hybrid/model.ts';
 
 export interface AccountInfo {
   readonly label: string;
@@ -283,8 +283,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const online = useOnline();
   const hybrid = useMemo((): HybridValue => ({
     projectId: state.projectId, snapshot, live: connection === 'live', mode, execute: state.execute, refresh: state.refresh, resync: state.resync, agents,
-    browser: { ...DEFAULT_BROWSER, online },
-  }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online]);
+    browser: { ...DEFAULT_BROWSER, online }, handover: state.handover,
+  }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online, state.handover]);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
     try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls); } catch { return null; }
@@ -321,7 +321,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     // The worker card shows the effective route of its task's AI steps (inference), beside its model and sandbox.
     const taskId = snapshot?.workers[id]?.taskId ?? team?.rows.find((r) => r.workerId === id)?.task?.taskId ?? null;
     const route = taskId ? snapshot?.tasks[taskId]?.route : undefined;
-    return { portrait: a ? <Portrait color={a.color} size={40} /> : null, key: i < 9 ? String(i + 1) : null, chip: a?.state ?? null, route: route ? `AI: ${modeLabel(route.effective)}${route.lock ? ' (locked)' : ''}` : null };
+    return { portrait: a ? <Portrait color={a.color} size={40} /> : null, key: i < 9 ? String(i + 1) : null, chip: a?.state ?? null, route: route ? workerRouteText(route) : null };
   };
   const headerH = useHeaderHeight(headerRef);
   // On the office screen its own panels sit at the left of the canvas; the camera keeps the office clear of them where there is room.

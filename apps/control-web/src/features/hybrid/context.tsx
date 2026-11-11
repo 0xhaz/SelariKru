@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useState } from 'react';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import { useStore } from 'zustand';
 import type { AuthorizedViewCommand, CommandReceipt, ProjectViewSnapshot } from '@selarikru/view-protocol';
-import { CommandNotSent } from '../../shell/projection-store.ts';
+import { CommandNotSent, type HandoverPort } from '../../shell/projection-store.ts';
 import { NETWORK_MESSAGE, NOT_SENT_MESSAGE, rejectionView } from '../decisions/copy.ts';
 import type { AgentsOutcome, AgentsPort, InFlightCall } from './agents.ts';
 import type { AgentActionKind, BrowserInputs } from './model.ts';
@@ -18,6 +18,8 @@ export interface HybridValue {
   readonly resync: () => void;
   readonly agents: AgentsPort | null;
   readonly browser: BrowserInputs;
+  /** Read before a replan, to say if it would close an open handover. Null: the source has none. */
+  readonly handover: HandoverPort | null;
 }
 
 const Ctx = createContext<HybridValue | null>(null);

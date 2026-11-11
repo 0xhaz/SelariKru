@@ -49,7 +49,7 @@ describe('live task context and criteria revisions (H4)', () => {
     await expect(unknown.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-9', text: 'x' }] })).rejects.toBeInstanceOf(DataSourceException);
     expect(unknown.calls).toHaveLength(1);
     const moved = source([() => ({ status: 200, body: context('local', { planRevision: 4 }) })]);
-    await expect(moved.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toThrow(/plan moved/);
+    await expect(moved.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toThrow(/stale_revision/);
     const nospec = source([() => ({ status: 200, body: { ...context('local'), spec: undefined } })]);
     await expect(nospec.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toBeInstanceOf(DataSourceException);
   });
@@ -57,5 +57,17 @@ describe('live task context and criteria revisions (H4)', () => {
   it('a refused plan revision is an error with the server\'s reason, never a result', async () => {
     const live = source([() => ({ status: 200, body: context('local') }), () => ({ status: 409, body: { error: { code: 'stale_revision', message: 'moved' } } })]);
     await expect(live.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toBeInstanceOf(DataSourceException);
+  });
+
+  it('passes this call\'s override, so the server can check the destination against the route', async () => {
+    const ok = source([() => ({ status: 200, body: context('cloud') })]);
+    await ok.s.getTaskContext!('p', 't1', 'cloud', 'ONLY_IN_CLOUD');
+    expect(ok.calls[0]!.url).toBe('http://x/v1/projects/p/tasks/t1/context?destination=cloud&callOverride=ONLY_IN_CLOUD');
+  });
+
+  it('refuses to revise a restricted task from a browser proposal, before anything is sent; the server stays the authority', async () => {
+    const restricted = source([() => ({ status: 200, body: context('local', { task: { ...context('local').task, classification: 'restricted' } }) })]);
+    await expect(restricted.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toThrow(/restricted/);
+    expect(restricted.calls).toHaveLength(1);
   });
 });

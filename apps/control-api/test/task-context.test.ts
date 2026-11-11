@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
-import { PROJECT, TENANT, get, makeHarness, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+import { sql } from 'drizzle-orm';
+import { PROJECT, RUN, TENANT, get, post, makeHarness, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 let h: Harness;
@@ -17,9 +18,13 @@ const brainSource = (taskId: string | null, classification: string, allowedUse: 
   tenantId: TENANT, projectId: PROJECT, sourceId, revision: 1, kind: 'note', title: 'n', standing: 'accepted', classification, allowedUse,
   provenance: { origin: 'owner', ref: 'x', recordedBy: 'u' }, taskId, sections: [], contentSha256: 'a'.repeat(64), seq: (seq += 1), recordedAt: new Date(),
 });
-const context = (taskId: string, destination: string) => get(h.app, `/v1/projects/${PROJECT}/tasks/${taskId}/context?destination=${destination}`);
+const context = (taskId: string, destination: string, callOverride?: string, project = PROJECT) => get(h.app, `/v1/projects/${project}/tasks/${taskId}/context?destination=${destination}${callOverride ? `&callOverride=${callOverride}` : ''}`);
+const onboardingChoice = (inference: string) => t.db.execute(sql`UPDATE runs SET setup_snapshot = ${JSON.stringify({ blueprintVersion: 1, execution: 'local', inference, agentBudgetUsd: 10, repository: null, defaultBranch: null, baseSha: null })}::jsonb WHERE run_id = ${RUN}`);
+const save = (key: string, change: Record<string, unknown>) => post(h.app, `/v1/projects/${PROJECT}/settings`, { key, change, expectedRevision: 0, idempotencyKey: `k-${Math.random()}` });
 
 describe('a task context for its agents (H4)', () => {
+  beforeEach(async () => { await onboardingChoice('PREFER_ON_DEVICE'); });
+
   it('gives the task, its label, the bundle for the asked destination and the spec for the replan path', async () => {
     await seedTask(t.db, specFor('t1', { title: 'Search index', description: 'Index feedback by title.', allowedPaths: ['src/search'], requirementIds: ['FB-1'], criteria: [{ id: 'FB-1', text: 'Finds by title' }] }));
     const res = await context('t1', 'cloud');
@@ -31,15 +36,21 @@ describe('a task context for its agents (H4)', () => {
     expect(c.spec).toMatchObject({ taskId: 't1', revision: 1 });
   });
 
-  it('a cloud bundle leaves out a restricted source the local bundle may keep, and the label is the strongest of the task and its sources', async () => {
+  it('a cloud bundle leaves out a restricted project source the local bundle may keep', async () => {
     await seedTask(t.db, specFor('t1'));
-    await brainSource('t1', 'restricted', ['local'], 'note:secret-plan');
+    await brainSource(null, 'restricted', ['local'], 'note:secret-plan');
     const cloud = (await context('t1', 'cloud')).body;
     expect(cloud.bundle.omissions).toContainEqual({ kind: 'source', id: 'note:secret-plan', reason: 'restricted_for_destination' });
-    expect(cloud.task.classification).toBe('restricted');
+    expect(cloud.task.classification).toBe('internal');
     const local = (await context('t1', 'local')).body;
     expect(local.bundle.destination).toBe('local');
     expect(local.bundle.omissions).not.toContainEqual({ kind: 'source', id: 'note:secret-plan', reason: 'restricted_for_destination' });
+  });
+
+  it('the label is the strongest of the project, the task and its Brain sources', async () => {
+    await seedTask(t.db, specFor('t1'));
+    await brainSource('t1', 'restricted', ['local'], 'note:t1');
+    expect((await context('t1', 'local')).body.task.classification).toBe('restricted');
   });
 
   it('refuses a destination it does not know and a task that does not exist', async () => {
@@ -47,5 +58,34 @@ describe('a task context for its agents (H4)', () => {
     expect((await context('t1', 'everywhere')).status).toBe(400);
     expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/context`)).status).toBe(400);
     expect((await context('nope', 'cloud')).status).toBe(404);
+  });
+
+  it('refuses a task whose spec cannot be read, and a task asked for under another project', async () => {
+    await seedTask(t.db, specFor('t1'));
+    await t.db.execute(sql`UPDATE task_revisions SET spec = '{"broken": true}'::jsonb WHERE task_id = 't1'`);
+    const broken = await context('t1', 'local');
+    expect(broken.status).toBe(409);
+    expect(broken.body.error.code).toBe('task_spec_unreadable');
+    await seedTask(t.db, specFor('t2'));
+    await t.db.insert(schema.projects).values({ tenantId: TENANT, projectId: 'proj_other', repository: 'r2', defaultBranch: 'main', classification: 'internal' });
+    expect((await context('t2', 'local', undefined, 'proj_other')).status).toBe(404);
+  });
+
+  it('a cloud context is refused when the route keeps the task on the device: locked, device only, or unset', async () => {
+    await seedTask(t.db, specFor('locked', { classification: 'restricted' }));
+    const locked = await context('locked', 'cloud');
+    expect(locked.status).toBe(409);
+    expect(locked.body.error.code).toBe('context_destination_refused');
+    expect((await context('locked', 'cloud', 'ONLY_IN_CLOUD')).status).toBe(409);
+    expect((await context('locked', 'local')).status).toBe(200);
+    await seedTask(t.db, specFor('device'));
+    expect((await save('device', { scope: 'task', field: 'route_override', value: 'ONLY_ON_DEVICE' })).status).toBe(200);
+    expect((await context('device', 'cloud')).status).toBe(409);
+    // A one-call override is the owner's choice for that call: it widens the destination unless the lock forbids it.
+    expect((await context('device', 'cloud', 'ONLY_IN_CLOUD')).status).toBe(200);
+    expect((await context('device', 'cloud', 'SOMEWHERE')).status).toBe(400);
+    await onboardingChoice('');
+    await seedTask(t.db, specFor('unset'));
+    expect((await context('unset', 'cloud')).status).toBe(409);
   });
 });

@@ -48,7 +48,7 @@ export function RunDefaultPanel() {
         <p className="text-fg">Where a task&apos;s AI steps run when the task has no route of its own. This is assistant inference; where a worker&apos;s sandbox runs is set separately.</p>
         <div className="flex flex-wrap items-center gap-2">
           <label htmlFor={`${id}-s`} className="text-sm text-muted">Run {run.runId}</label>
-          <select id={`${id}-s`} value={choice} disabled={off !== null || busy} onChange={(e) => setChoice(e.target.value)} className="rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-fg">
+          <select id={`${id}-s`} value={choice} disabled={off !== null || busy} onChange={(e) => setChoice(e.target.value)} aria-describedby={`${id}-o`} className="rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-fg">
             {saved === '' ? <option value="" disabled>Choose one</option> : null}
             {RUNS_ON.map((o) => <option key={o.mode} value={o.mode}>{o.label}</option>)}
           </select>
@@ -56,7 +56,7 @@ export function RunDefaultPanel() {
         </div>
         <p className="text-sm text-muted" data-testid="run-default-origin">{ORIGIN[policy.origin]}</p>
         {off ? <p className="text-sm text-muted">{off}</p> : null}
-        <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(6rem,auto)_minmax(0,1fr)]">
+        <dl id={`${id}-o`} className="grid grid-cols-1 gap-x-3 gap-y-1 text-sm sm:grid-cols-[minmax(6rem,auto)_minmax(0,1fr)]">
           {RUNS_ON.map((o) => <div key={o.mode} className="contents"><dt className="font-medium text-fg">{o.label}</dt><dd className="m-0 text-muted">{o.description}</dd></div>)}
         </dl>
         <p className="text-sm text-muted">A task set on its own route keeps it, and restricted data always stays on this device.</p>

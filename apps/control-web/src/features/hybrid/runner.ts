@@ -1,8 +1,8 @@
-import { effectiveRoutePolicy, isCloudCapable, parseUnifiedDiff, routeLockFor, type RoutePolicyMode } from '@selarikru/domain';
+import { parseUnifiedDiff, type RoutePolicyMode } from '@selarikru/domain';
 import type { AgentInputs, AgentResult } from '@selarikru/inference-firebase-web';
 import { FIREBASE_CLOUD_ROUTE, type Policy } from '@selarikru/policy';
 import type { TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
-import type { AgentActionKind } from './model.ts';
+import { effectiveStep, type AgentActionKind } from './model.ts';
 
 /**
  * Runs one AI step of a task through the agent catalog (H3). The route is read fresh first, only to choose the destination of the context bundle: `cloud` for any
@@ -12,7 +12,8 @@ import type { AgentActionKind } from './model.ts';
 export interface AgentRunnerDeps {
   readonly projectId: string;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
-  readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud') => Promise<TaskAgentContext>;
+  /** The server checks the destination against the route with this call's override, and refuses `cloud` when the route keeps the task on the device. */
+  readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null) => Promise<TaskAgentContext>;
   readonly catalog: { run<K extends AgentActionKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>> };
   /** The task's latest failed check, from the snapshot. Untrusted text. */
   readonly failedCheck: (taskId: string) => { readonly checkId: string; readonly output: string } | null;
@@ -39,12 +40,7 @@ export const taskAgentPolicy = (sourceId: string): Policy => ({
 } as Policy);
 
 /** Where the bundle may go for this call, from a fresh read: the call override, else the task override, else the run default, after the lock. */
-export function destinationFor(read: TaskRouteRead, callOverride: RoutePolicyMode | null): 'local' | 'cloud' {
-  const r = read.route;
-  const lock = r.lock ? routeLockFor([r.lock.label]) : null;
-  const mode = effectiveRoutePolicy({ call: callOverride, task: r.override, run: r.runDefault, lock }).mode;
-  return mode !== null && isCloudCapable(mode) ? 'cloud' : 'local';
-}
+export const destinationFor = (read: TaskRouteRead, callOverride: RoutePolicyMode | null): 'local' | 'cloud' => effectiveStep(read.route, callOverride).destination;
 
 export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest): Promise<AgentRunOutcome> {
   let read: TaskRouteRead;
@@ -55,7 +51,7 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
   }
   let context: TaskAgentContext;
   try {
-    context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride));
+    context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride);
   } catch {
     return { kind: 'refused', code: 'context_unavailable' };
   }

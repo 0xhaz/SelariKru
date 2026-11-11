@@ -74,8 +74,17 @@ test('run an agent on demo data, see its proposal with checks, source and timing
   await expect(result).toContainText('Ran on this device');
   await expect(result.getByTestId('result-timing')).toHaveText(/^\d+\.\d s$/);
   await expect(result).toContainText('recorded as an untrusted browser report');
+  await expect(result.getByTestId('accept-note')).toContainText('goes back to planned, pending approvals for it are withdrawn, an open handover for it closes');
+  const proposed = (await result.locator('li').first().textContent())!;
   await result.getByRole('button', { name: 'Accept criteria' }).click();
   await expect(result.getByTestId('criteria-accepted')).toContainText('Criteria revision recorded in the demo');
+  // The next read of the task shows the accepted criteria.
+  const next = await page.evaluate(() => window.__spiedSource!.getTaskContext!('demo-feature-delivery', 'feature-delivery.search', 'local'));
+  expect(proposed).toContain(next.task.criteria[0]!.text);
+  expect(next.task.criteria[0]!.text).toMatch(/checked by an automated test/);
+  // Only one announcement per result, and the card itself is not a live region.
+  await expect(criteria.getByTestId('result-announce')).toHaveText(/^Draft criteria: proposal ready, ran on this device\.$/);
+  await expect(result).not.toHaveAttribute('role', 'status');
   // The route record went through the route.report command, metadata only.
   const reports = (await commands(page)).filter((c) => c.command === 'route.report');
   expect(reports).toHaveLength(1);
@@ -88,6 +97,9 @@ test('run an agent on demo data, see its proposal with checks, source and timing
   await expect(breakdown.getByTestId('agent-route')).toContainText('Cloud only, in the cloud only (This call only)');
   await breakdown.getByRole('button', { name: 'Break down' }).click();
   await expect(breakdown.getByTestId('agent-result')).toContainText('Ran in the cloud');
+  // The override was for that call only.
+  await expect(breakdown.getByLabel('Use cloud for this call')).not.toBeChecked();
+  await expect(breakdown.getByTestId('agent-route')).toContainText('(Run default)');
   // A proposed change is shown, never applied.
   await action(page, 'patch').getByRole('button', { name: 'Propose change' }).click();
   await expect(action(page, 'patch').getByRole('button', { name: 'Apply comes next' })).toBeDisabled();
@@ -123,18 +135,81 @@ test('the run default is set in Settings › Workflow, seeded from setup', async
   await expect(panel).toContainText('Saved: new tasks run Cloud first.');
 });
 
-test('the office marks a desk with where its call runs, and lights the CLOUD rack while a cloud call is in flight', async ({ page }) => {
+test('the office marks a desk with where its call runs, expected while in flight and observed after, and lights the CLOUD rack while a cloud call is in flight', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await open(page, `#/pipeline?task=${T('api')}`, { holdAgents: true });
-  type World = { cloudCall: boolean; agents: { id: string; ai: { place: string; live: boolean } | null }[] };
+  await open(page, `#/pipeline?task=${T('web')}`, { holdAgents: true });
+  type World = { cloudCall: boolean; agents: { id: string; ai: { place: string; state: string } | null }[] };
   const world = () => page.evaluate(() => (window as unknown as { __selarikruOffice?: { world: World } }).__selarikruOffice?.world ?? null);
-  await expect.poll(async () => (await world())?.agents.find((a) => a.id === 'runner_local_2')?.ai ?? null).toEqual({ place: 'cloud', live: false });
-  await row(page, T('api')).getByRole('button', { name: 'Feedback API' }).click();
+  const frontend = async () => (await world())?.agents.find((a) => a.id === 'runner_local_2')?.ai ?? null;
+  const canvas = page.getByTestId('office-canvas');
+  // The list UI fell back to the cloud last time: an observed mark.
+  await expect.poll(frontend).toEqual({ place: 'cloud', state: 'observed' });
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend last AI call ran in the cloud/);
+  await row(page, T('web')).getByRole('button', { name: 'Feedback list UI', exact: true }).click();
+  // Its route is Local first: held in flight, the desk shows where the call is expected to run.
   await action(page, 'criteria').getByRole('button', { name: 'Draft criteria' }).click();
-  await expect.poll(async () => (await world())?.cloudCall).toBe(true);
-  await expect(page.getByTestId('office-canvas')).toHaveAttribute('aria-label', /The cloud rack is lit/);
+  await expect.poll(frontend).toEqual({ place: 'device', state: 'expected' });
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend expected on this device/);
+  expect((await world())?.cloudCall).toBe(false);
   await page.evaluate(() => window.__releaseAgents!());
-  await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran in the cloud');
+  await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran on this device');
+  await expect.poll(frontend).toEqual({ place: 'device', state: 'observed' });
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend last AI call ran on this device/);
+  // A one-call cloud override, held: headed to the cloud, and the CLOUD rack is lit until it lands.
+  await page.evaluate(() => { (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain(); });
+  const breakdown = action(page, 'breakdown');
+  await breakdown.getByLabel('Use cloud for this call').check();
+  await breakdown.getByRole('button', { name: 'Break down' }).click();
+  await expect.poll(frontend).toEqual({ place: 'cloud', state: 'expected' });
+  await expect.poll(async () => (await world())?.cloudCall).toBe(true);
+  await expect(canvas).toHaveAttribute('aria-label', /Frontend headed to the cloud \(expected\)\. The cloud rack is lit: a call is headed to the cloud\./);
+  await page.evaluate(() => window.__releaseAgents!());
+  await expect(breakdown.getByTestId('agent-result')).toContainText('Ran in the cloud');
   await expect.poll(async () => (await world())?.cloudCall).toBe(false);
-  await expect(page.getByTestId('activity-item').filter({ hasText: 'Feedback API: AI ran in cloud' })).toHaveCount(1);
+  await expect.poll(frontend).toEqual({ place: 'cloud', state: 'observed' });
+  await expect(page.getByTestId('activity-item').filter({ hasText: 'Feedback list UI: AI ran in cloud' })).toHaveCount(1);
+});
+
+test('a task that cannot be replanned does not offer to accept criteria, and says why', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  await row(page, T('api')).getByRole('button', { name: 'Feedback API' }).click();
+  const criteria = action(page, 'criteria');
+  await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+  await expect(criteria.getByRole('button', { name: 'Accept criteria' })).toBeDisabled();
+  await expect(criteria.getByTestId('accept-note')).toContainText('A verified task cannot take a new revision');
+});
+
+test('a cloud route forced onto the locked task is refused by the source, and the refusal is said in words', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  const control = runsOnIn(page, T('e2e'));
+  const select = control.getByLabel('Runs on');
+  await expect(select).toHaveAccessibleDescription(/Local only: Gemini Nano on this device\. Never the cloud/);
+  // Past the disabled option, as a stale or tampered page could: the source still refuses.
+  await select.evaluate((el: HTMLSelectElement) => { for (const o of el.options) o.disabled = false; });
+  await select.selectOption('ONLY_IN_CLOUD');
+  await control.getByRole('button', { name: 'Save' }).click();
+  await expect(control.getByTestId('runs-on-feedback')).toHaveText(/restricted data, so its AI steps stay on this device/);
+  await expect(control.getByTestId('runs-on-now')).toHaveText('Local only · Locked by restricted data');
+  const sent = (await commands(page)).filter((c) => c.command === 'setting.set');
+  expect(sent).toHaveLength(1);
+});
+
+test('accepting criteria for a task with a pending approval asks first, and Escape keeps everything as it was', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const at = new Date(Date.UTC(2026, 10, 1)).toISOString();
+  await open(page, '#/pipeline', { extraApprovals: { apr_h4: { approvalId: 'apr_h4', taskId: T('search'), taskRevision: 1, runId: 'feature-delivery.run', scopeHash: 's', reason: 'Start a cloud worker', operation: 'start_cloud_worker', destination: null, requester: null, state: 'pending', requestedAt: at, expiresAt: null, resolvedAt: null } } });
+  await row(page, T('search')).getByRole('button', { name: 'Search index' }).click();
+  const criteria = action(page, 'criteria');
+  await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+  await criteria.getByRole('button', { name: 'Accept criteria' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Replan this task with these criteria?' });
+  await expect(dialog).toContainText('its pending approval is withdrawn');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(criteria.getByTestId('criteria-accepted')).toHaveCount(0);
+  await criteria.getByRole('button', { name: 'Accept criteria' }).click();
+  await page.getByRole('dialog', { name: 'Replan this task with these criteria?' }).getByRole('button', { name: 'Replan with these criteria' }).click();
+  await expect(criteria.getByTestId('criteria-accepted')).toContainText('Criteria revision recorded in the demo');
 });

@@ -263,23 +263,30 @@ export function drawPlanTitle(p: Pen, l: OfficeLayout, title: string) {
 
 
 /**
- * The desk's AI mark (H4): a small chip for this device, or a cloud for Gemini in the cloud, on the cubicle's partition. A call in flight blinks; the last call's
- * mark is steady. Paired with words in the office summary and the team cards.
+ * The desk's AI mark (H4): a chip for this device, or a cloud for Gemini in the cloud, on the cubicle's partition. An observed mark is filled. An expected one, for a
+ * call still in flight, is only outlined with a "?" beside it, so the two differ without motion; it also blinks when motion is allowed. Paired with words in the office
+ * summary and the team cards.
  */
 export function drawAiMark(p: Pen, d: DeskSpot, ox: number, oy: number, ai: NonNullable<OfficeAgent['ai']>, t: number) {
   const X = ox + d.x0 * 16 + 5 * 16 + 2;
   const Y = oy + d.y0 * 16 - 9;
-  if (ai.live && blink(t, 4)) return;
+  const expected = ai.state === 'expected';
+  if (expected && blink(t, 4)) return;
+  const fill = ai.place === 'device' ? '#2e7d32' : '#1d4f91';
+  const ink = expected ? fill : C.white;
   p.rect(X - 1, Y - 1, 14, 10, C.ink);
+  p.rect(X, Y, 12, 8, expected ? C.white : fill);
+  if (expected) {
+    // A dashed frame and a question mark: where it is headed, not where it ran.
+    for (let i = 0; i < 12; i += 2) { p.rect(X + i, Y, 1, 1, fill); p.rect(X + i, Y + 7, 1, 1, fill); }
+    p.rect(X + 15, Y, 3, 1, C.ink); p.rect(X + 17, Y + 1, 1, 2, C.ink); p.rect(X + 16, Y + 3, 1, 2, C.ink); p.rect(X + 16, Y + 6, 1, 1, C.ink);
+  }
   if (ai.place === 'device') {
-    p.rect(X, Y, 12, 8, '#2e7d32');
-    p.rect(X + 3, Y + 2, 6, 4, '#c8f7c5');
-    for (let i = 0; i < 3; i++) { p.rect(X + 2 + i * 3, Y - 1, 1, 1, '#c8f7c5'); p.rect(X + 2 + i * 3, Y + 8, 1, 1, '#c8f7c5'); }
+    p.rect(X + 3, Y + 2, 6, 4, expected ? fill : '#c8f7c5');
   } else {
-    p.rect(X, Y, 12, 8, '#1d4f91');
-    p.rect(X + 2, Y + 4, 8, 3, C.white);
-    p.rect(X + 3, Y + 2, 3, 2, C.white);
-    p.rect(X + 6, Y + 1, 3, 3, C.white);
+    p.rect(X + 2, Y + 4, 8, 3, ink);
+    p.rect(X + 3, Y + 2, 3, 2, ink);
+    p.rect(X + 6, Y + 1, 3, 3, ink);
   }
 }
 

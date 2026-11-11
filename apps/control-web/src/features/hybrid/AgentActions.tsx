@@ -1,38 +1,51 @@
 import { useEffect, useId, useState } from 'react';
-import type { RoutePolicyMode } from '@selarikru/domain';
+import { OPEN_HANDOVER_STATES, type RoutePolicyMode } from '@selarikru/domain';
 import { Chip, buttonPrimary, buttonQuiet, type Tone } from '@selarikru/ui';
 import { DataSourceException, type TaskAgentContext, type TaskRouteView, type TaskView } from '@selarikru/view-protocol';
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
-import { AGENT_ACTIONS, STATUS_TEXT, actionAvailability, refusalText, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
-
-/** What the agents may read for a task, read once per task and destination-free: whether there is a change, and how long the input is. */
-export interface TaskFacts {
-  readonly hasChange: boolean;
-  readonly inputChars: number;
-}
-const factsCache = new Map<string, Promise<TaskFacts | null>>();
+import { AGENT_ACTIONS, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
+import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
+import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
+import { approvalStateAt } from '@selarikru/view-protocol';
 
 export const inputCharsOf = (c: TaskAgentContext): number =>
   c.task.title.length + (c.task.description?.length ?? 0) + c.task.criteria.reduce((n, x) => n + x.text.length, 0) + c.bundle.claims.reduce((n, x) => n + x.text.length + x.heading.length, 0);
 
-/** The cloud bundle is enough to know these facts, and it carries nothing restricted. */
-export function useTaskFacts(h: HybridValue | null, taskId: string, revision: number): TaskFacts | null {
-  const [facts, setFacts] = useState<TaskFacts | null>(null);
+/** Only answers are cached, by the task's aggregate revision, so a change event reads again. A failure is never kept. */
+const factsCache = new Map<string, TaskFacts>();
+const pause = (ms: number): Promise<void> => new Promise((r) => { window.setTimeout(r, ms); });
+
+export type FactsState = { readonly phase: 'loading' } | { readonly phase: 'ready'; readonly facts: TaskFacts } | { readonly phase: 'failed'; readonly retry: () => void };
+
+/**
+ * Whether the task has a change, and its input size, from a context read for the destination its route allows. Retried with a bounded backoff; after that the screen
+ * says the read failed and offers a retry. Read again when the task's aggregate revision moves.
+ */
+export function useTaskFacts(h: HybridValue | null, task: TaskView | undefined): FactsState {
+  const [state, setState] = useState<FactsState>({ phase: 'loading' });
+  const [attempt, setAttempt] = useState(0);
+  const destination = task?.route ? effectiveStep(task.route, null).destination : 'local';
+  const key = h && task ? `${h.projectId}|${task.taskId}|${task.aggregateRevision}|${destination}` : null;
   useEffect(() => {
-    if (!h?.agents) return;
-    const key = `${h.projectId}|${taskId}|${revision}`;
-    let p = factsCache.get(key);
-    if (!p) {
-      p = h.agents.context(taskId, 'cloud').then((c) => ({ hasChange: c.change !== null, inputChars: inputCharsOf(c) }), () => null);
-      factsCache.set(key, p);
-    }
+    if (!h?.agents || !task || key === null) return;
+    const hit = factsCache.get(key);
+    if (hit) { setState({ phase: 'ready', facts: hit }); return; }
     let live = true;
-    void p.then((f) => { if (live) setFacts(f); });
+    setState({ phase: 'loading' });
+    const agents = h.agents;
+    void loadFactsWithRetry(async () => {
+      const c = await agents.context(task.taskId, destination);
+      return { hasChange: c.change !== null, inputChars: inputCharsOf(c) };
+    }, pause).then((f) => {
+      if (!live) return;
+      if (f) { factsCache.set(key, f); setState({ phase: 'ready', facts: f }); }
+      else setState({ phase: 'failed', retry: () => setAttempt((n) => n + 1) });
+    });
     return () => { live = false; };
-  }, [h?.agents, h?.projectId, taskId, revision]);
-  return facts;
+  }, [h?.agents, key, attempt]);
+  return state;
 }
 
 const SOURCE_CHIP: Readonly<Record<string, { label: string; tone: Tone }>> = {
@@ -54,7 +67,8 @@ export function AgentActions({ taskId }: { taskId: string }) {
 
 function Actions({ h, task, route }: { h: HybridValue; task: TaskView; route: TaskRouteView }) {
   const id = useId();
-  const facts = useTaskFacts(h, task.taskId, task.revision);
+  const factsState = useTaskFacts(h, task);
+  const facts = factsState.phase === 'ready' ? factsState.facts : null;
   const failedCheck = Object.values(h.snapshot?.checks ?? {}).some((c) => c.taskId === task.taskId && c.state === 'failed');
   if (!h.agents) {
     return (
@@ -70,11 +84,17 @@ function Actions({ h, task, route }: { h: HybridValue; task: TaskView; route: Ta
         <h3 id={`${id}-t`} className="font-medium text-fg">AI actions</h3>
         <p className="text-sm text-muted">Each runs one Firebase AI Logic call in this browser and comes back as a proposal. Nothing runs commands or changes the task until you accept it.</p>
         {h.agents.simulated ? <p className="mt-1 text-sm font-medium text-warning" data-testid="agents-demo-note">Demo data: answers are simulated, with no live model. They are never evidence.</p> : null}
+        {factsState.phase === 'failed' ? (
+          <p className="mt-1 flex flex-wrap items-center gap-2 text-sm text-warning" data-testid="facts-failed">
+            Couldn&apos;t read whether this task has a change.
+            <button type="button" className={buttonQuiet} onClick={factsState.retry}>Retry</button>
+          </p>
+        ) : null}
       </div>
       <ul className="space-y-3">
         {AGENT_ACTIONS.map((a) => (
           <ActionRow key={a.kind} h={h} task={task} route={route} kind={a.kind} label={a.label} what={a.what}
-            unavailable={facts === null && (a.kind === 'review' || a.kind === 'prDescription') ? 'Reading whether this task has a change.' : actionAvailability(a.kind, { hasChange: facts?.hasChange ?? false, failedCheck })}
+            unavailable={facts === null && (a.kind === 'review' || a.kind === 'prDescription') ? (factsState.phase === 'failed' ? 'Couldn\'t read whether this task has a change.' : 'Reading whether this task has a change.') : actionAvailability(a.kind, { hasChange: facts?.hasChange ?? false, failedCheck })}
             inputChars={facts?.inputChars ?? null} />
         ))}
       </ul>
@@ -91,7 +111,7 @@ function ActionRow({ h, task, route, kind, label, what, unavailable, inputChars 
   const offer = stepRoute(route, null).override;
   const suggestion = suggestionFor(route, kind, inputChars, h.browser);
   const running = result?.phase === 'running';
-  const off = !h.live ? 'AI actions are off until the connection is live.' : sr.mode === null ? 'No route is set for this task or its run. Choose one under Runs on.' : unavailable;
+  const off = !h.live ? 'AI actions are off until the connection is live.' : sr.mode === null ? 'No route is set for this task or its run.' : unavailable;
   useEffect(() => { if (sr.locked) setOverride(null); }, [sr.locked]);
 
   async function run(): Promise<void> {
@@ -99,6 +119,8 @@ function ActionRow({ h, task, route, kind, label, what, unavailable, inputChars 
     hybridResults.getState().set(key, { phase: 'running' });
     const outcome = await h.agents.run({ taskId: task.taskId, kind, callOverride: override });
     hybridResults.getState().set(key, { phase: 'done', outcome });
+    // A one-call override is for that call only.
+    setOverride(null);
   }
 
   const where = sr.place === 'device' ? (sr.mode === 'ONLY_ON_DEVICE' ? 'on this device only' : 'on this device first') : sr.place === 'cloud' ? (sr.mode === 'ONLY_IN_CLOUD' ? 'in the cloud only' : 'in the cloud first') : 'nowhere yet';
@@ -109,13 +131,15 @@ function ActionRow({ h, task, route, kind, label, what, unavailable, inputChars 
         <span id={`${id}-route`} className="text-sm text-fg" data-testid="agent-route">Uses {sr.label}, {where} <span className="text-muted">({sr.source})</span>{sr.locked ? <span className="text-warning"> · restricted data stays on this device</span> : null}</span>
       </div>
       <p className="mt-1 text-sm text-muted">{what} Suggested for this step: {suggestion.label}.</p>
-      {offer && !sr.locked ? (
+      {offer && !sr.locked && !sr.needsDefault ? (
         <label className="mt-1.5 flex items-center gap-2 text-sm text-fg">
           <input type="checkbox" checked={override !== null} disabled={running} onChange={(e) => setOverride(e.target.checked ? offer.mode : null)} />
           {offer.label}
         </label>
       ) : null}
-      {off ? <p className="mt-1 text-sm text-muted">{off}</p> : null}
+      {sr.needsDefault ? <p className="mt-1 text-sm text-fg" data-testid="needs-default">Choose where new tasks run first, in <a className="font-medium text-active underline underline-offset-2" href="#/settings?section=workflow">Settings › Workflow</a>, or set this task&apos;s route above.</p> : null}
+      {off && !sr.needsDefault ? <p className="mt-1 text-sm text-muted">{off}</p> : null}
+      {kind === 'patch' && h.agents && !h.agents.simulated ? <p className="mt-1 text-sm text-muted" data-testid="patch-new-files-only">Until file contents can be read here, a proposal can only add new files.</p> : null}
       {running ? <p role="status" className="mt-2 text-sm text-fg">Running {where}.</p> : null}
       {result?.phase === 'done' ? <ProposalCard h={h} task={task} kind={kind} outcome={result.outcome} onDiscard={() => hybridResults.getState().set(key, null)} /> : null}
     </li>
@@ -125,8 +149,8 @@ function ActionRow({ h, task, route, kind, label, what, unavailable, inputChars 
 function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; task: TaskView; kind: AgentActionKind; outcome: AgentsOutcome; onDiscard: () => void }) {
   if (outcome.kind === 'refused') {
     return (
-      <div role="status" data-testid="agent-result" data-status="refused" className="mt-2 rounded-chip border border-warning bg-warning-tint p-2.5">
-        <p className="text-fg">{refusalText(outcome.code)}</p>
+      <div data-testid="agent-result" data-status="refused" className="mt-2 rounded-chip border border-warning bg-warning-tint p-2.5">
+        <p role="status" className="text-fg">{refusalText(outcome.code)}</p>
         <button type="button" className={`${buttonQuiet} mt-2`} onClick={onDiscard}>Dismiss</button>
       </div>
     );
@@ -137,7 +161,8 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
   const src = fell ? { label: p.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', tone: 'warning' as const } : SOURCE_CHIP[p.observedSource]!;
   const ran = p.status !== 'blocked' && p.status !== 'error';
   return (
-    <div role="status" data-testid="agent-result" data-status={p.status} data-kind={kind} className={`mt-2 space-y-2 rounded-chip border p-2.5 ${ok ? 'border-line-strong bg-panel-2' : 'border-warning bg-warning-tint'}`}>
+    <div data-testid="agent-result" data-status={p.status} data-kind={kind} className={`mt-2 space-y-2 rounded-chip border p-2.5 ${ok ? 'border-line-strong bg-panel-2' : 'border-warning bg-warning-tint'}`}>
+      <p role="status" className="sr-only" data-testid="result-announce">{`${AGENT_ACTIONS.find((a) => a.kind === kind)?.label ?? kind}: ${ok ? `proposal ready, ${src.label.toLowerCase()}` : p.status === 'blocked' ? `stopped. ${refusalText(p.blockedReason)}` : 'not usable'}.`}</p>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium text-fg">Proposal</span>
         {outcome.simulated ? <span className="rounded-chip bg-warning px-1.5 py-0.5 text-sm font-semibold text-bg" data-testid="result-demo">Demo data</span> : null}
@@ -202,48 +227,69 @@ function ProposalBody({ h, task, kind, outcome }: { h: HybridValue; task: TaskVi
           <dt className="text-muted">Next step</dt><dd className="m-0 text-fg">{String(data['nextStep'] ?? '')}</dd>
         </dl>
       );
-    case 'prDescription': return <PrProposal task={task} title={String(data['title'] ?? '')} body={String(data['body'] ?? '')} />;
+    case 'prDescription': return <PrProposal task={task} title={String(data['title'] ?? '')} body={String(data['body'] ?? '')} locked={outcome.result.locked} />;
   }
 }
 
 function CriteriaProposal({ h, task, data, outcome }: { h: HybridValue; task: TaskView; data: Criteria; outcome: Extract<AgentsOutcome, { kind: 'result' }> }) {
-  const [state, setState] = useState<{ phase: 'idle' | 'working' } | { phase: 'done' | 'failed'; text: string }>({ phase: 'idle' });
+  const [state, setState] = useState<{ phase: 'idle' | 'working' | 'confirming' } | { phase: 'done' | 'failed'; text: string }>({ phase: 'idle' });
+  const [confirm, setConfirm] = useState<ReturnType<typeof replanConfirm>['confirm']>(null);
   const revise = h.agents?.reviseCriteria ?? null;
-  const reason = outcome.result.locked ? 'This proposal came from restricted data. It stays on this device, and a browser proposal does not revise a restricted task.'
-    : !revise ? 'This source cannot take a plan revision.' : !h.live ? 'Accepting is off until the connection is live.' : null;
-  async function accept(): Promise<void> {
+  const reason = acceptBlocker({ status: task.status, locked: outcome.result.locked, canRevise: revise !== null, live: h.live });
+  const pendingApproval = Object.values(h.snapshot?.approvals ?? {}).some((a) => a.taskId === task.taskId && approvalStateAt(a, Date.now()) === 'pending');
+  async function send(): Promise<void> {
     if (!revise) return;
+    setConfirm(null);
     setState({ phase: 'working' });
     try {
       const r = await revise({ taskId: task.taskId, expectedPlanRevision: outcome.context.planRevision, idempotencyKey: `criteria-${outcome.result.proposal.requestId}`, criteria: data.acceptanceCriteria.map((c) => ({ id: c.requirementId, text: c.text })) });
       h.refresh();
-      setState({ phase: 'done', text: r.simulated ? `Criteria revision recorded in the demo as plan revision ${r.planRevision}. Demo data, not evidence.` : `Plan revision ${r.planRevision} created with the reworded criteria. The task continues from its new revision.` });
+      setState({ phase: 'done', text: r.simulated ? `Criteria revision recorded in the demo as plan revision ${r.planRevision}. Demo data, not evidence.` : `Plan revision ${r.planRevision} created with the reworded criteria. The task is planned again from its new revision.` });
     } catch (e) {
-      setState({ phase: 'failed', text: e instanceof DataSourceException ? `Not recorded: ${e.detail.message}.` : 'The revision was not recorded. Trying again is safe.' });
+      setState({ phase: 'failed', text: revisionRefusal(e instanceof DataSourceException ? e.detail.message : '') });
     }
   }
+  async function accept(): Promise<void> {
+    setState({ phase: 'confirming' });
+    // An open handover is read now; one that cannot be read is treated as open, so the person is asked.
+    let openHandover = false;
+    if (h.handover) {
+      try {
+        const view = await h.handover.load();
+        openHandover = view.tasks.some((t) => t.taskId === task.taskId && t.current !== null && (OPEN_HANDOVER_STATES as readonly string[]).includes(t.current.state));
+      } catch {
+        openHandover = true;
+      }
+    }
+    const c = replanConfirm({ pendingApproval, openHandover }).confirm;
+    if (c) { setConfirm(c); setState({ phase: 'idle' }); return; }
+    await send();
+  }
+  const copy = replanConfirm({ pendingApproval: false, openHandover: false }).consequence;
   return (
     <div className="space-y-1.5">
       <ul className="space-y-1">{data.acceptanceCriteria.map((c) => <li key={c.requirementId} className="text-fg"><span className="font-mono text-mono text-muted">{c.requirementId}</span> {c.text}</li>)}</ul>
       {state.phase === 'done' ? <p className="text-sm font-medium text-fg" data-testid="criteria-accepted">{state.text}</p> : (
         <>
-          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working'} onClick={() => void accept()}>{state.phase === 'working' ? 'Accepting' : 'Accept criteria'}</button>
-          <p className="text-sm text-muted">{reason ?? 'Accepting makes a new revision of this task through the replan path, with these criteria and nothing else changed.'}</p>
-          {state.phase === 'failed' ? <p className="text-sm text-danger">{state.text}</p> : null}
+          <button type="button" className={buttonPrimary} disabled={reason !== null || state.phase === 'working' || state.phase === 'confirming'} onClick={() => void accept()}>{state.phase === 'working' ? 'Accepting' : 'Accept criteria'}</button>
+          <p className="text-sm text-muted" data-testid="accept-note">{reason ?? copy}</p>
+          {state.phase === 'failed' ? <p className="text-sm text-danger" data-testid="accept-refused">{state.text}</p> : null}
         </>
       )}
+      {confirm ? <ConfirmDialog copy={confirm} confirmLabel="Replan with these criteria" onConfirm={() => void send()} onKeep={() => setConfirm(null)} /> : null}
     </div>
   );
 }
 
-function PrProposal({ task, title, body }: { task: TaskView; title: string; body: string }) {
+function PrProposal({ task, title, body, locked }: { task: TaskView; title: string; body: string; locked: boolean }) {
   const id = useId();
   const field = useHybridResults((s) => s.prBody[task.runId]);
   return (
     <div className="space-y-1.5">
       <p className="font-medium text-fg">{title}</p>
       <p className="whitespace-pre-wrap text-fg">{body}</p>
-      <button type="button" className={buttonQuiet} onClick={() => hybridResults.getState().setPrBody(task.runId, `${title}\n\n${body}`)}>Use as PR description</button>
+      <button type="button" className={buttonQuiet} disabled={locked} onClick={() => hybridResults.getState().setPrBody(task.runId, `${title}\n\n${body}`)}>Use as PR description</button>
+      {locked ? <p className="text-sm text-muted" data-testid="pr-locked">This text came from restricted data. It stays on this device, so it is not used as a pull request description.</p> : null}
       {field !== undefined ? (
         <div>
           <label htmlFor={`${id}-pr`} className="block text-sm font-medium text-fg">Pull request description</label>

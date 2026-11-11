@@ -27,7 +27,7 @@ function harness(r: TaskRouteView = route(), over: Partial<AgentRunnerDeps> = {}
   const deps: AgentRunnerDeps = {
     projectId: 'p',
     getTaskRoute: vi.fn(async () => read(r)),
-    getTaskContext: vi.fn(async (_taskId: string, destination: 'local' | 'cloud') => { contexts.push(destination); return context(destination); }),
+    getTaskContext: vi.fn(async (_taskId: string, destination: 'local' | 'cloud', callOverride?: string | null) => { contexts.push(callOverride ? `${destination}+${callOverride}` : destination); return context(destination); }),
     catalog: new AgentCatalog(adapter),
     failedCheck: () => ({ checkId: 'ci:t1', output: 'expected 2, got 3' }),
     ...over,
@@ -56,11 +56,11 @@ describe('the context bundle is fetched for the destination the route allows', (
     expect(await dest(route())).toEqual(['cloud']);
     expect(await dest(route({ effective: 'PREFER_IN_CLOUD', override: 'PREFER_IN_CLOUD', source: 'task' }))).toEqual(['cloud']);
     expect(await dest(route({ effective: 'ONLY_ON_DEVICE', override: 'ONLY_ON_DEVICE', source: 'task' }))).toEqual(['local']);
-    expect(await dest(route(), 'ONLY_ON_DEVICE')).toEqual(['local']);
-    expect(await dest(route({ effective: 'ONLY_ON_DEVICE', runDefault: 'ONLY_ON_DEVICE' }), 'ONLY_IN_CLOUD')).toEqual(['cloud']);
+    expect(await dest(route(), 'ONLY_ON_DEVICE')).toEqual(['local+ONLY_ON_DEVICE']);
+    expect(await dest(route({ effective: 'ONLY_ON_DEVICE', runDefault: 'ONLY_ON_DEVICE' }), 'ONLY_IN_CLOUD')).toEqual(['cloud+ONLY_IN_CLOUD']);
   });
   it('a locked task gets the device bundle even with a cloud call override', async () => {
-    expect(await dest(route({ effective: 'ONLY_ON_DEVICE', source: 'lock', override: 'ONLY_IN_CLOUD', lock: { label: 'restricted', reason: 'r' } }), 'ONLY_IN_CLOUD')).toEqual(['local']);
+    expect(await dest(route({ effective: 'ONLY_ON_DEVICE', source: 'lock', override: 'ONLY_IN_CLOUD', lock: { label: 'restricted', reason: 'r' } }), 'ONLY_IN_CLOUD')).toEqual(['local+ONLY_IN_CLOUD']);
   });
   it('the task is labelled for the policy grant, and a cloud grant covers public and internal only', async () => {
     const h = harness();

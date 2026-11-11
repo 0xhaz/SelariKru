@@ -1,4 +1,5 @@
-import { effectiveRoutePolicy, routeLockFor, type RouteRecordReport } from '@selarikru/domain';
+import type { RouteRecordReport } from '@selarikru/domain';
+import { effectiveStep } from './model.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
 import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
@@ -45,11 +46,7 @@ export const fetchRouteFrom = (source: Pick<EngineeringDataSource, 'getTaskRoute
 };
 
 /** Where a call is meant to run first, from the fresh read and this call's override. */
-function placeOf(read: TaskRouteRead, callOverride: AgentRunRequest['callOverride']): InFlightCall['place'] {
-  const r = read.route;
-  const mode = effectiveRoutePolicy({ call: callOverride, task: r.override, run: r.runDefault, lock: r.lock ? routeLockFor([r.lock.label]) : null }).mode;
-  return mode === null ? null : mode === 'ONLY_ON_DEVICE' || mode === 'PREFER_ON_DEVICE' ? 'device' : 'cloud';
-}
+const placeOf = (read: TaskRouteRead, callOverride: AgentRunRequest['callOverride']): InFlightCall['place'] => effectiveStep(read.route, callOverride).place;
 
 /** Null when the source cannot run task agents (no route reads or no context reads). */
 export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
@@ -96,7 +93,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
             publish([...calls, { callId, taskId: req.taskId, kind: req.kind, place: placeOf(read, req.callOverride) }]);
             return read;
           },
-          getTaskContext: (taskId, destination) => getTaskContext(projectId, taskId, destination),
+          getTaskContext: (taskId, destination, callOverride) => getTaskContext(projectId, taskId, destination, callOverride),
         }, req);
         return { ...out, simulated: opts.simulated };
       } finally {

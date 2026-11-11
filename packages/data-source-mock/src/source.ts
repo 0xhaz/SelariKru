@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { approvalUnavailableReason, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { RoutePolicyModeSchema, approvalUnavailableReason, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -15,7 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
-import { demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
+import { checkDestination, demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
 import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, withRouteLocks, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
@@ -54,6 +54,8 @@ interface Project {
   readonly routeRecords: Map<string, RouteRecord[]>;
   /** Criteria reworded by an accepted proposal, by task. Simulated. */
   readonly criteria: Map<string, { id: string; text: string }[]>;
+  /** Plan revisions the demo's criteria accepts moved, by run. Simulated: no plan event is emitted. */
+  readonly planBumps: Map<string, number>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -123,7 +125,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
-      criteria: new Map(),
+      criteria: new Map(), planBumps: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -382,7 +384,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   function contextState(p: Project, runId: string) {
-    return { routes: p.fixture.routes, criteria: p.criteria, planRevision: p.state.snapshot.runs[runId]?.planRevision ?? 0 };
+    return { routes: p.fixture.routes, criteria: p.criteria, planRevision: (p.state.snapshot.runs[runId]?.planRevision ?? 0) + (p.planBumps.get(runId) ?? 0) };
   }
 
   function routeViewOf(p: Project, t: { taskId: string; runId: string }) {
@@ -682,10 +684,13 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     },
 
     /** What the demo's task agents read: simulated, with a bundle built by the domain code for the asked destination. */
-    async getTaskContext(projectId, taskId, destination) {
+    async getTaskContext(projectId, taskId, destination, callOverride) {
       const p = project(projectId);
       const t = p.state.snapshot.tasks[taskId];
       if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      const call = callOverride ? RoutePolicyModeSchema.safeParse(callOverride) : null;
+      if (call && !call.success) throw fail('invalid_event', 'callOverride must be a route mode');
+      checkDestination(destination, routeViewOf(p, t), routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId), call?.data ?? null);
       return demoTaskContext(contextState(p, t.runId), t, destination);
     },
 
@@ -697,6 +702,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (!t) throw fail('unavailable', `no task ${r.taskId} in this project`);
       const state = contextState(p, t.runId);
       p.criteria.set(t.taskId, reviseDemoCriteria(state, t, r.expectedPlanRevision, r.criteria));
+      // As the server: an accepted revision moves the plan, so a second accept at the revision read before it is stale.
+      p.planBumps.set(t.runId, (p.planBumps.get(t.runId) ?? 0) + 1);
       return { planRevision: state.planRevision + 1, taskIds: [t.taskId], simulated: true };
     },
 

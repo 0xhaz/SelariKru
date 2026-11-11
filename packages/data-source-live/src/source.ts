@@ -173,7 +173,7 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     });
 
   /** A GET (or, with a body, a POST) read through a schema. `missingIsNull`: a 404 rejects with `NOT_RECORDED` for the caller to turn into null. */
-  async function readJson<T>(path: string, parser: { parse(v: unknown): T }, what: string, missingIsNull = false, body?: unknown): Promise<T> {
+  async function readJson<T>(path: string, parser: { parse(v: unknown): T }, what: string, missingIsNull = false, body?: unknown, codeInMessage = false): Promise<T> {
     assertOpen();
     let res: Response;
     try {
@@ -182,7 +182,12 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       throw fail(fromThrown(e));
     }
     if (missingIsNull && res.status === 404) throw NOT_RECORDED;
-    if (!res.ok) throw fail(toDataSourceError(await readWireError(res)));
+    if (!res.ok) {
+      const wire = await readWireError(res);
+      const e = toDataSourceError(wire);
+      // The refusal's code leads the message, so a screen can say which refusal it was without parsing prose.
+      throw fail(codeInMessage ? { ...e, message: `${wire.code}: ${wire.message}` } : e);
+    }
     try {
       return parser.parse(await res.json());
     } catch {
@@ -190,14 +195,14 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     }
   }
 
-  const readTaskContext = (projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskAgentContext> =>
-    readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context?destination=${destination}`, {
+  const readTaskContext = (projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null): Promise<TaskAgentContext> =>
+    readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context?destination=${destination}${callOverride ? `&callOverride=${encodeURIComponent(callOverride)}` : ''}`, {
       parse: (v: unknown) => {
         const c = TaskAgentContextSchema.parse(v);
         if (c.destination !== destination || c.taskId !== taskId) throw new Error('context for another destination or task');
         return c;
       },
-    }, 'a task context');
+    }, 'a task context', false, undefined, true);
 
   return {
     mode: 'live',
@@ -251,12 +256,14 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       const spec = context.spec;
       const current = Array.isArray(spec?.['criteria']) ? (spec['criteria'] as { id: string; text: string }[]) : null;
       if (!spec || !current) throw fail({ code: 'invalid_event', message: 'the task spec cannot be revised from this build', retryable: false });
-      if (context.planRevision !== r.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'the plan moved since this was read; nothing was sent', retryable: false });
+      if (context.planRevision !== r.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'stale_revision: the plan moved since this was read; nothing was sent', retryable: false });
+      // Checked here as well as on the server, which stays the authority: a restricted or secret task is not revised from a browser proposal.
+      if (context.task.classification === 'restricted' || context.task.classification === 'secret') throw fail({ code: 'unavailable', message: 'route_locked_restricted: this task reads restricted data, so a browser proposal does not revise it; nothing was sent', retryable: false });
       const ids = new Set(current.map((c) => c.id));
-      if (r.criteria.some((c) => !ids.has(c.id))) throw fail({ code: 'invalid_event', message: 'a criterion is not one this task has; nothing was sent', retryable: false });
+      if (r.criteria.some((c) => !ids.has(c.id))) throw fail({ code: 'invalid_event', message: 'criterion_unknown: a criterion is not one this task has; nothing was sent', retryable: false });
       const reworded = new Map(r.criteria.map((c) => [c.id, c.text]));
       const tasks = [{ ...spec, revision: context.revision + 1, criteria: current.map((c) => ({ ...c, text: reworded.get(c.id) ?? c.text })) }];
-      const done = await readJson(`/v1/runs/${encodeURIComponent(context.runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false, { expectedRevision: r.expectedPlanRevision, idempotencyKey: r.idempotencyKey, tasks });
+      const done = await readJson(`/v1/runs/${encodeURIComponent(context.runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false, { expectedRevision: r.expectedPlanRevision, idempotencyKey: r.idempotencyKey, tasks }, true);
       return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
     },
 

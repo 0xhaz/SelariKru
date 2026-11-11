@@ -67,10 +67,10 @@ export interface EngineeringDataSource {
    */
   getTaskRoute?(projectId: string, taskId: string): Promise<TaskRouteRead>;
   /**
-   * What a task's AI agents read, with the context bundle served for `destination` (`cloud` for any cloud-capable route). Owner only. Absent: this source cannot
-   * run the task agents.
+   * What a task's AI agents read, with the context bundle served for `destination` (`cloud` for any cloud-capable route). The source refuses `cloud` when the
+   * task's route, with this call's override, keeps it on the device (`context_destination_refused`). Owner only. Absent: this source cannot run the task agents.
    */
-  getTaskContext?(projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskAgentContext>;
+  getTaskContext?(projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null): Promise<TaskAgentContext>;
   /** An accepted criteria proposal, through the replan path: a new revision of the task with its criteria reworded. Absent: this source cannot replan. */
   reviseTaskCriteria?(projectId: string, request: CriteriaRevisionRequest): Promise<CriteriaRevisionResult>;
   disconnect(): void;

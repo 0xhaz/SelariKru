@@ -35,13 +35,14 @@ describe('mock task context for the agents (H4)', () => {
     const { ds, projectId, first } = await setup();
     const t = id('search');
     const before = await ds.getTaskContext!(projectId, t, 'local');
+    expect(before.planRevision).toBe(first.runs[before.runId]!.planRevision);
     const plan = first.runs[before.runId]!.planRevision;
     const c1 = before.task.criteria[0]!;
     const done = await ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan, idempotencyKey: 'k1', criteria: [{ id: c1.id, text: 'Finds feedback by title, ignoring case' }] });
     expect(done).toMatchObject({ taskIds: [t], simulated: true });
     expect((await ds.getTaskContext!(projectId, t, 'cloud')).task.criteria[0]).toEqual({ id: c1.id, text: 'Finds feedback by title, ignoring case' });
     await expect(ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan, idempotencyKey: 'k2', criteria: [{ id: 'NOPE-1', text: 'x' }] })).rejects.toThrow();
-    await expect(ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan + 7, idempotencyKey: 'k3', criteria: [{ id: c1.id, text: 'x' }] })).rejects.toThrow(/plan moved/);
+    await expect(ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan + 7, idempotencyKey: 'k3', criteria: [{ id: c1.id, text: 'x' }] })).rejects.toThrow(/stale_revision/);
   });
 
   it('a restricted task\'s criteria are not revised from a browser proposal', async () => {
@@ -49,5 +50,26 @@ describe('mock task context for the agents (H4)', () => {
     const t = id('e2e');
     const c = await ds.getTaskContext!(projectId, t, 'local');
     await expect(ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: first.runs[c.runId]!.planRevision, idempotencyKey: 'k', criteria: [{ id: c.task.criteria[0]!.id, text: 'x' }] })).rejects.toThrow(/restricted/);
+  });
+
+  it('mirrors the live rules: only a replannable task is revised, and an accept moves the plan, so a second one at the old revision is stale', async () => {
+    const { ds, projectId, first } = await setup();
+    const api = await ds.getTaskContext!(projectId, id('api'), 'cloud');
+    await expect(ds.reviseTaskCriteria!(projectId, { taskId: id('api'), expectedPlanRevision: api.planRevision, idempotencyKey: 'k', criteria: [{ id: api.task.criteria[0]!.id, text: 'x' }] })).rejects.toThrow(/task_not_replannable/);
+    const t = id('search');
+    const c = await ds.getTaskContext!(projectId, t, 'local');
+    const plan = first.runs[c.runId]!.planRevision;
+    const done = await ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan, idempotencyKey: 'k1', criteria: [{ id: c.task.criteria[0]!.id, text: 'Reworded once' }] });
+    expect(done.planRevision).toBe(plan + 1);
+    expect((await ds.getTaskContext!(projectId, t, 'local')).planRevision).toBe(plan + 1);
+    await expect(ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: plan, idempotencyKey: 'k2', criteria: [{ id: c.task.criteria[0]!.id, text: 'Reworded twice' }] })).rejects.toThrow(/stale_revision/);
+  });
+
+  it('refuses a cloud context when the route keeps the task on the device, as the server does', async () => {
+    const { ds, projectId } = await setup();
+    await expect(ds.getTaskContext!(projectId, id('e2e'), 'cloud')).rejects.toThrow(/context_destination_refused/);
+    await expect(ds.getTaskContext!(projectId, id('e2e'), 'cloud', 'ONLY_IN_CLOUD')).rejects.toThrow(/context_destination_refused/);
+    await expect(ds.getTaskContext!(projectId, id('integrate'), 'cloud')).rejects.toThrow(/context_destination_refused/);
+    expect((await ds.getTaskContext!(projectId, id('integrate'), 'cloud', 'ONLY_IN_CLOUD')).destination).toBe('cloud');
   });
 });

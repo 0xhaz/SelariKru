@@ -77,6 +77,8 @@ export const ERROR_CODES = [
   'handover_refused', 'handover_task_blocked', 'checkpoint_refused', 'checkpoint_tampered', 'checkpoint_restricted', 'handover_not_found', 'no_checkpoint',
   /** A task's agent context: its spec cannot be read, so nothing is given to an agent. */
   'task_spec_unreadable',
+  /** A cloud context asked for a task whose route keeps its AI steps on the device. */
+  'context_destination_refused',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

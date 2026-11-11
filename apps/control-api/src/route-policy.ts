@@ -120,7 +120,7 @@ export async function loadProjectRouteInputs(db: Executor, tenantId: string, pro
 }
 
 /** A task's current spec, its run and its route, read fresh. Null when there is no such task. */
-export async function loadTaskRoute(db: Executor, tenantId: string, projectId: string, taskId: string, nanoBudgetChars: number): Promise<{ readonly runId: string; readonly revision: number; readonly rowRevision: number; readonly spec: TaskSpec | null; readonly lock: RouteLock | null; readonly route: TaskRouteView } | null> {
+export async function loadTaskRoute(db: Executor, tenantId: string, projectId: string, taskId: string, nanoBudgetChars: number): Promise<{ readonly runId: string; readonly revision: number; readonly rowRevision: number; readonly spec: TaskSpec | null; readonly lock: RouteLock | null; readonly route: TaskRouteView; readonly labels: readonly unknown[] } | null> {
   const [row] = await db.select({ revision: schema.taskStatus.currentRevision, rowRevision: schema.taskStatus.rowRevision, runId: schema.taskRevisions.runId, spec: schema.taskRevisions.spec }).from(schema.taskStatus)
     .innerJoin(schema.taskRevisions, and(eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId), eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
     .where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId), eq(schema.taskStatus.taskId, taskId)));
@@ -133,7 +133,8 @@ export async function loadTaskRoute(db: Executor, tenantId: string, projectId: s
     spec, projectLabel: inputs.projectLabel, brainLabels, runDefault: inputs.runDefaults.get(row.runId)?.value ?? null, override: inputs.overrides.get(taskId),
     lastObserved: inputs.lastObserved.get(taskId) ?? null, nanoBudgetChars,
   });
-  return { runId: row.runId, revision: row.revision, rowRevision: row.rowRevision, spec, lock: routeLockFor(lockLabels(inputs.projectLabel, spec, brainLabels)), route };
+  const labels = lockLabels(inputs.projectLabel, spec, brainLabels);
+  return { runId: row.runId, revision: row.revision, rowRevision: row.rowRevision, spec, lock: routeLockFor(labels), route, labels };
 }
 
 /** A task's route history, newest first. Metadata only. */

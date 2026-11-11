@@ -68,6 +68,8 @@ interface Scenario {
   observed?: boolean;
   /** The first snapshot load waits until the test calls `window.__releaseSnapshot`, holding the shell in its loading state. */
   holdSnapshot?: boolean;
+  /** Approvals added to that fixture's snapshots, by id, such as a pending one on a task the demo has none for. */
+  extraApprovals?: Record<string, Record<string, unknown>>;
   /** Each demo agent answer waits until the test calls `window.__releaseAgents`, so a call stays in flight. */
   holdAgents?: boolean;
 }
@@ -216,9 +218,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       await held;
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
-      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch && !sc.workerPatch) return base;
+      if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch && !sc.workerPatch && !sc.extraApprovals) return base;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
-      return { ...base, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
+      return { ...base, approvals: { ...base.approvals, ...(sc.extraApprovals ?? {}) } as typeof base.approvals, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
@@ -307,6 +309,7 @@ if (sc.onboardingApi) {
   // The demo's task agents: the real adapter over the stand-in SDK. Held, each answer waits for `window.__releaseAgents`.
   let agentGate: { p: Promise<void>; release: () => void } | null = sc.holdAgents ? gate() : null;
   window.__releaseAgents = () => { agentGate?.release(); agentGate = null; };
+  (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain = () => { agentGate = gate(); };
   const agentRuntime = { sdk: createDemoSdk({ beforeGenerate: () => agentGate?.p ?? Promise.resolve() }), simulated: true };
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(

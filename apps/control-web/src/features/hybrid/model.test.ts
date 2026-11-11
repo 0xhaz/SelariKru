@@ -3,7 +3,7 @@ import type { RouteRecord } from '@selarikru/domain';
 import type { SettingView, TaskRouteView } from '@selarikru/view-protocol';
 import { iso, task } from '../overview/testing.ts';
 import { settingStatus } from '../settings/model.ts';
-import { AGENT_ACTIONS, RUNS_ON, actionAvailability, observedChip, refusalText, routeIntent, runsOnModel, sourceLabel, stepRoute, type BrowserInputs } from './model.ts';
+import { AGENT_ACTIONS, RUNS_ON, acceptBlocker, actionAvailability, effectiveStep, observedChip, refusalText, replanConfirm, revisionRefusal, routeIntent, runsOnModel, sourceLabel, stepRoute, workerRouteText, type BrowserInputs } from './model.ts';
 
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null,
@@ -145,5 +145,57 @@ describe('refusals in plain words', () => {
     expect(refusalText('route_fetch_failed')).toMatch(/could not be read/i);
     expect(refusalText('something_new')).toMatch(/stopped/i);
     for (const code of ['input_too_large_for_device', 'route_changed_in_queue', 'secret_in_input', 'cloud_source_without_approval', 'something_new']) expect(refusalText(code)).not.toMatch(/_/);
+  });
+});
+
+describe('fix round 1', () => {
+  it('one mapping from route to mode, first place and bundle destination', () => {
+    expect(effectiveStep(route(), null)).toMatchObject({ mode: 'PREFER_ON_DEVICE', place: 'device', destination: 'cloud', locked: false });
+    expect(effectiveStep(route(), 'ONLY_ON_DEVICE')).toMatchObject({ place: 'device', destination: 'local' });
+    expect(effectiveStep(route({ effective: 'PREFER_IN_CLOUD', override: 'PREFER_IN_CLOUD', source: 'task' }), null)).toMatchObject({ place: 'cloud', destination: 'cloud' });
+    expect(effectiveStep(route({ effective: 'ONLY_ON_DEVICE', source: 'lock', lock: LOCK }), 'ONLY_IN_CLOUD')).toMatchObject({ mode: 'ONLY_ON_DEVICE', place: 'device', destination: 'local', locked: true });
+    expect(effectiveStep(route({ effective: null, source: 'unset', runDefault: null }), null)).toMatchObject({ mode: null, place: null, destination: 'local' });
+  });
+
+  it('with no route at all, no one-call override is offered: the run default comes first', () => {
+    const unset = stepRoute(route({ effective: null, source: 'unset', runDefault: null }), null);
+    expect(unset.override).toBeNull();
+    expect(unset.needsDefault).toBe(true);
+    expect(stepRoute(route(), null).needsDefault).toBe(false);
+  });
+
+  it('the worker card names the effective route and the last observed source, in words', () => {
+    expect(workerRouteText(route())).toBe('AI: Local first · No AI call yet');
+    expect(workerRouteText(route({ lastObserved: record({ observedSource: 'IN_CLOUD', fellBack: true }) }))).toBe('AI: Local first · Fell back to cloud');
+    expect(workerRouteText(route({ effective: 'ONLY_ON_DEVICE', source: 'lock', lock: LOCK, lastObserved: record() }))).toBe('AI: Local only (locked) · Ran on this device');
+  });
+
+  it('accepting criteria needs a replannable task, an unlocked result, a source that can replan and a live connection', () => {
+    const ok = { status: 'ready' as const, locked: false, canRevise: true, live: true };
+    expect(acceptBlocker(ok)).toBeNull();
+    for (const status of ['planned', 'blocked', 'awaiting_approval'] as const) expect(acceptBlocker({ ...ok, status })).toBeNull();
+    for (const status of ['running', 'verifying', 'verified', 'merged', 'failed', 'cancelled', 'superseded'] as const) expect(acceptBlocker({ ...ok, status })).toMatch(new RegExp(`${status.replace('_', ' ')}.*cannot take a new revision`, 'i'));
+    expect(acceptBlocker({ ...ok, locked: true })).toMatch(/restricted/i);
+    expect(acceptBlocker({ ...ok, canRevise: false })).toMatch(/cannot take a plan revision/i);
+    expect(acceptBlocker({ ...ok, live: false })).toMatch(/live/i);
+  });
+
+  it('says what a replan does, and asks first when it withdraws an approval or closes a handover', () => {
+    expect(replanConfirm({ pendingApproval: false, openHandover: false }).confirm).toBeNull();
+    const both = replanConfirm({ pendingApproval: true, openHandover: true });
+    expect(both.consequence).toMatch(/back to planned/i);
+    expect(both.consequence).toMatch(/pending approvals .* withdrawn/i);
+    expect(both.consequence).toMatch(/handover .* closes/i);
+    expect(both.consequence).toMatch(/cost cap/i);
+    expect(both.consequence).not.toMatch(/nothing else/i);
+    expect(both.confirm?.title).toMatch(/replan/i);
+    expect(replanConfirm({ pendingApproval: false, openHandover: true }).confirm?.consequence).toMatch(/handover/i);
+  });
+
+  it('a refused revision reads in plain words, by the refusal\'s code', () => {
+    expect(revisionRefusal('stale_revision: the plan moved')).toMatch(/plan changed since/i);
+    expect(revisionRefusal('task_not_replannable: a running task')).toMatch(/cannot take a new revision/i);
+    expect(revisionRefusal('route_locked_restricted: x')).toMatch(/restricted/i);
+    expect(revisionRefusal('something odd')).toMatch(/not recorded/i);
   });
 });

@@ -132,6 +132,27 @@ export function runsOnModel(input: {
   };
 }
 
+/**
+ * The one mapping from a route to where a call runs: the effective mode (this call's override, else the task's, else the run default, after the lock), where it is
+ * meant to run first, and which context bundle it may read (`cloud` for any cloud-capable mode). The step control, the runner and the office all use it.
+ */
+export interface EffectiveStep {
+  readonly mode: RoutePolicyMode | null;
+  readonly source: RoutePolicySource;
+  readonly locked: boolean;
+  readonly place: 'device' | 'cloud' | null;
+  readonly destination: 'local' | 'cloud';
+}
+export function effectiveStep(route: Pick<TaskRouteView, 'override' | 'runDefault' | 'lock'>, callOverride: RoutePolicyMode | null): EffectiveStep {
+  const lock = route.lock ? routeLockFor([route.lock.label]) : null;
+  const e = effectiveRoutePolicy({ call: callOverride, task: route.override, run: route.runDefault, lock });
+  return {
+    mode: e.mode, source: e.source, locked: lock !== null,
+    place: e.mode === null ? null : e.mode === 'ONLY_ON_DEVICE' || e.mode === 'PREFER_ON_DEVICE' ? 'device' : 'cloud',
+    destination: e.mode !== null && isCloudCapable(e.mode) ? 'cloud' : 'local',
+  };
+}
+
 export interface StepRoute {
   readonly mode: RoutePolicyMode | null;
   readonly label: string;
@@ -139,22 +160,56 @@ export interface StepRoute {
   readonly locked: boolean;
   /** Where the call is meant to run first. Null: no route, so it cannot run. */
   readonly place: 'device' | 'cloud' | null;
-  /** The one-call override on offer. Never under the lock. */
+  /** The one-call override on offer. Never under the lock, and never before a route exists. */
   readonly override: { readonly mode: RoutePolicyMode; readonly label: string } | null;
+  /** Nothing is chosen for the task or the run: the run default comes first. */
+  readonly needsDefault: boolean;
 }
 
 /** The route one AI step will use, with this call's override if any, after the lock. The adapter reads the route again before the call; this is what is shown. */
 export function stepRoute(route: TaskRouteView, callOverride: RoutePolicyMode | null): StepRoute {
-  const lock = lockOf(route);
-  const e = effectiveRoutePolicy({ call: callOverride, task: route.override, run: route.runDefault, lock });
-  const place = e.mode === null ? null : e.mode === 'ONLY_ON_DEVICE' || e.mode === 'PREFER_ON_DEVICE' ? 'device' : 'cloud';
+  const e = effectiveStep(route, callOverride);
   // The offer is relative to the route without this call's override, so choosing it and then un-choosing it is the same control.
-  const base = effectiveRoutePolicy({ task: route.override, run: route.runDefault, lock }).mode;
-  const override = lock ? null : base === 'ONLY_IN_CLOUD' || base === 'PREFER_IN_CLOUD'
+  const base = effectiveStep(route, null);
+  const override = base.locked || base.place === null ? null : base.place === 'cloud'
     ? { mode: 'ONLY_ON_DEVICE' as const, label: 'Use this device for this call' }
     : { mode: 'ONLY_IN_CLOUD' as const, label: 'Use cloud for this call' };
-  return { mode: e.mode, label: modeLabel(e.mode), source: sourceLabel(e.source), locked: lock !== null, place, override };
+  return { mode: e.mode, label: modeLabel(e.mode), source: sourceLabel(e.source), locked: e.locked, place: e.place, override, needsDefault: base.mode === null };
 }
+
+/** The worker card's line: the task's effective route and, in words, where its last call ran. */
+export const workerRouteText = (route: TaskRouteView): string =>
+  `AI: ${modeLabel(route.effective)}${route.lock ? ' (locked)' : ''} · ${observedChip(route.lastObserved).label}`;
+
+/** The statuses the server's plan route lets take a new revision. */
+export const REPLANNABLE_STATUSES: readonly TaskView['status'][] = ['planned', 'ready', 'blocked', 'awaiting_approval'];
+
+/** Why a criteria proposal cannot be accepted now. Null: it can. */
+export function acceptBlocker(f: { readonly status: TaskView['status']; readonly locked: boolean; readonly canRevise: boolean; readonly live: boolean }): string | null {
+  if (f.locked) return 'This proposal came from restricted data. It stays on this device, and a browser proposal does not revise a restricted task.';
+  if (!f.canRevise) return 'This source cannot take a plan revision.';
+  if (!REPLANNABLE_STATUSES.includes(f.status)) return `A ${f.status.replace(/_/g, ' ')} task cannot take a new revision. Accept criteria when it is planned, ready, blocked or awaiting approval.`;
+  if (!f.live) return 'Accepting is off until the connection is live.';
+  return null;
+}
+
+const REPLAN_CONSEQUENCE = 'Accepting makes a new revision of this task through the replan path, with these criteria. The task goes back to planned, pending approvals for it are withdrawn, an open handover for it closes, and its cost cap may be set again.';
+
+/** What a replan does, and the confirmation it needs when it would withdraw an approval or close a handover. */
+export function replanConfirm(f: { readonly pendingApproval: boolean; readonly openHandover: boolean }): { readonly consequence: string; readonly confirm: { readonly title: string; readonly consequence: string; readonly keepLabel: string } | null } {
+  if (!f.pendingApproval && !f.openHandover) return { consequence: REPLAN_CONSEQUENCE, confirm: null };
+  const lost = [f.pendingApproval ? 'its pending approval is withdrawn' : null, f.openHandover ? 'its open handover closes' : null].filter(Boolean).join(' and ');
+  return { consequence: REPLAN_CONSEQUENCE, confirm: { title: 'Replan this task with these criteria?', consequence: `The task goes back to planned, ${lost}, and its cost cap may be set again. This cannot be undone.`, keepLabel: 'Keep the current criteria' } };
+}
+
+const REVISION_REFUSALS: Readonly<Record<string, string>> = {
+  stale_revision: 'The plan changed since this was read, so nothing was recorded. Draft the criteria again.',
+  task_not_replannable: 'This task cannot take a new revision in its current state, so nothing was recorded.',
+  route_locked_restricted: 'This task reads restricted data, so a browser proposal does not revise it. Nothing was recorded.',
+  criterion_unknown: 'A criterion in the proposal is not one this task has, so nothing was recorded.',
+};
+/** A refused revision in words, by the code that leads its message. */
+export const revisionRefusal = (message: string): string => REVISION_REFUSALS[/^([a-z_]+):/.exec(message)?.[1] ?? ''] ?? 'The revision was not recorded. Trying again is safe.';
 
 export const AGENT_ACTIONS: readonly { readonly kind: Exclude<RouteStepKind, 'brief' | 'plan'>; readonly label: string; readonly what: string }[] = [
   { kind: 'criteria', label: 'Draft criteria', what: 'Rewords this task\'s acceptance criteria so each can be tested.' },
@@ -193,6 +248,7 @@ const REFUSALS: Readonly<Record<string, string>> = {
   context_bundle_unreadable: 'The task\'s project context could not be read, so nothing was sent.',
   context_bundle_task_mismatch: 'The project context was for another task, so nothing was sent.',
   context_unavailable: 'The task\'s context could not be read from the server, so nothing was sent.',
+  context_destination_refused: 'This task\'s route keeps its AI steps on this device, so no cloud context was served and nothing was sent.',
   no_change: 'There is no change for this task that the browser can read, so there is nothing to review or describe.',
   no_failed_check: 'This task has no failed check to explain.',
   diff_unreadable: 'The change could not be read as a diff, so it was not reviewed.',
