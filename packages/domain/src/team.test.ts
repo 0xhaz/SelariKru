@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkDelegation, workerRoleOf, quoteName, workerLabel, workerNameProblem, type DelegationScope } from './index.ts';
+import { checkDelegation, delegationOutputSha256, workerRoleOf, quoteName, workerLabel, workerNameProblem, type DelegationScope } from './index.ts';
 
 describe('worker names (H11)', () => {
   it('accepts 1 to 24 characters in any script, trimmed, unique per project', () => {
@@ -81,5 +81,10 @@ describe('the Project Manager delegates only inside the accepted plan (H11)', ()
     const r = checkDelegation(scope, { planRevision: 3, assignments: [{ taskId: 't1', workerId: 'w1' }, { taskId: 't1', workerId: 'w1' }] });
     expect(r.apply).toHaveLength(1);
     expect(r.refuse[0]!.reason).toBe('duplicate_task');
+  });
+
+  it('M-c (fix round 2): the delegation hash leaves out each reason, and keeps every other field', () => {
+    expect(delegationOutputSha256([{ taskId: 't1', workerId: 'w1', why: 'because' }])).toBe(delegationOutputSha256([{ taskId: 't1', workerId: 'w1' }]));
+    expect(delegationOutputSha256([{ taskId: 't1', workerId: 'w1', allowedPaths: ['/'] }])).not.toBe(delegationOutputSha256([{ taskId: 't1', workerId: 'w1' }]));
   });
 });

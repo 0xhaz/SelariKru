@@ -725,4 +725,37 @@ describe('the Project Manager (H11)', () => {
     expect(r.proposal.blockedReason).toBe('research_device_only');
     expect(sdk.specs).toHaveLength(0);
   });
+
+  it('fix round 2 (I4): a PM plan sees the run\'s current tasks and may revise one by id; an id it was not given is refused; a locked task is withheld on a cloud route', async () => {
+    const plan = { planRevision: 2, tasks: [{ taskId: 't1', title: 'Add posting', role: 'backend', status: 'ready' }, { taskId: 't2', title: 'WARD-NAMES export', role: 'docs', status: 'ready', restricted: true }], workers: [] };
+    const good = { tasks: [{ key: 'T1', title: 'API', description: 'Add the route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [], revises: 't1' }] };
+    const c = setup(cloud);
+    c.sdk.result = { text: JSON.stringify(good), inferenceSource: 'in_cloud' };
+    const r = await c.catalog.pmPlan({ ...INPUTS.pmPlan, plan, policy: policy('ONLY_IN_CLOUD') });
+    expect(r.proposal.status).toBe('ok');
+    expect(c.sdk.prompts[0]).toContain('t1: Add posting');
+    expect(c.sdk.prompts[0]).toContain('t2 · restricted task (details withheld)');
+    expect(c.sdk.prompts[0]).not.toContain('WARD-NAMES');
+    const bad = setup(cloud);
+    bad.sdk.result = { text: JSON.stringify({ tasks: [{ ...good.tasks[0], revises: 'tX' }] }), inferenceSource: 'in_cloud' };
+    expect((await bad.catalog.pmPlan({ ...INPUTS.pmPlan, plan, policy: policy('ONLY_IN_CLOUD') })).proposal.status).toBe('invalid');
+  });
+
+  it('fix round 2 (M-a): on a device route that is not device only (PREFER_ON_DEVICE with no fallback), restricted history turns count in the labels', async () => {
+    const noFallback = { policyVersion: 'p1', preferredMode: 'PREFER_ON_DEVICE', selectedSources: ['s1'], destinations: [] } as never;
+    const d = setup({ runDefault: 'PREFER_ON_DEVICE', override: null, lock: null });
+    d.sdk.result = { text: JSON.stringify({ answer: 'x', citations: [] }), inferenceSource: 'on_device' };
+    const history = [{ who: 'owner' as const, text: 'RESTRICTED-TURN', classification: 'restricted' }];
+    const r = await d.catalog.pmAnswer({ ...INPUTS.pmAnswer, history, policy: noFallback });
+    // Either the turn is used and the call is locked, or it is left out; never used unlocked.
+    const used = (d.sdk.prompts[0] ?? '').includes('RESTRICTED-TURN');
+    expect(used ? r.locked : true).toBe(true);
+  });
+
+  it('fix round 2 (I5): research is refused when the task would run on this device only without the call override (the run default here)', async () => {
+    const { sdk, catalog } = setup({ runDefault: 'ONLY_ON_DEVICE', override: null, lock: null });
+    const r = await catalog.pmResearch({ ...INPUTS.pmResearch, policy: policy('ONLY_ON_DEVICE') });
+    expect(r.proposal.blockedReason).toBe('research_device_only');
+    expect(sdk.specs).toHaveLength(0);
+  });
 });

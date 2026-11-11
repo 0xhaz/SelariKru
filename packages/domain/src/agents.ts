@@ -57,6 +57,8 @@ export interface PmIds {
   readonly sourceIds?: readonly string[];
   readonly taskIds?: readonly string[];
   readonly workerIds?: readonly string[];
+  /** Fix round 2 (I4): the roles a PM plan task may take (the plan's roles); absent: the coding roles. */
+  readonly roles?: readonly string[];
 }
 
 const oneOf = (ids: readonly string[] | undefined): z.ZodType => (ids && ids.length > 0 ? z.enum(ids as [string, ...string[]]) : z.never());
@@ -103,8 +105,16 @@ export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[
       return z.strictObject({ answer: text(2000), citations: z.array(z.strictObject({ sourceId: oneOf(pm.sourceIds), note: text(300) })).max(8) });
     case 'pmResearch':
       return z.strictObject({ answer: text(2000), findings: z.array(z.strictObject({ point: text(400) })).max(8) });
+    // Fix round 2 (I4): like a plan, with the run's roles and an optional `revises` naming one of the run's current tasks it was shown.
     case 'pmPlan':
-      return agentOutputSchema('plan', criteriaIds, pm);
+      return z.strictObject({
+        tasks: z.array(z.strictObject({
+          key: planKey, title: text(120), description: text(600), role: pm.roles && pm.roles.length > 0 ? oneOf(pm.roles) : z.enum(PLAN_TASK_ROLES),
+          requirementIds: z.array(id).min(1).max(AGENT_LIMITS.criteria), paths: z.array(path).min(1).max(AGENT_LIMITS.pathsPerItem),
+          dependsOn: z.array(planKey).max(AGENT_LIMITS.planTasks - 1),
+          revises: oneOf(pm.taskIds).optional(),
+        })).min(1).max(AGENT_LIMITS.planTasks),
+      });
     case 'pmDelegate':
       return z.strictObject({ assignments: z.array(z.strictObject({ taskId: oneOf(pm.taskIds), workerId: oneOf(pm.workerIds), why: text(200) })).min(1).max(AGENT_LIMITS.planTasks) });
   }

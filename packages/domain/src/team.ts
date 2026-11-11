@@ -51,7 +51,9 @@ export function quoteName(name: string): string {
  * kept). The server applies only assignments whose hash is the one the call's route record carries.
  */
 export function delegationOutputSha256(assignments: unknown): string {
-  return sha256Hex(canonicalJson(assignments));
+  // Fix round 2 (M-c): each assignment's reason is the model's prose, shown in the browser and never sent; the hash covers every other field, as sent.
+  const bare = Array.isArray(assignments) ? assignments.map((a) => (a !== null && typeof a === 'object' ? Object.fromEntries(Object.entries(a as Record<string, unknown>).filter(([k]) => k !== 'why')) : a)) : assignments;
+  return sha256Hex(canonicalJson(bare));
 }
 
 // ---- delegation ----------------------------------------------------------------------------------------------------------

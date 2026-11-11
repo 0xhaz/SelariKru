@@ -78,7 +78,8 @@ export interface AgentInputs {
   readonly pmAnswer: PmInput;
   /** Cloud only, with Grounding with Google Search; refused on a locked route. */
   readonly pmResearch: PmInput;
-  readonly pmPlan: PmInput;
+  /** Fix round 2 (I4): the run's current tasks, so a plan task may revise one by id (`revises`). */
+  readonly pmPlan: PmInput & { readonly plan?: PmPlanScope };
   readonly pmDelegate: PmInput & { readonly plan: PmPlanScope };
 }
 
@@ -267,7 +268,7 @@ export const AGENT_CATALOG: Readonly<Record<AgentKind, AgentDefinition>> = {
 };
 
 /** The JSON Schema the SDK constrains each agent's output to. Brief and criteria keep the onboarding schemas; the others are the domain schemas. */
-export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[], pm: { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[] } = {}): Record<string, unknown> {
+export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[], pm: { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[] } = {}): Record<string, unknown> {
   if (kind === 'brief') return narrowSchema('draftBrief', criteriaIds);
   if (kind === 'criteria') return narrowSchema('suggestCriteria', criteriaIds);
   return agentOutputJsonSchema(kind, criteriaIds, pm);
@@ -276,7 +277,7 @@ export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[],
 // ---- input builders -----------------------------------------------------------------------------------------------------------
 
 type Built = { readonly prompt: string; readonly check: AgentCheckContext } | { readonly refused: string };
-interface At { readonly cloudCapable: boolean }
+interface At { readonly cloudCapable: boolean; readonly locked?: boolean }
 
 /** Missing information never counts as allowed: an input with no label is restricted, so it can only run on the device. */
 const labelOf = (l: unknown): unknown => (l === undefined || l === null ? 'restricted' : l);
@@ -450,7 +451,7 @@ function fencedContent(kind: AgentKind, input: AgentInputs[AgentKind]): string[]
   if (kind === 'triage') return [(input as AgentInputs['triage']).check.output];
   if (kind === 'pmAnswer' || kind === 'pmResearch' || kind === 'pmPlan' || kind === 'pmDelegate') {
     const i = input as PmInput;
-    const d = kind === 'pmDelegate' ? (input as AgentInputs['pmDelegate']).plan : null;
+    const d = kind === 'pmDelegate' || kind === 'pmPlan' ? (input as AgentInputs['pmDelegate']).plan ?? null : null;
     return [i.question, ...(i.history ?? []).map((t) => t.text), ...(d ? [...d.workers.map((w) => w.name ?? ''), ...d.tasks.map((t) => t.title)] : [])];
   }
   return [];
@@ -525,19 +526,27 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
     case 'pmPlan':
     case 'pmDelegate': {
       const i = input as PmInput;
-      const hist = pmHistory(i.history ?? [], at.cloudCapable);
+      // Restricted turns are read only by a locked call (H11 fix round 2, M-a): on a cloud-capable route they are left out, and on a device route that is not
+      // locked (local first with no fallback) too, so a call that read them is always locked and its reply restricted.
+      const hist = pmHistory(i.history ?? [], at.cloudCapable || at.locked !== true);
       const sourceIds = contextKeys(input.bundle);
       // History is owner and model text: fenced as data, like the question.
       out.push('', '# Conversation so far', hist.lines.length > 0 ? block('HISTORY', '', hist.lines.join('\n'), nonce) : '(none)', ...(hist.leftOut > 0 ? [`(${hist.leftOut} earlier turn${hist.leftOut === 1 ? '' : 's'} left out)`] : []));
       out.push('', '# The owner asks', block('QUESTION', '', i.question.trim(), nonce));
       const pm = { sourceIds };
       if (kind === 'pmAnswer') return finish(['Answer the owner.', sourceIds.length > 0 ? `Context keys you may cite: ${sourceIds.join(', ')}.` : 'There is no context to cite: say so if the answer needs it.'], { ...base, pm });
-      if (kind === 'pmPlan') return finish(['Draft a plan revision for this work.', idsLine(ids)], { ...base, pm });
-      const d = input as AgentInputs['pmDelegate'];
-      // A locked task's title never goes to a cloud-capable call (H11 fix round 1, H1): only its id, role and status. Titles are fenced as data.
+      // The run's current tasks, so a plan task may revise one (`revises`, by id); a locked task is listed by id, role and status only on a cloud-capable call.
       const taskLine = (x: PmPlanScope['tasks'][number]): string => x.restricted === true && at.cloudCapable
         ? `- ${x.taskId} · restricted task (details withheld) (role ${x.role}, ${x.status})`
         : `- ${x.taskId}: ${x.title.replace(/\s+/g, ' ').trim()} (role ${x.role}, ${x.status})`;
+      if (kind === 'pmPlan') {
+        const scope = (input as AgentInputs['pmPlan']).plan;
+        if (scope && scope.tasks.length > 0) out.push('', `# Current plan, revision ${scope.planRevision}`, block('PLAN', '', scope.tasks.map(taskLine).join('\n'), nonce));
+        return finish(['Draft a plan revision for this work.', idsLine(ids), ...(scope && scope.tasks.length > 0 ? ['To change a task listed above, give its id as "revises" and keep its role; a task without "revises" is new. Tasks you do not mention stay as they are.'] : [])],
+          // A plan spans the run's roles, so its paths are not bound to the subject task's: the server holds each task to its role's paths at accept.
+          { ...base, allowedPaths: [], pm: { ...pm, ...(scope ? { taskIds: scope.tasks.map((x) => x.taskId), roles: planRoles(scope) } : {}) } });
+      }
+      const d = input as AgentInputs['pmDelegate'];
       out.push('', `# Accepted plan, revision ${d.plan.planRevision}`, block('PLAN', '', d.plan.tasks.map(taskLine).join('\n'), nonce),
         '', '# Workers', ...d.plan.workers.filter((w) => w.enabled).map((w) => `- ${w.workerId}: ${w.name ? quoteName(w.name) : '(no name)'}, role ${roleLabel(w.role)}`));
       return finish(['Propose who takes each task.'], { ...base, pm: { ...pm, taskIds: d.plan.tasks.map((x) => x.taskId), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) } });
@@ -695,10 +704,14 @@ export class AgentCatalog {
   }
 }
 
+/** The roles a PM plan may use: the plan's own, and the coding roles. */
+const planRoles = (scope: PmPlanScope): string[] => [...new Set([...scope.tasks.map((t) => t.role), 'backend', 'frontend'])].sort();
+
 /** The ids a Project Manager call may name, the same ones its prompt lists. */
-function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[] } {
+function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[] } {
   if (kind !== 'pmAnswer' && kind !== 'pmResearch' && kind !== 'pmPlan' && kind !== 'pmDelegate') return {};
   const sourceIds = contextKeys(input.bundle);
+  if (kind === 'pmPlan') { const scope = (input as AgentInputs['pmPlan']).plan; return scope ? { sourceIds, taskIds: scope.tasks.map((x) => x.taskId), roles: planRoles(scope) } : { sourceIds }; }
   if (kind !== 'pmDelegate') return { sourceIds };
   const d = input as AgentInputs['pmDelegate'];
   return { sourceIds, taskIds: d.plan.tasks.map((x) => x.taskId), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) };

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, CRITERION_DESCRIPTIONS, err, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
+import { canonicalJson, CRITERION_DESCRIPTIONS, err, mapPmPlan, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
 import { readFileSync } from 'node:fs';
 import { PlanTaskSchema } from '@selarikru/protocol';
 import { z } from 'zod';
@@ -176,4 +176,56 @@ export function reviewPlanProposal(
     if (missing.length > 0) return err({ code: 'acknowledgement_required', paths: [...new Set(missing)] });
   }
   return ok({ tasks, needsReview, issues: v.issues, droppedFields: !c.rolePaths && v.data.tasks.some((t) => t.role !== undefined) ? ['role'] : [] });
+}
+
+// ---- H11 fix round 2 (I4): a Project Manager plan -------------------------------------------------------------------------------
+
+const PmPlanTaskInput = z.strictObject({
+  key: z.string().regex(/^T\d{1,2}$/), title: z.string().min(1).max(120), description: z.string().min(1).max(600), role: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
+  requirementIds: z.array(z.string().min(1)).min(1).max(8), paths: z.array(z.string().min(1).max(512)).min(1).max(8), dependsOn: z.array(z.string()).max(11),
+  revises: z.string().min(1).max(200).optional(),
+});
+const PmPlanInput = z.strictObject({ tasks: z.array(PmPlanTaskInput).min(1).max(12) });
+
+export type PmPlanReviewError = PlanReviewError | { code: 'pm_plan_refused'; reason: string; key: string };
+
+/**
+ * The Assistant's review of a Project Manager plan (fix round 2, I4): the same server configuration and requirement checks, with the plan mapped onto the run by
+ * `mapPmPlan`. A revision starts from the task's current spec (its board, limits, policy, label and base stay), taking the PM's title, description, criteria, paths
+ * and dependencies; a new task is built from the project's configuration, as any reviewed task is. The candidates go to the plan-revision route with the pmPlan call
+ * named, where H5's backstop judges that call.
+ */
+export function reviewPmPlan(data: unknown, rawConfig: ProjectPlanConfig, existing: readonly TaskSpec[], opts: { taskIdPrefix: string }): Result<PlanReview, PmPlanReviewError> {
+  const cfg = ProjectPlanConfigSchema.safeParse(rawConfig);
+  if (!cfg.success) return err({ code: 'missing_server_config', details: cfg.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
+  const c = cfg.data;
+  if (c.classification === 'secret' || c.classification === 'restricted') return err({ code: 'proposal_not_acceptable', reason: 'restricted_without_grant' });
+  const parsed = PmPlanInput.safeParse(data);
+  if (!parsed.success) return err({ code: 'proposal_rejected', issues: parsed.error.issues.map((i) => ({ kind: 'schema', path: `/${i.path.join('/')}`, message: i.message }) as unknown as ProposalIssue) });
+  const allowedIds = new Set(c.allowedRequirementIds);
+  const unknownId = parsed.data.tasks.findIndex((t) => t.requirementIds.some((id) => !allowedIds.has(id)));
+  if (unknownId >= 0) return err({ code: 'proposal_rejected', issues: [{ kind: 'unknown_requirement', path: `/tasks/${unknownId}/requirementIds`, message: 'not one of this project\'s criteria' } as unknown as ProposalIssue] });
+  const mapped = mapPmPlan(parsed.data.tasks, existing.map((s) => ({ taskId: s.taskId, revision: s.revision, role: s.role, locked: s.classification === 'restricted' || s.classification === 'secret', allowedPaths: s.allowedPaths })), {
+    newTaskId: (i) => `${opts.taskIdPrefix}-${i + 1}`, rolePaths: c.rolePaths, allowedPaths: c.allowedPaths,
+  });
+  if (!mapped.ok) return err({ code: 'pm_plan_refused', reason: mapped.reason, key: mapped.key });
+  const tasks: TaskSpec[] = [];
+  const bad: { path: string; message: string }[] = [];
+  mapped.items.forEach((m, i) => {
+    const criteria = m.requirementIds.flatMap((id) => (c.requirementText?.[id] !== undefined ? [{ id, text: c.requirementText[id] }] : []));
+    const prior = m.revises ? existing.find((s) => s.taskId === m.revises)! : null;
+    const base = prior ? { ...prior } : {
+      schemaVersion: 1, tenantId: c.tenantId, projectId: c.projectId, runId: c.runId, boardId: c.boardId, baseSha: c.baseSha, contractRefs: [], resourceClaims: [],
+      classification: c.classification, policyVersion: c.policyVersion, execution: c.execution, inferencePolicyId: c.inferencePolicyId, limits: c.limits,
+    };
+    const spec = PlanTaskSchema.safeParse({
+      ...base, taskId: m.taskId, revision: m.revision, role: m.role, title: m.title, description: m.description, requirementIds: [...m.requirementIds],
+      ...(criteria.length > 0 ? { criteria } : {}), allowedPaths: [...m.allowedPaths], dependencies: m.dependencies.map((d) => ({ ...d })),
+      acceptanceCheckIds: m.requirementIds.filter((id) => Object.hasOwn(CRITERION_DESCRIPTIONS, id)),
+    });
+    if (spec.success) tasks.push(spec.data);
+    else for (const is of spec.error.issues) bad.push({ path: `tasks.${i}.${is.path.join('.')}`, message: is.message });
+  });
+  if (bad.length > 0) return err({ code: 'task_invalid', details: bad });
+  return ok({ tasks, needsReview: false, issues: [], droppedFields: [] });
 }

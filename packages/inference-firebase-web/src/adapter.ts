@@ -58,7 +58,8 @@ export interface CallSpec {
   /** The output cites criterion IDs, so a call with none is refused. */
   readonly citesCriteria: boolean;
   /** Builds the prompt for the route in force. `cloudCapable`: the model may answer from the cloud. A refusal is a code, and blocks the call. */
-  prompt(at: { readonly mode: InferenceMode; readonly cloudCapable: boolean }): { readonly prompt: string } | { readonly refused: string };
+  /** `locked`: the call's route is locked to the device (its labels or the server's lock), so restricted input may be read and the result stays here. */
+  prompt(at: { readonly mode: InferenceMode; readonly cloudCapable: boolean; readonly locked?: boolean }): { readonly prompt: string } | { readonly refused: string };
   /** Checks a schema-valid response against the call's context. Codes and JSON paths only, never the response's text. Any entry makes the response invalid. */
   check?(data: unknown): readonly string[];
   /** H11: Grounding with Google Search. Only on a cloud-only route that is not locked; anywhere else the call is refused before any model call. */
@@ -376,10 +377,13 @@ export class FirebaseHybridAssistantAdapter {
     if (spec.grounding) {
       if (current?.lock) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_locked' });
       // The owner set this task to device only: research never overrides that, whatever the call asks for.
-      if (read.fresh?.override === 'ONLY_ON_DEVICE') return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_device_only' });
+      // Fix round 2: the route the task would use without this call's override (its own override, else the run default or the seed) is device only.
+      if (read.fresh?.override === 'ONLY_ON_DEVICE' || effectiveRoutePolicy({ call: null, task: read.fresh?.override ?? null, run: read.fresh?.runDefault ?? null, lock: null }).mode === 'ONLY_ON_DEVICE') {
+        return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_device_only' });
+      }
       if (mode !== 'ONLY_IN_CLOUD' || deviceMustServe) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_cloud_only' });
     }
-    const built = spec.prompt({ mode, cloudCapable: !deviceMustServe });
+    const built = spec.prompt({ mode, cloudCapable: !deviceMustServe, locked: current?.lock != null });
     if ('refused' in built) return make({ status: 'blocked', requestedMode: mode, blockedReason: built.refused });
     const systemInstruction = spec.systemInstruction;
     const prompt = built.prompt;

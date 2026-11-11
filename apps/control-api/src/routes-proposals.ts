@@ -1,12 +1,13 @@
 import { schema } from '@selarikru/persistence';
 import { evaluate } from '@selarikru/policy';
 import { redactSecrets } from '@selarikru/protocol';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
+import { TaskSpecSchema } from '@selarikru/domain';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
-import { proposalContentSha256, reviewPlanProposal, ProjectPlanConfigSchema, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
+import { proposalContentSha256, reviewPlanProposal, reviewPmPlan, ProjectPlanConfigSchema, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
 import { onboardingPlanSettings } from './routes-onboarding.ts';
 import { parseBody } from './routes-owner.ts';
 import { newId, requireProject, requireRun } from './store.ts';
@@ -42,6 +43,14 @@ const ownerOf = (req: FastifyRequest): string => {
 };
 const idParam = (req: FastifyRequest): string => (req.params as { id: string }).id;
 const context = (draftId: string, sha: string) => `reclassify:${draftId}:${sha}`;
+const PM_PLAN_REFUSAL: Readonly<Record<string, string>> = {
+  revises_unknown: 'The plan revises a task this run does not have.',
+  revises_locked: 'The plan revises a task that holds restricted data; that task is planned on this device only.',
+  revises_duplicate: 'Two tasks of the plan revise the same task.',
+  revises_role_changed: 'A revision keeps its task\'s role; a new role needs a new task.',
+  path_outside_role: 'A task names a path outside its role\'s paths.',
+  dependency_unknown: 'A task depends on a key the plan does not have.',
+};
 
 function toAppError(e: PlanReviewError): AppError {
   switch (e.code) {
@@ -88,6 +97,20 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
       }
     }
 
+    // H11 fix round 2 (I4): a Project Manager plan maps onto the run's current tasks (revises), reviewed with the same configuration.
+    if (body.envelope.operation === 'pmPlan') {
+      if (body.envelope.status !== 'ok') throw new AppError(422, 'proposal_not_acceptable', 'this proposal cannot be accepted', { reason: `status_${body.envelope.status}` });
+      const current = await db.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
+        eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
+        .where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
+      const existing = current.flatMap((x) => { const p = TaskSpecSchema.safeParse(x.spec); return p.success ? [p.data] : []; });
+      const pm = reviewPmPlan(body.envelope.data, cfg.data, existing, { taskIdPrefix: newId('prop').replace(/_/g, '-') });
+      if (!pm.ok) {
+        if (pm.error.code === 'pm_plan_refused') throw new AppError(422, 'pm_plan_refused', PM_PLAN_REFUSAL[pm.error.reason] ?? 'this plan cannot be accepted', { reason: pm.error.reason, key: pm.error.key });
+        throw toAppError(pm.error as PlanReviewError);
+      }
+      return reply.code(200).send({ expectedRevision: run.planRevision ?? 0, tasks: pm.value.tasks, needsReview: false, droppedFields: [], issues: [] });
+    }
     const r = reviewPlanProposal(body.envelope, cfg.data, {
       taskIdPrefix: newId('prop').replace(/_/g, '-'),
       ...(body.acknowledgedIssuePaths ? { acknowledgedIssuePaths: body.acknowledgedIssuePaths } : {}),
