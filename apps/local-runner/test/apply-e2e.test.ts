@@ -11,7 +11,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { checkPatch, selectFilesByName, sha256Hex, type AcceptedProposal } from '@selarikru/domain';
 import { buildApp } from '@selarikru/control-api';
-import { OWNER_TOKEN, PROJECT, enrolRunner, fakeVerifier, resetDb, seedTask, setupTestDb, specFor, testConfig, type TestDb } from '@selarikru/control-api/test-helpers';
+import { OWNER_TOKEN, PROJECT, RUN, enrolRunner, fakeVerifier, resetDb, seedTask, setupTestDb, specFor, testConfig, type TestDb } from '@selarikru/control-api/test-helpers';
 import { applyVerification, createScheduler } from '@selarikru/workflow';
 import { POLICY, TEST_CATALOG, TENANT, testClock } from '@selarikru/workflow/test-helpers';
 import { createAssemblyDriver } from '../../../services/verifier/src/assembly-driver.ts';
@@ -19,6 +19,8 @@ import { HttpRunnerApi } from '../src/api.ts';
 import type { AttemptDeps } from '../src/attempt.ts';
 import { RunnerLoop, harnessReportFor } from '../src/loop.ts';
 import { makeWorld, type World } from './world.ts';
+import { FirebaseHybridAssistantAdapter } from '../../../packages/inference-firebase-web/src/adapter.ts';
+import { AgentCatalog } from '../../../packages/inference-firebase-web/src/agents.ts';
 
 let t: TestDb;
 let w: World | null = null;
@@ -130,6 +132,81 @@ describe('a proposal accepted in the browser becomes a verified candidate, with 
       const types = (await t.db.execute(sql`SELECT type FROM events ORDER BY sequence`)).map((r) => String(r['type']));
       expect(types).toEqual(expect.arrayContaining(['proposal.accepted', 'attempt.started', 'attempt.completed', 'candidate.assembled']));
       expect(JSON.stringify(await t.db.execute(sql`SELECT payload FROM events`))).not.toContain('posts: string[]');
+    } finally {
+      stop.abort();
+      await running;
+      await app.close();
+    }
+  });
+});
+
+describe('a local agent\'s change on Local only is accepted and applied (H5 fix round 3)', () => {
+  it('an internal task on Local only: the patch agent runs on the device through the real adapter, is not locked, is accepted and applied with no model', async () => {
+    await resetDb(t.db);
+    await t.db.execute(sql`DELETE FROM runners`);
+    const clock = testClock(new Date().toISOString());
+    const config = testConfig({ codingWorkers: 'off' });
+    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: clock.now, policy: POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY, codingWorkers: 'off' }), catalog: TEST_CATALOG });
+    const base = await app.listen({ host: '127.0.0.1', port: 0 });
+    const stop = new AbortController();
+    let running: Promise<void> | null = null;
+    try {
+      w = await makeWorld();
+      await seedTask(t.db, specFor('T1', { baseSha: w.sha, allowedPaths: ['src'], projectId: PROJECT, title: 'Change the app constant', criteria: [{ id: 'R1', text: 'The app constant is 2.' }], requirementIds: ['R1'] }));
+      const owner = { authorization: `Bearer ${OWNER_TOKEN}` };
+      const call = async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
+        const res = await app.inject({ method, url, headers: owner, ...(payload !== undefined ? { payload: payload as object } : {}) });
+        return { status: res.statusCode, body: res.json() as any };
+      };
+      // The run's default: Local only.
+      expect((await call('POST', `/v1/projects/${PROJECT}/settings`, { key: RUN, change: { scope: 'run', field: 'route_policy', value: 'ONLY_ON_DEVICE' }, expectedRevision: 0, idempotencyKey: 'local-only' })).status).toBe(200);
+      const enrolled = await enrolRunner(app, 'local', []);
+      const api = new HttpRunnerApi(base, enrolled.token);
+      const deps: AttemptDeps = {
+        api, runtime: w.runtime, artifacts: w.artifacts, workRoot: w.workRoot, repos: { [PROJECT]: w.repo },
+        heartbeatMs: 20, maxMissedHeartbeats: 3, cpus: 2, memoryMiB: 4096, log: (l) => w!.logs.push(l), codingWorkers: 'off', harnesses: [],
+      };
+      const loop = new RunnerLoop({ api, runtime: w.runtime, attempt: deps, pollMs: 20, fileRequestMs: 20, log: (l) => w!.logs.push(l), harnessReport: harnessReportFor('off', async () => []) });
+      running = loop.run(stop.signal);
+
+      // The browser: a fresh route read, the device context, the task's files through the relay, then the real adapter and catalog over a stand-in device model.
+      const fetchRoute = async (_p: string, taskId: string) => (await call('GET', `/v1/projects/${PROJECT}/tasks/${taskId}/route`)).body.route;
+      const route = await fetchRoute(PROJECT, 'T1');
+      expect(route).toMatchObject({ effective: 'ONLY_ON_DEVICE', lock: null });
+      const ctx = (await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local`)).body;
+      const listing = (await call('POST', `/v1/projects/${PROJECT}/tasks/T1/files/list`, {})).body;
+      const read = (await call('POST', `/v1/projects/${PROJECT}/tasks/T1/files`, { paths: selectFilesByName(listing.entries, [ctx.task.title, ...ctx.task.criteria.map((c: { text: string }) => c.text)]) })).body;
+      const specs: { mode: string }[] = [];
+      const sdk = {
+        availability: async () => 'available' as const, initializeDeviceModel: async () => {},
+        createModel: (spec: { mode: string }) => { specs.push(spec); return { generate: async () => ({ text: JSON.stringify({ summary: 'Set the constant.', diff: DIFF }), inferenceSource: 'on_device' as const }) }; },
+      };
+      const adapter = new FirebaseHybridAssistantAdapter({ sdk: sdk as never, fetchRoute });
+      const catalog = new AgentCatalog(adapter, { reportRoute: async (_p, taskId, report) => { expect((await call('POST', `/v1/tasks/${taskId}/client-reports`, report)).status).toBe(201); } });
+      const sourceId = 'task:T1';
+      const r = await catalog.patch({
+        projectId: PROJECT, task: { taskId: 'T1', title: ctx.task.title, description: ctx.task.description, criteria: ctx.task.criteria, allowedPaths: ctx.task.allowedPaths, classification: ctx.task.classification },
+        bundle: ctx.bundle, sources: [{ id: sourceId, classification: ctx.task.classification }],
+        policy: { policyVersion: 'task-route.1', selectedSources: [sourceId], destinations: [{ destination: 'firebase-ai-logic-cloud', purpose: 'inference', classifications: ['public', 'internal'] }] } as never,
+        files: read.files.map((f: { path: string; content: string }) => ({ ...f, classification: ctx.task.classification })),
+      });
+      expect(r.proposal.status).toBe('ok');
+      expect(r.locked).toBe(false);
+      expect(specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE' });
+      expect(r.reported).toBe('sent');
+
+      // Accept: the checked results, the base from the listing, the call's own route record.
+      const proposal: AcceptedProposal = {
+        proposalId: r.proposal.requestId, taskId: 'T1', taskRevision: listing.revision, baseSha: listing.baseSha, routeRecordId: r.report!.requestId, diff: DIFF,
+        results: r.patch!.results.map((f) => ({ path: f.path, sha256: f.content === null ? null : sha256Hex(f.content), content: f.content })),
+      };
+      const accepted = await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'local-1', proposal });
+      expect([accepted.status, accepted.body.state]).toEqual([201, 'accepted']);
+      await until(async () => String((await t.db.execute(sql`SELECT status FROM task_status WHERE task_id = 'T1'`))[0]!['status']) === 'verifying');
+      const [attempt] = await t.db.execute(sql`SELECT model_route, detail FROM attempts WHERE task_id = 'T1'`);
+      expect(attempt!['model_route']).toBe('none');
+      const manifest = JSON.parse(Buffer.from((await w.artifacts.get((attempt!['detail'] as { changeManifestSha256: string }).changeManifestSha256))!).toString()) as { changes: { path: string }[] };
+      expect(manifest.changes.map((c) => c.path)).toEqual(['src/app.ts', 'src/posts.ts']);
     } finally {
       stop.abort();
       await running;

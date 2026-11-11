@@ -502,3 +502,15 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
     claims: served, omissions,
   };
 }
+
+/**
+ * The labels of what a context bundle actually holds (H5 fix round 3), for a call whose route keeps it on the device. A bundle that cannot be read is restricted. A
+ * claim carries no label of its own yet (a carry), so each served claim counts as internal; restricted or secret sources reach a task's own label, which the call
+ * counts separately. A bundle with no claims carries no content. A device bundle on a cloud-capable route is judged by where it was built instead: restricted.
+ */
+export function bundleContentLabels(bundle: unknown): string[] {
+  if (bundle === null || bundle === undefined) return [];
+  const b = BrainBundleSchema.safeParse(bundle);
+  if (!b.success) return ['restricted'];
+  return b.data.claims.length === 0 ? [] : ['internal'];
+}

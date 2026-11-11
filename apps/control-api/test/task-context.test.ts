@@ -127,3 +127,14 @@ describe('fix round 2: predecessor labels in one pass, failing closed without ab
     expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/down/route`)).body.route.lock).toMatchObject({ label: 'secret' });
   });
 });
+
+describe('fix round 3: a restricted claim keeps a Local only task locked (H5)', () => {
+  it('a task with a restricted Brain source is locked on Local only, and its proposal is refused before it is read', async () => {
+    await onboardingChoice('ONLY_ON_DEVICE');
+    await seedTask(t.db, specFor('t1', { allowedPaths: ['src'] }));
+    await brainSource('t1', 'restricted', ['local'], 'note:restricted-claim');
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`)).body.route).toMatchObject({ effective: 'ONLY_ON_DEVICE', lock: { label: 'restricted' } });
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/context?destination=local`)).body.task.classification).toBe('restricted');
+    expect((await post(h.app, `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`, { idempotencyKey: 'k', proposal: {} })).body.error.code).toBe('proposal_restricted');
+  });
+});

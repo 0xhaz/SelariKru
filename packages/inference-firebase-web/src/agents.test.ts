@@ -515,3 +515,37 @@ describe('fix round 2: a locked call reports no output hash (m1)', () => {
     expect(JSON.stringify(events)).not.toContain('outputSha256');
   });
 });
+
+describe('fix round 3: a device bundle is labelled by what it holds on a device-only route', () => {
+  const LOCAL_ONLY: FreshRoute = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null };
+  const patchInput = (over: Partial<AgentInputs['patch']> = {}): AgentInputs['patch'] => ({ ...INPUTS.patch, request: undefined, bundle: bundle({ destination: 'local' }), ...over });
+
+  it('an internal task on Local only, with a device bundle holding internal claims and internal files, is not locked; it stays on the device and its report carries the hash', async () => {
+    const { sdk, reports, catalog } = setup(LOCAL_ONLY);
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    const r = await catalog.patch(patchInput());
+    expect(r.proposal.status).toBe('ok');
+    expect(r.locked).toBe(false);
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+    const { sha256Hex } = await import('@selarikru/domain');
+    expect(reports[0]!.report.outputSha256).toBe(sha256Hex(DIFF));
+  });
+
+  it('restricted content in the call (the task\'s label, carrying its sources, or an included file) locks it: no hash', async () => {
+    for (const input of [patchInput({ task: { ...task, classification: 'restricted' } }), patchInput({ files: [{ ...files[0]!, classification: 'restricted' }] })]) {
+      const { sdk, reports, catalog } = setup(LOCAL_ONLY);
+      sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+      const r = await catalog.patch(input);
+      expect(r.locked).toBe(true);
+      expect(reports[0]!.report).not.toHaveProperty('outputSha256');
+    }
+  });
+
+  it('a device bundle on Cloud first is still treated as restricted: the call locks to the device', async () => {
+    const { sdk, catalog } = setup({ runDefault: 'PREFER_IN_CLOUD', override: null, lock: null });
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    const r = await catalog.patch(patchInput());
+    expect(r.locked).toBe(true);
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+  });
+});

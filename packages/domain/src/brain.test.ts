@@ -344,3 +344,14 @@ describe('compileBrain', () => {
     expect(bundle(null, [])).toMatchObject({ compilationVersion: null, claims: [], omissions: [], watermark: 0, indexLag: 0, compiledAt: null });
   });
 });
+
+describe('bundleContentLabels (H5 fix round 3)', () => {
+  it('labels a bundle by what it holds: served claims count as internal, none is nothing, unreadable is restricted', async () => {
+    const { bundleContentLabels } = await import('./index.ts');
+    const b = { schemaVersion: 1, destination: 'local', taskId: 't1', compilationVersion: null, generator: { id: 'g', version: '1' }, watermark: 0, sourceHead: 0, indexLag: 0, recordsPending: false, compiledAt: null, pinned: [], omissions: [] };
+    expect(bundleContentLabels({ ...b, claims: [] })).toEqual([]);
+    expect(bundleContentLabels({ ...b, claims: [{ claimId: 'c1', page: 'overview', key: 'criterion:AC-1', heading: 'h', text: 't', status: 'current', standing: 'accepted', citations: [{ sourceId: 'brief:b1', revision: 1, anchor: 'a1' }] }] })).toEqual(['internal']);
+    expect(bundleContentLabels({ broken: true })).toEqual(['restricted']);
+    expect(bundleContentLabels(null)).toEqual([]);
+  });
+});

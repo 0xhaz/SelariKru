@@ -67,6 +67,11 @@ export interface AgentCallRequest extends Omit<AssistRequest, 'taskText' | 'rout
   readonly route: AssistRoute;
   /** Labels of everything else the prompt reads (the task, the files). Restricted locks the call to the device; secret, or anything that is not a label, blocks it. */
   readonly labels?: readonly unknown[];
+  /**
+   * The same labels with a device bundle judged by what it holds (H5 fix round 3). Used instead of `labels` only when the route, with them, keeps the call on the device
+   * (device only): then nothing reaches the cloud whatever the bundle was built for. Absent: `labels` always.
+   */
+  readonly deviceLabels?: readonly unknown[];
 }
 
 /** The prompt's size against the device model's input budget, in characters (system instruction plus prompt). */
@@ -452,13 +457,22 @@ export class FirebaseHybridAssistantAdapter {
   }
 }
 
-type CallRequest = Omit<AssistRequest, 'taskText'> & { readonly labels?: readonly unknown[] };
+type CallRequest = Omit<AssistRequest, 'taskText'> & { readonly labels?: readonly unknown[]; readonly deviceLabels?: readonly unknown[] };
 
 /** The lock and the effective policy for a request, from a fresh read. Null when the request names no task. */
 function routeOf(req: CallRequest, fresh: FreshRoute | null): { lock: RouteLock | null; effective: EffectiveRoutePolicy } | null {
   if (!req.route || !fresh) return null;
-  const lock = routeLockFor([...req.sources.map((s) => s.classification), ...(req.labels ?? []), ...(fresh.lock ? ['restricted'] : [])]);
-  return { lock, effective: effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock }) };
+  const lockFrom = (labels: readonly unknown[]) => routeLockFor([...req.sources.map((s) => s.classification), ...labels, ...(fresh.lock ? ['restricted'] : [])]);
+  const policyWith = (lock: RouteLock | null) => effectiveRoutePolicy({ call: req.route!.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock });
+  // H5 fix round 3: when the route keeps the call on the device anyway (device only, with the content as it is), what the call reads is judged by its content, so an
+  // internal task's device bundle does not lock it. Any cloud-capable route judges a device bundle by where it was built: restricted, so the call locks to the device.
+  if (req.deviceLabels) {
+    const lock = lockFrom(req.deviceLabels);
+    const effective = policyWith(lock);
+    if (effective.mode === 'ONLY_ON_DEVICE') return { lock, effective };
+  }
+  const lock = lockFrom(req.labels ?? []);
+  return { lock, effective: policyWith(lock) };
 }
 
 /** An onboarding operation as a call: its fixed instruction and schema, and the request's own text then the allowed IDs. */

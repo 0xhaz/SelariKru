@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, reservedPath, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -250,8 +250,9 @@ const givenFileLabels = (files: readonly AgentFile[], allowed: readonly string[]
 ];
 
 /** Labels of everything the prompt may read, known before the route: the task, the bundle, the files, the diff's paths and any free text. */
-function labelsFor(kind: AgentKind, input: AgentInputs[AgentKind]): unknown[] {
-  const labels: unknown[] = [labelOf(input.task.classification), ...bundleLabels(input.bundle)];
+function labelsFor(kind: AgentKind, input: AgentInputs[AgentKind], bundleAs: 'built_for' | 'content' = 'built_for'): unknown[] {
+  // On a cloud-capable route a device bundle counts as restricted, by where it was built; on a device-only route, by what it holds.
+  const labels: unknown[] = [labelOf(input.task.classification), ...(bundleAs === 'content' ? bundleContentLabels(input.bundle) : bundleLabels(input.bundle))];
   const allowed = input.task.allowedPaths;
   switch (kind) {
     case 'patch': {
@@ -465,6 +466,7 @@ export class AgentCatalog {
       projectId: input.projectId, allowedRequirementIds: [], sources: input.sources, policy: input.policy,
       route: { taskId: input.task.taskId, stepKind: 'patch', callOverride: input.callOverride ?? null },
       labels: [labelOf(input.task.classification), ...bundleLabels(input.bundle)],
+      deviceLabels: [labelOf(input.task.classification), ...bundleContentLabels(input.bundle)],
     });
     const report = routeReportOf(proposal);
     let reported: AgentResult['reported'] = 'not_sent';
@@ -505,6 +507,7 @@ export class AgentCatalog {
       projectId: input.projectId, allowedRequirementIds: ids, sources: input.sources, policy: input.policy,
       route: { taskId: input.task.taskId, stepKind: kind, callOverride: input.callOverride ?? null },
       labels: labelsFor(kind, input),
+      deviceLabels: labelsFor(kind, input, 'content'),
     });
     const base = routeReportOf(proposal);
     // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output. Never for a locked call: a
