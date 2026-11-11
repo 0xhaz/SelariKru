@@ -88,4 +88,14 @@ describe('a task context for its agents (H4)', () => {
     await seedTask(t.db, specFor('unset'));
     expect((await context('unset', 'cloud')).status).toBe(409);
   });
+
+  it('sizes the input without serving it: counts for the allowed destination, refused like the context', async () => {
+    await seedTask(t.db, specFor('t1', { title: 'Search', description: 'Index it.', criteria: [{ id: 'FB-1', text: 'Finds by title' }], requirementIds: ['FB-1'] }));
+    const size = await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/context-size?destination=cloud`);
+    expect(size.status).toBe(200);
+    expect(size.body).toEqual({ taskId: 't1', destination: 'cloud', hasChange: false, inputChars: 'Search'.length + 'Index it.'.length + 'Finds by title'.length });
+    await seedTask(t.db, specFor('locked', { classification: 'restricted' }));
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/locked/context-size?destination=cloud`)).body.error.code).toBe('context_destination_refused');
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/locked/context-size?destination=local`)).status).toBe(200);
+  });
 });

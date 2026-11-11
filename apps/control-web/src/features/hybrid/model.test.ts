@@ -143,6 +143,8 @@ describe('refusals in plain words', () => {
     expect(refusalText('cloud_not_granted_for_label')).toMatch(/may not go to the cloud/i);
     expect(refusalText('device_unavailable')).toMatch(/not ready/i);
     expect(refusalText('route_fetch_failed')).toMatch(/could not be read/i);
+    expect(refusalText('context_destination_refused')).toMatch(/keeps its AI steps on this device/i);
+    expect(refusalText('task_spec_unreadable')).toMatch(/spec/i);
     expect(refusalText('something_new')).toMatch(/stopped/i);
     for (const code of ['input_too_large_for_device', 'route_changed_in_queue', 'secret_in_input', 'cloud_source_without_approval', 'something_new']) expect(refusalText(code)).not.toMatch(/_/);
   });
@@ -196,6 +198,14 @@ describe('fix round 1', () => {
     expect(revisionRefusal('stale_revision: the plan moved')).toMatch(/plan changed since/i);
     expect(revisionRefusal('task_not_replannable: a running task')).toMatch(/cannot take a new revision/i);
     expect(revisionRefusal('route_locked_restricted: x')).toMatch(/restricted/i);
+    for (const code of ['plan_invalid', 'path_not_allowed', 'criteria_not_covered', 'roles_not_covered', 'plan_over_run_budget', 'policy_denied']) {
+      const text = revisionRefusal(`${code}: server words`);
+      expect(text, code).toMatch(/not recorded/i);
+      expect(text, code).not.toMatch(/try again|trying again|retry/i);
+      expect(text, code).not.toBe(revisionRefusal('something odd'));
+    }
+    expect(new Set(['plan_invalid', 'path_not_allowed', 'criteria_not_covered', 'roles_not_covered', 'plan_over_run_budget', 'policy_denied'].map((c) => revisionRefusal(`${c}: x`))).size).toBe(6);
     expect(revisionRefusal('something odd')).toMatch(/not recorded/i);
+    expect(revisionRefusal('something odd')).not.toMatch(/safe|will work/i);
   });
 });

@@ -16,4 +16,11 @@ describe('reading whether a task has a change', () => {
     expect(await loadFactsWithRetry(read, async () => undefined)).toEqual({ hasChange: true, inputChars: 10 });
     expect(read).toHaveBeenCalledTimes(2);
   });
+
+  it('does not retry a refusal: only a transport failure is tried again', async () => {
+    const refusal = Object.assign(new Error('context_destination_refused: x'), { transient: false });
+    const read = vi.fn(async () => { throw refusal; });
+    expect(await loadFactsWithRetry(read, async () => undefined, (e) => (e as { transient?: boolean }).transient !== false)).toBeNull();
+    expect(read).toHaveBeenCalledTimes(1);
+  });
 });

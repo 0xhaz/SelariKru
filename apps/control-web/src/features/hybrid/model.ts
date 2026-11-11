@@ -207,9 +207,16 @@ const REVISION_REFUSALS: Readonly<Record<string, string>> = {
   task_not_replannable: 'This task cannot take a new revision in its current state, so nothing was recorded.',
   route_locked_restricted: 'This task reads restricted data, so a browser proposal does not revise it. Nothing was recorded.',
   criterion_unknown: 'A criterion in the proposal is not one this task has, so nothing was recorded.',
+  // The plan route's own checks. None of these changes on a retry: the plan, the run's settings or the policy has to change first.
+  plan_invalid: 'The revised plan did not pass the plan checks, so the revision was not recorded.',
+  path_not_allowed: 'This task\'s paths are no longer all approved for the run, so the revision was not recorded. Give the paths back under Bounded autonomy first.',
+  criteria_not_covered: 'The revised plan would leave a required criterion with no task, so the revision was not recorded.',
+  roles_not_covered: 'The revised plan would leave a role this project needs with no task, so the revision was not recorded.',
+  plan_over_run_budget: 'This run has no budget left for the revised task, so the revision was not recorded.',
+  policy_denied: 'Policy does not allow planning here, so the revision was not recorded.',
 };
-/** A refused revision in words, by the code that leads its message. */
-export const revisionRefusal = (message: string): string => REVISION_REFUSALS[/^([a-z_]+):/.exec(message)?.[1] ?? ''] ?? 'The revision was not recorded. Trying again is safe.';
+/** A refused revision in words, by the code that leads its message. The fallback promises nothing about a retry. */
+export const revisionRefusal = (message: string): string => REVISION_REFUSALS[/^([a-z_]+):/.exec(message)?.[1] ?? ''] ?? 'The revision was not recorded.';
 
 export const AGENT_ACTIONS: readonly { readonly kind: Exclude<RouteStepKind, 'brief' | 'plan'>; readonly label: string; readonly what: string }[] = [
   { kind: 'criteria', label: 'Draft criteria', what: 'Rewords this task\'s acceptance criteria so each can be tested.' },
@@ -249,6 +256,7 @@ const REFUSALS: Readonly<Record<string, string>> = {
   context_bundle_task_mismatch: 'The project context was for another task, so nothing was sent.',
   context_unavailable: 'The task\'s context could not be read from the server, so nothing was sent.',
   context_destination_refused: 'This task\'s route keeps its AI steps on this device, so no cloud context was served and nothing was sent.',
+  task_spec_unreadable: 'This task\'s spec could not be read, so nothing was given to the agent.',
   no_change: 'There is no change for this task that the browser can read, so there is nothing to review or describe.',
   no_failed_check: 'This task has no failed check to explain.',
   diff_unreadable: 'The change could not be read as a diff, so it was not reviewed.',

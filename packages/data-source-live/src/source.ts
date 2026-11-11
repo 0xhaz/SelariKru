@@ -3,7 +3,7 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
-import { CriteriaRevisionRequestSchema, TaskAgentContextSchema, type CriteriaRevisionResult, type TaskAgentContext } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, TaskAgentContextSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type TaskAgentContext, type TaskContextSize } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -245,6 +245,17 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
 
     /** What a task's agents read, with the bundle for `destination`. A context served for another destination or task is refused, never used. */
     getTaskContext: readTaskContext,
+
+    /** Counts only. A body with anything else in it is refused. */
+    getTaskContextSize(projectId, taskId, destination): Promise<TaskContextSize> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context-size?destination=${destination}`, {
+        parse: (v: unknown) => {
+          const c = TaskContextSizeSchema.parse(v);
+          if (c.destination !== destination || c.taskId !== taskId) throw new Error('size for another destination or task');
+          return c;
+        },
+      }, 'a task context size', false, undefined, true);
+    },
 
     /**
      * An accepted criteria proposal through the replan path: the task's current spec, with the named criteria reworded and nothing else changed, as a new revision at

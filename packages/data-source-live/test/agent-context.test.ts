@@ -70,4 +70,14 @@ describe('live task context and criteria revisions (H4)', () => {
     await expect(restricted.s.reviseTaskCriteria!('p', { taskId: 't1', expectedPlanRevision: 3, idempotencyKey: 'k', criteria: [{ id: 'FB-1', text: 'x' }] })).rejects.toThrow(/restricted/);
     expect(restricted.calls).toHaveLength(1);
   });
+
+  it('reads a task\'s input size for one destination: counts only, nothing else accepted', async () => {
+    const ok = source([() => ({ status: 200, body: { taskId: 't1', destination: 'local', hasChange: false, inputChars: 120 } })]);
+    expect(await ok.s.getTaskContextSize!('p', 't1', 'local')).toEqual({ taskId: 't1', destination: 'local', hasChange: false, inputChars: 120 });
+    expect(ok.calls[0]!.url).toBe('http://x/v1/projects/p/tasks/t1/context-size?destination=local');
+    const extra = source([() => ({ status: 200, body: { taskId: 't1', destination: 'local', hasChange: false, inputChars: 120, text: 'leak' } })]);
+    await expect(extra.s.getTaskContextSize!('p', 't1', 'local')).rejects.toBeInstanceOf(DataSourceException);
+    const refused = source([() => ({ status: 409, body: { error: { code: 'context_destination_refused', message: 'device only' } } })]);
+    await expect(refused.s.getTaskContextSize!('p', 't1', 'cloud')).rejects.toThrow(/^context_destination_refused:/);
+  });
 });

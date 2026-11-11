@@ -54,8 +54,6 @@ interface Project {
   readonly routeRecords: Map<string, RouteRecord[]>;
   /** Criteria reworded by an accepted proposal, by task. Simulated. */
   readonly criteria: Map<string, { id: string; text: string }[]>;
-  /** Plan revisions the demo's criteria accepts moved, by run. Simulated: no plan event is emitted. */
-  readonly planBumps: Map<string, number>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -125,7 +123,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
-      criteria: new Map(), planBumps: new Map(),
+      criteria: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -150,7 +148,14 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const planRevision = Number(event.payload['planRevision'] ?? 1);
       const ids = Array.isArray(event.payload['taskIds']) ? (event.payload['taskIds'] as string[]) : [];
       let tasks = snap.tasks;
+      // A criteria revision accepted in the demo re-plans a task the fixture has no new seed for: its next revision, planned again, as the plan route does.
+      const replanned = Array.isArray(event.payload['replanned']) ? (event.payload['replanned'] as string[]) : [];
       for (const id of ids) {
+        const prior = tasks[id];
+        if (replanned.includes(id) && prior) {
+          tasks = { ...tasks, [id]: { ...prior, revision: prior.revision + 1, aggregateRevision: prior.aggregateRevision + 1, status: 'planned', statusReason: null, placementBlock: null, activeAttemptId: null, enteredStatusAt: event.occurredAt, supersededByRevision: null } };
+          continue;
+        }
         const seed = seedFor(id, planRevision);
         if (seed) tasks = { ...tasks, [id]: seedTask(seed, event.runId, event.occurredAt, tasks[id]) };
       }
@@ -384,7 +389,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   function contextState(p: Project, runId: string) {
-    return { routes: p.fixture.routes, criteria: p.criteria, planRevision: (p.state.snapshot.runs[runId]?.planRevision ?? 0) + (p.planBumps.get(runId) ?? 0) };
+    return { routes: p.fixture.routes, criteria: p.criteria, planRevision: p.state.snapshot.runs[runId]?.planRevision ?? 0 };
   }
 
   function routeViewOf(p: Project, t: { taskId: string; runId: string }) {
@@ -414,12 +419,12 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
-  type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
+  type CommandEvent = 'plan.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
     | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided' | 'inference.reported';
   /** Who the services record as the actor of each simulated type that is not a person's. */
   const SCHEDULER_TYPES: readonly CommandEvent[] = ['task.ready', 'attempt.started', 'attempt.route_changed', 'checkpoint.recorded'];
   const SYSTEM_TYPES: readonly CommandEvent[] = ['attempt.failed', 'attempt.fenced', 'checkpoint.refused'];
-  const RUN_ADDRESSED: readonly CommandEvent[] = ['run.created', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
+  const RUN_ADDRESSED: readonly CommandEvent[] = ['plan.accepted', 'run.created', 'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled'];
   function appendCommandEvent(p: Project, taskId: string, type: CommandEvent, payload: Record<string, unknown>, o: { delayMs?: number; revisionStep?: number; attemptId?: string | null; system?: boolean } = {}): void {
     const task = p.state.snapshot.tasks[taskId];
     const runId = RUN_ADDRESSED.includes(type) ? taskId : task?.runId ?? Object.keys(p.state.snapshot.runs)[0] ?? p.fixture.projectId;
@@ -694,7 +699,18 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return demoTaskContext(contextState(p, t.runId), t, destination);
     },
 
-    /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and no plan revision is recorded. */
+    /** Counts only, refused like the context: the demo's input size for one destination. */
+    async getTaskContextSize(projectId, taskId, destination) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[taskId];
+      if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      checkDestination(destination, routeViewOf(p, t), routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId), null);
+      const c = demoTaskContext(contextState(p, t.runId), t, destination);
+      const inputChars = c.task.title.length + (c.task.description?.length ?? 0) + c.task.criteria.reduce((n, x) => n + x.text.length, 0) + c.bundle.claims.reduce((n, x) => n + x.text.length + x.heading.length, 0);
+      return { taskId, destination, hasChange: c.change !== null, inputChars };
+    },
+
+    /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and a simulated `plan.accepted` moves the plan. */
     async reviseTaskCriteria(projectId, request) {
       const p = project(projectId);
       const r = CriteriaRevisionRequestSchema.parse(request);
@@ -702,9 +718,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (!t) throw fail('unavailable', `no task ${r.taskId} in this project`);
       const state = contextState(p, t.runId);
       p.criteria.set(t.taskId, reviseDemoCriteria(state, t, r.expectedPlanRevision, r.criteria));
-      // As the server: an accepted revision moves the plan, so a second accept at the revision read before it is stale.
-      p.planBumps.set(t.runId, (p.planBumps.get(t.runId) ?? 0) + 1);
-      return { planRevision: state.planRevision + 1, taskIds: [t.taskId], simulated: true };
+      // As the server's plan route: a new plan revision, the task back to planned at its next revision, and `plan.accepted` on the stream. Simulated.
+      const planRevision = state.planRevision + 1;
+      appendCommandEvent(p, t.runId, 'plan.accepted', { planRevision, taskIds: [t.taskId], acceptedFor: 'demo-operator', replanned: [t.taskId] }, { revisionStep: planRevision, system: true });
+      return { planRevision, taskIds: [t.taskId], simulated: true };
     },
 
     async getRunFailures(projectId, runId) {

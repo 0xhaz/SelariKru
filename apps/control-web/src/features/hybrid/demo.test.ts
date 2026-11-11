@@ -67,4 +67,21 @@ describe('the demo runs every task step through the real adapter, with no live m
     expect(seen.at(-1)).toBe('');
     off();
   });
+
+  it('reads a task\'s facts for the destination its fresh route allows, and never pulls a bundle to count characters', async () => {
+    const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)) });
+    const projectId = 'demo-feature-delivery';
+    const reads: string[] = [];
+    const spied = {
+      getTaskRoute: (p: string, t: string) => { reads.push('route'); return ds.getTaskRoute!(p, t); },
+      getTaskContext: (p: string, t: string, d: 'local' | 'cloud', o?: string | null) => { reads.push(`context:${d}`); return ds.getTaskContext!(p, t, d, o); },
+      getTaskContextSize: (p: string, t: string, d: 'local' | 'cloud') => { reads.push(`size:${d}`); return ds.getTaskContextSize!(p, t, d); },
+    };
+    const agents = createAgents({ projectId, source: spied, sdk: createDemoSdk(), simulated: true, execute: (c) => ds.execute(c), snapshot: () => null })!;
+    expect(await agents.facts(id('e2e'))).toMatchObject({ hasChange: false });
+    expect(reads).toEqual(['route', 'size:local']);
+    reads.length = 0;
+    expect((await agents.facts(id('api'))).hasChange).toBe(true);
+    expect(reads).toEqual(['route', 'size:cloud']);
+  });
 });

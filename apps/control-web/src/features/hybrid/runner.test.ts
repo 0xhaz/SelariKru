@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AgentCatalog, type AgentCallRequest, type AssistantProposal, type CallSpec } from '@selarikru/inference-firebase-web';
-import type { TaskAgentContext, TaskRouteRead, TaskRouteView } from '@selarikru/view-protocol';
+import { DataSourceException, type TaskAgentContext, type TaskRouteRead, type TaskRouteView } from '@selarikru/view-protocol';
 import { AGENT_ACTIONS } from './model.ts';
 import { runAgentStep, type AgentRunnerDeps } from './runner.ts';
 
@@ -81,6 +81,12 @@ describe('a step that cannot run is refused before any model call', () => {
     const h = harness(route(), { getTaskContext: async () => { throw new Error('down'); } });
     expect(await runAgentStep(h.deps, { taskId: 't1', kind: 'criteria', callOverride: null })).toEqual({ kind: 'refused', code: 'context_unavailable' });
     expect(h.adapter.runAgent).not.toHaveBeenCalled();
+  });
+  it('a context the source refused keeps the refusal\'s code; only a read that failed is context_unavailable', async () => {
+    const refusedWith = (message: string) => harness(route(), { getTaskContext: async () => { throw new DataSourceException({ code: 'unavailable', message, retryable: false }); } });
+    expect(await runAgentStep(refusedWith('context_destination_refused: device only').deps, { taskId: 't1', kind: 'criteria', callOverride: null })).toEqual({ kind: 'refused', code: 'context_destination_refused' });
+    expect(await runAgentStep(refusedWith('task_spec_unreadable: x').deps, { taskId: 't1', kind: 'criteria', callOverride: null })).toEqual({ kind: 'refused', code: 'task_spec_unreadable' });
+    expect(await runAgentStep(refusedWith('the server is down').deps, { taskId: 't1', kind: 'criteria', callOverride: null })).toEqual({ kind: 'refused', code: 'context_unavailable' });
   });
   it('a review with no change and an explanation with no failed check', async () => {
     const none = harness(route(), { getTaskContext: async (_t, d) => ({ ...context(d), change: null }), failedCheck: () => null });

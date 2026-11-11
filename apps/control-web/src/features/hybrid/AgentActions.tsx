@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { OPEN_HANDOVER_STATES, type RoutePolicyMode } from '@selarikru/domain';
 import { Chip, buttonPrimary, buttonQuiet, type Tone } from '@selarikru/ui';
-import { DataSourceException, type TaskAgentContext, type TaskRouteView, type TaskView } from '@selarikru/view-protocol';
+import { DataSourceException, type TaskRouteView, type TaskView } from '@selarikru/view-protocol';
 import { hrefFor } from '../../shell/route.ts';
 import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
@@ -10,9 +10,6 @@ import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
 
-export const inputCharsOf = (c: TaskAgentContext): number =>
-  c.task.title.length + (c.task.description?.length ?? 0) + c.task.criteria.reduce((n, x) => n + x.text.length, 0) + c.bundle.claims.reduce((n, x) => n + x.text.length + x.heading.length, 0);
-
 /** Only answers are cached, by the task's aggregate revision, so a change event reads again. A failure is never kept. */
 const factsCache = new Map<string, TaskFacts>();
 const pause = (ms: number): Promise<void> => new Promise((r) => { window.setTimeout(r, ms); });
@@ -20,14 +17,14 @@ const pause = (ms: number): Promise<void> => new Promise((r) => { window.setTime
 export type FactsState = { readonly phase: 'loading' } | { readonly phase: 'ready'; readonly facts: TaskFacts } | { readonly phase: 'failed'; readonly retry: () => void };
 
 /**
- * Whether the task has a change, and its input size, from a context read for the destination its route allows. Retried with a bounded backoff; after that the screen
- * says the read failed and offers a retry. Read again when the task's aggregate revision moves.
+ * Whether the task has a change, and its input size: counts only, for the destination the task's fresh route allows (agents.facts reads the route first). Transport
+ * failures are retried with a bounded backoff, a refusal is not; then the screen says the read failed and offers a retry. Read again when the task's aggregate
+ * revision moves.
  */
 export function useTaskFacts(h: HybridValue | null, task: TaskView | undefined): FactsState {
   const [state, setState] = useState<FactsState>({ phase: 'loading' });
   const [attempt, setAttempt] = useState(0);
-  const destination = task?.route ? effectiveStep(task.route, null).destination : 'local';
-  const key = h && task ? `${h.projectId}|${task.taskId}|${task.aggregateRevision}|${destination}` : null;
+  const key = h && task ? `${h.projectId}|${task.taskId}|${task.aggregateRevision}` : null;
   useEffect(() => {
     if (!h?.agents || !task || key === null) return;
     const hit = factsCache.get(key);
@@ -35,10 +32,7 @@ export function useTaskFacts(h: HybridValue | null, task: TaskView | undefined):
     let live = true;
     setState({ phase: 'loading' });
     const agents = h.agents;
-    void loadFactsWithRetry(async () => {
-      const c = await agents.context(task.taskId, destination);
-      return { hasChange: c.change !== null, inputChars: inputCharsOf(c) };
-    }, pause).then((f) => {
+    void loadFactsWithRetry(() => agents.facts(task.taskId), pause).then((f) => {
       if (!live) return;
       if (f) { factsCache.set(key, f); setState({ phase: 'ready', facts: f }); }
       else setState({ phase: 'failed', retry: () => setAttempt((n) => n + 1) });

@@ -526,7 +526,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   // route allows, read fresh here with this call's override: `cloud` is refused when the lock, a device-only route or no route at all keeps the task on the device.
   // A cloud bundle leaves out restricted and secret content; a local one may carry it and is not streamable. The spec is for the replan path. Owner only; nothing
   // is recorded.
-  app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
+  /** The checks both context reads share: the destination against the fresh route with this call's override, then the spec. Reads the route inputs once. */
+  async function agentContext(req: FastifyRequest) {
     ownerOf(req);
     const { id: projectId, taskId } = req.params as { id: string; taskId: string };
     const query = (req.query ?? {}) as { destination?: unknown; callOverride?: unknown };
@@ -544,14 +545,26 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (destination === 'cloud' && (mode === null || !isCloudCapable(mode))) {
       throw new AppError(409, 'context_destination_refused', 'this task\'s route keeps its AI steps on the device, so no cloud context is served', { effective: mode, locked: task.lock !== null });
     }
+    const bundle = await serveBundle(db, { tenantId: config.tenantId, projectId, spec, destination, streamable: destination === 'cloud' });
+    return { projectId, taskId, task, spec, destination, bundle };
+  }
+
+  app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
+    const { taskId, task, spec, destination, bundle } = await agentContext(req);
     const classification = task.labels.reduce<string>((acc, l) => strongerLabel(acc, l), 'public');
     const [run] = await db.select({ planRevision: schema.runs.planRevision }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, task.runId)));
-    const bundle = await serveBundle(db, { tenantId: config.tenantId, projectId, spec, destination, streamable: destination === 'cloud' });
     return {
       taskId, revision: task.revision, runId: task.runId, planRevision: run?.planRevision ?? 0, destination,
       task: { title: spec.title, description: spec.description ?? null, criteria: (spec.criteria ?? []).map((c) => ({ id: c.id, text: c.text })), allowedPaths: [...spec.allowedPaths], classification },
       bundle, change: null, spec, simulated: false,
     };
+  });
+
+  // The same read, as counts only: what a step's suggestion and the offered actions need, without sending the task's text or bundle to the tab.
+  app.get('/v1/projects/:id/tasks/:taskId/context-size', auth, async (req) => {
+    const { taskId, spec, destination, bundle } = await agentContext(req);
+    const inputChars = spec.title.length + (spec.description?.length ?? 0) + (spec.criteria ?? []).reduce((n, c) => n + c.text.length, 0) + bundle.claims.reduce((n, c) => n + c.text.length + c.heading.length, 0);
+    return { taskId, destination, hasChange: false, inputChars };
   });
 
   // ---- approvals ---------------------------------------------------------------------------------------------

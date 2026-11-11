@@ -1,5 +1,6 @@
 import type { RouteRecordReport } from '@selarikru/domain';
 import { effectiveStep } from './model.ts';
+import type { TaskFacts } from './facts.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
 import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
@@ -23,12 +24,13 @@ export interface AgentsPort {
   onInFlight(fn: (calls: readonly InFlightCall[]) => void): () => void;
   /** Absent: the source cannot replan. */
   readonly reviseCriteria: ((request: CriteriaRevisionRequest) => Promise<CriteriaRevisionResult>) | null;
-  context(taskId: string, destination: 'local' | 'cloud'): Promise<TaskAgentContext>;
+  /** Whether the task has a change and its input size, for the destination its fresh route allows. Counts only: no context or bundle comes into the tab. */
+  facts(taskId: string): Promise<TaskFacts>;
 }
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'reviseTaskCriteria'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -82,7 +84,12 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       return () => void listeners.delete(fn);
     },
     reviseCriteria: source.reviseTaskCriteria ? (request) => source.reviseTaskCriteria!(projectId, request) : null,
-    context: (taskId, destination) => getTaskContext(projectId, taskId, destination),
+    async facts(taskId) {
+      if (!source.getTaskContextSize) throw new Error('this source cannot size a task\'s input');
+      const read = await getTaskRoute(projectId, taskId);
+      const size = await source.getTaskContextSize(projectId, taskId, effectiveStep(read.route, null).destination);
+      return { hasChange: size.hasChange, inputChars: size.inputChars };
+    },
     async run(req) {
       const callId = next++;
       try {

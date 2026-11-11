@@ -49,3 +49,15 @@ export type CriteriaRevisionRequest = z.infer<typeof CriteriaRevisionRequestSche
 
 export const CriteriaRevisionResultSchema = z.strictObject({ planRevision: z.number().int().min(1), taskIds: z.array(Id), simulated: z.boolean() });
 export type CriteriaRevisionResult = z.infer<typeof CriteriaRevisionResultSchema>;
+
+/**
+ * How big a task's agent input is for one destination, and whether it has a change: counts only, so the browser can size a step and say which steps it offers
+ * without pulling the context (for a locked task, the local bundle) into the tab. Refused like the context when the route does not allow the destination.
+ */
+export const TaskContextSizeSchema = z.strictObject({
+  taskId: Id,
+  destination: z.enum(BRAIN_DESTINATIONS),
+  hasChange: z.boolean(),
+  inputChars: z.number().int().min(0),
+});
+export type TaskContextSize = z.infer<typeof TaskContextSizeSchema>;

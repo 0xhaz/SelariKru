@@ -40,6 +40,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', '/v1/tasks/t1/client-reports'],
   ['GET', '/v1/projects/proj_a/tasks/t1/route'],
   ['GET', '/v1/projects/proj_a/tasks/t1/context?destination=cloud'],
+  ['GET', '/v1/projects/proj_a/tasks/t1/context-size?destination=cloud'],
   ['POST', '/v1/approvals/a1/resolve'],
   ['GET', `/v1/projects/${PROJECT}/snapshot`],
   ['GET', `/v1/projects/${PROJECT}/runs/${RUN}/failures`],

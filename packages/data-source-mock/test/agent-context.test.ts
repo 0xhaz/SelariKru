@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TaskAgentContextSchema } from '@selarikru/view-protocol';
 import { buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped } from '../src/index.ts';
 
@@ -71,5 +71,29 @@ describe('mock task context for the agents (H4)', () => {
     await expect(ds.getTaskContext!(projectId, id('e2e'), 'cloud', 'ONLY_IN_CLOUD')).rejects.toThrow(/context_destination_refused/);
     await expect(ds.getTaskContext!(projectId, id('integrate'), 'cloud')).rejects.toThrow(/context_destination_refused/);
     expect((await ds.getTaskContext!(projectId, id('integrate'), 'cloud', 'ONLY_IN_CLOUD')).destination).toBe('cloud');
+  });
+
+  it('an accepted criteria revision is a simulated plan event: the snapshot\'s plan revision moves and the task is planned again at its next revision', async () => {
+    const { ds, projectId, first } = await setup();
+    const events: { type: string; provenance: string }[] = [];
+    ds.subscribe(projectId, first.meta.cursor, (e) => events.push(e), () => undefined);
+    const t = id('search');
+    const c = await ds.getTaskContext!(projectId, t, 'local');
+    const before = first.tasks[t]!;
+    await ds.reviseTaskCriteria!(projectId, { taskId: t, expectedPlanRevision: c.planRevision, idempotencyKey: 'k', criteria: [{ id: c.task.criteria[0]!.id, text: 'Reworded' }] });
+    const after = await ds.getSnapshot(projectId);
+    expect(after.runs[c.runId]!.planRevision).toBe(c.planRevision + 1);
+    expect(after.tasks[t]).toMatchObject({ status: 'planned', revision: before.revision + 1 });
+    await vi.waitFor(() => expect(events.map((e) => e.type)).toContain('plan.accepted'));
+    expect(events.find((e) => e.type === 'plan.accepted')!.provenance).toBe('simulated');
+  });
+
+  it('sizes a task\'s input for the destination its route allows, with counts only', async () => {
+    const { ds, projectId } = await setup();
+    const size = await ds.getTaskContextSize!(projectId, id('e2e'), 'local');
+    expect(Object.keys(size).sort()).toEqual(['destination', 'hasChange', 'inputChars', 'taskId']);
+    expect(size.inputChars).toBeGreaterThan(0);
+    await expect(ds.getTaskContextSize!(projectId, id('e2e'), 'cloud')).rejects.toThrow(/context_destination_refused/);
+    expect((await ds.getTaskContextSize!(projectId, id('api'), 'cloud')).hasChange).toBe(true);
   });
 });

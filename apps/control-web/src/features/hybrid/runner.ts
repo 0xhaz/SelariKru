@@ -19,6 +19,9 @@ export interface AgentRunnerDeps {
   readonly failedCheck: (taskId: string) => { readonly checkId: string; readonly output: string } | null;
 }
 
+/** Context refusals the screen says in their own words. */
+const PASSED_THROUGH: readonly string[] = ['context_destination_refused', 'task_spec_unreadable'];
+
 export interface AgentRunRequest {
   readonly taskId: string;
   readonly kind: AgentActionKind;
@@ -52,8 +55,10 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
   let context: TaskAgentContext;
   try {
     context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride);
-  } catch {
-    return { kind: 'refused', code: 'context_unavailable' };
+  } catch (e) {
+    // A refusal the source names keeps its code; only a read that failed is `context_unavailable`.
+    const code = /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1];
+    return { kind: 'refused', code: code !== undefined && PASSED_THROUGH.includes(code) ? code : 'context_unavailable' };
   }
   const sourceId = `task:${req.taskId}`;
   const t = context.task;

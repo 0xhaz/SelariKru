@@ -6,7 +6,7 @@ import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
 import type { HandoverAction, HandoverDiffView, HandoversView } from './handover.ts';
-import type { CriteriaRevisionRequest, CriteriaRevisionResult, TaskAgentContext } from './agent-context.ts';
+import type { CriteriaRevisionRequest, CriteriaRevisionResult, TaskAgentContext, TaskContextSize } from './agent-context.ts';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -71,6 +71,8 @@ export interface EngineeringDataSource {
    * task's route, with this call's override, keeps it on the device (`context_destination_refused`). Owner only. Absent: this source cannot run the task agents.
    */
   getTaskContext?(projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null): Promise<TaskAgentContext>;
+  /** The task's agent input size and whether it has a change, for one destination: counts only, refused like the context. */
+  getTaskContextSize?(projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskContextSize>;
   /** An accepted criteria proposal, through the replan path: a new revision of the task with its criteria reworded. Absent: this source cannot replan. */
   reviseTaskCriteria?(projectId: string, request: CriteriaRevisionRequest): Promise<CriteriaRevisionResult>;
   disconnect(): void;
