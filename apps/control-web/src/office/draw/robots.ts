@@ -1,18 +1,44 @@
-// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
-//
-// Hover-robot sprites, recoloured per worker.
+// SelariKru's crew (H7): pixel workers drawn for this app. Each wears a flat worker's cap with a state lamp on it, has a wide face screen, a gold
+// apron band and two legs it walks on. Outlines are a dark shade of the worker's own accent colour rather than one black ink line, so each robot reads
+// as one shape in its colour. Nothing here is taken from another product's sprites.
 
 import { shade } from '../../theme/tokens.ts';
 import { C } from '../engine/palette.ts';
 import { flipCanvas, spriteCanvas } from '../engine/pen.ts';
 
-const HEAD_ANTENNA = ['.....kk.....', '....k..k....', '.....kk.....'];
-const BODY_FRONT = ['..kkkkkkkk..', '.khhBBBBBBk.', '.khVVVVVVBk.', '.kBVVVVVVBk.', '.kBVVVVVVBk.', '.kbBBBBBBbk.', '..kkkkkkkk..', '...kBBBBk...', '.kbkBBBBkbk.', '.kk.kbbk.kk.', '.....kk.....'];
-const BODY_BACK = ['..kkkkkkkk..', '.khhBBBBBBk.', '.kBBBBBBBBk.', '.kBBkbbkBBk.', '.kBBBBBBBBk.', '.kbBBBBBBbk.', '..kkkkkkkk..', '...kBBBBk...', '.kbkBBBBkbk.', '.kk.kbbk.kk.', '.....kk.....'];
-const BODY_TYPE = ['..kkkkkkkk..', '.khhBBBBBBk.', '.kBBBBBBBBk.', '.kBBkbbkBBk.', '.kBBBBBBBBk.', '.kbBBBBBBbk.', '..kkkkkkkk..', '.kbkBBBBkbk.', '.kkkBBBBkkk.', '....kbbk....', '.....kk.....'];
-const BODY_SIDE = ['..kkkkkkkk..', '.khhBBBBBBk.', '.kBBBBBVVVk.', '.kBBBBBVVVk.', '.kBBBBBVVVk.', '.kbBBBBBBbk.', '..kkkkkkkk..', '...kBBBBk...', '...kbBBBbk..', '....kbbkk...', '.....kk.....'];
+/*
+ * Legend: o outline (accent, much darker), B body (accent), b body shade, h highlight, C cap (deep green), c cap shine, F face screen, A apron band
+ * (gold), G boots. 12 wide, 15 tall. The face screen sits on rows 5 and 6; the cap lamp on row 1, columns 5 and 6 (both drawn live).
+ */
+const CAP = ['....oooo....', '...oCCCCo...', '..oCcCCCCo..', '.oooooooooo.'];
+const CAP_SIDE = ['...oooo.....', '..oCCCCo....', '.oCcCCCCo...', '.ooooooooooo'];
+const FRONT = [
+  ...CAP,
+  '.ohBBBBBBBo.', '.oBFFFFFFBo.', '.oBFFFFFFBo.', '.oBBBBBBBbo.', '..oooooooo..',
+  '.oBBAAAABBo.', 'oBoBBBBBBoBo', 'oBoBBBBBBoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
+];
+const BACK = [
+  ...CAP,
+  '.ohBBBBBBBo.', '.oBBBBBBBBo.', '.oBBbbbbBBo.', '.oBBBBBBBbo.', '..oooooooo..',
+  '.oBBAAAABBo.', 'oBoBBBBBBoBo', 'oBoBBbbBBoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
+];
+/** Seated at the desk, seen from behind, both hands up on the keyboard. */
+const TYPE = [
+  ...CAP,
+  '.ohBBBBBBBo.', '.oBBBBBBBBo.', '.oBBbbbbBBo.', '.oBBBBBBBbo.', '..oooooooo..',
+  'ooBBAAAABBoo', 'oBBBBBBBBBBo', '.oBBBbbBBBo.', '..obbbbbbo..', '...o....o...', '............',
+];
+const SIDE = [
+  ...CAP_SIDE,
+  '.ohBBBBBBBo.', '.oBBBBFFFFo.', '.oBBBBFFFFo.', '.oBBBBBBBbo.', '..oooooooo..',
+  '..oBAAAABo..', '..oBBBoBBo..', '..oBBBoBBo..', '..obbbbbbo..', '...oGo.oGo..', '...oo..oo...',
+];
 
 export type Facing = 'front' | 'back' | 'type' | 'side' | 'sideL';
+
+/** Width and height of a worker sprite, in pixels. */
+export const ROBOT_W = 12;
+export const ROBOT_H = 15;
 
 const cache = new Map<string, Record<Facing, HTMLCanvasElement>>();
 
@@ -20,12 +46,12 @@ const cache = new Map<string, Record<Facing, HTMLCanvasElement>>();
 export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> {
   const hit = cache.get(color);
   if (hit) return hit;
-  const pal = { k: C.ink, B: color, b: shade(color, -0.3), h: shade(color, 0.6), V: '#0f2b29', G: C.gold };
-  const side = spriteCanvas([...HEAD_ANTENNA, ...BODY_SIDE], pal);
+  const pal = { o: shade(color, -0.62), B: color, b: shade(color, -0.22), h: shade(color, 0.5), C: C.deep, c: '#2f6b66', F: C.screen, A: C.gold, G: C.deskDD };
+  const side = spriteCanvas(SIDE, pal);
   const canvases: Record<Facing, HTMLCanvasElement> = {
-    front: spriteCanvas([...HEAD_ANTENNA, ...BODY_FRONT], pal),
-    back: spriteCanvas([...HEAD_ANTENNA, ...BODY_BACK], pal),
-    type: spriteCanvas([...HEAD_ANTENNA, ...BODY_TYPE], pal),
+    front: spriteCanvas(FRONT, pal),
+    back: spriteCanvas(BACK, pal),
+    type: spriteCanvas(TYPE, pal),
     side,
     sideL: flipCanvas(side),
   };
@@ -34,10 +60,14 @@ export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> 
 }
 
 /**
- * The verifier on the gate: SelariKru's own figure (an inspector with a green status bulb and a visor), drawn for this app. It is not any review
- * product's mascot.
+ * The verifier at the gate: a kedai inspector in a songkok-style cap with a gold badge, holding a magnifier. Drawn
+ * for SelariKru; not any review product's mascot.
  */
-const VERIFIER_ROWS = ['....kkk....', '...kGGGk...', '....kkk....', '.kkkkkkkkk.', '.kMMMMMMMk.', '.kMWWkWWMk.', '.kMMMMMMMk.', '.kMMkkkMMk.', '.kkkkkkkkk.', '..kMk.kMk..', '..kk...kk..'];
+const VERIFIER_ROWS = [
+  '...ooooo...', '..oKKKKKo..', '..oKgKKKo..', '.ooooooooo.', '.oSSSSSSSo.', '.oSWWSWWSo.', '.oSSSSSSSo.', '..ooooooo..',
+  '.oTTTTTTToM', 'oToTTTTToMm', '.o.ooooo.o.',
+];
 export const VERIFIER = VERIFIER_ROWS;
-export const VERIFIER_BLINK = VERIFIER_ROWS.map((r, i) => (i === 5 ? '.kMkkkkkMk.' : r));
-export const VERIFIER_PAL = { k: C.ink, M: '#8fd3ff', W: C.white, G: C.green };
+/** Blinking: the eyes close for one frame. */
+export const VERIFIER_BLINK = VERIFIER_ROWS.map((r, i) => (i === 5 ? '.oSSSSSSSo.' : r));
+export const VERIFIER_PAL = { o: C.ink, K: C.deep, g: C.gold, S: '#e8c9a4', W: C.ink, T: C.teal, M: C.metalD, m: C.skyL };

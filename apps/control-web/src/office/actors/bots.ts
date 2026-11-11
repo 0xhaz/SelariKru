@@ -5,7 +5,7 @@
 
 import type { RobotState } from '../../theme/tokens.ts';
 import type { Tile } from '../engine/path.ts';
-import { robotCanvases, type Facing } from '../draw/robots.ts';
+import { ROBOT_H, ROBOT_W, robotCanvases, type Facing } from '../draw/robots.ts';
 import { tileCentre, type DeskAgent, type OfficeLayout } from '../layout/layout.ts';
 
 export type Face = 'up' | 'down' | 'left' | 'right';
@@ -84,13 +84,12 @@ export class Bot {
     }
   }
 
-  /** Picks the sprite and its position for this frame. */
+  /** Picks the sprite and its position for this frame. A worker stands on the floor; it bobs one pixel while it walks. */
   render(t: number, state: RobotState): void {
     const moving = this.path.length > 0;
-    const grounded = state === 'offline';
-    const hover = grounded ? 1 : 3 + (Math.floor(t * (moving ? 6 : 2.5) + this.index) % 2);
-    this.spriteX = Math.round(this.x) - 6;
-    this.spriteY = Math.round(this.y) - 13 - hover;
+    const bob = moving ? Math.floor(t * 8 + this.index) % 2 : 0;
+    this.spriteX = Math.round(this.x) - ROBOT_W / 2;
+    this.spriteY = Math.round(this.y) - ROBOT_H - bob;
     let f: Facing = 'front';
     if (this.face === 'up') f = this.seated && state === 'working' && Math.floor(t * 8) % 2 ? 'type' : 'back';
     else if (this.face === 'right') f = 'side';

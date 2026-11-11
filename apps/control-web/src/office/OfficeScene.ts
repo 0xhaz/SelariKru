@@ -9,7 +9,7 @@ import { Effects } from './actors/effects.ts';
 import { BeltPath, restingPlace, updateParcels, type Parcel } from './actors/parcels.ts';
 import { PlanNotes } from './actors/planNotes.ts';
 import * as live from './draw/live.ts';
-import { drawEmote, drawFace, drawNameTag, drawSelection, drawShadow } from './draw/overlay.ts';
+import { drawBadge, drawEmote, drawFace, drawNameTag, drawSelection, drawShadow } from './draw/overlay.ts';
 import { buildStatic } from './draw/static.ts';
 import { Camera, type Insets, type WorldTransform } from './engine/camera.ts';
 import { C } from './engine/palette.ts';
@@ -327,6 +327,8 @@ export class OfficeScene {
     for (const bot of bots) {
       const state = this.stateOf(bot.config.id);
       drawFace(p, bot, state, t);
+      const ai = world.agents.find((a) => a.id === bot.config.id)?.ai ?? null;
+      if (ai) drawBadge(p, bot, ai);
       drawEmote(p, bot, state, t, t);
     }
     // Under reduced motion every name shows, so no robot has to be hovered to be told apart.
