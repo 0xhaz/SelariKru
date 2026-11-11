@@ -10,6 +10,7 @@ import { createOnboardingApi } from '../../src/features/onboarding/index.ts';
 import { createProjectionStore, type ProjectionStore } from '../../src/shell/projection-store.ts';
 import { NO_PROJECT, projectFromUrl, useActiveProject } from '../../src/shell/active-project.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
+import { createDemoSdk } from '../../src/features/hybrid/demo-sdk.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
 import type { EngineeringDataSource, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlState, TerminalState } from '@selarikru/view-protocol';
 import '../../src/index.css';
@@ -67,6 +68,8 @@ interface Scenario {
   observed?: boolean;
   /** The first snapshot load waits until the test calls `window.__releaseSnapshot`, holding the shell in its loading state. */
   holdSnapshot?: boolean;
+  /** Each demo agent answer waits until the test calls `window.__releaseAgents`, so a call stays in flight. */
+  holdAgents?: boolean;
 }
 
 declare global {
@@ -79,6 +82,7 @@ declare global {
     __releaseSnapshot?: () => void;
     __releaseDownload?: () => void;
     __releaseGenerate?: () => void;
+    __releaseAgents?: () => void;
     __store: typeof useAssistantStore;
     __projection?: ProjectionStore;
     __hold: RestrictedDraftHold;
@@ -300,10 +304,14 @@ if (sc.onboardingApi) {
   shellStore.getState().start();
   root.render(<StrictMode><AppShell store={shellStore} mode="live" projectLabel={live.projectId} assistant={null} /></StrictMode>);
 } else if (sc.spiedFixture) {
+  // The demo's task agents: the real adapter over the stand-in SDK. Held, each answer waits for `window.__releaseAgents`.
+  let agentGate: { p: Promise<void>; release: () => void } | null = sc.holdAgents ? gate() : null;
+  window.__releaseAgents = () => { agentGate?.release(); agentGate = null; };
+  const agentRuntime = { sdk: createDemoSdk({ beforeGenerate: () => agentGate?.p ?? Promise.resolve() }), simulated: true };
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>
-        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} />
+        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} agentRuntime={agentRuntime} />
       </StrictMode>,
     );
   });

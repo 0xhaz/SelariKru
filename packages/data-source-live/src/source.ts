@@ -3,7 +3,17 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, TaskAgentContextSchema, type CriteriaRevisionResult, type TaskAgentContext } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
+
+/** What the plan-revisions route answers. */
+const PlanRevisionReplySchema = {
+  parse(v: unknown): { planRevision: number; taskIds: string[] } {
+    const r = v as { planRevision?: unknown; taskIds?: unknown } | null;
+    if (!r || !Number.isInteger(r.planRevision) || (r.planRevision as number) < 1 || !Array.isArray(r.taskIds) || !r.taskIds.every((x) => typeof x === 'string' && x.length > 0)) throw new Error('not a plan revision');
+    return { planRevision: r.planRevision as number, taskIds: r.taskIds as string[] };
+  },
+};
 import { openLiveControl, type WebSocketFactory } from './control.ts';
 import { openLiveTerminal } from './terminal.ts';
 
@@ -180,6 +190,15 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     }
   }
 
+  const readTaskContext = (projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskAgentContext> =>
+    readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context?destination=${destination}`, {
+      parse: (v: unknown) => {
+        const c = TaskAgentContextSchema.parse(v);
+        if (c.destination !== destination || c.taskId !== taskId) throw new Error('context for another destination or task');
+        return c;
+      },
+    }, 'a task context');
+
   return {
     mode: 'live',
 
@@ -217,6 +236,28 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       } catch {
         throw fail({ code: 'invalid_event', message: 'the server sent a task route this build cannot read', retryable: false });
       }
+    },
+
+    /** What a task's agents read, with the bundle for `destination`. A context served for another destination or task is refused, never used. */
+    getTaskContext: readTaskContext,
+
+    /**
+     * An accepted criteria proposal through the replan path: the task's current spec, with the named criteria reworded and nothing else changed, as a new revision at
+     * the plan revision the person saw. A criterion the task does not have, or a plan that moved, is refused here and nothing is sent.
+     */
+    async reviseTaskCriteria(projectId, request): Promise<CriteriaRevisionResult> {
+      const r = CriteriaRevisionRequestSchema.parse(request);
+      const context = await readTaskContext(projectId, r.taskId, 'local');
+      const spec = context.spec;
+      const current = Array.isArray(spec?.['criteria']) ? (spec['criteria'] as { id: string; text: string }[]) : null;
+      if (!spec || !current) throw fail({ code: 'invalid_event', message: 'the task spec cannot be revised from this build', retryable: false });
+      if (context.planRevision !== r.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'the plan moved since this was read; nothing was sent', retryable: false });
+      const ids = new Set(current.map((c) => c.id));
+      if (r.criteria.some((c) => !ids.has(c.id))) throw fail({ code: 'invalid_event', message: 'a criterion is not one this task has; nothing was sent', retryable: false });
+      const reworded = new Map(r.criteria.map((c) => [c.id, c.text]));
+      const tasks = [{ ...spec, revision: context.revision + 1, criteria: current.map((c) => ({ ...c, text: reworded.get(c.id) ?? c.text })) }];
+      const done = await readJson(`/v1/runs/${encodeURIComponent(context.runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false, { expectedRevision: r.expectedPlanRevision, idempotencyKey: r.idempotencyKey, tasks });
+      return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
     },
 
     async getRunFailures(projectId, runId): Promise<RunFailuresView> {

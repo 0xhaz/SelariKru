@@ -175,3 +175,34 @@ describe('the office world', () => {
     expect(world.agents.some((a) => a.state === 'needs_input')).toBe(true);
   });
 });
+
+describe('where each robot\'s AI call runs (H4)', () => {
+  const route = (observed: 'ON_DEVICE' | 'IN_CLOUD' | null) => ({
+    effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null, suggestion: { mode: 'PREFER_ON_DEVICE', rule: 'bounded_step', reason: 'r', locked: false },
+    lastObserved: observed === null ? null : { recordId: 'r', taskId: 'a', taskRevision: 1, requestId: 'q', stepKind: 'patch', callOverride: null, requestedMode: 'PREFER_ON_DEVICE', effectiveMode: 'PREFER_ON_DEVICE', policySource: 'run', locked: false,
+      observedSource: observed, fellBack: false, conformance: 'conforms', requestModeMismatch: false, status: 'ok', model: { cloudModel: 'm', sdkVersion: '1.0.0' }, timing: { totalMs: 1, firstOutputMs: null }, validation: 'passed', blockedReason: null, reportedBy: 'browser', trust: 'untrusted', reportedAt: iso(1) },
+  }) as never;
+  const s = snapshotOf({ tasks: [task('a', { route: route('ON_DEVICE') }), task('b', { route: route(null) })], workers: [worker('w1', { taskId: 'a' }), worker('w2', { taskId: 'b' })] });
+  const team = buildTeam(s, NOW, NOW, {});
+
+  it('a desk shows the device or cloud mark of its task\'s last call, and none before any call', () => {
+    const w = buildOfficeWorld(s, team, 'P');
+    expect(w.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', live: false });
+    expect(w.agents.find((a) => a.id === 'w2')!.ai).toBeNull();
+    expect(w.cloudCall).toBe(false);
+  });
+
+  it('a call in flight marks its desk with where it is going, and a cloud call lights the CLOUD rack', () => {
+    const w = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'b', place: 'cloud' }]);
+    expect(w.agents.find((a) => a.id === 'w2')!.ai).toEqual({ place: 'cloud', live: true });
+    expect(w.cloudCall).toBe(true);
+    expect(w.summary).toMatch(/cloud rack is lit/i);
+    const device = buildOfficeWorld(s, team, 'P', null, [{ taskId: 'a', place: 'device' }]);
+    expect(device.cloudCall).toBe(false);
+    expect(device.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'device', live: true });
+  });
+
+  it('a cloud call for a task no robot holds still lights the rack', () => {
+    expect(buildOfficeWorld(s, team, 'P', null, [{ taskId: 'zzz', place: 'cloud' }]).cloudCall).toBe(true);
+  });
+});

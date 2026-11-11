@@ -46,6 +46,10 @@ import { shortcutFor } from './shortcuts.ts';
 import { ui } from './ui-store.ts';
 import { TITLES, frameOf } from './views.ts';
 import { useUi } from './ui-store.ts';
+import type { AssistantSdk, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
+import { createAgents } from '../features/hybrid/agents.ts';
+import { HybridProvider, useInFlight, useOnline, type HybridValue } from '../features/hybrid/context.tsx';
+import { DEFAULT_BROWSER, modeLabel } from '../features/hybrid/model.ts';
 
 export interface AccountInfo {
   readonly label: string;
@@ -65,6 +69,11 @@ export interface AppShellProps {
   readonly devPanel?: ReactNode;
   /** Link that leaves demo mode, for the assistant notice. */
   readonly leaveDemoHref?: string;
+  /**
+   * What runs the task agents (H4): the live Firebase AI Logic adapter, wired to the source's fresh route reads, or under demo data a stand-in SDK whose answers are
+   * labelled demo data. Absent: no AI actions are offered.
+   */
+  readonly agentRuntime?: { readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>; readonly sdk?: AssistantSdk; readonly simulated: boolean } | null;
 }
 
 /** One polite announcement per change of connection state or attention count. Heartbeats and ticks say nothing. */
@@ -94,7 +103,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
  * the floating top bar, team cards and activity feed, each screen in a side drawer over the office, and Settings as a modal. Every screen reads
  * one projection store.
  */
-export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
@@ -265,10 +274,21 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // Development only: the reference's debug panel.
   // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
   const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);
+  // The task agents, and their calls in flight for the office's desk marks and CLOUD rack.
+  const agents = useMemo(() => (agentRuntime && state.agentSource ? createAgents({
+    projectId: state.projectId, source: state.agentSource, ...agentRuntime,
+    execute: (c) => store.getState().execute(c), snapshot: () => store.getState().projection?.snapshot ?? null,
+  }) : null), [agentRuntime, state.agentSource, state.projectId, store]);
+  const calls = useInFlight(agents);
+  const online = useOnline();
+  const hybrid = useMemo((): HybridValue => ({
+    projectId: state.projectId, snapshot, live: connection === 'live', mode, execute: state.execute, refresh: state.refresh, resync: state.resync, agents,
+    browser: { ...DEFAULT_BROWSER, online },
+  }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online]);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
-    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId); } catch { return null; }
-  }, [snapshot, team, projectLabel, planRunId]);
+    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls); } catch { return null; }
+  }, [snapshot, team, projectLabel, planRunId, calls]);
   const activity = useMemo(() => {
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
@@ -298,7 +318,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const agentById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a]) ?? []), [world]);
   const mark = (id: string, i: number): RowDecor => {
     const a = agentById.get(id);
-    return { portrait: a ? <Portrait color={a.color} size={40} /> : null, key: i < 9 ? String(i + 1) : null, chip: a?.state ?? null };
+    // The worker card shows the effective route of its task's AI steps (inference), beside its model and sandbox.
+    const taskId = snapshot?.workers[id]?.taskId ?? team?.rows.find((r) => r.workerId === id)?.task?.taskId ?? null;
+    const route = taskId ? snapshot?.tasks[taskId]?.route : undefined;
+    return { portrait: a ? <Portrait color={a.color} size={40} /> : null, key: i < 9 ? String(i + 1) : null, chip: a?.state ?? null, route: route ? `AI: ${modeLabel(route.effective)}${route.lock ? ' (locked)' : ''}` : null };
   };
   const headerH = useHeaderHeight(headerRef);
   // On the office screen its own panels sit at the left of the canvas; the camera keeps the office clear of them where there is room.
@@ -432,6 +455,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   ) : null;
 
   return (
+    <HybridProvider value={hybrid}>
     <div className="relative min-h-screen">
       <div ref={chromeRef}>
         <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} speed={mode === 'mock' ? speed : 1} paused={frame === 'settings' || (frame === 'drawer' && drawerMaximized && panelWide)} />
@@ -486,6 +510,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         />
       ) : null}
     </div>
+    </HybridProvider>
   );
 }
 

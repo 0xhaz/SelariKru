@@ -374,3 +374,78 @@ const measured = (page: Page, selector: string) => page.evaluate((sel) => {
     }
   });
 }
+
+/** H4: the "Runs on" control and the AI actions, by keyboard, as painted, and at 390 px. Demo data: the stand-in SDK answers, with no model. */
+test.describe('where AI runs (H4)', () => {
+  const hybrid = async (page: Page, hash: string): Promise<void> => {
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'feature-delivery' }; });
+    await page.goto(`/tests/harness/index.html${hash}`);
+  };
+
+  test('by keyboard alone: open a task, run an agent, accept its criteria; every stop shows its focus', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await hybrid(page, '#/pipeline');
+    await press(page, page.locator('[data-testid="pipeline-row"][data-task-id="feature-delivery.search"]').getByRole('button', { name: 'Search index' }));
+    const inspector = page.getByTestId('task-inspector');
+    await expect(inspector).toBeVisible();
+    const criteria = inspector.locator('[data-testid="agent-action"][data-kind="criteria"]');
+    await press(page, criteria.getByRole('button', { name: 'Draft criteria' }));
+    await expect(criteria.getByTestId('agent-result')).toHaveAttribute('data-status', 'ok');
+    await press(page, criteria.getByRole('button', { name: 'Accept criteria' }));
+    await expect(criteria.getByTestId('criteria-accepted')).toBeVisible();
+    // The one-call override is a checkbox Space toggles.
+    const breakdown = inspector.locator('[data-testid="agent-action"][data-kind="breakdown"]');
+    await press(page, breakdown.getByLabel('Use cloud for this call'), 'Space');
+    await expect(breakdown.getByTestId('agent-route')).toContainText('This call only');
+    // The route select takes focus with a visible ring.
+    await tabTo(page, inspector.getByTestId('runs-on').getByRole('combobox'));
+    await expectVisibleFocus(page);
+  });
+
+  test('contrast as painted: Pipeline rows, the inspector with a result, the locked task, and the drawer\'s Task tab', async ({ page }) => {
+    // Four full-page contrast passes: as long as the other contrast tests allow.
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await hybrid(page, '#/pipeline');
+    await expect(page.getByTestId('runs-on').first()).toBeVisible();
+    expect((await contrastFailures(page)).violations, 'pipeline rows').toEqual([]);
+    await page.locator('[data-testid="pipeline-row"][data-task-id="feature-delivery.search"]').getByRole('button', { name: 'Search index' }).click();
+    const criteria = page.getByTestId('task-inspector').locator('[data-testid="agent-action"][data-kind="criteria"]');
+    await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+    await expect(criteria.getByTestId('agent-result')).toBeVisible();
+    expect((await contrastFailures(page)).violations, 'inspector with a result').toEqual([]);
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('task-inspector')).toHaveCount(0);
+    await page.locator('[data-testid="pipeline-row"][data-task-id="feature-delivery.e2e"]').getByRole('button', { name: 'End-to-end checks' }).click();
+    await expect(page.getByTestId('task-inspector').getByTestId('route-lock')).toBeVisible();
+    expect((await contrastFailures(page)).violations, 'locked task').toEqual([]);
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('task-inspector')).toHaveCount(0);
+    await page.locator('[data-testid="team-panel-row"][data-panel-worker="runner_local_2"]').click();
+    await expect(page.getByTestId('worker-drawer').getByTestId('runs-on')).toBeVisible();
+    expect((await contrastFailures(page)).violations, 'drawer Task tab').toEqual([]);
+  });
+
+  test('at 390 px: the Pipeline cards and the inspector with a result fit, with no sideways scroll, and pass axe', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await hybrid(page, '#/pipeline');
+    await expect(page.getByTestId('runs-on').first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.locator('[data-testid="pipeline-row"][data-task-id="feature-delivery.search"]').getByRole('button', { name: 'Search index' }).click();
+    const inspector = page.getByTestId('task-inspector');
+    const criteria = inspector.locator('[data-testid="agent-action"][data-kind="criteria"]');
+    await criteria.getByRole('button', { name: 'Draft criteria' }).click();
+    await expect(criteria.getByTestId('agent-result')).toBeVisible();
+    const box = (await inspector.boundingBox())!;
+    expect(box.x + box.width).toBeLessThanOrEqual(390.5);
+    const cut = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-testid="task-inspector"] :is(button, select, input, p, li)')].filter((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 1 || r.height <= 1) return false;
+      for (let p = el.parentElement; p && !p.matches('[data-testid="task-inspector"]'); p = p.parentElement) { const o = getComputedStyle(p).overflowX; if (o === 'auto' || o === 'scroll') return false; }
+      return r.right > window.innerWidth + 0.5 || r.left < -0.5;
+    }).map((el) => `${el.tagName} ${(el.textContent ?? '').trim().slice(0, 40)}`));
+    expect(cut).toEqual([]);
+    const { violations } = await new AxeBuilder({ page }).withTags(TAGS).analyze();
+    expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
+  });
+});

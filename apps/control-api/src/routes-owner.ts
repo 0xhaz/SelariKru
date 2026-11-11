@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { NO_HARNESS_CATALOG, effectiveRoutePolicy, routeOutcome, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, strongerLabel, effectiveRoutePolicy, routeOutcome, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
@@ -16,6 +16,7 @@ import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from 
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
 import { loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
 import { skillRunnerWaits } from './skills.ts';
+import { serveBundle } from './brain.ts';
 import {
   bumpStatus, fingerprint, idempotent, loadSpecRow, newId, requireProject, requireRun, requireTaskStatus, writeEvent,
 } from './store.ts';
@@ -519,6 +520,30 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const task = await loadTaskRoute(db, config.tenantId, projectId, taskId, config.nanoInputBudgetChars);
     if (!task) throw new AppError(404, 'task_not_found', 'no such task');
     return { taskId, revision: task.revision, runId: task.runId, route: task.route, records: await loadRouteHistory(db, config.tenantId, projectId, taskId) };
+  });
+
+  // What a task's browser agents read (H4): the task's words, paths and label, and the context bundle for the destination the route allows. `cloud` for any
+  // cloud-capable route: restricted content is left out of it. The spec is for the replan path. Owner only, and nothing is recorded.
+  app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
+    ownerOf(req);
+    const { id: projectId, taskId } = req.params as { id: string; taskId: string };
+    const destination = (req.query as { destination?: unknown } | undefined)?.destination;
+    if (destination !== 'local' && destination !== 'cloud') throw invalidRequest('destination must be local or cloud');
+    await requireProject(db, config.tenantId, projectId);
+    const task = await loadTaskRoute(db, config.tenantId, projectId, taskId, config.nanoInputBudgetChars);
+    if (!task) throw new AppError(404, 'task_not_found', 'no such task');
+    // An unreadable spec has nothing an agent may read: refused rather than guessed.
+    if (!task.spec) throw new AppError(409, 'task_spec_unreadable', 'the task spec cannot be read');
+    const spec = task.spec;
+    const inputs = await loadProjectRouteInputs(db, config.tenantId, projectId, [taskId]);
+    const classification = [inputs.projectLabel, spec.classification, ...(inputs.brainLabels.get(taskId) ?? [])].reduce<string>((acc, l) => strongerLabel(acc, l), 'public');
+    const [run] = await db.select({ planRevision: schema.runs.planRevision }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, task.runId)));
+    const bundle = await serveBundle(db, { tenantId: config.tenantId, projectId, spec, destination, streamable: destination === 'cloud' });
+    return {
+      taskId, revision: task.revision, runId: task.runId, planRevision: run?.planRevision ?? 0, destination,
+      task: { title: spec.title, description: spec.description ?? null, criteria: (spec.criteria ?? []).map((c) => ({ id: c.id, text: c.text })), allowedPaths: [...spec.allowedPaths], classification },
+      bundle, change: null, spec, simulated: false,
+    };
   });
 
   // ---- approvals ---------------------------------------------------------------------------------------------

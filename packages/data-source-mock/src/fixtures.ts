@@ -315,6 +315,9 @@ function featureDelivery(): Fixture {
   b.ready('api', 81).start('api', 'att_api_1', 82, LOCAL, 'local', 'cloud').ready('web', 81).start('web', 'att_web_1', 83, LOCAL2, 'local', 'cloud').ready('search', 81);
   b.emit('placement.blocked', 90, { task: 'search', payload: { reason: 'approval_required:cloud_start', mode: 'local-first' } });
   b.complete('api', 'att_api_1', 150, LOCAL).verdict('api', 'att_api_1', 170, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
+  // The list UI's first attempt failed a check, so the demo can ask an agent to explain it; the repair attempt is running.
+  b.complete('web', 'att_web_1', 110, LOCAL2).verdict('web', 'att_web_1', 115, 'failed', { checkId: 'ci:web', summary: '2 of 24 checks failed: the feedback list is not sorted newest first' });
+  b.start('web', 'att_web_2', 120, LOCAL2, 'local', 'cloud', 2);
   return done(b, {
     id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE,
     // Every route mode is in use: the run default is Local first from onboarding; the contract runs Cloud only, the API Cloud first, the integration Local only, and
@@ -333,7 +336,7 @@ function featureDelivery(): Fixture {
         [scoped('feature-delivery', 'review')]: { inputChars: 700 },
       },
     },
-    description: 'A plan across stages: a brief and contract are verified, the API is done, the list UI is running in a local sandbox, and the search index is set to run in the cloud, so it waits for approval to start a cloud worker. Later tasks wait on it.',
+    description: 'A plan across stages: a brief and contract are verified, the API is done, the list UI failed a check and its repair is running in a local sandbox, and the search index is set to run in the cloud, so it waits for approval to start a cloud worker. Later tasks wait on it.',
     usage: [b.use('api', 'att_api_1', figure('cost_usd', '0.42', 'estimated', 'rate_card')), b.use('web', 'att_web_1', figure('cost_usd', '0.37', 'estimated', 'rate_card'))],
   });
 }

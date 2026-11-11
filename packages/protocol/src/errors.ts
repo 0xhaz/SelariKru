@@ -75,6 +75,8 @@ export const ERROR_CODES = [
   'product_record_not_found', 'product_citation_invalid', 'product_requirement_unknown', 'product_not_merged', 'product_needs_run', 'product_proposal_restricted', 'product_requirement_mismatch', 'product_proposal_not_found',
   /** Checkpoint continuation: a handover refused (the reason is in details), a checkpoint refused or changed since it was checked, restricted work's checkpoint, no such handover. */
   'handover_refused', 'handover_task_blocked', 'checkpoint_refused', 'checkpoint_tampered', 'checkpoint_restricted', 'handover_not_found', 'no_checkpoint',
+  /** A task's agent context: its spec cannot be read, so nothing is given to an agent. */
+  'task_spec_unreadable',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

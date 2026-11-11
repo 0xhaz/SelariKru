@@ -47,6 +47,15 @@ export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): re
     if (a.endedAt) items.push({ id: `attempt:${a.attemptId}`, at: a.endedAt, glyph: a.outcome === 'succeeded' ? '✓' : '✕', tone: a.outcome === 'succeeded' ? 'success' : a.outcome === 'failed' ? 'danger' : 'neutral', text: `Attempt ${a.number} on ${title(a.taskId)} ${OUTCOME[a.outcome] ?? a.outcome}` });
     else items.push({ id: `attempt:${a.attemptId}`, at: a.startedAt, glyph: '●', tone: 'active', text: `Attempt ${a.number} started on ${title(a.taskId)}` });
   }
+  // Where each task's last AI call ran, as the browser reported it (untrusted). A blocked call did not run, so it is not listed here.
+  for (const t of Object.values(snapshot.tasks)) {
+    const r = t.route?.lastObserved;
+    if (!r || r.status === 'blocked' || r.status === 'error') continue;
+    const where = r.observedSource === 'UNKNOWN' ? { text: 'AI ran, source unknown', glyph: '?', tone: 'warning' as const }
+      : r.fellBack === true ? { text: r.observedSource === 'IN_CLOUD' ? 'AI fell back to cloud' : 'AI fell back to device', glyph: '↷', tone: 'warning' as const }
+        : r.observedSource === 'IN_CLOUD' ? { text: 'AI ran in cloud', glyph: '☁', tone: 'active' as const } : { text: 'AI ran on device', glyph: '▣', tone: 'success' as const };
+    items.push({ id: `ai:${r.recordId}`, at: r.reportedAt, glyph: where.glyph, tone: where.tone, text: `${t.title ?? t.taskId}: ${where.text}` });
+  }
   for (const h of snapshot.approvalHistory) {
     if (!h.resolvedAt) continue;
     items.push({ id: `approval:${h.approvalId}`, at: h.resolvedAt, glyph: h.outcome === 'granted' ? '✓' : '✕', tone: h.outcome === 'granted' ? 'success' : 'neutral', text: `Approval ${h.outcome} for ${title(h.taskId)}` });

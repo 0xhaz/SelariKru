@@ -420,8 +420,18 @@ export async function bundleForAttempt(db: Db, lease: { tenantId: string; projec
   const row = await loadSpecRow(db, lease);
   const spec = TaskSpecSchema.safeParse(row?.spec);
   if (!spec.success) return null;
-  const s = spec.data;
-  const { tenantId, projectId } = lease;
+  // Anything but a clear yes from the claim is treated as output that may leave the device: restricted claims are then left out.
+  const bundle = await serveBundle(db, { tenantId: lease.tenantId, projectId: lease.projectId, spec: spec.data, destination: lease.location, streamable: lease.streamable !== false });
+  await db.insert(schema.brainBundles).values({ tenantId: lease.tenantId, projectId: lease.projectId, attemptId: lease.attemptId, taskId: spec.data.taskId, destination: lease.location, compilationVersion: bundle.compilationVersion, bundle, createdAt: at }).onConflictDoNothing();
+  return bundle;
+}
+
+/**
+ * A task's context bundle for one destination, from the last compilation, re-checked for revocation and for what that destination may see. Compiles nothing and
+ * records nothing. `streamable`: whether output may leave the device; a browser agent on a device-only route keeps its output on the device, so it is not.
+ */
+export async function serveBundle(db: Executor, input: { tenantId: string; projectId: string; spec: TaskSpec; destination: BrainDestination; streamable: boolean }): Promise<BrainBundle> {
+  const { tenantId, projectId, spec: s } = input;
   const [head] = await db.select().from(schema.brainHeads).where(where(schema.brainHeads, tenantId, projectId));
   const [c] = await db.select().from(schema.brainCompilations).where(where(schema.brainCompilations, tenantId, projectId)).orderBy(desc(schema.brainCompilations.version)).limit(1);
   const compilation = c ? BrainCompilationSchema.parse({ version: c.version, generator: { id: c.generatorId, version: c.generatorVersion }, generatedAt: c.generatedAt.toISOString(), watermark: c.watermark, pages: c.pages, conflicts: c.conflicts }) : null;
@@ -437,14 +447,10 @@ export async function bundleForAttempt(db: Db, lease: { tenantId: string; projec
   // One cheap fingerprint read: when the records moved since the last sync (a verdict the periodic pass has not read yet), the bundle says so rather than calling
   // its claims current.
   const recordsPending = head?.recordsMark !== (await recordsMark(db, tenantId, projectId));
-  const bundle = buildContextBundle({
-    compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: lease.location, recordsPending,
-    // Anything but a clear yes from the claim is treated as output that may leave the device: restricted claims are then left out.
-    streamable: lease.streamable !== false,
+  return buildContextBundle({
+    compilation, revisions, revocations, sourceHead: head?.lastSeq ?? 0, destination: input.destination, recordsPending, streamable: input.streamable,
     task: { taskId: s.taskId, baseSha: s.baseSha, criteria: [...s.requirementIds, ...s.acceptanceCheckIds, ...(s.criteria ?? []).map((x) => x.id)], dependsOn: s.dependencies.map((d) => d.taskId), paths: s.allowedPaths },
   });
-  await db.insert(schema.brainBundles).values({ tenantId, projectId, attemptId: lease.attemptId, taskId: s.taskId, destination: lease.location, compilationVersion: bundle.compilationVersion, bundle, createdAt: at }).onConflictDoNothing();
-  return bundle;
 }
 
 // ---- views --------------------------------------------------------------------------------------------------------

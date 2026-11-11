@@ -37,4 +37,22 @@ describe('the activity feed', () => {
   it('says nothing when nothing was recorded', () => {
     expect(recentActivity(snapshotOf({}), 7)).toEqual([]);
   });
+
+  it('lists where each task\'s last AI call ran: on device, in cloud, or fell back to cloud', () => {
+    const rec = (over: Record<string, unknown>) => ({
+      recordId: 'r', taskId: 'a', taskRevision: 1, requestId: 'q', stepKind: 'patch', callOverride: null, requestedMode: 'PREFER_ON_DEVICE', effectiveMode: 'PREFER_ON_DEVICE', policySource: 'run', locked: false,
+      observedSource: 'ON_DEVICE', fellBack: false, conformance: 'conforms', requestModeMismatch: false, status: 'ok', model: { cloudModel: 'm', sdkVersion: '12.5.0' }, timing: { totalMs: 900, firstOutputMs: null },
+      validation: 'passed', blockedReason: null, reportedBy: 'browser', trust: 'untrusted', reportedAt: iso(3), ...over,
+    });
+    const route = (lastObserved: unknown) => ({ effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null, suggestion: { mode: 'PREFER_ON_DEVICE', rule: 'bounded_step', reason: 'r', locked: false }, lastObserved }) as never;
+    const s = snapshotOf({ tasks: [
+      task('a', { title: 'Add table', enteredStatusAt: iso(100), route: route(rec({})) }),
+      task('b', { title: 'Feedback API', enteredStatusAt: iso(100), route: route(rec({ taskId: 'b', observedSource: 'IN_CLOUD', effectiveMode: 'ONLY_IN_CLOUD', reportedAt: iso(2) })) }),
+      task('c', { title: 'List UI', enteredStatusAt: iso(100), route: route(rec({ taskId: 'c', observedSource: 'IN_CLOUD', fellBack: true, reportedAt: iso(1) })) }),
+      task('d', { title: 'Search', enteredStatusAt: iso(100), route: route(rec({ taskId: 'd', observedSource: 'UNKNOWN', fellBack: null, conformance: 'unverified', reportedAt: iso(4) })) }),
+    ] });
+    const ai = recentActivity(s, 7).filter((i) => i.id.startsWith('ai:'));
+    expect(ai.map((i) => i.text)).toEqual(['List UI: AI fell back to cloud', 'Feedback API: AI ran in cloud', 'Add table: AI ran on device', 'Search: AI ran, source unknown']);
+    expect(ai[0]!.at).toBe(iso(1));
+  });
 });

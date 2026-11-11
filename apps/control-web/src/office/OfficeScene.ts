@@ -306,6 +306,11 @@ export class OfficeScene {
     this.notes.draw(p, world.notes, (id) => this.colorOf(id), t);
     if (!this.reducedMotion) live.drawCables(p, l, (id) => this.stateOf(id), (id) => this.colorOf(id), t);
     for (const d of l.desks) live.drawDeskStrip(p, d, l.ox, l.oy, this.stateOf(d.agentId), t);
+    for (const d of l.desks) {
+      const ai = world.agents.find((a) => a.id === d.agentId)?.ai ?? null;
+      if (ai) live.drawAiMark(p, d, l.ox, l.oy, ai, this.reducedMotion ? 0 : t);
+    }
+    live.drawCloudRack(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
     live.drawBelt(p, l, t);
     for (const parcel of this.parcels) {
       if (parcel.mode === 'gone') continue;

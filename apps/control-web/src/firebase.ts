@@ -23,8 +23,9 @@ if (usingAuthEmulator) {
 
 /** App Check (reCAPTCHA Enterprise) is set up inside createFirebaseSdk; the debug provider exists only when import.meta.env.DEV. */
 /**
- * `fetchRoute` reads a task's route fresh before every AI call that names a task (a data source's `getTaskRoute`). Until H4 wires one, a call that names a task is
- * blocked (`route_fetch_failed`); calls that name no task, such as onboarding drafts, are unaffected.
+ * `fetchRoute` reads a task's route fresh before every AI call that names a task: the live data source's `getTaskRoute` (LiveRoot wires it). With no source there is
+ * none, and a call that names a task is blocked (`route_fetch_failed`); calls that name no task, such as onboarding drafts, are unaffected. Where each call ran is
+ * reported through the `route.report` command by the task agents (features/hybrid/agents.ts).
  */
 export function createAdapter(fetchRoute: FetchRoute = async () => { throw new Error('no task route source is wired'); }): FirebaseHybridAssistantAdapter {
   const siteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;

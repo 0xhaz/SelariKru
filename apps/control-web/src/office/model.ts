@@ -17,6 +17,14 @@ export interface OfficeAgent {
   readonly state: RobotState;
   readonly label: string;
   readonly taskTitle: string | null;
+  /** The desk's mark: where its task's AI call is going (`live`, in flight now) or where the last one ran. Null: no call yet, or the source was not shown. */
+  readonly ai: { readonly place: 'device' | 'cloud'; readonly live: boolean } | null;
+}
+
+/** A task's AI call in flight in this browser, and where it is meant to run first. */
+export interface OfficeCall {
+  readonly taskId: string;
+  readonly place: 'device' | 'cloud' | null;
 }
 
 /** A sticky note on the plan wall. Columns: 0 to do, 1 doing, 2 verifying, 3 done. */
@@ -80,6 +88,8 @@ export interface OfficeWorld {
   readonly parcels: readonly OfficeParcel[];
   /** True while any task is verifying: the gate scans. */
   readonly verifying: boolean;
+  /** True while a cloud AI call is in flight: the server room's CLOUD rack is lit. */
+  readonly cloudCall: boolean;
   /** The canvas's text equivalent. */
   readonly summary: string;
 }
@@ -121,19 +131,28 @@ const ORDER: readonly RobotState[] = ['needs_input', 'working', 'in_review', 've
 
 const roleName = (role: string | null): string => (role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Worker');
 
-export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null): OfficeWorld {
+export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = []): OfficeWorld {
   // Colours follow the worker's id, not its place in the attention order, so a robot keeps its colour as the order changes.
   const ids = Object.keys(snapshot.workers).sort();
   const colorOf = (id: string): string => agentPalette[Math.max(0, ids.indexOf(id)) % agentPalette.length]!;
   const seen = new Map<string, number>();
   const roles = new Map<string, number>();
   for (const r of team.rows) roles.set(roleName(r.role), (roles.get(roleName(r.role)) ?? 0) + 1);
+  // A call in flight wins; otherwise the task's last reported source. Unknown is no mark: it is never shown as either side.
+  const aiMark = (taskId: string | null): OfficeAgent['ai'] => {
+    if (taskId === null) return null;
+    const live = calls.find((c) => c.taskId === taskId && c.place !== null);
+    if (live) return { place: live.place!, live: true };
+    const last = snapshot.tasks[taskId]?.route?.lastObserved;
+    if (!last || last.status === 'blocked' || last.status === 'error') return null;
+    return last.observedSource === 'ON_DEVICE' ? { place: 'device', live: false } : last.observedSource === 'IN_CLOUD' ? { place: 'cloud', live: false } : null;
+  };
   const agents = team.rows.map((r): OfficeAgent => {
     const base = roleName(r.role);
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     const state = robotState(r, snapshot);
-    return { id: r.workerId, name: (roles.get(base) ?? 0) > 1 ? `${base} ${n}` : base, color: colorOf(r.workerId), state, label: stateStyle[state].label, taskTitle: r.task?.title ?? null };
+    return { id: r.workerId, name: (roles.get(base) ?? 0) > 1 ? `${base} ${n}` : base, color: colorOf(r.workerId), state, label: stateStyle[state].label, taskTitle: r.task?.title ?? null, ai: aiMark(r.task?.taskId ?? null) };
   });
 
   const chosen = planRunId !== null ? snapshot.runs[planRunId] ?? null : null;
@@ -176,5 +195,8 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const prText = open > 0 ? ` ${open} pull request${open === 1 ? '' : 's'}.` : '';
     summary = `Office for ${projectName}: ${agents.length} worker${agents.length === 1 ? '' : 's'}. ${counts.join(', ')}.${prText} The team panel lists each worker.`;
   }
-  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, summary };
+  const cloudCall = calls.some((c) => c.place === 'cloud');
+  const onDevice = calls.filter((c) => c.place === 'device').length;
+  if (cloudCall || onDevice > 0) summary += ` AI calls in flight: ${onDevice} on this device, ${calls.filter((c) => c.place === 'cloud').length} in the cloud.${cloudCall ? ' The cloud rack is lit.' : ''}`;
+  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary };
 }

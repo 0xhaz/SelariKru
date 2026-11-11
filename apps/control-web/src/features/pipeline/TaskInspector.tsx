@@ -5,6 +5,7 @@ import { roleName } from '../team/TeamSignals.tsx';
 import { Note } from './ui.tsx';
 import { decisionHref } from '../../shell/route.ts';
 import { stageLabel, type BlockCause, type PipelineRow, type TaskLink } from './model.ts';
+import { TaskHybrid } from '../hybrid/TaskHybrid.tsx';
 
 const Exact = ({ iso }: { iso: string }) => <time dateTime={iso}>{formatExact(iso)}</time>;
 
@@ -115,6 +116,8 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
             <Section title="Status"><p className="text-fg">{row.reason ?? 'Nothing is holding this task.'} <span className="text-muted">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Action items</a></> : null}</p></Section>
           )}
 
+          <TaskHybrid taskId={row.taskId} />
+
           {row.ifApproved ? (
             <Section title="What changes if I approve?" testId="if-approved">
               <p className="text-fg">{row.ifApproved.text}</p>
@@ -181,7 +184,7 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
           <Note>Scope, per-task criteria, artifact contents and the branch are not reported in this snapshot.</Note>
         </div>
 
-        <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">Read-only. Closing this does not affect the task.</footer>
+        <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">Only Runs on and the AI actions change anything here. Closing this does not affect the task.</footer>
       </div>
     </dialog>
   );

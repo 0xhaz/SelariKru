@@ -6,6 +6,7 @@ import { decisionHref } from '../../shell/route.ts';
 import { PIPELINE_COLUMNS, stageLabel, type Predecessor, type PipelineRow, type StageGroup } from './model.ts';
 import { TaskHandover } from '../handover/ContinueInCloud.tsx';
 import type { HandoverState } from '../handover/useHandovers.ts';
+import { RunsOn } from '../hybrid/RunsOn.tsx';
 
 /** The handovers, for each row's "Continue in cloud". Null: the source has none. */
 type Handovers = { readonly handovers?: HandoverState | null; readonly live?: boolean };
@@ -42,6 +43,7 @@ function StateCell({ row, onOpen, handovers = null, live = false }: { row: Pipel
       {row.reason ? <p className="wrap-anywhere text-sm text-fg">{row.reason}</p> : null}
       {row.why.held ? <button type="button" className="rounded-chip text-sm font-medium text-active underline underline-offset-2" data-why-task={row.taskId} onClick={(e) => { e.stopPropagation(); onOpen(row.taskId); }}>Why blocked?</button> : null}
       {handover && handovers ? <div onClick={(e) => e.stopPropagation()}><TaskHandover task={handover} title={row.title} state={handovers} live={live} compact /></div> : null}
+      <RunsOn taskId={row.taskId} compact />
     </div>
   );
 }

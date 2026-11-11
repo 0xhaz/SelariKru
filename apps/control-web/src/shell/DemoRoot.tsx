@@ -5,6 +5,7 @@ import { AppShell } from './AppShell.tsx';
 import { OnboardingView } from '../features/onboarding/OnboardingView.tsx';
 import { createDemoOnboardingApi } from '../features/onboarding/demo-api.ts';
 import { createProjectionStore } from './projection-store.ts';
+import { createDemoSdk } from '../features/hybrid/demo-sdk.ts';
 
 const params = (): URLSearchParams => new URLSearchParams(window.location.search);
 
@@ -32,6 +33,8 @@ function DevPanel({ session, fixtureId, onFixture, onRestart }: { session: DemoS
 export default function DemoRoot() {
   const [session, setSession] = useState<DemoSession | null>(null);
   const demoOnboarding = useMemo(createDemoOnboardingApi, []);
+  // The task agents run through the real adapter over a stand-in SDK: no model and no network, and every answer is labelled demo data.
+  const agentRuntime = useMemo(() => ({ sdk: createDemoSdk(), simulated: true }), []);
   const [fixtureId, setFixtureId] = useState(() => params().get('fixture') ?? 'healthy-parallel-work');
   useEffect(() => {
     const raw = params().get('fault');
@@ -67,6 +70,6 @@ export default function DemoRoot() {
   const leave = new URL(window.location.href);
   leave.search = '';
   return (
-    <AppShell store={store} mode="mock" projectLabel={project.name} assistant={null} onboarding={<OnboardingView api={demoOnboarding} adapter={null} hold={null} mode="mock" leaveDemoHref={leave.href} />} leaveDemoHref={leave.href} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} onRestart={store.getState().restart} />} />
+    <AppShell store={store} mode="mock" agentRuntime={agentRuntime} projectLabel={project.name} assistant={null} onboarding={<OnboardingView api={demoOnboarding} adapter={null} hold={null} mode="mock" leaveDemoHref={leave.href} />} leaveDemoHref={leave.href} devPanel={<DevPanel session={session} fixtureId={project.fixtureId} onFixture={changeFixture} onRestart={store.getState().restart} />} />
   );
 }

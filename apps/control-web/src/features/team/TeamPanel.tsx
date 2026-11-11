@@ -53,6 +53,7 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
         {/* Why it waits, in brief: a decision, a block or a dependency. The full text is in its drawer. */}
         {waiting && row.detail ? <span className={`col-span-2 block truncate text-[13px] ${needs ? 'text-danger' : 'text-warning'}`} data-testid="team-panel-reason" title={row.detail}><span className="sr-only">Why: </span>{row.detail}</span> : null}
         <span className={`col-span-2 block truncate text-[13px] ${row.task === 'No task' ? 'text-muted' : 'text-fg'}`} data-testid="team-panel-task"><span className="sr-only">Task: </span>{row.task}</span>
+        {decor?.route ? <span className="col-span-2 block truncate text-[13px] text-muted" data-testid="team-panel-route"><span className="sr-only">Where its AI runs: </span>{decor.route}</span> : null}
       </button>
     </li>
   );
@@ -63,6 +64,8 @@ export interface RowDecor {
   readonly portrait: ReactNode;
   readonly key: string | null;
   readonly chip: RobotState | null;
+  /** Where its task's AI steps run (inference, not its sandbox): "AI: Local first". Null or absent: the source reports no route. */
+  readonly route?: string | null;
 }
 
 /** The card decoration for each worker. */

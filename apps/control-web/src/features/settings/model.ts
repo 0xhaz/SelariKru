@@ -45,6 +45,8 @@ export function settingStatus(s: SettingView | undefined): FieldStatus | null {
       : { label: 'Resume requested', tone: 'warning', inForce: false, detail: `The budget, policy and leases were checked again and work can be assigned.${none}` };
   }
   if (s.state === 'waiting_for_runner_update') return updateNeeded(s.waitingOn);
+  // A route override the data lock replaces: saved, but the task runs on this device only, which is what is in force.
+  if (s.state === 'locked') return { label: 'Locked to this device', tone: 'warning', inForce: true, detail: 'This task reads restricted data, so its AI steps run on this device only, whatever was saved. Only a reclassification decision lifts the lock.' };
   if (s.state === 'applied') return { label: 'Applied', tone: 'success', inForce: true, detail: s.enforcer === 'server' ? 'The server enforces it from the moment it was saved.' : 'The runner confirmed it.' };
   if (s.state === 'waiting_for_runner') {
     return { label: s.scope === 'runner' ? 'Saved · applies when this runner connects' : 'Saved · applies when a runner connects', tone: 'warning', inForce: false, detail: 'The server already refuses new work it would forbid. No runner is connected to confirm it.' };

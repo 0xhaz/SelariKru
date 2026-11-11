@@ -2,6 +2,7 @@
 
 import { useMemo, type ReactNode } from 'react';
 import { Panel, TONE_TEXT } from '@selarikru/ui';
+import { RunDefaultPanel } from '../hybrid/RunDefault.tsx';
 import type { AuthorizedViewCommand, CommandReceipt, ProjectViewSnapshot } from '@selarikru/view-protocol';
 import { hrefFor, useHashQuery } from '../../shell/route.ts';
 import type { ConnectionState, SkillsPort, StackPort } from '../../shell/projection-store.ts';
@@ -96,6 +97,7 @@ function WorkflowTab({ snapshot, connection }: { snapshot: ProjectViewSnapshot |
         {rows.length > 0 ? <Facts rows={rows} /> : <p className="text-muted">The server reports no policy for this run, so its merge and repair rules are not shown.</p>}
         <p className="mt-3 text-sm text-muted">Change these in Bounded autonomy, under <a className={link} href={settingsHref('team')}>Team</a>. Agents never merge: a person merges on GitHub.</p>
       </Panel>
+      <RunDefaultPanel />
       <Panel title="Pull requests" labelId="settings-prs-title">
         <p className="text-fg">{prs === 0 ? 'No pull request has been opened for this project.' : `${prs} pull request${prs === 1 ? '' : 's'} on record.`} Each one and its evidence are in <a className={link} href={hrefFor('evidence')}>Evidence and PR</a>.</p>
       </Panel>

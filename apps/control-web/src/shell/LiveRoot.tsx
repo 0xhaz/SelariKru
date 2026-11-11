@@ -10,6 +10,7 @@ import { createApiClient } from '../features/assistant/api.ts';
 import { auth, createAdapter, getOwnerToken, usingAuthEmulator } from '../firebase.ts';
 import { AppShell, type AccountInfo } from './AppShell.tsx';
 import { createProjectionStore, type Scheduler } from './projection-store.ts';
+import { fetchRouteFrom } from '../features/hybrid/agents.ts';
 import { NO_PROJECT, projectFromUrl, useActiveProject } from './active-project.ts';
 
 // Its own chunk, so a failed load is caught by the route's boundary inside the shell.
@@ -40,10 +41,14 @@ const signInAgain = {
 };
 
 function App({ account }: { account: AccountInfo }) {
-  const adapter = useMemo(createAdapter, []);
-  const hold = useMemo(() => new RestrictedDraftHold(), []);
   // The local default exists only in dev. A hosted build with no URL has no handoff.
   const baseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined) || (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '');
+  const source = useMemo(() => (baseUrl ? createLiveDataSource({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
+  // Every AI call that names a task reads its route fresh from the server first (getTaskRoute), and is blocked if that read fails.
+  const adapter = useMemo(() => createAdapter(source ? fetchRouteFrom(source) : undefined), [source]);
+  // The task agents report where each call ran through the route.report command (see createAgents).
+  const agentRuntime = useMemo(() => ({ adapter, simulated: false }), [adapter]);
+  const hold = useMemo(() => new RestrictedDraftHold(), []);
   const api = useMemo(() => (baseUrl ? createApiClient({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
   const onboardingApi = useMemo(() => (baseUrl ? createOnboardingApi({ baseUrl, getToken: getOwnerToken }) : null), [baseUrl]);
   // A project set up here opens with `?project=`, and activating a setup on this page opens it in place. The env defaults still serve the seeded `dev:demo` and `dev:real` stacks.
@@ -53,7 +58,7 @@ function App({ account }: { account: AccountInfo }) {
     runId: (import.meta.env.VITE_DEMO_RUN_ID as string | undefined) || (import.meta.env.VITE_DEFAULT_RUN_ID as string | undefined) || '',
   };
   // No URL or project configured means no source: the shell then says data is unavailable. It never shows mock data.
-  const store = useMemo(() => createProjectionStore({ source: baseUrl && defaults.projectId ? createLiveDataSource({ baseUrl, getToken: getOwnerToken }) : null, projectId: defaults.projectId, clock: { nowMs: () => Date.now() }, every }), [baseUrl, defaults.projectId]);
+  const store = useMemo(() => createProjectionStore({ source: source && defaults.projectId ? source : null, projectId: defaults.projectId, clock: { nowMs: () => Date.now() }, every }), [source, defaults.projectId]);
   useEffect(() => {
     store.getState().start();
     return () => store.getState().stop();
@@ -70,7 +75,7 @@ function App({ account }: { account: AccountInfo }) {
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
+  return <AppShell store={store} mode="live" agentRuntime={agentRuntime} projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
 }
 
 export default function LiveRoot() {

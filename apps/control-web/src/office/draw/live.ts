@@ -3,7 +3,7 @@
 // Animated parts of the office, redrawn every frame.
 
 import { colors, stateStyle, type RobotState } from '../../theme/tokens.ts';
-import type { OfficePr, OfficeRack } from '../model.ts';
+import type { OfficeAgent, OfficePr, OfficeRack } from '../model.ts';
 import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { box, disc, drawRows, line, type Pen } from '../engine/pen.ts';
@@ -261,3 +261,36 @@ export function drawPlanTitle(p: Pen, l: OfficeLayout, title: string) {
   tag(p, fit(title.toUpperCase(), b.w), b.x + b.w / 2, b.y - 11, C.ink, C.yellow);
 }
 
+
+/**
+ * The desk's AI mark (H4): a small chip for this device, or a cloud for Gemini in the cloud, on the cubicle's partition. A call in flight blinks; the last call's
+ * mark is steady. Paired with words in the office summary and the team cards.
+ */
+export function drawAiMark(p: Pen, d: DeskSpot, ox: number, oy: number, ai: NonNullable<OfficeAgent['ai']>, t: number) {
+  const X = ox + d.x0 * 16 + 5 * 16 + 2;
+  const Y = oy + d.y0 * 16 - 9;
+  if (ai.live && blink(t, 4)) return;
+  p.rect(X - 1, Y - 1, 14, 10, C.ink);
+  if (ai.place === 'device') {
+    p.rect(X, Y, 12, 8, '#2e7d32');
+    p.rect(X + 3, Y + 2, 6, 4, '#c8f7c5');
+    for (let i = 0; i < 3; i++) { p.rect(X + 2 + i * 3, Y - 1, 1, 1, '#c8f7c5'); p.rect(X + 2 + i * 3, Y + 8, 1, 1, '#c8f7c5'); }
+  } else {
+    p.rect(X, Y, 12, 8, '#1d4f91');
+    p.rect(X + 2, Y + 4, 8, 3, C.white);
+    p.rect(X + 3, Y + 2, 3, 2, C.white);
+    p.rect(X + 6, Y + 1, 3, 3, C.white);
+  }
+}
+
+/** The server room's CLOUD rack: lit while a cloud AI call is in flight, dark otherwise. Its word is always drawn, so it does not rely on colour. */
+export function drawCloudRack(p: Pen, l: OfficeLayout, lit: boolean, t: number) {
+  if (!l.serverRoom) return;
+  const x = l.ox + (l.serverRoom.x0 + 1) * 16;
+  const y = l.oy + 4;
+  const w = Math.max(40, (l.serverRoom.w - 2) * 16);
+  p.rect(x - 1, y - 1, w + 2, 16, C.ink);
+  p.rect(x, y, w, 14, lit ? '#1d4f91' : '#2e2b36');
+  for (let i = 0; i < 4; i++) p.rect(x + 3 + i * 4, y + 5, 2, 3, lit && (blink(t, 6) ? i % 2 === 0 : i % 2 === 1) ? '#bfe9ff' : '#4a4658');
+  text(p, 'CLOUD', x + 22, y + 4, lit ? C.white : '#8a8496');
+}

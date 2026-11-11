@@ -1,5 +1,5 @@
 import {
-  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
+  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CriteriaRevisionRequestSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
   isoOf, projectionFromSnapshot, sequenceToCursor,
   isReverifiableReason,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
@@ -15,6 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
+import { demoTaskContext, reviseDemoCriteria } from './agent-context.ts';
 import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, withRouteLocks, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
@@ -51,6 +52,8 @@ interface Project {
   readonly heldTasks: Set<string>;
   /** Every route record per task, newest first, as the browser reported them. */
   readonly routeRecords: Map<string, RouteRecord[]>;
+  /** Criteria reworded by an accepted proposal, by task. Simulated. */
+  readonly criteria: Map<string, { id: string; text: string }[]>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -120,6 +123,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
+      criteria: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -375,6 +379,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: withRouteLocks(p.fixture.routes ?? NO_ROUTES, p.settings), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
       runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
     };
+  }
+
+  function contextState(p: Project, runId: string) {
+    return { routes: p.fixture.routes, criteria: p.criteria, planRevision: p.state.snapshot.runs[runId]?.planRevision ?? 0 };
   }
 
   function routeViewOf(p: Project, t: { taskId: string; runId: string }) {
@@ -671,6 +679,25 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const t = p.state.snapshot.tasks[taskId];
       if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
       return { taskId, revision: t.revision, runId: t.runId, route: routeViewOf(p, t), records: [...(p.routeRecords.get(taskId) ?? [])] };
+    },
+
+    /** What the demo's task agents read: simulated, with a bundle built by the domain code for the asked destination. */
+    async getTaskContext(projectId, taskId, destination) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[taskId];
+      if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      return demoTaskContext(contextState(p, t.runId), t, destination);
+    },
+
+    /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and no plan revision is recorded. */
+    async reviseTaskCriteria(projectId, request) {
+      const p = project(projectId);
+      const r = CriteriaRevisionRequestSchema.parse(request);
+      const t = p.state.snapshot.tasks[r.taskId];
+      if (!t) throw fail('unavailable', `no task ${r.taskId} in this project`);
+      const state = contextState(p, t.runId);
+      p.criteria.set(t.taskId, reviseDemoCriteria(state, t, r.expectedPlanRevision, r.criteria));
+      return { planRevision: state.planRevision + 1, taskIds: [t.taskId], simulated: true };
     },
 
     async getRunFailures(projectId, runId) {

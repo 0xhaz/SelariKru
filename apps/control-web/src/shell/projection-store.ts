@@ -46,7 +46,14 @@ export interface ProjectionStoreState {
   readonly product: ProductPort | null;
   /** Checkpoint continuation: which running tasks may continue on a cloud runner, and each handover's state. Null when the source has none. */
   readonly handover: HandoverPort | null;
+  /** The project this store reads. */
+  readonly projectId: string;
+  /** What the task agents read: a task's route and context, and the replan path for criteria. Null when the source has no route reads or no context reads. */
+  readonly agentSource: AgentSource | null;
 }
+
+/** The reads the task agents need from the source. */
+export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'reviseTaskCriteria'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -206,6 +213,12 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.handoverAction!(projectId, action);
         },
+      } : null,
+      projectId,
+      agentSource: source?.getTaskRoute && source.getTaskContext ? {
+        getTaskRoute: source.getTaskRoute.bind(source),
+        getTaskContext: source.getTaskContext.bind(source),
+        ...(source.reviseTaskCriteria ? { reviseTaskCriteria: source.reviseTaskCriteria.bind(source) } : {}),
       } : null,
       stack: source?.getStack && source.stackAction ? {
         load: () => source.getStack!(projectId),

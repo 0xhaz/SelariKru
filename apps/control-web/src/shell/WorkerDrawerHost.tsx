@@ -16,6 +16,7 @@ import { DrawerHandover } from '../features/handover/ContinueInCloud.tsx';
 import { AttemptSkillsPanel } from '../features/skills/AttemptSkillsPanel.tsx';
 import { ContextPanel } from '../features/brain/ContextPanel.tsx';
 import { PANEL_WIDE, useMediaQuery } from './media.ts';
+import { TaskHybrid } from '../features/hybrid/TaskHybrid.tsx';
 
 /** The worker's robot and state, from the office world, so the drawer header matches its card. */
 export interface DrawerLook {
@@ -112,6 +113,7 @@ export function WorkerDrawerHost({ look = null, workerId, tab, team, snapshot, d
       handover={<DrawerHandover port={handover} taskId={row.terminalTarget?.taskId ?? null} title={row.terminalTarget ? snapshot.tasks[row.terminalTarget.taskId]?.title ?? null : null} refreshKey={snapshot.meta.cursor} live={live} />}
       identity={identity}
       messages={messages}
+      hybrid={(taskId) => <TaskHybrid taskId={taskId} />}
       context={<div className="space-y-4"><AttemptSkillsPanel attemptId={row.terminalTarget?.attemptId ?? null} port={skills} /><ContextPanel attemptId={row.terminalTarget?.attemptId ?? null} port={brain} /></div>}
     />
   );

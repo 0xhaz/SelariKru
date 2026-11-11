@@ -54,7 +54,7 @@ const Empty = ({ children }: { children: ReactNode }) => <p className="py-2 text
 const SIMULATED_NOTE = <p className="mb-3 text-sm text-warning">Simulated data. It is not evidence.</p>;
 
 
-function TaskPanel({ detail, row, onSettings }: { detail: WorkerDetail; row: TeamRow; onSettings: () => void }) {
+function TaskPanel({ detail, row, onSettings, hybrid }: { detail: WorkerDetail; row: TeamRow; onSettings: () => void; hybrid?: ReactNode }) {
   const t = detail.task;
   return (
     <div className="space-y-4">
@@ -97,6 +97,7 @@ function TaskPanel({ detail, row, onSettings }: { detail: WorkerDetail; row: Tea
             ...(t.runCriteria ? [{ label: 'Run progress', value: t.runCriteria }] : []),
           ]} />
           {t.current ? <Note>Accepted contract versions, per-task criteria and the branch or pull request are not reported in this snapshot.</Note> : null}
+          {hybrid ?? null}
         </>
       ) : <Empty>No task has been assigned to this worker.</Empty>}
       <p className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3 text-sm text-muted">
@@ -239,9 +240,11 @@ export interface WorkerDrawerProps {
   readonly identity?: DrawerIdentity | null;
   /** This worker's requests, as the same cards the Action items drawer shows. */
   readonly messages?: ReactNode;
+  /** Where the task's AI runs and its AI actions, in the Task tab. */
+  readonly hybrid?: (taskId: string) => ReactNode;
 }
 
-export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context, handover, identity = null, messages = null }: WorkerDrawerProps) {
+export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context, handover, identity = null, messages = null, hybrid }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -472,7 +475,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
           ) : null}
           {tab === 'task' ? (
             <div className="space-y-6">
-              <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} />
+              <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} hybrid={detail.task && hybrid ? hybrid(detail.task.taskId) : null} />
               <section aria-label="Checks and criteria"><h3 className="mb-2 font-semibold text-fg">Checks and criteria</h3><ChecksPanel detail={detail} simulated={simulated} /></section>
               <section aria-label="Artifacts"><h3 className="mb-2 font-semibold text-fg">Artifacts</h3><ArtifactsPanel detail={detail} simulated={simulated} /></section>
               <section aria-label="Context and knowledge"><h3 className="mb-2 font-semibold text-fg">Context and knowledge packs</h3>{context ?? <Empty>The Project Brain is not connected here.</Empty>}</section>
