@@ -161,3 +161,16 @@ describe('Propose change chooses and reads base files, and re-asks once (H5)', (
     expect(outside.adapter.runAgent).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('fix round 5: each call names its own served context', () => {
+  it('a re-ask reads the context again under a new id, so no context backs two calls', async () => {
+    let n = 0;
+    const ids: (string | undefined)[] = [];
+    const h = harness(route(), { newContextId: () => `ctx_${(n += 1)}` });
+    const read = h.deps.getTaskContext;
+    h.deps = { ...h.deps, getTaskContext: async (t, d, o, id) => { ids.push(id); return read(t, d, o, id); } };
+    h.adapter.runAgent.mockImplementation(async (spec: CallSpec, req: AgentCallRequest) => { h.calls.push({ spec, req }); return { ...blocked, status: 'invalid', blockedReason: null, validation: { status: 'failed', errors: ['/files/0 diff_does_not_apply'] }, operation: spec.op } as never; });
+    await runAgentStep(h.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(ids).toEqual(['ctx_1', 'ctx_2']);
+  });
+});

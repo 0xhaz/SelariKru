@@ -2,6 +2,7 @@ import { handleGithubWebhook, openReviewablePr, PrNotAllowed } from '@selarikru/
 import { ownerPrDescription } from '@selarikru/domain';
 import { evaluate } from '@selarikru/policy';
 import { z } from 'zod';
+import { sql } from 'drizzle-orm';
 import { parseBody } from './routes-owner.ts';
 import { agentOutputGuard } from './apply.ts';
 import { runUsageLines } from '@selarikru/workflow';
@@ -45,6 +46,11 @@ export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, gith
       const run = await requireRun(ctx.db, ctx.config.tenantId, (req.params as { id: string }).id);
       // The owner's description (H5): untrusted text, redacted and capped, placed ahead of the recorded sections. Any other field is ignored: the target comes from the project.
       const parsed = parseBody(PullRequestBodySchema, req.body);
+      if (parsed.bodyFrom && parsed.body) {
+        // The agent call must be about a task of this run.
+        const owns = await ctx.db.execute(sql`SELECT 1 FROM task_revisions WHERE tenant_id = ${ctx.config.tenantId} AND project_id = ${run.projectId} AND run_id = ${run.runId} AND task_id = ${parsed.bodyFrom.taskId} LIMIT 1`);
+        if (owns.length === 0) throw new AppError(422, 'invalid_request', 'the description\'s call is not about a task of this run', { reason: 'body_from_other_run' });
+      }
       if (parsed.bodyFrom && parsed.body) await agentOutputGuard(ctx.db, { tenantId: ctx.config.tenantId, projectId: run.projectId, taskId: parsed.bodyFrom.taskId }, parsed.bodyFrom.routeRecordId, 'prDescription');
       const description = ownerPrDescription(parsed.body);
       // Evaluated right before the push and PR creation. An absent policy denies.

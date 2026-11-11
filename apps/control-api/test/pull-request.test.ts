@@ -107,12 +107,15 @@ describe('POST /v1/runs/:id/pull-request', () => {
   it('an agent-written description is refused when its call read restricted context, and nothing reaches GitHub (fix round 4)', async () => {
     const record = async (requestId: string, served: string | null) => {
       if (served !== null) await t.db.execute(sql`INSERT INTO agent_contexts (tenant_id, project_id, context_id, task_id, revision, destination, content_label, served_at) VALUES (${TENANT}, ${PROJECT}, ${`ctx_${requestId}`}, 'task_a', 1, 'local', ${served}, now())`);
-      await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, ${`rpt_${requestId}`}, 'task', 'task_a', 'route', 'untrusted', ${JSON.stringify({ requestId, stepKind: 'prDescription', status: 'ok', locked: false, contextId: `ctx_${requestId}` })}::jsonb, 'owner_uid_1')`);
+      await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, ${`rpt_${requestId}`}, 'task', 'task_a', 'route', 'untrusted', ${JSON.stringify({ requestId, taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'prDescription', status: 'ok', locked: false, contextId: `ctx_${requestId}` })}::jsonb, 'owner_uid_1')`);
     };
     await record('pr_bad', 'restricted');
     const refused = await h.app.inject({ method: 'POST', url: URL, payload: { body: 'Add posting', bodyFrom: { taskId: 'task_a', routeRecordId: 'pr_bad' } }, headers: owner() });
     expect([refused.statusCode, refused.json().error.code]).toEqual([409, 'proposal_from_restricted_context']);
     expect(gh.prs).toHaveLength(0);
+    // A call about a task outside this run is refused before anything else (fix round 5).
+    const other = await h.app.inject({ method: 'POST', url: URL, payload: { body: 'Add posting', bodyFrom: { taskId: 'task_elsewhere', routeRecordId: 'pr_bad' } }, headers: owner() });
+    expect([other.statusCode, other.json().error.details.reason]).toEqual([422, 'body_from_other_run']);
     await record('pr_ok', 'internal');
     const ok = await h.app.inject({ method: 'POST', url: URL, payload: { body: 'Add posting', bodyFrom: { taskId: 'task_a', routeRecordId: 'pr_ok' } }, headers: owner() });
     expect(ok.statusCode).toBe(200);

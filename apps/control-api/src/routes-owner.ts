@@ -239,7 +239,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow planning', { reason: gate.reason, decision: gate.decision });
     // A browser agent's criteria: refused when that call read restricted context (or the server cannot vouch for what it read).
-    if (body.agentProposal) await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: body.agentProposal.taskId }, body.agentProposal.routeRecordId, 'criteria');
+    if (body.agentProposal) {
+      // An agent's criteria revise exactly the task whose call proposed them.
+      const named = body.agentProposal.taskId;
+      if (!body.tasks.every((x) => x.taskId === named)) throw invalidRequest('an agent proposal revises only the task whose call proposed it', { reason: 'agent_proposal_task_mismatch' });
+      await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'criteria');
+    }
 
     const extra: PlanError[] = body.tasks.filter((t) => t.tenantId !== config.tenantId).map((t) => ({ kind: 'scope_mismatch', taskId: t.taskId, field: 'projectId' }));
     // A dependent on a merge could never start: the run cannot reach a pull request while it has an unfinished task, so nothing would ever merge.
@@ -466,6 +471,13 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const body = parseBody(ClientReportSchema, req.body);
     const row = await requireTaskStatus(db, config.tenantId, idParam(req));
     if (body.kind === 'route') {
+      // One served context backs one call (H5 fix round 5): a second call naming it is refused, so one clean read cannot vouch for many outputs.
+      if (body.contextId !== undefined) {
+        const [other] = await db.select({ id: schema.clientReports.reportId }).from(schema.clientReports).where(and(
+          eq(schema.clientReports.tenantId, config.tenantId), eq(schema.clientReports.kind, 'route'), sql`${schema.clientReports.payload} ->> 'contextId' = ${body.contextId}`,
+          sql`${schema.clientReports.payload} ->> 'requestId' <> ${body.requestId}`)).limit(1);
+        if (other) throw new AppError(409, 'context_id_reused', 'this context was already named by another call; read the context again for each call');
+      }
       // A route record for one AI call. The server works out the effective route, the fallback and whether the source conforms from its own rows; the browser's
       // report supplies only what it observed. Metadata only: the shape has no field for prompt or output text. One request id is one record, and one event.
       // Collision-proof: a digest over the task id and the request id, separated by a byte neither alphabet allows.
@@ -559,13 +571,22 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
     const { projectId, taskId, task, spec, destination, bundle, change } = await agentContext(req);
     const classification = task.labels.reduce<string>((acc, l) => strongerLabel(acc, l), 'public');
-    // H5 fix round 4: what this context holds, recorded under the id the browser sends and reports with its route record. Ids and a label only. An accept, an agent
-    // criteria revision and an agent PR body are judged by it, whatever the browser says about its own lock. No id: nothing recorded, and nothing it led to is accepted.
+    // H5 fix rounds 4 and 5: a GET that records, on purpose. What this context holds is kept under the id the browser sends and later reports with its route record:
+    // ids and a label only, pruned after 7 days unless an accept is waiting (`pruneAgentContexts`). An accept, an agent criteria revision and an agent PR body are
+    // judged by it, whatever the browser says about its own lock. No id: nothing recorded, and nothing it led to is accepted. An id already recorded for another task,
+    // destination or revision is refused, and reading it again only ever keeps the stronger label, so a clean read cannot launder a restricted one.
     const contextId = (req.query as { contextId?: unknown }).contextId;
     if (contextId !== undefined) {
       if (typeof contextId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(contextId)) throw invalidRequest('contextId must be a plain id');
-      const served = bundle.claims.length === 0 ? 'public' : (bundle.contentLabel ?? 'restricted');
-      await db.insert(schema.agentContexts).values({ tenantId: config.tenantId, projectId, contextId, taskId, revision: task.revision, destination, contentLabel: strongerLabel(classification, served), servedAt: now() }).onConflictDoNothing();
+      const served = strongerLabel(classification, bundle.claims.length === 0 ? 'public' : (bundle.contentLabel ?? 'restricted'));
+      const inserted = await db.insert(schema.agentContexts).values({ tenantId: config.tenantId, projectId, contextId, taskId, revision: task.revision, destination, contentLabel: served, servedAt: now() }).onConflictDoNothing().returning({ id: schema.agentContexts.contextId });
+      if (inserted.length === 0) {
+        const where = and(eq(schema.agentContexts.tenantId, config.tenantId), eq(schema.agentContexts.projectId, projectId), eq(schema.agentContexts.contextId, contextId));
+        const [prior] = await db.select().from(schema.agentContexts).where(where);
+        if (!prior || prior.taskId !== taskId || prior.destination !== destination || prior.revision !== task.revision) throw new AppError(409, 'context_id_reused', 'this context id was already used for another task, destination or revision; use a new one');
+        const stronger = strongerLabel(prior.contentLabel, served);
+        if (stronger !== prior.contentLabel) await db.update(schema.agentContexts).set({ contentLabel: stronger }).where(and(where, eq(schema.agentContexts.contentLabel, prior.contentLabel)));
+      }
     }
     const [run] = await db.select({ planRevision: schema.runs.planRevision }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, task.runId)));
     return {

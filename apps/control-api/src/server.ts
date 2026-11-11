@@ -12,6 +12,7 @@ import { createGitProbes, ghRepoAccess, type ReadinessProbes } from './onboardin
 import { loadPlanConfigFile } from './proposals.ts';
 import type { TokenVerifier } from './auth.ts';
 import { ConfigError, type ControlApiConfig } from './config.ts';
+import { pruneAgentContexts } from './apply.ts';
 import { startLeaseExpiryDriver } from './expire.ts';
 import { refreshBrains } from './brain.ts';
 import { finishCancelledRuns, settlePendingSettings } from './settings.ts';
@@ -221,6 +222,8 @@ export async function startServer(options: {
       try { await settlePendingSettings({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
       // A handover released to a cloud runner that can no longer run there (no runner seen, cloud taken away, budget short) is offered back to the owner.
       try { await reviewHandovers({ db, now, policy, catalog, codingWorkers: config.codingWorkers }, config.caps, now()); } catch (e) { failures.push(e); }
+      // Agent context records (H5): kept 7 days, longer while their task has an accept waiting.
+      try { await pruneAgentContexts({ db, tenantId: config.tenantId, now }); } catch (e) { failures.push(e); }
       // The Project Brain: compiles a project whose records moved (a verifier's verdict, a merge) without waiting for anyone to look. Brain lock only.
       try { await refreshBrains({ db, tenantId: config.tenantId, now, onError: (entry) => app.log.warn(entry, 'compiling a project\'s Brain failed; the next pass retries') }); } catch (e) { failures.push(e); }
       if (failures.length > 0) throw new AggregateError(failures, 'settings pass failed');

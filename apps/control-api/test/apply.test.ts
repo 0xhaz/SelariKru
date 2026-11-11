@@ -27,11 +27,11 @@ const URL = `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`;
 const accept = (p: unknown, key = `k-${Math.random()}`) => post(h.app, URL, { idempotencyKey: key, proposal: p });
 let rid = 0;
 /** The browser's route record of a call, and the context the server served it (internal unless said otherwise), as the context read records it. */
-const routeRecord = async (requestId = 'req_1', over: Record<string, unknown> = {}, diff = DIFF, served: string | null = 'internal', taskId = 't1') => {
-  if (served !== null) await t.db.insert(schema.agentContexts).values({ tenantId: TENANT, projectId: PROJECT, contextId: `ctx_${requestId}`, taskId, revision: 1, destination: 'local', contentLabel: served, servedAt: new Date() });
+const routeRecord = async (requestId = 'req_1', over: Record<string, unknown> = {}, diff = DIFF, served: string | null = 'internal', taskId = 't1', context: { destination?: string; revision?: number } = {}) => {
+  if (served !== null) await t.db.insert(schema.agentContexts).values({ tenantId: TENANT, projectId: PROJECT, contextId: `ctx_${requestId}`, taskId, revision: context.revision ?? 1, destination: context.destination ?? 'local', contentLabel: served, servedAt: new Date() });
   await t.db.insert(schema.clientReports).values({
     tenantId: TENANT, projectId: PROJECT, reportId: `rpt_${(rid += 1)}`, subjectKind: 'task', subjectId: taskId, kind: 'route', trust: 'untrusted',
-    payload: { requestId, stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(diff), contextId: `ctx_${requestId}`, ...over }, reportedBy: 'owner_uid_1',
+    payload: { requestId, taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(diff), contextId: `ctx_${requestId}`, ...over }, reportedBy: 'owner_uid_1',
   });
 };
 
@@ -313,5 +313,67 @@ describe('fix round 4: a restricted sibling\'s project-wide plan claim, through 
     expect(cloud.body.bundle.claims.map((c: { key: string }) => c.key)).not.toContain('task:t2');
     expect(JSON.stringify(cloud.body.bundle)).not.toContain('Falcon');
     expect((await t.db.execute(sql`SELECT content_label FROM agent_contexts WHERE context_id = 'ctx_cloud'`))[0]!['content_label']).toBe('internal');
+  });
+});
+
+describe('fix round 5: the context record cannot be laundered (m1)', () => {
+  beforeEach(async () => { await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'] })); });
+  const ctxUrl = (id: string, destination: string) => `/v1/projects/${PROJECT}/tasks/t1/context?destination=${destination}&contextId=${id}`;
+  const setRoute = (inference: string) => t.db.execute(sql`UPDATE runs SET setup_snapshot = ${JSON.stringify({ blueprintVersion: 1, execution: 'local', inference, agentBudgetUsd: 10, repository: null, defaultBranch: null, baseSha: null })}::jsonb WHERE run_id = ${RUN}`);
+
+  it('a context id read again for another destination is refused, and a repeat keeps the stronger label', async () => {
+    await setRoute('PREFER_ON_DEVICE');
+    expect((await get(h.app, ctxUrl('ctx_a', 'local'))).status).toBe(200);
+    const again = await get(h.app, ctxUrl('ctx_a', 'cloud'));
+    expect([again.status, again.body.error.code]).toEqual([409, 'context_id_reused']);
+    await t.db.execute(sql`UPDATE agent_contexts SET content_label = 'restricted' WHERE context_id = 'ctx_a'`);
+    expect((await get(h.app, ctxUrl('ctx_a', 'local'))).status).toBe(200);
+    expect((await t.db.execute(sql`SELECT content_label FROM agent_contexts WHERE context_id = 'ctx_a'`))[0]!['content_label']).toBe('restricted');
+  });
+
+  it('a clean cloud context cannot back a device-only call', async () => {
+    await routeRecord('req_1', {}, DIFF, 'internal', 't1', { destination: 'cloud' });
+    const res = await accept(proposal());
+    expect([res.body.error.code, res.body.error.details.reason]).toEqual(['proposal_from_restricted_context', 'context_destination_mismatch']);
+  });
+
+  it('a context served for another revision is refused', async () => {
+    await routeRecord('req_1', {}, DIFF, 'internal', 't1', { revision: 2 });
+    expect((await accept(proposal())).body.error.details.reason).toBe('context_revision_mismatch');
+  });
+
+  it('one context id backs one call: a second record naming it is refused when reported, and refused at accept', async () => {
+    await routeRecord('req_1');
+    await t.db.insert(schema.clientReports).values({ tenantId: TENANT, projectId: PROJECT, reportId: 'rpt_dup', subjectKind: 'task', subjectId: 't1', kind: 'route', trust: 'untrusted', payload: { requestId: 'req_other', taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'patch', status: 'ok', contextId: 'ctx_req_1' }, reportedBy: 'owner_uid_1' });
+    expect((await accept(proposal())).body.error.details.reason).toBe('context_reused');
+    const report = { kind: 'route', requestId: 'req_third', stepKind: 'patch', callOverride: null, requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE', status: 'ok', model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' }, timing: { totalMs: 5, firstOutputMs: null }, validation: 'passed', blockedReason: null, contextId: 'ctx_req_1' };
+    const reported = await post(h.app, '/v1/tasks/t1/client-reports', report);
+    expect([reported.status, reported.body.error.code]).toEqual([409, 'context_id_reused']);
+  });
+});
+
+describe('fix round 5: agent sources name the right task (m2)', () => {
+  it('agent criteria must be for the task being revised', async () => {
+    await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'], criteria: [{ id: 'R1', text: 'x' }], requirementIds: ['R1'] }));
+    await seedTask(t.db, specFor('t2', { baseSha: BASE, allowedPaths: ['src'] }));
+    await routeRecord('req_c', { stepKind: 'criteria' }, DIFF, 'internal', 't2');
+    const spec = specFor('t1', { baseSha: BASE, allowedPaths: ['src'], criteria: [{ id: 'R1', text: 'y' }], requirementIds: ['R1'] });
+    const res = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, idempotencyKey: 'k', tasks: [{ ...spec, revision: 2 }], agentProposal: { taskId: 't2', routeRecordId: 'req_c' } });
+    expect([res.status, res.body.error.code, res.body.error.details.reason]).toEqual([400, 'invalid_request', 'agent_proposal_task_mismatch']);
+  });
+});
+
+describe('fix round 5: agent context retention (m3)', () => {
+  it('prunes contexts older than 7 days unless their task has an accept waiting', async () => {
+    const { pruneAgentContexts } = await import('../src/apply.ts');
+    await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'] }));
+    await seedTask(t.db, specFor('t2', { baseSha: BASE, allowedPaths: ['src'] }));
+    const old = new Date(h.clock.now().getTime() - 8 * 86_400_000);
+    for (const [id, task, at] of [['ctx_old', 't1', old], ['ctx_new', 't1', h.clock.now()], ['ctx_kept', 't2', old]] as const) {
+      await t.db.insert(schema.agentContexts).values({ tenantId: TENANT, projectId: PROJECT, contextId: id, taskId: task, revision: 1, destination: 'local', contentLabel: 'internal', servedAt: at });
+    }
+    await t.db.execute(sql`INSERT INTO accepted_proposals (tenant_id, project_id, proposal_id, task_id, revision, run_id, base_sha, route_record_id, digest, file_count, results, diff, state, accepted_by, accepted_at, updated_at) VALUES (${TENANT}, ${PROJECT}, 'p2', 't2', 1, ${RUN}, ${BASE}, 'p2', ${'a'.repeat(64)}, 1, '[]'::jsonb, 'd', 'accepted', 'o', now(), now())`);
+    expect(await pruneAgentContexts({ db: t.db, tenantId: TENANT, now: h.clock.now })).toBe(1);
+    expect((await t.db.execute(sql`SELECT context_id FROM agent_contexts ORDER BY context_id`)).map((r) => r['context_id'])).toEqual(['ctx_kept', 'ctx_new']);
   });
 });

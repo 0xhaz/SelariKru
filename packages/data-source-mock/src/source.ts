@@ -559,6 +559,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const task = snap.tasks[c.args.taskId];
       if (!task) return rejected(c.idempotencyKey, 'unknown_target');
       const recordId = `${c.args.taskId}.route_${c.args.report.requestId}`;
+      // As the server: one served context backs one call.
+      const ctx = c.args.report.contextId;
+      if (ctx !== undefined && [...p.reportContexts.entries()].some(([req, v]) => v.contextId === ctx && req !== c.args.report.requestId)) return rejected(c.idempotencyKey, 'stale_revision');
       const earlier = p.routeRecords.get(c.args.taskId) ?? [];
       if (earlier.some((x) => x.recordId === recordId)) return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied', replayed: true });
       const record = routeRecordOf({ routes: p.fixture.routes ?? NO_ROUTES, settings: p.settings, runId: task.runId, taskId: task.taskId, taskRevision: task.revision, recordId, at: isoOf(timeOf(p)), report: c.args.report });

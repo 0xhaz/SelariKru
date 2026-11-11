@@ -216,14 +216,39 @@ export async function agentOutputGuard(db: Executor, key: { tenantId: string; pr
     eq(schema.clientReports.tenantId, key.tenantId), eq(schema.clientReports.projectId, key.projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
     eq(schema.clientReports.subjectId, key.taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${routeRecordId}`,
   )).limit(1);
-  const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown; contextId?: unknown } | undefined;
+  const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown; contextId?: unknown; taskRevision?: unknown; effectiveMode?: unknown } | undefined;
   if (!rec || rec.stepKind !== stepKind || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', `there is no record of where the ${stepKind} call that produced this ran, so it cannot be used`);
   // A call that ran locked to the device read restricted data: its output stays on the device, whatever the task's label says now.
   if (rec.locked === true) throw new AppError(409, 'proposal_from_restricted_call', RESTRICTED_APPLY_REFUSAL, { reason: 'locked_call' });
-  const [served] = typeof rec.contextId === 'string' ? await db.select({ label: schema.agentContexts.contentLabel, taskId: schema.agentContexts.taskId }).from(schema.agentContexts)
-    .where(and(eq(schema.agentContexts.tenantId, key.tenantId), eq(schema.agentContexts.projectId, key.projectId), eq(schema.agentContexts.contextId, rec.contextId))) : [];
-  if (!served || served.taskId !== key.taskId || !['public', 'internal'].includes(served.label)) {
-    throw new AppError(409, 'proposal_from_restricted_context', 'this came from a call whose context held restricted data, or whose context the server cannot vouch for, so it stays on the device', { reason: served ? 'restricted_context' : 'context_not_recorded' });
-  }
+  const contextId = typeof rec.contextId === 'string' ? rec.contextId : null;
+  const [served] = contextId !== null ? await db.select({ label: schema.agentContexts.contentLabel, taskId: schema.agentContexts.taskId, revision: schema.agentContexts.revision, destination: schema.agentContexts.destination }).from(schema.agentContexts)
+    .where(and(eq(schema.agentContexts.tenantId, key.tenantId), eq(schema.agentContexts.projectId, key.projectId), eq(schema.agentContexts.contextId, contextId))) : [];
+  const refuse = (reason: string): never => {
+    throw new AppError(409, 'proposal_from_restricted_context', 'this came from a call whose context held restricted data, or whose context the server cannot vouch for, so it stays on the device', { reason });
+  };
+  if (!served || served.taskId !== key.taskId) refuse('context_not_recorded');
+  if (!['public', 'internal'].includes(served!.label)) refuse('restricted_context');
+  // The context must be the one this call could have read: the same task revision, and the device context exactly when the call's route kept it on the device.
+  if (served!.revision !== rec.taskRevision) refuse('context_revision_mismatch');
+  if ((served!.destination === 'local') !== (rec.effectiveMode === 'ONLY_ON_DEVICE')) refuse('context_destination_mismatch');
+  // One served context backs one call.
+  const named = await db.select({ id: schema.clientReports.reportId }).from(schema.clientReports).where(and(
+    eq(schema.clientReports.tenantId, key.tenantId), eq(schema.clientReports.projectId, key.projectId), eq(schema.clientReports.kind, 'route'), sql`${schema.clientReports.payload} ->> 'contextId' = ${contextId}`)).limit(2);
+  if (named.length !== 1) refuse('context_reused');
   return { outputSha256: rec.outputSha256 };
+}
+
+/** Context records older than this are pruned, unless their task has an accept waiting. */
+export const AGENT_CONTEXT_RETENTION_DAYS = 7;
+
+/**
+ * Retention for `agent_contexts` (H5 fix round 5), run by the periodic pass: rows older than 7 days whose task has no accepted proposal waiting for an apply attempt.
+ * Ids and labels only; no lock beyond the delete itself. Returns how many rows went.
+ */
+export async function pruneAgentContexts(ctx: { readonly db: Executor; readonly tenantId: string; readonly now: () => Date }): Promise<number> {
+  const before = new Date(ctx.now().getTime() - AGENT_CONTEXT_RETENTION_DAYS * 86_400_000);
+  const gone = await ctx.db.execute(sql`DELETE FROM agent_contexts c WHERE c.tenant_id = ${ctx.tenantId} AND c.served_at < ${before.toISOString()}::timestamptz
+    AND NOT EXISTS (SELECT 1 FROM accepted_proposals p WHERE p.tenant_id = c.tenant_id AND p.project_id = c.project_id AND p.task_id = c.task_id AND p.state = 'accepted')
+    RETURNING c.context_id`);
+  return gone.length;
 }

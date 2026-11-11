@@ -72,7 +72,8 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
   } catch {
     return { kind: 'refused', code: 'route_fetch_failed' };
   }
-  const contextId = (deps.newContextId ?? (() => `ctx_${crypto.randomUUID().replace(/-/g, '')}`))();
+  const newId = deps.newContextId ?? (() => `ctx_${crypto.randomUUID().replace(/-/g, '')}`);
+  const contextId = newId();
   let context: TaskAgentContext;
   try {
     context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride, contextId);
@@ -93,6 +94,19 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
     contextId,
   };
   const done = (result: AgentResult): AgentRunOutcome => ({ kind: 'result', result, context });
+  /**
+   * A further call in the same step (the file choice, a re-ask) reads the context again under a new id: the server lets one served context back one call only, so each
+   * call's record names the context it was given. Null when the read failed: that call is not made.
+   */
+  const again = async (): Promise<typeof base | null> => {
+    const id = newId();
+    try {
+      const c = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride, id);
+      return { ...base, bundle: c.bundle, contextId: id };
+    } catch {
+      return null;
+    }
+  };
   switch (req.kind) {
     case 'criteria': return done(await deps.catalog.run('criteria', base));
     case 'breakdown': return done(await deps.catalog.run('breakdown', base));
@@ -117,7 +131,9 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
         if (listing === null || listing.entries.length === 0) return [];
         const byName = prior ? [] : selectFilesByName(listing.entries, words);
         if (byName.length > 0 || !deps.catalog.pickFiles) return byName;
-        return (await deps.catalog.pickFiles({ ...base, listing: listing.entries, ...(prior ? { priorIssues: prior } : {}) })).paths;
+        const fresh = await again();
+        if (fresh === null) return [];
+        return (await deps.catalog.pickFiles({ ...fresh, listing: listing.entries, ...(prior ? { priorIssues: prior } : {}) })).paths;
       };
       const read = async (paths: readonly string[]): Promise<TaskBaseFiles | 'failed' | null> => {
         if (paths.length === 0 || !deps.getTaskFiles) return null;
@@ -140,7 +156,9 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
           const again = await read(await choose(codes));
           if (again !== 'failed' && again !== null) given = again;
         }
-        result = await deps.catalog.run('patch', { ...base, files: asFiles(given), priorIssues: codes });
+        const fresh = await again();
+        if (fresh === null) break;
+        result = await deps.catalog.run('patch', { ...fresh, files: asFiles(given), priorIssues: codes });
       }
       return { kind: 'result', result, context, base: at, reasked, filesNote };
     }

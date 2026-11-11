@@ -95,7 +95,7 @@ describe('a proposal accepted in the browser becomes a verified candidate, with 
       // The browser's route record of the patch call (route.report), naming the context the server served it (read under that id).
       expect((await app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_e2e`, headers: owner })).statusCode).toBe(200);
       await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by)
-        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_e2e', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(DIFF), contextId: 'ctx_e2e' })}::jsonb, 'owner')`);
+        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_e2e', taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(DIFF), contextId: 'ctx_e2e' })}::jsonb, 'owner')`);
 
       // 3. Accept.
       const accepted = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, headers: owner, payload: { idempotencyKey: 'e2e', proposal } });
@@ -257,11 +257,14 @@ describe('a restricted sibling\'s project-wide plan claim keeps a Local only tas
       const proposal: AcceptedProposal = { proposalId: patch.proposal.requestId, taskId: 'T1', taskRevision: 1, baseSha: base, routeRecordId: patch.proposal.requestId, diff, results: [{ path: 'src/posts.ts', sha256: sha256Hex(content), content }] };
       // The server records the call against its own route (the task is not locked there); what refuses it is the context it served.
       expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a1', proposal })).body.error.code).toBe('proposal_from_restricted_context');
-      // A tampered client: the same output, reported as an unlocked call with its hash, naming the same served context. The server's own record refuses it.
-      await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, 'rpt_tamper', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_tamper', stepKind: 'patch', status: 'ok', locked: false, outputSha256: sha256Hex(diff), contextId: 'ctx_sib' })}::jsonb, 'owner')`);
+      // A tampered client: the same output, reported as an unlocked call with its hash, naming a context it read for this call. The server's own record refuses it.
+      expect((await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_tamper`)).status).toBe(200);
+      await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, 'rpt_tamper', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_tamper', taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'patch', status: 'ok', locked: false, outputSha256: sha256Hex(diff), contextId: 'ctx_tamper' })}::jsonb, 'owner')`);
       expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a2', proposal: { ...proposal, proposalId: 'req_tamper', routeRecordId: 'req_tamper' } })).body.error.code).toBe('proposal_from_restricted_context');
       // Criteria from an agent call on the same context are refused as well.
-      const criteria = await catalog.criteria(input);
+      // Each call reads its own context (one served context backs one call).
+      const ctx2 = (await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_sib2`)).body;
+      const criteria = await catalog.criteria({ ...input, bundle: ctx2.bundle, contextId: 'ctx_sib2' });
       expect(criteria.locked).toBe(true);
       const spec = ctx.spec;
       const revised = await call('POST', `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 1, idempotencyKey: 'c1', tasks: [{ ...spec, revision: 2, criteria: [{ id: 'R1', text: 'Posts appear in the list.' }] }], agentProposal: { taskId: 'T1', routeRecordId: criteria.proposal.requestId } });
