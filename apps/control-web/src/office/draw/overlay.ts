@@ -63,6 +63,8 @@ export function drawBadge(p: Pen, bot: Bot, ai: NonNullable<OfficeAgent['ai']>) 
     p.rect(x + 1, y + 2, 4, 2, expected ? fill : C.cloudMarkL);
     p.rect(x + 2, y + 1, 2, 1, expected ? fill : C.cloudMarkL);
   }
+  // H12: waiting on a cloud checkpoint: a WAIT tag over the head, so it reads without colour or motion.
+  if (ai.state === 'waiting') tag(p, 'WAIT', Math.round(bot.x), bot.headY - 12, C.ink, C.gold);
 }
 
 /** A small signboard bubble over the head: a cream board on two posts. */

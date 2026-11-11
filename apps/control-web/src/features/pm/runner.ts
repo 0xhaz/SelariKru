@@ -19,6 +19,8 @@ export interface PmRequest {
   readonly questionClassification: 'internal' | 'restricted';
   readonly history: readonly PmTurn[];
   readonly callOverride: RoutePolicyMode | null;
+  /** H12: this turn continues a paused checkpoint (sent after reconnecting, or moved to device only). */
+  readonly resume?: { readonly checkpointId: string; readonly kind: 'after_reconnect' | 'escalated' | 'device_only' };
 }
 
 export type PmOutcome =
@@ -121,6 +123,7 @@ export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome
     bundle: context.bundle, sources: [{ id: sourceId, classification: t.classification }], policy: taskAgentPolicy(sourceId),
     callOverride: req.callOverride, contextId,
     question: req.question, questionClassification, history: req.history,
+    ...(req.resume ? { resume: req.resume } : {}),
   };
   const snap = deps.snapshot();
   const runId = snap?.tasks[req.subjectTaskId]?.runId ?? read.runId;

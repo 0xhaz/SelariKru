@@ -342,6 +342,9 @@ export function actionAvailability(kind: AgentActionKind, facts: { readonly hasC
 }
 
 const REFUSALS: Readonly<Record<string, string>> = {
+  // H12: not an error. The step is saved as a checkpoint and is sent when the connection is back.
+  offline: 'Waiting for connection. This step needs the cloud, and you are offline, so it is saved here and sent once you reconnect. Nothing was sent.',
+  inputs_changed: 'This step\'s inputs changed since it paused (its files, context or task revision), so it was not continued. Run it again.',
   input_too_large_for_device: 'The input is too large for the model on this device, and this route may not use the cloud. Nothing was cut and nothing was sent.',
   route_changed_in_queue: 'Where this task\'s AI runs changed while the call was waiting, so it was stopped before it ran. Run it again.',
   secret_in_input: 'The input looks like it holds a secret, such as a key or a token, so it was not sent to any model.',

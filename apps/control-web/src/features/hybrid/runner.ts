@@ -1,4 +1,4 @@
-import { parseUnifiedDiff, selectFilesByName, type RoutePolicyMode } from '@selarikru/domain';
+import { parseUnifiedDiff, selectFilesByName, sha256Hex, type AiCheckpointResume, type AiCheckpointStage, type RoutePolicyMode } from '@selarikru/domain';
 import type { AgentCatalog, AgentInputs, AgentResult } from '@selarikru/inference-firebase-web';
 import { FIREBASE_CLOUD_ROUTE, type Policy } from '@selarikru/policy';
 import type { TaskAgentContext, TaskBaseFiles, TaskFileListing, TaskRouteRead } from '@selarikru/view-protocol';
@@ -29,7 +29,24 @@ export interface AgentRunnerDeps {
   readonly listTaskFiles?: (taskId: string) => Promise<TaskFileListing>;
   /** How many times Propose change asks again after the check refuses a patch for line drift. Default 1. */
   readonly reaskLimit?: number;
+  /**
+   * H12: told at each stage boundary of the step: the context read, the files chosen (paths and hashes, never contents), each call's result. The caller keeps these
+   * as the step's checkpoint, so a stopped step can continue from its stage.
+   */
+  readonly onStage?: (mark: StageMark) => void;
 }
+
+/** One stage boundary of a step (H12). */
+export interface StageMark {
+  readonly stage: AiCheckpointStage;
+  readonly context?: TaskAgentContext;
+  readonly contextId?: string;
+  readonly files?: readonly { readonly path: string; readonly sha256: string | null }[];
+  readonly result?: AgentResult;
+}
+
+/** The stage each single-call step ends at. */
+const STAGE_OF: Readonly<Record<AgentActionKind, AiCheckpointStage>> = { criteria: 'criteria', breakdown: 'breakdown', patch: 'patch', review: 'review', triage: 'triage', prDescription: 'pr_description' };
 
 /** Patch check codes a fresh look at the same files can fix: a hunk that did not match, line drift, a file it was not given or one that exists. */
 const REASKABLE: readonly string[] = ['diff_does_not_apply', 'diff_file_not_provided', 'diff_file_exists', 'diff_unparseable', 'diff_header_mismatch', 'diff_empty'];
@@ -45,6 +62,16 @@ export interface AgentRunRequest {
   readonly taskId: string;
   readonly kind: AgentActionKind;
   readonly callOverride: RoutePolicyMode | null;
+  /**
+   * H12: this step continues a paused checkpoint from its stage. A patch with `files` reads exactly those files again, checks each hash, and skips the file choice; a
+   * file that changed refuses the step (`inputs_changed`). `priorIssues`: the earlier checks' codes, for the re-ask.
+   */
+  readonly resume?: {
+    readonly checkpointId: string;
+    readonly kind: AiCheckpointResume;
+    readonly files?: readonly { readonly path: string; readonly sha256: string | null }[];
+    readonly priorIssues?: readonly string[];
+  };
 }
 
 export type AgentRunOutcome =
@@ -92,8 +119,13 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
     policy: taskAgentPolicy(sourceId),
     callOverride: req.callOverride,
     contextId,
+    ...(req.resume ? { resume: { kind: req.resume.kind, checkpointId: req.resume.checkpointId } } : {}),
   };
-  const done = (result: AgentResult): AgentRunOutcome => ({ kind: 'result', result, context });
+  deps.onStage?.({ stage: 'context', context, contextId });
+  const done = (result: AgentResult): AgentRunOutcome => {
+    deps.onStage?.({ stage: STAGE_OF[req.kind], result });
+    return { kind: 'result', result, context };
+  };
   /**
    * A further call in the same step (the file choice, a re-ask) reads the context again under a new id: the server lets one served context back one call only, so each
    * call's record names the context it was given. Null when the read failed: that call is not made.
@@ -116,7 +148,8 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
       // device, and a runner with no copy of the project has none: either way the agent gets none and can only add files. Any other failed read refuses the step.
       let listing: TaskFileListing | null = null;
       let filesNote: 'restricted' | 'no_checkout' | null = null;
-      if (deps.listTaskFiles && deps.getTaskFiles && t.allowedPaths.length > 0) {
+      const resumed = req.resume?.files && req.resume.files.length > 0 ? req.resume.files : null;
+      if (!resumed && deps.listTaskFiles && deps.getTaskFiles && t.allowedPaths.length > 0) {
         try {
           listing = await deps.listTaskFiles(req.taskId);
         } catch (e) {
@@ -140,11 +173,24 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
         try { return await deps.getTaskFiles(req.taskId, paths); } catch { return 'failed'; }
       };
       const asFiles = (f: TaskBaseFiles | null) => (f?.files ?? []).map((x) => ({ path: x.path, content: x.content, classification: t.classification }));
-      let given = await read(await choose());
+      let given: TaskBaseFiles | 'failed' | null;
+      if (resumed) {
+        // H12: the files the step chose before it stopped, read again; any that changed (or is gone) means its inputs changed, so the step is not continued.
+        if (!deps.getTaskFiles) return { kind: 'refused', code: 'inputs_changed' };
+        given = await read(resumed.map((f) => f.path));
+        if (given === 'failed' || given === null) return { kind: 'refused', code: 'inputs_changed' };
+        const now = given.files;
+        if (resumed.some((f) => { const g = now.find((x) => x.path === f.path); return !g || sha256Hex(g.content) !== f.sha256; })) return { kind: 'refused', code: 'inputs_changed' };
+      } else {
+        given = await read(await choose());
+      }
       if (given === 'failed') return { kind: 'refused', code: 'files_unavailable' };
+      deps.onStage?.({ stage: 'file_choice', files: (given?.files ?? []).map((f) => ({ path: f.path, sha256: sha256Hex(f.content) })) });
       const specBase = typeof context.spec?.['baseSha'] === 'string' ? { sha: context.spec['baseSha'], revision: context.revision } : null;
       const at = listing !== null ? { sha: listing.baseSha, revision: listing.revision } : given !== null ? { sha: given.baseSha, revision: given.revision } : specBase;
-      let result = await deps.catalog.run('patch', { ...base, files: asFiles(given) });
+      const prior = req.resume?.priorIssues && req.resume.priorIssues.length > 0 ? { priorIssues: req.resume.priorIssues } : {};
+      let result = await deps.catalog.run('patch', { ...base, files: asFiles(given), ...prior });
+      deps.onStage?.({ stage: 'patch', result });
       let reasked = 0;
       const limit = Math.max(0, Math.floor(deps.reaskLimit ?? DEFAULT_REASK_LIMIT));
       // A bounded re-ask: once by default, a new call (its own route record) with the refusal codes, then it stops and shows the result. When the diff needed a file
@@ -159,6 +205,7 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
         const fresh = await again();
         if (fresh === null) break;
         result = await deps.catalog.run('patch', { ...fresh, files: asFiles(given), priorIssues: codes });
+        deps.onStage?.({ stage: 'reask', result });
       }
       return { kind: 'result', result, context, base: at, reasked, filesNote };
     }

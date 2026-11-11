@@ -1,10 +1,15 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useStore } from 'zustand';
 import { create } from 'zustand';
+import type { BrowserInputs } from '../hybrid/model.ts';
+import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
+import { planRouteProposals, routeTargets } from './routes.ts';
+import { modeLabel } from '../hybrid/model.ts';
 import type { RoutePolicyMode } from '@selarikru/domain';
 import { pmReplyTurn, type PmTurn } from '@selarikru/inference-firebase-web';
 import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import { DataSourceException, type DelegationReceipt, type ProjectViewSnapshot } from '@selarikru/view-protocol';
-import { useHybrid } from '../hybrid/context.tsx';
+import { sendCommand, useHybrid } from '../hybrid/context.tsx';
 import { PERSON_ACCEPTS, observedChip, proposalAttribution, stepRoute } from '../hybrid/model.ts';
 import { hrefFor } from '../../shell/route.ts';
 import { settingsHref } from '../../shell/views.ts';
@@ -17,13 +22,16 @@ import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabel
 
 /**
  * H11: Talk to the Project Manager. One single-turn Firebase AI Logic call per question, about one task of the run (its route, lock and context apply), with a
- * bounded and label-filtered part of this conversation. The conversation lives in this tab only and is never stored: a restricted turn stays on this device.
+ * bounded and label-filtered part of this conversation. H12: each turn is also a checkpoint (the PM's memory), under the storage split: a restricted turn is kept only
+ * in this browser, never on the server.
  * Every reply is a proposal until accepted; the PM's assignments apply on their own only inside the accepted plan, and only while auto-delegation is on.
  */
 type Reply = {
   readonly kind: PmKind; readonly subjectTaskId: string; readonly outcome: PmOutcome & { readonly simulated: boolean }; readonly delegation?: DelegationReceipt | { readonly error: string };
   /** I4: where accepting this plan stands. */
   readonly accepted?: { readonly planRevision: number } | { readonly error: string } | 'sending' | undefined;
+  /** H12: the routes set with the accepted plan: how many were set, and how many were refused. */
+  readonly routes?: { readonly set: number; readonly refused: number };
 };
 type NewTurn = { readonly who: 'owner'; readonly text: string; readonly restricted: boolean; readonly kind: PmKind } | { readonly who: 'pm'; readonly reply: Reply };
 type Turn = NewTurn & { readonly id: number };
@@ -71,7 +79,7 @@ function nameOf(snap: ProjectViewSnapshot | null, workerId: string): string {
   return w ? workerIdentity(snap, workerId, w.role).label : workerId;
 }
 
-function ReplyView({ reply, snap, onAcceptPlan }: { reply: Reply; snap: ProjectViewSnapshot | null; onAcceptPlan?: (() => void) | null }) {
+function ReplyView({ reply, snap, browser, onAcceptPlan }: { reply: Reply; snap: ProjectViewSnapshot | null; browser: BrowserInputs; onAcceptPlan?: (() => void) | null }) {
   const o = reply.outcome;
   if (o.kind === 'refused') return <p className="text-fg" data-testid="pm-refused">{say(o.code)}</p>;
   const p = o.result.proposal;
@@ -103,15 +111,29 @@ function ReplyView({ reply, snap, onAcceptPlan }: { reply: Reply; snap: ProjectV
           ) : null}
           {Array.isArray(data['tasks']) ? (
             <div>
-              <ol className="list-decimal pl-5 text-fg">{(data['tasks'] as { key: string; title: string; role: string; revises?: string }[]).map((t) => <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role}{t.revises ? `; revises ${snap?.tasks[t.revises]?.title ?? t.revises}` : '; new task'})</span></li>)}</ol>
-              <p className="text-sm text-muted">Until you accept it, it changes nothing. Accepting records it as the next plan revision; the server checks the call it came from first.</p>
+              {(() => {
+                const tasks = data['tasks'] as { key: string; title: string; role: string; revises?: string }[];
+                // H12: where each task runs, proposed with its reason; accepted with the plan.
+                const routes = planRouteProposals(tasks, snap, o.context?.task.classification ?? 'restricted', browser);
+                return (
+                  <ol className="list-decimal pl-5 text-fg">{tasks.map((t) => {
+                    const r = routes.find((x) => x.key === t.key);
+                    return (
+                      <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role}{t.revises ? `; revises ${snap?.tasks[t.revises]?.title ?? t.revises}` : '; new task'})</span>
+                        {r ? <span className="block text-sm text-fg" data-testid="pm-plan-route">Runs on: {modeLabel(r.mode)}{r.locked ? ' (fixed)' : ''}. <span className="text-muted">{r.reason}</span></span> : null}
+                      </li>
+                    );
+                  })}</ol>
+                );
+              })()}
+              <p className="text-sm text-muted">Until you accept it, it changes nothing. Accepting records it as the next plan revision, and sets each task&apos;s route as proposed; the server checks the call it came from first.</p>
               {reply.accepted === undefined ? (
                 o.result.locked ? <p className="text-sm text-muted" data-testid="pm-plan-locked">This plan came from restricted data. It stays on this device, so it cannot become the run\'s plan.</p>
                   : onAcceptPlan ? <button type="button" className={buttonPrimary} onClick={onAcceptPlan}>Accept plan</button>
                     : <p className="text-sm text-muted">Accept it through the replan step in the Assistant.</p>
               ) : reply.accepted === 'sending' ? <p role="status" className="text-sm text-fg">Accepting…</p>
                 : 'error' in reply.accepted ? <p className="text-sm text-danger" data-testid="pm-plan-refused">{reply.accepted.error}</p>
-                  : <p className="text-sm text-fg" data-testid="pm-plan-accepted">Accepted as plan rev {reply.accepted.planRevision}. The Project Manager assigns its tasks next, inside it.</p>}
+                  : <p className="text-sm text-fg" data-testid="pm-plan-accepted">Accepted as plan rev {reply.accepted.planRevision}. The Project Manager assigns its tasks next, inside it.{reply.routes ? ` Routes set: ${reply.routes.set}${reply.routes.refused > 0 ? `, ${reply.routes.refused} not set` : ''}.` : ''}</p>}
             </div>
           ) : null}
           {Array.isArray(data['assignments']) ? <DelegationView reply={reply} snap={snap} /> : null}
@@ -140,10 +162,18 @@ function DelegationView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapsh
   );
 }
 
+/** When this tab started: PM checkpoints from before it are remembered turns (H12 PM memory); later ones are already in this tab's conversation. */
+const TAB_STARTED = new Date().toISOString();
+
 export function PmPanel() {
   const h = useHybrid();
   const id = useId();
   const turns = pmConversation((s) => s.turns);
+  // H12: the PM's memory. Its earlier turns are checkpoints under the same split (restricted ones only in this browser), read back here with their labels.
+  const kept = useStore(h?.checkpoints?.store ?? EMPTY_CHECKPOINT_STORE, (s) => s.checkpoints);
+  const remembered = useMemo(() => Object.values(kept)
+    .filter((cp) => cp.stepKind.startsWith('pm') && (cp.status === 'done' || cp.status === 'sent') && cp.createdAt < TAB_STARTED && (cp.partial?.texts.length ?? 0) > 0)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).flatMap((cp) => cp.partial!.texts), [kept]);
   const snap = h?.snapshot ?? null;
   const run = snap ? currentRun(snap) : null;
   const runTasks = snap && run ? Object.values(snap.tasks).filter((t) => t.runId === run.runId) : [];
@@ -166,8 +196,8 @@ export function PmPanel() {
     const add = pmConversation.getState().add;
     // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call. A reply from a call that read
     // restricted text is itself restricted (`pmReplyTurn`), so its paraphrase never reaches the cloud either (fix round 1, H2).
-    const history: PmTurn[] = pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
-      : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []);
+    const history: PmTurn[] = [...remembered.map((t): PmTurn => ({ who: t.who, text: t.text, classification: t.classification }))].concat(pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
+      : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []));
     // A question about a locked task is restricted, whatever the checkbox says.
     const label = questionLabelFor(task, restricted);
     const ownerId = add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
@@ -212,6 +242,15 @@ export function PmPanel() {
       const r = await h.agents.acceptPlan(o.runId, { expectedPlanRevision: o.planRevision ?? 0, subjectTaskId: reply.subjectTaskId, routeRecordId: o.result.report.requestId, plan: o.result.proposal.data as never, idempotencyKey: `pm-plan-${o.result.proposal.requestId}` });
       update({ planRevision: r.planRevision });
       h.refresh();
+      // H12: the routes the PM proposed, accepted with the plan: each task's own route override, through the same owner write as the "Runs on" control.
+      const tasks = (o.result.proposal.data as { tasks?: { key: string; revises?: string }[] }).tasks ?? [];
+      const targets = routeTargets(tasks, planRouteProposals(tasks, h.snapshot, o.context?.task.classification ?? 'restricted', h.browser), r.taskIds, h.snapshot);
+      let set = 0;
+      for (const t of targets) {
+        const sent = await sendCommand(h, { command: 'setting.set', expectedRevision: t.overrideRevision, args: { projectId: h.projectId, key: t.taskId, change: { scope: 'task', field: 'route_override', value: t.mode } } } as never);
+        if (sent.ok) set += 1;
+      }
+      pmConversation.getState().update(turnId, { ...reply, accepted: { planRevision: r.planRevision }, routes: { set, refused: targets.length - set } });
       if (autoDelegate) {
         // Wait for the new revision to be in the snapshot the PM reads, then let it assign inside it.
         for (let i = 0; i < 40 && (h.snapshot?.runs[o.runId]?.planRevision ?? 0) < r.planRevision; i++) await new Promise((res) => setTimeout(res, 50));
@@ -262,11 +301,17 @@ export function PmPanel() {
           {busy ? <p role="status" className="text-sm text-fg">The Project Manager is answering.</p> : null}
         </div>
       )}
+      {remembered.length > 0 ? (
+        <section aria-label="Earlier with the Project Manager" data-testid="pm-memory" className="rounded-card border border-line p-3">
+          <h2 className="text-sm font-medium text-muted">Earlier, kept as checkpoints</h2>
+          <ol className="mt-1 space-y-1 text-sm">{remembered.map((t, i) => <li key={i}><span className="font-medium">{t.who === 'owner' ? 'You' : 'Project Manager'}{t.classification === 'restricted' ? ' (restricted, kept on this device)' : ''}:</span> {t.text}</li>)}</ol>
+        </section>
+      ) : null}
       <ol className="space-y-3" data-testid="pm-turns" aria-label="Conversation with the Project Manager">
         {turns.map((t) => (
           <li key={t.id} className={`rounded-card border p-3 ${t.who === 'owner' ? 'border-line bg-panel-2' : 'border-line-strong bg-panel'}`} data-testid={t.who === 'owner' ? 'pm-turn-owner' : 'pm-turn-reply'}>
             <p className="text-sm font-medium text-muted">{t.who === 'owner' ? `You${t.restricted ? ' (restricted, kept on this device)' : ''}` : 'Project Manager'}</p>
-            {t.who === 'owner' ? <p className="whitespace-pre-wrap text-fg">{t.text}</p> : <ReplyView reply={t.reply} snap={snap} onAcceptPlan={t.reply.kind === 'pmPlan' && h?.agents?.acceptPlan ? () => void acceptPlan(t.id, t.reply) : null} />}
+            {t.who === 'owner' ? <p className="whitespace-pre-wrap text-fg">{t.text}</p> : <ReplyView reply={t.reply} snap={snap} browser={h?.browser ?? { online: true, cloudBudgetAvailable: null, nanoBudgetChars: 6000 }} onAcceptPlan={t.reply.kind === 'pmPlan' && h?.agents?.acceptPlan ? () => void acceptPlan(t.id, t.reply) : null} />}
           </li>
         ))}
       </ol>

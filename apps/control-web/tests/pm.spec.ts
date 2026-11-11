@@ -82,8 +82,12 @@ test('I4: the PM drafts a plan, the owner accepts it, and the PM then assigns in
   await page.getByTestId('pm-question').fill('Plan the rest of the work.');
   await page.getByRole('button', { name: 'Draft a plan' }).click();
   const reply = page.getByTestId('pm-turn-reply').first();
+  // H12: the PM proposes where each task runs, with its reason; the routes are accepted with the plan.
+  await expect(reply.getByTestId('pm-plan-route')).toHaveCount(2);
+  await expect(reply.getByTestId('pm-plan-route').first()).toContainText(/Runs on: (Local first|Local only|Cloud first|Cloud only)/);
   await reply.getByRole('button', { name: 'Accept plan' }).click();
   await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Accepted as plan rev 2');
+  await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Routes set:');
   // Fix round 2 (I4): the plan revised an existing task (same id, the PM's title) and added one; it did not only bump the revision.
   await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo plan step (revised)' })).toHaveCount(1);
   await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo follow-up' })).toHaveCount(1);

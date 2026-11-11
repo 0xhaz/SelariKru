@@ -9,7 +9,7 @@ function world(over: Partial<OfficeWorld> = {}, cues: Partial<OfficeCue>[] = [{}
     planRunId: 'run', banner: null, runs: [], notes: [], leadLabel: 'PLAN', racks: [], running: 0, prs: [], parcels: [], verifying: false, cloudCall: false, summary: '',
     cues: cues.map((c, i) => ({ agentId: `w${i + 1}`, taskId: 't1', taskRevision: 1, runId: 'run', attemptId: null, attemptRunning: false, attemptOutcome: null, recordId: null, fellBackToCloud: false, cloudCall: false, deviceCall: false, needsYou: false, ...c })),
     resolvedApprovals: [], verdicts: [], delegations: [], epoch: 'p#1', pm: { id: null, name: 'Project Manager', busy: false },
-    roof: { device: { place: 'device', count: 0, expected: [], observed: null, violation: null, locked: false }, cloud: { place: 'cloud', count: 0, expected: [], observed: null, violation: null, locked: false }, fellBack: null, fellBackCount: 0, summary: '' },
+    roof: { device: { place: 'device', count: 0, expected: [], observed: null, violation: null, locked: false, waiting: [] }, cloud: { place: 'cloud', count: 0, expected: [], observed: null, violation: null, locked: false, waiting: [] }, fellBack: null, fellBackCount: 0, summary: '', offline: false },
     ...over,
   };
 }

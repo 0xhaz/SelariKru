@@ -301,3 +301,15 @@ describe('the team in the office (H11)', () => {
     expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').cues[0]).toMatchObject({ delegatedAt: iso(3), delegatedPlanRevision: 2 });
   });
 });
+
+describe('H12: a robot waiting on a cloud checkpoint', () => {
+  it('stands at the rooftop CLOUD deck with a waiting mark; offline, the roof says Offline', () => {
+    const s = snapshotOf({ tasks: [task('t1', { title: 'Search index' })], workers: [worker('w1', { taskId: 't1', taskRevision: 1 })] });
+    const world = buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue', null, [{ taskId: 't1', place: 'cloud', stepKind: 'criteria', waiting: true }], '', { offline: true });
+    expect(world.agents.find((a) => a.id === 'w1')!.ai).toEqual({ place: 'cloud', state: 'waiting' });
+    expect(world.cues.find((c) => c.agentId === 'w1')!.cloudCall).toBe(true);
+    expect(world.roof.offline).toBe(true);
+    expect(world.summary).toMatch(/waiting at the cloud deck for the connection/);
+    expect(world.summary).toMatch(/Offline\./);
+  });
+});

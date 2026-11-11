@@ -58,3 +58,15 @@ describe('the rooftop inference deck', () => {
     expect(roofState(s, null, []).device.count).toBe(0);
   });
 });
+
+describe('H12: offline and waiting steps on the roof', () => {
+  it('a step waiting for the cloud is not "expected": it is waiting at the CLOUD deck, and offline the roof says Offline', () => {
+    const s = snapshotOf({ tasks: [task('b', { title: 'Feedback API', route: route(null) })] });
+    const roof = roofState(s, 'run', [{ taskId: 'b', place: 'cloud', waiting: true }], { offline: true });
+    expect(roof.offline).toBe(true);
+    expect(roof.cloud.expected).toEqual([]);
+    expect(roof.cloud.waiting).toEqual(['FEEDBACK A']);
+    expect(roof.summary).toMatch(/Offline\. 1 step waiting for connection at the cloud deck\./);
+    expect(roofState(s, 'run', []).offline).toBe(false);
+  });
+});

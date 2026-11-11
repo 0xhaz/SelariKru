@@ -174,3 +174,38 @@ describe('fix round 5: each call names its own served context', () => {
     expect(ids).toEqual(['ctx_1', 'ctx_2']);
   });
 });
+
+describe('H12: stage checkpoints and resuming from a stage', () => {
+  const listing = (paths: string[]) => ({ taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), entries: paths.map((path) => ({ path, size: 10 })), truncated: false });
+  const filesFor = (paths: readonly string[], content = 'export const A = 1;\n') => ({ taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), files: paths.map((path) => ({ path, content })), omitted: [] });
+
+  it('a step marks each stage boundary: the context, the file choice (paths and hashes, never contents), the patch', async () => {
+    const stages: { stage: string; files?: unknown; contextId?: string }[] = [];
+    const h = harness(route(), { listTaskFiles: async () => listing(['src/t1/searchIndex.ts']), getTaskFiles: async (_t, paths) => filesFor(paths), onStage: (m) => stages.push(m) });
+    await runAgentStep(h.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    expect(stages.map((s) => s.stage)).toEqual(['context', 'file_choice', 'patch']);
+    expect(stages[1]!.files).toEqual([{ path: 'src/t1/searchIndex.ts', sha256: expect.stringMatching(/^[0-9a-f]{64}$/) }]);
+    expect(JSON.stringify(stages[1])).not.toContain('export const A');
+    const single: string[] = [];
+    await runAgentStep(harness(route(), { onStage: (m) => single.push(m.stage) }).deps, { taskId: 't1', kind: 'review', callOverride: null });
+    expect(single).toEqual(['context', 'review']);
+  });
+
+  it('a resumed patch continues from its stage: the same files (hashes checked), the earlier issue codes, no file choice; changed files refuse it', async () => {
+    const marks: { files?: readonly { path: string; sha256: string | null }[] | undefined }[] = [];
+    const first = harness(route(), { listTaskFiles: async () => listing(['src/t1/searchIndex.ts']), getTaskFiles: async (_t, paths) => filesFor(paths), onStage: (m) => marks.push(m) });
+    await runAgentStep(first.deps, { taskId: 't1', kind: 'patch', callOverride: null });
+    const files = marks.find((m) => m.files)!.files!;
+    const listTaskFiles = vi.fn(async () => listing(['src/t1/searchIndex.ts']));
+    const h = harness(route(), { listTaskFiles, getTaskFiles: async (_t, paths) => filesFor(paths) });
+    const pickFiles = vi.fn();
+    (h.deps.catalog as { pickFiles?: unknown }).pickFiles = pickFiles;
+    await runAgentStep(h.deps, { taskId: 't1', kind: 'patch', callOverride: 'ONLY_IN_CLOUD', resume: { checkpointId: 'ckp_0123456789ab', kind: 'escalated', files, priorIssues: ['/diff diff_does_not_apply'] } });
+    expect(pickFiles).not.toHaveBeenCalled();
+    expect(listTaskFiles).not.toHaveBeenCalled();
+    expect(h.calls[0]!.spec.prompt({ mode: 'ONLY_IN_CLOUD', cloudCapable: true })).toMatchObject({ prompt: expect.stringContaining('diff_does_not_apply') });
+    const changed = harness(route(), { listTaskFiles, getTaskFiles: async (_t, paths) => filesFor(paths, 'export const A = 2;\n') });
+    expect(await runAgentStep(changed.deps, { taskId: 't1', kind: 'patch', callOverride: 'ONLY_IN_CLOUD', resume: { checkpointId: 'ckp_0123456789ab', kind: 'escalated', files, priorIssues: [] } })).toEqual({ kind: 'refused', code: 'inputs_changed' });
+    expect(changed.adapter.runAgent).not.toHaveBeenCalled();
+  });
+});

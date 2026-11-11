@@ -343,6 +343,10 @@ export function roofDeck(p: Pen, l: OfficeLayout, roof: OfficeRoof, fresh: { dev
     text(p, count, x + 6, y + rect.h - 10, C.ink);
     if (box.place === 'device' && box.locked) padlock(p, x + rect.w - 12, y + 3);
   }
+  // H12: steps waiting for the connection, in the cloud box, and an Offline badge on the roof.
+  const cloudRect = l.roofBoxes.cloud;
+  if (roof.cloud.waiting.length > 0) text(p, fit(`WAITING: ${roof.cloud.waiting.join(', ')}`, cloudRect.w - 10), l.ox + cloudRect.x + 5, l.oy + cloudRect.y + 25, C.gold);
+  if (roof.offline) tag(p, 'OFFLINE', l.ox + cloudRect.x + cloudRect.w - 26, l.oy + cloudRect.y - 6, C.ink, C.red);
   // The uplink dish, in the cloud box; it lights and beams while a cloud call is in flight.
   const d = dishSpot(l);
   uplinkDish(p, l.ox + d.x, l.oy + d.y);

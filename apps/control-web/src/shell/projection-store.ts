@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan'>;
+export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan' | 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -225,6 +225,10 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.acceptPatchProposal!(p, proposal, key);
         } } : {}),
+        // H12: AI step checkpoints. Not gated on a live session: a checkpoint is what keeps a step while the connection is down.
+        ...(source.saveAiCheckpoint ? { saveAiCheckpoint: source.saveAiCheckpoint.bind(source) } : {}),
+        ...(source.listAiCheckpoints ? { listAiCheckpoints: source.listAiCheckpoints.bind(source) } : {}),
+        ...(source.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: source.claimAiCheckpointEscalation.bind(source) } : {}),
         ...(source.getTaskFiles ? { getTaskFiles: source.getTaskFiles.bind(source) } : {}),
         ...(source.listTaskFiles ? { listTaskFiles: source.listTaskFiles.bind(source) } : {}),
         ...(source.getProposalState ? { getProposalState: source.getProposalState.bind(source) } : {}),

@@ -1,4 +1,6 @@
-import { sha256Hex, type AcceptedProposal, type RouteRecordReport } from '@selarikru/domain';
+import { sha256Hex, type AcceptedProposal, type AiCheckpointResume, type AiCheckpointText, type RouteRecordReport } from '@selarikru/domain';
+import type { CheckpointEngine, ChainOutcome } from '../checkpoints/engine.ts';
+import { connectivity, isOnline } from '../checkpoints/connectivity.ts';
 import { effectiveStep } from './model.ts';
 import type { TaskFacts } from './facts.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
@@ -14,7 +16,8 @@ export interface InFlightCall {
   readonly place: 'device' | 'cloud' | null;
 }
 
-export type AgentsOutcome = AgentRunOutcome & { readonly simulated: boolean };
+/** `resumed`: this outcome continued a paused step (H12): sent after reconnecting, escalated, or moved to device only. */
+export type AgentsOutcome = AgentRunOutcome & { readonly simulated: boolean; readonly resumed?: AiCheckpointResume };
 
 /** The task agents for one project: run a step, watch calls in flight, accept a criteria proposal through the replan path. */
 export interface AgentsPort {
@@ -32,7 +35,7 @@ export interface AgentsPort {
   /** Where an accepted patch proposal is now, read from the server. Null: never accepted, or the source cannot say. */
   readonly proposalState: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt | null>) | null;
   /** H11: one turn with the Project Manager, through the same adapter and the subject task's route. */
-  pm(req: PmRequest): Promise<PmOutcome & { readonly simulated: boolean }>;
+  pm(req: PmRequest): Promise<PmOutcome & { readonly simulated: boolean; readonly resumed?: AiCheckpointResume }>;
   /** H11: sends the PM's delegation for the server to apply inside the accepted plan. Absent: the source cannot delegate. */
   readonly delegate: ((runId: string, request: DelegationRequest) => Promise<DelegationReceipt>) | null;
   /** H11 fix round 1 (I3): the owner's own assignment, from Action items. Absent: the source cannot assign. */
@@ -68,6 +71,10 @@ export interface CreateAgentsOptions {
   readonly snapshot: () => ProjectViewSnapshot | null;
   /** How many times Propose change asks again after a patch fails its check for line drift. Default 1 (`DEFAULT_REASK_LIMIT`). */
   readonly reaskLimit?: number;
+  /** H12: keeps each step's checkpoint at every stage boundary. Absent: no checkpoints. */
+  readonly checkpoints?: CheckpointEngine | null;
+  /** H12: a step that continued a paused checkpoint finished; the screen shows its outcome where the step lives. */
+  readonly onResumed?: (req: { readonly taskId: string; readonly kind: AgentRunRequest['kind'] | PmKind; readonly question?: string; readonly restricted?: boolean }, outcome: AgentsOutcome | (PmOutcome & { readonly simulated: boolean; readonly resumed?: AiCheckpointResume })) => void;
 }
 
 /** The route read the adapter routes from: the data source's `getTaskRoute`, fresh each time. */
@@ -85,7 +92,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
   if (!source.getTaskRoute || !source.getTaskContext) return null;
   const getTaskRoute = source.getTaskRoute;
   const getTaskContext = source.getTaskContext;
-  const adapter = opts.adapter ?? (opts.sdk ? new FirebaseHybridAssistantAdapter({ sdk: opts.sdk, fetchRoute: fetchRouteFrom(source) }) : null);
+  const adapter = opts.adapter ?? (opts.sdk ? new FirebaseHybridAssistantAdapter({ sdk: opts.sdk, fetchRoute: fetchRouteFrom(source), isOnline, onNetworkFailure: () => connectivity.getState().reportNetworkFailure() }) : null);
   if (!adapter) return null;
   const reportRoute = async (p: string, taskId: string, report: RouteRecordReport): Promise<void> => {
     const receipt = await opts.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: `route-${report.requestId}`, args: { projectId: p, taskId, report } });
@@ -131,9 +138,16 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
     acceptPlan: source.acceptPmPlan ? (runId, request) => source.acceptPmPlan!(projectId, runId, request) : null,
     async pm(req) {
       const callId = next++;
+      // H12: one PM turn is one checkpoint: the owner's question with its label, then the reply with its label.
+      const contextId = `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
+      const rec = opts.checkpoints?.begin({
+        taskId: req.subjectTaskId, stepKind: req.kind, callOverride: req.callOverride,
+        texts: [{ who: 'owner', text: req.question.slice(0, 2000), classification: req.questionClassification }],
+        ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}),
+      });
       try {
         const out = await runPmStep({
-          projectId, catalog, snapshot: opts.snapshot,
+          projectId, catalog, snapshot: opts.snapshot, newContextId: () => contextId,
           // The owner's grant for web research, read from the run's settings at the time of the call.
           webResearch: () => { const s = opts.snapshot(); return webResearchGranted(s, s?.tasks[req.subjectTaskId]?.runId ?? null); },
           getTaskRoute: async (taskId) => {
@@ -144,16 +158,23 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           },
           getTaskContext: (taskId, destination, callOverride, contextId) => getTaskContext(projectId, taskId, destination, callOverride, contextId),
         }, req);
-        return { ...out, simulated: opts.simulated };
+        if (rec) {
+          if (out.kind === 'result' && out.context) rec.stage({ stage: 'context', context: out.context, contextId });
+          await rec.finish(out as ChainOutcome, out.kind === 'result' ? pmReplyText(out) : undefined);
+        }
+        const done = { ...out, simulated: opts.simulated, ...(req.resume ? { resumed: req.resume.kind } : {}) };
+        if (req.resume) opts.onResumed?.({ taskId: req.subjectTaskId, kind: req.kind, question: req.question, restricted: req.questionClassification === 'restricted' }, done);
+        return done;
       } finally {
         if (calls.some((c) => c.callId === callId)) publish(calls.filter((c) => c.callId !== callId));
       }
     },
     async run(req) {
       const callId = next++;
+      const rec = opts.checkpoints?.begin({ taskId: req.taskId, stepKind: req.kind, callOverride: req.callOverride, ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}) });
       try {
         const out = await runAgentStep({
-          projectId, catalog, failedCheck, ...(opts.reaskLimit !== undefined ? { reaskLimit: opts.reaskLimit } : {}),
+          projectId, catalog, failedCheck, ...(opts.reaskLimit !== undefined ? { reaskLimit: opts.reaskLimit } : {}), ...(rec ? { onStage: (m) => rec.stage(m) } : {}),
           getTaskRoute: async (taskId) => {
             const read = await getTaskRoute(projectId, taskId);
             publish([...calls, { callId, taskId: req.taskId, kind: req.kind, place: placeOf(read, req.callOverride) }]);
@@ -163,10 +184,22 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           ...(source.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => source.getTaskFiles!(projectId, taskId, paths) } : {}),
           ...(source.listTaskFiles ? { listTaskFiles: (taskId: string) => source.listTaskFiles!(projectId, taskId) } : {}),
         }, req);
-        return { ...out, simulated: opts.simulated };
+        await rec?.finish(out as ChainOutcome);
+        const done = { ...out, simulated: opts.simulated, ...(req.resume ? { resumed: req.resume.kind } : {}) };
+        if (req.resume) opts.onResumed?.({ taskId: req.taskId, kind: req.kind }, done);
+        return done;
       } finally {
         if (calls.some((c) => c.callId === callId)) publish(calls.filter((c) => c.callId !== callId));
       }
     },
   };
+}
+
+/** H12: what a PM reply leaves in its checkpoint: its answer (or, for a plan or assignments, a one-line summary), with the label its call earned. */
+function pmReplyText(out: Extract<PmOutcome, { kind: 'result' }>): AiCheckpointText | undefined {
+  const p = out.result.proposal;
+  if (p.status !== 'ok') return undefined;
+  const d = (p.data ?? {}) as { answer?: unknown; tasks?: unknown[]; assignments?: unknown[] };
+  const text = typeof d.answer === 'string' ? d.answer : Array.isArray(d.tasks) ? `Drafted a plan with ${d.tasks.length} task${d.tasks.length === 1 ? '' : 's'}.` : Array.isArray(d.assignments) ? `Proposed ${d.assignments.length} assignment${d.assignments.length === 1 ? '' : 's'}.` : '';
+  return text ? { who: 'pm', text: text.slice(0, 2000), classification: out.result.locked ? 'restricted' : 'internal' } : undefined;
 }

@@ -5,6 +5,7 @@ import type { AuthorizedViewCommand, CommandReceipt, ProjectViewSnapshot } from 
 import { CommandNotSent, type HandoverPort } from '../../shell/projection-store.ts';
 import { NETWORK_MESSAGE, NOT_SENT_MESSAGE, rejectionView } from '../decisions/copy.ts';
 import type { AgentsOutcome, AgentsPort, InFlightCall } from './agents.ts';
+import type { CheckpointEngine } from '../checkpoints/engine.ts';
 import type { AgentActionKind, BrowserInputs } from './model.ts';
 
 /** What the "Runs on" control and the agent actions read: the snapshot (display only), the owner's commands and the task agents. */
@@ -20,6 +21,8 @@ export interface HybridValue {
   readonly browser: BrowserInputs;
   /** Read before a replan, to say if it would close an open handover. Null: the source has none. */
   readonly handover: HandoverPort | null;
+  /** H12: the AI step checkpoints (the offline queue). Null: no task agents. */
+  readonly checkpoints?: CheckpointEngine | null;
 }
 
 const Ctx = createContext<HybridValue | null>(null);

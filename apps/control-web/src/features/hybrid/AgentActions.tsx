@@ -7,6 +7,7 @@ import type { AgentsOutcome } from './agents.ts';
 import { hybridResults, resultKey, useHybrid, useHybridResults, type HybridValue } from './context.tsx';
 import { AGENT_ACTIONS, PERSON_ACCEPTS, omissionText, proposalAttribution, PATCH_ACCEPT_CONSEQUENCE, STATUS_TEXT, acceptBlocker, actionAvailability, effectiveStep, acceptRoundFor, filesNoteText, patchAcceptBlocker, patchAcceptRefusal, patchReceiptText, reaskNote, refusalText, replanConfirm, revisionRefusal, stepRoute, suggestionFor, type AgentActionKind } from './model.ts';
 import { loadFactsWithRetry, type TaskFacts } from './facts.ts';
+import { resumedText } from '../checkpoints/model.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { approvalStateAt } from '@selarikru/view-protocol';
 
@@ -153,17 +154,22 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
   const ok = p.status === 'ok';
   // A violation is never shown as an allowed fallback (H7 fix I2).
   const violation = p.status === 'route_violation' || p.route?.conformance === 'violation';
-  const fell = !violation && p.route?.fellBack === true && p.route?.conformance === 'conforms';
+  // H12: a step sent after reconnecting (or escalated) is that, never a fallback.
+  const resumed = resumedText(outcome.resumed);
+  const fell = !violation && resumed === null && p.route?.fellBack === true && p.route?.conformance === 'conforms';
+  // H12: waiting for the connection is not an error: the step is kept as a checkpoint and sent once this browser reconnects.
+  const waiting = p.status === 'blocked' && p.blockedReason === 'offline';
   const src = violation ? { label: 'Route violation', tone: 'danger' as const } : fell ? { label: p.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', tone: 'warning' as const } : SOURCE_CHIP[p.observedSource]!;
   const ran = p.status !== 'blocked' && p.status !== 'error';
   return (
-    <div data-testid="agent-result" data-status={p.status} data-kind={kind} className={`mt-2 space-y-2 rounded-chip border p-2.5 ${ok ? 'border-line-strong bg-panel-2' : 'border-warning bg-warning-tint'}`}>
+    <div data-testid="agent-result" data-status={waiting ? 'waiting' : p.status} data-kind={kind} className={`mt-2 space-y-2 rounded-chip border p-2.5 ${ok || waiting ? 'border-line-strong bg-panel-2' : 'border-warning bg-warning-tint'}`}>
       <p role="status" className="sr-only" data-testid="result-announce">{`${AGENT_ACTIONS.find((a) => a.kind === kind)?.label ?? kind}: ${ok ? `proposal ready, ${src.label.toLowerCase()}` : p.status === 'blocked' ? `stopped. ${refusalText(p.blockedReason)}` : 'not usable'}.`}</p>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium text-fg">Proposal</span>
         {outcome.simulated ? <span className="rounded-chip bg-warning px-1.5 py-0.5 text-sm font-semibold text-bg" data-testid="result-demo">Demo data</span> : null}
-        <Chip tone={ok ? 'success' : 'warning'}>{ok ? STATUS_TEXT['ok']! : p.status === 'blocked' ? STATUS_TEXT['blocked']! : 'Not usable'}</Chip>
+        <Chip tone={ok ? 'success' : waiting ? 'neutral' : 'warning'}>{ok ? STATUS_TEXT['ok']! : waiting ? 'Waiting for connection' : p.status === 'blocked' ? STATUS_TEXT['blocked']! : 'Not usable'}</Chip>
         {ran ? <Chip tone={src.tone}>{src.label}</Chip> : null}
+        {resumed ? <span data-testid="result-resumed"><Chip tone="active">{resumed}</Chip></span> : null}
         {ran ? <span className="text-sm text-muted" data-testid="result-timing">{seconds(p.timing.totalMs)}</span> : null}
       </div>
       {ok ? (
@@ -180,7 +186,8 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
       {p.status === 'invalid' ? <p className="text-sm text-muted">The answer did not pass its checks ({p.validation.errors.length} problem{p.validation.errors.length === 1 ? '' : 's'}), so it is not shown.</p> : null}
       {ok ? <ProposalBody h={h} task={task} kind={kind} outcome={outcome} /> : null}
       <p className="text-sm text-muted">
-        {outcome.result.locked ? 'Restricted data: this result stays in this tab and is not stored. ' : ''}
+        {outcome.result.locked ? 'Restricted data: this result stays on this device. Its checkpoint is kept only in this browser and never sent. ' : ''}
+        {waiting ? <span data-testid="result-waiting">Saved as a checkpoint: it is checked again and sent once you reconnect. See Paused AI work in <a className="underline" href={hrefFor('actions')}>Action items</a>. </span> : null}
         {omissionText(outcome.result.omissions) ? <span data-testid="result-omissions">{omissionText(outcome.result.omissions)} </span> : <span data-testid="result-omissions">Nothing was left out of what the AI saw. </span>}
         {outcome.result.reported === 'sent' ? 'Where it ran was recorded as an untrusted browser report, with no prompt or output.' : outcome.result.reported === 'failed' ? 'Where it ran could not be recorded. Nothing else changed.' : ''}
       </p>

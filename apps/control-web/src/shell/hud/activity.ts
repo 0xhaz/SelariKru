@@ -40,7 +40,8 @@ const OUTCOME: Readonly<Record<string, string>> = { succeeded: 'finished', faile
 
 const by = (name: string | null): string => (name ? `${name}: ` : '');
 
-export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): readonly ActivityItem[] {
+/** `extra`: lines the snapshot does not hold, such as this browser's AI step checkpoints (H12): "Paused: offline", "Sent after reconnecting", "Escalated to cloud". */
+export function recentActivity(snapshot: ProjectViewSnapshot, limit: number, extra: readonly ActivityItem[] = []): readonly ActivityItem[] {
   const title = (taskId: string | null): string => (taskId ? snapshot.tasks[taskId]?.title ?? taskId : 'a task');
   // H11: who did it, as "<Name> · <Role>" when the owner named the worker.
   const who = (workerId: string | null | undefined, taskId: string | null): string | null => {
@@ -48,7 +49,7 @@ export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): re
     const id = workerIdentity(snapshot, workerId, taskId ? snapshot.tasks[taskId]?.role ?? null : null);
     return id.name ? id.label : null;
   };
-  const items: ActivityItem[] = [];
+  const items: ActivityItem[] = [...extra];
   for (const t of Object.values(snapshot.tasks)) {
     const s = STATUS[t.status];
     items.push({ id: `task:${t.taskId}`, at: t.enteredStatusAt, glyph: s.glyph, tone: s.tone, text: `${t.title ?? t.taskId}: ${s.word}` });

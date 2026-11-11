@@ -119,3 +119,14 @@ describe('the run\'s AI counter and the fallback banner (H7)', () => {
     expect(texts.join(' ')).not.toMatch(/fell back/);
   });
 });
+
+describe('H12: checkpoint lines in the activity feed', () => {
+  it('shows "Paused: offline", "Sent after reconnecting" and "Escalated to cloud" from the checkpoints, newest first', () => {
+    const s = snapshotOf({ tasks: [] });
+    const items = recentActivity(s, 7, [
+      { id: 'ckp:a', at: '2026-11-12T00:00:01.000Z', glyph: '‖', tone: 'warning', text: 'Search · Draft criteria: Paused: offline' },
+      { id: 'ckp:b', at: '2026-11-12T00:00:02.000Z', glyph: '☁', tone: 'active', text: 'Search · Draft criteria: Sent after reconnecting' },
+    ]);
+    expect(items.map((i) => i.text)).toEqual(['Search · Draft criteria: Sent after reconnecting', 'Search · Draft criteria: Paused: offline']);
+  });
+});

@@ -18,6 +18,8 @@ export interface RoofBox {
   readonly violation: { readonly task: string; readonly recordId: string } | null;
   /** Device box only: a call for a restricted or locked task is in flight, so it stays on this device. */
   readonly locked: boolean;
+  /** H12, cloud box: short names of the tasks with a step waiting to be sent to the cloud (a checkpoint), not in flight. */
+  readonly waiting: readonly string[];
 }
 
 export interface OfficeRoof {
@@ -27,11 +29,13 @@ export interface OfficeRoof {
   readonly fellBack: { readonly task: string; readonly recordId: string } | null;
   readonly fellBackCount: number;
   readonly summary: string;
+  /** H12: this browser is offline: an Offline badge on the roof. */
+  readonly offline: boolean;
 }
 
 const short = (title: string): string => title.toUpperCase().slice(0, 10).trim();
 
-export function roofState(snapshot: ProjectViewSnapshot, runId: string | null, calls: readonly OfficeCall[]): OfficeRoof {
+export function roofState(snapshot: ProjectViewSnapshot, runId: string | null, calls: readonly OfficeCall[], opts: { readonly offline?: boolean } = {}): OfficeRoof {
   type Latest = { task: string; recordId: string; at: number } | null;
   const newer = (a: Latest, b: Latest): Latest => (a === null || (b !== null && b.at > a.at) ? b : a);
   const counts = { device: 0, cloud: 0, fellBack: 0, unknown: 0, violation: 0 };
@@ -55,11 +59,12 @@ export function roofState(snapshot: ProjectViewSnapshot, runId: string | null, c
     else cloudSeen = newer(cloudSeen, item);
   }
   const title = (taskId: string): string => short(snapshot.tasks[taskId]?.title ?? taskId);
-  const flying = (place: 'device' | 'cloud') => calls.filter((c) => c.place === place).map((c) => title(c.taskId));
+  const flying = (place: 'device' | 'cloud') => calls.filter((c) => c.place === place && c.waiting !== true).map((c) => title(c.taskId));
+  const waiting = calls.filter((c) => c.place === 'cloud' && c.waiting === true).map((c) => title(c.taskId));
   const locked = calls.some((c) => c.place === 'device' && (snapshot.tasks[c.taskId]?.route?.lock ?? null) !== null);
   const strip = (x: Latest) => (x === null ? null : { task: x.task, recordId: x.recordId });
-  const device: RoofBox = { place: 'device', count: counts.device, expected: flying('device'), observed: strip(devSeen), violation: strip(devBad), locked };
-  const cloud: RoofBox = { place: 'cloud', count: counts.cloud, expected: flying('cloud'), observed: strip(cloudSeen), violation: strip(cloudBad), locked: false };
+  const device: RoofBox = { place: 'device', count: counts.device, expected: flying('device'), observed: strip(devSeen), violation: strip(devBad), locked, waiting: [] };
+  const cloud: RoofBox = { place: 'cloud', count: counts.cloud, expected: flying('cloud'), observed: strip(cloudSeen), violation: strip(cloudBad), locked: false, waiting };
   const plural = (n: number) => `${n} task${n === 1 ? '' : 's'}`;
   let summary = `Roof: ${plural(counts.device)} on this device, ${counts.cloud} in the cloud, ${counts.fellBack} fell back.`;
   if (counts.unknown > 0) summary += ` ${counts.unknown} ran somewhere not shown.`;
@@ -70,5 +75,7 @@ export function roofState(snapshot: ProjectViewSnapshot, runId: string | null, c
     if (cloud.expected.length > 0) parts.push(`${cloud.expected.length} expected in the cloud`);
     summary += ` In flight: ${parts.join(', ')}.`;
   }
-  return { device, cloud, fellBack: strip(fell), fellBackCount: counts.fellBack, summary };
+  const offline = opts.offline === true;
+  if (offline || waiting.length > 0) summary += `${offline ? ' Offline.' : ''}${waiting.length > 0 ? ` ${waiting.length} step${waiting.length === 1 ? '' : 's'} waiting for connection at the cloud deck.` : ''}`;
+  return { device, cloud, fellBack: strip(fell), fellBackCount: counts.fellBack, summary, offline };
 }

@@ -82,6 +82,8 @@ export interface DecisionsViewProps {
   readonly onResync: () => void;
   /** The Project Brain's open conflicts, Product follow-ups and handover offers, shown under "Also waiting on you". */
   readonly brain?: ReactNode;
+  /** H12: "Paused AI work", the third group, below "Also waiting on you". */
+  readonly paused?: ReactNode;
 }
 
 /** Cards a worker raised: approval requests. Everything else is a decision about the run, under "Also waiting on you". */
@@ -91,7 +93,7 @@ const FROM_WORKERS: ReadonlySet<DecisionCardModel['kind']> = new Set(['approval'
  * The queue of things only a person can decide. Inspecting never resolves anything: a command is sent only by pressing a button that names its outcome, and
  * a button is on only while the session is live and the card still matches what the person last looked at.
  */
-export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync, brain, fromWorkers = null, noted = null, workerOf }: DecisionsViewProps) {
+export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync, brain, paused = null, fromWorkers = null, noted = null, workerOf }: DecisionsViewProps) {
   if (failure !== undefined) throw failure;
 
   const [refused, setRefused] = useState<Readonly<Record<string, string>>>({});
@@ -307,6 +309,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
       )}
 
       {brain ? <section aria-label="Also waiting on you: Brain, Product and handovers" className="mt-6">{brain}</section> : null}
+      {paused}
       {noted ? <div className="mt-6">{noted}</div> : null}
 
       {model.history.length > 0 ? (

@@ -53,7 +53,16 @@ import { ui } from './ui-store.ts';
 import { TITLES, frameOf } from './views.ts';
 import { useUi } from './ui-store.ts';
 import type { AssistantSdk, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
-import { createAgents } from '../features/hybrid/agents.ts';
+import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
+import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
+import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
+import { defaultDeviceStore } from '../features/checkpoints/device-store.ts';
+import { connectivity, isOnline, onReconnect, useOnlineNow, useSimulatedOffline, watchNavigator } from '../features/checkpoints/connectivity.ts';
+import { checkpointActivity, waitingCloudCalls } from '../features/checkpoints/model.ts';
+import { PausedWork } from '../features/checkpoints/PausedWork.tsx';
+import { pausedRows } from '../features/checkpoints/model.ts';
+import { pmConversation } from '../features/pm/PmPanel.tsx';
+import type { AgentActionKind } from '../features/hybrid/model.ts';
 import { HybridProvider, useInFlight, useOnline, type HybridValue } from '../features/hybrid/context.tsx';
 import { DEFAULT_BROWSER, workerRouteText } from '../features/hybrid/model.ts';
 
@@ -82,6 +91,22 @@ export interface AppShellProps {
    * labelled demo data. Absent: no AI actions are offered.
    */
   readonly agentRuntime?: { readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>; readonly sdk?: AssistantSdk; readonly simulated: boolean } | null;
+  /** H12: who this browser's checkpoints belong to (the signed-in owner's uid). The device store is scoped to it. Default: the demo operator, or the owner. */
+  readonly ownerKey?: string;
+}
+
+/** H12: one device store per tab (IndexedDB, or memory without it). */
+let sharedDeviceStore: ReturnType<typeof defaultDeviceStore> | null = null;
+const deviceStore = () => (sharedDeviceStore ??= defaultDeviceStore());
+
+/** H12, demo only (Debug): simulates going offline and reconnecting. It never changes the browser's own online state. Demo data, never evidence. */
+function DemoNetwork({ offline }: { offline: boolean }) {
+  return (
+    <div className="mt-2 space-y-1 p-1" data-testid="demo-network">
+      <button type="button" className="btn text-[14px]" aria-pressed={offline} onClick={() => connectivity.getState().simulateOffline(!offline)}>{offline ? 'Go online' : 'Go offline'}</button>
+      <p className="text-sm">Demo only: {offline ? 'simulated offline. Steps that need the cloud wait as checkpoints.' : 'simulates losing the connection.'} The browser&apos;s own online state is not changed.</p>
+    </div>
+  );
 }
 
 /** One polite announcement per change of connection state or attention count. Heartbeats and ticks say nothing. */
@@ -115,7 +140,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
 let epochSeq = 0;
 const nextEpoch = (): number => (epochSeq += 1);
 
-export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null, ownerKey }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
@@ -292,27 +317,68 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
   const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);
   // The task agents, and their calls in flight for the office's desk marks and rooftop cloud deck.
-  const agents = useMemo(() => (agentRuntime && state.agentSource ? createAgents({
+  // H12: the AI step checkpoints (the offline queue), kept on this device and, when not restricted, by the server. One engine per project and source.
+  const owner = ownerKey ?? (mode === 'mock' ? 'demo-operator' : 'owner');
+  const engine = useMemo(() => {
+    const src = state.agentSource;
+    if (!agentRuntime || !src?.getTaskRoute || !src.getTaskContext) return null;
+    const projectId = state.projectId;
+    return createCheckpointEngine({
+      projectId, ownerKey: owner, device: deviceStore(),
+      server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}) } : null,
+      getTaskRoute: (taskId) => src.getTaskRoute!(projectId, taskId),
+      getTaskContext: (taskId, destination, callOverride, contextId) => src.getTaskContext!(projectId, taskId, destination, callOverride, contextId),
+      snapshot: () => store.getState().projection?.snapshot ?? null, isOnline,
+      // The projection's own clock: the demo's under demo data, so checkpoints sit in the same timeline as everything else.
+      now: () => new Date(store.getState().nowMs),
+    });
+  }, [agentRuntime, state.agentSource, state.projectId, store, owner]);
+  const agents = useMemo((): AgentsPort | null => (agentRuntime && state.agentSource ? createAgents({
     projectId: state.projectId, source: state.agentSource, ...agentRuntime,
     execute: (c) => store.getState().execute(c), snapshot: () => store.getState().projection?.snapshot ?? null,
-  }) : null), [agentRuntime, state.agentSource, state.projectId, store]);
+    checkpoints: engine,
+    // A step that continued a paused checkpoint shows its outcome where the step lives: its task's AI actions, or the PM conversation.
+    onResumed: (req, outcome) => {
+      if (req.kind.startsWith('pm')) {
+        pmConversation.getState().add({ who: 'owner', text: req.question ?? '', restricted: req.restricted === true, kind: req.kind as never });
+        pmConversation.getState().add({ who: 'pm', reply: { kind: req.kind as never, subjectTaskId: req.taskId, outcome: outcome as never } });
+      } else {
+        hybridResults.getState().set(resultKey(req.taskId, req.kind as AgentActionKind), { phase: 'done', outcome: outcome as never });
+      }
+      store.getState().refresh();
+    },
+  }) : null), [agentRuntime, state.agentSource, state.projectId, store, engine]);
+  useEffect(() => {
+    if (!engine || !agents) return;
+    engine.attach(agents as unknown as CheckpointRunner);
+    watchNavigator();
+    // A reload, or a new tab: the queue is read back, and whatever may be sent now is checked again and sent.
+    void engine.load().then(() => engine.reconnect());
+    return onReconnect(connectivity, () => void engine.reconnect());
+  }, [engine, agents]);
+  const checkpointState = useStore(engine?.store ?? EMPTY_CHECKPOINT_STORE);
+  const onlineNow = useOnlineNow();
+  const simulatedOffline = useSimulatedOffline();
   const calls = useInFlight(agents);
   const pmItems = pmProposals((x) => x.items);
   const online = useOnline();
   const hybrid = useMemo((): HybridValue => ({
     projectId: state.projectId, snapshot, live: connection === 'live', mode, execute: state.execute, refresh: state.refresh, resync: state.resync, agents,
-    browser: { ...DEFAULT_BROWSER, online }, handover: state.handover,
-  }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online, state.handover]);
+    browser: { ...DEFAULT_BROWSER, online: online && onlineNow }, handover: state.handover, checkpoints: engine,
+  }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online, onlineNow, state.handover, engine]);
   // A new store is a new projection (another fixture or project, or the demo loop starting over): the office treats it as a fresh start (round 2).
   const epoch = useMemo(() => nextEpoch(), [store]);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
-    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls.map((c) => ({ taskId: c.taskId, place: c.place, stepKind: c.kind })), `${snapshot.meta.projectId}#${epoch}`); } catch { return null; }
-  }, [snapshot, team, projectLabel, planRunId, calls, epoch]);
+    // H12: a step waiting to be sent to the cloud stands at the rooftop CLOUD deck, marked waiting; offline, the roof says so.
+    const waiting = waitingCloudCalls(Object.values(checkpointState.checkpoints)).filter((w) => !calls.some((c) => c.taskId === w.taskId));
+    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, [...calls.map((c) => ({ taskId: c.taskId, place: c.place, stepKind: c.kind })), ...waiting], `${snapshot.meta.projectId}#${epoch}`, { offline: !onlineNow }); } catch { return null; }
+  }, [snapshot, team, projectLabel, planRunId, calls, epoch, checkpointState.checkpoints, onlineNow]);
   const activity = useMemo(() => {
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
-    try { return recentActivity(snapshot, 7); } catch { return []; }
-  }, [route, panelWide, snapshot]);
+    const titleOf = (id: string): string => snapshot.tasks[id]?.title ?? id;
+    try { return recentActivity(snapshot, 7, checkpointActivity(Object.values(checkpointState.checkpoints), titleOf)); } catch { return []; }
+  }, [route, panelWide, snapshot, checkpointState.checkpoints]);
   const fallback = useMemo(() => { try { return snapshot && world ? latestFallback(snapshot, world.planRunId) : null; } catch { return null; } }, [snapshot, world]);
   const aiCounts = useMemo(() => { try { return snapshot && world ? aiRunCounts(snapshot, world.planRunId) : null; } catch { return null; } }, [snapshot, world]);
   const frame = frameOf(route);
@@ -337,7 +403,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   };
   // H11 fix round 1 (I3): the Project Manager's assignments waiting for the owner count as waiting too.
   const pmWaiting = proposalRows(snapshot, pmItems).length;
-  const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length + pmWaiting;
+  // H12: paused AI steps count as waiting on you too.
+  const titleOfTask = (id: string): string => snapshot?.tasks[id]?.title ?? id;
+  const pausedCount = engine ? pausedRows(checkpointState, titleOfTask, onlineNow).length : 0;
+  const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length + pmWaiting + pausedCount;
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
   const agentById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a]) ?? []), [world]);
   const mark = (id: string, i: number): RowDecor => {
@@ -425,7 +494,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
               fromWorkers={actionsFromWorkers} noted={actionsNoted} workerOf={workerOfCard}
               connection={connection} error={state.error} model={builtDecisions.decisions} failure={builtDecisions.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} leaveDemoHref={leaveDemoHref}
               delivery={overview ? { criteria: overview.delivery.criteriaLabel, blocker: overview.delivery.blocker } : null}
-              elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
+              elsewhere={(overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0) + pausedCount}
+              paused={engine ? <PausedWork engine={engine} titleOf={titleOfTask} simulated={mode === 'mock'} /> : null}
               counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
               brain={<><PmProposals /><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /><HandoverDecisions port={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} live={connection === 'live'} titleOf={(id) => snapshot?.tasks[id]?.title ?? null} /></>}
@@ -520,7 +590,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           </ViewDrawer>
         )}
         {/* Inside the page region, so it is inert like the rest of the page while a worker is open beside the team cards. */}
-        {import.meta.env.DEV && debugOpen ? <DebugPanel connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}>{devPanel}</DebugPanel> : null}
+        {import.meta.env.DEV && debugOpen ? <DebugPanel connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}>{devPanel}{mode === 'mock' ? <DemoNetwork offline={simulatedOffline} /> : null}</DebugPanel> : null}
       </div>
       {/* The page under a worker open beside the team cards is inert, and an inert region is not hit-tested: this catcher gives the paused area its arrow pointer. */}
       {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}

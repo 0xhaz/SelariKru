@@ -30,7 +30,7 @@ export interface OfficeAgent {
    * last call ran, as reported. Null: no call yet, the last one was blocked, or its source was not shown. `fellBack` (observed only, from the record's
    * server-derived flag): the call ran on the other side from where its route sent it first.
    */
-  readonly ai: { readonly place: 'device' | 'cloud'; readonly state: 'expected' | 'observed'; readonly fellBack?: true } | null;
+  readonly ai: { readonly place: 'device' | 'cloud'; readonly state: 'expected' | 'observed' | 'waiting'; readonly fellBack?: true } | null;
 }
 
 /** A task's AI call in flight in this browser, and where it is meant to run first. */
@@ -39,6 +39,8 @@ export interface OfficeCall {
   readonly place: 'device' | 'cloud' | null;
   /** The step, when known: a Project Manager step makes the PM robot talk while it runs (H11). */
   readonly stepKind?: string;
+  /** H12: not in flight: a checkpoint waiting to be sent to the cloud. Its robot waits at the CLOUD deck, marked waiting. */
+  readonly waiting?: true;
 }
 
 /** A sticky note on the plan wall. Columns: 0 to do, 1 doing, 2 verifying, 3 done. */
@@ -200,7 +202,7 @@ const ORDER: readonly RobotState[] = ['needs_input', 'working', 'in_review', 've
 
 const roleName = (role: string | null): string => (role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Worker');
 
-export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = [], epoch = ''): OfficeWorld {
+export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = [], epoch = '', opts: { readonly offline?: boolean } = {}): OfficeWorld {
   // Colours follow the worker's id, not its place in the attention order, so a robot keeps its colour as the order changes.
   const ids = Object.keys(snapshot.workers).sort();
   const colorOf = (id: string): string => workerAccents[Math.max(0, ids.indexOf(id)) % workerAccents.length]!;
@@ -211,7 +213,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
   const aiMark = (taskId: string | null): OfficeAgent['ai'] => {
     if (taskId === null) return null;
     const live = calls.find((c) => c.taskId === taskId && c.place !== null);
-    if (live) return { place: live.place!, state: 'expected' };
+    if (live) return { place: live.place!, state: live.waiting === true ? 'waiting' : 'expected' };
     const last = snapshot.tasks[taskId]?.route?.lastObserved;
     if (!last || last.status === 'blocked' || last.status === 'error') return null;
     const place = last.observedSource === 'ON_DEVICE' ? 'device' : last.observedSource === 'IN_CLOUD' ? 'cloud' : null;
@@ -287,12 +289,12 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
   if (notStarted.length > 0) summary += ` ${notStarted.length} role${notStarted.length === 1 ? '' : 's'} not started (${notStarted.map((a) => a.name).join(', ')}): an empty desk until a worker holds ${notStarted.length === 1 ? 'it' : 'them'}.`;
   const cloudCall = calls.some((c) => c.place === 'cloud');
   // The desk marks in words: a call in flight is where its route sends it, expected until its record says where it ran.
-  const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'expected'
+  const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'waiting' ? `${labelOf(a)} waiting at the cloud deck for the connection` : a.ai.state === 'expected'
     ? `${labelOf(a)} ${a.ai.place === 'cloud' ? 'headed to the cloud (expected)' : 'expected on this device'}`
     : `${labelOf(a)} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
   if (marks.length > 0) summary += ` Desk marks: ${marks.join('; ')}.`;
   if (cloudCall) summary += ' The rooftop cloud deck is lit: a call is headed to the cloud.';
-  const roof = roofState(snapshot, run?.runId ?? null, calls);
+  const roof = roofState(snapshot, run?.runId ?? null, calls, opts);
   summary += ` ${roof.summary}`;
   const cues = team.rows.map((r): OfficeCue => {
     const taskId = r.task?.taskId ?? null;
