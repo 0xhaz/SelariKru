@@ -35,7 +35,8 @@ function files(dir: string): string[] {
   });
 }
 
-const hexIn = (text: string): string[] => [...text.matchAll(/#[0-9a-fA-F]{6}\b/g)].map((m) => m[0].toLowerCase());
+/** 3, 6 and 8 digit hex colours. */
+const hexIn = (text: string): string[] => [...text.matchAll(/#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g)].map((m) => m[0].toLowerCase());
 
 describe('the palette is SelariKru\'s own', () => {
   it('no colour from the reference template appears anywhere in control-web src', () => {
@@ -47,6 +48,15 @@ describe('the palette is SelariKru\'s own', () => {
       for (const hex of hexIn(text)) if ((REFERENCE_HEX as readonly string[]).includes(hex)) found.push(`${relative(SRC, file)}: ${hex}`);
       if (REFERENCE_INK_RGB.test(text)) found.push(`${relative(SRC, file)}: the reference ink as rgb()`);
     }
+    expect(found).toEqual([]);
+  });
+
+  // When the reference is checked out beside the repo, every colour anywhere in its src counts, not only its palette (H7 fix M1).
+  it.runIf(existsSync(join(REFERENCE, 'src')))('no hex colour from anywhere in the reference src appears in control-web src', () => {
+    const theirs = new Set(files(join(REFERENCE, 'src')).flatMap((f) => hexIn(readFileSync(f, 'utf8'))));
+    expect(theirs.size).toBeGreaterThan(30);
+    const self = fileURLToPath(import.meta.url);
+    const found = files(SRC).filter((f) => f !== self).flatMap((f) => hexIn(readFileSync(f, 'utf8')).filter((h) => theirs.has(h)).map((h) => `${relative(SRC, f)}: ${h}`));
     expect(found).toEqual([]);
   });
 

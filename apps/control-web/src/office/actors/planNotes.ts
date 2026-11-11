@@ -57,11 +57,11 @@ export class PlanNotes {
       const y = Math.round(n.y - lift);
       if (lift) p.rect(x + 1, y + lift + 1, 7, 6, C.shadow, 0.25);
       if (task.column === 3) {
-        p.rect(x, y, 7, 6, '#ddd5c4');
+        p.rect(x, y, 7, 6, C.tileD);
         p.rect(x, y, 2, 6, color);
-        p.rect(x + 3, y + 3, 1, 1, '#008751');
-        p.rect(x + 4, y + 2, 1, 1, '#008751');
-        p.rect(x + 5, y + 1, 1, 1, '#008751');
+        p.rect(x + 3, y + 3, 1, 1, C.leafD);
+        p.rect(x + 4, y + 2, 1, 1, C.leafD);
+        p.rect(x + 5, y + 1, 1, 1, C.leafD);
       } else {
         p.rect(x, y, 7, 6, color);
         p.rect(x, y, 7, 1, shade(color, 0.5));

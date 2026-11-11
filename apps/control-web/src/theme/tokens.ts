@@ -28,7 +28,7 @@ export const colors = {
   /** Batik indigo, for the blocked state and batik accents. */
   indigo: '#56609e',
   rose: '#c9677a',
-  white: '#ffffff',
+  white: '#fffdf8',
 } as const;
 
 /**
@@ -58,8 +58,8 @@ export const stateStyle: Readonly<Record<RobotState, StateStyle>> = {
 };
 
 /**
- * The team cards' state chips. Each pairs a colour with its word, and each pair meets WCAG AA: Working 5.46:1, Needs input 5.83:1, In review 7.74:1,
- * Verified 5.34:1, Idle 5.50:1, Blocked 5.89:1, Lost 9.21:1, Unknown 5.64:1.
+ * The team cards' state chips. Each pairs a colour with its word, and each pair meets WCAG AA: Working 5.46:1, Needs input 5.73:1, In review 7.74:1,
+ * Verified 5.34:1, Idle 5.41:1, Blocked 5.80:1, Lost 9.06:1, Unknown 5.64:1.
  */
 export const chipStyle: Readonly<Record<RobotState, { readonly bg: string; readonly fg: string }>> = {
   working: { bg: '#3fa596', fg: colors.ink },
