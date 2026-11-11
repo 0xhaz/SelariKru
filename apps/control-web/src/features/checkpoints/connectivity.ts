@@ -7,29 +7,45 @@ import { createStore, type StoreApi } from 'zustand/vanilla';
  */
 export interface Connectivity {
   readonly navigatorOnline: boolean;
-  /** A cloud request failed on the network. Cleared when the browser reports `online` again, or the owner retries. */
+  /** A cloud request failed on the network. Cleared by the next answer from the cloud, or when the browser reports `online` again. */
   readonly networkFailed: boolean;
+  /**
+   * Fix round 1 (I2): the backoff after a network failure has elapsed, so the next request may start: that request is the probe (no other endpoint is called). Its
+   * success clears the failure; another failure starts a longer backoff.
+   */
+  readonly probeDue: boolean;
   /** Demo only: simulated offline. */
   readonly simulatedOffline: boolean;
 }
 
-export const isOnlineState = (c: Connectivity): boolean => c.navigatorOnline && !c.networkFailed && !c.simulatedOffline;
+export const isOnlineState = (c: Connectivity): boolean => c.navigatorOnline && (!c.networkFailed || c.probeDue) && !c.simulatedOffline;
 
 export interface ConnectivityStore extends Connectivity {
   setNavigatorOnline(online: boolean): void;
   reportNetworkFailure(): void;
-  clearNetworkFailure(): void;
+  reportNetworkSuccess(): void;
   /** Demo only. */
   simulateOffline(offline: boolean): void;
 }
 
+/** The first backoff after a network failure, doubled on each failed probe up to the cap. */
+export const PROBE_BACKOFF_MS = { first: 5_000, max: 60_000 } as const;
+
 export function createConnectivity(navigatorOnline = typeof navigator === 'undefined' || navigator.onLine !== false): StoreApi<ConnectivityStore> {
+  let backoff = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const stop = (): void => { if (timer !== null) { clearTimeout(timer); timer = null; } };
   return createStore<ConnectivityStore>()((set) => ({
-    navigatorOnline, networkFailed: false, simulatedOffline: false,
+    navigatorOnline, networkFailed: false, probeDue: false, simulatedOffline: false,
     // The browser's own `online` event clears a network failure too: it is the browser saying the connection is back.
-    setNavigatorOnline: (online) => set(online ? { navigatorOnline: true, networkFailed: false } : { navigatorOnline: false }),
-    reportNetworkFailure: () => set({ networkFailed: true }),
-    clearNetworkFailure: () => set({ networkFailed: false }),
+    setNavigatorOnline: (online) => { if (online) { stop(); backoff = 0; } set(online ? { navigatorOnline: true, networkFailed: false, probeDue: false } : { navigatorOnline: false }); },
+    reportNetworkFailure: () => {
+      stop();
+      backoff = backoff === 0 ? PROBE_BACKOFF_MS.first : Math.min(backoff * 2, PROBE_BACKOFF_MS.max);
+      set({ networkFailed: true, probeDue: false });
+      timer = setTimeout(() => { timer = null; set({ probeDue: true }); }, backoff);
+    },
+    reportNetworkSuccess: () => { stop(); backoff = 0; set({ networkFailed: false, probeDue: false }); },
     simulateOffline: (offline) => set({ simulatedOffline: offline }),
   }));
 }

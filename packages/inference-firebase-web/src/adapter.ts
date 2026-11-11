@@ -191,12 +191,16 @@ export interface AdapterOptions {
   readonly isOnline?: () => boolean;
   /** H12: told when a cloud request failed on the network, so the browser counts as offline until it reconnects. */
   readonly onNetworkFailure?: () => void;
+  /** H12 fix round 1 (I2): told when an answer came back from the cloud, so a network failure is cleared. */
+  readonly onNetworkSuccess?: () => void;
 }
 
-/** H12: an SDK error that means the request never reached the cloud. A code or a name only; the message is never read. */
+/**
+ * H12: an SDK error that means the request never reached the cloud: only the SDK's own fetch or network error codes (fix round 1, I2). A plain TypeError is a bug,
+ * not the network, and surfaces as an error. A code only; the message is never read.
+ */
 export function isNetworkFailure(e: unknown): boolean {
-  const code = errorCodeOf(e) ?? '';
-  return (e instanceof TypeError) || /fetch-error|network|offline|unavailable/i.test(code);
+  return /(^|\/)(fetch-error|network-error|network-request-failed)$/i.test(errorCodeOf(e) ?? '');
 }
 
 export interface AdapterState {
@@ -222,6 +226,7 @@ export class FirebaseHybridAssistantAdapter {
   private readonly budgetChars: number;
   private readonly isOnline: () => boolean;
   private readonly onNetworkFailure: (() => void) | undefined;
+  private readonly onNetworkSuccess: (() => void) | undefined;
   private readonly ajv = new Ajv({ strict: false, allErrors: true });
   private readonly readiness = new ReadinessTracker();
   private models = new Map<string, SdkModel>();
@@ -239,6 +244,7 @@ export class FirebaseHybridAssistantAdapter {
     this.budgetChars = Number.isFinite(b) && b > 0 ? Math.floor(b) : 0;
     this.isOnline = opts.isOnline ?? (() => true);
     this.onNetworkFailure = opts.onNetworkFailure;
+    this.onNetworkSuccess = opts.onNetworkSuccess;
   }
 
   draftBrief(req: AssistRequest): Promise<AssistantProposal> {
@@ -469,6 +475,7 @@ export class FirebaseHybridAssistantAdapter {
     }
 
     const observedSource = mapInferenceSource(result.inferenceSource);
+    if (observedSource === 'IN_CLOUD') this.onNetworkSuccess?.();
     const rawInferenceSource = result.inferenceSource ?? null;
     const u = result.usage;
     const usage: ProposalUsage =

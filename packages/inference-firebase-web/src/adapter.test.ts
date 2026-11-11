@@ -57,7 +57,7 @@ const fetchRoute: FetchRoute = async () => {
   return fresh.route;
 };
 
-function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void } = {}) {
+function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void; onNetworkSuccess?: () => void } = {}) {
   let t = 0;
   fresh.route = null;
   fresh.fail = false;
@@ -758,14 +758,35 @@ describe('H12: offline', () => {
     expect(await off.adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline' });
   });
 
-  it('a cloud call whose request fails on the network is offline too, and says so', async () => {
+  it('fix 1 (I2): a TypeError (a bug, not the network) surfaces as an error, never as offline', async () => {
     const sdk = new FakeSdk();
-    sdk.gate = Promise.reject(new TypeError('Failed to fetch'));
+    sdk.gate = Promise.reject(new TypeError('cannot read properties of undefined'));
     sdk.gate.catch(() => undefined);
     let failures = 0;
     const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
     fresh.route = server();
-    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorName: 'TypeError' });
+    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'error', errorName: 'TypeError', blockedReason: null });
+    expect(failures).toBe(0);
+  });
+
+  it('fix 1 (I2): a cloud answer tells the browser the network is back', async () => {
+    const sdk = new FakeSdk();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    let ok = 0;
+    const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkSuccess: () => { ok += 1; } });
+    fresh.route = server();
+    expect((await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).status).toBe('ok');
+    expect(ok).toBe(1);
+  });
+
+  it('a cloud call whose request fails on the network is offline too, and says so', async () => {
+    const sdk = new FakeSdk();
+    sdk.gate = Promise.reject(Object.assign(new Error('fetch failed'), { name: 'FirebaseError', code: 'AI/fetch-error' }));
+    sdk.gate.catch(() => undefined);
+    let failures = 0;
+    const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
+    fresh.route = server();
+    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorCode: 'AI/fetch-error' });
     expect(failures).toBe(1);
   });
 });
