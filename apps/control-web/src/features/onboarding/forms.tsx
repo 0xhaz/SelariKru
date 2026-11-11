@@ -472,7 +472,7 @@ export function ExecutionStep(p: StepProps) {
           <legend className="text-sm font-semibold">Assistant inference</legend>
           <p className="mb-2 text-sm text-muted">Where the browser assistant&apos;s model runs. It never starts work.</p>
           {/* H7: progressive disclosure. The suggestion and one sentence first; what each choice means sits behind "Why?". */}
-          <p className="mb-2 text-sm text-fg" data-testid="inference-suggestion"><span className="font-medium">Suggested: {INFERENCE_TEXT.PREFER_ON_DEVICE.label}.</span> Your text stays on this device while Gemini Nano is ready here, and goes to the cloud when it is not.</p>
+          <p className="mb-2 text-sm text-fg" data-testid="inference-suggestion"><span className="font-medium">Suggested: {INFERENCE_TEXT.PREFER_ON_DEVICE.label}.</span> Your text stays on this device while Gemini Nano is ready here. If it isn&apos;t, only text approved for the cloud goes to the cloud; restricted text never does.</p>
           {group('inference', inference, setInference, ['ONLY_ON_DEVICE', 'PREFER_ON_DEVICE', 'ONLY_IN_CLOUD', 'PREFER_IN_CLOUD'] as const, INFERENCE_TEXT, false)}
           <details className="mt-2 text-sm" data-testid="inference-why">
             <summary className="cursor-pointer font-medium text-active">Why?</summary>

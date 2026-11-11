@@ -67,7 +67,11 @@ export default function DemoRoot() {
       playing: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
     });
     setPlayback(pb);
-    return () => pb.stop();
+    // Turning on reduced motion during the session pauses the demo (round 2). Turning it off leaves the choice to the person: Play resumes.
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onMotion = (e: MediaQueryListEvent): void => { if (e.matches) pb.pause(); };
+    motion.addEventListener('change', onMotion);
+    return () => { motion.removeEventListener('change', onMotion); pb.stop(); };
   }, []);
   useEffect(() => {
     const raw = params().get('fault');

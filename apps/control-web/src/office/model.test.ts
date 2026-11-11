@@ -230,3 +230,24 @@ describe('a desk mark whose call was blocked is cleared', () => {
     expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').agents[0]!.ai).toBeNull();
   });
 });
+
+describe('what the office world records for its events (H7 fix round 2)', () => {
+  it('a resolved approval counts as answered only when a person granted or denied it; expired and superseded do not', () => {
+    const s = snapshotOf({ tasks: [task('a')], workers: [worker('w1', { taskId: 'a' })] });
+    const entry = (approvalId: string, outcome: string, approver: string | null) => ({ approvalId, runId: 'run', taskId: 'a', revision: 1, outcome, approver, scopeHash: null, operation: null, destination: null, requestedAt: iso(9), resolvedAt: iso(5), consumedAt: null, consumedBy: null });
+    s.approvalHistory = [entry('g', 'granted', 'owner'), entry('d', 'denied', 'owner'), entry('x', 'expired', null), entry('s', 'superseded', null), entry('n', 'granted', null)] as never;
+    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').resolvedApprovals.map((a) => a.approvalId)).toEqual(['g', 'd']);
+  });
+
+  it('a verdict per run candidate: failed from a recorded failed criterion on it, rejected, or retired when replaced', () => {
+    const s = snapshotOf({ tasks: [task('a')] });
+    const cand = (over: Record<string, unknown>) => ({ sha: 'abc1234', status: 'assembled', live: true, baseSha: 'b', treeSha: null, target: 'main', recordedAt: iso(5), recordId: null, recordValid: false, verifierHost: null, checkManifestSha256: null, verifierSha256: null, flaky: [], ...over });
+    const crit = (state: string) => ({ criterionId: 'AC-1', description: null, state, verified: false, taskIds: ['a'], check: null, candidateSha: 'abc1234' });
+    const at = (candidate: unknown, criteria: unknown[]) => { s.runs['run'] = { ...s.runs['run']!, evidence: { candidate, criteria } as never }; return buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').verdicts; };
+    expect(at(cand({}), [crit('not_run')])).toEqual([{ id: 'run:abc1234', label: 'ABC1', outcome: 'pending' }]);
+    expect(at(cand({}), [crit('failed')])[0]!.outcome).toBe('failed');
+    expect(at(cand({ live: false, status: 'rejected' }), [crit('failed')])[0]!.outcome).toBe('rejected');
+    expect(at(cand({ live: false, status: 'replaced' }), [crit('failed')])[0]!.outcome).toBe('retired');
+    expect(at(null, [])).toEqual([]);
+  });
+});

@@ -166,6 +166,7 @@ export class OfficeScene {
     const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color })), projectName: world.projectName, leadLabel: world.leadLabel };
     const key = layoutKey(input);
     const first = this.layout === null;
+    const newEpoch = before !== null && before.epoch !== world.epoch;
     if (!this.layout || this.layout.key !== key) {
       const l = generateLayout(input);
       this.layout = l;
@@ -198,21 +199,24 @@ export class OfficeScene {
 
     // Parcels: one per live candidate. A candidate seen for the first time already merged has nothing left to deliver.
     const belt = this.belt!;
+    // A new epoch keeps nothing from the last one: no parcel and no stage carry over.
+    if (newEpoch) { this.parcels = []; this.stages = new Map(); }
     const prev = this.stages;
     this.stages = new Map(world.parcels.map((p) => [p.id, p]));
     this.parcels = this.parcels.filter((p) => this.stages.has(p.id) && p.mode !== 'gone');
     for (const c of this.stages.values()) {
       if (this.parcels.some((p) => p.id === c.id)) continue;
       if (c.stage === 'merged' && !prev.has(c.id)) continue;
-      const fresh = first || this.reducedMotion;
+      const fresh = first || newEpoch || this.reducedMotion;
       this.parcels.push({ id: c.id, label: c.label, mode: 'belt', s: fresh ? restingPlace(c, belt, false) : 0 });
     }
     for (const c of this.stages.values()) {
       const was = prev.get(c.id);
-      if (was && was.stage === 'to_gate' && c.stage === 'verified') this.gateMode = { mode: 'passed', at: this.t };
+      if (!newEpoch && was && was.stage === 'to_gate' && c.stage === 'verified') this.gateMode = { mode: 'passed', at: this.t };
     }
-    // Errands and effects, each from a real change between the last world and this one (H7 fix).
-    if (!first) this.dispatch(officeEvents(before, world), l);
+    // Errands and effects, each from a real change between the last world and this one (H7 fix). A new epoch starts afresh: queued errands are dropped.
+    if (newEpoch) for (const b of this.bots.values()) b.queue.settle();
+    else if (!first) this.dispatch(officeEvents(before, world), l);
     if (this.reducedMotion) {
       for (const p of this.parcels) {
         const c = this.stages.get(p.id)!;

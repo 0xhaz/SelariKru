@@ -8,7 +8,7 @@ function world(over: Partial<OfficeWorld> = {}, cues: Partial<OfficeCue>[] = [{}
     projectName: 'P', agents: cues.map((c, i) => ({ id: c.agentId ?? `w${i + 1}`, name: `W${i + 1}`, color: '#2fa39a', state: 'working', label: 'Working', taskTitle: null, ai: null })),
     planRunId: 'run', banner: null, runs: [], notes: [], leadLabel: 'PLAN', racks: [], running: 0, prs: [], parcels: [], verifying: false, cloudCall: false, summary: '',
     cues: cues.map((c, i) => ({ agentId: `w${i + 1}`, taskId: 't1', taskRevision: 1, runId: 'run', attemptId: null, attemptRunning: false, attemptOutcome: null, recordId: null, fellBackToCloud: false, cloudCall: false, needsYou: false, ...c })),
-    resolvedApprovals: [],
+    resolvedApprovals: [], verdicts: [], epoch: 'p#1',
     ...over,
   };
 }
@@ -49,8 +49,6 @@ describe('office events, read from two worlds in a row (H7 fix: errands follow r
     expect(officeEvents(world({ prs: [pr] }), world({ prs: [{ ...pr, merged: true }] }))).toEqual([{ kind: 'prMerged', agentIds: ['w1'], num: 7 }]);
     const parcel = { id: 'run:abc', label: 'ABC', stage: 'to_gate' as const };
     expect(officeEvents(world({ parcels: [parcel] }), world({ parcels: [{ ...parcel, stage: 'verified' }] }))).toEqual([{ kind: 'verified', parcelId: 'run:abc' }]);
-    expect(kinds(officeEvents(world({ parcels: [parcel] }), world({ parcels: [] })))).toEqual(['changes']);
-    expect(officeEvents(world({ parcels: [parcel] }), world({ parcels: [] }))[0]).toMatchObject({ agentIds: ['w1'] });
   });
 });
 
@@ -73,9 +71,32 @@ describe('each event\'s errand and effect', () => {
     expect(effectsFor({ kind: 'answered', agentId: 'w1' })).toEqual([{ kind: 'envelope', from: 'plan', to: { agent: 'w1' } }]);
     expect(effectsFor({ kind: 'verified', parcelId: 'p' })).toEqual([{ kind: 'burst', at: 'gate' }, { kind: 'text', at: 'gate', text: 'VERIFIED', tone: 'pass' }]);
     expect(effectsFor({ kind: 'changes', parcelId: 'p', label: 'ABC', agentIds: ['w1'] })).toEqual([
-      { kind: 'text', at: 'gate', text: 'CHANGES', tone: 'fail' }, { kind: 'gate', look: 'changes' }, { kind: 'flyBack', label: 'ABC', to: { agent: 'w1' } },
+      { kind: 'text', at: 'gate', text: 'CHANGES', tone: 'fail' }, { kind: 'gate', look: 'changes' }, { kind: 'flyBack', label: 'ABC', to: 'plan' },
     ]);
-    expect(effectsFor({ kind: 'changes', parcelId: 'p', label: 'ABC', agentIds: [] })[2]).toEqual({ kind: 'flyBack', label: 'ABC', to: 'plan' });
     expect(effectsFor({ kind: 'claimed', agentId: 'w1' })).toEqual([]);
+  });
+});
+
+describe('round 2: no invented events', () => {
+  it('a new epoch (the demo loop wraps, the fixture or project switches) dispatches nothing, however much changed', () => {
+    const before = world({ epoch: 'p#1', parcels: [{ id: 'run:abc', label: 'ABC', stage: 'to_gate' }] }, [{ attemptId: null }]);
+    const after = world({ epoch: 'p#2', parcels: [], verdicts: [{ id: 'run:abc', label: 'ABC', outcome: 'failed' }], resolvedApprovals: [{ approvalId: 'ap', taskId: 't1' }] }, [{ attemptId: 'a1', attemptRunning: true, needsYou: true }]);
+    expect(officeEvents(before, after)).toEqual([]);
+    expect(officeEvents(world({ epoch: 'p#1' }), world({ epoch: 'q#1' }, [{ needsYou: true }]))).toEqual([]);
+  });
+
+  it('CHANGES only on a recorded failed verification or a rejected candidate; a replaced candidate or evidence going away retires the parcel quietly', () => {
+    const pending = { id: 'run:abc', label: 'ABC', outcome: 'pending' as const };
+    const parcel = { id: 'run:abc', label: 'ABC', stage: 'to_gate' as const };
+    // A real failure while the candidate stays live: CHANGES, and the tiffin goes back to the plan table.
+    const failed = officeEvents(world({ parcels: [parcel], verdicts: [pending] }), world({ parcels: [parcel], verdicts: [{ ...pending, outcome: 'failed' }] }));
+    expect(failed).toEqual([{ kind: 'changes', parcelId: 'run:abc', label: 'ABC', agentIds: ['w1'] }]);
+    expect(kinds(officeEvents(world({ verdicts: [pending] }), world({ verdicts: [{ ...pending, outcome: 'rejected' }] })))).toEqual(['changes']);
+    // Replaced, or evidence gone: nothing.
+    expect(officeEvents(world({ parcels: [parcel], verdicts: [pending] }), world({ parcels: [], verdicts: [{ ...pending, outcome: 'retired' }] }))).toEqual([]);
+    expect(officeEvents(world({ parcels: [parcel], verdicts: [pending] }), world({ parcels: [], verdicts: [] }))).toEqual([]);
+    // A failure already recorded is not raised again.
+    expect(officeEvents(world({ verdicts: [{ ...pending, outcome: 'failed' }] }), world({ verdicts: [{ ...pending, outcome: 'failed' }] }))).toEqual([]);
+    expect(effectsFor(failed[0]!)[2]).toEqual({ kind: 'flyBack', label: 'ABC', to: 'plan' });
   });
 });

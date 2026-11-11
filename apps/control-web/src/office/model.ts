@@ -120,8 +120,21 @@ export interface OfficeWorld {
   readonly summary: string;
   /** Per worker, what errands are read from. */
   readonly cues: readonly OfficeCue[];
-  /** Approvals a person has answered, by task. */
+  /** Approvals a person answered (granted or denied, with an approver), by task. Expired and superseded ones were not answered. */
   readonly resolvedApprovals: readonly { readonly approvalId: string; readonly taskId: string | null }[];
+  /**
+   * What the record says about each run's candidate (round 2): `failed` (a failed criterion recorded on it while it is live), `rejected`, `retired`
+   * (replaced or otherwise no longer live), or `pending`. Only a change to failed or rejected raises CHANGES.
+   */
+  readonly verdicts: readonly OfficeVerdict[];
+  /** Which projection this world belongs to (the project and the data source session). A world from another epoch is never compared with this one. */
+  readonly epoch: string;
+}
+
+export interface OfficeVerdict {
+  readonly id: string;
+  readonly label: string;
+  readonly outcome: 'pending' | 'passed' | 'failed' | 'rejected' | 'retired';
 }
 
 /** Only a recorded merge is a merge. `merged_sha_mismatch` merged a commit that is not the verified one, and a stale PR's merge commit is not this run's. */
@@ -161,7 +174,7 @@ const ORDER: readonly RobotState[] = ['needs_input', 'working', 'in_review', 've
 
 const roleName = (role: string | null): string => (role ? role.charAt(0).toUpperCase() + role.slice(1) : 'Worker');
 
-export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = []): OfficeWorld {
+export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = [], epoch = ''): OfficeWorld {
   // Colours follow the worker's id, not its place in the attention order, so a robot keeps its colour as the order changes.
   const ids = Object.keys(snapshot.workers).sort();
   const colorOf = (id: string): string => workerAccents[Math.max(0, ids.indexOf(id)) % workerAccents.length]!;
@@ -249,6 +262,16 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       needsYou: agents.find((a) => a.id === r.workerId)?.state === 'needs_input',
     };
   });
-  const resolvedApprovals = snapshot.approvalHistory.filter((h) => h.resolvedAt !== null).map((h) => ({ approvalId: h.approvalId, taskId: h.taskId }));
-  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals };
+  const resolvedApprovals = snapshot.approvalHistory
+    .filter((h) => h.resolvedAt !== null && (h.outcome === 'granted' || h.outcome === 'denied') && h.approver !== null)
+    .map((h) => ({ approvalId: h.approvalId, taskId: h.taskId }));
+  const verdicts = Object.values(snapshot.runs).flatMap((r): OfficeVerdict[] => {
+    const candidate = r.evidence?.candidate ?? null;
+    if (!candidate) return [];
+    const failed = (r.evidence?.criteria ?? []).some((c) => c.state === 'failed' && c.candidateSha === candidate.sha);
+    const outcome: OfficeVerdict['outcome'] = !candidate.live ? (candidate.status === 'rejected' ? 'rejected' : 'retired')
+      : failed ? 'failed' : verifiedState(r, r.evidence).established ? 'passed' : 'pending';
+    return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), outcome }];
+  });
+  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, epoch: epoch || snapshot.meta.projectId };
 }

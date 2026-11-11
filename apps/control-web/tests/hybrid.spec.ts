@@ -296,4 +296,35 @@ test('H7 fix M4: on a phone the run\'s AI counts head the Boards menu, and the h
   await expect(page.getByTestId('ai-counter')).toBeHidden();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ }).click();
   await expect(page.getByTestId('menu-ai-counts')).toHaveText(/^AI · last call per task: \d+ device · \d+ cloud · \d+ fell back/);
+  // Round 2: the menu is fully on screen and on top: nothing covers it, and the nav's sideways scroll does not clip it.
+  const counts = page.getByTestId('menu-ai-counts');
+  const pipeline = page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Pipeline' });
+  await expect(counts).toBeInViewport({ ratio: 1 });
+  await expect(pipeline).toBeInViewport({ ratio: 1 });
+  for (const target of [counts, pipeline, counts.locator('xpath=..')]) expect(await onTop(target)).toBe(true);
+  await pipeline.click();
+  await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
+});
+
+/** True when the element is the one hit at its own centre (or holds it): it is on screen and on top. */
+async function onTop(target: import('@playwright/test').Locator): Promise<boolean> {
+  return target.evaluate((el) => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return hit !== null && (el === hit || el.contains(hit)); });
+}
+
+test('round 2: every top-bar menu is fully on screen and on top at 390 px and at desktop width', async ({ page }) => {
+  for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: 844 });
+    await open(page, '#/office');
+    const nav = page.getByRole('navigation', { name: 'Primary' });
+    await nav.getByRole('button', { name: /^Boards/ }).click();
+    const benchmark = nav.getByRole('link', { name: 'Benchmark' });
+    await expect(benchmark).toBeInViewport({ ratio: 1 });
+    expect(await onTop(benchmark), `Boards at ${width}`).toBe(true);
+    await page.keyboard.press('Escape');
+    await nav.getByRole('button', { name: 'Terminal' }).click();
+    const first = nav.getByRole('link', { name: /terminal$/ }).first();
+    await expect(first).toBeInViewport({ ratio: 1 });
+    expect(await onTop(first), `Terminal at ${width}`).toBe(true);
+    await page.keyboard.press('Escape');
+  }
 });

@@ -26,11 +26,12 @@ export type OfficeEvent =
   | { readonly kind: 'answered'; readonly agentId: string }
   /** A candidate passed verification. */
   | { readonly kind: 'verified'; readonly parcelId: string }
-  /** A candidate waiting at the gate left the lane without passing: it goes back to the run's workers. */
+  /** The record says a candidate failed verification or was rejected: it goes back to the run's PLAN table. */
   | { readonly kind: 'changes'; readonly parcelId: string; readonly label: string; readonly agentIds: readonly string[] };
 
 export function officeEvents(prev: OfficeWorld | null, next: OfficeWorld): OfficeEvent[] {
-  if (prev === null) return [];
+  // A new epoch (another project, a new demo session, a loop that wrapped) is a fresh start, never a change: nothing is dispatched.
+  if (prev === null || prev.epoch !== next.epoch) return [];
   const out: OfficeEvent[] = [];
   const before = new Map(prev.cues.map((c) => [c.agentId, c]));
   for (const c of next.cues) {
@@ -61,7 +62,14 @@ export function officeEvents(prev: OfficeWorld | null, next: OfficeWorld): Offic
   for (const p of prev.parcels) {
     const now = nowParcels.get(p.id);
     if (now && p.stage === 'to_gate' && now.stage === 'verified') out.push({ kind: 'verified', parcelId: p.id });
-    if (!now && p.stage === 'to_gate') out.push({ kind: 'changes', parcelId: p.id, label: p.label, agentIds: onRun(p.id.split(':')[0]!) });
+  }
+  // CHANGES only from the record: a failed verification on a live candidate, or a rejected one. A candidate that was replaced, or evidence that went
+  // away, retires its parcel quietly.
+  const judged = new Map(prev.verdicts.map((v) => [v.id, v.outcome]));
+  for (const v of next.verdicts) {
+    const was = judged.get(v.id);
+    if (was === undefined || was === v.outcome) continue;
+    if ((v.outcome === 'failed' || v.outcome === 'rejected') && was !== 'failed' && was !== 'rejected') out.push({ kind: 'changes', parcelId: v.id, label: v.label, agentIds: onRun(v.id.split(':')[0]!) });
   }
   return out;
 }
@@ -98,7 +106,8 @@ export function effectsFor(e: OfficeEvent): OfficeEffect[] {
     case 'answered': return [{ kind: 'envelope', from: 'plan', to: { agent: e.agentId } }];
     case 'verified': return [{ kind: 'burst', at: 'gate' }, { kind: 'text', at: 'gate', text: 'VERIFIED', tone: 'pass' }];
     case 'changes': return [
-      { kind: 'text', at: 'gate', text: 'CHANGES', tone: 'fail' }, { kind: 'gate', look: 'changes' }, { kind: 'flyBack', label: e.label, to: e.agentIds[0] ? { agent: e.agentIds[0] } : 'plan' },
+      // The candidate belongs to the run, not one worker, so it flies back to the PLAN table.
+      { kind: 'text', at: 'gate', text: 'CHANGES', tone: 'fail' }, { kind: 'gate', look: 'changes' }, { kind: 'flyBack', label: e.label, to: 'plan' },
     ];
     default: return [];
   }

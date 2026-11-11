@@ -1,6 +1,6 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 
-import { forwardRef, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { TONE_TEXT, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import type { OfficeRunChoice } from '../../office/model.ts';
 import type { AiRunCounts } from './activity.ts';
@@ -56,6 +56,29 @@ function Mark() {
 }
 
 /**
+ * Where an open top-bar menu sits (round 2): fixed to the viewport under its button, right-aligned to it and kept inside the screen, so the nav's
+ * sideways scroll never clips it and nothing in the page covers it, at every width.
+ */
+function useMenuPlace(open: boolean, button: RefObject<HTMLButtonElement | null>): CSSProperties | undefined {
+  const [place, setPlace] = useState<CSSProperties | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = (): void => {
+      const r = button.current?.getBoundingClientRect();
+      if (!r) return;
+      const gutter = 8;
+      const right = Math.max(gutter, window.innerWidth - r.right);
+      setPlace({ position: 'fixed', top: r.bottom + 8, right, maxWidth: window.innerWidth - right - gutter, maxHeight: window.innerHeight - r.bottom - 16, overflowY: 'auto' });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => { window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true); };
+  }, [open, button]);
+  return open ? place : undefined;
+}
+
+/**
  * A top-bar menu: a disclosure of links. Escape or choosing a link closes it, and focus goes back to its button. The screen open now, when it
  * is in this menu, is named on the button and the button carries aria-current, so the current page is never only inside a closed menu.
  */
@@ -74,13 +97,14 @@ function Menu({ label, testId, entries, route, extra, urgent, note }: { label: s
     if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); }
   };
   const current = entries.find((e) => e.route === route) ?? null;
+  const place = useMenuPlace(open, button);
   return (
     <div ref={box} className="relative" data-more="" onKeyDown={onKey}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid={testId}
         onClick={() => setOpen((o) => !o)} style={urgent ? { background: 'var(--color-gold)' } : undefined}>
         {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
       </button>
-      <ul id={id} hidden={!open} className="panel motion-menu absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
         {note ? <li className="px-1 text-[12px] leading-snug text-fg sm:hidden" data-testid="menu-ai-counts">{note}</li> : null}
         {entries.map((e) => (
           <li key={e.route} className="flex flex-col">
@@ -107,11 +131,12 @@ function TerminalMenu({ workers, selectedId }: { workers: readonly { id: string;
     return () => document.removeEventListener('pointerdown', away);
   }, [open]);
   const go = (workerId: string): string => hashWith('wtab', 'terminal', hashWith('worker', workerId));
+  const place = useMenuPlace(open, button);
   if (selectedId !== null) return <a href={go(selectedId)} className="btn text-[14px]" data-testid="top-bar-terminal">Terminal</a>;
   return (
     <div ref={box} className="relative" onKeyDown={(e) => { if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); } }}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} data-testid="top-bar-terminal" onClick={() => setOpen((o) => !o)}>Terminal</button>
-      <ul id={id} hidden={!open} className="panel motion-menu absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[12rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max min-w-[12rem] list-none flex-col gap-1.5 p-2">
         {workers.length === 0 ? <li className="px-1 text-[13px] text-muted">No worker has a terminal yet.</li> : workers.map((w) => (
           <li key={w.id}><a href={go(w.id)} onClick={() => setOpen(false)} className="btn block text-left text-[14px]">{w.name}<span className="sr-only"> terminal</span></a></li>
         ))}

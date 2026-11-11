@@ -459,3 +459,31 @@ test.describe('H7 fix: errands and effects follow real events, with motion allow
     await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.effectCount)).toBeGreaterThan(0);
   });
 });
+
+test.describe('H7 fix round 2: a new epoch invents no events', () => {
+  test.use({ reducedMotion: 'no-preference' });
+  type Live = { world: { epoch: string; cues: { agentId: string; needsYou: boolean; attemptId: string | null; attemptRunning: boolean }[]; agents: { id: string; state: string }[] }; recentEvents: unknown[]; effectCount: number; setWorld(w: unknown): void };
+  test('when the demo loop wraps or the fixture switches, the scene starts afresh: no walk and no effect is dispatched', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
+    const out = await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+      const w = s.world;
+      const id = w.cues[0]!.agentId;
+      // Everything a fresh projection could differ in: a new attempt, a worker that needs you, a new epoch.
+      s.setWorld({ ...w, epoch: `${w.epoch}-next`, cues: w.cues.map((c) => (c.agentId === id ? { ...c, needsYou: true, attemptId: 'brand-new', attemptRunning: true } : c)), agents: w.agents.map((a) => (a.id === id ? { ...a, state: 'needs_input' } : a)) });
+      return { events: s.recentEvents.length, effects: s.effectCount };
+    });
+    expect(out).toEqual({ events: 0, effects: 0 });
+  });
+});
+
+test('H7 fix round 2: the demo plays at 1x and pauses when reduced motion turns on during the session', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?demo&fixture=human-wait#/office');
+  await expect(page.getByTestId('demo-play')).toHaveText('Pause');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(page.getByTestId('demo-play')).toHaveText('Play');
+});

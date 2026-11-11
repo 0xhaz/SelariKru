@@ -106,6 +106,10 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
  * the floating top bar, team cards and activity feed, each screen in a side drawer over the office, and Settings as a modal. Every screen reads
  * one projection store.
  */
+/** Counts projections, so each new store gets its own office epoch. */
+let epochSeq = 0;
+const nextEpoch = (): number => (epochSeq += 1);
+
 export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
@@ -291,10 +295,12 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     projectId: state.projectId, snapshot, live: connection === 'live', mode, execute: state.execute, refresh: state.refresh, resync: state.resync, agents,
     browser: { ...DEFAULT_BROWSER, online }, handover: state.handover,
   }), [state.projectId, snapshot, connection, mode, state.execute, state.refresh, state.resync, agents, online, state.handover]);
+  // A new store is a new projection (another fixture or project, or the demo loop starting over): the office treats it as a fresh start (round 2).
+  const epoch = useMemo(() => nextEpoch(), [store]);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
-    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls); } catch { return null; }
-  }, [snapshot, team, projectLabel, planRunId, calls]);
+    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls, `${snapshot.meta.projectId}#${epoch}`); } catch { return null; }
+  }, [snapshot, team, projectLabel, planRunId, calls, epoch]);
   const activity = useMemo(() => {
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
