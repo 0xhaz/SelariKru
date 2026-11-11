@@ -758,4 +758,24 @@ describe('the Project Manager (H11)', () => {
     expect(r.proposal.blockedReason).toBe('research_device_only');
     expect(sdk.specs).toHaveLength(0);
   });
+
+  it('fix round 3 (N1): on an unlocked device call, a locked sibling is withheld from pmPlan and pmDelegate prompts, and cannot be named', async () => {
+    // An internal device bundle: the call itself reads nothing restricted, so it is not locked.
+    const clean = bundle({ destination: 'local', contentLabel: 'internal' as never, claims: bundle().claims.map((c) => ({ ...c, classification: 'internal' as never })) });
+    const plan = { planRevision: 2, tasks: [{ taskId: 't1', title: 'Add posting', role: 'backend', status: 'ready' }, { taskId: 't2', title: 'WARD-NAMES export of patients', role: 'backend', status: 'ready', restricted: true }], workers: [{ workerId: 'w1', name: 'Aisyah', role: 'backend', enabled: true }] };
+    const p = setup();
+    p.sdk.result = { text: JSON.stringify({ tasks: [{ key: 'T1', title: 'API', description: 'D', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [], revises: 't2' }] }), inferenceSource: 'on_device' };
+    const rp = await p.catalog.pmPlan({ ...INPUTS.pmPlan, bundle: clean, plan });
+    expect(rp.locked).toBe(false);
+    for (const part of ['WARD-NAMES', 'patients']) expect(p.sdk.prompts[0]).not.toContain(part);
+    expect(p.sdk.prompts[0]).toContain('t2 · restricted task (details withheld)');
+    // A locked task's id is not one the call may name.
+    expect(rp.proposal.status).toBe('invalid');
+    const d = setup();
+    d.sdk.result = { text: JSON.stringify({ assignments: [{ taskId: 't2', workerId: 'w1', why: 'x' }] }), inferenceSource: 'on_device' };
+    const rd = await d.catalog.pmDelegate({ ...INPUTS.pmDelegate, bundle: clean, plan });
+    expect(rd.locked).toBe(false);
+    for (const part of ['WARD-NAMES', 'patients']) expect(d.sdk.prompts[0]).not.toContain(part);
+    expect(rd.proposal.status).toBe('invalid');
+  });
 });

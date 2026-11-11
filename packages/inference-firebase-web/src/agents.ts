@@ -536,7 +536,9 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
       const pm = { sourceIds };
       if (kind === 'pmAnswer') return finish(['Answer the owner.', sourceIds.length > 0 ? `Context keys you may cite: ${sourceIds.join(', ')}.` : 'There is no context to cite: say so if the answer needs it.'], { ...base, pm });
       // The run's current tasks, so a plan task may revise one (`revises`, by id); a locked task is listed by id, role and status only on a cloud-capable call.
-      const taskLine = (x: PmPlanScope['tasks'][number]): string => x.restricted === true && at.cloudCapable
+      // Fix round 3 (N1): a locked task is withheld unless the call itself is locked (the M-a rule): on a cloud-capable call, and on a device call that is not
+      // locked, whose output may still be accepted and leave the device.
+      const taskLine = (x: PmPlanScope['tasks'][number]): string => x.restricted === true && (at.cloudCapable || at.locked !== true)
         ? `- ${x.taskId} · restricted task (details withheld) (role ${x.role}, ${x.status})`
         : `- ${x.taskId}: ${x.title.replace(/\s+/g, ' ').trim()} (role ${x.role}, ${x.status})`;
       if (kind === 'pmPlan') {
@@ -544,12 +546,12 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
         if (scope && scope.tasks.length > 0) out.push('', `# Current plan, revision ${scope.planRevision}`, block('PLAN', '', scope.tasks.map(taskLine).join('\n'), nonce));
         return finish(['Draft a plan revision for this work.', idsLine(ids), ...(scope && scope.tasks.length > 0 ? ['To change a task listed above, give its id as "revises" and keep its role; a task without "revises" is new. Tasks you do not mention stay as they are.'] : [])],
           // A plan spans the run's roles, so its paths are not bound to the subject task's: the server holds each task to its role's paths at accept.
-          { ...base, allowedPaths: [], pm: { ...pm, ...(scope ? { taskIds: scope.tasks.map((x) => x.taskId), roles: planRoles(scope) } : {}) } });
+          { ...base, allowedPaths: [], pm: { ...pm, ...(scope ? { taskIds: nameable(scope), roles: planRoles(scope) } : {}) } });
       }
       const d = input as AgentInputs['pmDelegate'];
       out.push('', `# Accepted plan, revision ${d.plan.planRevision}`, block('PLAN', '', d.plan.tasks.map(taskLine).join('\n'), nonce),
         '', '# Workers', ...d.plan.workers.filter((w) => w.enabled).map((w) => `- ${w.workerId}: ${w.name ? quoteName(w.name) : '(no name)'}, role ${roleLabel(w.role)}`));
-      return finish(['Propose who takes each task.'], { ...base, pm: { ...pm, taskIds: d.plan.tasks.map((x) => x.taskId), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) } });
+      return finish(['Propose who takes each task.'], { ...base, pm: { ...pm, taskIds: nameable(d.plan), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) } });
     }
   }
 }
@@ -704,6 +706,9 @@ export class AgentCatalog {
   }
 }
 
+/** The task ids a PM call may name: the plan scope's unlocked tasks. */
+const nameable = (scope: PmPlanScope): string[] => scope.tasks.filter((t) => t.restricted !== true).map((t) => t.taskId);
+
 /** The roles a PM plan may use: the plan's own, and the coding roles. */
 const planRoles = (scope: PmPlanScope): string[] => [...new Set([...scope.tasks.map((t) => t.role), 'backend', 'frontend'])].sort();
 
@@ -711,8 +716,9 @@ const planRoles = (scope: PmPlanScope): string[] => [...new Set([...scope.tasks.
 function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[] } {
   if (kind !== 'pmAnswer' && kind !== 'pmResearch' && kind !== 'pmPlan' && kind !== 'pmDelegate') return {};
   const sourceIds = contextKeys(input.bundle);
-  if (kind === 'pmPlan') { const scope = (input as AgentInputs['pmPlan']).plan; return scope ? { sourceIds, taskIds: scope.tasks.map((x) => x.taskId), roles: planRoles(scope) } : { sourceIds }; }
+  // Fix round 3 (N1, N2): a locked task's id is never one the call may name, so its output never revises or assigns it.
+  if (kind === 'pmPlan') { const scope = (input as AgentInputs['pmPlan']).plan; return scope ? { sourceIds, taskIds: nameable(scope), roles: planRoles(scope) } : { sourceIds }; }
   if (kind !== 'pmDelegate') return { sourceIds };
   const d = input as AgentInputs['pmDelegate'];
-  return { sourceIds, taskIds: d.plan.tasks.map((x) => x.taskId), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) };
+  return { sourceIds, taskIds: nameable(d.plan), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) };
 }
