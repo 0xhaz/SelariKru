@@ -1,6 +1,7 @@
 // The live layer of the kedai studio (H7), redrawn every frame: desk screens and lamps, the delivery path with its tiffin carriers, the verifier's
 // gate, the local racks, the pull request shelves, the louvre window and clock, the desk AI marks, the rooftop cloud deck and the fallback path.
-// SelariKru's own drawing. What each part shows is read from the office world (model.ts); nothing here decides a state.
+// The drawing is SelariKru's own; the rack lights' flicker and the cable dots' timing per state are adapted from jsm-hq (MIT), see
+// THIRD_PARTY_NOTICES.md. What each part shows is read from the office world (model.ts); nothing here decides a state.
 
 import { stateStyle, type RobotState } from '../../theme/tokens.ts';
 import type { OfficeAgent, OfficePr, OfficeRack } from '../model.ts';
