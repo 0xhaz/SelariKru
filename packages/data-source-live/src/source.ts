@@ -269,8 +269,8 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
      * pmPlan call named, so the server's backstop judges that call. Issues needing an acknowledgement come back as the review's refusal, for the Assistant.
      */
     async acceptPmPlan(projectId, runId, request): Promise<PmPlanAcceptReceipt> {
-      const data = { tasks: request.plan.tasks.map((t) => ({ title: t.title, description: t.description, requirementIds: [...t.requirementIds], ...(t.role === 'backend' || t.role === 'frontend' ? { role: t.role } : {}) })) };
-      const review = await readJson(`/v1/runs/${encodeURIComponent(runId)}/proposals/review`, { parse: (v: unknown) => v as { expectedRevision: number; tasks: unknown[] } }, 'a plan review', false, { envelope: { operation: 'draftTaskPlan', status: 'ok', data } }, true);
+      // Sent as the call gave it (fix round 2, I4): the server's review maps `revises` onto the run's tasks, keeping roles, paths and dependencies.
+      const review = await readJson(`/v1/runs/${encodeURIComponent(runId)}/proposals/review`, { parse: (v: unknown) => v as { expectedRevision: number; tasks: unknown[] } }, 'a plan review', false, { envelope: { operation: 'pmPlan', status: 'ok', data: request.plan } }, true);
       if (review.expectedRevision !== request.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'stale_revision: the plan changed since the Project Manager drafted this', retryable: false });
       const done = await readJson(`/v1/runs/${encodeURIComponent(runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false,
         { expectedRevision: review.expectedRevision, idempotencyKey: request.idempotencyKey, tasks: review.tasks, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId, stepKind: 'pmPlan' } }, true);

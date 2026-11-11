@@ -125,3 +125,15 @@ describe('live accepted proposals, base files and the PR body (H5)', () => {
     expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/runs/r1/pull-request', body: { body: 'Add posting' } });
   });
 });
+
+describe('live Project Manager plan accept (H11 fix round 2, I4)', () => {
+  it('sends the PM plan as the call gave it (roles, paths, dependencies, revises) to the review, then the reviewed specs to plan-revisions with the pmPlan call named', async () => {
+    const reviewed = [{ taskId: 't_back', revision: 2 }];
+    const live = source([() => ({ status: 200, body: { expectedRevision: 2, tasks: reviewed } }), () => ({ status: 201, body: { planRevision: 3, taskIds: ['t_back'] } })]);
+    const plan = { tasks: [{ key: 'T1', title: 'API', description: 'D', role: 'docs', requirementIds: ['FB-1'], paths: ['apps/docs/x'], dependsOn: [], revises: 't_back' }] };
+    const r = await live.s.acceptPmPlan!('p', 'r1', { expectedPlanRevision: 2, subjectTaskId: 't_back', routeRecordId: 'req_plan', plan, idempotencyKey: 'k' });
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/runs/r1/proposals/review', body: { envelope: { operation: 'pmPlan', status: 'ok', data: plan } } });
+    expect(live.calls[1]).toMatchObject({ url: 'http://x/v1/runs/r1/plan-revisions', body: { expectedRevision: 2, tasks: reviewed, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan', stepKind: 'pmPlan' } } });
+    expect(r).toEqual({ planRevision: 3, taskIds: ['t_back'], simulated: false });
+  });
+});

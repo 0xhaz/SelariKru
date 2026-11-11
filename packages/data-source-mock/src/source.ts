@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type DelegationReceipt, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { MAX_ATTEMPTS_CAP, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { MAX_ATTEMPTS_CAP, mapPmPlan, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -163,7 +163,15 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       let tasks = snap.tasks;
       // A criteria revision accepted in the demo re-plans a task the fixture has no new seed for: its next revision, planned again, as the plan route does.
       const replanned = Array.isArray(event.payload['replanned']) ? (event.payload['replanned'] as string[]) : [];
+      // A Project Manager plan the demo accepted (fix round 2): its items carry the PM's title, role and dependencies.
+      const pmItems = Array.isArray(event.payload['pmPlan']) ? (event.payload['pmPlan'] as { taskId: string; revision: number; title: string; role: string; dependencies: { taskId: string }[] }[]) : [];
+      for (const m of pmItems) {
+        const prior = tasks[m.taskId];
+        const base: TaskView = prior ?? { taskId: m.taskId, runId: event.runId, revision: 1, aggregateRevision: 0, title: m.title, role: m.role, dependsOn: [], status: 'planned', statusReason: null, placementBlock: null, cancelRequested: null, cancelReason: null, supersededByRevision: null, attemptIds: [], activeAttemptId: null, enteredStatusAt: event.occurredAt, latestEvidence: null };
+        tasks = { ...tasks, [m.taskId]: { ...base, revision: m.revision, aggregateRevision: base.aggregateRevision + 1, title: m.title, role: m.role, dependsOn: m.dependencies.map((d) => d.taskId), status: 'planned', statusReason: null, placementBlock: null, activeAttemptId: null, enteredStatusAt: event.occurredAt, supersededByRevision: null } };
+      }
       for (const id of ids) {
+        if (pmItems.some((m) => m.taskId === id)) continue;
         const prior = tasks[id];
         if (replanned.includes(id) && prior) {
           tasks = { ...tasks, [id]: { ...prior, revision: prior.revision + 1, aggregateRevision: prior.aggregateRevision + 1, status: 'planned', statusReason: null, placementBlock: null, activeAttemptId: null, enteredStatusAt: event.occurredAt, supersededByRevision: null } };
@@ -581,7 +589,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const off = p.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'auto_delegate' && x.desired === false);
     if (by === 'agent' && off) return { applied: [], refused: all.map((a) => ({ ...a, reason: 'auto_delegate_off' })), autoDelegate: false, simulated: true };
     const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => ({
-      taskId: t.taskId, role: t.role ?? '', status: t.status, maxAttempts: MAX_ATTEMPTS_CAP,
+      taskId: t.taskId, role: t.role ?? '', status: t.status, maxAttempts: demoMaxAttempts(run),
       attemptsUsed: t.attemptIds.filter((id) => snap.attempts[id]?.outcome !== 'interrupted').length,
     }));
     const workers = Object.keys(snap.workers).map((id) => ({ workerId: id, role: demoRoleOf(snap, p.settings, id), enabled: !p.settings.some((x) => x.scope === 'runner' && x.key === id && x.field === 'enabled' && x.desired === false) }));
@@ -813,9 +821,15 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const servedLabel = call?.contextId ? p.contextLabels.get(call.contextId) : undefined;
       if (servedLabel === undefined || !['public', 'internal'].includes(servedLabel)) throw fail('unavailable', 'proposal_from_restricted_context: this came from a call whose context held restricted data, or that the demo cannot vouch for');
       if (request.expectedPlanRevision !== run.planRevision) throw fail('unavailable', 'stale_revision: the plan changed since the Project Manager drafted this');
+      // The server's mapping (fix round 2, I4): `revises` makes the next revision of that task, a task without it is new, T-key dependencies map to the final ids,
+      // and tasks the plan does not mention stay as they are.
+      const existing = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'cancelled' && t.status !== 'superseded')
+        .map((t) => ({ taskId: t.taskId, revision: t.revision, role: t.role ?? '', locked: (t.route?.lock ?? routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId)) !== null, allowedPaths: ['**'] }));
+      const mapped = mapPmPlan(request.plan.tasks as never, existing, { newTaskId: (i) => `${runId}.pm-${seededId(prng, 't')}-${i + 1}`, allowedPaths: ['**'] });
+      if (!mapped.ok) throw fail('unavailable', `${mapped.reason}: the plan's ${mapped.key} cannot be accepted`);
       const planRevision = run.planRevision + 1;
-      const taskIds = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId).map((t) => t.taskId);
-      appendCommandEvent(p, runId, 'plan.accepted', { planRevision, taskIds, acceptedFor: 'demo-operator', replanned: [] }, { revisionStep: planRevision, system: true });
+      const taskIds = mapped.items.map((m) => m.taskId);
+      appendCommandEvent(p, runId, 'plan.accepted', { planRevision, taskIds, acceptedFor: 'demo-operator', replanned: mapped.items.filter((m) => m.revises).map((m) => m.taskId), pmPlan: mapped.items }, { revisionStep: planRevision, system: true });
       return { planRevision, taskIds, simulated: true };
     },
 
@@ -1019,6 +1033,15 @@ export function demoNameFor(workerId: string, taken: readonly string[]): string 
     if (!taken.includes(name)) return name;
   }
   return DEMO_NAMES[h % DEMO_NAMES.length]!;
+}
+
+/**
+ * M5 (fix round 2): a demo task's attempt limit, as its plan sets it: the run's repair limit plus the first attempt (the server reads the task spec's maxAttempts,
+ * which the plan builds the same way). Unknown: the cap.
+ */
+export function demoMaxAttempts(run: Pick<RunView, 'policy'>): number {
+  const repairs = run.policy?.repairAttempts?.value;
+  return typeof repairs === 'number' ? Math.min(MAX_ATTEMPTS_CAP, repairs + 1) : MAX_ATTEMPTS_CAP;
 }
 
 /** H11: the Project Manager's actor on its own delegations. */

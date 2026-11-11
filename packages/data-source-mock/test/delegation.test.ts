@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { delegationOutputSha256 } from '@selarikru/domain';
 import type { ProjectViewEvent } from '@selarikru/view-protocol';
-import { buildFixture, createMockDataSource, createSeededClock, demoNameFor, fixtureTime, scoped } from '../src/index.ts';
+import { buildFixture, createMockDataSource, createSeededClock, demoMaxAttempts, demoNameFor, fixtureTime, scoped } from '../src/index.ts';
 
 const id = (local: string) => scoped('feature-delivery', local);
 const report = (requestId: string, over: Record<string, unknown> = {}) => ({
@@ -84,16 +84,38 @@ describe('the demo\'s Project Manager delegation (H11)', () => {
     expect(demoNameFor('runner_local_1', [])).toBe(demoNameFor('runner_local_1', ['runner_zzz', 'runner_aaa']));
   });
 
-  it('I4: a Project Manager plan is accepted from a recorded, unlocked pmPlan call: the plan revision moves on, and delegation can follow under it', async () => {
-    const { ds, f, runId, run, subject, assignments } = await setup();
-    const plan = { tasks: [{ key: 'T1', title: 'API', description: 'Add the route.', role: 'backend', requirementIds: ['FB-01'], paths: ['src/api'], dependsOn: [] }] };
-    const req = { expectedPlanRevision: run.planRevision, subjectTaskId: subject, routeRecordId: 'req-plan', plan, idempotencyKey: 'plan-1' };
-    await expect(ds.acceptPmPlan!(f.projectId, runId, req)).rejects.toThrow(/route_record_missing/);
+  it('I4 (fix round 2): accepting a PM plan revises the named tasks, adds new ones with mapped dependencies, keeps the rest, and refuses bad revises', async () => {
+    const { ds, f, runId, run, subject } = await setup();
+    const before = await ds.getSnapshot(f.projectId);
+    const runTasks = Object.values(before.tasks).filter((t) => t.runId === runId && !t.route?.lock);
+    const target = runTasks.find((t) => ['planned', 'ready', 'blocked'].includes(t.status)) ?? runTasks[0]!;
+    const locked = Object.values(before.tasks).find((t) => t.runId === runId && t.route?.lock)!;
+    const untouched = runTasks.find((t) => t.taskId !== target.taskId)!;
+    const plan = { tasks: [
+      { key: 'T1', title: 'Revised work', description: 'Do it again.', role: target.role!, requirementIds: ['FB-01'], paths: ['src/x'], dependsOn: [], revises: target.taskId },
+      { key: 'T2', title: 'New follow-up', description: 'After it.', role: target.role!, requirementIds: ['FB-01'], paths: ['src/y'], dependsOn: ['T1'] },
+    ] };
+    const req = (p: unknown, key: string) => ({ expectedPlanRevision: run.planRevision, subjectTaskId: subject, routeRecordId: 'req-plan', plan: p as never, idempotencyKey: key });
+    await expect(ds.acceptPmPlan!(f.projectId, runId, req(plan, 'p0'))).rejects.toThrow(/route_record_missing/);
     await ds.getTaskContext!(f.projectId, subject, 'local', null, 'ctx_plan');
     await ds.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: 'rp', args: { projectId: f.projectId, taskId: subject, report: report('req-plan', { stepKind: 'pmPlan', contextId: 'ctx_plan' }) } });
-    const r = await ds.acceptPmPlan!(f.projectId, runId, req);
+    await expect(ds.acceptPmPlan!(f.projectId, runId, req({ tasks: [{ ...plan.tasks[0], revises: 'nope' }] }, 'p1'))).rejects.toThrow(/revises_unknown/);
+    await expect(ds.acceptPmPlan!(f.projectId, runId, req({ tasks: [{ ...plan.tasks[0], revises: locked.taskId, role: locked.role }] }, 'p2'))).rejects.toThrow(/revises_locked/);
+    const r = await ds.acceptPmPlan!(f.projectId, runId, req(plan, 'p3'));
     expect(r).toMatchObject({ planRevision: run.planRevision + 1, simulated: true });
     await expect.poll(async () => (await ds.getSnapshot(f.projectId)).runs[runId]!.planRevision).toBe(run.planRevision + 1);
-    expect(assignments).toHaveLength(1);
+    const after = await ds.getSnapshot(f.projectId);
+    expect(after.tasks[target.taskId]).toMatchObject({ revision: target.revision + 1, title: 'Revised work', role: target.role, status: 'planned' });
+    const added = r.taskIds.find((id) => id !== target.taskId)!;
+    expect(after.tasks[added]).toMatchObject({ revision: 1, title: 'New follow-up', status: 'planned', dependsOn: [target.taskId] });
+    expect(after.tasks[untouched.taskId]).toMatchObject({ revision: untouched.revision, title: untouched.title });
+  });
+});
+
+describe('M5 (fix round 2): the demo counts retries against the task\'s own attempt limit', () => {
+  it('a task\'s maxAttempts is its run\'s repair limit plus the first attempt, as the plan the demo stands for sets it', () => {
+    expect(demoMaxAttempts({ policy: { repairAttempts: { value: 0, basis: 'configured' } } } as never)).toBe(1);
+    expect(demoMaxAttempts({ policy: { repairAttempts: { value: 2, basis: 'configured' } } } as never)).toBe(3);
+    expect(demoMaxAttempts({ policy: null } as never)).toBe(3);
   });
 });

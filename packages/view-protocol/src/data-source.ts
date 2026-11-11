@@ -121,8 +121,8 @@ export interface PmPlanAcceptRequest {
   readonly expectedPlanRevision: number;
   readonly subjectTaskId: string;
   readonly routeRecordId: string;
-  /** The pmPlan output as the call gave it (the plan schema). */
-  readonly plan: { readonly tasks: readonly { readonly title: string; readonly description: string; readonly role?: string; readonly requirementIds: readonly string[] }[] };
+  /** The pmPlan output as the call gave it: each task with its key, role, paths, dependencies (T-keys) and, to change an existing task, `revises` (its id). */
+  readonly plan: { readonly tasks: readonly { readonly key: string; readonly title: string; readonly description: string; readonly role: string; readonly requirementIds: readonly string[]; readonly paths: readonly string[]; readonly dependsOn: readonly string[]; readonly revises?: string }[] };
   readonly idempotencyKey: string;
 }
 export interface PmPlanAcceptReceipt {
