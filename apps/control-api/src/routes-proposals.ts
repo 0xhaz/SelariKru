@@ -2,12 +2,13 @@ import { schema } from '@selarikru/persistence';
 import { evaluate } from '@selarikru/policy';
 import { redactSecrets } from '@selarikru/protocol';
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { TaskSpecSchema } from '@selarikru/domain';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
-import { proposalContentSha256, reviewPlanProposal, reviewPmPlan, ProjectPlanConfigSchema, type PlanReviewError, type VerifiedGrant } from './proposals.ts';
+import { proposalContentSha256, reviewPlanProposal, toPlanReviewAppError, ProjectPlanConfigSchema, type VerifiedGrant } from './proposals.ts';
+import { derivePmPlanSpecs, pmPlanHash } from './pm-plan.ts';
+import { agentOutputGuard } from './apply.ts';
 import { onboardingPlanSettings } from './routes-onboarding.ts';
 import { parseBody } from './routes-owner.ts';
 import { newId, requireProject, requireRun } from './store.ts';
@@ -19,6 +20,8 @@ const ReviewBodySchema = z
   .object({
     envelope: z.object({ operation: z.string().max(40), status: z.string().max(40), data: z.unknown() }).strict(),
     acknowledgedIssuePaths: z.array(z.string().max(200)).max(100).optional(),
+    /** H11 fix round 3: a Project Manager plan names the pmPlan call that produced it (its task and route record). */
+    agentProposal: z.object({ taskId: z.string().min(1).max(200), routeRecordId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/) }).strict().optional(),
     /** Present when the content derives from a restricted source: the draft and the grant the owner obtained. */
     restricted: z.object({ draftId: z.string().regex(SAFE_ID), grantId: z.string().regex(SAFE_ID) }).strict().optional(),
   })
@@ -43,24 +46,8 @@ const ownerOf = (req: FastifyRequest): string => {
 };
 const idParam = (req: FastifyRequest): string => (req.params as { id: string }).id;
 const context = (draftId: string, sha: string) => `reclassify:${draftId}:${sha}`;
-const PM_PLAN_REFUSAL: Readonly<Record<string, string>> = {
-  revises_unknown: 'The plan revises a task this run does not have.',
-  revises_locked: 'The plan revises a task that holds restricted data; that task is planned on this device only.',
-  revises_duplicate: 'Two tasks of the plan revise the same task.',
-  revises_role_changed: 'A revision keeps its task\'s role; a new role needs a new task.',
-  path_outside_role: 'A task names a path outside its role\'s paths.',
-  dependency_unknown: 'A task depends on a key the plan does not have.',
-};
 
-function toAppError(e: PlanReviewError): AppError {
-  switch (e.code) {
-    case 'proposal_not_acceptable': return new AppError(422, 'proposal_not_acceptable', 'this proposal cannot be accepted', { reason: e.reason });
-    case 'missing_server_config': return new AppError(422, 'missing_server_config', 'project plan settings are missing or incomplete', e.details);
-    case 'proposal_rejected': return new AppError(422, 'proposal_rejected', 'the proposal failed validation', e.issues.map((i) => ({ kind: i.kind, path: i.path, message: i.message })));
-    case 'acknowledgement_required': return new AppError(409, 'acknowledgement_required', 'acknowledge the listed issues to continue', { paths: e.paths });
-    case 'task_invalid': return new AppError(422, 'plan_invalid', 'a mapped task is not valid', e.details);
-  }
-}
+const toAppError = toPlanReviewAppError;
 
 export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, config, now } = ctx;
@@ -100,16 +87,12 @@ export function registerProposalRoutes(app: FastifyInstance, ctx: AppContext): v
     // H11 fix round 2 (I4): a Project Manager plan maps onto the run's current tasks (revises), reviewed with the same configuration.
     if (body.envelope.operation === 'pmPlan') {
       if (body.envelope.status !== 'ok') throw new AppError(422, 'proposal_not_acceptable', 'this proposal cannot be accepted', { reason: `status_${body.envelope.status}` });
-      const current = await db.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).innerJoin(schema.taskStatus, and(
-        eq(schema.taskStatus.tenantId, schema.taskRevisions.tenantId), eq(schema.taskStatus.projectId, schema.taskRevisions.projectId), eq(schema.taskStatus.taskId, schema.taskRevisions.taskId), eq(schema.taskStatus.currentRevision, schema.taskRevisions.revision)))
-        .where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, run.projectId), eq(schema.taskRevisions.runId, run.runId), sql`${schema.taskStatus.status} NOT IN ('cancelled', 'superseded')`));
-      const existing = current.flatMap((x) => { const p = TaskSpecSchema.safeParse(x.spec); return p.success ? [p.data] : []; });
-      const pm = reviewPmPlan(body.envelope.data, cfg.data, existing, { taskIdPrefix: newId('prop').replace(/_/g, '-') });
-      if (!pm.ok) {
-        if (pm.error.code === 'pm_plan_refused') throw new AppError(422, 'pm_plan_refused', PM_PLAN_REFUSAL[pm.error.reason] ?? 'this plan cannot be accepted', { reason: pm.error.reason, key: pm.error.key });
-        throw toAppError(pm.error as PlanReviewError);
-      }
-      return reply.code(200).send({ expectedRevision: run.planRevision ?? 0, tasks: pm.value.tasks, needsReview: false, droppedFields: [], issues: [] });
+      // Fix round 3: bound to the call that produced it. Its record (and served context) must pass H5's guard, and the plan must be the output it hashed.
+      if (!body.agentProposal) throw new AppError(422, 'invalid_request', 'a Project Manager plan names the call that produced it', { reason: 'agent_proposal_missing' });
+      const rec = await agentOutputGuard(db, { tenantId: config.tenantId, projectId: run.projectId, taskId: body.agentProposal.taskId }, body.agentProposal.routeRecordId, 'pmPlan');
+      if (rec.outputSha256 !== pmPlanHash(body.envelope.data)) throw new AppError(409, 'plan_output_mismatch', 'this is not the plan the Project Manager call produced, so it is not accepted');
+      const tasks = await derivePmPlanSpecs(db, { tenantId: config.tenantId, projectId: run.projectId, runId: run.runId, routeRecordId: body.agentProposal.routeRecordId, plan: body.envelope.data, settings, nanoBudgetChars: config.nanoInputBudgetChars });
+      return reply.code(200).send({ expectedRevision: run.planRevision ?? 0, tasks, needsReview: false, droppedFields: [], issues: [] });
     }
     const r = reviewPlanProposal(body.envelope, cfg.data, {
       taskIdPrefix: newId('prop').replace(/_/g, '-'),

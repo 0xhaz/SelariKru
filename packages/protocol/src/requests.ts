@@ -83,6 +83,8 @@ export const PlanRevisionRequestSchema = z
       /** H11 fix round 1: `pmPlan` when the revision is a Project Manager plan the owner accepted (its call ran about `taskId`). Default: an agent's criteria. */
       stepKind: z.enum(['criteria', 'pmPlan']).optional(),
     }).strict().optional(),
+    /** H11 fix round 3: with a pmPlan agentProposal, the PM's plan as the call produced it. The server re-derives the specs from it and requires them to be `tasks`. */
+    pmPlan: z.unknown().optional(),
   })
   .strict();
 export type PlanRevisionRequest = z.infer<typeof PlanRevisionRequestSchema>;

@@ -1,3 +1,7 @@
+import { canonicalPath, reservedPath } from './agents.ts';
+import { secretFileReason } from './checkpoint.ts';
+import { allowedPathProblem } from './plan.ts';
+
 /**
  * H11 fix round 2 (I4): how an accepted Project Manager plan becomes a plan revision, one rule for the server and the demo. A plan task that names `revises` (an id
  * from the plan scope the PM saw) becomes the next revision of that task: same task id and role, with the PM's title, description, criteria, paths and dependencies.
@@ -24,7 +28,19 @@ export interface PmPlanExisting {
   readonly allowedPaths: readonly string[];
 }
 
-export type PmPlanRefusal = 'revises_unknown' | 'revises_locked' | 'revises_duplicate' | 'revises_role_changed' | 'path_outside_role' | 'dependency_unknown';
+export type PmPlanRefusal = 'revises_unknown' | 'revises_locked' | 'revises_duplicate' | 'revises_role_changed' | 'path_outside_role' | 'dependency_unknown'
+  | 'path_invalid' | 'path_reserved' | 'role_unknown';
+
+/**
+ * A plan path in its one canonical form (fix round 3, N3), or why not: repo-relative, no `..`, `.` or empty segment, not absolute, not reserved, not a credentials
+ * file by name. A trailing `/` (a directory prefix) is dropped first.
+ */
+export function planPath(raw: string): { readonly path: string } | { readonly refused: 'path_invalid' | 'path_reserved' } {
+  const p = canonicalPath(raw.replace(/\/+$/, ''));
+  if (p === null || raw.startsWith('/') || allowedPathProblem(p) !== null) return { refused: 'path_invalid' };
+  if (reservedPath(p) || secretFileReason(p) !== null) return { refused: 'path_reserved' };
+  return { path: p };
+}
 
 export interface PmPlanItem {
   readonly key: string;
@@ -53,6 +69,8 @@ export function mapPmPlan(tasks: readonly PmPlanTask[], existing: readonly PmPla
   /** Per role, the paths its tasks may change (the project's role paths). A role not listed gets `allowedPaths`. */
   readonly rolePaths?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly allowedPaths: readonly string[];
+  /** The project's roles (those its tasks name). When given, a new task's role must be one of them. */
+  readonly projectRoles?: readonly string[] | undefined;
 }): PmPlanMapping {
   const byId = new Map(existing.map((e) => [e.taskId, e]));
   const seen = new Set<string>();
@@ -66,13 +84,22 @@ export function mapPmPlan(tasks: readonly PmPlanTask[], existing: readonly PmPla
       if (e.role !== t.role) return { ok: false, reason: 'revises_role_changed', key: t.key };
       seen.add(e.taskId);
       ids.set(t.key, { taskId: e.taskId, revision: e.revision + 1 });
-    } else ids.set(t.key, { taskId: opts.newTaskId(i), revision: 1 });
+    } else {
+      if (opts.projectRoles && !opts.projectRoles.includes(t.role)) return { ok: false, reason: 'role_unknown', key: t.key };
+      ids.set(t.key, { taskId: opts.newTaskId(i), revision: 1 });
+    }
   }
   const items: PmPlanItem[] = [];
   for (const t of tasks) {
     const e = t.revises !== undefined ? byId.get(t.revises)! : null;
     const roots = [...(opts.rolePaths?.[t.role] ?? opts.allowedPaths), ...(e?.allowedPaths ?? [])];
-    if (t.paths.some((p) => !pathWithin(p, roots))) return { ok: false, reason: 'path_outside_role', key: t.key };
+    const paths: string[] = [];
+    for (const raw of t.paths) {
+      const n = planPath(raw);
+      if ('refused' in n) return { ok: false, reason: n.refused, key: t.key };
+      if (!pathWithin(n.path, roots)) return { ok: false, reason: 'path_outside_role', key: t.key };
+      paths.push(n.path);
+    }
     const deps: PmPlanItem['dependencies'][number][] = [];
     for (const d of t.dependsOn) {
       const to = ids.get(d);
@@ -80,7 +107,7 @@ export function mapPmPlan(tasks: readonly PmPlanTask[], existing: readonly PmPla
       deps.push({ taskId: to.taskId, revision: to.revision, condition: 'artifact_verified' });
     }
     const id = ids.get(t.key)!;
-    items.push({ key: t.key, taskId: id.taskId, revision: id.revision, revises: e?.taskId ?? null, role: t.role, title: t.title, description: t.description, requirementIds: [...t.requirementIds], allowedPaths: [...t.paths], dependencies: deps });
+    items.push({ key: t.key, taskId: id.taskId, revision: id.revision, revises: e?.taskId ?? null, role: t.role, title: t.title, description: t.description, requirementIds: [...t.requirementIds], allowedPaths: paths, dependencies: deps });
   }
   return { ok: true, items };
 }

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
+import { canonicalJson, sha256Hex } from '@selarikru/domain';
 import { API_POLICY, PROJECT, RUN, TENANT, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 /**
@@ -31,8 +32,12 @@ beforeEach(async () => {
 });
 
 const task = (over: Record<string, unknown>) => ({ key: 'T1', title: 'Posting API', description: 'Store a post.', role: 'backend', requirementIds: ['FB-01'], paths: ['apps/api/posts'], dependsOn: [], ...over });
-const review = (tasks: unknown[]) => post(h.app, `/v1/runs/${RUN}/proposals/review`, { envelope: { operation: 'pmPlan', status: 'ok', data: { tasks } } });
-const revise = (tasks: unknown[], expectedRevision = 2) => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision, idempotencyKey: `k-${Math.random()}`, tasks, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan', stepKind: 'pmPlan' } });
+/** The pmPlan call's record carries the hash of its output (fix round 3): bind it to the plan the test sends. */
+const bind = (tasks: unknown[]) => t.db.execute(sql`UPDATE client_reports SET payload = payload || ${JSON.stringify({ outputSha256: sha256Hex(canonicalJson({ tasks })) })}::jsonb WHERE report_id = 'rpt_plan'`);
+const agentProposal = { taskId: 't_back', routeRecordId: 'req_plan', stepKind: 'pmPlan' };
+let lastPlan: unknown[] = [];
+const review = async (tasks: unknown[], bound = true) => { lastPlan = tasks; if (bound) await bind(tasks); return post(h.app, `/v1/runs/${RUN}/proposals/review`, { envelope: { operation: 'pmPlan', status: 'ok', data: { tasks } }, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan' } }); };
+const revise = (tasks: unknown[], expectedRevision = 2, plan: unknown[] = lastPlan) => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision, idempotencyKey: `k-${Math.random()}`, tasks, agentProposal, pmPlan: { tasks: plan } });
 
 describe('accepting a Project Manager plan revises the run\'s tasks (H11 fix round 2, I4)', () => {
   it('revises the named tasks with the PM\'s paths and dependencies, adds the new one, keeps the rest, and no role has two tasks', async () => {
@@ -63,5 +68,44 @@ describe('accepting a Project Manager plan revises the run\'s tasks (H11 fix rou
     expect(await code([task({ revises: 't_back' }), task({ key: 'T2', revises: 't_back' })])).toBe('revises_duplicate');
     expect(await code([task({ revises: 't_back', role: 'frontend', paths: ['apps/web'] })])).toBe('revises_role_changed');
     expect(await code([task({ revises: 't_back', paths: ['apps/web/x'] })])).toBe('path_outside_role');
+  });
+
+  it('N2 (fix round 3): revises_locked follows the real route lock: a Brain-restricted task, a task downstream of a restricted one, and a restricted project', async () => {
+    const code = async (tasks: unknown[]) => { const r = await review(tasks); return r.body.error?.details?.reason ?? r.body.error?.code; };
+    await t.db.insert(schema.brainSources).values({
+      tenantId: TENANT, projectId: PROJECT, sourceId: 'note:t_back', revision: 1, kind: 'note', title: 'n', standing: 'accepted', classification: 'restricted', allowedUse: ['local'],
+      provenance: { origin: 'owner', ref: 'x', recordedBy: 'u' }, taskId: 't_back', sections: [], contentSha256: 'a'.repeat(64), seq: 1, recordedAt: new Date(),
+    });
+    expect(await code([task({ revises: 't_back' })])).toBe('revises_locked');
+    await seedTask(t.db, specFor('t_down', { role: 'frontend', allowedPaths: ['apps/web'], dependencies: [{ taskId: 't_secret', revision: 1, condition: 'artifact_verified' }] }), 'planned');
+    expect(await code([task({ revises: 't_down', role: 'frontend', paths: ['apps/web'] })])).toBe('revises_locked');
+    await t.db.execute(sql`UPDATE projects SET classification = 'restricted' WHERE project_id = ${PROJECT}`);
+    expect(await code([task({ revises: 't_front', role: 'frontend', paths: ['apps/web'] })])).toBe('revises_locked');
+  });
+
+  it('N3 (fix round 3): paths are normalised first: .. segments, absolute and empty paths are refused', async () => {
+    const code = async (tasks: unknown[]) => { const r = await review(tasks); return r.body.error?.details?.reason ?? r.body.error?.code; };
+    for (const p of ['apps/api/../../infra/deploy', '/etc/passwd', '', 'apps/api/./../web']) expect(await code([task({ revises: 't_back', paths: [p] })]), p).toBe('path_invalid');
+  });
+
+  it('a new task\'s role must be one of the project\'s roles', async () => {
+    const r = await review([task({ role: 'designer', paths: ['apps/api'] })]);
+    expect(r.body.error?.details?.reason ?? r.body.error?.code).toBe('role_unknown');
+  });
+
+  it('the accepted plan is bound to the PM output: the review and plan-revisions refuse a plan whose hash is not the record\'s, and plan-revisions re-derives the specs', async () => {
+    const plan = [task({ revises: 't_back' })];
+    await bind([task({ revises: 't_back', title: 'Something else' })]);
+    const unbound = await review(plan, false);
+    expect(unbound.body.error?.code).toBe('plan_output_mismatch');
+    const r = await review(plan);
+    expect(r.status).toBe(200);
+    // A tampered client changes a reviewed spec (its paths): refused, nothing written.
+    const tampered = (r.body.tasks as Record<string, unknown>[]).map((x) => ({ ...x, allowedPaths: ['apps'] }));
+    expect((await revise(tampered)).body.error?.code).toBe('plan_output_mismatch');
+    // A plan that differs from the record: refused.
+    expect((await revise(r.body.tasks, 2, [task({ revises: 't_back', paths: ['apps/api/other'] })])).body.error?.code).toBe('plan_output_mismatch');
+    const ok = await revise(r.body.tasks);
+    expect(ok.status, JSON.stringify(ok.body)).toBe(201);
   });
 });

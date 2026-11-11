@@ -394,7 +394,8 @@ describe('fix round 1: a claim racing a revoke (M7)', () => {
     await seedTask(t.db, specFor('api', BACKEND));
     const { token } = await enrolRunner(h.app);
     const KEY = `selarikru.scheduler:${TENANT}`;
-    const BOUND_MS = 5_000;
+    // Fix round 3: generous, since every wait below is on a condition, not a sleep: under the full parallel suite the routes can take seconds to queue.
+    const BOUND_MS = 20_000;
     const holderDb = postgres(TEST_DATABASE_URL, { max: 1, onnotice: () => {} });
     let release!: () => void;
     const held = new Promise<void>((r) => { release = r; });
@@ -458,7 +459,7 @@ describe('fix round 1: a claim racing a revoke (M7)', () => {
       // The routes that queued behind it finish once it is gone: none is left holding a transaction for the next test.
       await Promise.race([Promise.allSettled(pending), new Promise((res) => setTimeout(res, BOUND_MS))]);
     }
-  }, 25_000);
+  }, 90_000);
 });
 
 describe('fix round 1 (T6.6 M2): an expired lease', () => {

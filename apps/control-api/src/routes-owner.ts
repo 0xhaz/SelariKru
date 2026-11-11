@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { derivePmPlanSpecs, pmPlanHash } from './pm-plan.ts';
+import { canonicalJson } from '@selarikru/domain';
 import { NO_HARNESS_CATALOG, RoutePolicyModeSchema, isCloudCapable, strongerLabel, effectiveRoutePolicy, routeOutcome, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
@@ -247,7 +249,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const [subject] = await db.select({ runId: schema.taskRevisions.runId }).from(schema.taskRevisions)
           .where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.taskId, named))).limit(1);
         if (!subject || subject.runId !== run.runId) throw invalidRequest('the Project Manager call names no task of this run', { reason: 'agent_proposal_task_mismatch' });
-        await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'pmPlan');
+        const rec = await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'pmPlan');
+        // Fix round 3: bound to the PM's output, and re-derived here with every check (locks, roles, paths), so a tampered client cannot skip one.
+        if (body.pmPlan === undefined || rec.outputSha256 !== pmPlanHash(body.pmPlan)) throw new AppError(409, 'plan_output_mismatch', 'this is not the plan the Project Manager call produced, so it is not accepted');
+        const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(db, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
+        const derived = await derivePmPlanSpecs(db, { tenantId: config.tenantId, projectId, runId: run.runId, routeRecordId: body.agentProposal.routeRecordId, plan: body.pmPlan, settings, nanoBudgetChars: config.nanoInputBudgetChars });
+        if (canonicalJson(derived) !== canonicalJson(body.tasks)) throw new AppError(409, 'plan_output_mismatch', 'these task specs are not the ones the server derives from the Project Manager\'s plan, so they are not accepted');
       } else {
         // An agent's criteria revise exactly the task whose call proposed them.
         if (!body.tasks.every((x) => x.taskId === named)) throw invalidRequest('an agent proposal revises only the task whose call proposed it', { reason: 'agent_proposal_task_mismatch' });

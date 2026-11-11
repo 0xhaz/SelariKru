@@ -3,6 +3,7 @@ import { canonicalJson, CRITERION_DESCRIPTIONS, err, mapPmPlan, ok, validateProp
 import { readFileSync } from 'node:fs';
 import { PlanTaskSchema } from '@selarikru/protocol';
 import { z } from 'zod';
+import { AppError } from './errors.ts';
 
 /**
  * Server side of proposal handling. A proposal is browser output and is untrusted; so is the client's claim about
@@ -182,7 +183,7 @@ export function reviewPlanProposal(
 
 const PmPlanTaskInput = z.strictObject({
   key: z.string().regex(/^T\d{1,2}$/), title: z.string().min(1).max(120), description: z.string().min(1).max(600), role: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/),
-  requirementIds: z.array(z.string().min(1)).min(1).max(8), paths: z.array(z.string().min(1).max(512)).min(1).max(8), dependsOn: z.array(z.string()).max(11),
+  requirementIds: z.array(z.string().min(1)).min(1).max(8), paths: z.array(z.string().max(512)).min(1).max(8), dependsOn: z.array(z.string()).max(11),
   revises: z.string().min(1).max(200).optional(),
 });
 const PmPlanInput = z.strictObject({ tasks: z.array(PmPlanTaskInput).min(1).max(12) });
@@ -195,7 +196,8 @@ export type PmPlanReviewError = PlanReviewError | { code: 'pm_plan_refused'; rea
  * and dependencies; a new task is built from the project's configuration, as any reviewed task is. The candidates go to the plan-revision route with the pmPlan call
  * named, where H5's backstop judges that call.
  */
-export function reviewPmPlan(data: unknown, rawConfig: ProjectPlanConfig, existing: readonly TaskSpec[], opts: { taskIdPrefix: string }): Result<PlanReview, PmPlanReviewError> {
+export function reviewPmPlan(data: unknown, rawConfig: ProjectPlanConfig, current: readonly { readonly spec: TaskSpec; readonly locked: boolean }[], opts: { taskIdPrefix: string; projectRoles?: readonly string[] }): Result<PlanReview, PmPlanReviewError> {
+  const existing = current.map((x) => x.spec);
   const cfg = ProjectPlanConfigSchema.safeParse(rawConfig);
   if (!cfg.success) return err({ code: 'missing_server_config', details: cfg.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) });
   const c = cfg.data;
@@ -205,8 +207,9 @@ export function reviewPmPlan(data: unknown, rawConfig: ProjectPlanConfig, existi
   const allowedIds = new Set(c.allowedRequirementIds);
   const unknownId = parsed.data.tasks.findIndex((t) => t.requirementIds.some((id) => !allowedIds.has(id)));
   if (unknownId >= 0) return err({ code: 'proposal_rejected', issues: [{ kind: 'unknown_requirement', path: `/tasks/${unknownId}/requirementIds`, message: 'not one of this project\'s criteria' } as unknown as ProposalIssue] });
-  const mapped = mapPmPlan(parsed.data.tasks, existing.map((s) => ({ taskId: s.taskId, revision: s.revision, role: s.role, locked: s.classification === 'restricted' || s.classification === 'secret', allowedPaths: s.allowedPaths })), {
-    newTaskId: (i) => `${opts.taskIdPrefix}-${i + 1}`, rolePaths: c.rolePaths, allowedPaths: c.allowedPaths,
+  // Fix round 3 (N2): a task is locked by its real route lock (the project's label, its own, its Brain sources and its predecessors), as the caller read it.
+  const mapped = mapPmPlan(parsed.data.tasks, current.map(({ spec: s, locked }) => ({ taskId: s.taskId, revision: s.revision, role: s.role, locked, allowedPaths: s.allowedPaths })), {
+    newTaskId: (i) => `${opts.taskIdPrefix}-${i + 1}`, rolePaths: c.rolePaths, allowedPaths: c.allowedPaths, projectRoles: opts.projectRoles,
   });
   if (!mapped.ok) return err({ code: 'pm_plan_refused', reason: mapped.reason, key: mapped.key });
   const tasks: TaskSpec[] = [];
@@ -228,4 +231,15 @@ export function reviewPmPlan(data: unknown, rawConfig: ProjectPlanConfig, existi
   });
   if (bad.length > 0) return err({ code: 'task_invalid', details: bad });
   return ok({ tasks, needsReview: false, issues: [], droppedFields: [] });
+}
+
+/** A review error as the API answers it. */
+export function toPlanReviewAppError(e: PlanReviewError): AppError {
+  switch (e.code) {
+    case 'proposal_not_acceptable': return new AppError(422, 'proposal_not_acceptable', 'this proposal cannot be accepted', { reason: e.reason });
+    case 'missing_server_config': return new AppError(422, 'missing_server_config', 'project plan settings are missing or incomplete', e.details);
+    case 'proposal_rejected': return new AppError(422, 'proposal_rejected', 'the proposal failed validation', e.issues.map((i) => ({ kind: i.kind, path: i.path, message: i.message })));
+    case 'acknowledgement_required': return new AppError(409, 'acknowledgement_required', 'acknowledge the listed issues to continue', { paths: e.paths });
+    case 'task_invalid': return new AppError(422, 'plan_invalid', 'a mapped task is not valid', e.details);
+  }
 }
