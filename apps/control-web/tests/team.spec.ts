@@ -21,11 +21,11 @@ async function expectNoAxeViolations(page: Page): Promise<void> {
 }
 
 test('the Team nav item is a real link and the page is titled', async ({ page }) => {
-  await page.goto('/?demo#/overview');
-  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
-  // The Team screen is in the Boards menu for now (T5.12).
-  await page.getByTestId('top-bar-boards').click();
-  await page.getByRole('link', { name: 'Team', exact: true }).click();
+  await page.goto('/?demo#/summary');
+  await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
+  // The Team screen is in the Settings menu (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Team fleet' }).click();
   await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
   await expect(page).toHaveTitle('Team · SelariKru');
   await expect(page.locator('#main')).toBeFocused();
@@ -148,18 +148,22 @@ test('drawer opens to Task, focus returns on close', async ({ page }) => {
 test('tabs follow the arrow keys and show exact times', async ({ page }) => {
   await openTeam(page, fixture('failed-ci'));
   await openWorker(page, 'runner_local_1');
+  // The reference's order (T5.12): Terminal, Shell, Task, Sandbox, Messages, Settings.
   await page.keyboard.press('ArrowRight');
-  await expect(drawer(page).getByRole('tab', { name: 'Settings' })).toBeFocused();
+  await expect(drawer(page).getByRole('tab', { name: 'Sandbox' })).toBeFocused();
   await page.keyboard.press('ArrowLeft');
   await expect(drawer(page).getByRole('tab', { name: 'Task' })).toBeFocused();
-  await drawer(page).getByRole('tab', { name: 'Timeline' }).click();
-  const timeline = drawer(page).getByRole('tab', { name: 'Timeline' });
+  // The timeline is under Messages.
+  await drawer(page).getByRole('tab', { name: 'Messages' }).click();
+  const timeline = drawer(page).getByRole('tab', { name: 'Messages' });
   await expect(timeline).toHaveAttribute('aria-selected', 'true');
   await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Check failed');
   await expect(drawer(page).getByTestId('drawer-panel').locator('time').first()).toContainText('2026');
-  await page.keyboard.press('End');
-  await expect(drawer(page).getByRole('tab', { name: 'Usage' })).toBeFocused();
+  // Usage is under Sandbox.
+  await drawer(page).getByRole('tab', { name: 'Sandbox' }).click();
   await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Estimated');
+  await page.keyboard.press('End');
+  await expect(drawer(page).getByRole('tab', { name: 'Settings' })).toBeFocused();
 });
 
 test('opening a worker is read-only', async ({ page }) => {
@@ -174,7 +178,8 @@ test('opening a worker is read-only', async ({ page }) => {
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i += 1) {
     await rows(page).nth(i).locator('[data-open-worker]').click();
-    for (const tab of ['Task', 'Settings', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) await drawer(page).getByRole('tab', { name: tab }).click();
+    // Every tab but Terminal and Shell, which open the output stream (checked on their own).
+    for (const tab of ['Task', 'Sandbox', 'Messages', 'Settings']) await drawer(page).getByRole('tab', { name: tab }).click();
     await page.keyboard.press('Escape');
     await expect(drawer(page)).toHaveCount(0);
   }
@@ -202,7 +207,7 @@ test('unknown costs read as unknown and never zero', async ({ page }) => {
   await expect(rowOf(page, 'runner_cloud_1')).not.toContainText('$0');
   await expect(rowOf(page, 'runner_local_1').getByTestId('row-spend')).toContainText('estimated');
   await openWorker(page, 'runner_cloud_1');
-  await drawer(page).getByRole('tab', { name: 'Usage' }).click();
+  await drawer(page).getByRole('tab', { name: 'Sandbox' }).click();
   await expect(drawer(page).getByTestId('drawer-panel')).toContainText('Unavailable');
   await expect(drawer(page).getByTestId('drawer-panel')).not.toContainText('$0');
 });
@@ -374,7 +379,7 @@ test('axe pass: drawer light theme and every tab', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
   await openTeam(page, fixture('failed-ci'));
   await rows(page).first().locator('[data-open-worker]').click();
-  for (const tab of ['Task', 'Settings', 'Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage']) {
+  for (const tab of ['Terminal', 'Shell', 'Task', 'Sandbox', 'Messages', 'Settings']) {
     await drawer(page).getByRole('tab', { name: tab }).click();
     await expectNoAxeViolations(page);
   }
@@ -385,7 +390,7 @@ test('opening a worker opens no terminal channel', async ({ page }) => {
   await page.goto('/tests/harness/index.html#/team');
   await rows(page).first().locator('[data-open-worker]').click();
   await expect(drawer(page).getByRole('tab', { name: 'Task' })).toHaveAttribute('aria-selected', 'true');
-  for (const tab of ['Timeline', 'Checks', 'Artifacts', 'Permissions', 'Sandbox', 'Usage', 'Task']) await drawer(page).getByRole('tab', { name: tab }).click();
+  for (const tab of ['Sandbox', 'Messages', 'Settings', 'Task']) await drawer(page).getByRole('tab', { name: tab }).click();
   await page.keyboard.press('Escape');
   await expect(drawer(page)).toHaveCount(0);
   expect(await terminalCalls(page)).toEqual({ opened: 0, closed: 0 });
@@ -698,7 +703,8 @@ async function controlPage(page: Page, control: Record<string, unknown>, theme?:
   }, { c: control, l: theme === 'light', x: extra });
   await page.goto('/tests/harness/index.html#/team');
   await rows(page).first().locator('[data-open-worker]').click();
-  await drawer(page).getByRole('tab', { name: 'Terminal' }).click();
+  // Control mode is on the Shell tab (T5.12); Terminal is the read-only stream.
+  await drawer(page).getByRole('tab', { name: 'Shell' }).click();
   await expect(drawer(page).getByTestId('terminal-panel')).toHaveAttribute('data-status', 'live');
 }
 

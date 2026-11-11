@@ -24,7 +24,7 @@ const measuredComplete = (): BenchmarkFile => benchmarkFile({ records: [...compl
 test('the Benchmark nav item opens the panel', async ({ page }) => {
   await page.route('**/benchmark-results.json', (route) => route.fulfill({ status: 404, body: 'none' }));
   await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'merge-review', observed: true }; });
-  await page.goto('/tests/harness/index.html#/overview');
+  await page.goto('/tests/harness/index.html#/summary');
   // Benchmark is in the top bar's Boards menu for now (T5.12).
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ }).click();
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Benchmark' }).click();

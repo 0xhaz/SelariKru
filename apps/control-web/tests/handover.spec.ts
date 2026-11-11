@@ -49,7 +49,7 @@ test('continue a running local task in cloud: the confirmation says what is carr
   await expect(api.getByTestId('handover-state')).toContainText('Checkpoint ready for review');
 
   // The review is on Decisions: the files with their size, hash and change, a diff on request, what was not carried, and the estimated cost.
-  await page.getByRole('link', { name: 'Decisions' }).first().click();
+  await page.getByTestId('action-items').click();
   const card = page.getByTestId('handover-decision').filter({ has: page.getByTestId('handover-review') });
   await expect(card).toHaveCount(1);
   const reviewed = card.getByTestId('handover-review-file');
@@ -65,6 +65,7 @@ test('continue a running local task in cloud: the confirmation says what is carr
   await expectNoAxeViolations(page);
   await card.getByRole('button', { name: 'Release to a cloud runner' }).click();
   await expect(page.getByTestId('handover-decision')).toHaveCount(0);
+  await page.getByTestId('top-bar-boards').click();
   await page.getByRole('link', { name: 'Pipeline' }).first().click();
   await expect(api.getByTestId('handover-state')).toContainText('Fenced');
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
@@ -80,6 +81,8 @@ test('the worker drawer offers it with its eligibility, and shows the steps once
   await page.locator('[data-testid="fleet-row"][data-worker-id="runner_local_1"]').locator('[data-open-worker="runner_local_1"]').click();
   const drawer = page.getByTestId('worker-drawer');
   await expect(drawer).toBeVisible();
+  // Continue in cloud is on the Sandbox tab (T5.12).
+  await drawer.getByRole('tab', { name: 'Sandbox' }).click();
   const section = drawer.getByTestId('drawer-handover');
   await expect(section).toContainText('Demo data');
   await section.getByRole('button', { name: 'Continue in cloud' }).click();
@@ -94,7 +97,7 @@ test('a checkpoint that cannot be carried whole is a restart offer on Decisions 
   await row(page, 'policy-block.lint').getByRole('button', { name: /^Continue in cloud: / }).click();
   await page.getByTestId('handover-confirm').getByRole('button', { name: 'Continue in cloud' }).click();
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
-  await page.getByRole('link', { name: 'Decisions' }).first().click();
+  await page.getByTestId('action-items').click();
   const card = page.getByTestId('handover-decision');
   await expect(card).toHaveCount(1);
   await expect(card.getByTestId('handover-refusal')).toContainText('had to be excluded');

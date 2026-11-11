@@ -29,7 +29,7 @@ async function showPanel(page: Page): Promise<void> {
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
 }
 
-const VIEWS = [['overview', 'Mission Control'], ['team', 'Team'], ['pipeline', 'Pipeline'], ['decisions', 'Decisions'], ['evidence', 'Evidence'], ['benchmark', 'Benchmark']] as const;
+const VIEWS = [['summary', 'Run summary'], ['actions', 'Action items'], ['team', 'Team'], ['pipeline', 'Pipeline'], ['evidence', 'Evidence'], ['benchmark', 'Benchmark']] as const;
 
 test('team panel shows each worker\'s live state on every view', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -56,7 +56,7 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
   await expect(panelRow(page, 'runner_local_1')).toHaveAttribute('data-state', 'lost');
   await expect(panelRow(page, 'runner_local_1').getByTestId('team-panel-state')).toContainText('Lost');
   await expect(panelRow(page, 'runner_local_1').getByTestId('team-panel-since')).toHaveText(/ago$/);
-  await page.goto('/?demo&fixture=failed-ci#/decisions');
+  await page.goto('/?demo&fixture=failed-ci#/actions');
   await expect(panelRow(page, 'runner_local_1')).toHaveAttribute('data-state', 'idle');
   await expect(panelRow(page, 'runner_local_1').getByTestId('team-panel-task')).toContainText('Last: Feedback API');
   await page.goto('/?demo&fixture=human-wait&fault=reconnecting#/evidence');
@@ -96,7 +96,7 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
 for (const [width, height] of [[1024, 768], [375, 800]] as const) {
   test(`at ${width}, an unknown worker is never summed up as nobody needing you`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    await spied(page, { spiedFixture: 'human-wait', workerPatch: { runner_local_1: { health: 'unknown' } } }, 'overview');
+    await spied(page, { spiedFixture: 'human-wait', workerPatch: { runner_local_1: { health: 'unknown' } } }, 'summary');
     const toggle = page.getByTestId('team-panel-toggle');
     await expect(toggle).toBeVisible();
     if (width >= 1280) await expect(panel(page)).toHaveAttribute('data-variant', 'side');
@@ -148,7 +148,7 @@ test('selecting a worker opens the drawer without navigation', async ({ page }) 
 
 test('changing a model in the drawer applies to the next attempt', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'healthy-parallel-work' }, 'overview');
+  await spied(page, { spiedFixture: 'healthy-parallel-work' }, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const settings = drawer(page).getByTestId('worker-settings');
@@ -192,7 +192,7 @@ test('stop in the drawer asks for confirmation and is disabled when not live', a
 
   // With the connection not live, Stop is off and says why.
   await page.goto('about:blank');
-  await spied(page, { spiedFixture: 'human-wait', fault: 'reconnecting' }, 'overview');
+  await spied(page, { spiedFixture: 'human-wait', fault: 'reconnecting' }, 'summary');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   await expect(drawer(page).getByRole('button', { name: 'Cancel task' })).toBeDisabled();
@@ -218,7 +218,7 @@ async function patchSnapshot(page: Page, patch: { task?: [string, Record<string,
 
 async function openCancelConfirm(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await spied(page, { spiedFixture: 'human-wait' }, 'summary');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   await drawer(page).getByRole('button', { name: 'Cancel task' }).click();
@@ -244,7 +244,7 @@ test('a cancel confirmation is dropped unsent when the worker moves to another t
 
 test('a decision that changes in the drawer is held until reviewed, as on the Decisions screen', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await spied(page, { spiedFixture: 'human-wait' }, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const card = drawer(page).getByTestId('settings-card');
@@ -295,7 +295,7 @@ test('with the panel beside the page, choosing another worker switches the open 
 for (const [width, height] of [[1440, 900], [1280, 800]] as const) {
   test(`beside the panel at ${width}, keyboard focus never lands on anything under the drawer, and Escape closes it from the panel`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    await page.goto('/?demo&fixture=human-wait#/overview');
+    await page.goto('/?demo&fixture=human-wait#/summary');
     await panelRow(page, 'runner_local_1').click();
     await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
     // The drawer starts below the header, so no header control is under it.
@@ -369,7 +369,7 @@ test('the folded toggle says loading, never nobody, until the first snapshot arr
 
 test('the page beside an open drawer is dimmed and says why it does not respond', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?demo&fixture=human-wait#/overview');
+  await page.goto('/?demo&fixture=human-wait#/summary');
   const content = page.getByTestId('page-content');
   await expect(content).not.toHaveAttribute('data-paused', 'true');
   await expect(page.getByTestId('page-paused-hint')).toHaveCount(0);
@@ -411,7 +411,7 @@ test('the page beside an open drawer is dimmed and says why it does not respond'
 
 test('crossing the panel width with the drawer open keeps what is in Settings', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?demo&fixture=healthy-parallel-work#/overview');
+  await page.goto('/?demo&fixture=healthy-parallel-work#/summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const model = drawer(page).getByRole('region', { name: 'Model for this task' }).getByLabel('Model for Feedback API');
@@ -428,13 +428,13 @@ test('crossing the panel width with the drawer open keeps what is in Settings', 
 
 test('a card held in the drawer stays held on the Decisions screen through its link', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await spied(page, { spiedFixture: 'human-wait' }, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   await patchSnapshot(page, { approvalScope: 'moved' });
   const card = drawer(page).getByTestId('settings-card');
   await expect(card.getByTestId('request-changed')).toBeVisible();
-  await card.getByRole('link', { name: 'See the full card in Decisions' }).click();
+  await card.getByRole('link', { name: 'See the full card in Action items' }).click();
   await expect(drawer(page)).toHaveCount(0);
   const full = page.getByTestId('decision-card').first();
   await expect(full.getByTestId('request-changed')).toContainText('This request changed');
@@ -464,7 +464,7 @@ async function tabThroughDrawer(page: Page): Promise<void> {
 
 test('drawer keeps focus order and closes on Escape', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?demo&fixture=human-wait#/overview');
+  await page.goto('/?demo&fixture=human-wait#/summary');
   const opener = panelRow(page, 'runner_local_1');
   await opener.focus();
   await page.keyboard.press('Enter');
@@ -478,7 +478,7 @@ test('drawer keeps focus order and closes on Escape', async ({ page }) => {
   await page.keyboard.press('Escape');
   await expect(drawer(page)).toHaveCount(0);
   await expect(opener).toBeFocused();
-  expect(new URL(page.url()).hash).toBe('#/overview');
+  expect(new URL(page.url()).hash).toBe('#/summary');
 
   // Modal at narrower widths: focus stays inside, on a real control, the whole way round.
   await page.setViewportSize({ width: 1024, height: 768 });
@@ -508,10 +508,10 @@ test('drawer keeps focus order and closes on Escape', async ({ page }) => {
 });
 
 for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [768, 1024], [375, 812]] as const) {
-  test(`axe at ${width}: Mission Control with the panel, and the drawer on Task, Settings and Terminal`, async ({ page }) => {
+  test(`axe at ${width}: the run summary with the panel, and the drawer on Task, Settings and Terminal`, async ({ page }) => {
     await page.setViewportSize({ width, height });
-    await page.goto('/?demo&fixture=human-wait#/overview');
-    await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+    await page.goto('/?demo&fixture=human-wait#/summary');
+    await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
     await expect(width >= 1280 ? panelRow(page, 'runner_local_1') : page.getByTestId('team-panel-toggle')).toBeVisible();
     await shot(page, `mission-control-${width}`);
     await expectNoAxeViolations(page);
@@ -538,7 +538,7 @@ for (const [width, height] of [[1440, 900], [1280, 800], [1024, 768], [768, 1024
 test('axe in the light theme at 1440: the panel and the drawer on Task, Settings and Terminal', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?demo&fixture=human-wait#/overview');
+  await page.goto('/?demo&fixture=human-wait#/summary');
   await expect(panelRow(page, 'runner_local_1')).toBeVisible();
   await shot(page, 'mission-control-1440-light');
   await expectNoAxeViolations(page);
@@ -552,12 +552,12 @@ test('axe in the light theme at 1440: the panel and the drawer on Task, Settings
 
 test('the drawer\'s Settings offer the decision on this worker\'s task, and send it through the same confirmation', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'human-wait' }, 'overview');
+  await spied(page, { spiedFixture: 'human-wait' }, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const card = drawer(page).getByTestId('settings-card');
   await expect(card).toHaveCount(1);
-  await expect(card.getByRole('link', { name: 'See the full card in Decisions' })).toBeVisible();
+  await expect(card.getByRole('link', { name: 'See the full card in Action items' })).toBeVisible();
   const deny = card.getByRole('button', { name: /^Deny/ });
   await deny.click();
   await expect(page.getByRole('dialog', { name: /Deny/ })).toBeVisible();

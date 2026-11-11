@@ -58,7 +58,8 @@ test('review a staged pack, bind it, and see it with its digest in the worker dr
   await page.getByRole('link', { name: 'Close settings' }).click();
   await page.locator('[data-testid="team-panel-row"]').first().click();
   const drawer = page.getByTestId('worker-drawer');
-  await drawer.getByRole('tab', { name: 'Context' }).click();
+  await // Context and packs are on the Task tab (T5.12).
+  await drawer.getByRole('tab', { name: 'Task' }).click();
   const pack = drawer.locator('[data-testid="drawer-skill"][data-version^="tp-team-review-notes@0.3.0+"]');
   await expect(pack).toBeVisible();
   await expect(pack).toContainText('Enabled for this task');

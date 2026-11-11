@@ -15,7 +15,7 @@ async function spied(page: Page, route: string): Promise<void> {
 
 test('changing a worker\'s model reads as saved and applying until the runner acknowledges it, then applied', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, 'overview');
+  await spied(page, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const settings = drawer(page).getByTestId('worker-settings');
@@ -33,7 +33,7 @@ test('changing a worker\'s model reads as saved and applying until the runner ac
 
 test('pause scheduling reads as requested until the runner acknowledges it, then paused; resume goes back the same way', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, 'overview');
+  await spied(page, 'summary');
   const panel = autonomy(page);
   await expect(panel.getByTestId('policy-row').filter({ hasText: 'Merge' })).toContainText('Human merge on GitHub. Agents never merge.');
   await expect(panel.getByTestId('policy-row').filter({ hasText: 'Approved scope' })).toContainText('Configured');
@@ -54,7 +54,7 @@ test('pause scheduling reads as requested until the runner acknowledges it, then
 
 test('a worker can be disabled in its drawer, and it reads as applying until its runner confirms it', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, 'overview');
+  await spied(page, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const worker = drawer(page).getByTestId('settings-worker');
@@ -67,7 +67,7 @@ test('a worker can be disabled in its drawer, and it reads as applying until its
 
 test('cancel run asks first, then reads as cancel requested until its attempts end', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, 'overview');
+  await spied(page, 'summary');
   const panel = autonomy(page);
   await panel.getByRole('button', { name: 'Cancel run' }).click();
   const dialog = page.getByRole('dialog', { name: 'Cancel this run?' });
@@ -80,7 +80,7 @@ test('cancel run asks first, then reads as cancel requested until its attempts e
 
 test('the Bounded autonomy panel passes axe and fits a 390 px screen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await spied(page, 'overview');
+  await spied(page, 'summary');
   await expect(autonomy(page)).toBeVisible();
   const { violations } = await new AxeBuilder({ page }).include('[data-testid="bounded-autonomy"]').analyze();
   expect(violations.map((v) => v.id)).toEqual([]);

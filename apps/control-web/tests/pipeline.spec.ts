@@ -24,8 +24,9 @@ async function expectNoAxeViolations(page: Page): Promise<void> {
 }
 
 test('the Pipeline nav item is a real link and the page is titled', async ({ page }) => {
-  await page.goto('/?demo#/overview');
-  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.goto('/?demo#/summary');
+  await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
+  await page.getByTestId('top-bar-boards').click();
   await page.getByRole('link', { name: 'Pipeline' }).click();
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
   await expect(page).toHaveTitle('Pipeline · SelariKru');
@@ -243,7 +244,7 @@ test('a graph wider than the screen says more stages follow', async ({ page }) =
   await page.setViewportSize({ width: 1024, height: 800 });
   await openPipeline(page, 'feature-delivery', 'graph');
   await expect(page.getByTestId('graph-scroll-hint')).toContainText('More stages to the right');
-  // Wide enough for the whole graph once the Mission Control drawer is maximised over the office.
+  // Wide enough for the whole graph once the drawer is maximised over the office.
   await page.setViewportSize({ width: 1440, height: 800 });
   await page.getByRole('button', { name: 'Maximize' }).click();
   await expect(page.getByTestId('graph-scroll-hint')).toHaveCount(0);

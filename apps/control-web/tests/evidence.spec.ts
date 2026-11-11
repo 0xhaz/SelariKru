@@ -147,7 +147,7 @@ test('drop during restart shows last-confirmed time, disables privileged actions
   const api = await wire();
   try {
     await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, { liveApi: { baseUrl: api.base, token: 'test-token', projectId: 'p' } });
-    await page.goto('/tests/harness/index.html#/decisions');
+    await page.goto('/tests/harness/index.html#/actions');
     const grant = page.getByRole('button', { name: 'Grant cloud start' });
     await expect(grant).toBeEnabled({ timeout: 10_000 });
     await expect(page.getByTestId('freshness')).toContainText('Live');

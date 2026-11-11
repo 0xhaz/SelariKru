@@ -3,8 +3,14 @@ import { expect, test, type Page } from '@playwright/test';
 
 async function open(page: Page, scenario: Record<string, unknown>): Promise<void> {
   await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, scenario);
-  await page.goto('/tests/harness/index.html#/decisions');
-  await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
+  await page.goto('/tests/harness/index.html#/actions');
+  await expect(page.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
+  await expandRows(page);
+}
+/** "Also waiting on you" shows each decision as a compact row; its full card, with every action, opens from Details. Open them all. */
+async function expandRows(page: Page): Promise<void> {
+  const closed = page.locator('[data-testid="action-row"] button[aria-expanded="false"]');
+  while (await closed.count() > 0) await closed.first().click();
 }
 const commands = (page: Page) => page.evaluate(() => (window as unknown as { __calls: { commands: unknown[] } }).__calls.commands);
 const cards = (page: Page) => page.getByTestId('decision-card');
@@ -105,7 +111,8 @@ test('a confirmed denial records one command, keeps its key, and moves focus to 
   await expect(page.locator(':focus')).toHaveRole('heading');
   expect(await page.locator(':focus').innerText()).not.toEqual(title);
   // The denied task is now blocked and asks for a replan or a cancel: a new card, not the same one.
-  await expect(page.locator('[data-kind="blocked"]')).toContainText('approval was denied');
+  await expandRows(page);
+  await expect(card(page, 'blocked')).toContainText('approval was denied');
   const [cmd] = await commands(page) as [{ command: { command: string; idempotencyKey: string } }];
   expect(cmd.command.command).toBe('approval.deny');
   expect(cmd.command.idempotencyKey).toMatch(/^decision-/);
@@ -121,7 +128,7 @@ test('budget stop lists what was not delivered, and accepting it stops it counti
   await page.getByRole('dialog').getByRole('button', { name: 'Accept reduced scope' }).click();
   await expect(card(page, 'budget_stop')).toHaveCount(0);
   await expect(page.getByTestId('history-entry').first()).toContainText('Accepted reduced scope');
-  await expect(page.getByRole('link', { name: /Decisions/ })).not.toContainText(/\d/);
+  await expect(page.getByTestId('action-items')).not.toContainText(/\d/);
 });
 
 test('expired approval can be denied and offers no grant', async ({ page }) => {
@@ -138,16 +145,21 @@ test('merged-SHA mismatch and blocked verification get their own cards and real 
   await page.close();
   const next = await page.context().newPage();
   await next.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'integration-blocked' }; });
-  await next.goto('/tests/harness/index.html#/decisions');
-  await expect(next.locator('[data-kind="reverify"]').getByRole('button', { name: 'Re-verify the run' })).toBeVisible();
-  await expect(next.locator('[data-kind="blocked"]').getByRole('button', { name: 'Cancel task' })).toBeVisible();
+  await next.goto('/tests/harness/index.html#/actions');
+  await expect(next.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
+  await expandRows(next);
+  await expect(card(next, 'reverify').getByRole('button', { name: 'Re-verify the run' })).toBeVisible();
+  await expect(card(next, 'blocked').getByRole('button', { name: 'Cancel task' })).toBeVisible();
 });
 
-test('a deep link from Mission Control lands on the card', async ({ page }) => {
+test('a deep link from a worker\'s request lands on its card in the Action items drawer', async ({ page }) => {
   await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, { spiedFixture: 'expired-approval' });
-  await page.goto('/tests/harness/index.html#/overview');
-  await page.getByTestId('decision-link').first().click();
-  await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
+  await page.goto('/tests/harness/index.html#/office');
+  // The worker drawer's Messages tab links each of its requests to its card.
+  await page.getByTestId('team-panel-row').first().click();
+  await page.getByTestId('worker-drawer').getByRole('tab', { name: 'Messages' }).click();
+  await page.getByTestId('worker-drawer').getByRole('link', { name: 'Open in Action items' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
   await expect(page.locator(':focus')).toContainText('Vendor');
 });
 
@@ -183,7 +195,7 @@ test('a confirm dialog closes when the session stops being live, with not-sent c
 
 test('a busy decision shows it is sending', async ({ page }) => {
   await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue', holdExecute: true }; });
-  await page.goto('/tests/harness/index.html#/decisions');
+  await page.goto('/tests/harness/index.html#/actions');
   const c = card(page, 'approval').first();
   await c.getByRole('button', { name: 'Grant cloud start' }).click();
   await expect(c.getByRole('button', { name: /Grant cloud start/ })).toHaveAttribute('data-busy', 'true');
@@ -202,18 +214,21 @@ test('history keeps a decision after a resync', async ({ page }) => {
   await expect(page.getByRole('region', { name: 'Decision history' })).toContainText('A grant is a record');
 });
 
-test('the queue says how it differs from the header count', async ({ page }) => {
+test('what a worker asks without a decision card of its own is in the same drawer, and the counts agree', async ({ page }) => {
   await open(page, { spiedFixture: 'policy-block' });
   await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
   await expect(page.getByTestId('decisions-count')).toContainText('1');
-  await expect(page.getByTestId('decisions-elsewhere')).toContainText('1 more item needs you');
+  // The ask with no card sits under From workers; the total waiting counts both.
+  await expect(page.getByTestId('from-workers').getByTestId('attention-item')).toHaveCount(1);
+  await expect(page.getByTestId('view-drawer-aside')).toHaveText('2 waiting on you');
+  await expect(page.getByTestId('action-items')).toContainText('· 2');
 });
 
 test('two stops sharing one decision say why the counts differ', async ({ page }) => {
   await open(page, { spiedFixture: 'budget-stop' });
   await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
   await expect(page.getByTestId('decisions-count')).toContainText('1');
-  await expect(page.getByTestId('decisions-grouped')).toContainText('The header counts 2 items');
+  await expect(page.getByTestId('decisions-grouped')).toContainText('Some items share one decision here');
 });
 
 test('the replan banner clears when the link no longer names a run', async ({ page }) => {

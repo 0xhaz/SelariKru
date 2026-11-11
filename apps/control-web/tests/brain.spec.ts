@@ -47,7 +47,8 @@ test('the Project Brain: cited claims, a citation that opens its anchor, a revoc
   // The next worker's bundle names the revoked source and why claims were left out.
   await page.locator('[data-testid="team-panel-row"]').first().click();
   const drawer = page.getByTestId('worker-drawer');
-  await drawer.getByRole('tab', { name: 'Context' }).click();
+  await // Context and packs are on the Task tab (T5.12).
+  await drawer.getByRole('tab', { name: 'Task' }).click();
   const ctx = drawer.getByTestId('drawer-context');
   await expect(ctx).toBeVisible();
   await expect(ctx).toContainText('quoted data');

@@ -105,9 +105,8 @@ test('an outcome review records a decision and its follow-up is a proposal on De
   await expect(traceRow(page, 'FB-03').getByTestId('trace-outcome')).toHaveAttribute('data-outcome', 'Insufficient data');
   await expect(page.getByTestId('product-review')).toContainText('Result Unknown');
 
-  // Decisions is a tab of the Mission Control drawer.
-  await page.getByTestId('top-bar-boards').click();
-  await page.getByRole('link', { name: 'Mission Control: Decisions' }).click();
+  // Decisions is under Action items.
+  await page.getByTestId('action-items').click();
   const card = page.getByTestId('product-follow-up');
   await expect(card).toContainText('Show a triage age on each item');
   await expect(card).toContainText('It is not in any plan');

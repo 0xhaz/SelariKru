@@ -122,9 +122,10 @@ test.describe('keyboard only', () => {
   test('Decisions: reach a card, inspect, back out, then deny, all from the keys', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue' }; });
-    await page.goto('/tests/harness/index.html#/overview');
-    await press(page, page.getByRole('navigation', { name: 'Mission Control' }).getByRole('link', { name: /^Decisions/ }));
-    await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
+    await page.goto('/tests/harness/index.html#/summary');
+    // Decisions are in the Action items drawer, one button in the top bar.
+    await press(page, page.getByTestId('action-items'));
+    await expect(page.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
     const first = page.getByTestId('decision-card').first();
     const deny = first.getByRole('button', { name: 'Deny and block task' });
     await press(page, deny);
@@ -155,7 +156,7 @@ test.describe('keyboard only', () => {
   test('the worker drawer: open from the panel, move between tabs with arrows, close with Escape', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
-    await page.goto('/tests/harness/index.html#/overview');
+    await page.goto('/tests/harness/index.html#/summary');
     const row = page.locator('[data-testid="team-panel-row"][data-panel-worker="runner_local_1"]');
     await press(page, row);
     const drawer = page.getByTestId('worker-drawer');
@@ -169,7 +170,7 @@ test.describe('keyboard only', () => {
     await expect(drawer.getByRole('tab').last()).toBeFocused();
     await expect(drawer.getByRole('tab').last()).toHaveAttribute('aria-selected', 'true');
     await page.keyboard.press('Home');
-    await expect(drawer.getByRole('tab', { name: 'Task' })).toBeFocused();
+    await expect(drawer.getByRole('tab', { name: 'Terminal' })).toBeFocused();
     // The keys are shown where they work (design section 11: show shortcuts in the UI).
     await expect(drawer.getByTestId('drawer-keys')).toHaveText(/^Esc closes this\. On the tabs, ←.*and →.* switch tabs; Home and End go to the first and last\.$/);
     await page.keyboard.press('Escape');
@@ -179,7 +180,7 @@ test.describe('keyboard only', () => {
 });
 
 // The office (T5.12) is the default screen; every other route opens in a drawer over it.
-const ROUTES = ['office', 'overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'settings', 'settings?section=skills'] as const;
+const ROUTES = ['office', 'actions', 'summary', 'team', 'pipeline', 'evidence', 'product', 'brain', 'benchmark', 'settings', 'settings?section=skills'] as const;
 const FIXTURES = ['human-wait', 'decision-queue', 'failed-ci', 'runner-loss', 'budget-stop', 'merge-flow'] as const;
 
 async function contrastFailures(page: Page): Promise<{ violations: string[]; incomplete: string[] }> {
@@ -230,7 +231,7 @@ const moving = (page: Page) => page.evaluate(() => [...document.querySelectorAll
   test(`${theme}: contrast in the worker drawer, on the paused page beside it, and in a confirm dialog`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.addInitScript((t) => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; window.localStorage.setItem('selarikru.theme', t); }, theme);
-    await page.goto('/tests/harness/index.html#/overview');
+    await page.goto('/tests/harness/index.html#/summary');
     await page.locator('[data-testid="team-panel-row"][data-panel-worker="runner_local_1"]').click();
     await expect(page.getByTestId('page-paused-hint')).toBeVisible();
     for (const tab of ['Task', 'Settings', 'Terminal']) {
@@ -238,7 +239,7 @@ const moving = (page: Page) => page.evaluate(() => [...document.querySelectorAll
       expect((await contrastFailures(page)).violations, `drawer ${tab}`).toEqual([]);
     }
     await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'decision-queue' }; });
-    await page.goto('/tests/harness/index.html#/decisions');
+    await page.goto('/tests/harness/index.html#/actions');
     await page.getByTestId('decision-card').first().getByRole('button', { name: 'Deny and block task' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     expect((await contrastFailures(page)).violations, 'confirm dialog').toEqual([]);
@@ -273,7 +274,7 @@ test.describe('reduced motion', () => {
 });
 
 test.describe('390 px', () => {
-  for (const [route, fixture] of [['office', 'human-wait'], ['decisions', 'decision-queue'], ['overview', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['decisions', 'budget-stop'], ['brain', 'healthy-parallel-work'], ['settings', 'healthy-parallel-work'], ['settings?section=skills', 'healthy-parallel-work'], ['product', 'merge-flow']] as const) {
+  for (const [route, fixture] of [['office', 'human-wait'], ['actions', 'decision-queue'], ['summary', 'human-wait'], ['team', 'human-wait'], ['pipeline', 'failed-ci'], ['actions', 'budget-stop'], ['brain', 'healthy-parallel-work'], ['settings', 'healthy-parallel-work'], ['settings?section=skills', 'healthy-parallel-work'], ['product', 'merge-flow']] as const) {
     // One theme since T5.12 round 2: the reference's cream and ink. The loops stay so a second theme would be measured the same way.
   for (const theme of ['light'] as const) {
       test(`${route} with ${fixture} in ${theme}: no sideways scroll, nothing cut off, targets big enough, axe clean`, async ({ page }) => {
@@ -297,7 +298,7 @@ test.describe('390 px', () => {
         const { violations } = await new AxeBuilder({ page }).withTags(TAGS).analyze();
         expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
         // The decision actions are reachable and named at this width.
-        if (route === 'decisions') await expect(page.getByTestId('decision-card').first().getByRole('button').first()).toBeVisible();
+        if (route === 'actions') await expect(page.locator('[data-testid="decision-card"], [data-testid="action-row"]').first().getByRole('button').first()).toBeVisible();
       });
     }
   }
@@ -306,7 +307,7 @@ test.describe('390 px', () => {
 test('at 390 px the folded team panel and the worker drawer fit, keep focus, and pass axe', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
-  await page.goto('/tests/harness/index.html#/overview');
+  await page.goto('/tests/harness/index.html#/summary');
   const toggle = page.getByTestId('team-panel-toggle');
   await press(page, toggle);
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
@@ -361,7 +362,7 @@ const measured = (page: Page, selector: string) => page.evaluate((sel) => {
   for (const theme of ['light'] as const) {
   test(`${theme}: the team panel rows and timestamps axe cannot measure meet AA`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    for (const [fixture, route] of [['human-wait', 'overview'], ['human-wait', 'pipeline'], ['human-wait', 'decisions'], ['budget-stop', 'decisions']] as const) {
+    for (const [fixture, route] of [['human-wait', 'summary'], ['human-wait', 'pipeline'], ['human-wait', 'actions'], ['budget-stop', 'actions']] as const) {
       await page.addInitScript(([f, t]) => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: f }; window.localStorage.setItem('selarikru.theme', t!); }, [fixture, theme]);
       await page.goto(`/tests/harness/index.html#/${route}`);
       await expect(page.locator('[data-testid="team-panel-row"]').first()).toBeVisible();

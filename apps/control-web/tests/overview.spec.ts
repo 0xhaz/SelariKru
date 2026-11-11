@@ -2,26 +2,32 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
 async function open(page: Page, query = ''): Promise<void> {
-  await page.goto(`/?demo${query}#/overview`);
-  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.goto(`/?demo${query}#/summary`);
+  await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
 }
 const fixture = (id: string): string => `&fixture=${id}`;
 /** Below the width where the team panel sits beside the page, so the Fleet card lists each worker itself. */
 const FULL_FLEET = { width: 1024, height: 900 };
 const items = (page: Page) => page.getByTestId('attention-item');
+/** What waits on a person is in the Action items drawer (T5.12): asks with no card of their own, decision cards, and records that need nothing. */
+async function openActions(page: Page, query = ''): Promise<void> {
+  await page.goto(`/?demo${query}#/actions`);
+  await expect(page.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
+}
 
 async function expectNoAxeViolations(page: Page): Promise<void> {
   const { violations } = await new AxeBuilder({ page }).analyze();
   expect(violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(', ')}`)).toEqual([]);
 }
 
-test('attention sorted per design §4 order', async ({ page }) => {
+test('attention sorted per design §4 order: the run summary counts both, the drawer shows the ask and the decision', async ({ page }) => {
   await open(page, fixture('policy-block'));
-  await expect(items(page)).toHaveCount(2);
-  await expect(items(page).nth(0)).toHaveAttribute('data-kind', 'policy_incident');
-  await expect(items(page).nth(1)).toHaveAttribute('data-kind', 'decision');
   await expect(page.getByTestId('headline')).toHaveText(/2 items need you\.$/);
   await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
+  await openActions(page, fixture('policy-block'));
+  // One item has no card of its own: it is under From workers. The policy incident is its card, under Also waiting on you.
+  await expect(page.getByTestId('from-workers').getByTestId('attention-item')).toHaveCount(1);
+  await expect(page.getByTestId('also-waiting').locator('[data-row-kind="policy_deny"]')).toHaveCount(1);
 });
 
 test('shows "n of m criteria verified", never a percentage', async ({ page }) => {
@@ -106,9 +112,10 @@ test('execution and inference are separately labeled for each worker', async ({ 
 test('a runner loss shows the last confirmed time and offers inspection', async ({ page }) => {
   await page.setViewportSize(FULL_FLEET); // below the team panel's width, where this card lists every worker
   await open(page, fixture('runner-loss'));
+  await expect(page.getByTestId('fleet-row').first()).toContainText('Connection lost; state last confirmed');
+  await openActions(page, fixture('runner-loss'));
   await expect(items(page).first()).toHaveAttribute('data-kind', 'worker_lost');
   await expect(items(page).first()).toContainText('Inspect the attempt before relaunching anything');
-  await expect(page.getByTestId('fleet-row').first()).toContainText('Connection lost; state last confirmed');
 });
 
 test('unknown costs read as unknown, never zero', async ({ page }) => {
@@ -130,31 +137,33 @@ test('reconnecting keeps the last confirmed state and stops claiming health', as
 test('a runner loss stays visible over stale data, labelled as of the last confirmed state', async ({ page }) => {
   await open(page, `${fixture('runner-loss')}&fault=reconnecting`);
   await expect(page.getByTestId('connection-banner')).toBeVisible();
+  await expect(page.getByTestId('headline')).toContainText('at the last confirmed state');
+  await openActions(page, `${fixture('runner-loss')}&fault=reconnecting`);
   await expect(items(page).first()).toHaveAttribute('data-kind', 'worker_lost');
   await expect(items(page).first()).toContainText('As of last confirmed state');
-  await expect(page.getByTestId('headline')).toContainText('at the last confirmed state');
   await expect(page.getByTestId('attention-count')).toHaveText('1 item at last confirmed state');
+  await open(page, `${fixture('runner-loss')}&fault=reconnecting`);
   await expect(page.getByRole('region', { name: 'Fleet' })).toContainText('1 lost');
 });
 
 test('a view that fails to render is contained: shell and badge stay, and the other tab works', async ({ page }) => {
-  await page.goto('/?demo&fault=corrupt#/overview');
+  await page.goto('/?demo&fault=corrupt#/summary');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toBeVisible();
   // The Assistant is in the Settings menu for now (T5.12).
   await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
-  // Mission Control is in the Boards menu for now (T5.12).
+  // The run summary is in the Boards menu (T5.12).
   await page.getByTestId('top-bar-boards').click();
-  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
+  await page.getByRole('link', { name: 'Run summary' }).click();
 });
 
 test('a failed Overview recovers once the failure clears', async ({ page }) => {
-  await page.goto('/?demo&fault=corrupt#/overview');
+  await page.goto('/?demo&fault=corrupt#/summary');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await page.getByRole('button', { name: 'Restart projection' }).click();
-  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
   await expect(page.getByTestId('criteria')).toBeVisible();
 });
 
@@ -168,7 +177,7 @@ test('changing route moves focus to the main content, and first load does not', 
 });
 
 test('exact time appears on keyboard focus', async ({ page }) => {
-  await open(page, fixture('human-wait'));
+  await openActions(page, fixture('runner-loss'));
   const time = items(page).first().locator('time').first();
   const before = await items(page).first().boundingBox();
   await time.focus();
@@ -203,17 +212,20 @@ test('the 375 header stays on two rows, with the count on the Overview tab', asy
 
 test('a calm screen says it once', async ({ page }) => {
   await open(page, fixture('healthy-parallel-work'));
-  await expect(page.getByText('No decisions waiting.')).toBeVisible();
   await expect(page.getByTestId('headline')).toHaveCount(0);
   await expect(page.getByTestId('attention-count')).toHaveCount(0);
+  await openActions(page, fixture('healthy-parallel-work'));
+  await expect(page.getByTestId('decisions-empty')).toContainText('Nothing is waiting on you.');
 });
 
 test('a budget stop asks for a decision but is not the top blocker, and its criteria stay in the total', async ({ page }) => {
   await open(page, fixture('unknown-costs'));
   await expect(page.getByTestId('criteria')).toHaveText('2 of 7 criteria verified');
   await expect(page.getByTestId('headline')).toHaveText(/1 item needs you\.$/);
-  await expect(items(page).first()).toContainText('Stopped');
   await expect(page.getByTestId('top-blocker')).toContainText('none right now');
+  // The stopped tasks share one decision: the budget stop, a row under Also waiting on you.
+  await openActions(page, fixture('unknown-costs'));
+  await expect(page.getByTestId('also-waiting').locator('[data-row-kind="budget_stop"]')).toContainText('Budget stop');
 });
 
 test('a light-theme preference is applied before any app code runs', async ({ page }) => {
@@ -265,7 +277,7 @@ test('axe pass: the one theme', async ({ page }) => {
 
 test('axe pass: 375 wide with details open', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 800 });
-  await open(page, fixture('human-wait'));
+  await openActions(page, fixture('runner-loss'));
   await items(page).first().getByText('Details').click();
   await expectNoAxeViolations(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -275,7 +287,7 @@ test('with no live source the shell is honest and the assistant still works', as
   await page.addInitScript(() => {
     (window as unknown as { __scenario: unknown }).__scenario = { shell: true };
   });
-  await page.goto('/tests/harness/index.html#/overview');
+  await page.goto('/tests/harness/index.html#/summary');
   await expect(page.getByText('Project data is unavailable')).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toHaveCount(0);
   await expect(page.getByTestId('criteria')).toHaveCount(0);
@@ -291,10 +303,10 @@ test('with no live source the shell is honest and the assistant still works', as
   await expect(output.getByTestId('output-list')).toBeVisible();
 
   // Moving between tabs does not discard the draft.
-  // Mission Control is in the Boards menu for now (T5.12).
+  // The run summary is in the Boards menu (T5.12).
   await page.getByTestId('top-bar-boards').click();
-  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
-  await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Run summary' }).click();
+  await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
   // The Assistant is in the Settings menu for now (T5.12).
   await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
@@ -318,10 +330,10 @@ for (const failure of ['render', 'chunk']) {
   await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
   await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
     await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
-    // Mission Control is in the Boards menu for now (T5.12).
+    // The run summary is in the Boards menu (T5.12).
   await page.getByTestId('top-bar-boards').click();
-  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
-    await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
+  await page.getByRole('link', { name: 'Run summary' }).click();
+    await expect(page.getByRole('heading', { name: 'Run summary', level: 1 })).toBeVisible();
   });
 }
 
