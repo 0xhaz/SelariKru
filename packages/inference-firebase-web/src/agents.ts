@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, delegationOutputSha256, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, quoteName, reservedPath, roleLabel, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -87,7 +87,22 @@ export interface PmTurn {
   readonly who: 'owner' | 'pm';
   readonly text: string;
   readonly classification: unknown;
+  /** A Project Manager reply from web research: when it comes back in a later prompt it is fenced and marked as web-derived, unverified. */
+  readonly source?: 'web';
 }
+
+/**
+ * The turn a Project Manager reply becomes (H11 fix round 1). A reply from a call that read restricted text (its route locked: a restricted question, a restricted
+ * history turn on the device, a restricted task) is itself restricted, so a later cloud call never carries it, paraphrased or not.
+ */
+export function pmReplyTurn(result: Pick<AgentResult, 'kind' | 'locked'>, text: string): PmTurn {
+  return { who: 'pm', text, classification: result.locked ? 'restricted' : 'internal', ...(result.kind === 'pmResearch' ? { source: 'web' as const } : {}) };
+}
+
+/** The most a web research question may be (H11 fix round 1): research sends only the owner's question, bounded. */
+export const PM_RESEARCH_MAX_CHARS = 500;
+
+export { delegationOutputSha256 } from '@selarikru/domain';
 
 export interface PmInput extends AgentBaseInput {
   /** The owner's question. Missing label: restricted. */
@@ -100,7 +115,8 @@ export interface PmInput extends AgentBaseInput {
 /** What the accepted plan lets the Project Manager delegate: its revision, tasks and the project's workers. Names are owner text, quoted as data. */
 export interface PmPlanScope {
   readonly planRevision: number;
-  readonly tasks: readonly { readonly taskId: string; readonly title: string; readonly role: string; readonly status: string }[];
+  /** `restricted`: the task is locked (restricted data). On a cloud-capable call it is listed by id, role and status only: its title never leaves the device. */
+  readonly tasks: readonly { readonly taskId: string; readonly title: string; readonly role: string; readonly status: string; readonly restricted?: boolean }[];
   readonly workers: readonly { readonly workerId: string; readonly name: string | null; readonly role: string | null; readonly enabled: boolean }[];
 }
 
@@ -126,7 +142,7 @@ export function pmHistory(turns: readonly PmTurn[], cloudCapable: boolean): { re
     if (picked.length >= PM_HISTORY.maxTurns) { leftOut += 1; continue; }
     const text = t.text.replace(/\s+/g, ' ').trim();
     const clipped = text.length > PM_HISTORY.turnChars ? `${text.slice(0, PM_HISTORY.turnChars - 1)}…` : text;
-    const line = `- ${t.who === 'owner' ? 'Owner' : 'Project Manager'}: ${clipped}`;
+    const line = `- ${t.who === 'owner' ? 'Owner' : t.source === 'web' ? 'Project Manager (from web research, unverified)' : 'Project Manager'}: ${clipped}`;
     if (used + line.length > PM_HISTORY.totalChars) { leftOut += 1; continue; }
     picked.unshift(line);
     used += line.length;
@@ -358,11 +374,14 @@ function labelsFor(kind: AgentKind, input: AgentInputs[AgentKind], bundleAs: 'bu
       labels.push(labelOf((input as AgentInputs['triage']).check.classification));
       break;
     // H11: the question's label always counts; history turns are filtered by the route (pmHistory), so they never decide the lock.
+    // H11 fix round 1: on the device (the content labels), every history turn may be used, so each one's label counts: a restricted turn locks the call, and the
+    // reply is restricted too. On a cloud-capable route the restricted turns are left out of the prompt (`pmHistory`), so they do not count there.
     case 'pmAnswer':
     case 'pmResearch':
     case 'pmPlan':
     case 'pmDelegate':
       labels.push(labelOf((input as PmInput).questionClassification));
+      if (bundleAs === 'content' && kind !== 'pmResearch') labels.push(...((input as PmInput).history ?? []).map((t) => labelOf(t.classification)));
       break;
     case 'prDescription': {
       const i = input as AgentInputs['prDescription'];
@@ -431,12 +450,19 @@ function fencedContent(kind: AgentKind, input: AgentInputs[AgentKind]): string[]
   if (kind === 'triage') return [(input as AgentInputs['triage']).check.output];
   if (kind === 'pmAnswer' || kind === 'pmResearch' || kind === 'pmPlan' || kind === 'pmDelegate') {
     const i = input as PmInput;
-    return [i.question, ...(i.history ?? []).map((t) => t.text), ...(kind === 'pmDelegate' ? (input as AgentInputs['pmDelegate']).plan.workers.map((w) => w.name ?? '') : [])];
+    const d = kind === 'pmDelegate' ? (input as AgentInputs['pmDelegate']).plan : null;
+    return [i.question, ...(i.history ?? []).map((t) => t.text), ...(d ? [...d.workers.map((w) => w.name ?? ''), ...d.tasks.map((t) => t.title)] : [])];
   }
   return [];
 }
 
 function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions: AgentOmission[], nonce: string): Built {
+  // H11 fix round 1: web research sends only the owner's question, bounded: no task, criteria, paths, context bundle or history.
+  if (kind === 'pmResearch') {
+    const q = (input as PmInput).question.trim();
+    if (q.length > PM_RESEARCH_MAX_CHARS) return { refused: 'question_too_long' };
+    return { prompt: ['# The owner asks', block('QUESTION', '', q, nonce), '', '# What to do', 'Research the question on the web and answer it briefly.'].join('\n'), check: { criteriaIds: [], allowedPaths: [], pm: { sourceIds: [] } } };
+  }
   const head = header(input, omissions);
   if ('refused' in head) return head;
   const t = input.task;
@@ -496,20 +522,23 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
       return finish(['Write the pull request description.', idsLine(ids)]);
     }
     case 'pmAnswer':
-    case 'pmResearch':
     case 'pmPlan':
     case 'pmDelegate': {
       const i = input as PmInput;
       const hist = pmHistory(i.history ?? [], at.cloudCapable);
       const sourceIds = contextKeys(input.bundle);
-      out.push('', '# Conversation so far', ...(hist.lines.length > 0 ? hist.lines : ['(none)']), ...(hist.leftOut > 0 ? [`(${hist.leftOut} earlier turn${hist.leftOut === 1 ? '' : 's'} left out)`] : []));
+      // History is owner and model text: fenced as data, like the question.
+      out.push('', '# Conversation so far', hist.lines.length > 0 ? block('HISTORY', '', hist.lines.join('\n'), nonce) : '(none)', ...(hist.leftOut > 0 ? [`(${hist.leftOut} earlier turn${hist.leftOut === 1 ? '' : 's'} left out)`] : []));
       out.push('', '# The owner asks', block('QUESTION', '', i.question.trim(), nonce));
       const pm = { sourceIds };
       if (kind === 'pmAnswer') return finish(['Answer the owner.', sourceIds.length > 0 ? `Context keys you may cite: ${sourceIds.join(', ')}.` : 'There is no context to cite: say so if the answer needs it.'], { ...base, pm });
-      if (kind === 'pmResearch') return finish(['Research the question on the web and answer it briefly.'], { ...base, pm });
       if (kind === 'pmPlan') return finish(['Draft a plan revision for this work.', idsLine(ids)], { ...base, pm });
       const d = input as AgentInputs['pmDelegate'];
-      out.push('', `# Accepted plan, revision ${d.plan.planRevision}`, ...d.plan.tasks.map((x) => `- ${x.taskId}: ${x.title} (role ${x.role}, ${x.status})`),
+      // A locked task's title never goes to a cloud-capable call (H11 fix round 1, H1): only its id, role and status. Titles are fenced as data.
+      const taskLine = (x: PmPlanScope['tasks'][number]): string => x.restricted === true && at.cloudCapable
+        ? `- ${x.taskId} · restricted task (details withheld) (role ${x.role}, ${x.status})`
+        : `- ${x.taskId}: ${x.title.replace(/\s+/g, ' ').trim()} (role ${x.role}, ${x.status})`;
+      out.push('', `# Accepted plan, revision ${d.plan.planRevision}`, block('PLAN', '', d.plan.tasks.map(taskLine).join('\n'), nonce),
         '', '# Workers', ...d.plan.workers.filter((w) => w.enabled).map((w) => `- ${w.workerId}: ${w.name ? quoteName(w.name) : '(no name)'}, role ${roleLabel(w.role)}`));
       return finish(['Propose who takes each task.'], { ...base, pm: { ...pm, taskIds: d.plan.tasks.map((x) => x.taskId), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) } });
     }
@@ -641,7 +670,14 @@ export class AgentCatalog {
     // restricted result stays on the device, and even its hash is not sent.
     const diff = kind === 'patch' && proposal.status === 'ok' && proposal.route?.locked !== true ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
     const withContext = base !== null && input.contextId !== undefined ? { ...base, contextId: input.contextId } : base;
-    const report = withContext !== null && typeof diff === 'string' ? { ...withContext, outputSha256: sha256Hex(diff) } : withContext;
+    // H11 fix round 1: a locked call read restricted text; the record says so, so the server keeps its output on the device whatever else it knows.
+    const labelled = withContext !== null && proposal.route?.locked === true ? { ...withContext, inputLabel: 'restricted' as const } : withContext;
+    // An ok, unlocked delegation call binds its output: the hash of its assignments and the plan revision its prompt listed.
+    const assignments = kind === 'pmDelegate' && proposal.status === 'ok' && proposal.route?.locked !== true ? (proposal.data as { assignments?: unknown } | null)?.assignments : undefined;
+    const report = labelled === null ? null
+      : typeof diff === 'string' ? { ...labelled, outputSha256: sha256Hex(diff) }
+        : assignments !== undefined ? { ...labelled, outputSha256: delegationOutputSha256(assignments), planRevision: (input as AgentInputs['pmDelegate']).plan.planRevision }
+          : labelled;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try {

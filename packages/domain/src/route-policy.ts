@@ -206,6 +206,13 @@ export const RouteRecordReportSchema = z.strictObject({
   outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   /** The id of the task context the server served this call (H5 fix round 4), so the server can judge the output by what it was given to read. */
   contextId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional(),
+  /**
+   * H11 fix round 1: the strongest label of what the call read that the server cannot see (the Project Manager's restricted history turns, a locked route). Only ever
+   * stricter than the server's own judgement: `restricted` or `secret` marks the record locked, so its output can never leave the device.
+   */
+  inputLabel: z.enum(['public', 'internal', 'restricted', 'secret']).optional(),
+  /** A Project Manager delegation call only (H11 fix round 1): the accepted plan revision its prompt listed. The server applies its output only under that revision. */
+  planRevision: z.number().int().min(1).optional(),
 });
 export type RouteRecordReport = z.infer<typeof RouteRecordReportSchema>;
 
@@ -235,6 +242,9 @@ export const RouteRecordSchema = z.strictObject({
   blockedReason: z.string().nullable(),
   outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   contextId: z.string().optional(),
+  /** H11 fix round 1: as reported (stricter only), and the plan revision a delegation call used. */
+  inputLabel: z.enum(['public', 'internal', 'restricted', 'secret']).optional(),
+  planRevision: z.number().int().min(1).optional(),
   reportedBy: z.literal('browser'),
   trust: z.literal('untrusted'),
   reportedAt: z.string(),

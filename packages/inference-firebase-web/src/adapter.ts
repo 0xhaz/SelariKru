@@ -375,6 +375,8 @@ export class FirebaseHybridAssistantAdapter {
     // H11: web search runs only on a cloud-only route, and never for a locked (restricted) task. Refused before any prompt is built or model called.
     if (spec.grounding) {
       if (current?.lock) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_locked' });
+      // The owner set this task to device only: research never overrides that, whatever the call asks for.
+      if (read.fresh?.override === 'ONLY_ON_DEVICE') return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_device_only' });
       if (mode !== 'ONLY_IN_CLOUD' || deviceMustServe) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_cloud_only' });
     }
     const built = spec.prompt({ mode, cloudCapable: !deviceMustServe });
