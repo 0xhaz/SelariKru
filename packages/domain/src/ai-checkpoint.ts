@@ -14,6 +14,10 @@ import { ROUTE_RESUMES, RoutePolicyModeSchema, RouteStepKindSchema, suggestRoute
  *
  * A checkpoint holds ids, hashes, sizes, codes, and text only with its label (the PM's turns). Never a prompt, a bundle, file contents or a model's answer.
  */
+/**
+ * Why a step stopped. `budget`: a cloud send was blocked by the run's budget (missing or spent). `awaiting_owner` is reserved: nothing sets it yet; a step that waits
+ * for the owner is shown through its Action items ask, with the stop reason it already had.
+ */
 export const AI_CHECKPOINT_STOP_REASONS = ['offline', 'input_too_large_for_device', 'local_failed_checks', 'awaiting_owner', 'route_changed', 'budget'] as const;
 export type AiCheckpointStopReason = (typeof AI_CHECKPOINT_STOP_REASONS)[number];
 
@@ -24,8 +28,9 @@ export type AiCheckpointStage = (typeof AI_CHECKPOINT_STAGES)[number];
 /**
  * `running`: between stages. `waiting`: stopped, with a stop reason, until it is resumed, moved or dropped. `done`: the step finished (kept as memory). `sent`: sent
  * after reconnecting. `escalated`: continued in the cloud after its local result failed checks. `moved_to_device`: the owner moved it to device only. `dropped`.
+ * Fix round 1: `sending`, claimed by one tab to send it (M1), and `abandoned`, a step left `running` (its tab closed mid-step) for 30 minutes (M6).
  */
-export const AI_CHECKPOINT_STATUSES = ['running', 'waiting', 'done', 'sent', 'escalated', 'moved_to_device', 'dropped'] as const;
+export const AI_CHECKPOINT_STATUSES = ['running', 'waiting', 'sending', 'done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned'] as const;
 export type AiCheckpointStatus = (typeof AI_CHECKPOINT_STATUSES)[number];
 
 /** Where the step may continue, from the H2 route and the H3 lock when it stopped. */
@@ -141,8 +146,11 @@ export interface CheckpointRecheck {
   readonly budget: 'ok' | 'missing' | 'exhausted';
   /** The step's inputs as they are now. Null: they could not be read, so they count as changed. */
   readonly inputs: { readonly bundleSha256?: string | null; readonly files?: readonly { readonly path: string; readonly sha256: string | null }[]; readonly changeSha256?: string | null; readonly checkId?: string | null } | null;
-  /** The context backstop (H5): the server served a context for this destination, no stronger than the destination allows. */
-  readonly context: 'ok' | 'refused';
+  /**
+   * The context backstop (H5): the server served a context for this destination, no stronger than the destination allows. `not_applicable`: the step reads no task
+   * context (web research sends only the question), so there is none to check.
+   */
+  readonly context: 'ok' | 'refused' | 'not_applicable';
 }
 
 export const CHECKPOINT_PROBLEMS = ['not_waiting', 'route_unreadable', 'route_changed', 'locked', 'revision_changed', 'inputs_changed', 'budget_missing', 'budget_exhausted', 'context_refused'] as const;

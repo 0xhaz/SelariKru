@@ -124,6 +124,40 @@ describe('AI step checkpoints on the server (H12)', () => {
     expect(reopen.body.error.code).toBe('checkpoint_closed');
   });
 
+  describe('fix 1 (M1, M2, M3, M6)', () => {
+    it('M1: one tab sends a waiting checkpoint: the claim moves it waiting → sending once; a second claim is refused; the sender then saves it sent (or waiting again)', async () => {
+      await save(cp());
+      const claim = () => post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_0123456789abcdef/send-claim`, {});
+      const [a, b] = await Promise.all([claim(), claim()]);
+      expect([a.status, b.status].sort()).toEqual([200, 409]);
+      expect([a, b].find((r) => r.status === 409)!.body.error.code).toBe('checkpoint_claimed');
+      expect((await list()).body.checkpoints[0].status).toBe('sending');
+      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect' }))).status).toBe(200);
+      await save(cp({ checkpointId: 'ckp_again_00000001' }));
+      await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_again_00000001/send-claim`, {});
+      expect((await save(cp({ checkpointId: 'ckp_again_00000001', status: 'waiting' }))).status).toBe(200);
+    });
+
+    it('M2: two concurrent first saves of one checkpoint both succeed, with no 500', async () => {
+      const [a, b] = await Promise.all([save(cp()), save(cp({ updatedAt: '2026-11-12T00:00:01.000Z' }))]);
+      expect([a.status, b.status].every((x) => x === 200 || x === 201)).toBe(true);
+      expect((await list()).body.checkpoints).toHaveLength(1);
+    });
+
+    it('M3: escalation names the owner: another owner\'s row is not found', async () => {
+      await t.db.insert(schema.aiCheckpoints).values({ tenantId: TENANT, projectId: PROJECT, checkpointId: 'ckp_other_owner01', ownerUid: 'someone_else', taskId: 't_open', status: 'waiting', stopReason: 'local_failed_checks', body: cp({ checkpointId: 'ckp_other_owner01', stopReason: 'local_failed_checks', routeMode: 'PREFER_ON_DEVICE' }) as never, createdAt: new Date(), updatedAt: new Date() });
+      expect((await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_other_owner01/escalation`, {})).status).toBe(404);
+      const [row] = await t.db.execute(sql`SELECT escalated_at FROM ai_checkpoints WHERE checkpoint_id = 'ckp_other_owner01'`);
+      expect(row!['escalated_at']).toBeNull();
+    });
+
+    it('M6: a checkpoint can be closed as abandoned, and stays closed', async () => {
+      await save(cp({ status: 'running', stopReason: null }));
+      expect((await save(cp({ status: 'abandoned', stopReason: null }))).status).toBe(200);
+      expect((await save(cp({ status: 'waiting' }))).body.error.code).toBe('checkpoint_closed');
+    });
+  });
+
   describe('escalation', () => {
     const failed = (over: Partial<AiCheckpoint> = {}) => cp({ checkpointId: 'ckp_escalate_0001', stepKind: 'patch', stage: 'reask', routeMode: 'PREFER_ON_DEVICE', stopReason: 'local_failed_checks', partial: { issues: ['/diff diff_does_not_apply'], texts: [] }, ...over });
     const escalate = (id = 'ckp_escalate_0001') => post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/${id}/escalation`, {});

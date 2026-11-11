@@ -281,6 +281,13 @@
       "when": 1794423020976,
       "tag": "0039_ai_checkpoints",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794441297165,
+      "tag": "0040_ai_checkpoint_claims",
+      "breakpoints": true
     }
   ]
 }

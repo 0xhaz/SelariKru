@@ -56,6 +56,16 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     await expect(ds.claimAiCheckpointEscalation!(f.projectId, pinned.checkpointId)).rejects.toThrow(/device_only/);
   });
 
+  it('fix 1 (M1, M6): one claim sends a waiting checkpoint; abandoned is closed', async () => {
+    const { ds, f, cp } = await setup();
+    await ds.saveAiCheckpoint!(f.projectId, cp());
+    expect((await ds.claimAiCheckpointSend!(f.projectId, 'ckp_demo_000000001')).status).toBe('sending');
+    await expect(ds.claimAiCheckpointSend!(f.projectId, 'ckp_demo_000000001')).rejects.toThrow(/checkpoint_claimed/);
+    await ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sent', resumedAs: 'after_reconnect' }));
+    await ds.saveAiCheckpoint!(f.projectId, cp({ checkpointId: 'ckp_demo_abandon01', status: 'abandoned', stopReason: null }));
+    await expect(ds.saveAiCheckpoint!(f.projectId, cp({ checkpointId: 'ckp_demo_abandon01' }))).rejects.toThrow(/checkpoint_closed/);
+  });
+
   it('a resumed call\'s route record says so', async () => {
     const { ds, f } = await setup();
     const report = { kind: 'route' as const, requestId: 'req-resumed', stepKind: 'criteria' as const, callOverride: 'ONLY_IN_CLOUD' as const, requestedMode: 'ONLY_IN_CLOUD' as const, observedSource: 'IN_CLOUD' as const, status: 'ok' as const,

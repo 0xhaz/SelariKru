@@ -8,6 +8,8 @@ import { AiCheckpointSchema, redactSecrets, type AiCheckpoint } from '@selarikru
 export interface DeviceCheckpointStore {
   put(ownerKey: string, cp: AiCheckpoint): Promise<void>;
   list(ownerKey: string, projectId: string): Promise<AiCheckpoint[]>;
+  /** Fix round 1 (M6): removes one checkpoint (a closed one past its retention). */
+  remove(ownerKey: string, projectId: string, checkpointId: string): Promise<void>;
 }
 
 /** What is written: secret-shaped text redacted, in every text a checkpoint can carry. */
@@ -31,6 +33,7 @@ export function memoryDeviceStore(): DeviceCheckpointStore & { readonly rows: Ma
       const prefix = `${scopeKey(ownerKey, projectId)}|`;
       return [...rows.entries()].filter(([k]) => k.startsWith(prefix)).map(([, v]) => structuredClone(v));
     },
+    async remove(ownerKey, projectId, checkpointId) { rows.delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`); },
   };
 }
 
@@ -66,6 +69,10 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): DeviceCheckpoin
       const rows = await promised(db.transaction(STORE, 'readonly').objectStore(STORE).index('scope').getAll(scopeKey(ownerKey, projectId))) as { checkpoint: unknown }[];
       // Anything this build cannot read is left alone, never shown.
       return rows.flatMap((r) => { const p = AiCheckpointSchema.safeParse(r.checkpoint); return p.success ? [p.data] : []; });
+    },
+    async remove(ownerKey, projectId, checkpointId) {
+      const db = await open();
+      await promised(db.transaction(STORE, 'readwrite').objectStore(STORE).delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`));
     },
   };
 }

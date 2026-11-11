@@ -26,7 +26,8 @@ describe('Paused AI work (H12)', () => {
   it('a refused re-validation says why, and offers only Move to device only and Drop', () => {
     const [row] = pausedRows(state([cp()], { problems: { ckp_model_0000001: ['budget_missing'] } }), titles, true);
     expect(row!.problems[0]).toMatch(/no budget set.*Missing is never unlimited/);
-    expect(row!.resume).not.toBeNull();
+    // Fix round 1 (M4): Resume runs the check again, so it is offered while online, problems or not.
+    expect(row!.resume).toBeNull();
     expect(row!.moveToDevice).toBeNull();
   });
 

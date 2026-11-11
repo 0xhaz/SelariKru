@@ -1,0 +1,2 @@
+ALTER TABLE "ai_checkpoints" DROP CONSTRAINT "ai_checkpoints_status";--> statement-breakpoint
+ALTER TABLE "ai_checkpoints" ADD CONSTRAINT "ai_checkpoints_status" CHECK ("ai_checkpoints"."status" IN ('running', 'waiting', 'sending', 'done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned'));

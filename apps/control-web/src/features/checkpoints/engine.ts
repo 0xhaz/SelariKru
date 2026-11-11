@@ -45,7 +45,7 @@ export interface CheckpointEngineDeps {
   /** Who the device store is scoped to: the signed-in owner (or the demo's operator). */
   readonly ownerKey: string;
   readonly device: DeviceCheckpointStore;
-  readonly server: Pick<EngineeringDataSource, 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation'> | null;
+  readonly server: Pick<EngineeringDataSource, 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend'> | null;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null, contextId: string) => Promise<TaskAgentContext>;
   /** Fix round 1 (H2): the task's files at its base, to check a paused patch's chosen files are unchanged. Absent: they cannot be checked, so they count as changed. */
@@ -85,6 +85,10 @@ const PM_STEPS: ReadonlySet<string> = new Set(['pmAnswer', 'pmResearch', 'pmPlan
 const LABELS = new Set(['public', 'internal', 'restricted', 'secret']);
 const asLabel = (l: unknown): 'public' | 'internal' | 'restricted' | 'secret' => (typeof l === 'string' && LABELS.has(l) ? l as never : 'restricted');
 const bundleSha = (c: TaskAgentContext): string => sha256Hex(canonicalJson({ pinned: c.bundle.pinned, claims: c.bundle.claims }));
+/** Fix round 1 (M6): how long a running step may sit before it is abandoned, and how long a closed one is kept on this device. */
+export const ABANDON_AFTER_MS = 30 * 60_000;
+export const PURGE_AFTER_MS = 7 * 86_400_000;
+const CLOSED_STATUSES: ReadonlySet<string> = new Set(['done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned']);
 const codeOf = (e: unknown): string => /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1] ?? '';
 
 export interface CheckpointEngine {
@@ -233,8 +237,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     const budget = checkpointBudget(run?.policy?.budgetLimitUsd ?? null, run !== undefined && (run.scopeAssessment !== null || run.lifecycle === 'cancelled'));
     let inputs: { -readonly [K in keyof NonNullable<CheckpointRecheck['inputs']>]: NonNullable<CheckpointRecheck['inputs']>[K] } | null = {};
     let context: CheckpointRecheck['context'] = 'ok';
-    if (PM_STEPS.has(cp.stepKind) && cp.stepKind === 'pmResearch') {
+    if (cp.stepKind === 'pmResearch') {
+      // Research reads no task context: there is nothing to serve or check (fix round 1, M4).
       inputs = {};
+      context = 'not_applicable';
     } else if (mode !== null) {
       try {
         const c = await deps.getTaskContext(cp.taskId, isCloudCapable(mode) ? 'cloud' : 'local', cp.callOverride, newCtx());
@@ -265,6 +271,13 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     setFor('busy', cp.checkpointId, true);
     setFor('asks', cp.checkpointId, undefined);
     try {
+      // Fix round 1 (M1): one tab sends it. A stored checkpoint is claimed on the server first (waiting → sending); an escalation was claimed already.
+      if (how !== 'escalated' && deps.server?.claimAiCheckpointSend && !store.getState().deviceOnly[cp.checkpointId] && checkpointStorage(cp) === 'server') {
+        try { await deps.server.claimAiCheckpointSend(deps.projectId, cp.checkpointId); } catch (e) {
+          setFor('problems', cp.checkpointId, [codeOf(e) === 'checkpoint_claimed' ? 'claimed' : 'claim_failed']);
+          return;
+        }
+      }
       if (PM_STEPS.has(cp.stepKind)) {
         const q = cp.partial?.texts.find((t) => t.who === 'owner');
         if (!q) return;
@@ -308,7 +321,11 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       return;
     }
     if (cp.continuation !== 'cloud_capable' || !deps.isOnline()) return;
-    if (!(await revalidated(cp, false))) return;
+    // Fix round 1 (M1): busy before the re-check, so a second trigger (reconnect, the owner's button) does not send it again.
+    setFor('busy', id, true);
+    let ok: boolean;
+    try { ok = await revalidated(cp, false); } finally { setFor('busy', id, undefined); }
+    if (!ok) return;
     setFor('problems', id, undefined);
     if (cp.stopReason === 'offline' && resumeDisposition(cp, planOf(cp)) === 'automatic') await send(cp, 'after_reconnect', cp.callOverride);
     else setFor('asks', id, 'resume');
@@ -347,6 +364,17 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       }
       patch(() => ({ checkpoints: merged }));
       for (const cp of mine) if (cp.deviceOnly === true || checkpointStorage(cp) !== 'server') setFor('deviceOnly', cp.checkpointId, true);
+      // Fix round 1 (M6): a step left running (its tab closed mid-step) for 30 minutes is closed as abandoned, here and on the server; a closed checkpoint older
+      // than 7 days is purged from this device. Waiting ones are kept: they are the queue.
+      const at = (deps.now ?? (() => new Date()))().getTime();
+      for (const cp of Object.values(merged)) {
+        const age = at - Date.parse(cp.updatedAt);
+        if ((cp.status === 'running' || cp.status === 'sending') && age > ABANDON_AFTER_MS) await write({ ...cp, status: 'abandoned', updatedAt: now() });
+        else if (CLOSED_STATUSES.has(cp.status) && age > PURGE_AFTER_MS) {
+          try { await deps.device.remove(deps.ownerKey, deps.projectId, cp.checkpointId); } catch { /* left for the next load */ }
+          patch((s) => { const next = { ...s.checkpoints }; delete next[cp.checkpointId]; return { checkpoints: next }; });
+        }
+      }
     },
     async reconnect() {
       for (const cp of Object.values(store.getState().checkpoints)) if (cp.status === 'waiting') await process(cp.checkpointId);
@@ -354,8 +382,12 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     process,
     async resume(id) {
       const cp = store.getState().checkpoints[id];
-      if (!cp || cp.status !== 'waiting' || cp.continuation !== 'cloud_capable') return;
-      if (!(await revalidated(cp, false))) return;
+      if (!cp || cp.status !== 'waiting' || cp.continuation !== 'cloud_capable' || store.getState().busy[id]) return;
+      // Fix round 1 (M1, M4): busy before the re-check, which runs again on every Resume.
+      setFor('busy', id, true);
+      let ok: boolean;
+      try { ok = await revalidated(cp, false); } finally { setFor('busy', id, undefined); }
+      if (!ok) return;
       await send(cp, 'after_reconnect', cp.callOverride);
     },
     escalate,

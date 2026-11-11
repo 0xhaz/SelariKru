@@ -778,11 +778,6 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return { taskId, destination, hasChange: c.change !== null, inputChars };
     },
 
-    /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and a simulated `plan.accepted` moves the plan. */
-    /**
-     * H11: the Project Manager's delegation, simulated with the server's rule (`checkDelegation`): only the accepted plan's tasks, to enabled workers of the task's
-     * role, from a recorded pmDelegate call. Applied ones are recorded as `task.delegated` by agent:pm. Demo data, never evidence.
-     */
     // H12: AI step checkpoints, with the server's refusals: the storage split, the task's lock, a locked call record, a restricted served context, secrets.
     async saveAiCheckpoint(projectId, checkpoint) {
       const p = project(projectId);
@@ -806,12 +801,21 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       }
       const prior = p.aiCheckpoints.get(cp.checkpointId);
       if (prior && prior.taskId !== cp.taskId) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
-      if (prior && !['running', 'waiting'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
+      if (prior && !['running', 'waiting', 'sending'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
       p.aiCheckpoints.set(cp.checkpointId, { ...cp, escalatedAt: prior?.escalatedAt ?? null });
     },
     async listAiCheckpoints(projectId) {
       const p = project(projectId);
       return [...p.aiCheckpoints.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ ...c }));
+    },
+    async claimAiCheckpointSend(projectId, checkpointId) {
+      const p = project(projectId);
+      const cp = p.aiCheckpoints.get(checkpointId);
+      if (!cp) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
+      if (cp.status !== 'waiting') throw fail('unavailable', `checkpoint_claimed: this step is ${cp.status.replace(/_/g, ' ')}, not waiting`);
+      const next = { ...cp, status: 'sending' as const, updatedAt: isoOf(timeOf(p)) };
+      p.aiCheckpoints.set(checkpointId, next);
+      return { ...next };
     },
     async claimAiCheckpointEscalation(projectId, checkpointId) {
       const p = project(projectId);
@@ -828,6 +832,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return { ...next };
     },
 
+    /**
+     * H11: the Project Manager's delegation, simulated with the server's rule (`checkDelegation`): only the accepted plan's tasks, to enabled workers of the task's
+     * role, from a recorded pmDelegate call. Applied ones are recorded as `task.delegated` by agent:pm. Demo data, never evidence.
+     */
     async delegate(projectId, runId, request) {
       const p = project(projectId);
       const snap = p.state.snapshot;
@@ -892,6 +900,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return applyDemoDelegation(p, runId, request.planRevision, request.assignments, 'human');
     },
 
+    /** The demo's replan path for an accepted criteria proposal. Simulated: the reworded criteria are kept for the next read, and a simulated `plan.accepted` moves the plan. */
     async reviseTaskCriteria(projectId, request) {
       const p = project(projectId);
       const r = CriteriaRevisionRequestSchema.parse(request);

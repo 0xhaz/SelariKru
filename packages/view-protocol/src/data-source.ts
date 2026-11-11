@@ -108,6 +108,8 @@ export interface EngineeringDataSource {
   listAiCheckpoints?(projectId: string): Promise<AiCheckpoint[]>;
   /** H12: claims the one escalation a checkpoint may have (Local first, a local result that failed its checks). A second claim is refused (`escalation_refused`). */
   claimAiCheckpointEscalation?(projectId: string, checkpointId: string): Promise<AiCheckpoint>;
+  /** H12 fix round 1 (M1): claims a waiting checkpoint for sending (waiting → sending), so only one tab sends it. A second claim is refused (`checkpoint_claimed`). */
+  claimAiCheckpointSend?(projectId: string, checkpointId: string): Promise<AiCheckpoint>;
   disconnect(): void;
 }
 

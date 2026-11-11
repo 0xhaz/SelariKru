@@ -325,7 +325,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     const projectId = state.projectId;
     return createCheckpointEngine({
       projectId, ownerKey: owner, device: deviceStore(),
-      server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}) } : null,
+      server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}), ...(src.claimAiCheckpointSend ? { claimAiCheckpointSend: src.claimAiCheckpointSend } : {}) } : null,
       getTaskRoute: (taskId) => src.getTaskRoute!(projectId, taskId),
       getTaskContext: (taskId, destination, callOverride, contextId) => src.getTaskContext!(projectId, taskId, destination, callOverride, contextId),
       ...(src.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => src.getTaskFiles!(projectId, taskId, paths) } : {}),

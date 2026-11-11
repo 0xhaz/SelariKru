@@ -80,6 +80,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['GET', `/v1/projects/${PROJECT}/ai-checkpoints`],
   ['POST', `/v1/projects/${PROJECT}/ai-checkpoints`],
   ['POST', `/v1/projects/${PROJECT}/ai-checkpoints/a1/escalation`],
+  ['POST', `/v1/projects/${PROJECT}/ai-checkpoints/a1/send-claim`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],

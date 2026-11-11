@@ -29,7 +29,7 @@ export const aiCheckpoints = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.checkpointId] }),
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     index('ai_checkpoints_owner_idx').on(t.tenantId, t.projectId, t.ownerUid, t.updatedAt),
-    check('ai_checkpoints_status', sql`${t.status} IN ('running', 'waiting', 'done', 'sent', 'escalated', 'moved_to_device', 'dropped')`),
+    check('ai_checkpoints_status', sql`${t.status} IN ('running', 'waiting', 'sending', 'done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned')`),
     // The storage split, again at the table: nothing locked, restricted or secret is ever stored here.
     check('ai_checkpoints_not_locked', sql`(${t.body} ->> 'locked') = 'false'`),
     check('ai_checkpoints_no_restricted_labels', sql`NOT (${t.body} -> 'labels' ?| array['restricted', 'secret'])`),

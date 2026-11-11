@@ -303,6 +303,13 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       }, 'an escalated checkpoint', false, {}, true);
     },
 
+    /** H12 fix round 1 (M1): one tab sends a waiting checkpoint. */
+    claimAiCheckpointSend(projectId, checkpointId): Promise<AiCheckpoint> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints/${encodeURIComponent(checkpointId)}/send-claim`, {
+        parse: (v: unknown) => AiCheckpointSchema.parse((v as { checkpoint?: unknown } | null)?.checkpoint),
+      }, 'a claimed checkpoint', false, {}, true);
+    },
+
     /** H11 fix round 1: the owner's own assignment, through the same plan rule. */
     assign(projectId, runId, request): Promise<DelegationReceipt> {
       return readJson(`/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/delegations/owner`, {

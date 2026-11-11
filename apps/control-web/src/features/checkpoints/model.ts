@@ -32,6 +32,8 @@ export const PROBLEM_TEXT: Readonly<Record<string, string>> = {
   device_only: 'Not escalated: this call was set to run on this device only, so it never goes to the cloud.',
   not_failed_checks: 'Not escalated: its local result did not fail its checks.',
   escalation_refused: 'The server did not allow escalating this step.',
+  claimed: 'Another tab is sending this step, or already sent it; it is not sent twice.',
+  claim_failed: 'This step could not be claimed for sending. Try again.',
 };
 
 export interface PausedRow {
@@ -77,9 +79,10 @@ export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problem
     const restricted = !['public', 'internal'].includes(checkpointLabel(cp));
     const headline = ask === 'resume' ? `Resume in cloud? ${title} · ${step}` : ask === 'escalate' ? `Escalate to cloud? ${title} · ${step}` : `${stop}: ${title} · ${step}`;
     const cloudOk = cp.continuation === 'cloud_capable';
+    // Fix round 1 (M4): Resume runs the whole check again, so it is offered whenever this browser is online, even after a refusal.
     const resume = cp.stopReason === 'local_failed_checks' ? 'This step continues in the cloud only by escalation.'
-      : !cloudOk ? 'This step may only run on this device.' : !online ? 'Waiting for connection.' : problems.length > 0 ? 'It changed since it paused; see why above.' : null;
-    const escalate = cp.stopReason !== 'local_failed_checks' ? 'Only a step whose local result failed its checks is escalated.' : !online ? 'Waiting for connection.' : problems.length > 0 ? 'Not allowed; see why above.' : null;
+      : !cloudOk ? 'This step may only run on this device.' : !online ? 'Waiting for connection.' : null;
+    const escalate = cp.stopReason !== 'local_failed_checks' ? 'Only a step whose local result failed its checks is escalated.' : !online ? 'Waiting for connection.' : null;
     return {
       id: cp.checkpointId, taskId: cp.taskId, title, step, headline, stop, tone: problems.length > 0 ? 'warning' : ask ? 'active' : 'neutral',
       sends: sendsText(cp), problems, restricted, busy: state.busy[cp.checkpointId] === true, resume, escalate,

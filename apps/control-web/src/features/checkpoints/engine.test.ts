@@ -35,7 +35,7 @@ function snap(over: { budget?: { value: number | null; basis: string } } = {}): 
 
 function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRouteView = () => route()) {
   const device = memoryDeviceStore();
-  const server = { saved: [] as AiCheckpoint[], rows: new Map<string, AiCheckpoint>(), claims: 0 };
+  const server = { saved: [] as AiCheckpoint[], rows: new Map<string, AiCheckpoint>(), claims: 0, sends: 0 };
   let online = true;
   let snapshot = snap();
   const deps: CheckpointEngineDeps = {
@@ -43,6 +43,14 @@ function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRou
     server: {
       saveAiCheckpoint: async (_p, cp) => { server.saved.push(structuredClone(cp)); server.rows.set(cp.checkpointId, { ...cp, escalatedAt: server.rows.get(cp.checkpointId)?.escalatedAt ?? null }); },
       listAiCheckpoints: async () => [...server.rows.values()],
+      claimAiCheckpointSend: async (_p, id) => {
+        const cp = server.rows.get(id)!;
+        if (cp.status !== 'waiting') throw new Error(`checkpoint_claimed: ${cp.status}`);
+        server.sends += 1;
+        const next = { ...cp, status: 'sending' as const };
+        server.rows.set(id, next);
+        return next;
+      },
       claimAiCheckpointEscalation: async (_p, id) => {
         const cp = server.rows.get(id)!;
         if (cp.escalatedAt) throw new Error('escalation_refused: already_escalated');
@@ -152,6 +160,57 @@ describe('fix 1 (I3): nothing is sent before the lock is known', () => {
       expect(again.store.getState().deviceOnly[rec.id]).toBe(true);
     });
   }
+});
+
+describe('fix 1 (M1, M4, M6)', () => {
+  it('M1: two resumes at once send it once: busy is set before the re-check, and the server claim refuses a second tab', async () => {
+    const h = setup();
+    h.setOnline(false);
+    const id = await pauseOffline(h);
+    h.setOnline(true);
+    await Promise.all([h.engine.resume(id), h.engine.resume(id)]);
+    expect(h.runs).toHaveLength(1);
+    expect(h.server.sends).toBe(1);
+    // Another tab already claimed it: this one does not send.
+    const other = setup();
+    other.setOnline(false);
+    const oid = await pauseOffline(other);
+    other.server.rows.set(oid, { ...other.server.rows.get(oid)!, status: 'sending' });
+    other.setOnline(true);
+    await other.engine.resume(oid);
+    expect(other.runs).toEqual([]);
+    expect(other.engine.store.getState().problems[oid]).toEqual(['claimed']);
+  });
+
+  it('M4: web research has no task context to check: its context check is not_applicable, and it is sent', async () => {
+    const reads: string[] = [];
+    const h = setup({ getTaskContext: async () => { reads.push('ctx'); return context(); } });
+    h.setOnline(false);
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'pmResearch', callOverride: 'ONLY_IN_CLOUD', texts: [{ who: 'owner', text: 'Which sort order do boards use?', classification: 'internal' }] });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    const r = result(proposal({ status: 'blocked', blockedReason: 'offline', observedSource: 'UNKNOWN' }), 'pmResearch');
+    await rec.finish({ kind: 'result', result: r, context: context() });
+    reads.length = 0;
+    const s = snap();
+    h.setSnap(s);
+    h.setOnline(true);
+    await h.engine.resume(rec.id);
+    expect(reads).toEqual([]);
+    expect(h.runner.pm).toHaveBeenCalledTimes(1);
+  });
+
+  it('M6: on load, a running checkpoint older than 30 minutes is closed as abandoned (here and on the server); closed ones older than 7 days are purged from this device', async () => {
+    const h = setup({ now: () => new Date('2026-11-12T12:00:00.000Z') });
+    const base = { projectId: 'p', taskId: 't1', taskRevision: 1, runId: 'run', planRevision: 1, stepKind: 'criteria' as const, stage: 'criteria' as const, callOverride: null, routeMode: 'ONLY_IN_CLOUD' as const, continuation: 'cloud_capable' as const, labels: ['internal' as const], locked: false, inputs: { contextId: null, bundleSha256: null, files: [], inputChars: null }, partial: null, stopReason: null, routeRecordId: null, escalatedAt: null, resumedAs: null };
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_stale_running1', status: 'running', createdAt: '2026-11-12T11:00:00.000Z', updatedAt: '2026-11-12T11:00:00.000Z' });
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_fresh_running1', status: 'running', createdAt: '2026-11-12T11:50:00.000Z', updatedAt: '2026-11-12T11:50:00.000Z' });
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_old_done_00001', status: 'done', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_old_wait_00001', status: 'waiting', stopReason: 'offline', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
+    await h.engine.load();
+    const kept = Object.fromEntries((await h.device.list('owner_1', 'p')).map((c) => [c.checkpointId, c.status]));
+    expect(kept).toEqual({ ckp_stale_running1: 'abandoned', ckp_fresh_running1: 'running', ckp_old_wait_00001: 'waiting' });
+    expect(h.server.rows.get('ckp_stale_running1')).toMatchObject({ status: 'abandoned' });
+  });
 });
 
 describe('the checkpoint engine (H12)', () => {

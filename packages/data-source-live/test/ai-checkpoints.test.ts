@@ -54,4 +54,14 @@ describe('live AI step checkpoints (H12)', () => {
     expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/ai-checkpoints/ckp_0123456789abcdef/escalation', method: 'POST' });
     await expect(live.s.claimAiCheckpointEscalation!('p', 'ckp_0123456789abcdef')).rejects.toThrow(/escalation_refused/);
   });
+
+  it('fix 1 (M1): claims a waiting checkpoint for sending; a second claim keeps its code', async () => {
+    const live = source([
+      () => ({ status: 200, body: { checkpoint: cp({ status: 'sending' }) } }),
+      () => ({ status: 409, body: { error: { code: 'checkpoint_claimed', message: 'no' } } }),
+    ]);
+    expect((await live.s.claimAiCheckpointSend!('p', 'ckp_0123456789abcdef')).status).toBe('sending');
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/ai-checkpoints/ckp_0123456789abcdef/send-claim', method: 'POST' });
+    await expect(live.s.claimAiCheckpointSend!('p', 'ckp_0123456789abcdef')).rejects.toThrow(/checkpoint_claimed/);
+  });
 });
