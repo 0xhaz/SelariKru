@@ -38,6 +38,7 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/draft-reclassifications`],
   ['POST', '/v1/tasks/t1/commands'],
   ['POST', '/v1/tasks/t1/client-reports'],
+  ['GET', '/v1/projects/proj_a/tasks/t1/route'],
   ['POST', '/v1/approvals/a1/resolve'],
   ['GET', `/v1/projects/${PROJECT}/snapshot`],
   ['GET', `/v1/projects/${PROJECT}/runs/${RUN}/failures`],

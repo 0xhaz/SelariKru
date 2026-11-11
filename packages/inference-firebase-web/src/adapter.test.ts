@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { FirebaseHybridAssistantAdapter, errorCodeOf, type AssistRequest, type TelemetryEvent } from './adapter.ts';
+import { FirebaseHybridAssistantAdapter, errorCodeOf, routeReportOf, type AssistRequest, type TelemetryEvent } from './adapter.ts';
+import { RouteRecordReportSchema } from '@selarikru/domain';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
 
 const GOOD = JSON.stringify({ summary: 'Add a board.', acceptanceCriteria: [{ requirementId: 'FB-01', text: 'Shows posts.' }] });
@@ -441,5 +442,72 @@ describe('project change', () => {
     await adapter.draftBrief(req({ projectId: 'proj-9' }));
     expect(sdk.specs).toHaveLength(2);
     expect(adapter.getState().projectId).toBe('proj-9');
+  });
+});
+
+describe('route policy per task', () => {
+  const route = (over: Partial<NonNullable<AssistRequest['route']>> = {}): NonNullable<AssistRequest['route']> => ({
+    taskId: 't1', stepKind: 'triage', runDefault: 'PREFER_ON_DEVICE', taskOverride: null, locked: false, ...over,
+  });
+
+  it('uses the effective policy: call override, else task override, else run default, in place of the policy default', async () => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route({ runDefault: 'ONLY_ON_DEVICE', taskOverride: 'PREFER_IN_CLOUD' }) }));
+    expect(p.requestedMode).toBe('PREFER_IN_CLOUD');
+    expect(p.route).toMatchObject({ taskId: 't1', effectiveMode: 'PREFER_IN_CLOUD', policySource: 'task', locked: false, fellBack: false, conformance: 'conforms' });
+    const q = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route({ runDefault: 'ONLY_ON_DEVICE', taskOverride: 'PREFER_IN_CLOUD', callOverride: 'ONLY_IN_CLOUD' }) }));
+    expect(q.requestedMode).toBe('ONLY_IN_CLOUD');
+    expect(q.route).toMatchObject({ policySource: 'call', callOverride: 'ONLY_IN_CLOUD' });
+    const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route({ runDefault: 'ONLY_ON_DEVICE' }) }));
+    expect(r.requestedMode).toBe('ONLY_ON_DEVICE');
+    expect(r.route).toMatchObject({ policySource: 'run' });
+  });
+
+  it('an unset route policy blocks with no SDK call', async () => {
+    const { adapter, sdk } = make();
+    const p = await adapter.draftBrief(req({ route: route({ runDefault: null }) }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'route_policy_unset' });
+    expect(sdk.generateCalls).toBe(0);
+  });
+
+  it('a restricted task never reaches IN_CLOUD, even when the call override asks for cloud', async () => {
+    const { adapter, sdk } = make();
+    // Locked by its own sources.
+    const p = await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'restricted' }], policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'ONLY_IN_CLOUD', taskOverride: 'PREFER_IN_CLOUD' }) }));
+    expect(p.requestedMode).toBe('ONLY_ON_DEVICE');
+    expect(p.route).toMatchObject({ effectiveMode: 'ONLY_ON_DEVICE', policySource: 'lock', locked: true, callOverride: 'ONLY_IN_CLOUD' });
+    // Locked by the server's word, though the browser's sources say internal.
+    const q = await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'public' }], policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'PREFER_IN_CLOUD', locked: true }) }));
+    expect(q.requestedMode).toBe('ONLY_ON_DEVICE');
+    expect(sdk.specs.every((s) => s.mode === 'ONLY_ON_DEVICE' && s.allowCloud === false)).toBe(true);
+    // And if the SDK still answered from the cloud, the data is withheld and the record says it was a violation.
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'ONLY_IN_CLOUD', locked: true }) }));
+    expect(r).toMatchObject({ status: 'route_violation', data: null });
+    expect(r.route).toMatchObject({ conformance: 'violation', locked: true });
+  });
+
+  it('records a fallback and an unknown source as such', async () => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const p = await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route: route({ runDefault: 'PREFER_ON_DEVICE' }) }));
+    expect(p.route).toMatchObject({ effectiveMode: 'PREFER_ON_DEVICE', fellBack: true, conformance: 'conforms' });
+    sdk.result = { text: GOOD };
+    const q = await adapter.draftBrief(req({ policy: cloud('PREFER_IN_CLOUD'), route: route({ runDefault: 'PREFER_IN_CLOUD' }) }));
+    expect(q.observedSource).toBe('UNKNOWN');
+    expect(q.route).toMatchObject({ fellBack: null, conformance: 'unverified' });
+  });
+
+  it('the report for the server is metadata only and parses as the closed shape', async () => {
+    const { adapter } = make();
+    const p = await adapter.draftBrief(req({ route: route({ runDefault: 'ONLY_ON_DEVICE' }) }));
+    const report = routeReportOf(p);
+    expect(RouteRecordReportSchema.safeParse(report).success).toBe(true);
+    expect(report).toMatchObject({ kind: 'route', requestId: 'req-1', stepKind: 'triage', requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE', status: 'ok', validation: 'passed' });
+    expect(JSON.stringify(report)).not.toContain('SECRET-PROMPT-BODY');
+    expect(JSON.stringify(report)).not.toContain('Add a board');
+    // A call with no route has nothing to report.
+    expect(routeReportOf(await adapter.draftBrief(req()))).toBeNull();
   });
 });

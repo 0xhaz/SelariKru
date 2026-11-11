@@ -1,22 +1,28 @@
 import { z } from 'zod';
+import { RoutePolicyModeSchema } from './route-policy.ts';
 
 /**
  * Settings the owner can change while a run is live. Each one stores a desired revision; its effective revision advances only when the component that
  * enforces it says so: the server, in the same transaction as the save, for policy it enforces itself; the runner, on its next claim poll or heartbeat,
  * for what it holds in its own loop. A save is never the same thing as applied.
  */
-export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible'] as const;
+export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy'] as const;
 export const RUNNER_SETTING_FIELDS = ['enabled', 'slots'] as const;
+/** A task's own settings. `route_override` replaces the run's `route_policy` for this task; null clears it. */
+export const TASK_SETTING_FIELDS = ['route_override'] as const;
 export type RunSettingField = (typeof RUN_SETTING_FIELDS)[number];
 export type RunnerSettingField = (typeof RUNNER_SETTING_FIELDS)[number];
-export type SettingField = RunSettingField | RunnerSettingField;
-export const SETTING_SCOPES = ['run', 'runner'] as const;
+export type TaskSettingField = (typeof TASK_SETTING_FIELDS)[number];
+export type SettingField = RunSettingField | RunnerSettingField | TaskSettingField;
+export const SETTING_SCOPES = ['run', 'runner', 'task'] as const;
 export type SettingScope = (typeof SETTING_SCOPES)[number];
 
 export type SettingEnforcer = 'server' | 'runner';
 /** Who must acknowledge a change before it is shown as in force. A runner-acknowledged field is still gated on the server from the moment it is saved. */
 export const SETTING_ENFORCER: Readonly<Record<SettingField, SettingEnforcer>> = {
   paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner',
+  // Route policy is metadata the server serves to the browser adapter: in force when the save commits.
+  route_policy: 'server', route_override: 'server',
 };
 
 /** Upper bound on a runner's slots. The server's total concurrency cap still applies on top. */
@@ -32,6 +38,10 @@ export const SettingChangeSchema = z.discriminatedUnion('field', [
   z.object({ scope: z.literal('run'), field: z.literal('cloud_eligible'), value: z.boolean() }).strict(),
   z.object({ scope: z.literal('runner'), field: z.literal('enabled'), value: z.boolean() }).strict(),
   z.object({ scope: z.literal('runner'), field: z.literal('slots'), value: z.number().int().min(1).max(MAX_RUNNER_SLOTS) }).strict(),
+  /** The run's default route policy for every task's AI steps. Seeded from the onboarding choice; a run default cannot be cleared, only changed. */
+  z.object({ scope: z.literal('run'), field: z.literal('route_policy'), value: RoutePolicyModeSchema }).strict(),
+  /** One task's route policy override; null clears it. A cloud-capable value on a task locked by restricted data is refused (`route_locked_restricted`). */
+  z.object({ scope: z.literal('task'), field: z.literal('route_override'), value: RoutePolicyModeSchema.nullable() }).strict(),
 ]);
 export type SettingChange = z.infer<typeof SettingChangeSchema>;
 export type SettingValue = SettingChange['value'];
@@ -49,6 +59,9 @@ export function isReduction(field: SettingField, before: SettingValue | null, af
     case 'slots':
     case 'budget_limit_usd': return before === null || (after as number) < (before as number);
     case 'paused': return false;
+    // Where a model runs is not a grant the scheduler holds: restricted data is kept on the device by the lock, whatever this says.
+    case 'route_policy':
+    case 'route_override': return false;
   }
 }
 

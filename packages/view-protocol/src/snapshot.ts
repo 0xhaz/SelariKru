@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import { ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, RUN_SETTING_FIELDS, RUNNER_SETTING_FIELDS, RUN_STATUSES, SETTING_SCOPES, TASK_STATUSES } from '@selarikru/domain';
+import {
+  ASSIGNMENT_SCOPES, ASSIGNMENT_SOURCES, CATALOG_STATUSES, CheckStatusSchema, ModelSelectionSchema, ROUTE_POLICY_SOURCES, ROUTE_SUGGESTION_RULES, RoutePolicyModeSchema, RouteRecordSchema,
+  RUN_SETTING_FIELDS, RUNNER_SETTING_FIELDS, RUN_STATUSES, SETTING_SCOPES, TASK_SETTING_FIELDS, TASK_STATUSES,
+} from '@selarikru/domain';
 import { INFERENCE_MODES } from '@selarikru/policy';
 import { CursorSchema, ProvenanceSchema, VIEW_SCHEMA_VERSION } from './common.ts';
 import { UsageEntrySchema } from './usage.ts';
@@ -63,9 +66,9 @@ export type ModelAssignmentView = z.infer<typeof ModelAssignmentViewSchema>;
 export const SettingViewSchema = z
   .object({
     scope: z.enum(SETTING_SCOPES),
-    /** The run id for a run setting, the runner id for a worker setting. */
+    /** The run id for a run setting, the runner id for a worker setting, the task id for a task setting. */
     key: Id,
-    field: z.enum([...RUN_SETTING_FIELDS, ...RUNNER_SETTING_FIELDS]),
+    field: z.enum([...RUN_SETTING_FIELDS, ...RUNNER_SETTING_FIELDS, ...TASK_SETTING_FIELDS]),
     desired: z.unknown(),
     /** What is in force now. Null: nothing saved has been acknowledged yet, so the configured value still applies. */
     effective: z.unknown(),
@@ -202,6 +205,36 @@ export type RunFailuresView = z.infer<typeof RunFailuresViewSchema>;
 export const RunEvidenceViewSchema = z.object({ candidate: CandidateEvidenceViewSchema.nullable(), criteria: z.array(CriterionEvidenceViewSchema) }).strict();
 export type RunEvidenceView = z.infer<typeof RunEvidenceViewSchema>;
 
+/**
+ * A run's default route policy for its tasks' AI steps. `origin`: `setting` when the owner saved one, `onboarding` when it is still the choice recorded at activation,
+ * `unset` when there is neither, which blocks AI steps without an override: missing is never a default. `revision` is what a change sends back (0 if never saved).
+ */
+export const RunRoutePolicyViewSchema = z.object({ value: RoutePolicyModeSchema.nullable(), origin: z.enum(['setting', 'onboarding', 'unset']), revision: z.number().int().min(0) }).strict();
+export type RunRoutePolicyView = z.infer<typeof RunRoutePolicyViewSchema>;
+
+/**
+ * Where a task's AI steps run, from the server. `effective` is the task override, else the run default, after the lock; a call override applies to one call only and is
+ * never here. `lock` is set when the task's data is restricted or secret: `effective` is then always ONLY_ON_DEVICE, and only a reclassification decision lifts it.
+ * `suggestion` is shown beside the policy, never applied. `lastObserved` is the latest route record, reported by the browser and untrusted.
+ */
+export const TaskRouteViewSchema = z
+  .object({
+    effective: RoutePolicyModeSchema.nullable(),
+    source: z.enum(ROUTE_POLICY_SOURCES),
+    runDefault: RoutePolicyModeSchema.nullable(),
+    override: RoutePolicyModeSchema.nullable(),
+    /** The override's desired revision: what a change sends back as `expectedRevision`. 0 if never saved. */
+    overrideRevision: z.number().int().min(0),
+    lock: z.object({ label: z.enum(['restricted', 'secret']), reason: z.string().min(1) }).strict().nullable(),
+    suggestion: z.object({ mode: RoutePolicyModeSchema, rule: z.enum(ROUTE_SUGGESTION_RULES), reason: z.string().min(1), locked: z.boolean() }).strict(),
+    lastObserved: RouteRecordSchema.nullable(),
+  })
+  .strict()
+  .superRefine((r, ctx) => {
+    if (r.lock !== null && r.effective !== 'ONLY_ON_DEVICE') ctx.addIssue({ code: 'custom', path: ['effective'], message: 'a locked task runs on the device only' });
+  });
+export type TaskRouteView = z.infer<typeof TaskRouteViewSchema>;
+
 export const RunViewSchema = z
   .object({
     runId: Id,
@@ -234,6 +267,8 @@ export const RunViewSchema = z
     policy: BoundedAutonomySchema.nullable().optional(),
     /** Every attempt of this run a person opened a shell in, older task revisions included. Absent: the source does not report it. */
     humanInterventions: z.array(z.object({ attemptId: Id, taskId: Id, at: Iso }).strict()).optional(),
+    /** The run's default route policy. Absent: the source does not report it. */
+    routePolicy: RunRoutePolicyViewSchema.optional(),
   })
   .strict()
   .superRefine((run, ctx) => {
@@ -278,6 +313,8 @@ export const TaskViewSchema = z
      * Absent or empty: not waiting for that.
      */
     skillRunnerWait: z.array(Id).optional(),
+    /** Where this task's AI steps run. Absent: the source does not report it. */
+    route: TaskRouteViewSchema.optional(),
   })
   .strict();
 export type TaskView = z.infer<typeof TaskViewSchema>;

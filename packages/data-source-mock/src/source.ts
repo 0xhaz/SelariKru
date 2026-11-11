@@ -5,9 +5,9 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { approvalUnavailableReason, criterionDescription, SETTING_ENFORCER, type SettingChange } from '@selarikru/domain';
+import { approvalUnavailableReason, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
-import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, type Fixture, type TaskSeed } from './builder.ts';
+import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
 import { mulberry32, seededId } from './prng.ts';
 import { createDemoBrain } from './brain.ts';
@@ -15,6 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
+import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
   cursor: number;
@@ -48,7 +49,11 @@ interface Project {
   /** Scripted events held back while their run is paused: an attempt start, and everything after it for that task. Released, in order, on resume. */
   held: ProjectViewEvent[];
   readonly heldTasks: Set<string>;
+  /** The latest route record per task, as the browser reported it. */
+  readonly routeRecords: Map<string, RouteRecord>;
 }
+
+const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
 
 export interface MockOptions {
   readonly clock: VirtualClock;
@@ -114,7 +119,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     projects.set(fixture.projectId, {
       fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
       modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
-      settings: [], cancels: new Map(), held: [], heldTasks: new Set(),
+      settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
+      routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
   }
@@ -360,8 +366,13 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         return [id, { ...w, lastHeartbeatAt: a.lastHeartbeatAt, latestAction }];
       }),
     );
-    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, { ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id), policy: policyOf(p, r, workers) }]));
-    return { ...s, runs, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: p.settings.map((x) => ({ ...x })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
+    const routes = p.fixture.routes;
+    const runs = Object.fromEntries(Object.entries(s.runs).map(([id, r]) => [id, {
+      ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id), policy: policyOf(p, r, workers),
+      ...(routes ? { routePolicy: runRouteDefaultOf(routes, p.settings, id) } : {}),
+    }]));
+    const tasks = routes ? Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, route: taskRouteOf(routes, p.settings, t.runId, id, p.routeRecords.get(id)) }])) : s.tasks;
+    return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: p.settings.map((x) => ({ ...x })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
       runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
     };
   }
@@ -390,7 +401,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   const prng = mulberry32(0x5e1a);
   type CommandEvent = 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
-    | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided';
+    | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided' | 'inference.reported';
   /** Who the services record as the actor of each simulated type that is not a person's. */
   const SCHEDULER_TYPES: readonly CommandEvent[] = ['task.ready', 'attempt.started', 'attempt.route_changed', 'checkpoint.recorded'];
   const SYSTEM_TYPES: readonly CommandEvent[] = ['attempt.failed', 'attempt.fenced', 'checkpoint.refused'];
@@ -453,11 +464,15 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const { key, change } = c.args;
     const snap = p.state.snapshot;
     let eventRun: string;
-    if (change.scope === 'run') {
-      const r = snap.runs[key];
+    if (change.scope === 'run' || change.scope === 'task') {
+      const task = change.scope === 'task' ? snap.tasks[key] : undefined;
+      if (change.scope === 'task' && !task) return rejected(c.idempotencyKey, 'unknown_target');
+      const r = snap.runs[task ? task.runId : key];
       if (!r) return rejected(c.idempotencyKey, 'unknown_target');
       if (['merged', 'failed', 'cancelled'].includes(r.lifecycle) || r.cancel) return rejected(c.idempotencyKey, 'run_closed');
-      eventRun = key;
+      // The data lock, as on the server: a cloud-capable override on a task with restricted data is refused.
+      if (change.field === 'route_override' && change.value !== null && isCloudCapable(change.value) && routeLockOf(p.fixture.routes ?? NO_ROUTES, key)) return rejected(c.idempotencyKey, 'route_locked_restricted');
+      eventRun = r.runId;
     } else {
       if (!snap.workers[key]) return rejected(c.idempotencyKey, 'unknown_target');
       const first = Object.keys(snap.runs)[0];
@@ -512,6 +527,17 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     if (c.command === 'assignment.set') return setAssignment(p, c, op);
     if (c.command === 'setting.set') return setSetting(p, c, op);
     if (c.command === 'run.cancel') return cancelRun(p, c, op);
+    // As the server: the record's effective mode, fallback and conformance come from the policy, not the report. Metadata only.
+    if (c.command === 'route.report') {
+      const task = snap.tasks[c.args.taskId];
+      if (!task) return rejected(c.idempotencyKey, 'unknown_target');
+      const recordId = `${c.args.taskId}.route_${c.args.report.requestId}`;
+      if (p.routeRecords.get(c.args.taskId)?.recordId === recordId) return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied', replayed: true });
+      const record = routeRecordOf({ routes: p.fixture.routes ?? NO_ROUTES, settings: p.settings, runId: task.runId, taskId: task.taskId, taskRevision: task.revision, recordId, at: isoOf(timeOf(p)), report: c.args.report });
+      p.routeRecords.set(task.taskId, record);
+      appendCommandEvent(p, task.taskId, 'inference.reported', { revision: task.revision, record }, { revisionStep: 0 });
+      return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied' });
+    }
     // Mirrors the owner route: a new run, in planning, with no plan. The demo has no recorded ceiling to enforce.
     if (c.command === 'run.start_new') {
       const runId = `run_${seededId(prng, 'sim')}`;

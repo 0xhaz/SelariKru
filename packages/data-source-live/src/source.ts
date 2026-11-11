@@ -103,6 +103,8 @@ function routeOf(c: AuthorizedViewCommand): Route {
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
     case 'setting.set': return { path: `/v1/projects/${enc(c.args.projectId)}/settings`, body: { key: c.args.key, change: c.args.change, expectedRevision: c.expectedRevision, ...key } };
     case 'run.cancel': return { path: `/v1/runs/${enc(c.args.runId)}/cancel`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
+    // The report is the closed metadata shape; the request id inside it makes a retry the same record, so the idempotency key has nowhere to go.
+    case 'route.report': return { path: `/v1/tasks/${enc(c.args.taskId)}/client-reports`, body: { ...c.args.report } };
   }
 }
 
@@ -119,6 +121,7 @@ function acceptedOf(c: AuthorizedViewCommand, body: Record<string, unknown>): Ac
   // A saved setting or model is in force only once its enforcer says so: a runner-acknowledged one is pending until then, never applied by the save.
   if (c.command === 'setting.set' || c.command === 'assignment.set') return { operationId: null, execution: body['state'] === 'applied' ? 'applied' : 'pending' };
   if (c.command === 'run.cancel') return { operationId: op('operationId'), execution: body['state'] === 'applied' ? 'applied' : 'cancel_requested' };
+  if (c.command === 'route.report') return { operationId: op('reportId'), execution: 'applied' };
   return { operationId: null, execution: 'applied' };
 }
 

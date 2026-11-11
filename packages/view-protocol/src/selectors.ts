@@ -1,6 +1,6 @@
-import { RUNNER_RECENT_SECONDS } from '@selarikru/domain';
+import { ROUTE_POLICY_LABELS, RUNNER_RECENT_SECONDS } from '@selarikru/domain';
 import { LEASE_EXPIRY_MS, LIVENESS_STALE_MS, SUSPECT_AFTER_MS } from './common.ts';
-import type { ApprovalView, ProjectViewSnapshot, RunView, RunnerView, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
+import type { ApprovalView, ProjectViewSnapshot, RunView, RunnerView, TaskRouteView, TaskView, WorkerHealth, WorkerView } from './snapshot.ts';
 
 /** Derived reads. Time is a parameter (`nowMs`); nothing here reads a clock. */
 
@@ -75,3 +75,18 @@ export function verifiedCounts(snapshot: ProjectViewSnapshot, runId?: string): {
 }
 
 export const isEmptyProject = (s: ProjectViewSnapshot): boolean => Object.keys(s.runs).length === 0 && Object.keys(s.tasks).length === 0;
+
+const ROUTE_SOURCE_WORDS = { call: 'this call', task: 'task override', run: 'run default', unset: 'not set' } as const;
+const OBSERVED_WORDS = { ON_DEVICE: 'On device', IN_CLOUD: 'Cloud', UNKNOWN: 'Unknown' } as const;
+
+/**
+ * A task's route in words: the effective mode (`Local only`, `Local first`, `Cloud only`, `Cloud first`, or `Not set`), where it came from, and where the last call
+ * actually ran as the browser reported it. An unknown source stays unknown; nothing is counted as on the device because of a setting.
+ */
+export function taskRouteLabel(route: TaskRouteView): { readonly mode: string; readonly source: string; readonly observed: string | null } {
+  const mode = route.effective === null ? 'Not set' : ROUTE_POLICY_LABELS[route.effective];
+  const source = route.source === 'lock' ? `locked: ${route.lock?.label ?? 'restricted'} data` : ROUTE_SOURCE_WORDS[route.source];
+  const last = route.lastObserved;
+  const observed = last === null ? null : `${OBSERVED_WORDS[last.observedSource]}${last.fellBack === true ? ', fell back' : ''} (reported by the browser)`;
+  return { mode, source, observed };
+}

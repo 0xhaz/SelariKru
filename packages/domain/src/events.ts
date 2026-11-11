@@ -14,6 +14,7 @@ export const EVENT_TYPES = [
   'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
   'product.recorded', 'product.proposed',
   'handover.requested', 'checkpoint.recorded', 'checkpoint.refused', 'attempt.fenced', 'attempt.route_changed', 'attempt.publish_refused', 'handover.decided',
+  'inference.reported',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -109,6 +110,11 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'attempt.publish_refused': [S],
   /** The owner chose what to do with a restart offer: restart from the persisted input, or keep the task where policy places it. Human only. */
   'handover.decided': [H],
+  /**
+   * The owner's browser reported where one AI call of a task ran (a route record). Human only: it is the owner's own report, untrusted and labelled as reported by the
+   * browser. Modes, the observed source, fallback, model id, timing and validation only: never prompt or output text.
+   */
+  'inference.reported': [H],
 };
 
 export interface ActorNotPermitted {

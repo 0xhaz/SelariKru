@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SOURCES, EVENT_TYPES, RUN_STATUSES, type EventType, type RunStatus, type TaskStatus } from '@selarikru/domain';
+import { ASSIGNMENT_SOURCES, EVENT_TYPES, RouteRecordSchema, RUN_STATUSES, type EventType, type RunStatus, type TaskStatus } from '@selarikru/domain';
 import { cursorToSequence, sequenceToCursor } from './common.ts';
 import type { ProjectViewEvent } from './events.ts';
 import {
@@ -408,6 +408,13 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'attempt.publish_refused':
     case 'handover.decided':
       return commit(task);
+
+    // The browser's route record for one AI call: the last observed source on a task whose route the snapshot carries. A record that does not read changes nothing.
+    case 'inference.reported': {
+      const record = RouteRecordSchema.safeParse(p['record']);
+      if (!record.success || !task.route || record.data.taskId !== task.taskId) return commit(task);
+      return commit({ ...task, route: { ...task.route, lastObserved: record.data } });
+    }
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.

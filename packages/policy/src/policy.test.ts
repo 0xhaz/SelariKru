@@ -80,6 +80,18 @@ describe('resolveInferenceMode', () => {
     const p = cloudPolicy({ destinations: [{ destination: FIREBASE_CLOUD_ROUTE, purpose: 'inference', classifications: ['restricted'] }] });
     expect(resolveInferenceMode([{ id: 'a', classification: 'restricted' }], p)).toMatchObject({ mode: 'ONLY_ON_DEVICE' });
   });
+  it("a task's effective route policy replaces the policy's preferred mode, and never relaxes the data rule", () => {
+    const src = [{ id: 'a', classification: 'internal' as const }];
+    const p = cloudPolicy({ preferredMode: 'ONLY_ON_DEVICE' });
+    expect(resolveInferenceMode(src, p, 'ONLY_IN_CLOUD')).toMatchObject({ blocked: false, mode: 'ONLY_IN_CLOUD' });
+    expect(resolveInferenceMode(src, cloudPolicy({ preferredMode: 'ONLY_IN_CLOUD' }), 'ONLY_ON_DEVICE')).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowFallback: false });
+    // Restricted stays on the device whatever the route policy asks.
+    expect(resolveInferenceMode([{ id: 'a', classification: 'restricted' }], p, 'ONLY_IN_CLOUD')).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowFallback: false });
+    // A cloud mode still needs the cloud grant.
+    expect(resolveInferenceMode(src, { ...base, selectedSources: ['a'] }, 'PREFER_IN_CLOUD')).toMatchObject({ blocked: true, reason: 'missing_destination:firebase_cloud_inference' });
+    // An explicit null means the route policy is unset: blocked, never the policy's default.
+    expect(resolveInferenceMode(src, p, null)).toMatchObject({ blocked: true, reason: 'route_policy_unset' });
+  });
 });
 
 describe('evaluate', () => {

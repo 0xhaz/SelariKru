@@ -1,6 +1,7 @@
 import type { Actor, EventType } from '@selarikru/domain';
 import type { AssistantView, ChangeRequestView, ModelAssignmentView, ModelCatalogView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
 import { mulberry32, seededId } from './prng.ts';
+import type { FixtureRoutes } from './routes.ts';
 
 /** Every fixture starts from this instant (the first day of the interface milestone). Fixed, so fixtures never depend on the wall clock. */
 export const FIXTURE_T0_MS = Date.parse('2026-11-16T09:00:00.000Z');
@@ -81,6 +82,8 @@ export interface Fixture {
   /** What the harness adapters report. Default `DEMO_CATALOG`. Simulated like everything here. */
   readonly modelCatalog?: ModelCatalogView;
   readonly modelAssignments?: readonly ModelAssignmentView[];
+  /** Where the tasks' AI steps run: the run default, labels, overrides and what the browser reported. Absent: the fixture does not report routes. */
+  readonly routes?: FixtureRoutes;
 }
 
 /** Claude only: no provider is listed that is not installed. Opus is marked not allowed so the demo can show a refused choice. */

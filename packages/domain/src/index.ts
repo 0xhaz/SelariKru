@@ -13,6 +13,7 @@ export * from './assignment.ts';
 export * from './terminal.ts';
 export * from './onboarding.ts';
 export * from './settings.ts';
+export * from './route-policy.ts';
 export * from './brain.ts';
 export * from './stack.ts';
 export * from './skills.ts';

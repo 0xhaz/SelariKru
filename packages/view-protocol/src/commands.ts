@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SCOPES, ModelSelectionSchema, SettingChangeSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RouteRecordReportSchema, SettingChangeSchema } from '@selarikru/domain';
 import { z } from 'zod';
 
 const Id = z.string().min(1);
@@ -24,7 +24,11 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   z.object({ command: z.literal('assignment.set'), ...base, args: z.object({ projectId: Id, scope: z.enum(ASSIGNMENT_SCOPES), key: Id, selection: ModelSelectionSchema.nullable() }).strict() }).strict(),
   // Saves one setting; `expectedRevision` is its desired revision (0 if never saved). `key` is the run id or the runner id. A receipt's `applied` is the server's
   // own enforcement; a field a runner acknowledges comes back `pending` until it does.
+  // `key` is the task id for a task setting: `route_override` sets or clears where one task's AI steps run. A cloud-capable value on a task locked by restricted data
+  // is refused with `route_locked_restricted`. The run default is the run setting `route_policy`.
   z.object({ command: z.literal('setting.set'), ...base, args: z.object({ projectId: Id, key: Id, change: SettingChangeSchema }).strict() }).strict(),
+  // The browser's record of where one AI call of a task ran. Metadata only, stored as untrusted and labelled as reported by the browser. `expectedRevision` is not used and is sent as 0.
+  z.object({ command: z.literal('route.report'), ...base, args: z.object({ projectId: Id, taskId: Id, report: RouteRecordReportSchema }).strict() }).strict(),
   // Asks to cancel a whole run. `expectedRevision` is its plan revision. `cancel_requested` until every active attempt has ended.
   z.object({ command: z.literal('run.cancel'), ...base, args: z.object({ runId: Id }).strict() }).strict(),
 ]);
@@ -43,6 +47,8 @@ export const REJECTION_REASONS = [
   'no_provider_detected', 'unsupported_provider', 'unsupported_model', 'model_not_allowed', 'trial_model_pinned',
   // Named refusals of settings and run controls.
   'run_closed', 'outside_plan_scope', 'resume_refused',
+  // A cloud-capable route asked for a task whose data is restricted or secret.
+  'route_locked_restricted',
 ] as const;
 export type RejectionReason = (typeof REJECTION_REASONS)[number];
 

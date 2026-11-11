@@ -33,6 +33,7 @@ export function testConfig(over: Partial<ControlApiConfig> = {}): ControlApiConf
     caps: { ...CAPS },
     pairingCodeTtlSeconds: 600,
     reclassificationGrantTtlSeconds: 86_400,
+    nanoInputBudgetChars: 6000,
     expireLeasesIntervalMs: 1000,
     sse: { pollIntervalMs: 20, keepAliveMs: 5000 },
     ...over,

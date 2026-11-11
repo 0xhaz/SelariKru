@@ -35,6 +35,11 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  * - a run setting save: scheduler lock, run row (`lockBudget` re-takes it for a resume), the setting row, the runner config row, the run's status rows in task
  *   order (only for a narrowed or widened path or cloud grant, `requestPolicyStop` and `placement.cleared` included), then the event sequence. A worker setting save: scheduler lock,
  *   the setting row, the runner config row, the event sequence. A budget lowered below what is committed is stopped after the commit, by `stopForExhaustedBudget`.
+ * - a task setting save (the route policy override, `route_override`): scheduler lock, the task's run row, the `task_settings` row, then the event sequence. The task's
+ *   spec, its labels (project, spec, Brain sources) and the run default are read without a lock after the scheduler lock, and no status row is taken: a route policy
+ *   is metadata the server serves to the browser adapter, so nothing queued or running changes. A run's default (`route_policy`) is a run setting save as above.
+ * - a browser's route record (`POST /v1/tasks/:id/client-reports`, kind `route`): no scheduler lock, run row or status row. It reads the task's route without a lock,
+ *   inserts its `client_reports` row (a replay inserts nothing and appends nothing), then the event sequence last (`inference.reported`, the owner as actor).
  * - a run cancel, and finishing one (`finishCancelledRuns`): scheduler lock, run row, the run's open tasks' status rows in task order, this lock, the event
  *   sequence, then the run's approval and reservation rows.
  * - a model assignment: its own advisory lock, the runner config row, the event sequence.

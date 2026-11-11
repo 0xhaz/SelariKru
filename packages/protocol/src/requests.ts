@@ -1,4 +1,4 @@
-import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RunnerHarnessReportSchema, SettingChangeSchema, TaskSpecSchema } from '@selarikru/domain';
+import { ASSIGNMENT_SCOPES, ModelSelectionSchema, RouteRecordReportSchema, RunnerHarnessReportSchema, SettingChangeSchema, TaskSpecSchema } from '@selarikru/domain';
 import { z } from 'zod';
 import { redactSecrets } from './redact.ts';
 
@@ -181,6 +181,13 @@ export const ClientInferenceReportSchema = z
   })
   .strict();
 export type ClientInferenceReport = z.infer<typeof ClientInferenceReportSchema>;
+
+/**
+ * Everything the browser may report about a task: the assistant's inference, or a route record for one AI call (requested and observed route, fallback, model, timing,
+ * validation). Both are closed shapes with no field for prompt or output text, stored as `untrusted` and labelled as reported by the browser.
+ */
+export const ClientReportSchema = z.discriminatedUnion('kind', [ClientInferenceReportSchema, RouteRecordReportSchema]);
+export type ClientReport = z.infer<typeof ClientReportSchema>;
 
 export const PairingCodeRequestSchema = z.object({ location: z.enum(['local', 'cloud']) }).strict();
 export const PairingCodeResponseSchema = z.object({ pairingCode: z.string(), location: z.enum(['local', 'cloud']), expiresAt: z.string() }).strict();

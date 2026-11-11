@@ -11,6 +11,8 @@ interface RawTask {
   taskId: string; runId: string | null; revision: number; aggregateRevision: number; status: TaskView['status']; placementBlock: string | null; blockedReason: string | null; skillRunnerWait?: string[];
   title: string | null; role: string | null; dependsOn: string[] | null; enteredStatusAt: string; latestEvidence: TaskView['latestEvidence']; attempts: RawAttempt[];
   cancel: { operationId: string; requestedAt: string; reason?: string } | null;
+  /** Where the task's AI steps run, as the server works it out. Absent from servers before route policy. */
+  route?: unknown;
 }
 interface RawApproval {
   outcome: string; approvalId: string; runId: string; taskId: string | null; revision: number | null; requester: string | null; scopeHash: string | null;
@@ -21,7 +23,7 @@ interface RawUsage { entryId: string; runId: string; taskId: string | null; atte
 export interface RawSnapshot {
   projectId: string; cursor: number; generatedAt: string; modelCatalog: unknown; modelAssignments: unknown[];
   limits: unknown; runners: unknown[]; checks: unknown[]; usage: RawUsage[]; settings?: unknown[];
-  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown; budget?: unknown; cancel?: unknown; policy?: unknown }[];
+  runs: { runId: string; rebuildDeferred?: unknown; failedRebuildMainMoved?: unknown; lifecycle: string; planRevision: number; pinnedModel: unknown; latestEvidence: unknown; criteria: unknown; evidence: unknown; reducedScope: unknown; scopeAssessment: unknown; humanInterventions?: unknown; budget?: unknown; cancel?: unknown; policy?: unknown; routePolicy?: unknown }[];
   tasks: RawTask[]; approvals: RawApproval[]; approvalHistory: RawHistory[]; changeRequests: unknown[];
   clientReports: { kind: string; payload: unknown; createdAt: string }[];
 }
@@ -102,6 +104,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
       taskId: t.taskId, runId: t.runId, revision: t.revision, aggregateRevision: t.aggregateRevision, title: t.title, role: t.role, dependsOn: t.dependsOn, status: t.status, statusReason: t.blockedReason, placementBlock: t.placementBlock, ...(Array.isArray(t.skillRunnerWait) && t.skillRunnerWait.length > 0 ? { skillRunnerWait: t.skillRunnerWait.filter((x): x is string => typeof x === 'string') } : {}),
       cancelRequested: t.cancel ? { at: t.cancel.requestedAt, operationId: t.cancel.operationId, reason: t.cancel.reason ?? null } : null, cancelReason: null, supersededByRevision: null,
       attemptIds: started.map((a) => a.attemptId), activeAttemptId: started.find((a) => a.endedAt === null)?.attemptId ?? null, enteredStatusAt: t.enteredStatusAt, latestEvidence: t.latestEvidence,
+      ...(t.route !== undefined ? { route: t.route } : {}),
     };
   }
   const approvals: Record<string, unknown> = {};
@@ -113,11 +116,11 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
     approvals[a.approvalId] = { approvalId: a.approvalId, taskId: a.taskId, taskRevision: a.revision, runId: a.runId, scopeHash: a.scopeHash, reason: a.reason, operation: a.operation, destination: a.destination, requester: a.requester, state: a.outcome === 'expired' ? 'expired' : 'pending', requestedAt: a.requestedAt, expiresAt: a.expiresAt, resolvedAt: a.resolvedAt };
   }
   // Client reports are self-reported and untrusted. The latest one that reads as an inference report states the assistant's axis; anything else stays unknown.
-  const report = raw.clientReports.flatMap((r) => { const v = AssistantViewSchema.safeParse(r.payload && typeof r.payload === 'object' ? { mode: (r.payload as Record<string, unknown>)['mode'] ?? null, observedSource: (r.payload as Record<string, unknown>)['observedSource'] } : null); return v.success ? [v.data] : []; })[0];
+  const report = raw.clientReports.filter((r) => r.kind === 'inference').flatMap((r) => { const v = AssistantViewSchema.safeParse(r.payload && typeof r.payload === 'object' ? { mode: (r.payload as Record<string, unknown>)['mode'] ?? null, observedSource: (r.payload as Record<string, unknown>)['observedSource'] } : null); return v.success ? [v.data] : []; })[0];
   return ProjectViewSnapshotSchema.parse({
     meta: { schemaVersion: 1, projectId: raw.projectId, cursor: String(raw.cursor), observedAt: raw.generatedAt, provenance: 'observed' },
     assistant: report ?? { mode: null, observedSource: 'unknown' },
-    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, budgetLimitUsd: limitOf(r.budget), cancel: r.cancel ?? null, policy: r.policy ?? null, ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}) }])),
+    runs: Object.fromEntries(raw.runs.map((r) => [r.runId, { runId: r.runId, rebuildDeferred: r.rebuildDeferred ?? null, failedRebuildMainMoved: r.failedRebuildMainMoved === true, lifecycle: r.lifecycle, planRevision: r.planRevision, latestEvidence: r.latestEvidence, criteria: r.criteria, evidence: r.evidence, reducedScope: r.reducedScope, scopeAssessment: r.scopeAssessment, pinnedModel: r.pinnedModel, budgetLimitUsd: limitOf(r.budget), cancel: r.cancel ?? null, policy: r.policy ?? null, ...(r.humanInterventions !== undefined ? { humanInterventions: r.humanInterventions } : {}), ...(r.routePolicy !== undefined ? { routePolicy: r.routePolicy } : {}) }])),
     tasks, attempts, approvals,
     workers: buildWorkers(raw.tasks, raw.approvals),
     checks: Object.fromEntries((raw.checks as { checkId: string }[]).map((c) => [c.checkId, c])),

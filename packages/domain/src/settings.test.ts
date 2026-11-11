@@ -13,10 +13,12 @@ describe('settings', () => {
     expect(isReduction('slots', 1, 2)).toBe(false);
     expect(isReduction('budget_limit_usd', 10, 5)).toBe(true);
     expect(isReduction('paused', false, true)).toBe(false);
+    expect(isReduction('route_policy', 'ONLY_IN_CLOUD', 'ONLY_ON_DEVICE')).toBe(false);
+    expect(isReduction('route_override', null, 'ONLY_IN_CLOUD')).toBe(false);
   });
 
   it('the server enforces policy, the runner acknowledges what it holds', () => {
-    expect(SETTING_ENFORCER).toEqual({ paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner' });
+    expect(SETTING_ENFORCER).toEqual({ paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner', route_policy: 'server', route_override: 'server' });
   });
 
   it('accepts only closed values for each field', () => {

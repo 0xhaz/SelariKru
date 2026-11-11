@@ -182,3 +182,41 @@ describe('settings and run controls', () => {
     expect(v.tasks['t1']!.cancelRequested).toMatchObject({ reason: 'policy_revoked:allowed_paths' });
   });
 });
+
+describe('route policy', () => {
+  const recording = (answer: Record<string, unknown>, status = 200) => {
+    const calls: { url: string; body: unknown }[] = [];
+    const source = createLiveDataSource({ baseUrl: 'http://x', getToken: async () => 't', fetch: (async (url: string, init: RequestInit) => { calls.push({ url: String(url), body: JSON.parse(String(init.body)) }); return new Response(JSON.stringify(answer), { status }); }) as unknown as typeof fetch });
+    return { source, calls };
+  };
+  const route = {
+    effective: 'ONLY_ON_DEVICE', source: 'lock', runDefault: 'PREFER_IN_CLOUD', override: null, overrideRevision: 0, lock: { label: 'restricted', reason: 'This task reads restricted data.' },
+    suggestion: { mode: 'ONLY_ON_DEVICE', rule: 'restricted', reason: 'Local only, fixed.', locked: true }, lastObserved: null,
+  };
+  const report = {
+    kind: 'route' as const, requestId: 'req-1', stepKind: 'triage' as const, callOverride: null, requestedMode: 'ONLY_ON_DEVICE' as const, observedSource: 'ON_DEVICE' as const, status: 'ok' as const,
+    model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' }, timing: { totalMs: 5, firstOutputMs: null }, validation: 'passed' as const, blockedReason: null,
+  };
+
+  it("carries each task's route and the run default", () => {
+    const v = toViewSnapshot(raw({ runs: [{ ...raw().runs[0]!, routePolicy: { value: 'PREFER_IN_CLOUD', origin: 'onboarding', revision: 0 } }], tasks: [task({ route })] }));
+    expect(v.tasks['t1']!.route).toEqual(route);
+    expect(v.runs['r']!.routePolicy).toEqual({ value: 'PREFER_IN_CLOUD', origin: 'onboarding', revision: 0 });
+    // A server that does not report routes leaves them absent.
+    expect(toViewSnapshot(raw()).tasks['t1']!.route).toBeUndefined();
+  });
+
+  it('the assistant axis reads only inference reports', () => {
+    const v = toViewSnapshot(raw({ clientReports: [{ kind: 'route', payload: { observedSource: 'IN_CLOUD' }, createdAt: T }, { kind: 'inference', payload: { mode: 'ONLY_ON_DEVICE', observedSource: 'on_device' }, createdAt: T }] }));
+    expect(v.assistant).toEqual({ mode: 'ONLY_ON_DEVICE', observedSource: 'on_device' });
+  });
+
+  it('reports a route record to the task, and a locked override keeps its refusal name', async () => {
+    const { source, calls } = recording({ reportId: 'rte_t1_req-1', trust: 'untrusted' }, 201);
+    expect(await source.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: 'k1', args: { projectId: 'p', taskId: 't1', report } })).toMatchObject({ accepted: true, execution: 'applied', operationId: 'rte_t1_req-1' });
+    expect(calls[0]).toEqual({ url: 'http://x/v1/tasks/t1/client-reports', body: report });
+    const refused = recording({ error: { code: 'route_locked_restricted', message: 'locked', details: { label: 'restricted', reason: 'This task reads restricted data.' } } }, 409);
+    expect(await refused.source.execute({ command: 'setting.set', expectedRevision: 0, idempotencyKey: 'k2', args: { projectId: 'p', key: 't1', change: { scope: 'task', field: 'route_override', value: 'ONLY_IN_CLOUD' } } }))
+      .toMatchObject({ accepted: false, rejection: 'route_locked_restricted' });
+  });
+});

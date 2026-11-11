@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HeartbeatRequestSchema, PlanRevisionRequestSchema, ResultRequestSchema } from './index.ts';
+import { ClientReportSchema, ERROR_CODES, HeartbeatRequestSchema, PlanRevisionRequestSchema, ResultRequestSchema, SettingRequestSchema } from './index.ts';
 
 const CANARY = 'sk_live_CANARY0123456789abcdefXYZ';
 const spec = (over: Record<string, unknown> = {}) => ({
@@ -82,5 +82,25 @@ describe('runner result fields', () => {
     const ask = (destination: unknown) => ResultRequestSchema.safeParse({ lease, result: { outcome: 'approval_requested', reason: 'x', operation: 'new_domain', destination } }).success;
     expect(ask({ kind: 'network_host', host: 'api.example.com' })).toBe(true);
     for (const bad of ['https://api.example.com', { kind: 'network_host', host: 'API.example.com' }, { kind: 'network_host', host: '1.2.3.4' }, { kind: 'network_host', host: 'a..b' }, { kind: 'other', host: 'a.example.com' }, { kind: 'network_host', host: 'a.example.com', note: 'x' }]) expect(ask(bad)).toBe(false);
+  });
+});
+
+describe('route policy requests', () => {
+  const route = {
+    kind: 'route', requestId: 'req-1', stepKind: 'patch', callOverride: 'ONLY_IN_CLOUD', requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE', status: 'ok',
+    model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' }, timing: { totalMs: 10, firstOutputMs: null }, validation: 'passed', blockedReason: null,
+  };
+  it('a client report is the assistant inference report or a route record, each closed', () => {
+    expect(ClientReportSchema.safeParse({ kind: 'inference', mode: 'ONLY_ON_DEVICE', observedSource: 'on_device' }).success).toBe(true);
+    expect(ClientReportSchema.safeParse(route).success).toBe(true);
+    expect(ClientReportSchema.safeParse({ ...route, text: 'the prompt' }).success).toBe(false);
+    expect(ClientReportSchema.safeParse({ ...route, kind: 'other' }).success).toBe(false);
+  });
+  it('the run default and the task override go through the settings request', () => {
+    expect(SettingRequestSchema.safeParse({ key: 'run_1', change: { scope: 'run', field: 'route_policy', value: 'PREFER_ON_DEVICE' }, expectedRevision: 0, idempotencyKey: 'k1' }).success).toBe(true);
+    expect(SettingRequestSchema.safeParse({ key: 't1', change: { scope: 'task', field: 'route_override', value: null }, expectedRevision: 1, idempotencyKey: 'k2' }).success).toBe(true);
+  });
+  it('the lock refusal has its own code', () => {
+    expect(ERROR_CODES).toContain('route_locked_restricted');
   });
 });

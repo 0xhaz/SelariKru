@@ -1,5 +1,5 @@
 import type { ChangeRequestView } from '@selarikru/view-protocol';
-import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, fixtureTime, type Fixture, type FixtureId } from './builder.ts';
+import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, fixtureTime, scoped, type Fixture, type FixtureId } from './builder.ts';
 
 /**
  * Ten named scenarios. Each is a stream of real domain events (the payload fields the services emit today), a fixed start time, usage
@@ -317,6 +317,20 @@ function featureDelivery(): Fixture {
   b.complete('api', 'att_api_1', 150, LOCAL).verdict('api', 'att_api_1', 170, 'passed', { checkId: 'ci:api', summary: '38 of 38 checks passed' });
   return done(b, {
     id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE,
+    // Every route mode is in use: the run default is Local first from onboarding; the contract runs Cloud only, the API Cloud first, the integration Local only, and
+    // the search index reads restricted data, so it is locked to the device. The list UI fell back to the cloud once; the integration's last source is unknown.
+    routes: {
+      runDefault: 'PREFER_ON_DEVICE',
+      tasks: {
+        [scoped('feature-delivery', 'brief')]: { inputChars: 900, observed: { sec: 20, stepKind: 'brief', source: 'ON_DEVICE', totalMs: 2400 } },
+        [scoped('feature-delivery', 'contract')]: { override: 'ONLY_IN_CLOUD', inputChars: 4200, observed: { sec: 60, stepKind: 'criteria', source: 'IN_CLOUD', totalMs: 1300 } },
+        [scoped('feature-delivery', 'api')]: { override: 'PREFER_IN_CLOUD', inputChars: 12000, observed: { sec: 120, stepKind: 'patch', source: 'IN_CLOUD', totalMs: 3100 } },
+        [scoped('feature-delivery', 'web')]: { inputChars: 2600, observed: { sec: 130, stepKind: 'patch', source: 'IN_CLOUD', totalMs: 2900 } },
+        [scoped('feature-delivery', 'search')]: { label: 'restricted', inputChars: 1800, observed: { sec: 95, stepKind: 'triage', source: 'ON_DEVICE', totalMs: 1700 } },
+        [scoped('feature-delivery', 'integrate')]: { override: 'ONLY_ON_DEVICE', inputChars: 9000, observed: { sec: 150, stepKind: 'review', source: 'UNKNOWN', totalMs: 4100 } },
+        [scoped('feature-delivery', 'review')]: { inputChars: 700 },
+      },
+    },
     description: 'A plan across stages: a brief and contract are verified, the API is done, the list UI is running in a local sandbox, and the search index is set to run in the cloud, so it waits for approval to start a cloud worker. Later tasks wait on it.',
     usage: [b.use('api', 'att_api_1', figure('cost_usd', '0.42', 'estimated', 'rate_card')), b.use('web', 'att_web_1', figure('cost_usd', '0.37', 'estimated', 'rate_card'))],
   });

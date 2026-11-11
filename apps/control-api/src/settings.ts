@@ -1,5 +1,5 @@
 import {
-  RUNNER_RECENT_SECONDS, SETTING_ENFORCER, TaskSpecSchema, isReduction, policyRevokedReason, transition,
+  RUNNER_RECENT_SECONDS, RoutePolicyModeSchema, SETTING_ENFORCER, TaskSpecSchema, isCloudCapable, isReduction, policyRevokedReason, transition,
   type TaskSpec, type TaskStatus,
   type RunnerConfig, type RunnerConfigAck, type SettingChange, type SettingField, type SettingValue,
 } from '@selarikru/domain';
@@ -13,6 +13,7 @@ import type { AppContext } from './app.ts';
 import { AppError, staleRevision } from './errors.ts';
 import { recordedBudgetCeiling } from './routes-onboarding.ts';
 import { parseBody } from './routes-owner.ts';
+import { loadTaskRoute } from './route-policy.ts';
 import { bumpStatus, fingerprint, idempotent, newId, requireProject, requireRun, writeEvent } from './store.ts';
 
 /**
@@ -98,11 +99,14 @@ async function configuredValue(tx: Executor, tenantId: string, projectId: string
     case 'budget_limit_usd': { const v = run?.budget['limitUsd']; return typeof v === 'number' ? v : null; }
     case 'allowed_paths': return run ? await planPaths(tx, tenantId, projectId, run.runId) : null;
     case 'cloud_eligible': return run ? cloudSlotsOf(run.placement ?? null) > 0 : false;
+    // The choice recorded at onboarding seeds the run default; a task has no override until one is saved.
+    case 'route_policy': { const seeded = RoutePolicyModeSchema.safeParse(run?.setupSnapshot?.['inference']); return seeded.success ? seeded.data : null; }
+    case 'route_override': return null;
   }
 }
 
 export interface SettingSaveResult {
-  readonly scope: 'run' | 'runner';
+  readonly scope: 'run' | 'runner' | 'task';
   readonly key: string;
   readonly field: SettingField;
   readonly desiredRevision: number;
@@ -138,11 +142,18 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         const change = body.change;
         let run: typeof schema.runs.$inferSelect | null = null;
         let eventRunId: string;
-        if (change.scope === 'run') {
-          run = await requireRun(tx, config.tenantId, body.key, true);
+        if (change.scope === 'run' || change.scope === 'task') {
+          // A task setting is recorded against the task's current run, and changes only while that run is open.
+          const task = change.scope === 'task' ? await loadTaskRoute(tx, config.tenantId, projectId, body.key, config.nanoInputBudgetChars) : null;
+          if (change.scope === 'task' && !task) throw new AppError(404, 'task_not_found', 'no such task');
+          run = await requireRun(tx, config.tenantId, task ? task.runId : body.key, true);
           if (run.projectId !== projectId) throw new AppError(404, 'run_not_found', 'no such run');
           if (TERMINAL_RUN.includes(run.lifecycle) || run.cancelRequestedAt !== null) throw new AppError(409, 'run_closed', `this run is ${run.cancelRequestedAt !== null ? 'being cancelled' : run.lifecycle}, so its settings no longer change`, { lifecycle: run.lifecycle });
           eventRunId = run.runId;
+          // The data lock: restricted or secret data keeps a task's AI steps on the device. A cloud-capable override is refused; device only, or clearing it, is not.
+          if (change.field === 'route_override' && task?.lock && change.value !== null && isCloudCapable(change.value)) {
+            throw new AppError(409, 'route_locked_restricted', task.lock.reason, { label: task.lock.label, reason: task.lock.reason, requested: change.value });
+          }
         } else {
           const [runner] = await tx.select().from(schema.runners).where(and(eq(schema.runners.tenantId, config.tenantId), eq(schema.runners.runnerId, body.key), isNull(schema.runners.revokedAt)));
           if (!runner) throw new AppError(404, 'runner_not_found', 'no such worker');
@@ -150,10 +161,12 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
           if (!latest) throw new AppError(409, 'no_run', 'this project has no run to record the change against');
           eventRunId = latest.runId;
         }
-        const table = change.scope === 'run' ? schema.runSettings : schema.runnerSettings;
+        const table = change.scope === 'run' ? schema.runSettings : change.scope === 'task' ? schema.taskSettings : schema.runnerSettings;
         const where = change.scope === 'run'
           ? and(eq(schema.runSettings.tenantId, config.tenantId), eq(schema.runSettings.projectId, projectId), eq(schema.runSettings.runId, body.key), eq(schema.runSettings.field, change.field))
-          : and(eq(schema.runnerSettings.tenantId, config.tenantId), eq(schema.runnerSettings.runnerId, body.key), eq(schema.runnerSettings.field, change.field));
+          : change.scope === 'task'
+            ? and(eq(schema.taskSettings.tenantId, config.tenantId), eq(schema.taskSettings.projectId, projectId), eq(schema.taskSettings.taskId, body.key), eq(schema.taskSettings.field, change.field))
+            : and(eq(schema.runnerSettings.tenantId, config.tenantId), eq(schema.runnerSettings.runnerId, body.key), eq(schema.runnerSettings.field, change.field));
         const [row] = await tx.select().from(table as typeof schema.runSettings).where(where).for('update');
         const current = row?.desiredRevision ?? 0;
         if (body.expectedRevision !== current) throw staleRevision(current, 'this setting');
@@ -172,6 +185,12 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         if (change.scope === 'run') {
           await tx.insert(schema.runSettings).values({ tenantId: config.tenantId, projectId, runId: body.key, ...values })
             .onConflictDoUpdate({ target: [schema.runSettings.tenantId, schema.runSettings.projectId, schema.runSettings.runId, schema.runSettings.field], set: values });
+        } else if (change.scope === 'task') {
+          // A cleared override is stored as JSON null: `desired` is never SQL NULL.
+          const json = (v: unknown) => (v === null ? sql`'null'::jsonb` : v);
+          const stored = { ...values, desired: json(values.desired), effective: json(values.effective), runId: eventRunId };
+          await tx.insert(schema.taskSettings).values({ tenantId: config.tenantId, projectId, taskId: body.key, ...stored })
+            .onConflictDoUpdate({ target: [schema.taskSettings.tenantId, schema.taskSettings.projectId, schema.taskSettings.taskId, schema.taskSettings.field], set: stored });
         } else {
           await tx.insert(schema.runnerSettings).values({ tenantId: config.tenantId, runnerId: body.key, ...values, eventProjectId: projectId, eventRunId })
             .onConflictDoUpdate({ target: [schema.runnerSettings.tenantId, schema.runnerSettings.runnerId, schema.runnerSettings.field], set: { ...values, eventProjectId: projectId, eventRunId } });
@@ -248,6 +267,10 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         }
         return;
       case 'enabled':
+        return;
+      // Any mode is a valid run default: a locked task stays on the device whatever it says. The lock on a task override is checked with the task, above.
+      case 'route_policy':
+      case 'route_override':
         return;
     }
   }
@@ -532,7 +555,7 @@ export async function eventRunFor(tx: Executor, tenantId: string, projectId: str
 export type SettingState = 'applied' | 'applying' | 'waiting_for_runner' | 'waiting_for_runner_update';
 
 export interface SettingView {
-  readonly scope: 'run' | 'runner';
+  readonly scope: 'run' | 'runner' | 'task';
   readonly key: string;
   readonly field: SettingField;
   readonly desired: unknown;
@@ -568,11 +591,12 @@ export async function loadSettingsView(tx: Executor, tenantId: string, projectId
   const everyone = pendingOnEveryone(recentRows);
   const runRows = await tx.select().from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.projectId, projectId))).orderBy(asc(schema.runSettings.runId), asc(schema.runSettings.field));
   const runnerRows = await tx.select().from(schema.runnerSettings).where(eq(schema.runnerSettings.tenantId, tenantId)).orderBy(asc(schema.runnerSettings.runnerId), asc(schema.runnerSettings.field));
+  const taskRows = await tx.select().from(schema.taskSettings).where(and(eq(schema.taskSettings.tenantId, tenantId), eq(schema.taskSettings.projectId, projectId))).orderBy(asc(schema.taskSettings.taskId), asc(schema.taskSettings.field));
   const ofRunner = (runnerId: string): Pending => {
     const r = recentRows.find((x) => x.runnerId === runnerId);
     return !r ? { state: 'waiting_for_runner' } : r.ack === null ? { state: 'waiting_for_runner_update', waitingOn: [runnerId] } : { state: 'applying' };
   };
-  const view = (scope: 'run' | 'runner', key: string, r: typeof runRows[number] | typeof runnerRows[number], pending: Pending): SettingView => {
+  const view = (scope: 'run' | 'runner' | 'task', key: string, r: typeof runRows[number] | typeof runnerRows[number] | typeof taskRows[number], pending: Pending): SettingView => {
     const p: Pending = r.effectiveRevision >= r.desiredRevision ? { state: 'applied' } : r.enforcer === 'runner' ? pending : { state: 'applying' };
     return {
       scope, key, field: r.field as SettingField, desired: r.desired, effective: inForce(r), desiredRevision: r.desiredRevision, effectiveRevision: r.effectiveRevision,
@@ -584,6 +608,7 @@ export async function loadSettingsView(tx: Executor, tenantId: string, projectId
     settings: [
       ...runRows.map((r) => view('run', r.runId, r, everyone)),
       ...runnerRows.map((r) => view('runner', r.runnerId, r, ofRunner(r.runnerId))),
+      ...taskRows.map((r) => view('task', r.taskId, r, everyone)),
     ],
     everyone,
   };

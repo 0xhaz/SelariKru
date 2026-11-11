@@ -1,4 +1,5 @@
 import { Ajv } from 'ajv';
+import { effectiveRoutePolicy, routeLockFor, routeOutcome, type RouteConformance, type RoutePolicySource, type RouteRecordReport, type RouteStepKind } from '@selarikru/domain';
 import { resolveInferenceMode, type InferenceMode, type Policy, type Source } from '@selarikru/policy';
 import {
   MODEL_METADATA,
@@ -23,6 +24,36 @@ export interface AssistRequest {
   /** Classified sources feeding this prompt, supplied by the caller. */
   readonly sources: readonly Source[];
   readonly policy: Policy | undefined;
+  /**
+   * The task's route policy, as the server serves it (the snapshot's task route). When present, the effective policy (this call's override, else the task override,
+   * else the run default, after the lock) replaces the policy's preferred mode. The lock is the server's word or the strongest label of `sources`, whichever locks.
+   */
+  readonly route?: AssistRoute;
+}
+
+export interface AssistRoute {
+  readonly taskId: string;
+  readonly stepKind: RouteStepKind;
+  readonly runDefault: InferenceMode | null;
+  readonly taskOverride: InferenceMode | null;
+  /** True when the server says restricted data locks this task to the device. */
+  readonly locked: boolean;
+  /** This call only. Never stored, and never relaxes the lock. */
+  readonly callOverride?: InferenceMode | null;
+}
+
+/** Where this call was meant to run and where it did. Metadata only. */
+export interface ProposalRoute {
+  readonly taskId: string;
+  readonly stepKind: RouteStepKind;
+  readonly callOverride: InferenceMode | null;
+  /** The effective policy after the lock. Null: unset, so the call was blocked. */
+  readonly effectiveMode: InferenceMode | null;
+  readonly policySource: RoutePolicySource;
+  readonly locked: boolean;
+  /** Null when the source is unknown or nothing ran. */
+  readonly fellBack: boolean | null;
+  readonly conformance: RouteConformance;
 }
 
 export type ProposalStatus = 'ok' | 'invalid' | 'blocked' | 'route_violation' | 'unverified_source' | 'error';
@@ -63,6 +94,8 @@ export interface AssistantProposal {
   readonly errorName: string | null;
   /** The SDK's stable error code (for example `AI/api-not-enabled`) when it gave one. Never the message: that can quote the request. */
   readonly errorCode: string | null;
+  /** Where this call was meant to run and where it did. Absent or null: the request carried no task route. */
+  readonly route?: ProposalRoute | null;
 }
 
 /**
@@ -199,15 +232,33 @@ export class FirebaseHybridAssistantAdapter {
       blockedReason: null,
       errorName: null,
       errorCode: null,
+      route: null,
       ...over,
     });
   }
 
   private async execute(op: Operation, req: AssistRequest, requestId: string, start: number): Promise<AssistantProposal> {
-    const make = this.base(op, req, requestId, start);
+    const plain = this.base(op, req, requestId, start);
+    // The task's route policy, when there is one. The lock follows the strongest label of what this call reads, or the server's word.
+    const lock = req.route ? routeLockFor([...req.sources.map((s) => s.classification), ...(req.route.locked ? ['restricted'] : [])]) : null;
+    const effective = req.route ? effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: req.route.taskOverride, run: req.route.runDefault, lock }) : null;
+    const make = (over: Partial<Mutable<AssistantProposal>>): AssistantProposal => {
+      const p = plain(over);
+      if (!req.route || !effective) return p;
+      const ran = p.status === 'ok' || p.status === 'invalid' || p.status === 'route_violation' || p.status === 'unverified_source';
+      const outcome = ran ? routeOutcome(effective.mode, p.observedSource) : { fellBack: null, conformance: 'unverified' as const };
+      return {
+        ...p,
+        route: {
+          taskId: req.route.taskId, stepKind: req.route.stepKind, callOverride: req.route.callOverride ?? null, effectiveMode: effective.mode, policySource: effective.source,
+          locked: lock !== null,
+          fellBack: outcome.fellBack, conformance: outcome.conformance,
+        },
+      };
+    };
 
     // Policy first, before any SDK call.
-    const routed = resolveInferenceMode(req.sources, req.policy);
+    const routed = resolveInferenceMode(req.sources, req.policy, effective ? effective.mode : undefined);
     if (routed.blocked) return make({ status: 'blocked', blockedReason: routed.reason });
     if (req.allowedRequirementIds.length === 0) {
       return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: 'no_allowed_requirement_ids' });
@@ -277,3 +328,14 @@ export class FirebaseHybridAssistantAdapter {
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/** What the browser sends the server about one call with a task route: identifiers, modes, the observed source, timing and validation. Never prompt or output. */
+export function routeReportOf(p: AssistantProposal): RouteRecordReport | null {
+  if (!p.route) return null;
+  const code = p.blockedReason !== null && /^[a-z][a-z0-9_]*(?::[a-z0-9_.-]+)*$/.test(p.blockedReason) && p.blockedReason.length <= 120 ? p.blockedReason : null;
+  return {
+    kind: 'route', requestId: p.requestId, stepKind: p.route.stepKind, callOverride: p.route.callOverride, requestedMode: p.requestedMode, observedSource: p.observedSource, status: p.status,
+    model: { cloudModel: p.model.cloudModel, sdkVersion: p.model.sdkVersion },
+    timing: { totalMs: p.timing.totalMs, firstOutputMs: p.timing.firstOutputMs }, validation: p.validation.status, blockedReason: code,
+  };
+}

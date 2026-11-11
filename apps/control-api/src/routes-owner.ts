@@ -1,8 +1,8 @@
-import { NO_HARNESS_CATALOG, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
+import { NO_HARNESS_CATALOG, effectiveRoutePolicy, routeOutcome, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
 import {
-  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientInferenceReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
+  AcceptReducedScopeRequestSchema, ApprovalResolveRequestSchema, ClientReportSchema, CreateRunRequestSchema, ModelAssignmentRequestSchema, PlanRevisionRequestSchema, ReverifyRunRequestSchema, TaskCommandRequestSchema,
   redactSecrets, type BudgetStatus,
 } from '@selarikru/protocol';
 import { assignmentRevision, closeHandovers, catalogView, loadModelAssignments, loadRecentRunnerReports, loadRunEvidence, validateSelection, acceptanceCovers, assessRunScope, modelOverRunBudget, planCapMicros, leaseHealth, loadAcceptedReducedScope, notDeliveredHash, reducedScopeContext, leaveReviewForPlan, lockBeforeRunRow, lockStaleCandidate, lockPartsForClaims, releaseTaskClaims, retireStaleCandidate, reverifyRun, type AcceptedReducedScope, type ReverifyOutcome, type StaleCandidate } from '@selarikru/workflow';
@@ -13,6 +13,7 @@ import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
+import { loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
 import { skillRunnerWaits } from './skills.ts';
 import {
   bumpStatus, fingerprint, idempotent, loadSpecRow, newId, requireProject, requireRun, requireTaskStatus, writeEvent,
@@ -457,8 +458,34 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   // ---- client-reported metadata (untrusted) -------------------------------------------------------------------
   app.post('/v1/tasks/:id/client-reports', auth, async (req, reply) => {
     const uid = ownerOf(req);
-    const body = parseBody(ClientInferenceReportSchema, req.body);
+    const body = parseBody(ClientReportSchema, req.body);
     const row = await requireTaskStatus(db, config.tenantId, idParam(req));
+    if (body.kind === 'route') {
+      // A route record for one AI call. The server works out the effective route, the fallback and whether the source conforms from its own rows; the browser's
+      // report supplies only what it observed. Metadata only: the shape has no field for prompt or output text. One request id is one record, and one event.
+      const reportId = `rte_${row.taskId}_${body.requestId}`.slice(0, 200);
+      const result = await withTx(db, async (tx) => {
+        const task = await loadTaskRoute(tx, config.tenantId, row.projectId, row.taskId, config.nanoInputBudgetChars);
+        if (!task) throw new AppError(404, 'task_not_found', 'no such task');
+        const effective = effectiveRoutePolicy({ call: body.callOverride, task: task.route.override, run: task.route.runDefault, lock: task.lock });
+        const outcome = body.status === 'blocked' || body.status === 'error' ? { fellBack: null, conformance: 'unverified' as const } : routeOutcome(effective.mode, body.observedSource);
+        const payload = {
+          requestId: body.requestId, taskRevision: task.revision, stepKind: body.stepKind, callOverride: body.callOverride, requestedMode: body.requestedMode,
+          effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource, fellBack: outcome.fellBack, conformance: outcome.conformance,
+          status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
+          validation: body.validation, blockedReason: body.blockedReason,
+        };
+        // Insert first, then the event sequence: no other lock is held.
+        const inserted = await tx.insert(schema.clientReports).values({
+          tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,
+        }).onConflictDoNothing().returning({ reportId: schema.clientReports.reportId, createdAt: schema.clientReports.createdAt });
+        if (inserted.length === 0) return { reportId, replayed: true };
+        const record = { ...payload, recordId: reportId, taskId: row.taskId, reportedBy: 'browser', trust: 'untrusted', reportedAt: inserted[0]!.createdAt.toISOString() };
+        await writeEvent(tx, now(), { projectId: row.projectId, runId: task.runId, taskId: row.taskId, aggregateRevision: task.rowRevision, type: 'inference.reported', actor: { kind: 'human', id: uid }, payload: { revision: task.revision, record } });
+        return { reportId, replayed: false };
+      });
+      return reply.code(result.replayed ? 200 : 201).send({ reportId: result.reportId, trust: 'untrusted', reportedBy: 'browser' });
+    }
     const reportId = newId('rpt');
     await db.insert(schema.clientReports).values({
       tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: body.kind,
@@ -467,6 +494,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
       reportedBy: uid,
     });
     return reply.code(201).send({ reportId, trust: 'untrusted' });
+  });
+
+  // The task's route policy as the browser adapter reads it, and where its AI calls actually ran, newest first. Metadata only.
+  app.get('/v1/projects/:id/tasks/:taskId/route', auth, async (req) => {
+    ownerOf(req);
+    const { id: projectId, taskId } = req.params as { id: string; taskId: string };
+    await requireProject(db, config.tenantId, projectId);
+    const task = await loadTaskRoute(db, config.tenantId, projectId, taskId, config.nanoInputBudgetChars);
+    if (!task) throw new AppError(404, 'task_not_found', 'no such task');
+    return { taskId, revision: task.revision, runId: task.runId, route: task.route, records: await loadRouteHistory(db, config.tenantId, projectId, taskId) };
   });
 
   // ---- approvals ---------------------------------------------------------------------------------------------
@@ -667,7 +704,9 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const resolved = await tx.select().from(schema.approvals)
           .where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['granted', 'denied', 'expired', 'superseded'])))
           .orderBy(sql`${schema.approvals.resolvedAt} DESC NULLS LAST`, desc(schema.approvals.createdAt)).limit(APPROVAL_HISTORY_LIMIT);
-        const reports = await tx.select().from(schema.clientReports).where(scope(schema.clientReports)).orderBy(desc(schema.clientReports.createdAt)).limit(50);
+        // The assistant's own inference reports. Route records are per task, read below.
+        const reports = await tx.select().from(schema.clientReports).where(and(scope(schema.clientReports), eq(schema.clientReports.kind, 'inference'))).orderBy(desc(schema.clientReports.createdAt)).limit(50);
+        const routeInputs = await loadProjectRouteInputs(tx, config.tenantId, projectId);
         const changes = await tx.select().from(schema.changeRequests).where(scope(schema.changeRequests));
         // A rebuild for a moved main retires the pull request's candidate first, so this is true from the moment the rebuild starts. Read from candidates, not the evidence report: a run with no requirement ids has none.
         const retiredForMain = await tx.execute(sql`SELECT run_id, sha, updated_at FROM candidates WHERE tenant_id = ${config.tenantId} AND project_id = ${projectId} AND status = 'invalidated' AND reason = 'base_changed' AND sha IS NOT NULL`);
@@ -804,6 +843,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             /** The effective policy the run works within, each value labelled configured, recommended or unresolved. */
             policy: boundedAutonomy({ run: r, planPaths: pathsOf(r.runId), settings: settingsView.settings, policy: ctx.policy, caps: config.caps, recordedCeilingUsd: ceiling }),
             humanInterventions: attempts.filter((a) => a.humanIntervenedAt !== null && specOf(a.taskId, a.revision)?.runId === r.runId).map((a) => ({ attemptId: a.attemptId, taskId: a.taskId, at: a.humanIntervenedAt!.toISOString() })),
+            /** The run's default route policy for its tasks' AI steps: saved, else the onboarding choice, else unset. */
+            routePolicy: routeInputs.runDefaults.get(r.runId) ?? { value: null, origin: 'unset', revision: 0 },
           })),
           tasks: statuses.map((s) => {
             const spec = specOf(s.taskId, s.currentRevision);
@@ -826,6 +867,15 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               enteredStatusAt: statusEvents.find((e) => e['task_id'] === s.taskId) ? eventTime(statusEvents.find((e) => e['task_id'] === s.taskId)!) : s.updatedAt.toISOString(),
               latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === s.taskId)),
               ...(skillWaits.has(s.taskId) ? { skillRunnerWait: skillWaits.get(s.taskId) } : {}),
+              /** Where the task's AI steps run: the effective policy and its source, the data lock, the suggestion, and the last source the browser reported. */
+              route: (() => {
+                const parsed = TaskSpecSchema.safeParse(spec?.spec);
+                return taskRouteView({
+                  spec: parsed.success ? parsed.data : null, projectLabel: routeInputs.projectLabel, brainLabels: routeInputs.brainLabels.get(s.taskId) ?? [],
+                  runDefault: spec ? routeInputs.runDefaults.get(spec.runId)?.value ?? null : null, override: routeInputs.overrides.get(s.taskId),
+                  lastObserved: routeInputs.lastObserved.get(s.taskId) ?? null, nanoBudgetChars: config.nanoInputBudgetChars,
+                });
+              })(),
               attempts: attempts.filter((a) => a.taskId === s.taskId && a.revision === s.currentRevision).map((a) => ({
                 attemptId: a.attemptId, number: a.attemptNumber, runner: a.runner, fence: a.leaseFence, outcome: a.outcome, exitReason: a.exitReason === null || a.streamable ? a.exitReason : restrictedStoredReason(a.exitReason),
                 /** Where this attempt's sandbox runs. Null: its runner is no longer enrolled. */

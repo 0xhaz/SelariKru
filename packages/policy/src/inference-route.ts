@@ -28,7 +28,12 @@ function cloudApproved(src: { id: string; classification: Classification }, poli
   return isDestinationGranted('inference', FIREBASE_CLOUD_ROUTE, src.classification, policy);
 }
 
-export function resolveInferenceMode(sources: readonly Source[], policy: Policy | undefined): Routed | Blocked {
+/**
+ * `routeMode`, when given, is the task's effective route policy (the call override, else the task override, else the run default, after the lock; see
+ * `effectiveRoutePolicy` in @selarikru/domain). It replaces the policy's `preferredMode`; null means the route policy is unset, which blocks. It never relaxes
+ * anything below: restricted input still goes device only, secret is still excluded, and a cloud mode still needs the cloud grant.
+ */
+export function resolveInferenceMode(sources: readonly Source[], policy: Policy | undefined, routeMode?: InferenceMode | null): Routed | Blocked {
   if (!policy) return { blocked: true, reason: 'missing_policy', policyVersion: 'unknown' };
   const v = policy.policyVersion;
   const blocked = (reason: string): Blocked => ({ blocked: true, reason, policyVersion: v });
@@ -46,7 +51,8 @@ export function resolveInferenceMode(sources: readonly Source[], policy: Policy 
     return { blocked: false, mode: 'ONLY_ON_DEVICE', allowFallback: false, reason: 'restricted_on_device_only', policyVersion: v };
   }
 
-  const mode = policy.preferredMode;
+  if (routeMode === null) return blocked('route_policy_unset');
+  const mode = routeMode ?? policy.preferredMode;
   if (!mode) return blocked('missing_preferred_mode');
   const cloudOk = classified.every((s) => cloudApproved(s, policy));
   const ok = (allowFallback: boolean, reason: string): Routed => ({ blocked: false, mode, allowFallback, reason, policyVersion: v });
