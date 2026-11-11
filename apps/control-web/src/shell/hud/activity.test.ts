@@ -76,22 +76,37 @@ describe('the run\'s AI counter and the fallback banner (H7)', () => {
 
   it('counts the run\'s route records: on device, in cloud and fell back apart, unknown said, blocked and no call left out', () => {
     const c = aiRunCounts(s, 'run');
-    expect(c).toEqual({ device: 1, cloud: 1, fellBack: 1, unknown: 1, total: 4 });
-    expect(c.total).toBe(c.device + c.cloud + c.fellBack + c.unknown);
+    expect(c).toEqual({ device: 1, cloud: 1, fellBack: 1, unknown: 1, violation: 0, total: 4 });
+    expect(c.total).toBe(c.device + c.cloud + c.fellBack + c.unknown + c.violation);
   });
 
   it('counts records only: the function sees the snapshot and nothing that is in flight, and a run with no records counts zero', () => {
     expect(aiRunCounts.length).toBe(2);
-    expect(aiRunCounts(snapshotOf({ tasks: [task('x', { route: route(null) })] }), 'run')).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, total: 0 });
-    expect(aiRunCounts(s, null)).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, total: 0 });
+    expect(aiRunCounts(snapshotOf({ tasks: [task('x', { route: route(null) })] }), 'run')).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, violation: 0, total: 0 });
+    expect(aiRunCounts(s, null)).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, violation: 0, total: 0 });
   });
 
   it('names the latest fallback with its task and its reason in one plain line, from the record', () => {
-    const f = latestFallback(s)!;
+    const f = latestFallback(s, 'run')!;
     expect(f.title).toBe('Fell back to cloud');
     expect(f.task).toBe('List UI');
     expect(f.reason).toBe('The device model was not ready, so the cloud answered, which this route allows.');
     expect(f.at).toBe(iso(1));
-    expect(latestFallback(snapshotOf({ tasks: [task('a', { route: route(rec({})) })] }))).toBeNull();
+    expect(latestFallback(snapshotOf({ tasks: [task('a', { route: route(rec({})) })] }), 'run')).toBeNull();
+    // Scoped to the counter's run.
+    expect(latestFallback(s, 'other')).toBeNull();
+  });
+
+  it('a route violation is counted apart, never as a fallback, and an invalid call is not counted (I2)', () => {
+    const v = snapshotOf({ tasks: [
+      task('a', { title: 'Restricted', route: route(rec({ taskId: 'a', observedSource: 'IN_CLOUD', effectiveMode: 'ONLY_ON_DEVICE', fellBack: true, conformance: 'violation', status: 'route_violation' })) }),
+      task('b', { title: 'Wide', route: route(rec({ taskId: 'b', observedSource: 'IN_CLOUD', fellBack: true, conformance: 'violation' })) }),
+      task('c', { title: 'Invalid', route: route(rec({ taskId: 'c', status: 'invalid' })) }),
+    ] });
+    expect(aiRunCounts(v, 'run')).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, violation: 2, total: 2 });
+    expect(latestFallback(v, 'run')).toBeNull();
+    const texts = recentActivity(v, 7).filter((i) => i.id.startsWith('ai:')).map((i) => i.text);
+    expect(texts).toContain('Restricted: AI route violation, answer discarded');
+    expect(texts.join(' ')).not.toMatch(/fell back/);
   });
 });

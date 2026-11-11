@@ -59,7 +59,7 @@ function Mark() {
  * A top-bar menu: a disclosure of links. Escape or choosing a link closes it, and focus goes back to its button. The screen open now, when it
  * is in this menu, is named on the button and the button carries aria-current, so the current page is never only inside a closed menu.
  */
-function Menu({ label, testId, entries, route, extra, urgent }: { label: string; testId: string; entries: readonly MenuEntry[]; route: Route; extra?: ReactNode; urgent?: boolean }) {
+function Menu({ label, testId, entries, route, extra, urgent, note }: { label: string; testId: string; entries: readonly MenuEntry[]; route: Route; extra?: ReactNode; urgent?: boolean; note?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const box = useRef<HTMLDivElement>(null);
@@ -81,6 +81,7 @@ function Menu({ label, testId, entries, route, extra, urgent }: { label: string;
         {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
       </button>
       <ul id={id} hidden={!open} className="panel motion-menu absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
+        {note ? <li className="px-1 text-[12px] leading-snug text-fg sm:hidden" data-testid="menu-ai-counts">{note}</li> : null}
         {entries.map((e) => (
           <li key={e.route} className="flex flex-col">
             <a href={hrefFor(e.route)} aria-current={e.route === route ? 'page' : undefined} onClick={() => setOpen(false)} className="btn text-left text-[14px]">
@@ -159,10 +160,11 @@ const SPEEDS = [1, 2, 4] as const;
  * a prediction or a call still in flight. A fallback counts once, as a fallback; an unknown source is said, never folded into either side.
  */
 export function aiCounterText(c: AiRunCounts): string {
-  if (c.total === 0) return 'AI: no calls recorded yet';
-  const parts = [`${c.device} on device`, `${c.cloud} in cloud`, `${c.fellBack} fell back`];
+  if (c.total === 0) return 'AI · last call per task: none recorded yet';
+  const parts = [`${c.device} device`, `${c.cloud} cloud`, `${c.fellBack} fell back`];
   if (c.unknown > 0) parts.push(`${c.unknown} unknown`);
-  return `AI: ${parts.join(' · ')}`;
+  if (c.violation > 0) parts.push(`${c.violation} route violation${c.violation === 1 ? '' : 's'}`);
+  return `AI · last call per task: ${parts.join(' · ')}`;
 }
 
 function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | null }) {
@@ -233,7 +235,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
           {attentionCount && panelWide ? <span data-testid="attention-count" className="sr-only">{attentionCount}</span> : null}
           {decisionCount > 0 ? <span data-testid="decisions-count" className="sr-only">, {decisionCount} decision{decisionCount === 1 ? '' : 's'}</span> : null}
         </a>
-        <Menu label="Boards" testId="top-bar-boards" entries={BOARDS_MENU} route={route} />
+        {/* Below 640 px the counter has no room in the bar, so the same counts head the Boards menu (H7 fix M4). */}
+        <Menu label="Boards" testId="top-bar-boards" entries={BOARDS_MENU} route={route} note={aiCounts !== null ? aiCounterText(aiCounts) : undefined} />
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
         <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>

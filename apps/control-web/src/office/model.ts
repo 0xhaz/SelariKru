@@ -151,7 +151,8 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     if (!last || last.status === 'blocked' || last.status === 'error') return null;
     const place = last.observedSource === 'ON_DEVICE' ? 'device' : last.observedSource === 'IN_CLOUD' ? 'cloud' : null;
     if (place === null) return null;
-    return last.fellBack === true ? { place, state: 'observed', fellBack: true } : { place, state: 'observed' };
+    // Only a conforming record is an allowed fallback; a violation is never drawn as one (H7 fix I2).
+    return last.fellBack === true && last.conformance === 'conforms' ? { place, state: 'observed', fellBack: true } : { place, state: 'observed' };
   };
   const agents = team.rows.map((r): OfficeAgent => {
     const base = roleName(r.role);

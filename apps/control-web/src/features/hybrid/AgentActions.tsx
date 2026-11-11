@@ -151,8 +151,10 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
   }
   const p = outcome.result.proposal;
   const ok = p.status === 'ok';
-  const fell = p.route?.fellBack === true;
-  const src = fell ? { label: p.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', tone: 'warning' as const } : SOURCE_CHIP[p.observedSource]!;
+  // A violation is never shown as an allowed fallback (H7 fix I2).
+  const violation = p.status === 'route_violation' || p.route?.conformance === 'violation';
+  const fell = !violation && p.route?.fellBack === true && p.route?.conformance === 'conforms';
+  const src = violation ? { label: 'Route violation', tone: 'danger' as const } : fell ? { label: p.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', tone: 'warning' as const } : SOURCE_CHIP[p.observedSource]!;
   const ran = p.status !== 'blocked' && p.status !== 'error';
   return (
     <div data-testid="agent-result" data-status={p.status} data-kind={kind} className={`mt-2 space-y-2 rounded-chip border p-2.5 ${ok ? 'border-line-strong bg-panel-2' : 'border-warning bg-warning-tint'}`}>
@@ -164,12 +166,13 @@ function ProposalCard({ h, task, kind, outcome, onDiscard }: { h: HybridValue; t
         {ran ? <Chip tone={src.tone}>{src.label}</Chip> : null}
         {ran ? <span className="text-sm text-muted" data-testid="result-timing">{seconds(p.timing.totalMs)}</span> : null}
       </div>
-      {ran ? (
+      {ok ? (
         <p className="text-sm text-fg" data-testid="proposal-attribution">
-          <span className="font-medium">{proposalAttribution(p.observedSource, p.route?.fellBack)}.</span>{' '}
-          <span className="text-muted">{ok ? `Checks: passed, ${p.validation.errors.length} schema issue${p.validation.errors.length === 1 ? '' : 's'}. ` : ''}{PERSON_ACCEPTS}</span>
+          <span className="font-medium">{proposalAttribution(p.observedSource, fell, outcome.simulated)}.</span>{' '}
+          <span className="text-muted">{`Checks: passed, ${p.validation.errors.length} schema issue${p.validation.errors.length === 1 ? '' : 's'}. `}{PERSON_ACCEPTS}</span>
         </p>
       ) : null}
+      {violation ? <p className="text-sm font-medium text-danger" data-testid="result-violation">{p.observedSource === 'IN_CLOUD' && p.route?.effectiveMode === 'ONLY_ON_DEVICE' ? 'A cloud answer came back for a device-only task. It was discarded.' : 'This answer did not follow the task\'s route. It is not used.'}</p> : null}
       {!ok ? (
         <p className="text-fg" data-testid="result-refusal">{p.status === 'blocked' ? refusalText(p.blockedReason) : p.blockedReason ? refusalText(p.blockedReason) : STATUS_TEXT[p.status] ?? 'Not usable.'}</p>
       ) : null}

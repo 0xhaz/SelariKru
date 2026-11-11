@@ -1,7 +1,7 @@
 import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
 import type { Tone } from '@selarikru/ui';
 import { isRecordedMerge } from '../../office/model.ts';
-import { fallbackReason } from '../../features/hybrid/model.ts';
+import { fallbackReason, isRouteViolation } from '../../features/hybrid/model.ts';
 
 /**
  * The activity feed: the latest things the snapshot itself records, each with the time it carries. It is read from the current snapshot,
@@ -52,7 +52,8 @@ export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): re
   for (const t of Object.values(snapshot.tasks)) {
     const r = t.route?.lastObserved;
     if (!r || r.status === 'blocked' || r.status === 'error') continue;
-    const where = r.observedSource === 'UNKNOWN' ? { text: 'AI ran, source unknown', glyph: '?', tone: 'warning' as const }
+    const where = isRouteViolation(r) ? { text: r.status === 'route_violation' ? 'AI route violation, answer discarded' : 'AI route violation', glyph: '!', tone: 'danger' as const }
+      : r.observedSource === 'UNKNOWN' ? { text: 'AI ran, source unknown', glyph: '?', tone: 'warning' as const }
       : r.fellBack === true ? { text: r.observedSource === 'IN_CLOUD' ? 'AI fell back to cloud' : 'AI fell back to device', glyph: '↷', tone: 'warning' as const }
         : r.observedSource === 'IN_CLOUD' ? { text: 'AI ran in cloud', glyph: '☁', tone: 'active' as const } : { text: 'AI ran on device', glyph: '▣', tone: 'success' as const };
     items.push({ id: `ai:${r.recordId}`, at: r.reportedAt, glyph: where.glyph, tone: where.tone, text: `${t.title ?? t.taskId}: ${where.text}` });
@@ -77,6 +78,8 @@ export interface AiRunCounts {
   readonly cloud: number;
   readonly fellBack: number;
   readonly unknown: number;
+  /** Answers that did not follow their route: counted apart, never as a fallback. */
+  readonly violation: number;
   readonly total: number;
 }
 
@@ -85,18 +88,21 @@ export interface AiRunCounts {
  * either side; a blocked or failed call did not run and is left out, as is a task with no call yet.
  */
 export function aiRunCounts(snapshot: ProjectViewSnapshot, runId: string | null): AiRunCounts {
-  const c = { device: 0, cloud: 0, fellBack: 0, unknown: 0 };
+  const c = { device: 0, cloud: 0, fellBack: 0, unknown: 0, violation: 0 };
   if (runId !== null) {
     for (const t of Object.values(snapshot.tasks)) {
       const r = t.runId === runId ? t.route?.lastObserved : null;
-      if (!r || r.status === 'blocked' || r.status === 'error') continue;
+      if (!r) continue;
+      if (isRouteViolation(r)) { c.violation += 1; continue; }
+      // Only calls that answered usably are counted; blocked, failed and invalid ones are left out.
+      if (r.status !== 'ok') continue;
       if (r.observedSource === 'UNKNOWN') c.unknown += 1;
       else if (r.fellBack === true) c.fellBack += 1;
       else if (r.observedSource === 'ON_DEVICE') c.device += 1;
       else c.cloud += 1;
     }
   }
-  return { ...c, total: c.device + c.cloud + c.fellBack + c.unknown };
+  return { ...c, total: c.device + c.cloud + c.fellBack + c.unknown + c.violation };
 }
 
 export interface FallbackNote {
@@ -107,11 +113,12 @@ export interface FallbackNote {
 }
 
 /** The most recent route record that fell back, with its reason in one plain line (from what the record says, never guessed beyond it). */
-export function latestFallback(snapshot: ProjectViewSnapshot): FallbackNote | null {
+export function latestFallback(snapshot: ProjectViewSnapshot, runId: string | null): FallbackNote | null {
   let best: FallbackNote | null = null;
   for (const t of Object.values(snapshot.tasks)) {
-    const r = t.route?.lastObserved;
-    if (!r || r.fellBack !== true || r.status === 'blocked' || r.status === 'error') continue;
+    // The same run as the counter; only a conforming, usable answer is an allowed fallback.
+    const r = runId !== null && t.runId === runId ? t.route?.lastObserved : null;
+    if (!r || r.fellBack !== true || r.status !== 'ok' || r.conformance !== 'conforms') continue;
     if (best && Date.parse(best.at) >= Date.parse(r.reportedAt)) continue;
     best = { title: r.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', task: t.title ?? t.taskId, reason: fallbackReason(r), at: r.reportedAt };
   }

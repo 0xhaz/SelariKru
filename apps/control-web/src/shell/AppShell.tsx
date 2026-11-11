@@ -293,7 +293,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
   }, [route, panelWide, snapshot]);
-  const fallback = useMemo(() => { try { return snapshot ? latestFallback(snapshot) : null; } catch { return null; } }, [snapshot]);
+  const fallback = useMemo(() => { try { return snapshot && world ? latestFallback(snapshot, world.planRunId) : null; } catch { return null; } }, [snapshot, world]);
   const aiCounts = useMemo(() => { try { return snapshot && world ? aiRunCounts(snapshot, world.planRunId) : null; } catch { return null; } }, [snapshot, world]);
   const frame = frameOf(route);
   // The Action items drawer: what workers ask with no card of its own goes under "From workers"; records needing nothing from you stay visible as "Noted".

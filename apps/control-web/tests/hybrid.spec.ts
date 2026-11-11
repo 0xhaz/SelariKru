@@ -253,7 +253,7 @@ test('H7: the top bar counts the run\'s AI calls from route records only, and th
   await open(page, '#/pipeline', { holdAgents: true });
   const counter = page.getByTestId('ai-counter');
   const before = (await counter.textContent())!;
-  expect(before).toMatch(/^AI: \d+ on device · \d+ in cloud · \d+ fell back/);
+  expect(before).toMatch(/^AI · last call per task: \d+ device · \d+ cloud · \d+ fell back/);
   expect(before).toContain('1 fell back');
   // The fallback banner: one plain line with its task and its reason.
   await page.goto(`/tests/harness/index.html#/office`);
@@ -264,13 +264,13 @@ test('H7: the top bar counts the run\'s AI calls from route records only, and th
   // A call held in flight is a prediction: the counter does not move until its record lands.
   await page.goto(`/tests/harness/index.html#/pipeline`);
   await row(page, T('search')).getByRole('button', { name: 'Search index' }).click();
-  const deviceBefore = Number(/(\d+) on device/.exec((await counter.textContent())!)![1]);
+  const deviceBefore = Number(/(\d+) device/.exec((await counter.textContent())!)![1]);
   await action(page, 'criteria').getByRole('button', { name: 'Draft criteria' }).click();
   await expect(action(page, 'criteria').getByRole('button', { name: /running/ })).toBeVisible();
-  await expect(counter).toContainText(`${deviceBefore} on device`);
+  await expect(counter).toContainText(`${deviceBefore} device`);
   await page.evaluate(() => window.__releaseAgents!());
   await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran on this device');
-  await expect(counter).toContainText(`${deviceBefore + 1} on device`);
+  await expect(counter).toContainText(`${deviceBefore + 1} device`);
 });
 
 test('H7: a proposal says who suggested it and where, how sure the checks are, that a person accepts it, and what the AI did not see', async ({ page }) => {
@@ -280,12 +280,20 @@ test('H7: a proposal says who suggested it and where, how sure the checks are, t
   const criteria = action(page, 'criteria');
   await criteria.getByRole('button', { name: 'Draft criteria' }).click();
   const device = criteria.getByTestId('proposal-attribution');
-  await expect(device).toContainText('Suggested by Gemini Nano on this device.');
+  await expect(device).toContainText('Simulated in the demo; no model ran.');
   await expect(device).toContainText('Checks: passed, 0 schema issues.');
   await expect(device).toContainText('A person accepts every proposal. Until then it changes nothing and is not verified.');
   await expect(criteria.getByTestId('result-omissions')).toHaveText(/^(Left out of what the AI saw: \d+ items? \(.+\)\.( Left out: \d+ restricted files?\.)?|Nothing was left out of what the AI saw\.) $/);
   const breakdown = action(page, 'breakdown');
   await breakdown.getByLabel('Use cloud for this call').check();
   await breakdown.getByRole('button', { name: 'Break down' }).click();
-  await expect(breakdown.getByTestId('proposal-attribution')).toContainText('Suggested by Gemini (cloud).');
+  await expect(breakdown.getByTestId('proposal-attribution')).toContainText('Simulated in the demo; no model ran.');
+});
+
+test('H7 fix M4: on a phone the run\'s AI counts head the Boards menu, and the header stays at two rows', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, '#/office');
+  await expect(page.getByTestId('ai-counter')).toBeHidden();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ }).click();
+  await expect(page.getByTestId('menu-ai-counts')).toHaveText(/^AI · last call per task: \d+ device · \d+ cloud · \d+ fell back/);
 });

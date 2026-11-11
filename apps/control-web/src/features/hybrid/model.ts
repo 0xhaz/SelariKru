@@ -52,10 +52,22 @@ export function fallbackReason(r: RouteRecord): string {
   return 'The cloud call did not answer, so this device did, which this route allows.';
 }
 
-/** The last observed source, as reported by the browser and untrusted. An unknown source stays unknown. */
+/** A record whose answer did not follow its route (conformance `violation`, or the adapter's `route_violation`). */
+export const isRouteViolation = (r: RouteRecord): boolean => r.conformance === 'violation' || r.status === 'route_violation';
+
+/** A route violation in plain words (H7 fix I2). Never described as a fallback, and never as something the route allows. */
+export function violationText(r: RouteRecord): string {
+  const gone = r.status === 'route_violation' ? ' It was discarded.' : ' It does not count as following this task\'s route.';
+  if (r.observedSource === 'IN_CLOUD' && r.effectiveMode === 'ONLY_ON_DEVICE') return `A cloud answer came back for a device-only task.${gone}`;
+  if (r.observedSource === 'ON_DEVICE' && r.effectiveMode === 'ONLY_IN_CLOUD') return `A device answer came back for a cloud-only task.${gone}`;
+  return `The call was not sent the way this task's route says.${gone}`;
+}
+
+/** The last observed source, as reported by the browser and untrusted. An unknown source stays unknown; a violation is said as one. */
 export function observedChip(r: RouteRecord | null): Chip {
   if (!r) return { label: 'No AI call yet', tone: 'neutral', detail: null };
   if (r.status === 'blocked' || r.status === 'error') return { label: 'Stopped before running', tone: 'warning', detail: r.blockedReason ? refusalText(r.blockedReason) : 'The call did not run.' };
+  if (isRouteViolation(r)) return { label: 'Route violation', tone: 'danger', detail: violationText(r) };
   if (r.observedSource === 'UNKNOWN') return { label: 'Unknown', tone: 'warning', detail: 'Where the last call ran was not shown, so it is not counted as either.' };
   if (r.fellBack === true) return { label: r.observedSource === 'IN_CLOUD' ? 'Fell back to cloud' : 'Fell back to this device', tone: 'warning', detail: fallbackReason(r) };
   return r.observedSource === 'ON_DEVICE'
@@ -380,7 +392,9 @@ export const STATUS_TEXT: Readonly<Record<string, string>> = {
  * Who suggested a proposal and where it ran (H7), shown until it is accepted. From the SDK's reported source and the server-derived fallback flag; an
  * unknown source is said, never shown as either side.
  */
-export function proposalAttribution(source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN', fellBack: boolean | null | undefined): string {
+export function proposalAttribution(source: 'ON_DEVICE' | 'IN_CLOUD' | 'UNKNOWN', fellBack: boolean | null | undefined, simulated = false): string {
+  // Demo output came from no model, so it never names one (H7 fix I3).
+  if (simulated) return 'Simulated in the demo; no model ran';
   if (source === 'ON_DEVICE') return `Suggested by Gemini Nano on this device${fellBack === true ? ', after falling back from the cloud' : ''}`;
   if (source === 'IN_CLOUD') return `Suggested by Gemini (cloud)${fellBack === true ? ', after falling back from this device' : ''}`;
   return 'Suggested by Gemini; where it ran was not shown';

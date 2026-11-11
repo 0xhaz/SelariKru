@@ -281,3 +281,21 @@ describe('trust and transparency on a proposal (H7)', () => {
       .toBe('Left out of what the AI saw: 2 items (1 restricted, 1 too large). Left out: 1 restricted file.');
   });
 });
+
+describe('a route violation is never an allowed fallback (H7 fix I2, I3)', () => {
+  it('a violation reads as a violation in plain words, never "Fell back" and never "which this route allows"', () => {
+    const v = observedChip(record({ observedSource: 'IN_CLOUD', effectiveMode: 'ONLY_ON_DEVICE', fellBack: true, conformance: 'violation', status: 'route_violation' }));
+    expect(v.label).toBe('Route violation');
+    expect(v.tone).toBe('danger');
+    expect(v.detail).toBe('A cloud answer came back for a device-only task. It was discarded.');
+    expect(v.detail).not.toMatch(/allows/);
+    const ok = observedChip(record({ observedSource: 'IN_CLOUD', fellBack: true, conformance: 'conforms' }));
+    expect(ok.label).toBe('Fell back to cloud');
+    expect(ok.detail).toMatch(/which this route allows/);
+  });
+
+  it('demo output never names Gemini', () => {
+    expect(proposalAttribution('ON_DEVICE', false, true)).toBe('Simulated in the demo; no model ran');
+    expect(proposalAttribution('IN_CLOUD', true, true)).toBe('Simulated in the demo; no model ran');
+  });
+});
