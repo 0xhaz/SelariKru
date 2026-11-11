@@ -29,6 +29,7 @@ export const PROBLEM_TEXT: Readonly<Record<string, string>> = {
   context_refused: 'The server did not serve this step\'s context for the cloud, so it was not sent.',
   not_local_first: 'Not escalated: only a Local first task continues in the cloud after its local result fails. This one is not Local first.',
   already_escalated: 'Already escalated once; it is not escalated again.',
+  device_only: 'Not escalated: this call was set to run on this device only, so it never goes to the cloud.',
   not_failed_checks: 'Not escalated: its local result did not fail its checks.',
   escalation_refused: 'The server did not allow escalating this step.',
 };

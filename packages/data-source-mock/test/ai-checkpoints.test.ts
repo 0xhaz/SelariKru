@@ -49,6 +49,13 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     await expect(ds.saveAiCheckpoint!(f.projectId, cp())).rejects.toThrow(/checkpoint_closed/);
   });
 
+  it('fix 1 (H1): a call pinned to the device on a Local first task is never escalated', async () => {
+    const { ds, f, cp } = await setup();
+    const pinned = cp({ checkpointId: 'ckp_demo_pinned01', stopReason: 'local_failed_checks', routeMode: 'ONLY_ON_DEVICE', callOverride: 'ONLY_ON_DEVICE', continuation: 'device_only', stepKind: 'patch', stage: 'reask' });
+    await ds.saveAiCheckpoint!(f.projectId, pinned);
+    await expect(ds.claimAiCheckpointEscalation!(f.projectId, pinned.checkpointId)).rejects.toThrow(/device_only/);
+  });
+
   it('a resumed call\'s route record says so', async () => {
     const { ds, f } = await setup();
     const report = { kind: 'route' as const, requestId: 'req-resumed', stepKind: 'criteria' as const, callOverride: 'ONLY_IN_CLOUD' as const, requestedMode: 'ONLY_IN_CLOUD' as const, observedSource: 'IN_CLOUD' as const, status: 'ok' as const,

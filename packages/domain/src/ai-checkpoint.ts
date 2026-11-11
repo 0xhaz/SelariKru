@@ -184,17 +184,20 @@ export function checkpointBudget(limit: { readonly value: number | null; readonl
 
 // ---- escalation ---------------------------------------------------------------------------------------------------------------
 
-export type EscalationDecision = { readonly ok: true } | { readonly ok: false; readonly reason: 'not_failed_checks' | 'already_escalated' | 'not_local_first' | 'locked' };
+export type EscalationDecision = { readonly ok: true } | { readonly ok: false; readonly reason: 'not_failed_checks' | 'already_escalated' | 'not_local_first' | 'locked' | 'device_only' };
 
 /**
- * Whether a stopped step may continue in the cloud because its local result failed its checks. Only on Local first (the task's route, not a call override), never
- * on Local only and never on locked or restricted data, and at most once: the escalation is recorded on the checkpoint, so a reload cannot do it twice.
+ * Whether a stopped step may continue in the cloud because its local result failed its checks. Only on Local first (both the task's route now and the mode the
+ * call itself ran under), never for a call pinned to the device, never on Local only and never on locked or restricted data, and at most once: the escalation is recorded on the checkpoint, so a reload cannot do it twice.
  */
 export function escalationDecision(cp: AiCheckpoint, route: { readonly mode: RoutePolicyMode | null; readonly lock: boolean }): EscalationDecision {
   if (cp.stopReason !== 'local_failed_checks' || cp.status !== 'waiting') return { ok: false, reason: 'not_failed_checks' };
   if (cp.escalatedAt !== null) return { ok: false, reason: 'already_escalated' };
   if (route.lock || cp.locked || checkpointStorage(cp) !== 'server') return { ok: false, reason: 'locked' };
-  if (route.mode !== 'PREFER_ON_DEVICE') return { ok: false, reason: 'not_local_first' };
+  // Fix round 1 (H1): the call's own choice counts, not only the task's. A call the owner pinned to the device (its override, or a device-only continuation) is
+  // never sent to the cloud, whatever the task's route says; and the call itself must have run Local first.
+  if (cp.callOverride === 'ONLY_ON_DEVICE' || cp.continuation !== 'cloud_capable') return { ok: false, reason: 'device_only' };
+  if (cp.routeMode !== 'PREFER_ON_DEVICE' || route.mode !== 'PREFER_ON_DEVICE') return { ok: false, reason: 'not_local_first' };
   return { ok: true };
 }
 

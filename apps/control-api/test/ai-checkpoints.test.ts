@@ -138,6 +138,12 @@ describe('AI step checkpoints on the server (H12)', () => {
       expect((await escalate('ckp_offline_00001')).body.error).toMatchObject({ code: 'escalation_refused', details: { reason: 'not_failed_checks' } });
     });
 
+    it('fix 1 (H1): is refused for a call the owner pinned to the device, even on a Local first task', async () => {
+      await routeOf('PREFER_ON_DEVICE');
+      await save(failed({ callOverride: 'ONLY_ON_DEVICE', routeMode: 'ONLY_ON_DEVICE', continuation: 'device_only' }));
+      expect((await escalate()).body.error).toMatchObject({ code: 'escalation_refused', details: { reason: 'device_only' } });
+    });
+
     it('is refused when the task became locked after the checkpoint was stored', async () => {
       await routeOf('PREFER_ON_DEVICE');
       await save(failed());

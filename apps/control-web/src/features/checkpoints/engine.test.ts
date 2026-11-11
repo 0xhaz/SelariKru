@@ -192,6 +192,18 @@ describe('the checkpoint engine (H12)', () => {
       expect(h.runs).toHaveLength(1);
     });
 
+    it('fix 1 (H1): never for a call the owner pinned to this device, even on a Local first task', async () => {
+      const h = setup({}, localFirst);
+      const rec = h.engine.begin({ taskId: 't1', stepKind: 'patch', callOverride: 'ONLY_ON_DEVICE' });
+      rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+      const r = result(proposal({ status: 'invalid', observedSource: 'ON_DEVICE', requestedMode: 'ONLY_ON_DEVICE', validation: { status: 'failed', errors: ['/diff diff_does_not_apply'] }, route: { ...proposal().route!, callOverride: 'ONLY_ON_DEVICE', effectiveMode: 'ONLY_ON_DEVICE' } }), 'patch');
+      rec.stage({ stage: 'patch', result: r });
+      await rec.finish({ kind: 'result', result: r, context: context() });
+      expect(h.runs).toEqual([]);
+      expect(h.server.claims).toBe(0);
+      expect(h.engine.store.getState().problems[rec.id]).toEqual(['device_only']);
+    });
+
     it('never on Local only, and never on locked data', async () => {
       const only = setup({}, () => route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE' }));
       const id = await localFailed(only);

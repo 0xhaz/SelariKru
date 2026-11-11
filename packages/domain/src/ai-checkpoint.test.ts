@@ -92,6 +92,18 @@ describe('AI step checkpoints (H12)', () => {
     expect(escalationDecision(cp(), { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: false, reason: 'not_failed_checks' });
   });
 
+  it('fix 1 (H1): escalation respects the call\'s own device-only choice: a call pinned to the device on a Local first task never goes to the cloud', () => {
+    const failed = cp({ stopReason: 'local_failed_checks', routeMode: 'PREFER_ON_DEVICE', continuation: 'cloud_capable' });
+    // The review's case: Local first task, this call overridden to Local only. Its effective mode was Local only and its continuation device only.
+    const pinned = { ...failed, callOverride: 'ONLY_ON_DEVICE' as const, routeMode: 'ONLY_ON_DEVICE' as const, continuation: 'device_only' as const };
+    expect(escalationDecision(pinned, { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: false, reason: 'device_only' });
+    // Each condition on its own refuses too.
+    expect(escalationDecision({ ...failed, callOverride: 'ONLY_ON_DEVICE' }, { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: false, reason: 'device_only' });
+    expect(escalationDecision({ ...failed, continuation: 'device_only' }, { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: false, reason: 'device_only' });
+    expect(escalationDecision({ ...failed, routeMode: 'PREFER_IN_CLOUD' }, { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: false, reason: 'not_local_first' });
+    expect(escalationDecision(failed, { mode: 'PREFER_ON_DEVICE', lock: false })).toEqual({ ok: true });
+  });
+
   it('inside the accepted plan a checkpoint resumes on its own; outside it, or for a step that changes the plan, it waits for the owner', () => {
     const plan = { planRevision: 3, taskIds: ['t1', 't2'] };
     expect(resumeDisposition(cp(), plan)).toBe('automatic');
