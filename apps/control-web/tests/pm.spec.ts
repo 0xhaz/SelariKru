@@ -88,6 +88,13 @@ test('I4: the PM drafts a plan, the owner accepts it, and the PM then assigns in
   await reply.getByRole('button', { name: 'Accept plan' }).click();
   await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Accepted as plan rev 2');
   await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Routes set:');
+  // Fix round 1 (I5): what was applied is exactly what was shown, never wider than the task's route now.
+  await expect(reply.getByTestId('pm-plan-route').first()).toContainText(/now .+ → proposed /);
+  const shown = await reply.getByTestId('pm-plan-route').evaluateAll((els) => els.filter((e) => e.getAttribute('data-locked') === 'false').map((e) => e.getAttribute('data-mode')));
+  const applied = await page.evaluate(() => (window.__calls.commands as { method: string; command?: { command: string; args: { change: { field: string; value: unknown } } } }[])
+    .filter((c) => c.method === 'execute' && c.command?.command === 'setting.set' && c.command.args.change.field === 'route_override').map((c) => c.command!.args.change.value));
+  expect(applied.length).toBeGreaterThan(0);
+  expect(applied).toEqual(shown);
   // Fix round 2 (I4): the plan revised an existing task (same id, the PM's title) and added one; it did not only bump the revision.
   await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo plan step (revised)' })).toHaveCount(1);
   await expect(page.getByTestId('pm-subject').locator('option', { hasText: 'Demo follow-up' })).toHaveCount(1);

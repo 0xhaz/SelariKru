@@ -3,7 +3,7 @@ import { useStore } from 'zustand';
 import { create } from 'zustand';
 import type { BrowserInputs } from '../hybrid/model.ts';
 import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
-import { planRouteProposals, routeTargets } from './routes.ts';
+import { planRouteProposals, routeTargets, type ShownRoute } from './routes.ts';
 import { rememberedTurns } from './memory.ts';
 import { modeLabel } from '../hybrid/model.ts';
 import type { RoutePolicyMode } from '@selarikru/domain';
@@ -33,6 +33,8 @@ type Reply = {
   readonly accepted?: { readonly planRevision: number } | { readonly error: string } | 'sending' | undefined;
   /** H12: the routes set with the accepted plan: how many were set, and how many were refused. */
   readonly routes?: { readonly set: number; readonly refused: number };
+  /** Fix round 1 (I5): the route proposals as shown, computed once when the reply arrived; Accept writes exactly these. */
+  readonly routeProposals?: readonly ShownRoute[];
 };
 type NewTurn = { readonly who: 'owner'; readonly text: string; readonly restricted: boolean; readonly kind: PmKind } | { readonly who: 'pm'; readonly reply: Reply };
 type Turn = NewTurn & { readonly id: number };
@@ -114,14 +116,14 @@ function ReplyView({ reply, snap, browser, onAcceptPlan }: { reply: Reply; snap:
             <div>
               {(() => {
                 const tasks = data['tasks'] as { key: string; title: string; role: string; revises?: string }[];
-                // H12: where each task runs, proposed with its reason; accepted with the plan.
-                const routes = planRouteProposals(tasks, snap, o.context?.task.classification ?? 'restricted', browser);
+                // H12: where each task runs, proposed with its reason; accepted with the plan. The proposals were fixed when the reply arrived (fix round 1, I5).
+                const routes = reply.routeProposals ?? [];
                 return (
                   <ol className="list-decimal pl-5 text-fg">{tasks.map((t) => {
                     const r = routes.find((x) => x.key === t.key);
                     return (
                       <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role}{t.revises ? `; revises ${snap?.tasks[t.revises]?.title ?? t.revises}` : '; new task'})</span>
-                        {r ? <span className="block text-sm text-fg" data-testid="pm-plan-route">Runs on: {modeLabel(r.mode)}{r.locked ? ' (fixed)' : ''}. <span className="text-muted">{r.reason}</span></span> : null}
+                        {r ? <span className="block text-sm text-fg" data-testid="pm-plan-route" data-mode={r.mode} data-locked={r.locked ? "true" : "false"}>Runs on: {modeLabel(r.mode)}{r.locked ? ' (fixed)' : ''} ({r.change}). <span className="text-muted">{r.reason}</span></span> : null}
                       </li>
                     );
                   })}</ol>
@@ -205,7 +207,10 @@ export function PmPanel() {
       const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question: asked, questionClassification: label, history, callOverride: override });
       // The call came back locked (its route said so, whatever this tab's snapshot showed): the question was restricted, and is kept as such.
       if (ownerTurnLabelAfter(label, outcome) === 'restricted' && label !== 'restricted') pmConversation.getState().restrict(ownerId);
-      const rid = add({ who: 'pm', reply: { kind, subjectTaskId: subjectId, outcome } });
+      // A plan's route proposals are computed once, here, and are what Accept writes (fix round 1, I5).
+      const planTasks = kind === 'pmPlan' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' ? (outcome.result.proposal.data as { tasks?: { key: string; revises?: string }[] }).tasks : undefined;
+      const routeProposals = planTasks ? planRouteProposals(planTasks, h.snapshot, outcome.kind === 'result' ? outcome.context?.task.classification ?? 'restricted' : 'restricted', h.browser, outcome.kind === 'result' ? outcome.runId : null) : undefined;
+      const rid = add({ who: 'pm', reply: { kind, subjectTaskId: subjectId, outcome, ...(routeProposals ? { routeProposals } : {}) } });
       // H11: the PM's assignments apply on their own, inside the accepted plan only; the server re-checks them and refuses anything else, for you.
       if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && !h.agents.delegate) {
         pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: { error: 'This source cannot apply assignments, so they wait for you.' } });
@@ -243,7 +248,7 @@ export function PmPanel() {
       h.refresh();
       // H12: the routes the PM proposed, accepted with the plan: each task's own route override, through the same owner write as the "Runs on" control.
       const tasks = (o.result.proposal.data as { tasks?: { key: string; revises?: string }[] }).tasks ?? [];
-      const targets = routeTargets(tasks, planRouteProposals(tasks, h.snapshot, o.context?.task.classification ?? 'restricted', h.browser), r.taskIds, h.snapshot);
+      const targets = routeTargets(tasks, reply.routeProposals ?? [], r.taskIds, h.snapshot);
       let set = 0;
       for (const t of targets) {
         const sent = await sendCommand(h, { command: 'setting.set', expectedRevision: t.overrideRevision, args: { projectId: h.projectId, key: t.taskId, change: { scope: 'task', field: 'route_override', value: t.mode } } } as never);

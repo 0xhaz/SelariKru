@@ -24,3 +24,31 @@ describe('the PM\'s route per task (H12)', () => {
     ]);
   });
 });
+
+describe('fix 1 (I5): a PM route proposal never widens a route', () => {
+  const routeOf = (effective: string, lock: unknown = null) => ({ effective, source: 'run', runDefault: effective, override: null, overrideRevision: 0, lock, suggestion: null, lastObserved: null }) as never;
+  const runWith = (value: string | null) => {
+    const s = snapshotOf({ tasks: [task('t1', { route: routeOf('ONLY_ON_DEVICE') }), task('t2', { route: routeOf('PREFER_ON_DEVICE') })] });
+    return { ...s, runs: { run: { ...s.runs['run']!, routePolicy: { value, origin: 'owner', revision: 1 } as never } } };
+  };
+
+  it('a run default of Device only is not widened, for a revised task or a new one; each says "now X → proposed Y"', () => {
+    const routes = planRouteProposals([{ key: 'T1', revises: 't1' }, { key: 'T2' }], runWith('ONLY_ON_DEVICE'), 'internal', BROWSER, 'run');
+    expect(routes.map((r) => [r.key, r.mode])).toEqual([['T1', 'ONLY_ON_DEVICE'], ['T2', 'ONLY_ON_DEVICE']]);
+    expect(routes[0]!.change).toBe('now Local only → proposed Local only');
+  });
+
+  it('a Local first task is not proposed the cloud, even for a long input; it may be narrowed', () => {
+    const routes = planRouteProposals([{ key: 'T1', revises: 't2' }], runWith('PREFER_IN_CLOUD'), 'internal', { ...BROWSER, online: false }, 'run');
+    expect(routes[0]).toMatchObject({ mode: 'ONLY_ON_DEVICE', change: 'now Local first → proposed Local only' });
+    const wide = planRouteProposals([{ key: 'T1', revises: 't2' }], runWith('PREFER_IN_CLOUD'), 'internal', { ...BROWSER, nanoBudgetChars: 1 }, 'run');
+    expect(wide[0]!.mode).toBe('PREFER_ON_DEVICE');
+  });
+
+  it('what is applied is exactly what was shown', () => {
+    const plan = [{ key: 'T1', revises: 't2' }, { key: 'T2' }];
+    const shown = planRouteProposals(plan, runWith('PREFER_IN_CLOUD'), 'internal', BROWSER, 'run');
+    const applied = routeTargets(plan, shown, ['t2', 'new-2'], runWith('PREFER_IN_CLOUD'));
+    expect(applied.map((a) => a.mode)).toEqual(shown.filter((r) => !r.locked).map((r) => r.mode));
+  });
+});
