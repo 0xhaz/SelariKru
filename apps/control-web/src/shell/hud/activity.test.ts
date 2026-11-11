@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { iso, snapshotOf, task } from '../../features/overview/testing.ts';
-import { recentActivity } from './activity.ts';
+import { aiRunCounts, latestFallback, recentActivity } from './activity.ts';
 
 describe('the activity feed', () => {
   it('lists what the snapshot recorded, newest first, each with its own time', () => {
@@ -54,5 +54,44 @@ describe('the activity feed', () => {
     const ai = recentActivity(s, 7).filter((i) => i.id.startsWith('ai:'));
     expect(ai.map((i) => i.text)).toEqual(['List UI: AI fell back to cloud', 'Feedback API: AI ran in cloud', 'Add table: AI ran on device', 'Search: AI ran, source unknown']);
     expect(ai[0]!.at).toBe(iso(1));
+  });
+});
+
+describe('the run\'s AI counter and the fallback banner (H7)', () => {
+  const rec = (over: Record<string, unknown>) => ({
+    recordId: `r-${String(over['taskId'] ?? 'a')}`, taskId: 'a', taskRevision: 1, requestId: 'q', stepKind: 'patch', callOverride: null, requestedMode: 'PREFER_ON_DEVICE', effectiveMode: 'PREFER_ON_DEVICE', policySource: 'run', locked: false,
+    observedSource: 'ON_DEVICE', fellBack: false, conformance: 'conforms', requestModeMismatch: false, status: 'ok', model: { cloudModel: 'm', sdkVersion: '12.5.0' }, timing: { totalMs: 900, firstOutputMs: null },
+    validation: 'passed', blockedReason: null, reportedBy: 'browser', trust: 'untrusted', reportedAt: iso(3), ...over,
+  });
+  const route = (lastObserved: unknown) => ({ effective: 'PREFER_ON_DEVICE', source: 'run', runDefault: 'PREFER_ON_DEVICE', override: null, overrideRevision: 0, lock: null, suggestion: { mode: 'PREFER_ON_DEVICE', rule: 'bounded_step', reason: 'r', locked: false }, lastObserved }) as never;
+  const s = snapshotOf({ tasks: [
+    task('a', { title: 'Add table', route: route(rec({})) }),
+    task('b', { title: 'Feedback API', route: route(rec({ taskId: 'b', observedSource: 'IN_CLOUD', effectiveMode: 'ONLY_IN_CLOUD' })) }),
+    task('c', { title: 'List UI', route: route(rec({ taskId: 'c', observedSource: 'IN_CLOUD', fellBack: true, reportedAt: iso(1) })) }),
+    task('d', { title: 'Search', route: route(rec({ taskId: 'd', observedSource: 'UNKNOWN', fellBack: null, conformance: 'unverified' })) }),
+    task('e', { title: 'Blocked call', route: route(rec({ taskId: 'e', observedSource: 'UNKNOWN', fellBack: null, status: 'blocked', blockedReason: 'device_unavailable' })) }),
+    task('f', { title: 'No call yet', route: route(null) }),
+    task('g', { title: 'Other run', runId: 'other', route: route(rec({ taskId: 'g' })) }),
+  ] });
+
+  it('counts the run\'s route records: on device, in cloud and fell back apart, unknown said, blocked and no call left out', () => {
+    const c = aiRunCounts(s, 'run');
+    expect(c).toEqual({ device: 1, cloud: 1, fellBack: 1, unknown: 1, total: 4 });
+    expect(c.total).toBe(c.device + c.cloud + c.fellBack + c.unknown);
+  });
+
+  it('counts records only: the function sees the snapshot and nothing that is in flight, and a run with no records counts zero', () => {
+    expect(aiRunCounts.length).toBe(2);
+    expect(aiRunCounts(snapshotOf({ tasks: [task('x', { route: route(null) })] }), 'run')).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, total: 0 });
+    expect(aiRunCounts(s, null)).toEqual({ device: 0, cloud: 0, fellBack: 0, unknown: 0, total: 0 });
+  });
+
+  it('names the latest fallback with its task and its reason in one plain line, from the record', () => {
+    const f = latestFallback(s)!;
+    expect(f.title).toBe('Fell back to cloud');
+    expect(f.task).toBe('List UI');
+    expect(f.reason).toBe('The device model was not ready, so the cloud answered, which this route allows.');
+    expect(f.at).toBe(iso(1));
+    expect(latestFallback(snapshotOf({ tasks: [task('a', { route: route(rec({})) })] }))).toBeNull();
   });
 });

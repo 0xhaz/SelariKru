@@ -3,6 +3,7 @@
 import { forwardRef, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { TONE_TEXT, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import type { OfficeRunChoice } from '../../office/model.ts';
+import type { AiRunCounts } from './activity.ts';
 import type { ConnectionState } from '../projection-store.ts';
 import { hashWith, hrefFor, type Route } from '../route.ts';
 import { ui } from '../ui-store.ts';
@@ -140,6 +141,8 @@ export interface TopBarProps {
   readonly speed: number;
   readonly onSpeed: (speed: number) => void;
   readonly running: number | null;
+  /** The run's AI calls by where they ran, from route records; null when there is no run to count. */
+  readonly aiCounts: AiRunCounts | null;
   readonly workers: readonly { id: string; name: string }[];
   readonly selectedWorker: string | null;
   readonly debugOpen: boolean;
@@ -152,12 +155,33 @@ export interface TopBarProps {
 const SPEEDS = [1, 2, 4] as const;
 
 /**
+ * The run's AI counter (H7): where the run's AI calls ran, counted from route records (each task's last one, as the browser reported it), never from
+ * a prediction or a call still in flight. A fallback counts once, as a fallback; an unknown source is said, never folded into either side.
+ */
+export function aiCounterText(c: AiRunCounts): string {
+  if (c.total === 0) return 'AI: no calls recorded yet';
+  const parts = [`${c.device} on device`, `${c.cloud} in cloud`, `${c.fellBack} fell back`];
+  if (c.unknown > 0) parts.push(`${c.unknown} unknown`);
+  return `AI: ${parts.join(' · ')}`;
+}
+
+function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | null }) {
+  const why = `Counted from each task's last route record${runId ? ` in ${runId}` : ''}, as reported by the browser. Calls still in flight are not counted.`;
+  return (
+    <span data-testid="ai-counter" className="chip shrink-0 justify-center whitespace-normal text-[12px] leading-[16px]" title={why}>
+      <span aria-hidden="true">{aiCounterText(counts)}</span>
+      <span className="sr-only">{`${aiCounterText(counts)}. ${why}`}</span>
+    </span>
+  );
+}
+
+/**
  * The reference's top bar: the mark and name, the Demo data chip, the project, the plan wall's run, the demo speed, zoom, the sandbox count, and
  * the main menus (Action items, Boards, PRs, Terminal, Settings, Debug in development). Below the floating layout's width it sits at the top of
  * the page and wraps.
  */
 export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props, ref) {
-  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide } = props;
+  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, aiCounts, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide } = props;
   // The narrow nav scrolls sideways: the current page must be in view, or the operator cannot tell where they are.
   const navRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -182,7 +206,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         </label>
       ) : null}
       {mode === 'mock' ? (
-        <span className="hidden gap-1.5 lg:flex" role="group" aria-label="Office animation speed (demo)" title="Demo only: how fast the office animates. It does not change any data.">
+        <span className="hidden gap-1.5 2xl:flex" role="group" aria-label="Office animation speed (demo)" title="Demo only: how fast the office animates. It does not change any data.">
           {SPEEDS.map((x) => <button key={x} type="button" className="btn px-2 text-[14px]" aria-pressed={speed === x} onClick={() => onSpeed(x)}>{x}x</button>)}
         </span>
       ) : null}
@@ -190,12 +214,16 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom out" onClick={() => ui.zoom(-1)}>−</button>
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom in" onClick={() => ui.zoom(1)}>+</button>
       </span>
-      {running !== null ? (
-        <span data-testid="sandbox-chip" className="hidden items-center gap-2 whitespace-nowrap border-2 border-ink bg-deep px-2.5 py-0.5 text-[15px] text-paper lg:flex" title="Each worker runs in its own sandbox">
-          <span>Sandbox · <b>{running}</b> running</span>
-          <i aria-hidden="true" className="led" data-off={running === 0 ? '' : undefined} />
-        </span>
-      ) : null}
+      {/* The sandbox count and, under it, where the run's AI calls ran (H7), stacked so both fit the bar. */}
+      <span className="order-5 flex w-full shrink-0 flex-col justify-center gap-0.5 pb-1 xl:order-none xl:w-auto xl:pb-0">
+        {running !== null ? (
+          <span data-testid="sandbox-chip" className="hidden items-center justify-between gap-2 whitespace-nowrap rounded-[3px] border-2 border-ink bg-deep px-2 text-[13px] leading-[18px] text-paper lg:flex" title="Each worker runs in its own sandbox">
+            <span>Sandbox · <b>{running}</b> running</span>
+            <i aria-hidden="true" className="led" data-off={running === 0 ? '' : undefined} />
+          </span>
+        ) : null}
+        {aiCounts !== null ? <AiCounter counts={aiCounts} runId={planRunId} /> : null}
+      </span>
       <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:w-auto xl:flex-1 xl:justify-end xl:overflow-visible xl:p-0">
         {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
         <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-gold)' } : undefined}>

@@ -43,7 +43,7 @@ export interface Chip {
 }
 
 /** Why a call fell back: from what the record says, never guessed beyond it. */
-function fallbackReason(r: RouteRecord): string {
+export function fallbackReason(r: RouteRecord): string {
   if (r.observedSource === 'IN_CLOUD') {
     return r.requestModeMismatch && r.requestedMode === 'ONLY_IN_CLOUD'
       ? 'The input was too large for the device model, so it was sent to the cloud, which this route allows.'

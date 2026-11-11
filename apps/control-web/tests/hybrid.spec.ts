@@ -247,3 +247,28 @@ test('accepting criteria for a task with a pending approval asks first, and Esca
   await page.getByRole('dialog', { name: 'Replan this task with these criteria?' }).getByRole('button', { name: 'Replan with these criteria' }).click();
   await expect(criteria.getByTestId('criteria-accepted')).toContainText('Criteria revision recorded in the demo');
 });
+
+test('H7: the top bar counts the run\'s AI calls from route records only, and the activity feed explains the latest fallback', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline', { holdAgents: true });
+  const counter = page.getByTestId('ai-counter');
+  const before = (await counter.textContent())!;
+  expect(before).toMatch(/^AI: \d+ on device · \d+ in cloud · \d+ fell back/);
+  expect(before).toContain('1 fell back');
+  // The fallback banner: one plain line with its task and its reason.
+  await page.goto(`/tests/harness/index.html#/office`);
+  const banner = page.getByTestId('activity-fallback');
+  await expect(banner).toContainText('Fell back to cloud');
+  await expect(banner).toContainText('Feedback list UI');
+  await expect(banner).toContainText('The device model was not ready, so the cloud answered, which this route allows.');
+  // A call held in flight is a prediction: the counter does not move until its record lands.
+  await page.goto(`/tests/harness/index.html#/pipeline`);
+  await row(page, T('search')).getByRole('button', { name: 'Search index' }).click();
+  const deviceBefore = Number(/(\d+) on device/.exec((await counter.textContent())!)![1]);
+  await action(page, 'criteria').getByRole('button', { name: 'Draft criteria' }).click();
+  await expect(action(page, 'criteria').getByRole('button', { name: /running/ })).toBeVisible();
+  await expect(counter).toContainText(`${deviceBefore} on device`);
+  await page.evaluate(() => window.__releaseAgents!());
+  await expect(action(page, 'criteria').getByTestId('agent-result')).toContainText('Ran on this device');
+  await expect(counter).toContainText(`${deviceBefore + 1} on device`);
+});

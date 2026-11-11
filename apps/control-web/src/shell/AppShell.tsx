@@ -34,7 +34,7 @@ import { applyFont, savedFont } from '../theme/fonts.ts';
 import { OfficeCanvas } from '../office/OfficeCanvas.tsx';
 import { buildOfficeWorld, type OfficeWorld } from '../office/model.ts';
 import { ActivityFeed } from './hud/ActivityFeed.tsx';
-import { recentActivity } from './hud/activity.ts';
+import { aiRunCounts, latestFallback, recentActivity } from './hud/activity.ts';
 import { ConnectionBanner } from './hud/ConnectionBanner.tsx';
 import { OfficeHome } from './hud/OfficeHome.tsx';
 import { Tooltip } from './hud/Tooltip.tsx';
@@ -293,6 +293,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
   }, [route, panelWide, snapshot]);
+  const fallback = useMemo(() => { try { return snapshot ? latestFallback(snapshot) : null; } catch { return null; } }, [snapshot]);
+  const aiCounts = useMemo(() => { try { return snapshot && world ? aiRunCounts(snapshot, world.planRunId) : null; } catch { return null; } }, [snapshot, world]);
   const frame = frameOf(route);
   // The Action items drawer: what workers ask with no card of its own goes under "From workers"; records needing nothing from you stay visible as "Noted".
   const titles = useMemo(() => Object.fromEntries(Object.values(snapshot?.tasks ?? {}).map((t) => [t.taskId, t.title ?? t.taskId])), [snapshot]);
@@ -464,7 +466,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         <TopBar
           ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
           attentionCount={attentionCount} attentionNumber={builtDecisions.decisions ? waitingCount : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
-          runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null}
+          runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null} aiCounts={aiCounts}
           workers={world?.agents.map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
           debugOpen={debugOpen} onDebug={import.meta.env.DEV ? () => setDebugOpen((o) => !o) : null}
           teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
@@ -472,7 +474,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         />
         <ConnectionBanner connection={connection} />
         {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
-        {panelWide ? <ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} /> : null}
+        {panelWide ? <ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} /> : null}
       </div>
 
       {/* The screen in front of the office. Under a worker open beside the team cards it is inert; the scrim and the hint say why it does not respond. */}
@@ -481,7 +483,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         {frame === 'office' ? (
           <>
             {pausedHint ? <div className="fixed inset-x-0 top-[74px]">{pausedHint}</div> : null}
-            <OfficeHome world={world} wide={panelWide} activity={<ActivityFeed items={activity} nowMs={state.nowMs} stale={stale} />} />
+            <OfficeHome world={world} wide={panelWide} activity={<ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} />} />
           </>
         ) : frame === 'settings' ? (
           <SettingsModal paused={pausedHint}>{views}</SettingsModal>
