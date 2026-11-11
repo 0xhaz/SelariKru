@@ -1,8 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { schema, withTx } from '@selarikru/persistence';
+import { createDb, schema, withTx } from '@selarikru/persistence';
 import { createScheduler } from '@selarikru/workflow';
-import { CLOUD_POLICY, TEST_CATALOG } from '@selarikru/workflow/test-helpers';
+import { CLOUD_POLICY, TEST_CATALOG, TEST_DATABASE_URL } from '@selarikru/workflow/test-helpers';
 import { API_POLICY, PROJECT, RUN, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 import { finishCancelledRuns, settlePendingSettings } from '../src/settings.ts';
 import { bumpStatus } from '../src/store.ts';
@@ -202,6 +202,12 @@ describe('cloud revoke of a running cloud attempt, through the route', () => {
 
 describe('a deadlock between a run cancel and a lease path', () => {
   it('the cancel gets the retryable 503 and records nothing', async () => {
+    // The route's own connections check for a cycle at 5 s, not 1 s, and the lease side at 10 s: on a loaded machine the lease can be slow to ask for the run row, and
+    // with a 1 s window the lease would be the victim at 10 s while the cancel held the scheduler lock, which every test file's tenant shares (see lock-order.test.ts).
+    const routeDb = createDb(TEST_DATABASE_URL, { searchPath: t.schema, max: 10, connection: { deadlock_timeout: '5s' } });
+    await h.app.close();
+    h = makeHarness({ ...t, db: routeDb.db });
+    try {
     const a = await enrolRunner(h.app);
     await seedTask(t.db, specFor('t1'));
     await claim(a.token);
@@ -231,5 +237,10 @@ describe('a deadlock between a run cancel and a lease path', () => {
     expect(await count('events')).toBe(eventsBefore);
     expect(await count('task_commands')).toBe(0);
     expect((await t.db.execute(sql`SELECT cancel_requested_at FROM runs`))[0]!['cancel_requested_at']).toBeNull();
+    } finally {
+      await h.app.close();
+      await routeDb.close();
+      h = makeHarness(t);
+    }
   });
 });

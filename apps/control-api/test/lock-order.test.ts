@@ -3,7 +3,8 @@
  * the route is queued behind it, then asks for the lock the route would already hold if it took them in the wrong order. A wrong order is a real Postgres deadlock here.
  */
 import { sql } from 'drizzle-orm';
-import { withTx, type Tx } from '@selarikru/persistence';
+import { createDb, withTx, type Db, type Tx } from '@selarikru/persistence';
+import { TEST_DATABASE_URL } from '@selarikru/workflow/test-helpers';
 import { lockStaleCandidate, markRunReadyForReview, type TrustedVerifier } from '@selarikru/workflow';
 import { lockForVerdict } from '../../../services/verifier/src/service.ts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -11,17 +12,30 @@ import { PROJECT, RUN, TENANT, bearer, enrolRunner, makeHarness, post, resetDb, 
 
 let t: TestDb;
 let h: Harness;
+/** The routes' own connections: a deadlock check at 5 s instead of 1 s. See `ROUTE_DEADLOCK_TIMEOUT`. */
+let routeDb: { db: Db; close(): Promise<void> };
 const SHA = 'c'.repeat(40);
 const TRUSTED: TrustedVerifier = { checkManifestSha256: 'a'.repeat(64), verifierSha256: 'b'.repeat(64) };
 
+/**
+ * Postgres looks for a cycle once, `deadlock_timeout` after a backend starts to wait. The route's check must find the cycle the competitor closes, so the competitor
+ * must ask for its second lock inside the route's window, and the competitor's own check must come later. With the default 1 s window a loaded machine can miss it:
+ * the competitor is then the victim, at its own timeout, and the route holds the scheduler lock all that time. That lock's key is per tenant, and every test file
+ * uses the same tenant on the same database, so the hold stalled other files' scheduler work past their 30 s timeouts. Give the route 5 s, the competitor 10 s.
+ */
+const ROUTE_DEADLOCK_TIMEOUT = '5s';
+const COMPETITOR_DEADLOCK_TIMEOUT = '10s';
+
 beforeAll(async () => {
   t = await setupTestDb();
+  routeDb = createDb(TEST_DATABASE_URL, { searchPath: t.schema, max: 10, connection: { deadlock_timeout: ROUTE_DEADLOCK_TIMEOUT } });
   // A record store that has nothing: every assembled candidate reads as stale, which is what sends reverify and replan through the candidate lock.
-  h = makeHarness(t, {}, undefined, { evidence: { trusted: () => TRUSTED, artifacts: { read: async () => null } as never, loadRecord: async () => null } });
+  h = makeHarness({ ...t, db: routeDb.db }, {}, undefined, { evidence: { trusted: () => TRUSTED, artifacts: { read: async () => null } as never, loadRecord: async () => null } });
   await h.app.ready();
 });
 afterAll(async () => {
   await h.app.close();
+  await routeDb.close();
   await t.close();
 });
 beforeEach(async () => {
@@ -50,15 +64,17 @@ async function queuedBehind(tx: Tx): Promise<void> {
  * Runs `route` while a transaction holds `first`, then takes `second` once the route is waiting. The competitor gets a long deadlock timeout, so if there is a cycle
  * the route is the one Postgres aborts and the test sees it.
  */
-async function race<T>(first: (tx: Tx) => Promise<unknown>, second: (tx: Tx) => Promise<unknown>, route: () => Promise<T>): Promise<T> {
+async function race<T>(first: (tx: Tx) => Promise<unknown>, second: (tx: Tx) => Promise<unknown>, route: () => Promise<T>, o: { lateMs?: number } = {}): Promise<T> {
   let started!: () => void;
   const holding = new Promise<void>((r) => { started = r; });
   let pending: Promise<T> | undefined;
   const competitor = withTx(t.db, async (tx) => {
-    await tx.execute(sql`SET LOCAL deadlock_timeout = '20s'`);
+    await tx.execute(sql.raw(`SET LOCAL deadlock_timeout = '${COMPETITOR_DEADLOCK_TIMEOUT}'`));
     await first(tx);
     started();
     await queuedBehind(tx);
+    // A loaded machine is slow between seeing the route queued and asking for the second lock. `lateMs` makes that slowness certain.
+    if (o.lateMs) await new Promise((r) => setTimeout(r, o.lateMs));
     await second(tx);
   });
   await holding;
@@ -132,6 +148,16 @@ describe('a deadlock on an owner route', () => {
     expect(await t.db.execute(sql`SELECT 1 FROM task_revisions WHERE task_id = 't1' AND revision = 2`)).toHaveLength(0);
     // The same request again goes through.
     expect((await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('t1', { revision: 2 })] })).status).toBe(201);
+  });
+
+  it('is still the route that loses when the competitor asks for its second lock late, as on a loaded machine, and the tenant-wide scheduler lock is not held for long', async () => {
+    await seedTask(t.db, specFor('t1'), 'ready');
+    const start = Date.now();
+    const res = await race((tx) => statusRow(tx, 't1'), runRow, () => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, tasks: [specFor('t1', { revision: 2 })] }), { lateMs: 1500 });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('transaction_conflict');
+    // The route held the scheduler lock, which every test file's tenant shares, only until the route side's own deadlock check: well under the competitor's.
+    expect(Date.now() - start).toBeLessThan(9000);
   });
 
   it.each([['40P01', 'deadlock_detected'], ['40001', 'serialization_failure']])('maps a wrapped %s (%s) to the same 503', async (code) => {

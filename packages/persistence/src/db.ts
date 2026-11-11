@@ -11,6 +11,8 @@ export interface CreateDbOptions {
   max?: number;
   /** Sets the connection search_path. Used by tests to isolate a schema; omit in production. */
   searchPath?: string;
+  /** Extra session parameters sent at connect. Tests only (a lock-order race sets its routes' `deadlock_timeout`); omit in production. */
+  connection?: Readonly<Record<string, string>>;
 }
 
 /** The caller supplies the connection string. Library code has no default and reads no environment. */
@@ -18,7 +20,7 @@ export function createDb(connectionString: string, options: CreateDbOptions = {}
   const client = postgres(connectionString, {
     max: options.max ?? 10,
     onnotice: () => {},
-    ...(options.searchPath ? { connection: { search_path: options.searchPath } } : {}),
+    ...(options.searchPath || options.connection ? { connection: { ...(options.connection ?? {}), ...(options.searchPath ? { search_path: options.searchPath } : {}) } } : {}),
   });
   return { db: drizzle(client, { schema }), close: () => client.end() };
 }
