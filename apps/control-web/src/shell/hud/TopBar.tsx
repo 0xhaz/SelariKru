@@ -214,8 +214,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom out" onClick={() => ui.zoom(-1)}>−</button>
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom in" onClick={() => ui.zoom(1)}>+</button>
       </span>
-      {/* The sandbox count and, under it, where the run's AI calls ran (H7), stacked so both fit the bar. */}
-      <span className="order-5 flex w-full shrink-0 flex-col justify-center gap-0.5 pb-1 xl:order-none xl:w-auto xl:pb-0">
+      {/* The sandbox count and, under it, where the run's AI calls ran (H7), stacked so both fit the bar. At phone width the header keeps to two rows, so the counter shows from 640 px. */}
+      <span className="order-5 hidden w-full shrink-0 flex-col justify-center gap-0.5 pb-1 sm:flex xl:order-none xl:w-auto xl:pb-0">
         {running !== null ? (
           <span data-testid="sandbox-chip" className="hidden items-center justify-between gap-2 whitespace-nowrap rounded-[3px] border-2 border-ink bg-deep px-2 text-[13px] leading-[18px] text-paper lg:flex" title="Each worker runs in its own sandbox">
             <span>Sandbox · <b>{running}</b> running</span>
