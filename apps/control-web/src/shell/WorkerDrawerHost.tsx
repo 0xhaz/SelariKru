@@ -72,7 +72,8 @@ export function WorkerDrawerHost({ look = null, workerId, tab, team, snapshot, d
     const session = running
       ? { state: 'running' as const, label: 'Session running' }
       : attempt !== undefined ? { state: 'stopped' as const, label: 'Stopped' } : { state: 'idle' as const, label: 'Idle' };
-    const name = look?.name ?? roleName(row.role);
+    // H11: "<Name> · <Role>" when the owner named it; else the office's name for it.
+    const name = row.label && row.name ? row.label : `${look?.name ?? roleName(row.role)} worker`;
     const chip = look ? { label: stateStyle[look.state].label, ...chipStyle[look.state] } : { label: row.presence.label, bg: 'var(--color-paper-2)', fg: 'var(--color-ink)' };
     return {
       portrait: look ? <Portrait color={look.color} size={48} /> : null,

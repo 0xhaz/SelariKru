@@ -11,6 +11,7 @@ import { PlanNotes } from './actors/planNotes.ts';
 import * as live from './draw/live.ts';
 import { drawBadge, drawEmote, drawFace, drawNameTag, cornerMarks, footShadow } from './draw/overlay.ts';
 import { buildStatic } from './draw/static.ts';
+import { pmCanvas } from './draw/robots.ts';
 import { Camera, type Insets, type WorldTransform } from './engine/camera.ts';
 import { C } from './engine/palette.ts';
 import { CanvasPen } from './engine/pen.ts';
@@ -166,6 +167,9 @@ export class OfficeScene {
     return this.world ? live.roofLook(this.world.roof[place], this.roofFresh()[place]) : 'idle';
   }
 
+  /** H11: until when the Project Manager shows a talk bubble after a delegation. */
+  private pmTalkUntil = -1;
+
   /** The last events read from the world, newest last (development test hook). */
   readonly recentEvents: OfficeEvent[] = [];
 
@@ -177,7 +181,7 @@ export class OfficeScene {
   setWorld(world: OfficeWorld): void {
     const before = this.world;
     this.world = world;
-    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color })), projectName: world.projectName, leadLabel: world.leadLabel };
+    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color, active: a.active !== false })), projectName: world.projectName, leadLabel: world.leadLabel };
     const key = layoutKey(input);
     const first = this.layout === null;
     const newEpoch = before !== null && before.epoch !== world.epoch;
@@ -205,9 +209,11 @@ export class OfficeScene {
       }
     }
     const l = this.layout;
-    const ids = new Set(input.agents.map((a) => a.id));
+    // H11: an inactive worker has its desk but no robot.
+    const ids = new Set(input.agents.filter((a) => a.active !== false).map((a) => a.id));
     for (const id of [...this.bots.keys()]) if (!ids.has(id)) this.bots.delete(id);
     input.agents.forEach((a, i) => {
+      if (a.active === false) return;
       const existing = this.bots.get(a.id);
       if (existing) {
         existing.restyle(a);
@@ -325,6 +331,7 @@ export class OfficeScene {
         if (typeof at !== 'string') return at.agent;
         if (at === 'plan') return { x: l.lead.rect.x + l.lead.rect.w / 2, y: l.lead.rect.y + 10 };
         if (at === 'actions') return tileCentre(l, l.door);
+        if (at === 'pm') { const c = tileCentre(l, l.lead.seat); return { x: c.x, y: c.y - 16 }; }
         const g = l.gate;
         return g ? { x: g.x + g.w / 2, y: g.y } : tileCentre(l, l.door);
       };
@@ -334,6 +341,7 @@ export class OfficeScene {
         else if (fx.kind === 'burst') { const g = xy('gate'); this.effects.burst(g.x, g.y + 10, [C.green, C.gold, C.leafL, C.white], 22); }
         else if (fx.kind === 'text') { const g = xy('gate'); this.effects.text(fx.text, g.x, g.y - 20, fx.tone === 'pass' ? C.green : C.red); }
         else if (fx.kind === 'gate') this.gateMode = { mode: 'changes', at: this.t };
+        else if (fx.kind === 'pmEmote') this.pmTalkUntil = this.t + 2;
         else if (fx.kind === 'flyBack') {
           const g = xy('gate');
           const to = point(fx.to);
@@ -422,6 +430,18 @@ export class OfficeScene {
     for (const bot of bots) bot.render(t, this.stateOf(bot.config.id));
     for (const bot of bots) footShadow(p, bot);
     for (const bot of [...bots].sort((a, b) => a.y - b.y)) g.drawImage(bot.sprite, bot.spriteX, bot.spriteY);
+    // H11: the Project Manager at the PLAN table, always there; it talks while the owner's PM call runs, and when it delegates.
+    {
+      const seat = tileCentre(l, l.lead.seat);
+      const sprite = pmCanvas();
+      const px = Math.round(seat.x) - 6;
+      const py = Math.round(seat.y) - 15 - 10;
+      p.rect(px + 1, py + 15, 10, 2, C.shadow, 0.25);
+      g.drawImage(sprite, px, py);
+      const talking = world.pm.busy || this.t < this.pmTalkUntil;
+      if (talking) live.pmBubble(p, px + 6, py - 13, this.reducedMotion ? 0 : t);
+      if (this.reducedMotion || talking || this.hover?.agentId === 'pm') live.pmTag(p, world.pm.name, px + 6, py - (talking ? 22 : 9));
+    }
     for (const bot of bots) {
       const state = this.stateOf(bot.config.id);
       drawFace(p, bot, state, t);
@@ -450,14 +470,14 @@ export class OfficeScene {
     if (!w) return { title: '' };
     if (kind === 'agent') {
       const a = w.agents.find((x) => x.id === id);
-      return a ? { title: `${a.name} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.taskTitle ?? 'No task' } : { title: id };
+      return a ? { title: `${a.name}${a.roleLabel && a.roleLabel !== a.name ? ` · ${a.roleLabel}` : ''} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.active === false ? 'Not active: no runner is running for this worker' : a.taskTitle ?? 'No task' } : { title: id };
     }
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
     if (kind === 'env') {
       const r = w.racks.find((x) => x.agentId === id);
       return { title: `Sandbox rack: ${r?.name ?? id}`, sub: r?.running ? 'Running an attempt' : 'Not running' };
     }
-    if (kind === 'lead') return { title: 'Plan table', sub: `${w.banner ?? 'No run yet'}. Opens Pipeline.` };
+    if (kind === 'lead') return { title: `Plan table · ${w.pm.name} · Project manager`, sub: `${w.banner ?? 'No run yet'}. Opens Talk to the PM.` };
     const open = w.prs.filter((x) => !x.merged && !x.closed).length;
     if (kind === 'gate') return { title: 'Verifier', sub: `${w.verifying ? 'A task is verifying' : 'Nothing is verifying'}. Opens Evidence and PR.` };
     const verified = w.prs.filter((x) => !x.merged && !x.closed && x.verification === 'verified').length;

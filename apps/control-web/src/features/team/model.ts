@@ -1,3 +1,4 @@
+import { workerIdentity } from './identity.ts';
 import { formatAge, formatCount, formatDuration, formatExact, formatUsd, type Tone } from '@selarikru/ui';
 import {
   approvalStateAt, effectiveWorkerHealth, runnerRecent, usageFor,
@@ -70,6 +71,8 @@ export interface TaskDetail extends TaskRef {
   readonly attempt: string | null;
   readonly runId: string;
   readonly runCriteria: string | null;
+  /** H11: how this task came to this worker, when the record says it was assigned. */
+  readonly assignedBy?: string | null;
 }
 
 export interface Blocker {
@@ -160,6 +163,9 @@ export interface TeamRow {
   readonly workerId: string;
   readonly presence: Presence;
   readonly role: string | null;
+  /** H11: the owner-given name and "<Name> · <Role>". Absent in older test fixtures: the role label shows. */
+  readonly name?: string | null;
+  readonly label?: string;
   /** The run of the task held now, or of the last one. Null when the worker has had no task. */
   readonly runId: string | null;
   /** The task held now. Null when idle or offline, in which case `lastTask` is what it last worked on. */
@@ -337,6 +343,7 @@ function taskDetail(t: TaskView, current: boolean, attempt: AttemptView | undefi
       return { taskId: id, title: dep?.title ?? id, status: dep ? taskRow(dep).statusLabel : 'Unknown' };
     }),
     attempt: attempt ? `Attempt ${attempt.number}, ${attempt.outcome}${attempt.exitReason ? `. ${explain(attempt.exitReason)}` : ''}` : null,
+    assignedBy: t.delegation ? (t.delegation.actor === 'agent' ? `Assigned by the Project Manager under your accepted plan rev ${t.delegation.planRevision}.` : `Assigned by you under plan rev ${t.delegation.planRevision}.`) : null,
     runId: t.runId, runCriteria: run?.criteria ? `${run.criteria.verified} of ${run.criteria.total} criteria verified across the run` : null,
   };
 }
@@ -498,11 +505,12 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
 
   const rank = attentionRank(w, health);
   const blockers = blockersOf(w, currentTask, snapshot);
+  const identity = workerIdentity(snapshot, w.workerId, focus?.role ?? null);
   const taskId = focus?.taskId ?? null;
   const progressTimes = [w.enteredStateAt, w.latestAction?.at, w.latestEvidence?.at].filter((t): t is string => t !== undefined);
 
   return {
-    workerId: w.workerId, presence: presenceOf(w, health, stale, activity, blockers, lastConfirmedAt, nowMs, snapshot), role: focus?.role ?? null, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
+    workerId: w.workerId, presence: presenceOf(w, health, stale, activity, blockers, lastConfirmedAt, nowMs, snapshot), role: identity.role, name: identity.name, label: identity.label, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
     execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, humanIntervenedAt: attempt?.humanIntervenedAt ?? null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,

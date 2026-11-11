@@ -12,6 +12,15 @@ describe('the activity feed', () => {
     expect(items[0]!.at).toBe(iso(5));
   });
 
+  it('names the worker and records the Project Manager\'s assignment under the plan revision (H11)', () => {
+    const s = snapshotOf({ tasks: [task('a', { title: 'Add table', role: 'backend', enteredStatusAt: iso(100), delegation: { workerId: 'r', planRevision: 2, actor: 'agent', at: iso(40) } })] });
+    s.attempts = { x: { attemptId: 'x', taskId: 'a', number: 1, fence: 1, outcome: 'running', exitReason: null, runnerId: 'r', startedAt: iso(20), endedAt: null, lastHeartbeatAt: iso(1), assignment: null } };
+    s.settings = [{ scope: 'runner', key: 'r', field: 'display_name', desired: 'Aisyah', effective: 'Aisyah', desiredRevision: 1, effectiveRevision: 1, enforcer: 'server', state: 'applied', updatedBy: 'o', updatedAt: iso(90), appliedAt: iso(90) }] as never;
+    const texts = recentActivity(s, 7).map((i) => i.text);
+    expect(texts).toContain('Aisyah · Backend: Attempt 1 started on Add table');
+    expect(texts).toContain('Add table: assigned to Aisyah · Backend by the Project Manager under your accepted plan rev 2');
+  });
+
   it('keeps to the limit', () => {
     const s = snapshotOf({ tasks: Array.from({ length: 12 }, (_, i) => task(`t${i}`, { enteredStatusAt: iso(i) })) });
     expect(recentActivity(s, 7)).toHaveLength(7);

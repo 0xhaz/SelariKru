@@ -11,7 +11,7 @@ export interface OfficeCanvasProps {
   /** Room the HUD covers on each side, so the camera centres the office in what is left. */
   readonly insets: Insets;
   readonly onOpenWorker: (workerId: string) => void;
-  readonly onOpenPlace: (place: 'plan' | 'prs') => void;
+  readonly onOpenPlace: (place: 'plan' | 'prs' | 'pm') => void;
   /** True on the office screen, where the canvas is the subject. Behind a drawer it is decoration and hidden from assistive technology. */
   readonly subject: boolean;
   /** True while the office cannot be seen (a maximised drawer, the Settings modal): its animation stops. */

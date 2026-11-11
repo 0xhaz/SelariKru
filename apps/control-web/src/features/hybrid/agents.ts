@@ -2,14 +2,15 @@ import { sha256Hex, type AcceptedProposal, type RouteRecordReport } from '@selar
 import { effectiveStep } from './model.ts';
 import type { TaskFacts } from './facts.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
-import type { AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
+import type { DelegationReceipt, DelegationRequest, AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
+import { runPmStep, type PmKind, type PmOutcome, type PmRequest } from '../pm/runner.ts';
 
 /** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the rooftop cloud deck. */
 export interface InFlightCall {
   readonly callId: number;
   readonly taskId: string;
-  readonly kind: AgentRunRequest['kind'];
+  readonly kind: AgentRunRequest['kind'] | PmKind;
   readonly place: 'device' | 'cloud' | null;
 }
 
@@ -30,6 +31,10 @@ export interface AgentsPort {
   readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>, round: number) => Promise<ProposalAcceptReceipt>) | null;
   /** Where an accepted patch proposal is now, read from the server. Null: never accepted, or the source cannot say. */
   readonly proposalState: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt | null>) | null;
+  /** H11: one turn with the Project Manager, through the same adapter and the subject task's route. */
+  pm(req: PmRequest): Promise<PmOutcome & { readonly simulated: boolean }>;
+  /** H11: sends the PM's delegation for the server to apply inside the accepted plan. Absent: the source cannot delegate. */
+  readonly delegate: ((runId: string, request: DelegationRequest) => Promise<DelegationReceipt>) | null;
 }
 
 /**
@@ -48,7 +53,7 @@ export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -116,6 +121,24 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       const read = await getTaskRoute(projectId, taskId);
       const size = await source.getTaskContextSize(projectId, taskId, effectiveStep(read.route, null).destination);
       return { hasChange: size.hasChange, inputChars: size.inputChars };
+    },
+    delegate: source.delegate ? (runId, request) => source.delegate!(projectId, runId, request) : null,
+    async pm(req) {
+      const callId = next++;
+      try {
+        const out = await runPmStep({
+          projectId, catalog, snapshot: opts.snapshot,
+          getTaskRoute: async (taskId) => {
+            const read = await getTaskRoute(projectId, taskId);
+            publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);
+            return read;
+          },
+          getTaskContext: (taskId, destination, callOverride, contextId) => getTaskContext(projectId, taskId, destination, callOverride, contextId),
+        }, req);
+        return { ...out, simulated: opts.simulated };
+      } finally {
+        if (calls.some((c) => c.callId === callId)) publish(calls.filter((c) => c.callId !== callId));
+      }
     },
     async run(req) {
       const callId = next++;

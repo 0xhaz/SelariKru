@@ -4,7 +4,9 @@ import type { AuthorizedViewCommand, CommandReceipt } from '@selarikru/view-prot
 import { CommandNotSent } from '../../shell/projection-store.ts';
 import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { NETWORK_MESSAGE, NOT_SENT_MESSAGE, rejectionView } from '../decisions/copy.ts';
-import type { AutonomyModel, FieldStatus, SettingAction, WorkerControlsModel } from './model.ts';
+import { roleLabel } from '@selarikru/domain';
+import { suggestedName } from '../team/name-suggestions.ts';
+import type { AutonomyModel, AutoDelegateModel, FieldStatus, SettingAction, WorkerControlsModel } from './model.ts';
 
 export interface SendProps {
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
@@ -180,6 +182,23 @@ export function WorkerSettingControls({ model, workerId, ...send }: SendProps & 
   const slotsId = useId();
   const [slots, setSlots] = useState(String(model.slots.value ?? model.slots.options.at(-1) ?? 1));
   useEffect(() => { setSlots(String(model.slots.value ?? model.slots.options.at(-1) ?? 1)); }, [model.slots.value, model.slots.revision]);
+  const nameId = useId();
+  const roleId = useId();
+  const [name, setName] = useState(model.name.value);
+  useEffect(() => { setName(model.name.value); }, [model.name.value, model.name.revision]);
+  const [role, setRole] = useState(model.role.value ?? '');
+  useEffect(() => { setRole(model.role.value ?? ''); }, [model.role.value, model.role.revision]);
+  const trimmed = name.trim();
+  const nameAction: SettingAction = {
+    id: 'name', label: 'Save name', confirm: null,
+    disabledReason: model.name.disabledReason ?? (trimmed === '' ? 'Enter a name.' : [...trimmed].length > 24 ? 'At most 24 characters.' : trimmed === model.name.value ? 'Change the name to save it.' : null),
+    intent: { command: 'setting.set', expectedRevision: model.name.revision, args: { projectId: model.name.projectId, key: workerId, change: { scope: 'runner', field: 'display_name', value: trimmed } } },
+  };
+  const roleAction: SettingAction = {
+    id: 'role', label: 'Save role', confirm: null,
+    disabledReason: model.role.disabledReason ?? (role === '' ? 'Choose a role.' : role === model.role.value ? 'Choose another role to save it.' : null),
+    intent: { command: 'setting.set', expectedRevision: model.role.revision, args: { projectId: model.role.projectId, key: workerId, change: { scope: 'runner', field: 'role', value: role } } },
+  };
   const slotAction: SettingAction = {
     id: 'slots', label: 'Save slots', confirm: null, disabledReason: model.slots.disabledReason,
     intent: { command: 'setting.set', expectedRevision: model.slots.revision, args: { projectId: model.slots.projectId, key: workerId, change: { scope: 'runner', field: 'slots', value: Number(slots) } } },
@@ -187,6 +206,31 @@ export function WorkerSettingControls({ model, workerId, ...send }: SendProps & 
   return (
     <div className="space-y-3" data-testid="worker-controls">
       <Feedback feedback={feedback} />
+      <div className="space-y-2 rounded-chip border border-line p-3" data-testid="worker-name">
+        <p className="text-sm text-fg">Name: how this worker is shown everywhere, as "Name · Role". 1 to 24 characters in any script, different from the other workers' names.</p>
+        <StatusLine status={model.name.status} />
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label htmlFor={nameId} className="mb-1 block text-sm text-muted">Name</label>
+            <input id={nameId} data-testid="worker-name-input" maxLength={48} className="w-48 rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg" value={name} placeholder={suggestedName(model.name.projectId, model.role.value) ?? roleLabel(model.role.value)} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <ActionButton action={nameAction} busy={busy} onClick={() => void dispatch(nameAction)} />
+        </div>
+      </div>
+      <div className="space-y-2 rounded-chip border border-line p-3" data-testid="worker-role">
+        <p className="text-sm text-fg">Role: this worker takes only its role's tasks, from its next attempt. An attempt already running finishes under the role it started with.</p>
+        <StatusLine status={model.role.status} />
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label htmlFor={roleId} className="mb-1 block text-sm text-muted">Role</label>
+            <select id={roleId} data-testid="worker-role-select" className="rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg" value={role} onChange={(e) => setRole(e.target.value)}>
+              {model.role.value === null ? <option value="">Not set (the task's role)</option> : null}
+              {model.role.options.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+            </select>
+          </div>
+          <ActionButton action={roleAction} busy={busy} onClick={() => void dispatch(roleAction)} />
+        </div>
+      </div>
       <div className="space-y-2 rounded-chip border border-line p-3" data-testid="worker-enabled">
         <p className="text-sm text-fg">{model.enabled.detail}</p>
         <StatusLine status={model.enabled.status} />
@@ -206,5 +250,22 @@ export function WorkerSettingControls({ model, workerId, ...send }: SendProps & 
         </div>
       </div>
     </div>
+  );
+}
+
+/** H11: Settings › Workflow. On, the Project Manager's assignments apply by themselves, only inside your accepted plan; off, each one waits for you. */
+export function AutoDelegatePanel({ model, ...send }: SendProps & { model: AutoDelegateModel }) {
+  const { busy, feedback, send: dispatch } = useSender(send);
+  return (
+    <Panel title="Project Manager" labelId="settings-auto-delegate-title" aside={model.on ? 'Auto-delegate on' : 'Auto-delegate off'}>
+      <div className="space-y-3" data-testid="auto-delegate" data-on={model.on ? 'true' : 'false'}>
+        <p className="text-sm text-fg">{model.on
+          ? 'Auto-delegate is on: the Project Manager assigns tasks to workers by itself, only among your accepted plan\'s tasks, to enabled workers of the task\'s role. It never changes a path, a budget or a task. Anything outside the plan waits for you.'
+          : 'Auto-delegate is off: the Project Manager\'s assignments are proposals only. Nothing is assigned until you do it.'}</p>
+        <Feedback feedback={feedback} />
+        <StatusLine status={model.status} />
+        <ActionButton action={model.action} busy={busy} onClick={() => void dispatch(model.action)} />
+      </div>
+    </Panel>
   );
 }

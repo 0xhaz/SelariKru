@@ -324,7 +324,7 @@ const REVISION_REFUSALS: Readonly<Record<string, string>> = {
 /** A refused revision in words, by the code that leads its message. The fallback promises nothing about a retry. */
 export const revisionRefusal = (message: string): string => REVISION_REFUSALS[/^([a-z_]+):/.exec(message)?.[1] ?? ''] ?? 'The revision was not recorded.';
 
-export const AGENT_ACTIONS: readonly { readonly kind: Exclude<RouteStepKind, 'brief' | 'plan'>; readonly label: string; readonly what: string }[] = [
+export const AGENT_ACTIONS: readonly { readonly kind: Exclude<RouteStepKind, 'brief' | 'plan' | 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate'>; readonly label: string; readonly what: string }[] = [
   { kind: 'criteria', label: 'Draft criteria', what: 'Rewords this task\'s acceptance criteria so each can be tested.' },
   { kind: 'breakdown', label: 'Break down', what: 'Splits this task into ordered steps.' },
   { kind: 'patch', label: 'Propose change', what: 'Proposes a change as a diff, inside the task\'s allowed paths.' },

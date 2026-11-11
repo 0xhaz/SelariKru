@@ -2,6 +2,7 @@ import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
 import type { Tone } from '@selarikru/ui';
 import { isRecordedMerge } from '../../office/model.ts';
 import { fallbackReason, isRouteViolation } from '../../features/hybrid/model.ts';
+import { workerIdentity } from '../../features/team/identity.ts';
 
 /**
  * The activity feed: the latest things the snapshot itself records, each with the time it carries. It is read from the current snapshot,
@@ -37,16 +38,32 @@ const PR_STATUS: Readonly<Record<string, string>> = {
 
 const OUTCOME: Readonly<Record<string, string>> = { succeeded: 'finished', failed: 'failed', cancelled: 'was cancelled', interrupted: 'was interrupted' };
 
+const by = (name: string | null): string => (name ? `${name}: ` : '');
+
 export function recentActivity(snapshot: ProjectViewSnapshot, limit: number): readonly ActivityItem[] {
   const title = (taskId: string | null): string => (taskId ? snapshot.tasks[taskId]?.title ?? taskId : 'a task');
+  // H11: who did it, as "<Name> · <Role>" when the owner named the worker.
+  const who = (workerId: string | null | undefined, taskId: string | null): string | null => {
+    if (!workerId) return null;
+    const id = workerIdentity(snapshot, workerId, taskId ? snapshot.tasks[taskId]?.role ?? null : null);
+    return id.name ? id.label : null;
+  };
   const items: ActivityItem[] = [];
   for (const t of Object.values(snapshot.tasks)) {
     const s = STATUS[t.status];
     items.push({ id: `task:${t.taskId}`, at: t.enteredStatusAt, glyph: s.glyph, tone: s.tone, text: `${t.title ?? t.taskId}: ${s.word}` });
   }
   for (const a of Object.values(snapshot.attempts)) {
-    if (a.endedAt) items.push({ id: `attempt:${a.attemptId}`, at: a.endedAt, glyph: a.outcome === 'succeeded' ? '✓' : '✕', tone: a.outcome === 'succeeded' ? 'success' : a.outcome === 'failed' ? 'danger' : 'neutral', text: `Attempt ${a.number} on ${title(a.taskId)} ${OUTCOME[a.outcome] ?? a.outcome}` });
-    else items.push({ id: `attempt:${a.attemptId}`, at: a.startedAt, glyph: '●', tone: 'active', text: `Attempt ${a.number} started on ${title(a.taskId)}` });
+    if (a.endedAt) items.push({ id: `attempt:${a.attemptId}`, at: a.endedAt, glyph: a.outcome === 'succeeded' ? '✓' : '✕', tone: a.outcome === 'succeeded' ? 'success' : a.outcome === 'failed' ? 'danger' : 'neutral', text: `${by(who(a.runnerId, a.taskId))}Attempt ${a.number} on ${title(a.taskId)} ${OUTCOME[a.outcome] ?? a.outcome}` });
+    else items.push({ id: `attempt:${a.attemptId}`, at: a.startedAt, glyph: '●', tone: 'active', text: `${by(who(a.runnerId, a.taskId))}Attempt ${a.number} started on ${title(a.taskId)}` });
+  }
+  // H11: the Project Manager's assignments, each under the accepted plan revision that allowed it.
+  for (const t of Object.values(snapshot.tasks)) {
+    const d = t.delegation;
+    if (!d) continue;
+    const to = who(d.workerId, t.taskId) ?? d.workerId;
+    const byPm = d.actor === 'agent';
+    items.push({ id: `delegation:${t.taskId}`, at: d.at, glyph: '✉', tone: 'active', text: `${t.title ?? t.taskId}: assigned to ${to}${byPm ? ` by the Project Manager under your accepted plan rev ${d.planRevision}` : ` under plan rev ${d.planRevision}`}` });
   }
   // Where each task's last AI call ran, as the browser reported it (untrusted). A blocked call did not run, so it is not listed here.
   for (const t of Object.values(snapshot.tasks)) {

@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState'>;
+export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -228,6 +228,11 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         ...(source.getTaskFiles ? { getTaskFiles: source.getTaskFiles.bind(source) } : {}),
         ...(source.listTaskFiles ? { listTaskFiles: source.listTaskFiles.bind(source) } : {}),
         ...(source.getProposalState ? { getProposalState: source.getProposalState.bind(source) } : {}),
+        // H11: the PM's delegation, sent only while the session is live, as a command is.
+        ...(source.delegate ? { delegate: async (p: string, runId: string, request: Parameters<NonNullable<EngineeringDataSource['delegate']>>[2]) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.delegate!(p, runId, request);
+        } } : {}),
       } : null,
       stack: source?.getStack && source.stackAction ? {
         load: () => source.getStack!(projectId),

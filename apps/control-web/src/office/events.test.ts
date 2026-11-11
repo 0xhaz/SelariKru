@@ -8,7 +8,7 @@ function world(over: Partial<OfficeWorld> = {}, cues: Partial<OfficeCue>[] = [{}
     projectName: 'P', agents: cues.map((c, i) => ({ id: c.agentId ?? `w${i + 1}`, name: `W${i + 1}`, color: '#2fa39a', state: 'working', label: 'Working', taskTitle: null, ai: null })),
     planRunId: 'run', banner: null, runs: [], notes: [], leadLabel: 'PLAN', racks: [], running: 0, prs: [], parcels: [], verifying: false, cloudCall: false, summary: '',
     cues: cues.map((c, i) => ({ agentId: `w${i + 1}`, taskId: 't1', taskRevision: 1, runId: 'run', attemptId: null, attemptRunning: false, attemptOutcome: null, recordId: null, fellBackToCloud: false, cloudCall: false, deviceCall: false, needsYou: false, ...c })),
-    resolvedApprovals: [], verdicts: [], epoch: 'p#1',
+    resolvedApprovals: [], verdicts: [], delegations: [], epoch: 'p#1', pm: { id: null, name: 'Project Manager', busy: false },
     roof: { device: { place: 'device', count: 0, expected: [], observed: null, violation: null, locked: false }, cloud: { place: 'cloud', count: 0, expected: [], observed: null, violation: null, locked: false }, fellBack: null, fellBackCount: 0, summary: '' },
     ...over,
   };
@@ -103,5 +103,27 @@ describe('round 2: no invented events', () => {
     // A failure already recorded is not raised again.
     expect(officeEvents(world({ verdicts: [{ ...pending, outcome: 'failed' }] }), world({ verdicts: [{ ...pending, outcome: 'failed' }] }))).toEqual([]);
     expect(effectsFor(failed[0]!)[2]).toEqual({ kind: 'flyBack', label: 'ABC', to: 'plan' });
+  });
+});
+
+describe('the Project Manager\'s events (H11)', () => {
+  it('a delegation recorded for a worker\'s task sends an envelope from the PM to that worker, who shows mail; the PM talks', () => {
+    const d = { taskId: 't9', workerId: 'w1', planRevision: 2, at: '2026-11-11T00:00:05Z' };
+    const e = officeEvents(world({ delegations: [] }), world({ delegations: [d] }));
+    expect(e).toEqual([{ kind: 'delegated', agentId: 'w1', planRevision: 2 }]);
+    expect(errandFor(e[0]!)).toEqual([{ to: 'here', emote: 'mail', linger: 2 }]);
+    expect(effectsFor(e[0]!)).toEqual([{ kind: 'envelope', from: 'pm', to: { agent: 'w1' } }, { kind: 'pmEmote', emote: 'talk' }]);
+    // The same delegation again is not a new event.
+    expect(officeEvents(world({ delegations: [d] }), world({ delegations: [d] }))).toEqual([]);
+    // A delegation to a worker with no desk in the office (unknown) moves no one.
+    expect(officeEvents(world({ delegations: [] }), world({ delegations: [{ ...d, workerId: 'nobody' }] }))).toEqual([]);
+  });
+
+  it('a newly accepted plan revision for the same run makes the PM speak; another run or the same revision does nothing', () => {
+    const e = officeEvents(world({ planRevision: 1 }), world({ planRevision: 2 }));
+    expect(e).toEqual([{ kind: 'planAccepted', planRevision: 2 }]);
+    expect(effectsFor(e[0]!)).toEqual([{ kind: 'pmEmote', emote: 'talk' }]);
+    expect(officeEvents(world({ planRevision: 2 }), world({ planRevision: 2 }))).toEqual([]);
+    expect(officeEvents(world({ planRevision: 1 }), world({ planRunId: 'other', planRevision: 2 }))).toEqual([]);
   });
 });

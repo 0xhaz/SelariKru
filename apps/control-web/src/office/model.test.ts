@@ -160,7 +160,7 @@ describe('the office world', () => {
 
   it('says what it shows in words, for the canvas label', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
+    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Team: Backend 1, Backend 2, Worker. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
   });
 
   it('says so when there are no workers', () => {
@@ -249,5 +249,42 @@ describe('what the office world records for its events (H7 fix round 2)', () => 
     expect(at(cand({ live: false, status: 'rejected' }), [crit('failed')])[0]!.outcome).toBe('rejected');
     expect(at(cand({ live: false, status: 'replaced' }), [crit('failed')])[0]!.outcome).toBe('retired');
     expect(at(null, [])).toEqual([]);
+  });
+});
+
+describe('the team in the office (H11)', () => {
+  const setting = (key: string, field: string, value: unknown) => ({ scope: 'runner', key, field, desired: value, effective: value, desiredRevision: 1, effectiveRevision: 1, enforcer: 'server', state: 'applied', updatedBy: 'o', updatedAt: iso(9), appliedAt: iso(9) });
+
+  it('desks show the owner-given name, the role on hover and in the summary as "<Name> · <Role>"', () => {
+    const s = snapshotOf({ tasks: [task('a', { role: 'backend' })], workers: [worker('w1', { taskId: 'a' })] });
+    s.settings = [setting('w1', 'display_name', 'Aisyah')] as never;
+    const w = buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P');
+    expect(w.agents[0]).toMatchObject({ name: 'Aisyah', roleLabel: 'Backend', active: true });
+    expect(w.summary).toContain('Aisyah · Backend');
+  });
+
+  it('a worker whose runner is lost, unknown or disabled keeps an empty, dimmed desk with its nameplate and no robot', () => {
+    const s = snapshotOf({ workers: [worker('w1', { health: 'disconnected', leaseHeld: false, lastHeartbeatAt: iso(600) }), worker('w2'), worker('w3')] });
+    s.settings = [setting('w3', 'enabled', false)] as never;
+    const w = buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P');
+    const byId = new Map(w.agents.map((a) => [a.id, a]));
+    expect(byId.get('w2')!.active).toBe(true);
+    expect(byId.get('w3')!.active).toBe(false);
+    expect(w.summary).toMatch(/inactive/);
+  });
+
+  it('the Project Manager sits at the PLAN desk, always there, and has no desk of its own; it is busy while the owner\'s PM call runs', () => {
+    const s = snapshotOf({ workers: [worker('w1'), worker('pm1', { leaseHeld: false })] });
+    s.settings = [setting('pm1', 'role', 'project_manager'), setting('pm1', 'display_name', 'Puan Rahmah')] as never;
+    const w = buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P', null, [{ taskId: 'x', place: 'device', stepKind: 'pmAnswer' }]);
+    expect(w.agents.map((a) => a.id)).toEqual(['w1']);
+    expect(w.pm).toEqual({ id: 'pm1', name: 'Puan Rahmah', busy: true });
+    const none = buildOfficeWorld(snapshotOf({}), buildTeam(snapshotOf({}), NOW, NOW, {}), 'P');
+    expect(none.pm).toEqual({ id: null, name: 'Project Manager', busy: false });
+  });
+
+  it('a delegation is on the worker\'s cue, from the record', () => {
+    const s = snapshotOf({ tasks: [task('a', { delegation: { workerId: 'w1', planRevision: 2, actor: 'agent', at: iso(3) } })], workers: [worker('w1', { taskId: 'a' })] });
+    expect(buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P').cues[0]).toMatchObject({ delegatedAt: iso(3), delegatedPlanRevision: 2 });
   });
 });

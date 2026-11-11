@@ -4,6 +4,7 @@ import { currentRun } from '../features/settings/model.ts';
 import type { TeamModel, TeamRow } from '../features/team/model.ts';
 import { workerAccents, stateStyle, type RobotState } from '../theme/tokens.ts';
 import { roofState, type OfficeRoof } from './roof.ts';
+import { PROJECT_MANAGER_ROLE, roleLabel } from '@selarikru/domain';
 
 /**
  * What the office canvas shows, read from SelariKru's own snapshot and team model. It is a picture of the same facts the team panel
@@ -12,8 +13,12 @@ import { roofState, type OfficeRoof } from './roof.ts';
 
 export interface OfficeAgent {
   readonly id: string;
-  /** The name on its desk plate and tag: its role, numbered when two share one. */
+  /** The name on its desk plate and tag: the owner-given name (H11), else its role, numbered when two share one. */
   readonly name: string;
+  /** Its role in words, shown on hover, in the team card and in the summary (H11). */
+  readonly roleLabel?: string;
+  /** False: not started, disabled, or its runner is not running. Its desk is empty and dimmed, with its nameplate and no robot (H11). */
+  readonly active?: boolean;
   readonly color: string;
   readonly state: RobotState;
   readonly label: string;
@@ -30,6 +35,8 @@ export interface OfficeAgent {
 export interface OfficeCall {
   readonly taskId: string;
   readonly place: 'device' | 'cloud' | null;
+  /** The step, when known: a Project Manager step makes the PM robot talk while it runs (H11). */
+  readonly stepKind?: string;
 }
 
 /** A sticky note on the plan wall. Columns: 0 to do, 1 doing, 2 verifying, 3 done. */
@@ -60,6 +67,9 @@ export interface OfficeCue {
   /** A device AI call for its task is in flight in this browser (round 4). */
   readonly deviceCall: boolean;
   readonly needsYou: boolean;
+  /** H11: when the task it holds was last delegated, and under which accepted plan revision. */
+  readonly delegatedAt?: string | null;
+  readonly delegatedPlanRevision?: number | null;
 }
 
 /** A pull request on the PR board. A run's change has no single author, so none is named. */
@@ -105,6 +115,8 @@ export interface OfficeWorld {
   readonly agents: readonly OfficeAgent[];
   /** The run whose tasks are on the plan wall, and the phase banner above it. */
   readonly planRunId: string | null;
+  /** The plan revision the owner accepted for that run (H11): a new one pins its notes and the Project Manager says so. */
+  readonly planRevision?: number | null;
   readonly banner: string | null;
   readonly runs: readonly OfficeRunChoice[];
   readonly notes: readonly OfficeNote[];
@@ -132,6 +144,10 @@ export interface OfficeWorld {
   readonly verdicts: readonly OfficeVerdict[];
   /** The rooftop inference deck (round 4): its two boxes' state, from records and calls in flight. */
   readonly roof: OfficeRoof;
+  /** H11: each task's delegation as recorded (worker, accepted plan revision, when). */
+  readonly delegations?: readonly { readonly taskId: string; readonly workerId: string; readonly planRevision: number; readonly at: string }[];
+  /** H11: the Project Manager at the PLAN desk, always there: the worker with role project_manager if there is one. Busy while a PM call runs. */
+  readonly pm: { readonly id: string | null; readonly name: string; readonly busy: boolean };
   /** Which projection this world belongs to (the project and the data source session). A world from another epoch is never compared with this one. */
   readonly epoch: string;
 }
@@ -156,6 +172,9 @@ function prVerification(snapshot: ProjectViewSnapshot, c: ChangeRequestView): Of
 }
 
 const DONE = new Set<TaskView['status']>(['verified', 'merged']);
+
+/** "<Name> · <Role>" for an office agent, or its desk name when it has no separate role label. */
+const labelOf = (a: OfficeAgent): string => (a.roleLabel && a.roleLabel !== a.name && !a.name.startsWith(a.roleLabel) ? `${a.name} · ${a.roleLabel}` : a.name);
 
 /** A worker's robot state: its presence first, then what its current task says. A stale or lost reading is never shown as a current one. */
 export function robotState(row: TeamRow, snapshot: ProjectViewSnapshot): RobotState {
@@ -198,13 +217,19 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     // Only a conforming record is an allowed fallback; a violation is never drawn as one (H7 fix I2).
     return last.fellBack === true && last.conformance === 'conforms' ? { place, state: 'observed', fellBack: true } : { place, state: 'observed' };
   };
-  const agents = team.rows.map((r): OfficeAgent => {
+  // H11: the Project Manager has the PLAN desk, not a worker desk; every other worker has a desk, lit when active and dimmed when not.
+  const pmRow = team.rows.find((r) => r.role === PROJECT_MANAGER_ROLE) ?? null;
+  const disabled = (id: string): boolean => snapshot.settings.some((x) => x.scope === 'runner' && x.key === id && x.field === 'enabled' && x.desired === false);
+  const agents = team.rows.filter((r) => r !== pmRow).map((r): OfficeAgent => {
     const base = roleName(r.role);
     const n = (seen.get(base) ?? 0) + 1;
     seen.set(base, n);
     const state = robotState(r, snapshot);
-    return { id: r.workerId, name: (roles.get(base) ?? 0) > 1 ? `${base} ${n}` : base, color: colorOf(r.workerId), state, label: stateStyle[state].label, taskTitle: r.task?.title ?? null, ai: aiMark(r.task?.taskId ?? null) };
+    const name = r.name ?? ((roles.get(base) ?? 0) > 1 ? `${base} ${n}` : base);
+    const active = !disabled(r.workerId) && state !== 'offline' && state !== 'unknown';
+    return { id: r.workerId, name, roleLabel: roleLabel(r.role), active, color: colorOf(r.workerId), state, label: stateStyle[state].label, taskTitle: r.task?.title ?? null, ai: aiMark(r.task?.taskId ?? null) };
   });
+  const pm = { id: pmRow?.workerId ?? null, name: pmRow?.name ?? 'Project Manager', busy: calls.some((c) => typeof c.stepKind === 'string' && c.stepKind.startsWith('pm')) };
 
   const chosen = planRunId !== null ? snapshot.runs[planRunId] ?? null : null;
   const run = chosen ?? currentRun(snapshot);
@@ -245,12 +270,16 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const open = prs.filter((p) => !p.closed && !p.merged).length;
     const prText = open > 0 ? ` ${open} pull request${open === 1 ? '' : 's'}.` : '';
     summary = `Office for ${projectName}: ${agents.length} worker${agents.length === 1 ? '' : 's'}. ${counts.join(', ')}.${prText} The team panel lists each worker.`;
+    // H11: who they are, as "<Name> · <Role>", and which desks are empty.
+    summary += ` Team: ${agents.map(labelOf).join(', ')}.`;
+    const inactive = agents.filter((a) => a.active === false).length;
+    if (inactive > 0) summary += ` ${inactive} inactive (empty desk).`;
   }
   const cloudCall = calls.some((c) => c.place === 'cloud');
   // The desk marks in words: a call in flight is where its route sends it, expected until its record says where it ran.
   const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'expected'
-    ? `${a.name} ${a.ai.place === 'cloud' ? 'headed to the cloud (expected)' : 'expected on this device'}`
-    : `${a.name} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
+    ? `${labelOf(a)} ${a.ai.place === 'cloud' ? 'headed to the cloud (expected)' : 'expected on this device'}`
+    : `${labelOf(a)} last AI call ran ${a.ai.place === 'cloud' ? 'in the cloud' : 'on this device'}${a.ai.fellBack ? (a.ai.place === 'cloud' ? ' (fell back from this device)' : ' (fell back from the cloud)') : ''}`]));
   if (marks.length > 0) summary += ` Desk marks: ${marks.join('; ')}.`;
   if (cloudCall) summary += ' The rooftop cloud deck is lit: a call is headed to the cloud.';
   const roof = roofState(snapshot, run?.runId ?? null, calls);
@@ -268,6 +297,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       cloudCall: taskId !== null && calls.some((c) => c.taskId === taskId && c.place === 'cloud'),
       deviceCall: taskId !== null && calls.some((c) => c.taskId === taskId && c.place === 'device'),
       needsYou: agents.find((a) => a.id === r.workerId)?.state === 'needs_input',
+      delegatedAt: t?.delegation?.at ?? null, delegatedPlanRevision: t?.delegation?.planRevision ?? null,
     };
   });
   const resolvedApprovals = snapshot.approvalHistory
@@ -281,5 +311,5 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       : failed ? 'failed' : verifiedState(r, r.evidence).established ? 'passed' : 'pending';
     return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), outcome }];
   });
-  return { projectName, agents, planRunId: run?.runId ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, epoch: epoch || snapshot.meta.projectId };
+  return { projectName, agents, planRunId: run?.runId ?? null, planRevision: run?.planRevision ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, pm, delegations: Object.values(snapshot.tasks).flatMap((t) => (t.delegation ? [{ taskId: t.taskId, workerId: t.delegation.workerId, planRevision: t.delegation.planRevision, at: t.delegation.at }] : [])), epoch: epoch || snapshot.meta.projectId };
 }

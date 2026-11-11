@@ -41,7 +41,9 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
         {selected ? <span aria-hidden="true" className="absolute -left-0 top-4 text-[12px]">▶</span> : null}
         <span aria-hidden="true" className="row-span-2 self-start">{decor?.portrait ?? null}</span>
         <span className="flex min-w-0 items-baseline gap-1.5">
-          <b className="shrink-0 text-[17px] text-fg">{row.role}</b>
+          {/* "<Name> · <Role>": the name first, the role as the secondary label (H11). */}
+          <b className="shrink-0 text-[17px] text-fg" data-testid="team-panel-name">{row.name ?? row.role}</b>
+          {row.name ? <span className="shrink-0 text-[13px] text-muted" data-testid="team-panel-role"><span aria-hidden="true">· </span><span className="sr-only">, </span>{row.role}</span> : null}
           <span className="min-w-0 flex-1 truncate font-mono text-mono text-muted" data-testid="team-panel-model"><span className="sr-only">Recorded model: </span>{row.model}</span>
           {decor?.key ? <kbd aria-hidden="true" className="kbd shrink-0 px-1 text-[13px]">{decor.key}</kbd> : null}
         </span>

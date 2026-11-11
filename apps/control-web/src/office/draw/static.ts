@@ -181,8 +181,8 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
     p.rect(hall, 16, width - hall - TS, 44, C.wallD);
     for (let plank = hall; plank < width - TS; plank += 6) p.rect(plank, 16, 1, 44, C.wall);
     // The racks are where code runs (sandboxes), not where AI runs: that is the roof's ON THIS DEVICE box (round 4).
+    // The sign alone says it (H11): the small "ON THIS DEVICE" line overlapped the racks' name cards.
     signboard(p, racks.x0 * TS + 4, 2, racks.w * TS - 8, 'SANDBOXES', C.kopi, C.cream);
-    text(p, 'ON THIS DEVICE', racks.x0 * TS + (racks.w * TS - textW('ON THIS DEVICE')) / 2, 18, C.ink);
     // The rack room's timber screen, slatted.
     const screenX = racks.glassX * TS;
     framed(p, screenX, 64, TS, depth - 80, C.wood, C.wood, 1);
@@ -293,6 +293,12 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
     const top = desk.y0 * TS;
     kedaiDesk(p, left + 2 * TS, top + TS, desk.index);
     louvreScreens(p, left, top, 7);
+    // H11: an inactive worker's desk stays, empty and dimmed, with its nameplate.
+    const agent = input.agents.find((a) => a.id === desk.agentId);
+    if (agent?.active === false) {
+      p.rect(left + 6, top, 7 * TS - 12, 7 * TS + 4, C.ink, 0.5);
+      text(p, 'NOT ACTIVE', left + 56 - textW('NOT ACTIVE') / 2, top + 4 * TS, C.metalL);
+    }
     nameCard(p, input.agents.find((a) => a.id === desk.agentId)?.name.toUpperCase().slice(0, 10) ?? '', left + 64, top + 4);
   }
 

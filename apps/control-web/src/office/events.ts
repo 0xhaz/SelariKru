@@ -27,6 +27,10 @@ export type OfficeEvent =
   | { readonly kind: 'needsYou'; readonly agentId: string }
   /** A person answered an approval for the worker's task. */
   | { readonly kind: 'answered'; readonly agentId: string }
+  /** H11: the owner accepted a new plan revision for the same run: its notes are pinned on the wall and the Project Manager speaks. */
+  | { readonly kind: 'planAccepted'; readonly planRevision: number }
+  /** H11: a task was delegated to this worker (by the Project Manager inside the accepted plan, or by the owner), as recorded. */
+  | { readonly kind: 'delegated'; readonly agentId: string; readonly planRevision: number | null }
   /** A candidate passed verification. */
   | { readonly kind: 'verified'; readonly parcelId: string }
   /** The record says a candidate failed verification or was rejected: it goes back to the run's PLAN table. */
@@ -51,6 +55,10 @@ export function officeEvents(prev: OfficeWorld | null, next: OfficeWorld): Offic
     if (c.recordId !== null && c.recordId !== b.recordId && c.fellBackToCloud) out.push({ kind: 'fellBackToCloud', agentId: id });
     if (c.needsYou && !b.needsYou) out.push({ kind: 'needsYou', agentId: id });
   }
+  if (next.planRunId !== null && next.planRunId === prev.planRunId && typeof next.planRevision === 'number' && typeof prev.planRevision === 'number' && next.planRevision > prev.planRevision) out.push({ kind: 'planAccepted', planRevision: next.planRevision });
+  // H11: a new delegation, for a worker in the office: the PM sends it an envelope.
+  const seenDelegations = new Set((prev.delegations ?? []).map((d) => `${d.taskId}@${d.at}`));
+  for (const d of next.delegations ?? []) if (!seenDelegations.has(`${d.taskId}@${d.at}`) && next.cues.some((c) => c.agentId === d.workerId)) out.push({ kind: 'delegated', agentId: d.workerId, planRevision: d.planRevision });
   const answered = new Set(prev.resolvedApprovals.map((a) => a.approvalId));
   for (const a of next.resolvedApprovals) {
     if (answered.has(a.approvalId) || a.taskId === null) continue;
@@ -92,24 +100,29 @@ export function errandFor(e: OfficeEvent): ErrandStep[] {
     case 'prMerged': return [{ to: 'here', emote: 'heart', linger: 2 }];
     case 'needsYou': return [{ to: 'seat', emote: 'talk' }];
     case 'answered': return [{ to: 'here', emote: 'mail', linger: 2 }];
+    case 'delegated': return [{ to: 'here', emote: 'mail', linger: 2 }];
     default: return [];
   }
 }
 
-export type EffectPoint = 'plan' | 'actions' | 'gate' | { readonly agent: string };
+export type EffectPoint = 'plan' | 'actions' | 'gate' | 'pm' | { readonly agent: string };
 
 export type OfficeEffect =
   | { readonly kind: 'envelope'; readonly from: EffectPoint; readonly to: EffectPoint }
   | { readonly kind: 'burst'; readonly at: 'gate' }
   | { readonly kind: 'text'; readonly at: 'gate'; readonly text: string; readonly tone: 'pass' | 'fail' }
   | { readonly kind: 'gate'; readonly look: 'changes' }
-  | { readonly kind: 'flyBack'; readonly label: string; readonly to: EffectPoint };
+  | { readonly kind: 'flyBack'; readonly label: string; readonly to: EffectPoint }
+  /** The Project Manager robot shows an emote (H11). */
+  | { readonly kind: 'pmEmote'; readonly emote: 'talk' };
 
 /** The effects an event shows. Under reduced motion the scene shows only their end state (no flight, no burst). */
 export function effectsFor(e: OfficeEvent): OfficeEffect[] {
   switch (e.kind) {
     case 'needsYou': return [{ kind: 'envelope', from: { agent: e.agentId }, to: 'actions' }];
     case 'answered': return [{ kind: 'envelope', from: 'plan', to: { agent: e.agentId } }];
+    case 'delegated': return [{ kind: 'envelope', from: 'pm', to: { agent: e.agentId } }, { kind: 'pmEmote', emote: 'talk' }];
+    case 'planAccepted': return [{ kind: 'pmEmote', emote: 'talk' }];
     case 'verified': return [{ kind: 'burst', at: 'gate' }, { kind: 'text', at: 'gate', text: 'VERIFIED', tone: 'pass' }];
     case 'changes': return [
       // The candidate belongs to the run, not one worker, so it flies back to the PLAN table.

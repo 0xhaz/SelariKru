@@ -81,6 +81,7 @@ function TaskPanel({ detail, row, onSettings, hybrid }: { detail: WorkerDetail; 
               <span className="text-sm text-muted">Revision {t.revision}</span>
               {t.role ? <span className="text-sm text-muted">{roleName(t.role)}</span> : null}
             </div>
+            {t.assignedBy ? <p className="mt-1 text-sm text-muted" data-testid="drawer-assigned-by">{t.assignedBy}</p> : null}
             {t.reason && !detail.blockers.some((b) => b.code === t.reasonCode) ? <p className="mt-2 wrap-anywhere text-fg">{t.reason} {t.reasonCode ? <span className="block break-all font-mono text-mono text-muted">{t.reasonCode}</span> : null}</p> : null}
           </section>
           <section aria-label="Dependencies">
@@ -394,7 +395,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
               {identity?.portrait ?? null}
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h2 id={titleId} className="text-lg font-bold text-fg">{identity ? `${identity.name} worker` : `${roleName(row.role)} worker`}</h2>
+                  <h2 id={titleId} className="text-lg font-bold text-fg">{identity ? identity.name : `${roleName(row.role)} worker`}</h2>
                   {identity ? <span className="chip chip-dot" data-testid="drawer-state-chip" style={{ background: identity.chip.bg, color: identity.chip.fg }}>{identity.chip.label}</span> : null}
                 </div>
                 {identity ? <p className="text-[13px] text-muted wrap-anywhere" data-testid="drawer-identity">{identity.line}</p> : null}

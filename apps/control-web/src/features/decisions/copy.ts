@@ -58,6 +58,12 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   outside_plan_scope: { text: 'A setting can only narrow the paths the accepted plan lists. A new path needs a plan revision. Nothing was saved.', changed: false },
   resume_refused: { text: 'Scheduling stays paused: the run has no budget left, no policy is loaded, or a lapsed lease is still being reconciled. Nothing was saved.', changed: false },
   route_locked_restricted: { text: 'This task reads restricted data, so its AI steps stay on this device. Only a reclassification decision can change that. Nothing was saved.', changed: false },
+  // H11: a worker name the rules refuse.
+  name_empty: { text: 'A name needs at least one character. Nothing was saved.', changed: false },
+  name_too_long: { text: 'A name can be at most 24 characters. Nothing was saved.', changed: false },
+  name_invalid: { text: 'A name cannot contain line breaks or hidden characters. Nothing was saved.', changed: false },
+  name_secret: { text: 'That looks like a secret, so it cannot be a name. Nothing was saved.', changed: false },
+  name_taken: { text: 'Another worker already has this name. Names are unique in a project. Nothing was saved.', changed: false },
 };
 
 export const rejectionView = (rejection: CommandReceipt['rejection']): RejectionView => REJECTION[rejection ?? 'not_allowed'];

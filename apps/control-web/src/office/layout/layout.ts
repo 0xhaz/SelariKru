@@ -20,6 +20,8 @@ export interface DeskAgent {
   readonly id: string;
   readonly name: string;
   readonly color: string;
+  /** H11: false for a worker that is not started, disabled, or whose runner is not running: its desk is empty and dimmed, with its nameplate and no robot. */
+  readonly active?: boolean;
 }
 
 export interface LayoutInput {
@@ -112,7 +114,7 @@ export interface OfficeLayout {
 }
 
 export function layoutKey(input: LayoutInput): string {
-  return JSON.stringify([input.agents.map((a) => [a.id, a.name, a.color]), input.projectName, input.leadLabel]);
+  return JSON.stringify([input.agents.map((a) => [a.id, a.name, a.color, a.active !== false]), input.projectName, input.leadLabel]);
 }
 
 export function deskColumns(n: number): number {

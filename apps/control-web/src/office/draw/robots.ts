@@ -7,7 +7,7 @@ import { C } from '../engine/palette.ts';
 import { flipCanvas, spriteCanvas } from '../engine/pen.ts';
 
 /*
- * Legend: o outline (accent, much darker), B body (accent), b body toneShift, h highlight, C cap (deep green), c cap shine, F face screen, A apron band
+ * Legend: o outline (accent, much darker), B body (accent), b body shade, h highlight, C cap (deep green), c cap shine, F face screen, A apron band
  * (gold), G boots. 12 wide, 15 tall. The face screen sits on rows 5 and 6; the cap lamp on row 1, columns 5 and 6 (both drawn live).
  */
 const CAP = ['....oooo....', '...oCCCCo...', '..oCcCCCCo..', '.oooooooooo.'];
@@ -57,6 +57,23 @@ export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> 
   };
   cache.set(color, canvases);
   return canvases;
+}
+
+/**
+ * The Project Manager (H11): the same crew build in a gold songkok-style cap, holding a cream clipboard across its apron. Always at the PLAN desk.
+ */
+const PM_FRONT = [
+  '....oooo....', '...oKKKKo...', '..oKgKKKKo..', '.oooooooooo.',
+  '.ohBBBBBBBo.', '.oBFFFFFFBo.', '.oBFFFFFFBo.', '.oBBBBBBBbo.', '..oooooooo..',
+  '.oBPPPPPPBo.', 'oBoPPPPPPoBo', 'oBoPMMMMPoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
+];
+let pmCache: HTMLCanvasElement | null = null;
+/** The Project Manager's sprite, front facing (it sits at the PLAN desk and turns to the board). */
+export function pmCanvas(): HTMLCanvasElement {
+  if (pmCache) return pmCache;
+  const body = '#8a5a8c';
+  pmCache = spriteCanvas(PM_FRONT, { o: toneShift(body, -0.62), B: body, b: toneShift(body, -0.22), h: toneShift(body, 0.5), K: C.goldDark, g: C.gold, F: C.screen, P: C.cream, M: C.inkSoft, G: C.deskDD });
+  return pmCache;
 }
 
 /**

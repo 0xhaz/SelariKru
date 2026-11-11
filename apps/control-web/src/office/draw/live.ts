@@ -390,3 +390,16 @@ export function carriedTiffin(p: Pen, cx: number, top: number) {
   p.rect(x, y, 7, 7, C.ink);
   [C.teal, C.terracotta, C.gold].forEach((tier, k) => p.rect(x + 1, y + 1 + k * 2, 5, 1, tier));
 }
+
+/** The Project Manager's talk bubble: a cream board with three dots (H11). */
+export function pmBubble(p: Pen, cx: number, top: number, time: number) {
+  const x = Math.round(cx) - 7;
+  framed(p, x, top, 15, 9, C.ink, C.cream, 1);
+  for (let k = 0; k < 3; k++) p.rect(x + 4 + k * 3, top + 4 - (time > 0 && ((time * 4) | 0) % 3 === k ? 1 : 0), 2, 1, C.tealDark);
+  p.rect(x + 6, top + 9, 2, 2, C.ink);
+}
+
+/** The Project Manager's name tag, gold on deep green. */
+export function pmTag(p: Pen, name: string, cx: number, top: number) {
+  tag(p, fit(name.toUpperCase(), 80), cx, top, C.deep, C.gold);
+}

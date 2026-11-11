@@ -37,6 +37,7 @@ export const C = {
   pink: colors.rose, peach: '#f2c9a0', white: '#fffdf8', deep: colors.deepGreen, deep2: colors.deepGreen2,
   gold: colors.gold, goldDark: colors.goldDark,
   shadow: colors.ink,
+  inkSoft: '#6a5444',
   // Where AI runs (H4): device green and cloud blue-teal, always with a word or shape beside them.
   device: '#2f7a3a', deviceL: '#c9efc0', cloudMark: '#1f5f8a', cloudMarkL: '#d6ecf7',
 } as const;

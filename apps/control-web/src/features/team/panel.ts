@@ -4,6 +4,8 @@ import type { PresenceState, TeamModel } from './model.ts';
 export interface PanelRow {
   readonly workerId: string;
   readonly role: string;
+  /** H11: the owner-given name, shown first; null when none is set (the role shows alone). */
+  readonly name: string | null;
   readonly state: PresenceState;
   readonly label: string;
   readonly tone: Tone;
@@ -40,7 +42,7 @@ const roleName = (role: string | null): string => (role ? role.charAt(0).toUpper
 /** The always-on roster, read from the Team model so the panel and the Team view can never disagree. Rows keep the Team view's attention order. */
 export function panelOf(team: TeamModel, sessionStale: boolean): TeamPanelModel {
   const rows = team.rows.map((r): PanelRow => ({
-    workerId: r.workerId, role: roleName(r.role), state: r.presence.state, label: r.presence.label, tone: r.presence.tone, detail: r.presence.detail, since: r.presence.since, sinceIso: r.presence.sinceIso,
+    workerId: r.workerId, role: roleName(r.role), name: r.name ?? null, state: r.presence.state, label: r.presence.label, tone: r.presence.tone, detail: r.presence.detail, since: r.presence.since, sinceIso: r.presence.sinceIso,
     task: r.task ? r.task.title : r.lastTask ? `Last: ${r.lastTask.title}` : 'No task',
     model: r.modelDetail ?? 'Model not recorded',
   }));

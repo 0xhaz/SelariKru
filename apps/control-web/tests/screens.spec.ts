@@ -134,6 +134,13 @@ for (const size of SIZES) {
       await shot(page, '13-benchmark', size, page.getByRole('heading', { name: 'Benchmark', level: 1 }));
     });
 
+    test('Talk to the PM, with assignments applied (H11)', async ({ page }) => {
+      await open(page, '#/pm');
+      await page.getByTestId('pm-question').fill('Who should take the open tasks?');
+      await page.getByRole('button', { name: 'Propose assignments' }).click();
+      await shot(page, '15-talk-to-the-pm', size, page.getByTestId('pm-applied'));
+    });
+
     test('onboarding', async ({ page }) => {
       // The demo app's own onboarding (demo data, no network), as a first-time owner sees it.
       await page.clock.setFixedTime(FIXED);

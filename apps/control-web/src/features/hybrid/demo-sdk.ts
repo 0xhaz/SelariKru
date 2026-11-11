@@ -60,6 +60,22 @@ function answer(kind: string, prompt: string): unknown {
       return { summary: 'Demo triage: a test expects the newest item first.', category: 'test_failure', likelyCause: 'The list is sorted oldest first, while the check expects newest first.', nextStep: 'Sort by the created time, newest first, and run the list tests again.' };
     case 'prDescription':
       return { title: 'Demo: the change for this task', body: 'Demo data. Summarises the change and the criteria it covers. Not evidence.', criteriaCovered: ids };
+    // H11: the Project Manager. Built from what the prompt lists: the context keys it may cite, the accepted plan's tasks and the workers.
+    case 'pmAnswer': {
+      const keys = /Context keys you may cite: ([^.]+)\./.exec(prompt)?.[1]?.split(', ').filter(Boolean) ?? [];
+      return { answer: 'Demo answer: the plan orders the API before the screens, so the list screen waits on it. Simulated, not evidence.', citations: keys.slice(0, 2).map((k) => ({ sourceId: k, note: 'From the project context.' })) };
+    }
+    case 'pmResearch':
+      return { answer: 'Demo research: no web search ran in the demo. A real research call is cloud only and lists its web sources.', findings: [{ point: 'Simulated: shown so the panel can be seen. Not evidence.' }] };
+    case 'pmPlan':
+      return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: ids.slice(0, 1), paths: [root], dependsOn: [] }] };
+    case 'pmDelegate': {
+      const tasks = section(prompt, `Accepted plan, revision ${/# Accepted plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^:]+): .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]!, status: m[3]! }] : []; });
+      const workers = section(prompt, 'Workers').flatMap((l) => { const m = /^- ([^:]+): .*, role (.+)$/.exec(l); return m ? [{ workerId: m[1]!, role: m[2]!.toLowerCase().replace(/ /g, '_') }] : []; });
+      const open = tasks.filter((t) => ['planned', 'ready', 'blocked', 'failed'].includes(t.status));
+      const assignments = open.flatMap((t) => { const w = workers.find((x) => x.role === t.role); return w ? [{ taskId: t.taskId, workerId: w.workerId, why: `Demo: ${t.role} work for a ${t.role} worker.` }] : []; });
+      return { assignments: assignments.length > 0 ? assignments.slice(0, 12) : [{ taskId: tasks[0]?.taskId ?? 'none', workerId: workers[0]?.workerId ?? 'none', why: 'Demo: the only pairing listed.' }] };
+    }
     default:
       return {};
   }

@@ -1,3 +1,4 @@
+import { PROJECT_MANAGER_ROLE } from '@selarikru/domain';
 import type { Tone } from '@selarikru/ui';
 import type { AuthorizedViewCommand, BoundedAutonomy, PolicyBasis, ProjectViewSnapshot, RunView, SettingState, SettingView } from '@selarikru/view-protocol';
 import type { CommandIntent, ConfirmCopy } from '../decisions/model.ts';
@@ -195,8 +196,41 @@ export function autonomyModel(snapshot: ProjectViewSnapshot, live: boolean): Aut
 }
 
 export interface WorkerControlsModel {
+  /** H11: the worker's name (1-24 characters, any script, unique in the project) and role (one of the project's roles; it applies from the worker's next attempt). */
+  readonly name: { readonly value: string; readonly status: FieldStatus | null; readonly revision: number; readonly disabledReason: string | null; readonly projectId: string };
+  readonly role: { readonly value: string | null; readonly options: readonly string[]; readonly status: FieldStatus | null; readonly revision: number; readonly disabledReason: string | null; readonly projectId: string };
   readonly enabled: { readonly value: boolean; readonly status: FieldStatus | null; readonly action: SettingAction; readonly detail: string };
   readonly slots: { readonly value: number | null; readonly status: FieldStatus | null; readonly revision: number; readonly options: readonly number[]; readonly disabledReason: string | null; readonly projectId: string };
+}
+
+/** A role is the server's to apply: a worker takes only its role's tasks from its next claim, so an attempt already running keeps the role it started with. */
+function roleStatus(s: SettingView | undefined): FieldStatus | null {
+  const base = settingStatus(s);
+  if (!base) return null;
+  return base.inForce ? { ...base, detail: 'Applies from this worker\'s next attempt: it takes only this role\'s tasks. An attempt already running finishes under the role it started with.' } : base;
+}
+
+/** H11: the run's auto-delegate setting. On (the default), the Project Manager's assignments inside the accepted plan apply by themselves; off, each one waits for you. */
+export interface AutoDelegateModel {
+  readonly on: boolean;
+  readonly status: FieldStatus | null;
+  readonly action: SettingAction;
+}
+
+export function autoDelegateModel(snapshot: ProjectViewSnapshot, live: boolean): AutoDelegateModel | null {
+  const run = currentRun(snapshot);
+  if (!run) return null;
+  const closed = TERMINAL.includes(run.lifecycle);
+  const s = find(snapshot, 'run', run.runId, 'auto_delegate');
+  const on = s ? s.desired !== false : true;
+  return {
+    on, status: settingStatus(s),
+    action: {
+      id: 'auto-delegate', label: on ? 'Turn off auto-delegate' : 'Turn on auto-delegate', confirm: null,
+      disabledReason: !live ? SETTINGS_OFF : closed ? `This run is ${run.lifecycle}, so its settings no longer change.` : null,
+      intent: save(snapshot.meta.projectId, run.runId, s, { scope: 'run', field: 'auto_delegate', value: !on }),
+    },
+  };
 }
 
 /** A worker's own settings, changed in its drawer. The server refuses a disabled worker's claims from the save; its current attempt finishes. */
@@ -207,7 +241,14 @@ export function workerControls(snapshot: ProjectViewSnapshot, workerId: string, 
   const on = enabled ? enabled.desired !== false : true;
   const off = live ? null : SETTINGS_OFF;
   const max = snapshot.limits.maxConcurrentTotal ?? 1;
+  const name = find(snapshot, 'runner', workerId, 'display_name');
+  const role = find(snapshot, 'runner', workerId, 'role');
+  const roleValue = typeof role?.desired === 'string' ? role.desired : null;
+  // The project's roles: those its plan's tasks name, and the Project Manager's.
+  const roles = [...new Set([...Object.values(snapshot.tasks).map((t) => t.role).filter((r): r is string => typeof r === 'string' && r !== ''), PROJECT_MANAGER_ROLE, ...(roleValue ? [roleValue] : [])])].sort();
   return {
+    name: { value: typeof name?.desired === 'string' ? name.desired : '', status: settingStatus(name), revision: name?.desiredRevision ?? 0, disabledReason: off, projectId },
+    role: { value: roleValue, options: roles, status: roleStatus(role), revision: role?.desiredRevision ?? 0, disabledReason: off, projectId },
     enabled: {
       value: on, status: settingStatus(enabled), detail: on ? 'Disabling stops new work for this worker at once. Its current attempt finishes.' : 'Disabled: it is given no new work. Its current attempt, if any, finishes.',
       action: { id: 'enabled', label: on ? 'Disable worker' : 'Enable worker', disabledReason: off, confirm: null, intent: save(projectId, workerId, enabled, { scope: 'runner', field: 'enabled', value: !on }) },

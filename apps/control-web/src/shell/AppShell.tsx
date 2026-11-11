@@ -1,5 +1,6 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 
+import { workerIdentity } from '../features/team/identity.ts';
 import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from 'zustand';
@@ -23,6 +24,7 @@ import { buildDecisions, type DecisionsModel } from '../features/decisions/model
 import { EvidenceView } from '../features/evidence/EvidenceView.tsx';
 import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts';
 import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
+import { PmPanel } from '../features/pm/PmPanel.tsx';
 import { BrainConflicts, BrainView } from '../features/brain/BrainView.tsx';
 import { ProductFollowUps, ProductView } from '../features/product/ProductView.tsx';
 import { HandoverDecisions } from '../features/handover/ContinueInCloud.tsx';
@@ -299,7 +301,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const epoch = useMemo(() => nextEpoch(), [store]);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
-    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls, `${snapshot.meta.projectId}#${epoch}`); } catch { return null; }
+    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId, calls.map((c) => ({ taskId: c.taskId, place: c.place, stepKind: c.kind })), `${snapshot.meta.projectId}#${epoch}`); } catch { return null; }
   }, [snapshot, team, projectLabel, planRunId, calls, epoch]);
   const activity = useMemo(() => {
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
@@ -325,7 +327,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     const taskId = snapshot.approvals[card.id.slice('decision:'.length)]?.taskId ?? null;
     const w = taskId ? Object.values(snapshot.workers).find((x) => x.taskId === taskId) : undefined;
     if (!w) return null;
-    return { id: w.workerId, label: agentById.get(w.workerId)?.name ?? w.workerId };
+    return { id: w.workerId, label: workerIdentity(snapshot, w.workerId, snapshot.tasks[taskId!]?.role ?? null).label };
   };
   const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length;
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
@@ -390,7 +392,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-  const openPlace = (place: 'plan' | 'prs'): void => { window.location.hash = hrefFor(place === 'plan' ? 'pipeline' : 'evidence'); };
+  const openPlace = (place: 'plan' | 'prs' | 'pm'): void => { window.location.hash = hrefFor(place === 'plan' ? 'pipeline' : place === 'pm' ? 'pm' : 'evidence'); };
 
   const views = (
     <>
@@ -438,6 +440,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         {route === 'brain' ? (
           <RouteBoundary resetKey="brain">
             <BrainView port={state.brain} connection={connection} mode={mode} nowMs={state.nowMs} />
+          </RouteBoundary>
+        ) : null}
+        {route === 'pm' ? (
+          <RouteBoundary resetKey="pm">
+            <PmPanel />
           </RouteBoundary>
         ) : null}
         {route === 'benchmark' ? (

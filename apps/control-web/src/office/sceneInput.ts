@@ -10,7 +10,7 @@ export interface SceneHooks {
   /** A robot or a desk was clicked: open that worker's drawer. */
   readonly onOpenWorker: (workerId: string) => void;
   /** The plan wall, the gate or the PR board was clicked. */
-  readonly onOpenPlace: (place: 'plan' | 'prs') => void;
+  readonly onOpenPlace: (place: 'plan' | 'prs' | 'pm') => void;
   readonly onHover: (info: { title: string; sub?: string; x: number; y: number } | null) => void;
 }
 
@@ -38,7 +38,9 @@ function activate(s: OfficeScene, hit: Hit): void {
     const id = s.layout?.racks.find((r) => r.name === hit.id)?.agentId;
     if (id) s.hooks.onOpenWorker(id);
   }
-  else if (hit.kind === 'plan' || hit.kind === 'lead') s.hooks.onOpenPlace('plan');
+  else if (hit.kind === 'plan') s.hooks.onOpenPlace('plan');
+  // H11: the PLAN table is where the Project Manager sits: it opens Talk to the PM.
+  else if (hit.kind === 'lead') s.hooks.onOpenPlace('pm');
   else s.hooks.onOpenPlace('prs');
 }
 

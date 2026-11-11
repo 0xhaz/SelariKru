@@ -120,7 +120,7 @@ test('selecting a worker opens the drawer without navigation', async ({ page }) 
   const before = await page.evaluate(() => history.length);
   await panelRow(page, 'runner_local_1').click();
   await expect(drawer(page)).toBeVisible();
-  await expect(drawer(page).getByRole('heading', { name: 'Backend worker' })).toBeVisible();
+  await expect(drawer(page).getByRole('heading', { name: /^\S.* · Backend$/ })).toBeVisible();
   // The view underneath is still the one the person was on, with its own query kept, and nothing was pushed to history.
   expect(new URL(page.url()).hash).toMatch(/^#\/pipeline\?(.+&)?worker=runner_local_1$/);
   await expect(page.locator('#main').getByRole('heading', { name: 'Pipeline', level: 1 })).toBeAttached();
@@ -271,11 +271,11 @@ test('with the panel beside the page, choosing another worker switches the open 
   await page.goto('/?demo&fixture=human-wait#/pipeline');
   await panelRow(page, 'runner_local_1').click();
   await expect(drawer(page)).toHaveAttribute('data-modal', 'false');
-  await expect(drawer(page).getByRole('heading', { name: 'Backend worker' })).toBeVisible();
+  await expect(drawer(page).getByRole('heading', { name: /^\S.* · Backend$/ })).toBeVisible();
   await expect(panelRow(page, 'runner_local_1')).toHaveAttribute('aria-current', 'true');
   await panelRow(page, 'runner_cloud_1').click();
   await expect(drawer(page)).toHaveCount(1);
-  await expect(drawer(page).getByRole('heading', { name: 'Frontend worker' })).toBeVisible();
+  await expect(drawer(page).getByRole('heading', { name: /^\S.* · Frontend$/ })).toBeVisible();
   await expect(drawer(page).getByRole('tab', { name: 'Task' })).toBeFocused();
   await expect(panelRow(page, 'runner_cloud_1')).toHaveAttribute('aria-current', 'true');
   expect(new URL(page.url()).hash).toBe('#/pipeline?worker=runner_cloud_1');

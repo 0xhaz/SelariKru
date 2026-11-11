@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode, type RefObject } from 'react';
-import { COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, pilotCriteriaProblem, templateSupport, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
+import { defaultSuggestion, saveSuggestedName, suggestedName } from '../team/name-suggestions.ts';
+import { WORKER_NAME_MAX, COST_PAYERS, LEDGER_BASIS, NO_ASSUMPTIONS, PROJECT_TRACKS, TEMPLATE_CATALOG, TRACK_LABELS, costPlanFor, ledgerTotals, pilotCriteriaProblem, templateSupport, type BlueprintContent, type CostAssumptions, type CostLine, type ExecutionChoice, type GoalAssist, type LedgerKey, type OnboardingView as View, type ProjectTrack } from '@selarikru/domain';
 import type { RestrictedDraftHold } from '@selarikru/inference-firebase-web';
 import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import type { AssistantPort } from '../assistant/types.ts';
@@ -188,6 +189,28 @@ export function FocusStep(p: StepProps) {
 
 // ---- 4. blueprint --------------------------------------------------------------------------------------------------
 
+/** H11: each role with a suggested worker name, editable. The pick is offered again in the drawer of the worker of that role, where saving it names the worker. */
+function RoleNames({ projectId, roles }: { projectId: string; roles: readonly { readonly role: string; readonly reason: string }[] }) {
+  const all = roles.map((r) => r.role);
+  const [names, setNames] = useState<Record<string, string>>(() => Object.fromEntries(all.map((r) => [r, suggestedName(projectId, r, all) === defaultSuggestion(all.indexOf(r)) ? '' : suggestedName(projectId, r, all) ?? ''])));
+  return (
+    <>
+      <ul className="space-y-2" data-testid="role-names">
+        {roles.map((r, i) => (
+          <li key={r.role} className="space-y-1">
+            <span className="block"><span className="font-medium">{r.role}.</span> <span className="text-muted">{r.reason}</span></span>
+            <label className="flex flex-wrap items-center gap-2 text-sm text-muted">Suggested name
+              <input className="w-40 rounded-chip border border-line-strong bg-bg px-2 py-1 text-sm text-fg" maxLength={WORKER_NAME_MAX} placeholder={defaultSuggestion(i)} value={names[r.role] ?? ''}
+                onChange={(e) => { const v = e.target.value; setNames((n) => ({ ...n, [r.role]: v })); saveSuggestedName(projectId, r.role, v); }} />
+            </label>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-sm text-muted">Names are suggestions: each worker gets one when it joins, and you can rename it in its drawer. A name is shown, never followed as an instruction.</p>
+    </>
+  );
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return <section className="rounded-card border border-line bg-panel p-4"><h2 className="text-sm font-semibold">{title}</h2><div className="mt-2 text-sm">{children}</div></section>;
 }
@@ -275,7 +298,7 @@ export function BlueprintStep(p: StepProps) {
             <ol className="mt-2 list-decimal space-y-1 pl-5">{c.firstMilestone.tasks.map((t) => <li key={t.id}>{t.title}</li>)}</ol>
           </Section>
           <Section title="Acceptance criteria"><ul className="space-y-1">{c.acceptanceCriteria.map((a) => <li key={a.id} className="flex gap-2"><span className="shrink-0 whitespace-nowrap font-mono text-mono text-muted">{a.id}</span><span className="min-w-0 wrap-anywhere">{a.text}</span></li>)}</ul></Section>
-          <Section title="Who works on it"><ul className="space-y-1">{c.roles.map((r) => <li key={r.role}><span className="font-medium">{r.role}.</span> <span className="text-muted">{r.reason}</span></li>)}</ul></Section>
+          <Section title="Who works on it"><RoleNames projectId={view.projectId} roles={c.roles} /></Section>
           <Section title="Paths workers may change"><ul className="space-y-1 font-mono text-mono">{c.rolePaths ? (Object.entries(c.rolePaths) as [string, string[]][]).map(([role, paths]) => <li key={role}>{role}: {paths.join(", ")}</li>) : c.allowedPaths.map((x) => <li key={x}>{x}</li>)}</ul></Section>
           <Section title="Non-goals"><Bullets items={c.nonGoals} empty="None listed. Add any you want agents to leave alone." /></Section>
           <Section title="Assumptions"><Bullets items={c.assumptions} empty="None listed." /></Section>

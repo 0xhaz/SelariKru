@@ -12,7 +12,8 @@ import { SkillsSettings } from '../skills/SkillsSettings.tsx';
 import { StackSettings } from '../stack/StackSettings.tsx';
 import { ASSIGNMENTS_OFF, ModelAssignmentsPanel } from '../team/ModelAssignments.tsx';
 import type { TeamModel } from '../team/model.ts';
-import { autonomyModel } from './model.ts';
+import { autoDelegateModel, autonomyModel } from './model.ts';
+import { AutoDelegatePanel } from './SettingsPanel.tsx';
 
 export interface SettingsPageProps {
   readonly stack: StackPort | null;
@@ -60,12 +61,12 @@ function TeamTab({ team, connection, autonomy, onOpenWorker, onExecute, onRefres
       <Panel title="Workers" labelId="settings-workers-title" aside={<a className={link} href={hrefFor('team')}>Open the Team screen</a>}>
         {!team ? <p className="text-muted">No project data is connected, so no worker is shown.</p> : team.rows.length === 0 ? <p className="text-muted">No workers yet. They appear once a plan is accepted and a task starts.</p> : (
           <>
-            <p className="mb-3 text-sm text-muted">Each worker's model, switches, Terminal and control mode are in its drawer.</p>
+            <p className="mb-3 text-sm text-muted">Each worker's name, role, model, switches, Terminal and control mode are in its drawer. Disable a worker there to leave its desk empty.</p>
             <ul className="space-y-2" data-testid="settings-workers">
               {team.rows.map((r) => (
                 <li key={r.workerId} className="flex flex-wrap items-center justify-between gap-2 border-2 border-line bg-panel-2 px-3 py-2">
                   <span className="min-w-0">
-                    <span className="block font-semibold text-fg">{r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : 'Unassigned'} <span className="font-mono text-mono font-normal text-muted">{r.workerId}</span></span>
+                    <span className="block font-semibold text-fg">{r.label ?? (r.role ? r.role.charAt(0).toUpperCase() + r.role.slice(1) : 'Unassigned')} <span className="font-mono text-mono font-normal text-muted">{r.workerId}</span></span>
                     <span className={`block text-sm ${TONE_TEXT[r.presence.tone]}`}>{r.presence.label}<span className="text-muted"> · {r.modelDetail ?? 'Model not recorded'}</span></span>
                   </span>
                   {onOpenWorker ? <button type="button" className="btn" data-open-worker={r.workerId} onClick={() => onOpenWorker(r.workerId)}>Open settings<span className="sr-only"> for {r.workerId}</span></button> : null}
@@ -75,6 +76,7 @@ function TeamTab({ team, connection, autonomy, onOpenWorker, onExecute, onRefres
           </>
         )}
       </Panel>
+      <p className="text-sm text-muted" data-testid="settings-add-worker">To add a worker, enrol another runner (<a className={link} href={settingsHref('sandbox')}>Sandbox › Runners</a>). It joins the team here, and you give it a name and a role in its drawer.</p>
       {team && onExecute && onRefresh && onResync ? <ModelAssignmentsPanel model={team.assignments} disabledReason={connection === 'live' ? null : ASSIGNMENTS_OFF} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} idScope="settings" /> : null}
       {autonomy ?? (
         <Panel title="Bounded autonomy" labelId="settings-autonomy-title">
@@ -86,7 +88,8 @@ function TeamTab({ team, connection, autonomy, onOpenWorker, onExecute, onRefres
   );
 }
 
-function WorkflowTab({ snapshot, connection }: { snapshot: ProjectViewSnapshot | null; connection: ConnectionState }) {
+function WorkflowTab({ snapshot, connection, onExecute, onRefresh, onResync }: { snapshot: ProjectViewSnapshot | null; connection: ConnectionState } & Pick<SettingsPageProps, 'onExecute' | 'onRefresh' | 'onResync'>) {
+  const delegate = useMemo(() => (snapshot ? autoDelegateModel(snapshot, connection === 'live') : null), [snapshot, connection]);
   const policy = useMemo(() => { try { return snapshot ? autonomyModel(snapshot, connection === 'live') : null; } catch { return null; } }, [snapshot, connection]);
   const pick = (key: string) => policy?.rows.find((r) => r.key === key);
   const rows = ['merge', 'repairAttempts', 'attemptTimeoutSeconds'].flatMap((k) => { const r = pick(k); return r ? [{ label: r.label, value: r.value, note: `${r.basis}${r.note ? `. ${r.note}` : ''}` }] : []; });
@@ -97,6 +100,7 @@ function WorkflowTab({ snapshot, connection }: { snapshot: ProjectViewSnapshot |
         {rows.length > 0 ? <Facts rows={rows} /> : <p className="text-muted">The server reports no policy for this run, so its merge and repair rules are not shown.</p>}
         <p className="mt-3 text-sm text-muted">Change these in Bounded autonomy, under <a className={link} href={settingsHref('team')}>Team</a>. Agents never merge: a person merges on GitHub.</p>
       </Panel>
+      {delegate && onExecute && onRefresh && onResync ? <AutoDelegatePanel model={delegate} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} /> : null}
       <RunDefaultPanel />
       <Panel title="Pull requests" labelId="settings-prs-title">
         <p className="text-fg">{prs === 0 ? 'No pull request has been opened for this project.' : `${prs} pull request${prs === 1 ? '' : 's'} on record.`} Each one and its evidence are in <a className={link} href={hrefFor('evidence')}>Evidence and PR</a>.</p>
@@ -207,7 +211,7 @@ export function SettingsPage({ stack, skills = null, connection, mode, projectLa
         <div className="min-w-0 flex-1">
           {tab === 'team' && sub === 'skills' ? <SkillsSettings port={skills} connection={connection} mode={mode} /> : null}
           {tab === 'team' && sub === null ? <TeamTab team={team} connection={connection} autonomy={autonomy} onOpenWorker={onOpenWorker} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} /> : null}
-          {tab === 'workflow' ? <WorkflowTab snapshot={snapshot} connection={connection} /> : null}
+          {tab === 'workflow' ? <WorkflowTab snapshot={snapshot} connection={connection} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} /> : null}
           {tab === 'stack' ? <StackSettings port={stack} connection={connection} mode={mode} /> : null}
           {tab === 'mcp' ? (
             <NotBuilt id="mcp" title="MCP">
