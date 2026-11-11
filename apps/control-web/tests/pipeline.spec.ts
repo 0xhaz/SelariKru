@@ -95,7 +95,8 @@ test('graph and table share selection', async ({ page }) => {
   await expect(node(page, 'feature-delivery.contract')).toHaveAttribute('data-selected', 'true');
   await page.getByRole('button', { name: 'Table' }).click();
   await expect(row(page, 'feature-delivery.contract')).toHaveAttribute('data-selected', 'true');
-  await row(page, 'feature-delivery.web').click();
+  // Click the row itself, near its start: since H7 the table keeps its minimum width and scrolls inside the drawer, so the row's middle can be a control.
+  await row(page, 'feature-delivery.web').click({ position: { x: 12, y: 12 } });
   await inspector(page).getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Graph' }).click();
   await expect(node(page, 'feature-delivery.web')).toHaveAttribute('data-selected', 'true');
@@ -300,4 +301,19 @@ test('axe finds no violations in the table, graph, inspector, narrow layout and 
   await page.setViewportSize({ width: 375, height: 800 });
   await expect(page.getByTestId('pipeline-cards')).toBeVisible();
   await expectNoAxeViolations(page);
+});
+
+test('H7 fix: in the narrow default drawer the table keeps its width and scrolls inside the Pipeline, so no word breaks mid-way and the page does not scroll', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openPipeline(page, 'feature-delivery', 'table');
+  const box = page.getByTestId('pipeline-table-scroll');
+  await expect(box).toBeVisible();
+  const m = await box.evaluate((el) => ({ inner: el.scrollWidth, outer: el.clientWidth, table: el.querySelector('table')!.getBoundingClientRect().width }));
+  expect(m.table).toBeGreaterThanOrEqual(1040);
+  expect(m.inner).toBeGreaterThan(m.outer);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(1440);
+  // A one-word owner such as "Backend" stays on one line.
+  const owner = row(page, 'feature-delivery.api').locator('td').nth(1).locator('span').first();
+  const lines = await owner.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+  expect(lines).toBe(1);
 });
