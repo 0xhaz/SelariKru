@@ -4,6 +4,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
 import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing, type DelegationReceipt, type PmPlanAcceptReceipt } from '@selarikru/view-protocol';
+import { AiCheckpointSchema, checkpointStorage, type AiCheckpoint } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -275,6 +276,31 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       const done = await readJson(`/v1/runs/${encodeURIComponent(runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false,
         { expectedRevision: review.expectedRevision, idempotencyKey: request.idempotencyKey, tasks: review.tasks, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId, stepKind: 'pmPlan' }, pmPlan: request.plan }, true);
       return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
+    },
+
+    /** H12: one AI step checkpoint. A restricted, secret or locked one never leaves the browser: refused here before any request. */
+    async saveAiCheckpoint(projectId, checkpoint): Promise<void> {
+      const cp = AiCheckpointSchema.parse(checkpoint);
+      if (checkpointStorage(cp) !== 'server') throw fail({ code: 'unavailable', message: 'checkpoint_restricted: this checkpoint stays in this browser and is not sent', retryable: false });
+      await readJson(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints`, { parse: (v: unknown) => v }, 'a checkpoint receipt', false, cp, true);
+    },
+
+    /** H12: the owner's checkpoints. One the server should never have kept (restricted or locked) or cannot be read is dropped, not shown. */
+    listAiCheckpoints(projectId): Promise<AiCheckpoint[]> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints`, {
+        parse: (v: unknown) => {
+          const list = (v as { checkpoints?: unknown } | null)?.checkpoints;
+          if (!Array.isArray(list)) throw new Error('not a checkpoint list');
+          return list.flatMap((x) => { const p = AiCheckpointSchema.safeParse(x); return p.success && checkpointStorage(p.data) === 'server' ? [p.data] : []; });
+        },
+      }, 'a checkpoint list', false, undefined, true);
+    },
+
+    /** H12: the one escalation a checkpoint may have. */
+    claimAiCheckpointEscalation(projectId, checkpointId): Promise<AiCheckpoint> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints/${encodeURIComponent(checkpointId)}/escalation`, {
+        parse: (v: unknown) => AiCheckpointSchema.parse((v as { checkpoint?: unknown } | null)?.checkpoint),
+      }, 'an escalated checkpoint', false, {}, true);
     },
 
     /** H11 fix round 1: the owner's own assignment, through the same plan rule. */

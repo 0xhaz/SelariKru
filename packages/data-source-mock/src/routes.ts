@@ -40,7 +40,7 @@ export const routeLockOf = (routes: FixtureRoutes, taskId: string) => routeLockF
 /** A route record built the way the server builds one: its effective mode, fallback and conformance come from the policy, not from the report. */
 export function routeRecordOf(input: {
   readonly routes: FixtureRoutes; readonly settings: readonly SettingView[]; readonly runId: string; readonly taskId: string; readonly taskRevision: number; readonly recordId: string; readonly at: string;
-  readonly report: Pick<RouteRecordReport, 'requestId' | 'stepKind' | 'callOverride' | 'requestedMode' | 'observedSource' | 'status' | 'model' | 'timing' | 'validation' | 'blockedReason'> & Partial<Pick<RouteRecordReport, 'outputSha256' | 'contextId' | 'inputLabel' | 'planRevision'>>;
+  readonly report: Pick<RouteRecordReport, 'requestId' | 'stepKind' | 'callOverride' | 'requestedMode' | 'observedSource' | 'status' | 'model' | 'timing' | 'validation' | 'blockedReason'> & Partial<Pick<RouteRecordReport, 'outputSha256' | 'contextId' | 'inputLabel' | 'planRevision' | 'resumed' | 'checkpointId'>>;
 }): RouteRecord {
   const { report } = input;
   // As the server: the browser can only make the record stricter (H11 fix round 1): a call that read restricted input is recorded locked.
@@ -57,6 +57,7 @@ export function routeRecordOf(input: {
     validation: report.validation, blockedReason: report.blockedReason, reportedBy: 'browser', trust: 'untrusted', reportedAt: input.at,
     ...(report.outputSha256 !== undefined ? { outputSha256: report.outputSha256 } : {}), ...(report.contextId !== undefined ? { contextId: report.contextId } : {}),
     ...(report.inputLabel !== undefined ? { inputLabel: report.inputLabel } : {}), ...(report.planRevision !== undefined ? { planRevision: report.planRevision } : {}),
+    ...(report.resumed !== undefined ? { resumed: report.resumed } : {}), ...(report.checkpointId !== undefined ? { checkpointId: report.checkpointId } : {}),
   };
 }
 

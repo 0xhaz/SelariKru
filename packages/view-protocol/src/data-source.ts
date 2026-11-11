@@ -7,7 +7,7 @@ import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts
 import type { ProductAction, ProductActionResult, ProductView } from './product.ts';
 import type { HandoverAction, HandoverDiffView, HandoversView } from './handover.ts';
 import type { CriteriaRevisionRequest, CriteriaRevisionResult, ProposalAcceptReceipt, TaskAgentContext, TaskBaseFiles, TaskContextSize, TaskFileListing } from './agent-context.ts';
-import type { AcceptedProposal } from '@selarikru/domain';
+import type { AcceptedProposal, AiCheckpoint } from '@selarikru/domain';
 
 export type DataSourceErrorCode = 'unknown_project' | 'invalid_cursor' | 'unauthorized' | 'unavailable' | 'invalid_event' | 'disconnected'
   /** Session-level codes: the event stream is dead and will not recover without a new session; a liveness refresh failed; a snapshot older than the projection was rejected. */
@@ -99,6 +99,15 @@ export interface EngineeringDataSource {
    * after H5's backstop judged the pmPlan call that produced it.
    */
   acceptPmPlan?(projectId: string, runId: string, request: PmPlanAcceptRequest): Promise<PmPlanAcceptReceipt>;
+  /**
+   * H12: stores one AI step checkpoint with the server (owner only, project scoped), so a paused step survives a browser close. Only a checkpoint whose
+   * `checkpointStorage` is `server` is ever sent: a restricted, secret or locked one is refused here, before any request, and is kept in the browser instead.
+   */
+  saveAiCheckpoint?(projectId: string, checkpoint: AiCheckpoint): Promise<void>;
+  /** H12: this owner's checkpoints for the project, newest first. Anything that is not a server checkpoint is dropped. */
+  listAiCheckpoints?(projectId: string): Promise<AiCheckpoint[]>;
+  /** H12: claims the one escalation a checkpoint may have (Local first, a local result that failed its checks). A second claim is refused (`escalation_refused`). */
+  claimAiCheckpointEscalation?(projectId: string, checkpointId: string): Promise<AiCheckpoint>;
   disconnect(): void;
 }
 

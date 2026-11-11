@@ -84,6 +84,8 @@ export interface Fixture {
   readonly modelAssignments?: readonly ModelAssignmentView[];
   /** Where the tasks' AI steps run: the run default, labels, overrides and what the browser reported. Absent: the fixture does not report routes. */
   readonly routes?: FixtureRoutes;
+  /** H12: the demo run's configured budget limit, in USD. Absent: only a recommended one, which counts as missing for a cloud step. Simulated. */
+  readonly budgetLimitUsd?: number;
 }
 
 /** Claude only: no provider is listed that is not installed. Opus is marked not allowed so the demo can show a refused choice. */

@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type DelegationReceipt, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { MAX_ATTEMPTS_CAP, canonicalJson, mapPmPlan, sha256Hex, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { AiCheckpointSchema, effectiveRoutePolicy, escalationDecision, serverCheckpointRefusal, type AiCheckpoint, MAX_ATTEMPTS_CAP, canonicalJson, mapPmPlan, sha256Hex, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -61,6 +61,8 @@ interface Project {
   readonly reportContexts: Map<string, { taskId: string; contextId: string | null; locked: boolean }>;
   /** H11 fix round 1: each pmDelegate record authorises one delegation: the request it was used for (to replay a retry) and its answer. */
   readonly usedDelegations: Map<string, { print: string; result: DelegationReceipt }>;
+  /** H12: AI step checkpoints the demo keeps as the server would: public and internal only, by checkpoint id. Simulated. */
+  readonly aiCheckpoints: Map<string, AiCheckpoint>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -137,6 +139,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       contextLabels: new Map(),
       reportContexts: new Map(),
       usedDelegations: new Map(),
+      aiCheckpoints: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -423,7 +426,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     const cloud = Object.values(workers).some((w) => w.execution === 'cloud');
     const narrowed = own('allowed_paths');
     const cloudOff = own('cloud_eligible')?.effective === false;
-    const limit = own('budget_limit_usd')?.effective ?? r.budgetLimitUsd ?? null;
+    const limit = own('budget_limit_usd')?.effective ?? r.budgetLimitUsd ?? p.fixture.budgetLimitUsd ?? null;
     return {
       allowedPaths: { value: narrowed && Array.isArray(narrowed.effective) ? (narrowed.effective as string[]) : [...DEMO_PLAN_PATHS], basis: 'configured' },
       planPaths: [...DEMO_PLAN_PATHS],
@@ -780,6 +783,51 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
      * H11: the Project Manager's delegation, simulated with the server's rule (`checkDelegation`): only the accepted plan's tasks, to enabled workers of the task's
      * role, from a recorded pmDelegate call. Applied ones are recorded as `task.delegated` by agent:pm. Demo data, never evidence.
      */
+    // H12: AI step checkpoints, with the server's refusals: the storage split, the task's lock, a locked call record, a restricted served context, secrets.
+    async saveAiCheckpoint(projectId, checkpoint) {
+      const p = project(projectId);
+      const parsed = AiCheckpointSchema.safeParse(checkpoint);
+      if (!parsed.success) throw fail('unavailable', 'invalid_request: not a checkpoint');
+      const cp = parsed.data;
+      if (cp.projectId !== projectId) throw fail('unavailable', 'checkpoint_project_mismatch: this checkpoint names another project');
+      const own = serverCheckpointRefusal(cp);
+      if (own === 'checkpoint_secret') throw fail('unavailable', 'checkpoint_secret: this checkpoint carries something shaped like a credential');
+      const restricted = (): DataSourceException => fail('unavailable', 'checkpoint_restricted: this checkpoint holds restricted data, so it stays in this browser');
+      if (own !== null) throw restricted();
+      if (!p.state.snapshot.tasks[cp.taskId]) throw fail('unavailable', 'task_not_found: no such task');
+      if (routeLockOf(p.fixture.routes ?? NO_ROUTES, cp.taskId)) throw restricted();
+      if (cp.routeRecordId !== null) {
+        const rec = (p.routeRecords.get(cp.taskId) ?? []).find((r) => r.requestId === cp.routeRecordId);
+        if (rec && (rec.locked || rec.inputLabel === 'restricted' || rec.inputLabel === 'secret')) throw restricted();
+      }
+      if (cp.inputs.contextId !== null) {
+        const label = p.contextLabels.get(cp.inputs.contextId);
+        if (label !== undefined && !['public', 'internal'].includes(label)) throw restricted();
+      }
+      const prior = p.aiCheckpoints.get(cp.checkpointId);
+      if (prior && prior.taskId !== cp.taskId) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
+      if (prior && !['running', 'waiting'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
+      p.aiCheckpoints.set(cp.checkpointId, { ...cp, escalatedAt: prior?.escalatedAt ?? null });
+    },
+    async listAiCheckpoints(projectId) {
+      const p = project(projectId);
+      return [...p.aiCheckpoints.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ ...c }));
+    },
+    async claimAiCheckpointEscalation(projectId, checkpointId) {
+      const p = project(projectId);
+      const cp = p.aiCheckpoints.get(checkpointId);
+      if (!cp) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
+      const routes = p.fixture.routes ?? NO_ROUTES;
+      const lock = routeLockOf(routes, cp.taskId);
+      const override = p.settings.find((s) => s.scope === 'task' && s.key === cp.taskId && s.field === 'route_override')?.desired ?? null;
+      const mode = effectiveRoutePolicy({ call: null, task: (override as never) ?? null, run: runRouteDefaultOf(routes, p.settings, cp.runId).value, lock }).mode;
+      const d = escalationDecision(cp, { mode, lock: lock !== null });
+      if (!d.ok) throw fail('unavailable', `escalation_refused: ${d.reason}`);
+      const next = { ...cp, escalatedAt: isoOf(timeOf(p)) };
+      p.aiCheckpoints.set(checkpointId, next);
+      return { ...next };
+    },
+
     async delegate(projectId, runId, request) {
       const p = project(projectId);
       const snap = p.state.snapshot;

@@ -319,7 +319,7 @@ function featureDelivery(): Fixture {
   b.complete('web', 'att_web_1', 110, LOCAL2).verdict('web', 'att_web_1', 115, 'failed', { checkId: 'ci:web', summary: '2 of 24 checks failed: the feedback list is not sorted newest first' });
   b.start('web', 'att_web_2', 120, LOCAL2, 'local', 'cloud', 2);
   return done(b, {
-    id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE,
+    id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE, budgetLimitUsd: 25,
     // Every route mode is in use: the run default is Local first from onboarding; the contract runs Cloud only, the API Cloud first, the integration Local only, and
     // the end-to-end checks read restricted data, so their AI steps are locked to the device (a planned local task, never one headed to a cloud worker). The list
     // UI fell back to the cloud once; the integration's last source is unknown.
