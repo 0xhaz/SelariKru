@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
+import { withTx, type Tx } from '@selarikru/persistence';
 import { canonicalJson, sha256Hex } from '@selarikru/domain';
 import { API_POLICY, PROJECT, RUN, TENANT, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
@@ -107,5 +108,54 @@ describe('accepting a Project Manager plan revises the run\'s tasks (H11 fix rou
     expect((await revise(r.body.tasks, 2, [task({ revises: 't_back', paths: ['apps/api/other'] })])).body.error?.code).toBe('plan_output_mismatch');
     const ok = await revise(r.body.tasks);
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
+  });
+});
+
+describe('H12 step 0: plan-revisions derives the PM plan under its locks, and one pmPlan record accepts one plan', () => {
+  /** Resolves once some other backend is waiting on a lock this one holds. */
+  async function queuedBehind(tx: Tx): Promise<void> {
+    const [me] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+    const pid = Number(me!['pid']);
+    for (let i = 0; i < 2000; i++) {
+      const [row] = await t.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))`);
+      if (Number(row!['n']) > 0) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error('the route never queued behind the scheduler lock');
+  }
+
+  it('a task locked while plan-revisions waits for the scheduler lock is judged locked: the specs are derived after lockBeforeRunRow, inside the transaction', async () => {
+    const r = await review([task({ revises: 't_back' })]);
+    expect(r.status).toBe(200);
+    let pending: Promise<Awaited<ReturnType<typeof revise>>> | undefined;
+    await withTx(t.db, async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`selarikru.scheduler:${TENANT}`}, 0))`);
+      pending = revise(r.body.tasks);
+      await queuedBehind(tx);
+      // While the route waits, t_back becomes restricted (a Brain source), committed before the scheduler lock is released.
+      await t.db.insert(schema.brainSources).values({
+        tenantId: TENANT, projectId: PROJECT, sourceId: 'note:late', revision: 1, kind: 'note', title: 'n', standing: 'accepted', classification: 'restricted', allowedUse: ['local'],
+        provenance: { origin: 'owner', ref: 'x', recordedBy: 'u' }, taskId: 't_back', sections: [], contentSha256: 'a'.repeat(64), seq: 1, recordedAt: new Date(),
+      });
+    });
+    const done = await pending!;
+    expect(done.body.error?.details?.reason ?? done.body.error?.code, JSON.stringify(done.body)).toBe('revises_locked');
+    const [row] = await t.db.execute(sql`SELECT current_revision FROM task_status WHERE task_id = 't_back'`);
+    expect(row!['current_revision']).toBe(1);
+  });
+
+  it('a pmPlan record accepts one plan: the same request again gets the first answer, any other use of the record is refused (pm_plan:<record>)', async () => {
+    const r = await review([task({ revises: 't_back' })]);
+    const body = { expectedRevision: 2, idempotencyKey: 'k-once', tasks: r.body.tasks, agentProposal, pmPlan: { tasks: lastPlan } };
+    const first = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, body);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const again = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, body);
+    expect(again.body).toEqual(first.body);
+    // The same record, under a new key and the plan revision now in force: refused, nothing written.
+    const reuse = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { ...body, expectedRevision: 3, idempotencyKey: 'k-twice' });
+    expect(reuse.status).toBe(409);
+    expect(reuse.body.error?.code).toBe('route_record_used');
+    const [run] = await t.db.execute(sql`SELECT plan_revision FROM runs`);
+    expect(run!['plan_revision']).toBe(3);
   });
 });

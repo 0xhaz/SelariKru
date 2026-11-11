@@ -28,7 +28,8 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *
  * Who follows it. The verifier's verdict (`lockForVerdict` in services/verifier): candidate, run row, its parts' status rows, this lock, event sequence. An owner re-verify:
  * candidate, scheduler lock, run row, status rows, this lock (`lockBeforeRunRow`, `reverifyRun`). An owner replan: candidate if stale, scheduler lock, run row, the named tasks'
- * status rows, then the event sequence; a run in review leaves it there, on the run row it already holds (`leaveReviewForPlan`). A cancel: candidate and scheduler lock if
+ * status rows, then the event sequence; a run in review leaves it there, on the run row it already holds (`leaveReviewForPlan`). A Project Manager plan (H12 step 0)
+ * also takes its `pm_plan:<record>` receipt after the scheduler lock, and is re-derived after the run row, reading task routes and labels without a lock. A cancel: candidate and scheduler lock if
  * stale, the task's status row, this lock; only a stale exit takes the run row, last (below).
  *
  * The owner's settings and run controls (apps/control-api/src/settings.ts), each a path that takes the scheduler lock first:

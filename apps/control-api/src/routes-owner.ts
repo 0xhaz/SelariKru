@@ -252,9 +252,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         const rec = await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'pmPlan');
         // Fix round 3: bound to the PM's output, and re-derived here with every check (locks, roles, paths), so a tampered client cannot skip one.
         if (body.pmPlan === undefined || rec.outputSha256 !== pmPlanHash(body.pmPlan)) throw new AppError(409, 'plan_output_mismatch', 'this is not the plan the Project Manager call produced, so it is not accepted');
-        const settings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(db, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
-        const derived = await derivePmPlanSpecs(db, { tenantId: config.tenantId, projectId, runId: run.runId, routeRecordId: body.agentProposal.routeRecordId, plan: body.pmPlan, settings, nanoBudgetChars: config.nanoInputBudgetChars });
-        if (canonicalJson(derived) !== canonicalJson(body.tasks)) throw new AppError(409, 'plan_output_mismatch', 'these task specs are not the ones the server derives from the Project Manager\'s plan, so they are not accepted');
+        // The specs are re-derived inside the transaction below, after the scheduler lock (H12 step 0), so a task locked while this request waited is judged locked.
       } else {
         // An agent's criteria revise exactly the task whose call proposed them.
         if (!body.tasks.every((x) => x.taskId === named)) throw invalidRequest('an agent proposal revises only the task whose call proposed it', { reason: 'agent_proposal_task_mismatch' });
@@ -283,6 +281,12 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
         .where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.projectId, projectId), eq(schema.runs.runId, run.runId))).for('update');
       const current = locked?.planRevision ?? 0;
       if (body.expectedRevision !== current) throw staleRevision(current, 'the plan');
+      // H12 step 0: a Project Manager plan's specs, derived here under the scheduler lock and the run row, from the task routes and locks as they are now.
+      if (body.agentProposal?.stepKind === 'pmPlan') {
+        const planSettings = ctx.planConfig?.(projectId) ?? await onboardingPlanSettings(tx, config.tenantId, projectId, ctx.policy, config.caps.attemptTimeoutSeconds);
+        const derived = await derivePmPlanSpecs(tx, { tenantId: config.tenantId, projectId, runId: run.runId, routeRecordId: body.agentProposal.routeRecordId, plan: body.pmPlan, settings: planSettings, nanoBudgetChars: config.nanoInputBudgetChars });
+        if (canonicalJson(derived) !== canonicalJson(body.tasks)) throw new AppError(409, 'plan_output_mismatch', 'these task specs are not the ones the server derives from the Project Manager\'s plan, so they are not accepted');
+      }
       // The owner narrowed this run's approved paths: a plan cannot bring one back. Refused here, naming the path, rather than blocked later at claim.
       const [narrowed] = await tx.select({ desired: schema.runSettings.desired }).from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, config.tenantId), eq(schema.runSettings.projectId, projectId), eq(schema.runSettings.runId, run.runId), eq(schema.runSettings.field, 'allowed_paths')));
       if (narrowed) {
@@ -372,9 +376,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     const result = await withTx(db, async (tx) => {
       // The candidate and the scheduler lock come before the run row `persist` takes: the claim poll holds the scheduler lock and a ready task's status row, then takes the run row.
       const stale = await lockBeforeRunRow(tx, runScope, staleSha);
+      // H12 step 0: one pmPlan record accepts one plan. The same request again gets the first answer; any other use of the record is refused.
+      const once = body.agentProposal?.stepKind === 'pmPlan'
+        ? () => idempotent(tx, { tenantId: config.tenantId, projectId, key: `pm_plan:${body.agentProposal!.routeRecordId}` }, fingerprint(body), persist(tx, stale)).catch((e: unknown) => {
+          if (e instanceof AppError && e.code === 'idempotency_key_conflict') throw new AppError(409, 'route_record_used', 'this Project Manager plan was already accepted once; ask the Project Manager again');
+          throw e;
+        })
+        : persist(tx, stale);
       return body.idempotencyKey === undefined
-        ? persist(tx, stale)()
-        : idempotent(tx, { tenantId: config.tenantId, projectId, key: `plan.revise:${run.runId}:${body.idempotencyKey}` }, fingerprint(body), persist(tx, stale));
+        ? once()
+        : idempotent(tx, { tenantId: config.tenantId, projectId, key: `plan.revise:${run.runId}:${body.idempotencyKey}` }, fingerprint(body), once);
     });
     return reply.code(201).send(result);
   });

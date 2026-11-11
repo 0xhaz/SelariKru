@@ -138,7 +138,8 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           webResearch: () => { const s = opts.snapshot(); return webResearchGranted(s, s?.tasks[req.subjectTaskId]?.runId ?? null); },
           getTaskRoute: async (taskId) => {
             const read = await getTaskRoute(projectId, taskId);
-            publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);
+            // Only the subject's read is the call in flight; a plan scope's fresh read of each listed task (H12 step 0) is not.
+            if (taskId === req.subjectTaskId && !calls.some((c) => c.callId === callId)) publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);
             return read;
           },
           getTaskContext: (taskId, destination, callOverride, contextId) => getTaskContext(projectId, taskId, destination, callOverride, contextId),

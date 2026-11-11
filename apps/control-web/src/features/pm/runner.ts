@@ -49,10 +49,12 @@ export function webResearchGranted(snap: ProjectViewSnapshot | null, runId: stri
 }
 
 /** The accepted plan the Project Manager may delegate within: the subject task's run, its tasks and the project's workers (names quoted as data in the prompt). */
-export function planScopeFor(snap: ProjectViewSnapshot, runId: string) {
+export function planScopeFor(snap: ProjectViewSnapshot, runId: string, fresh?: ReadonlyMap<string, boolean>) {
   const run = snap.runs[runId];
   // A locked task (or one whose route is not known) is restricted: a cloud-capable prompt lists only its id, role and status (H11 fix round 1, H1).
-  const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => ({ taskId: t.taskId, title: t.title ?? t.taskId, role: t.role ?? 'worker', status: t.status, restricted: !t.route || t.route.lock !== null }));
+  // H12 step 0: `fresh` is each task's lock read again just before the scope is built (true: locked, or the read failed). The snapshot can be an interval stale, so
+  // a task it shows unlocked is withheld when the fresh read says locked; the fresh read never unlocks a task the snapshot shows locked.
+  const tasks = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => ({ taskId: t.taskId, title: t.title ?? t.taskId, role: t.role ?? 'worker', status: t.status, restricted: !t.route || t.route.lock !== null || (fresh !== undefined && fresh.get(t.taskId) !== false) }));
   // One role rule with the server and the demo (fix round 2, I2): a saved role, else the role of the task the worker last claimed.
   const settings = snap.settings.filter((s) => s.scope === 'runner').map((s) => ({ workerId: s.key, field: s.field, value: s.desired }));
   const history = Object.values(snap.attempts).map((a) => ({ workerId: a.runnerId ?? '', role: snap.tasks[a.taskId]?.role ?? null, at: a.startedAt }));
@@ -64,6 +66,15 @@ export function planScopeFor(snap: ProjectViewSnapshot, runId: string) {
   return { planRevision: run?.planRevision ?? 0, tasks, workers };
 }
 
+/** H12 step 0: every listed task's lock, read fresh just before a plan scope is built. A failed read counts as locked (fail closed). */
+export async function freshLocks(deps: Pick<PmDeps, 'getTaskRoute'>, snap: ProjectViewSnapshot, runId: string): Promise<Map<string, boolean>> {
+  const ids = Object.values(snap.tasks).filter((t) => t.runId === runId).map((t) => t.taskId);
+  const out = new Map<string, boolean>();
+  await Promise.all(ids.map(async (id) => {
+    try { out.set(id, (await deps.getTaskRoute(id)).route.lock !== null); } catch { out.set(id, true); }
+  }));
+  return out;
+}
 
 export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
   if (!req.question.trim()) return { kind: 'refused', code: 'question_empty' };
@@ -118,10 +129,10 @@ export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome
   switch (req.kind) {
     case 'pmAnswer': return done(await deps.catalog.pmAnswer(base));
     // The run's current tasks, so the plan can revise them by id (fix round 2, I4).
-    case 'pmPlan': return done(await deps.catalog.pmPlan(snap ? { ...base, plan: planScopeFor(snap, runId) } : base));
+    case 'pmPlan': return done(await deps.catalog.pmPlan(snap ? { ...base, plan: planScopeFor(snap, runId, await freshLocks(deps, snap, runId)) } : base));
     case 'pmDelegate': {
       if (!snap) return { kind: 'refused', code: 'no_snapshot' };
-      return done(await deps.catalog.pmDelegate({ ...base, plan: planScopeFor(snap, runId) }));
+      return done(await deps.catalog.pmDelegate({ ...base, plan: planScopeFor(snap, runId, await freshLocks(deps, snap, runId)) }));
     }
   }
 }

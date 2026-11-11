@@ -84,3 +84,26 @@ describe('the Project Manager runner (H11 fix round 1)', () => {
     expect((d.calls['pmPlan']![0] as { plan: { tasks: { taskId: string }[] } }).plan.tasks.map((t) => t.taskId)).toEqual(['t1', 't2']);
   });
 });
+
+describe('H12 step 0: the plan scope reads each listed task\'s route again just before it is built', () => {
+  const unlockedSnap = (): ProjectViewSnapshot => snapshotOf({ tasks: [task('t1', { title: 'Add posting', role: 'backend', route: route() }), task('t2', { title: 'PATIENT-LIST export', role: 'backend', route: route() })] });
+  for (const kind of ['pmPlan', 'pmDelegate'] as const) {
+    it(`${kind}: a sibling that became locked after the snapshot is withheld, and a sibling whose read fails counts as locked`, async () => {
+      const reads: string[] = [];
+      const d = deps({
+        snapshot: () => { const x = unlockedSnap(); x.tasks['t3'] = { ...x.tasks['t1']!, taskId: 't3', title: 'Third' }; return x; },
+        getTaskRoute: async (taskId) => {
+          reads.push(taskId);
+          if (taskId === 't3') throw new Error('offline');
+          return { taskId, revision: 1, runId: 'run', route: taskId === 't2' ? route({ lock }) : route(), records: [] } as never;
+        },
+      });
+      await runPmStep(d, req({ kind }));
+      const scope = (d.calls[kind]![0] as { plan: { tasks: { taskId: string; restricted?: boolean }[] } }).plan;
+      expect(scope.tasks.find((t) => t.taskId === 't2')!.restricted).toBe(true);
+      expect(scope.tasks.find((t) => t.taskId === 't3')!.restricted).toBe(true);
+      expect(scope.tasks.find((t) => t.taskId === 't1')!.restricted).toBe(false);
+      expect(reads).toEqual(expect.arrayContaining(['t2', 't3']));
+    });
+  }
+});
