@@ -255,8 +255,8 @@ describe('a restricted sibling\'s project-wide plan claim keeps a Local only tas
       const diff = String((patch.proposal.data as { diff: string }).diff);
       const content = 'export const posts = [];\n';
       const proposal: AcceptedProposal = { proposalId: patch.proposal.requestId, taskId: 'T1', taskRevision: 1, baseSha: base, routeRecordId: patch.proposal.requestId, diff, results: [{ path: 'src/posts.ts', sha256: sha256Hex(content), content }] };
-      // The server records the call against its own route (the task is not locked there); what refuses it is the context it served.
-      expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a1', proposal })).body.error.code).toBe('proposal_from_restricted_context');
+      // The call read restricted input, so its report carries inputLabel restricted and the server records it as locked (H11 H2); the record alone refuses it, before the served context is consulted.
+      expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a1', proposal })).body.error.code).toBe('proposal_from_restricted_call');
       // A tampered client: the same output, reported as an unlocked call with its hash, naming a context it read for this call. The server's own record refuses it.
       expect((await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_tamper`)).status).toBe(200);
       await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, 'rpt_tamper', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_tamper', taskRevision: 1, effectiveMode: 'ONLY_ON_DEVICE', stepKind: 'patch', status: 'ok', locked: false, outputSha256: sha256Hex(diff), contextId: 'ctx_tamper' })}::jsonb, 'owner')`);
@@ -268,7 +268,7 @@ describe('a restricted sibling\'s project-wide plan claim keeps a Local only tas
       expect(criteria.locked).toBe(true);
       const spec = ctx.spec;
       const revised = await call('POST', `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 1, idempotencyKey: 'c1', tasks: [{ ...spec, revision: 2, criteria: [{ id: 'R1', text: 'Posts appear in the list.' }] }], agentProposal: { taskId: 'T1', routeRecordId: criteria.proposal.requestId } });
-      expect(revised.body.error.code).toBe('proposal_from_restricted_context');
+      expect(revised.body.error.code).toBe('proposal_from_restricted_call');
       expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM accepted_proposals`))[0]!['n'])).toBe(0);
     } finally {
       await app.close();
