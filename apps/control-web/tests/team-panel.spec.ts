@@ -172,7 +172,7 @@ test('stop in the drawer asks for confirmation and is disabled when not live', a
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   await expect(drawer(page).getByRole('heading', { name: 'Cancel this task' })).toBeVisible();
-  const stop = drawer(page).getByRole('button', { name: 'Cancel task' });
+  const stop = drawer(page).getByRole('button', { name: 'Cancel task', exact: true });
   await expect(stop).toBeEnabled();
   await stop.click();
   const confirm = page.getByRole('dialog', { name: 'Cancel "Empty states"?' });
@@ -184,7 +184,7 @@ test('stop in the drawer asks for confirmation and is disabled when not live', a
   expect((await commands(page)).filter((c) => c.method === 'execute')).toEqual([]);
 
   await stop.click();
-  await page.getByRole('dialog', { name: /^Cancel/ }).getByRole('button', { name: 'Cancel task' }).click();
+  await page.getByRole('dialog', { name: /^Cancel/ }).getByRole('button', { name: 'Cancel task', exact: true }).click();
   await expect(drawer(page).getByTestId('settings-feedback')).toContainText('Cancel requested');
   const sent = (await commands(page)).filter((c) => c.method === 'execute');
   expect(sent).toHaveLength(1);
@@ -195,9 +195,9 @@ test('stop in the drawer asks for confirmation and is disabled when not live', a
   await spied(page, { spiedFixture: 'human-wait', fault: 'reconnecting' }, 'summary');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
-  await expect(drawer(page).getByRole('button', { name: 'Cancel task' })).toBeDisabled();
+  await expect(drawer(page).getByRole('button', { name: 'Cancel task', exact: true })).toBeDisabled();
   await expect(drawer(page).getByTestId('stop-disabled-reason')).toContainText(/connection/i);
-  await expect(drawer(page).getByRole('button', { name: 'Cancel task' })).toHaveAttribute('aria-describedby', /.+/);
+  await expect(drawer(page).getByRole('button', { name: 'Cancel task', exact: true })).toHaveAttribute('aria-describedby', /.+/);
 });
 
 /** Rewrites the projection's snapshot in place, as a new server snapshot would. */
@@ -221,7 +221,7 @@ async function openCancelConfirm(page: Page): Promise<void> {
   await spied(page, { spiedFixture: 'human-wait' }, 'summary');
   await panelRow(page, 'runner_cloud_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
-  await drawer(page).getByRole('button', { name: 'Cancel task' }).click();
+  await drawer(page).getByRole('button', { name: 'Cancel task', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Cancel "Empty states"?' })).toBeVisible();
 }
 

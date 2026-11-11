@@ -149,7 +149,7 @@ test('merged-SHA mismatch and blocked verification get their own cards and real 
   await expect(next.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
   await expandRows(next);
   await expect(card(next, 'reverify').getByRole('button', { name: 'Re-verify the run' })).toBeVisible();
-  await expect(card(next, 'blocked').getByRole('button', { name: 'Cancel task' })).toBeVisible();
+  await expect(card(next, 'blocked').getByRole('button', { name: 'Cancel task', exact: true })).toBeVisible();
 });
 
 test('a deep link from a worker\'s request lands on its card in the Action items drawer', async ({ page }) => {
@@ -228,7 +228,7 @@ test('two stops sharing one decision say why the counts differ', async ({ page }
   await open(page, { spiedFixture: 'budget-stop' });
   await expect(page.getByTestId('attention-count')).toHaveText('2 need attention');
   await expect(page.getByTestId('decisions-count')).toContainText('1');
-  await expect(page.getByTestId('decisions-grouped')).toContainText('Some items share one decision here');
+  await expect(page.getByTestId('decisions-grouped')).toContainText('The header counts 2 items');
 });
 
 test('the replan banner clears when the link no longer names a run', async ({ page }) => {
@@ -250,4 +250,63 @@ test('replan opens the Assistant with the run and task filled in', async ({ page
   await page.goto('/tests/harness/index.html#/assistant?run=run-42&task=task-7');
   await expect(page.getByTestId('replan-context')).toContainText('task-7');
   await expect(page.getByLabel('Run ID', { exact: false })).toHaveValue('run-42');
+});
+
+// ---- compact rows (T5.12): "Also waiting on you" shows each decision as one line with its primary action, the full card on request ----
+
+async function openCollapsed(page: Page, scenario: Record<string, unknown>): Promise<void> {
+  await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, scenario);
+  await page.goto('/tests/harness/index.html#/actions');
+  await expect(page.getByRole('heading', { name: 'Action items', level: 1 })).toBeVisible();
+}
+const row = (page: Page, kind: string) => page.locator(`[data-testid="action-row"][data-row-kind="${kind}"]`);
+const focusedId = (page: Page) => page.evaluate(() => document.activeElement?.id ?? '');
+
+test('a collapsed row\'s primary action goes through the same confirmation, and once accepted focus moves to the next item', async ({ page }) => {
+  await openCollapsed(page, { spiedFixture: 'budget-stop' });
+  const r = row(page, 'budget_stop');
+  await expect(r.getByRole('button', { name: /^Details/ })).toHaveAttribute('aria-expanded', 'false');
+  await r.getByRole('button', { name: 'Accept reduced scope' }).click();
+  await expect(page.getByRole('dialog')).toContainText('not delivered');
+  await page.getByRole('dialog').getByRole('button', { name: 'Accept reduced scope' }).click();
+  await expect(row(page, 'budget_stop')).toHaveCount(0);
+  await expect(page.getByTestId('history-entry').first()).toContainText('Accepted reduced scope');
+  expect(await commands(page)).toHaveLength(1);
+  // The next item's title, row or card, or the heading when nothing is left.
+  await expect.poll(() => focusedId(page)).toMatch(/(-title|-row-title|^decisions-heading)$/);
+});
+
+test('a refused primary action opens the row, says why, and puts focus on what it says', async ({ page }) => {
+  await openCollapsed(page, { spiedFixture: 'budget-stop', rejectWith: 'not_allowed' });
+  const r = row(page, 'budget_stop');
+  await r.getByRole('button', { name: 'Accept reduced scope' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Accept reduced scope' }).click();
+  await expect(r.getByRole('button', { name: 'Hide details' })).toHaveAttribute('aria-expanded', 'true');
+  const c = card(page, 'budget_stop');
+  await expect(c.getByTestId('card-feedback')).toContainText('The server refused this');
+  await expect.poll(() => focusedId(page)).toMatch(/^feedback-/);
+});
+
+test('a primary action refused because the request changed opens the row with the change shown, and focus on the feedback', async ({ page }) => {
+  await openCollapsed(page, { spiedFixture: 'budget-stop', rejectWith: 'reduced_scope_changed' });
+  const r = row(page, 'budget_stop');
+  await r.getByRole('button', { name: 'Accept reduced scope' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Accept reduced scope' }).click();
+  await expect(r.getByRole('button', { name: 'Hide details' })).toHaveAttribute('aria-expanded', 'true');
+  const c = card(page, 'budget_stop');
+  await expect(c.getByTestId('card-feedback')).toContainText('what was not delivered is different now');
+  await expect(c.getByTestId('request-changed')).toBeVisible();
+  await expect.poll(() => focusedId(page)).toMatch(/^feedback-/);
+});
+
+test('a deep link to a collapsed row opens it, scrolls to it and focuses its card', async ({ page }) => {
+  await openCollapsed(page, { spiedFixture: 'budget-stop' });
+  const id = await row(page, 'budget_stop').getAttribute('data-card-id');
+  expect(id).toMatch(/^scope:/);
+  await page.goto('about:blank');
+  await page.goto(`/tests/harness/index.html#/actions?card=${encodeURIComponent(id!)}`);
+  const c = card(page, 'budget_stop');
+  await expect(c).toBeVisible();
+  await expect(c).toBeInViewport();
+  await expect.poll(() => focusedId(page)).toBe(`${id}-title`);
 });

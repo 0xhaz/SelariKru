@@ -410,7 +410,19 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
               <span className="min-w-0 truncate font-mono text-mono text-muted" title={identity.session.workspace}>{identity.session.workspace}</span>
               {identity.session.state === 'running' ? (
                 // The stop request and its states are the Settings tab's; this takes you to it.
-                <button type="button" className={`${buttonQuiet} ml-auto`} data-testid="drawer-stop" onClick={() => { selectTab('settings', false); requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid="settings-stop"] [data-action]')?.focus()); }}>Stop…</button>
+                <>
+                  <button type="button" className={`${buttonQuiet} ml-auto`} data-testid="drawer-stop" aria-describedby={`${titleId}-stop-note`}
+                    onClick={() => {
+                      selectTab('settings', false);
+                      requestAnimationFrame(() => {
+                        // The cancel control itself when it can take focus; otherwise the section's heading, so focus never lands nowhere.
+                        const section = document.querySelector<HTMLElement>('[data-testid="settings-stop"]');
+                        const button = section?.querySelector<HTMLButtonElement>('[data-action]:not(:disabled)');
+                        (button ?? section?.querySelector<HTMLElement>('[data-section-title]'))?.focus();
+                      });
+                    }}>Cancel task…</button>
+                  <span id={`${titleId}-stop-note`} className="sr-only">Opens Settings, where you can cancel this task.</span>
+                </>
               ) : null}
             </div>
           ) : null}

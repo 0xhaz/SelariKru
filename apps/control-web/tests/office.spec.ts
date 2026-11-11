@@ -409,3 +409,18 @@ test('the worker drawer follows the reference: identity line with the reported c
   await d.getByRole('tab', { name: 'Messages' }).click();
   await expect(d.getByTestId('drawer-messages').getByRole('link', { name: 'Open in Action items' }).first()).toBeVisible();
 });
+
+test('"Cancel task…" in the session bar says where it leads, and lands on the existing cancel control or its heading', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await spied(page, 'healthy-parallel-work', '#/office?worker=runner_local_1');
+  const d = page.getByTestId('worker-drawer');
+  await expect(d.getByTestId('drawer-session')).toContainText('Session running');
+  const button = d.getByRole('button', { name: 'Cancel task…' });
+  await expect(button).toHaveAccessibleDescription('Opens Settings, where you can cancel this task.');
+  await button.click();
+  await expect(d.getByRole('tab', { name: 'Settings' })).toHaveAttribute('aria-selected', 'true');
+  // Focus is in the Cancel this task section: its button when it can take focus, else the section's heading.
+  await expect.poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="settings-stop"]')))).toBe(true);
+  const cancel = d.getByTestId('settings-stop').locator('[data-action]');
+  if (await cancel.count()) await expect(cancel).toHaveAccessibleDescription(/Cancelling stops the running attempt/);
+});

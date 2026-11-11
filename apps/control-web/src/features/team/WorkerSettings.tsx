@@ -34,7 +34,7 @@ function Section({ title, children, testId }: { title: string; children: ReactNo
   const id = useId();
   return (
     <section aria-labelledby={id} data-testid={testId} className="space-y-3">
-      <h3 id={id} className="text-sm font-semibold tracking-wide text-fg">{title}</h3>
+      <h3 id={id} tabIndex={-1} data-section-title="" className="text-sm font-semibold tracking-wide text-fg outline-none">{title}</h3>
       {children}
     </section>
   );
@@ -159,8 +159,8 @@ export function WorkerSettings({ row, settings, assign, live, onExecute, onRefre
       <Section title="Cancel this task" testId="settings-stop">
         {stop ? (
           <div className="space-y-2 rounded-chip border border-line p-3">
-            <p className="text-sm text-fg">Cancelling stops the running attempt and ends <span className="font-medium">{row.task?.title}</span> for good. To keep the task and try another model, change the model above instead.</p>
-            <div className="max-w-xs"><ActionControl action={stop} busyId={busy} cardId={STOP_CARD} describedBy={stop.disabledReason !== null ? `${reasonId}-stop` : undefined} onCommand={(a) => request(STOP_CARD, null, a)} /></div>
+            <p id={`${reasonId}-stop-explain`} className="text-sm text-fg">Cancelling stops the running attempt and ends <span className="font-medium">{row.task?.title}</span> for good. To keep the task and try another model, change the model above instead.</p>
+            <div className="max-w-xs"><ActionControl action={stop} busyId={busy} cardId={STOP_CARD} describedBy={[`${reasonId}-stop-explain`, ...(stop.disabledReason !== null ? [`${reasonId}-stop`] : [])].join(' ')} onCommand={(a) => request(STOP_CARD, null, a)} /></div>
             {stop.disabledReason !== null ? <p id={`${reasonId}-stop`} data-testid="stop-disabled-reason" className="text-sm text-muted">{stop.disabledReason}</p> : null}
           </div>
         ) : <p className="text-sm text-muted" data-testid="stop-none">{settings.stopNone}</p>}
