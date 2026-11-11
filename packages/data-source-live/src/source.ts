@@ -3,7 +3,7 @@ import {
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
-import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing, type DelegationReceipt } from '@selarikru/view-protocol';
+import { CriteriaRevisionRequestSchema, ProposalAcceptReceiptSchema, TaskAgentContextSchema, TaskBaseFilesSchema, TaskContextSizeSchema, type CriteriaRevisionResult, type ProposalAcceptReceipt, type TaskAgentContext, type TaskBaseFiles, type TaskContextSize, TaskFileListingSchema, type TaskFileListing, type DelegationReceipt, type PmPlanAcceptReceipt } from '@selarikru/view-protocol';
 import { toViewSnapshot, type RawSnapshot } from './snapshot.ts';
 
 /** What the plan-revisions route answers. */
@@ -260,6 +260,26 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     /** H11: the Project Manager's delegation. The server applies only what the accepted plan covers; a refusal's code leads the message. */
     delegate(projectId, runId, request): Promise<DelegationReceipt> {
       return readJson(`/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/delegations`, {
+        parse: (v: unknown) => ({ ...(v as { applied: DelegationReceipt['applied']; refused: DelegationReceipt['refused']; autoDelegate: boolean }), simulated: false }),
+      }, 'a delegation receipt', false, request, true);
+    },
+
+    /**
+     * H11 fix round 1 (I4): the owner accepts a Project Manager plan: the server reviews it into task specs (as the Assistant does), then records the revision with the
+     * pmPlan call named, so the server's backstop judges that call. Issues needing an acknowledgement come back as the review's refusal, for the Assistant.
+     */
+    async acceptPmPlan(projectId, runId, request): Promise<PmPlanAcceptReceipt> {
+      const data = { tasks: request.plan.tasks.map((t) => ({ title: t.title, description: t.description, requirementIds: [...t.requirementIds], ...(t.role === 'backend' || t.role === 'frontend' ? { role: t.role } : {}) })) };
+      const review = await readJson(`/v1/runs/${encodeURIComponent(runId)}/proposals/review`, { parse: (v: unknown) => v as { expectedRevision: number; tasks: unknown[] } }, 'a plan review', false, { envelope: { operation: 'draftTaskPlan', status: 'ok', data } }, true);
+      if (review.expectedRevision !== request.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'stale_revision: the plan changed since the Project Manager drafted this', retryable: false });
+      const done = await readJson(`/v1/runs/${encodeURIComponent(runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false,
+        { expectedRevision: review.expectedRevision, idempotencyKey: request.idempotencyKey, tasks: review.tasks, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId, stepKind: 'pmPlan' } }, true);
+      return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
+    },
+
+    /** H11 fix round 1: the owner's own assignment, through the same plan rule. */
+    assign(projectId, runId, request): Promise<DelegationReceipt> {
+      return readJson(`/v1/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/delegations/owner`, {
         parse: (v: unknown) => ({ ...(v as { applied: DelegationReceipt['applied']; refused: DelegationReceipt['refused']; autoDelegate: boolean }), simulated: false }),
       }, 'a delegation receipt', false, request, true);
     },

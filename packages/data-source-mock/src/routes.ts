@@ -40,10 +40,11 @@ export const routeLockOf = (routes: FixtureRoutes, taskId: string) => routeLockF
 /** A route record built the way the server builds one: its effective mode, fallback and conformance come from the policy, not from the report. */
 export function routeRecordOf(input: {
   readonly routes: FixtureRoutes; readonly settings: readonly SettingView[]; readonly runId: string; readonly taskId: string; readonly taskRevision: number; readonly recordId: string; readonly at: string;
-  readonly report: Pick<RouteRecordReport, 'requestId' | 'stepKind' | 'callOverride' | 'requestedMode' | 'observedSource' | 'status' | 'model' | 'timing' | 'validation' | 'blockedReason'>;
+  readonly report: Pick<RouteRecordReport, 'requestId' | 'stepKind' | 'callOverride' | 'requestedMode' | 'observedSource' | 'status' | 'model' | 'timing' | 'validation' | 'blockedReason'> & Partial<Pick<RouteRecordReport, 'outputSha256' | 'contextId' | 'inputLabel' | 'planRevision'>>;
 }): RouteRecord {
   const { report } = input;
-  const lock = routeLockOf(input.routes, input.taskId);
+  // As the server: the browser can only make the record stricter (H11 fix round 1): a call that read restricted input is recorded locked.
+  const lock = routeLockOf(input.routes, input.taskId) ?? (report.inputLabel === 'restricted' || report.inputLabel === 'secret' ? routeLockFor(['restricted']) : null);
   const override = input.settings.find((s) => s.scope === 'task' && s.key === input.taskId && s.field === 'route_override');
   const effective = effectiveRoutePolicy({ call: report.callOverride, task: (override?.desired as RoutePolicyMode | null | undefined) ?? null, run: runRouteDefaultOf(input.routes, input.settings, input.runId).value, lock });
   const outcome = report.status === 'blocked' || report.status === 'error'
@@ -54,6 +55,8 @@ export function routeRecordOf(input: {
     effectiveMode: effective.mode, policySource: effective.source, locked: lock !== null, observedSource: report.observedSource, fellBack: outcome.fellBack, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
     status: report.status, model: { ...report.model }, timing: { totalMs: Math.round(report.timing.totalMs), firstOutputMs: report.timing.firstOutputMs === null ? null : Math.round(report.timing.firstOutputMs) },
     validation: report.validation, blockedReason: report.blockedReason, reportedBy: 'browser', trust: 'untrusted', reportedAt: input.at,
+    ...(report.outputSha256 !== undefined ? { outputSha256: report.outputSha256 } : {}), ...(report.contextId !== undefined ? { contextId: report.contextId } : {}),
+    ...(report.inputLabel !== undefined ? { inputLabel: report.inputLabel } : {}), ...(report.planRevision !== undefined ? { planRevision: report.planRevision } : {}),
   };
 }
 

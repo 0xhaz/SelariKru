@@ -95,3 +95,20 @@ describe('mock pause holds the fixture\'s scripted attempt starts', () => {
     for (const a of (await ds.getSnapshot(projectId)).modelAssignments) expect(a.state).toBe('applied');
   });
 });
+
+describe('H11 fix round 1: names and roles in the demo follow the server', () => {
+  it('M1: a role is one of the project\'s roles, and only one worker is the Project Manager; M2: names are saved trimmed', async () => {
+    const { ds, projectId, snap } = await setup();
+    const s = await snap();
+    const [a, b] = Object.keys(s.workers);
+    const role = Object.values(s.tasks).find((t) => t.role)!.role!;
+    const set = (key: string, change: Record<string, unknown>, expectedRevision = 0) => ds.execute({ command: 'setting.set', expectedRevision, idempotencyKey: `k${Math.random()}`, args: { projectId, key, change: change as never } });
+    expect(await set(a!, { scope: 'runner', field: 'role', value: 'designer' })).toMatchObject({ accepted: false, rejection: 'role_unknown' });
+    expect(await set(a!, { scope: 'runner', field: 'role', value: role })).toMatchObject({ accepted: true });
+    expect(await set(b!, { scope: 'runner', field: 'role', value: 'project_manager' })).toMatchObject({ accepted: true });
+    expect(await set(a!, { scope: 'runner', field: 'role', value: 'project_manager' }, 1)).toMatchObject({ accepted: false, rejection: 'role_pm_taken' });
+    expect(await set(a!, { scope: 'runner', field: 'display_name', value: '  Nurul  ' }, 1)).toMatchObject({ accepted: true });
+    expect(setting(await snap(), a!, 'display_name')).toMatchObject({ desired: 'Nurul' });
+    expect(await set(b!, { scope: 'runner', field: 'display_name', value: 'nurul ' }, 1)).toMatchObject({ accepted: false, rejection: 'name_taken' });
+  });
+});
