@@ -364,7 +364,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
       data-modal={modal ? 'true' : 'false'}
       style={widthStyle}
       // Beside the panel it starts below the header, so no header control is ever under it.
-      className={`wrap-anywhere fixed right-0 left-auto m-0 max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem] ${modal ? 'inset-y-0 h-dvh' : 'top-[var(--header-h,6rem)] bottom-0 z-50 h-[calc(100dvh-var(--header-h,6rem))] shadow-[-12px_0_32px_-8px_var(--color-backdrop)]'}`}
+      className={`motion-drawer wrap-anywhere fixed right-0 left-auto m-0 max-h-none w-full max-w-full border-0 border-l border-line-strong bg-panel p-0 text-fg backdrop:bg-backdrop sm:w-[36rem] ${modal ? 'inset-y-0 h-dvh' : 'top-[var(--header-h,6rem)] bottom-0 z-50 h-[calc(100dvh-var(--header-h,6rem))] shadow-[-12px_0_32px_-8px_var(--color-backdrop)]'}`}
     >
         {canResize ? (
           <div
@@ -388,7 +388,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
         ) : null}
 
       <div className="flex h-full flex-col overflow-y-auto overscroll-contain">
-        <div className="border-b-[3px] border-ink p-3 sm:pl-6">
+        <div className="border-b-2 border-ink p-3 sm:pl-6">
           <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
             <div className="flex min-w-0 items-start gap-3">
               {identity?.portrait ?? null}
@@ -409,7 +409,7 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
           </div>
           {identity ? (
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-2" data-testid="drawer-session">
-              <span className="chip" style={{ background: identity.session.state === 'running' ? '#00e436' : identity.session.state === 'stopped' ? '#f0dfc2' : '#e2cba6', color: '#241a2e' }}>{identity.session.label}</span>
+              <span className="chip" style={{ background: identity.session.state === 'running' ? 'var(--color-leaf)' : identity.session.state === 'stopped' ? 'var(--color-paper-2)' : 'var(--color-paper-3)', color: 'var(--color-ink)' }}>{identity.session.label}</span>
               <span className="min-w-0 truncate font-mono text-mono text-muted" title={identity.session.workspace}>{identity.session.workspace}</span>
               {identity.session.state === 'running' ? (
                 // The stop request and its states are the Settings tab's; this takes you to it.

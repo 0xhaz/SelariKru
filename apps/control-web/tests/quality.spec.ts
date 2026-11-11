@@ -258,7 +258,7 @@ test.describe('reduced motion', () => {
     }
   });
 
-  // The one thing that moves at all is the on-device model download bar. It eases without the preference and jumps with it.
+  // On this page the one thing that moves is the on-device model download bar. It eases (by transform) without the preference and jumps with it.
   for (const motion of ['no-preference', 'reduce'] as const) {
     test(`the model download bar with ${motion}`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: motion });
@@ -268,7 +268,28 @@ test.describe('reduced motion', () => {
       await expect(page.getByRole('progressbar', { name: 'On-device model download' })).toHaveAttribute('aria-valuenow', '60');
       const found = await moving(page);
       if (motion === 'reduce') expect(found).toEqual([]);
-      else expect(found).toEqual([expect.stringMatching(/progress-fill.* transition width/)]);
+      else expect(found).toEqual([expect.stringMatching(/progress-fill.* transition transform/)]);
+    });
+  }
+
+  // H7 motion check: a drawer and the Settings dialog enter in 150 to 250 ms by transform and opacity, and not at all under reduced motion.
+  for (const motion of ['no-preference', 'reduce'] as const) {
+    test(`drawers and dialogs with ${motion}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.emulateMedia({ reducedMotion: motion });
+      await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait' }; });
+      const entrance = (sel: string) => page.locator(sel).first().evaluate((el) => { const s = getComputedStyle(el); return { name: s.animationName, ms: parseFloat(s.animationDuration) * 1000 }; });
+      for (const [hash, sel] of [['#/pipeline', '[data-testid="view-drawer"]'], ['#/settings', '[role="dialog"][data-view="settings"]']] as const) {
+        await page.goto(`/tests/harness/index.html${hash}`);
+        await expect(page.locator(sel)).toBeVisible();
+        const a = await entrance(sel);
+        if (motion === 'reduce') expect(a.name, hash).toBe('none');
+        else {
+          expect(a.name, hash).toMatch(/^kedai-(drawer|dialog)-in$/);
+          expect(a.ms, hash).toBeGreaterThanOrEqual(150);
+          expect(a.ms, hash).toBeLessThanOrEqual(250);
+        }
+      }
     });
   }
 });

@@ -1,25 +1,34 @@
-// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
-//
-// The pixel palette, shared by the office canvas and the HUD. HUD text never uses these raw colours: it uses the semantic tokens in index.css,
-// which are measured for contrast in both themes. These are for pixels on the canvas and for swatches that sit beside a text label.
+// SelariKru's own palette (H7): a kedai (shophouse) studio. Terracotta floor tiles, teal shutters, kopi-brown timber, cream paper, deep green
+// signboards, a gold accent and a warm kopi ink. Shared by the office canvas and the HUD. HUD text never uses these raw colours: it uses the semantic
+// tokens in index.css, which are measured for contrast. These are for pixels on the canvas and for swatches that sit beside a text label.
 
 export const colors = {
-  ink: '#241a2e',
-  cream: '#fff6e9',
-  cream2: '#f0dfc2',
-  cream3: '#e2cba6',
-  muted: '#7d6b73',
-  navy: '#1d2b53',
-  navy2: '#16213f',
-  blue: '#29adff',
-  red: '#ff004d',
-  orange: '#ffa300',
-  green: '#00e436',
-  lav: '#83769c',
-  yellow: '#ffec27',
-  pink: '#ff77a8',
-  grass: '#4a8f3d',
-  white: '#fff1e8',
+  /** Kopi-black ink: outlines, text on light surfaces. */
+  ink: '#2b1d14',
+  /** Cream paper and its two deeper folds. */
+  paper: '#fbf3e4',
+  paper2: '#f1e2c6',
+  paper3: '#e4cfa8',
+  /** Terracotta: floor tiles, roof, the "needs you" accent. */
+  terracotta: '#c4532f',
+  terracottaDark: '#8f3519',
+  /** Teal: shutters, louvres, the working accent. */
+  teal: '#2a9d8f',
+  tealDark: '#176b66',
+  /** Kopi brown: timber, shelves, the coffee corner. */
+  kopi: '#6b4226',
+  kopiLight: '#a8714a',
+  /** Deep green: signboards and the dark panels. */
+  deepGreen: '#173d3a',
+  deepGreen2: '#0f2b29',
+  leaf: '#5aa457',
+  /** Gold accent: lit signs, the pressed button, the Demo data chip. */
+  gold: '#f0c14b',
+  goldDark: '#b5841c',
+  /** Batik indigo, for the blocked state and batik accents. */
+  indigo: '#56609e',
+  rose: '#c9677a',
+  white: '#ffffff',
 } as const;
 
 /**
@@ -38,45 +47,40 @@ export interface StateStyle {
 }
 
 export const stateStyle: Readonly<Record<RobotState, StateStyle>> = {
-  working: { label: 'Working', glyph: '◆', color: colors.blue, dim: '#1d6fb8' },
-  needs_input: { label: 'Needs input', glyph: '▲', color: colors.red, dim: '#7e0f33' },
-  in_review: { label: 'In review', glyph: '◎', color: colors.orange, dim: '#a86a00' },
-  verified: { label: 'Verified', glyph: '✓', color: colors.green, dim: '#00873a' },
-  idle: { label: 'Idle', glyph: '○', color: colors.lav, dim: '#5a5170' },
-  blocked: { label: 'Blocked', glyph: '‖', color: colors.yellow, dim: '#8a7f14' },
-  offline: { label: 'Lost', glyph: '✕', color: '#5f5a66', dim: '#3b373e' },
-  unknown: { label: 'Unknown', glyph: '?', color: '#8e8a96', dim: '#5f5a66' },
+  working: { label: 'Working', glyph: '◆', color: '#3fa596', dim: '#256e64' },
+  needs_input: { label: 'Needs input', glyph: '▲', color: '#d2532e', dim: '#7d2a14' },
+  in_review: { label: 'In review', glyph: '◎', color: '#e2a93a', dim: '#8a6118' },
+  verified: { label: 'Verified', glyph: '✓', color: colors.leaf, dim: '#2f6a2e' },
+  idle: { label: 'Idle', glyph: '○', color: '#9a8878', dim: '#5e5045' },
+  blocked: { label: 'Blocked', glyph: '‖', color: '#6f7bbd', dim: '#3c4478' },
+  offline: { label: 'Lost', glyph: '✕', color: '#4f463f', dim: '#332c27' },
+  unknown: { label: 'Unknown', glyph: '?', color: '#a39686', dim: '#6a5f55' },
 };
 
 /**
- * The team cards' state chips: the reference's chip colours. Where its ink text failed WCAG AA on a colour, that chip uses a darker shade of the
- * same hue with white text instead: Needs input #ff004d -> #e0003f (4.95:1), Idle #83769c -> #6f6388 (5.50:1), Lost #5f5a66 (6.69:1).
+ * The team cards' state chips. Each pairs a colour with its word, and each pair meets WCAG AA: Working 5.46:1, Needs input 5.83:1, In review 7.74:1,
+ * Verified 5.34:1, Idle 5.50:1, Blocked 5.89:1, Lost 9.21:1, Unknown 5.64:1.
  */
 export const chipStyle: Readonly<Record<RobotState, { readonly bg: string; readonly fg: string }>> = {
-  working: { bg: colors.blue, fg: colors.ink },
-  needs_input: { bg: '#e0003f', fg: '#ffffff' },
-  in_review: { bg: colors.orange, fg: colors.ink },
-  verified: { bg: colors.green, fg: colors.ink },
-  idle: { bg: '#6f6388', fg: '#ffffff' },
-  blocked: { bg: colors.yellow, fg: colors.ink },
-  offline: { bg: '#5f5a66', fg: '#ffffff' },
-  unknown: { bg: '#8e8a96', fg: colors.ink },
+  working: { bg: '#3fa596', fg: colors.ink },
+  needs_input: { bg: '#b13f22', fg: colors.white },
+  in_review: { bg: '#e2a93a', fg: colors.ink },
+  verified: { bg: colors.leaf, fg: colors.ink },
+  idle: { bg: '#76665a', fg: colors.white },
+  blocked: { bg: colors.indigo, fg: colors.white },
+  offline: { bg: '#4f463f', fg: colors.white },
+  unknown: { bg: '#a39686', fg: colors.ink },
 };
 
-/** Robot body colours, in order. */
+/** Each worker's accent colour, in order: kedai tones (terracotta, teal, gold, pandan, kopi, batik indigo, rose, sage, peacock, sand, mangosteen, papaya). */
 export const agentPalette = [
-  '#ff77a8', '#29adff', '#ffd23a', '#00e436', '#ff8a3d', '#a98bff', '#3ee0d0', '#ff5c5c', '#c2c3c7', '#b0e04a', '#f0a6ff', '#6fa8ff',
+  '#d0643c', '#2fa39a', '#e8b33a', '#5f9a4e', '#a8714a', '#5867a8', '#c9677a', '#86b06c', '#3f86a6', '#d9a46b', '#9d5a8c', '#e07f52',
 ] as const;
 
 /** Lighter (amount > 0) or darker (amount < 0) variants of a colour, for sprite shading. */
 export function shade(hex: string, amount: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const ch = (v: number): number => {
-    const out = amount >= 0 ? v + (255 - v) * amount : v * (1 + amount);
-    return Math.max(0, Math.min(255, Math.round(out)));
-  };
-  const r = ch((n >> 16) & 255);
-  const g = ch((n >> 8) & 255);
-  const b = ch(n & 255);
-  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`;
+  const toward = amount >= 0 ? 255 : 0;
+  const t = Math.min(1, Math.abs(amount));
+  const channels = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return `#${channels.map((v) => Math.round(v + (toward - v) * t).toString(16).padStart(2, '0')).join('')}`;
 }

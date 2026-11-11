@@ -449,8 +449,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   );
 
   const pausedHint = drawerBeside ? (
-    <div className="pointer-events-none absolute inset-0 z-20 bg-cream/60">
-      <p data-testid="page-paused-hint" className="sticky top-3 mx-4 mt-3 max-w-[24rem] border-[3px] border-ink bg-cream px-3 py-2 text-sm text-fg shadow-[0_3px_0_rgba(36,26,46,0.45)]">The page is paused while a worker is open. Close the worker to use the page.</p>
+    <div className="pointer-events-none absolute inset-0 z-20 bg-paper/60">
+      <p data-testid="page-paused-hint" className="sticky top-3 mx-4 mt-3 max-w-[24rem] border-2 border-ink bg-paper px-3 py-2 text-sm text-fg rounded-[4px] shadow-[2px_3px_0_rgba(43,29,20,0.22)]">The page is paused while a worker is open. Close the worker to use the page.</p>
     </div>
   ) : null;
 
@@ -459,7 +459,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     <div className="relative min-h-screen">
       <div ref={chromeRef}>
         <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} speed={mode === 'mock' ? speed : 1} paused={frame === 'settings' || (frame === 'drawer' && drawerMaximized && panelWide)} />
-        <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:bg-cream focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
+        <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:bg-paper focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
         <Announcer message={announcement} />
         <TopBar
           ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
@@ -477,7 +477,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
 
       {/* The screen in front of the office. Under a worker open beside the team cards it is inert; the scrim and the hint say why it does not respond. */}
       {/* Floating, it is the area right of the team cards; it only takes the pointer while paused, so the office stays clickable around a drawer. */}
-      <div ref={contentRef} className={`relative z-20 min-w-0 xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px] ${drawerBeside ? 'cursor-default after:pointer-events-none after:absolute after:inset-0 after:z-30 after:bg-cream/40 after:content-[\'\']' : 'pointer-events-none'}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
+      <div ref={contentRef} className={`relative z-20 min-w-0 xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px] ${drawerBeside ? 'cursor-default after:pointer-events-none after:absolute after:inset-0 after:z-30 after:bg-paper/40 after:content-[\'\']' : 'pointer-events-none'}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
         {frame === 'office' ? (
           <>
             {pausedHint ? <div className="fixed inset-x-0 top-[74px]">{pausedHint}</div> : null}

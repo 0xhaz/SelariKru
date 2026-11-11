@@ -35,18 +35,21 @@ function Freshness({ connection, confirmedAt, nowMs }: { connection: ConnectionS
   );
 }
 
-/** Our own mark: a pixel "S" on a navy tile. */
+/** Our own mark: a pixel kedai (shophouse) front, terracotta roof over a teal shutter with a gold "S" signboard. */
 function Mark() {
   return (
-    <svg className="h-[30px] w-[30px] shrink-0" viewBox="0 0 10 10" shapeRendering="crispEdges" aria-hidden="true">
-      <rect x="0" y="0" width="10" height="10" fill="#241a2e" />
-      <rect x="1" y="1" width="8" height="8" fill="#1d2b53" />
-      <rect x="3" y="2" width="5" height="1" fill="#ffec27" />
-      <rect x="2" y="3" width="2" height="1" fill="#ffec27" />
-      <rect x="3" y="4" width="4" height="1" fill="#ffec27" />
-      <rect x="6" y="5" width="2" height="1" fill="#ffec27" />
-      <rect x="2" y="6" width="5" height="1" fill="#ffec27" />
-      <rect x="1" y="8" width="8" height="1" fill="#29adff" />
+    <svg className="h-[30px] w-[30px] shrink-0" viewBox="0 0 12 12" shapeRendering="crispEdges" aria-hidden="true">
+      <rect x="1" y="0" width="10" height="1" fill="#2b1d14" />
+      <rect x="0" y="1" width="12" height="3" fill="#2b1d14" />
+      <rect x="1" y="1" width="10" height="2" fill="#c4532f" />
+      <rect x="1" y="4" width="10" height="8" fill="#2b1d14" />
+      <rect x="2" y="4" width="8" height="7" fill="#fbf3e4" />
+      <rect x="3" y="5" width="6" height="3" fill="#173d3a" />
+      <rect x="5" y="5" width="3" height="1" fill="#f0c14b" />
+      <rect x="4" y="6" width="3" height="1" fill="#f0c14b" />
+      <rect x="4" y="7" width="3" height="1" fill="#f0c14b" />
+      <rect x="3" y="9" width="2" height="2" fill="#2a9d8f" />
+      <rect x="7" y="9" width="2" height="2" fill="#2a9d8f" />
     </svg>
   );
 }
@@ -73,10 +76,10 @@ function Menu({ label, testId, entries, route, extra, urgent }: { label: string;
   return (
     <div ref={box} className="relative" data-more="" onKeyDown={onKey}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid={testId}
-        onClick={() => setOpen((o) => !o)} style={urgent ? { background: 'var(--color-yellow)' } : undefined}>
+        onClick={() => setOpen((o) => !o)} style={urgent ? { background: 'var(--color-gold)' } : undefined}>
         {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
       </button>
-      <ul id={id} hidden={!open} className="panel absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} className="panel motion-menu absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
         {entries.map((e) => (
           <li key={e.route} className="flex flex-col">
             <a href={hrefFor(e.route)} aria-current={e.route === route ? 'page' : undefined} onClick={() => setOpen(false)} className="btn text-left text-[14px]">
@@ -106,7 +109,7 @@ function TerminalMenu({ workers, selectedId }: { workers: readonly { id: string;
   return (
     <div ref={box} className="relative" onKeyDown={(e) => { if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); } }}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} data-testid="top-bar-terminal" onClick={() => setOpen((o) => !o)}>Terminal</button>
-      <ul id={id} hidden={!open} className="panel absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[12rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} className="panel motion-menu absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[12rem] list-none flex-col gap-1.5 p-2">
         {workers.length === 0 ? <li className="px-1 text-[13px] text-muted">No worker has a terminal yet.</li> : workers.map((w) => (
           <li key={w.id}><a href={go(w.id)} onClick={() => setOpen(false)} className="btn block text-left text-[14px]">{w.name}<span className="sr-only"> terminal</span></a></li>
         ))}
@@ -166,7 +169,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <Mark />
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
-        <span className="contents" data-testid="top-bar-demo-chip">{mode === 'mock' ? <span role="status" data-testid="demo-badge" className="chip shrink-0 text-[12px]" style={{ background: '#ffec27' }}>Demo data</span> : null}</span>
+        <span className="contents" data-testid="top-bar-demo-chip">{mode === 'mock' ? <span role="status" data-testid="demo-badge" className="chip shrink-0 text-[12px]" style={{ background: 'var(--color-gold)' }}>Demo data</span> : null}</span>
         <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
       {runs.length > 0 ? (
@@ -188,14 +191,14 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <button type="button" className="btn w-8 px-0 text-[18px] leading-none" aria-label="Zoom in" onClick={() => ui.zoom(1)}>+</button>
       </span>
       {running !== null ? (
-        <span data-testid="sandbox-chip" className="hidden items-center gap-2 whitespace-nowrap border-[3px] border-ink bg-navy px-2.5 py-0.5 text-[15px] text-cream lg:flex" title="Each worker runs in its own sandbox">
+        <span data-testid="sandbox-chip" className="hidden items-center gap-2 whitespace-nowrap border-2 border-ink bg-deep px-2.5 py-0.5 text-[15px] text-paper lg:flex" title="Each worker runs in its own sandbox">
           <span>Sandbox · <b>{running}</b> running</span>
           <i aria-hidden="true" className="led" data-off={running === 0 ? '' : undefined} />
         </span>
       ) : null}
       <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:w-auto xl:flex-1 xl:justify-end xl:overflow-visible xl:p-0">
         {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
-        <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-yellow)' } : undefined}>
+        <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-gold)' } : undefined}>
           Action items
           {attentionNumber !== null && attentionNumber > 0 ? <span className="hidden sm:inline"> · {attentionNumber}<span className="sr-only"> waiting on you</span></span> : null}
           {attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="ml-1 text-warning sm:hidden">{attentionBadge}</span> : null}

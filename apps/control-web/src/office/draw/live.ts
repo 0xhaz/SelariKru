@@ -2,7 +2,7 @@
 //
 // Animated parts of the office, redrawn every frame.
 
-import { colors, stateStyle, type RobotState } from '../../theme/tokens.ts';
+import { stateStyle, type RobotState } from '../../theme/tokens.ts';
 import type { OfficeAgent, OfficePr, OfficeRack } from '../model.ts';
 import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
@@ -17,7 +17,7 @@ export function drawScreen(p: Pen, sx: number, sy: number, state: RobotState, co
   p.rect(sx, sy, 18, 11, C.screen);
   if (state === 'needs_input') {
     if (blink(t, 4)) {
-      p.rect(sx, sy, 18, 11, '#7e0f33');
+      p.rect(sx, sy, 18, 11, '#7d2a14');
       p.rect(sx + 8, sy + 2, 2, 5, C.white);
       p.rect(sx + 8, sy + 8, 2, 1, C.white);
     } else {
@@ -126,10 +126,10 @@ export function drawGate(p: Pen, g: PxRect, mode: GateMode, since: number, t: nu
   const lbl = fit(label.toUpperCase(), w - 4);
   text(p, lbl, cx - textW(lbl) / 2, top + 39, C.ink);
   [5, 15, w - 18, w - 8].forEach((lx, i) => {
-    let col = '#5a5170';
+    let col = '#5e5045';
     if (mode === 'reviewing') col = i === Math.floor(t * 8) % 4 ? C.orange : '#7a4a10';
-    else if (mode === 'passed') col = blink(t, 8) ? C.green : '#00873a';
-    else if (mode === 'changes') col = blink(t, 8) ? C.red : '#7e0f33';
+    else if (mode === 'passed') col = blink(t, 8) ? C.green : '#2f6a2e';
+    else if (mode === 'changes') col = blink(t, 8) ? C.red : '#7d2a14';
     p.rect(x0 + lx, top + 3, 6, 4, C.ink);
     p.rect(x0 + lx + 1, top + 3, 4, 3, col);
   });
@@ -157,7 +157,7 @@ export function drawRacks(
         const h = Math.sin((seedT + 1) * 12.9898 + (i * 3 + j) * 78.233 + r.x) * 43758.5453;
         const rnd = h - Math.floor(h);
         let col = '#2e2b36';
-        if (pz > 0.05) col = blink(t, 12) ? C.green : '#00873a';
+        if (pz > 0.05) col = blink(t, 12) ? C.green : '#2f6a2e';
         else if (rnd < activity) col = j === 2 && rnd < 0.08 ? C.orange : (i + j) % 3 ? C.green : C.blue;
         p.rect(r.x + 18 + j * 3, r.y + 15 + i * 10, 2, 1, col);
       }
@@ -175,7 +175,7 @@ export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficePr[]) {
     const x = b.x + 3 + (i % 3) * 20;
     const y = b.y + 11 + Math.floor(i / 3) * 14;
     // Colour only from the run's verification record: green is a verified candidate, grey is not verified, orange is out of date.
-    const col = pr.merged ? '#00873a' : pr.verification === 'verified' ? colors.green : pr.verification === 'out_of_date' ? colors.orange : C.metalD;
+    const col = pr.merged ? '#2f6a2e' : pr.verification === 'verified' ? C.green : pr.verification === 'out_of_date' ? C.orange : C.metalD;
     p.rect(x + 1, y + 1, 18, 12, C.ink, 0.3);
     p.rect(x, y, 18, 12, pr.merged ? '#e0dccf' : C.white);
     text(p, `#${pr.num % 1000}`, x + 2, y + 3, C.ink);

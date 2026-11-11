@@ -36,7 +36,7 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
         data-state={row.state}
         aria-current={selected ? 'true' : undefined}
         onClick={() => onOpen(row.workerId)}
-        className={`panel relative grid w-full grid-cols-[40px_minmax(0,1fr)] gap-x-2.5 gap-y-1 overflow-hidden px-2.5 pt-2 pb-2.5 text-left motion-safe:transition-transform before:absolute before:inset-y-0 before:left-0 before:w-[3px] hover:-translate-x-px hover:-translate-y-px ${rail} ${needs ? 'outline-[3px] outline-red outline-solid' : ''} ${selected ? 'bg-[#fff]' : ''}`}
+        className={`panel relative grid w-full grid-cols-[40px_minmax(0,1fr)] gap-x-2.5 gap-y-1 overflow-hidden px-2.5 pt-2 pb-2.5 text-left motion-safe:transition-transform before:absolute before:inset-y-0 before:left-0 before:w-[3px] hover:-translate-x-px hover:-translate-y-px ${rail} ${needs ? 'outline-[3px] outline-terracotta outline-solid' : ''} ${selected ? 'bg-[#fffdf8]' : ''}`}
       >
         {selected ? <span aria-hidden="true" className="absolute -left-0 top-4 text-[12px]">▶</span> : null}
         <span aria-hidden="true" className="row-span-2 self-start">{decor?.portrait ?? null}</span>
@@ -48,7 +48,7 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5" data-testid="team-panel-state">
           <span className="chip chip-dot" style={{ background: style.bg, color: style.fg }}>{stateStyle[chip].label}</span>
           <span className="font-mono text-mono text-muted tabular-nums" data-testid="team-panel-since">{since(row)}</span>
-          {needs ? <span className="chip text-[11px]" style={{ background: '#ffec27', color: '#241a2e' }}>1 for you</span> : null}
+          {needs ? <span className="chip text-[11px]" style={{ background: 'var(--color-gold)', color: 'var(--color-ink)' }}>1 for you</span> : null}
         </span>
         {/* Why it waits, in brief: a decision, a block or a dependency. The full text is in its drawer. */}
         {waiting && row.detail ? <span className={`col-span-2 block truncate text-[13px] ${needs ? 'text-danger' : 'text-warning'}`} data-testid="team-panel-reason" title={row.detail}><span className="sr-only">Why: </span>{row.detail}</span> : null}
@@ -126,12 +126,12 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   return (
     <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[74px] z-10 flex w-[280px] flex-col gap-2">
-      {/* The reference's "TEAM · N" header. On navy, not straight on the lawn, so its text meets AA. */}
+      {/* The "TEAM · N" header, on the deep green signboard so its text meets AA over the office. */}
       <div className="panel-dark flex items-center justify-between gap-2 px-2.5 py-1">
         {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}
-        <p className="min-w-0 text-[13px] font-semibold uppercase tracking-[0.12em] text-cream">
+        <p className="min-w-0 text-[13px] font-semibold uppercase tracking-[0.12em] text-paper">
           <span id="team-panel-title">Team</span><span aria-hidden="true"> · </span><span className="sr-only">: </span>
-          <span data-testid="team-panel-summary" className="[&_.text-muted]:text-[#b9c3e6] [&_.text-warning]:text-yellow"><Count status={status} /></span>
+          <span data-testid="team-panel-summary" className="[&_.text-muted]:text-feed-soft [&_.text-warning]:text-gold"><Count status={status} /></span>
         </p>
         <a href="#/settings" className="btn shrink-0 px-2 text-[12px] normal-case tracking-normal">Team settings</a>
       </div>
@@ -211,7 +211,7 @@ export function TeamFoldRegion({ status, open, onOpenChange, regionId, selectedI
     document.querySelector<HTMLElement>('[data-team-toggle]')?.focus();
   };
   return (
-    <section id={regionId} aria-label="Team" data-testid="team-panel" data-variant="fold" hidden={!open} onKeyDown={onKey} className="max-h-[60dvh] overflow-y-auto border-t-[3px] border-ink bg-cream-2">
+    <section id={regionId} aria-label="Team" data-testid="team-panel" data-variant="fold" hidden={!open} onKeyDown={onKey} className="max-h-[60dvh] overflow-y-auto border-t-2 border-ink bg-paper-2">
       <div className="mx-auto max-w-[1600px] px-4 py-3 sm:px-6">
         <p className="mb-2 px-1 text-sm" data-testid="team-panel-summary"><Count status={status} testId="team-fold-needs-you" /></p>
         <Rows status={status} selectedId={selectedId} onOpen={(id) => { onOpenChange(false); onOpen(id); }} grid mark={mark} />

@@ -42,7 +42,7 @@ function CompactRow({ card, actions, primary, open, onToggle, children, onComman
   return (
     <li id={`row-${card.id}`}>
       <div className="panel flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2" data-testid="action-row" data-row-kind={card.kind} data-card-id={card.id}>
-        <span className="chip shrink-0" style={{ background: 'var(--color-cream-2)' }}>{card.chip}</span>
+        <span className="chip shrink-0" style={{ background: 'var(--color-paper-2)' }}>{card.chip}</span>
         {/* A stable place for focus to land, whether or not the row is open. */}
         <span id={`${card.id}-row-title`} tabIndex={-1} className="min-w-0 flex-1 truncate font-semibold text-fg outline-none focus-visible:outline-[3px] focus-visible:outline-solid" title={card.title}>{card.title}</span>
         {/* Once open, the full card below carries every action, this one included. */}
@@ -277,7 +277,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
               <GroupTitle id="from-workers-title">From workers</GroupTitle>
               {workerCards.length > 0 ? (
                 <ol className="space-y-4" aria-label="Decisions waiting">
-                  {workerCards.map((card, i) => <li key={card.id} className={i === 0 ? 'outline-[3px] outline-orange outline-solid' : ''}>{renderCard(card, null)}</li>)}
+                  {workerCards.map((card, i) => <li key={card.id} className={i === 0 ? 'outline-[3px] outline-gold outline-solid' : ''}>{renderCard(card, null)}</li>)}
                 </ol>
               ) : null}
               {fromWorkers ? <div className="mt-4">{fromWorkers}</div> : null}

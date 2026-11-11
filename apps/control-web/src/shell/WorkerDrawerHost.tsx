@@ -73,7 +73,7 @@ export function WorkerDrawerHost({ look = null, workerId, tab, team, snapshot, d
       ? { state: 'running' as const, label: 'Session running' }
       : attempt !== undefined ? { state: 'stopped' as const, label: 'Stopped' } : { state: 'idle' as const, label: 'Idle' };
     const name = look?.name ?? roleName(row.role);
-    const chip = look ? { label: stateStyle[look.state].label, ...chipStyle[look.state] } : { label: row.presence.label, bg: '#f0dfc2', fg: '#241a2e' };
+    const chip = look ? { label: stateStyle[look.state].label, ...chipStyle[look.state] } : { label: row.presence.label, bg: 'var(--color-paper-2)', fg: 'var(--color-ink)' };
     return {
       portrait: look ? <Portrait color={look.color} size={48} /> : null,
       name,
@@ -89,7 +89,7 @@ export function WorkerDrawerHost({ look = null, workerId, tab, team, snapshot, d
     <ul className="space-y-2" data-testid="drawer-messages">
       {settings.cards.map(({ card }) => (
         <li key={card.id} className="panel flex flex-wrap items-center gap-2 px-3 py-2">
-          <span className="chip" style={{ background: '#f0dfc2' }}>{card.chip}</span>
+          <span className="chip" style={{ background: 'var(--color-paper-2)' }}>{card.chip}</span>
           <span className="min-w-0 flex-1 truncate font-semibold text-fg" title={card.title}>{card.title}</span>
           <a className="text-sm font-medium text-active underline underline-offset-2" href={decisionHref(card.id)}>Open in Action items</a>
         </li>

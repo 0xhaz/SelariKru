@@ -20,7 +20,7 @@ const cache = new Map<string, Record<Facing, HTMLCanvasElement>>();
 export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> {
   const hit = cache.get(color);
   if (hit) return hit;
-  const pal = { k: C.ink, B: color, b: shade(color, -0.3), h: shade(color, 0.6), V: '#16213f', G: C.gold };
+  const pal = { k: C.ink, B: color, b: shade(color, -0.3), h: shade(color, 0.6), V: '#0f2b29', G: C.gold };
   const side = spriteCanvas([...HEAD_ANTENNA, ...BODY_SIDE], pal);
   const canvases: Record<Facing, HTMLCanvasElement> = {
     front: spriteCanvas([...HEAD_ANTENNA, ...BODY_FRONT], pal),

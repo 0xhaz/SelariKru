@@ -1,41 +1,56 @@
-// Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
-//
-// Office palette (PICO-8 flavoured). HUD-shared colours come from theme/tokens.
+// The office's pixel colours (H7): a kedai (shophouse) studio in SelariKru's own palette. Shared HUD colours come from theme/tokens.
 
-import { colors } from '../../theme/tokens.ts';
+import { colors, stateStyle } from '../../theme/tokens.ts';
 
 export const C = {
   ink: colors.ink,
-  grass: '#4a8f3d', grassD: '#3d7a34', grassL: '#62a84a',
-  path: '#d9c49a', pathD: '#bfa57a',
-  wood: '#c98e5b', woodD: '#b37a4a', woodL: '#d8a06c', woodLine: '#94603a',
-  wall: '#4f7a6e', wallD: '#41675c', wallL: '#5f8b7e', wallTop: '#2c3d42', wallTopL: '#4a5d61', base: '#6b4a3a',
-  wallSrv: '#3e4a5e', wallSrvD: '#323d50',
-  carpetJ: '#8e3b46', carpetJD: '#742f39',
-  rugG: '#5f8f52', rugGD: '#4e7a43', rugP: '#7a5a8e', rugPD: '#664a78',
-  tileL: '#e9dcc6', tileD: '#d3c3a8',
-  grate: '#4f4a52', grateD: '#3b373e', grateL: '#625c66',
-  part: '#8b9bb4', partD: '#6b7a94', partCap: '#c9d1de',
-  desk: '#b97a4b', deskD: '#8a5a3b', deskDD: '#5e3a26',
-  metal: '#c2c3c7', metalL: '#e4e3ea', metalD: '#8e8a96', metalDD: '#5f5a66',
-  screen: '#111d35', bezel: '#3a3f55',
-  leaf: '#38b764', leafD: '#257953', leafL: '#73d36b', pot: '#b5523b', potD: '#8a3b2a',
-  belt: '#3a3640', beltL: '#57525e', rail: '#9d98a6',
-  cork: '#c48a52', corkD: '#9b6638',
-  sky: '#8fd3ff', skyN: '#1d2b53', cloud: '#ffffff',
-  couch: '#3f7f8f', couchD: '#2f5f6b',
-  red: colors.red, orange: colors.orange, yellow: colors.yellow, green: colors.green, blue: colors.blue, lav: colors.lav,
-  pink: colors.pink, peach: '#ffccaa', white: colors.white, navy: colors.navy,
-  gold: '#ffcf3a',
-  shadow: '#241a2e',
+  // The street and the five-foot way outside.
+  street: '#5b5048', streetD: '#4a413a', streetL: '#6c6158', kerb: '#8c8174',
+  way: '#d8c3a0', wayD: '#bda57e', wayL: '#e6d4b2',
+  // Terracotta and teal floor tiles.
+  tileT: '#c4673f', tileTD: '#a8532f', tileTL: '#d67f55', tileTeal: '#2f8a80', tileTealD: '#236f67', grout: '#8f4a2e',
+  // Lime-washed walls, timber and the roof.
+  wall: '#efe2c8', wallD: '#dcc9a6', wallL: '#f8efdc', wallTrim: '#2a9d8f', wallTrimD: '#176b66', wallTop: '#3a2a20', wallTopL: '#5a4334', base: '#6b4226',
+  roof: '#c4532f', roofD: '#8f3519', roofL: '#d67f55',
+  louvre: '#2a9d8f', louvreD: '#176b66', louvreL: '#5fbfb2',
+  // Timber furniture.
+  wood: '#a8714a', woodD: '#7d5032', woodL: '#c48d62', woodLine: '#5a3a24',
+  desk: '#9a6236', deskD: '#6b4226', deskDD: '#45291a',
+  shelf: '#7d5032', shelfD: '#5a3a24',
+  // Batik rugs and banners.
+  batikA: '#56609e', batikAD: '#434c85', batikB: '#e2a93a', batikC: '#c4532f', batikD: '#2a9d8f',
+  rugG: '#3f7a5a', rugGD: '#2f6247',
+  // The kopi corner.
+  kopi: colors.kopi, kopiL: colors.kopiLight, cream: '#f6ead2', tileL: '#f1e2c6', tileD: '#e0c9a0',
+  // Plants.
+  leaf: '#4f9a4a', leafD: '#2f6a2e', leafL: '#7cc46a', pot: '#c4532f', potD: '#8f3519',
+  // Metal, screens and the delivery path.
+  metal: '#bfb4a4', metalL: '#e2d9cb', metalD: '#8c8174', metalDD: '#5e554c',
+  screen: '#0f2b29', bezel: '#3a3330',
+  belt: '#3a302a', beltL: '#55493f', rail: '#a3968a',
+  cork: '#d2a26a', corkD: '#a8784a',
+  // The rooftop cloud deck.
+  sky: '#9fd3d0', skyL: '#c6e6e2', skyN: '#173d3a', cloud: '#fffdf8', deck: '#8c6b4f', deckD: '#6b5039', deckL: '#a8865f',
+  // Accents, by state and by family.
+  red: stateStyle.needs_input.color, orange: stateStyle.in_review.color, yellow: colors.gold, green: colors.leaf, blue: stateStyle.working.color, lav: stateStyle.idle.color,
+  teal: colors.teal, tealDark: colors.tealDark, terracotta: colors.terracotta, indigo: colors.indigo,
+  pink: colors.rose, peach: '#f2c9a0', white: '#fffdf8', deep: colors.deepGreen, deep2: colors.deepGreen2,
+  gold: colors.gold, goldDark: colors.goldDark,
+  shadow: colors.ink,
+  // Where AI runs (H4): device green and cloud blue-teal, always with a word or shape beside them.
+  device: '#2f7a3a', deviceL: '#c9efc0', cloudMark: '#1f5f8a', cloudMarkL: '#d6ecf7',
+  // Older drawing names, until the room is redrawn.
+  grass: '#5b5048', grassD: '#4a413a', grassL: '#6c6158', path: '#d8c3a0', pathD: '#bda57e', wallSrv: '#344a52', wallSrvD: '#2a3d44',
+  carpetJ: '#8f3519', carpetJD: '#6f2810', rugP: '#56609e', rugPD: '#434c85', grate: '#4a423c', grateD: '#38312c', grateL: '#5c534b',
+  part: '#b98a5a', partD: '#8f6640', partCap: '#dcb98a', couch: '#2a9d8f', couchD: '#176b66', navy: '#173d3a',
 } as const;
 
-/** Floor carpet colours for desks, cycled by desk index. */
+/** Batik rug colours under each desk, cycled by desk index. */
 export const deskCarpets: readonly (readonly [string, string])[] = [
-  ['#3e5f8a', '#334f75'],
-  ['#b5893a', '#9a7230'],
-  ['#4f7f5a', '#41694a'],
-  ['#7a4f7e', '#663f69'],
-  ['#8a5a3e', '#744a32'],
-  ['#3f7f8f', '#2f5f6b'],
+  ['#56609e', '#434c85'],
+  ['#b5841c', '#8f6714'],
+  ['#3f7a5a', '#2f6247'],
+  ['#9d5a8c', '#7d4570'],
+  ['#a8532f', '#8f4a2e'],
+  ['#2f8a80', '#236f67'],
 ];

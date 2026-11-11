@@ -13,5 +13,5 @@ export function Portrait({ color, size = 28 }: { color: string; size?: number })
     g.clearRect(0, 0, 16, 16);
     g.drawImage(robotCanvases(color).front, 2, 1);
   }, [color]);
-  return <canvas ref={ref} width={16} height={16} aria-hidden="true" className="pixelated shrink-0 border-2 border-edge bg-[#1d2b53]" style={{ width: size, height: size }} />;
+  return <canvas ref={ref} width={16} height={16} aria-hidden="true" className="pixelated shrink-0 border-2 border-edge bg-deep" style={{ width: size, height: size }} />;
 }

@@ -60,12 +60,12 @@ export function ViewDrawer({ view, title, paused, children, after, aside = null 
   return (
     <div
       data-testid="view-drawer" data-view={view}
-      className={`panel pointer-events-auto relative z-20 m-0 flex min-w-0 flex-col xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 ${maximized ? 'xl:left-4' : 'xl:w-[var(--drawer-w)]'}`}
+      className={`panel motion-drawer pointer-events-auto relative z-20 m-0 flex min-w-0 flex-col xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 ${maximized ? 'xl:left-4' : 'xl:w-[var(--drawer-w)]'}`}
       style={{ ['--drawer-w' as string]: `min(${width}px, calc(100vw - 32px))` }}
     >
       {maximized ? null : <ResizeHandle />}
       <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
-        <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b-[3px] border-ink px-3 py-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b-2 border-ink px-3 py-2">
           <span className="flex min-w-0 flex-1 items-baseline gap-2 truncate" aria-hidden="true"><b className="text-[15px] text-fg">{title}</b>{aside ? <span className="text-[13px] text-muted" data-testid="view-drawer-aside">{aside}</span> : null}</span>
           <span className="hidden text-[13px] text-muted 2xl:inline" data-testid="view-drawer-keys"><kbd className="kbd">Esc</kbd> on the page closes</span>
           <MaximizeButton />
@@ -84,11 +84,11 @@ export function ViewDrawer({ view, title, paused, children, after, aside = null 
 /** Settings: the reference's centred modal over the office. The rest of the app is inert while it is open, so focus stays inside it. */
 export function SettingsModal({ children, paused }: { children: ReactNode; paused: ReactNode }) {
   return (
-    <div className="pointer-events-auto fixed inset-0 z-30 grid place-items-center bg-[rgba(36,26,46,0.55)] p-2 sm:p-4" data-testid="settings-backdrop"
+    <div className="pointer-events-auto fixed inset-0 z-30 grid place-items-center bg-[rgba(43,29,20,0.55)] p-2 sm:p-4" data-testid="settings-backdrop"
       onMouseDown={(e) => { if (e.target === e.currentTarget) window.location.hash = hrefFor('office'); }}>
-      <div role="dialog" aria-modal="true" aria-label="Settings" data-shell-modal="" tabIndex={-1} data-testid="view-drawer" data-view="settings" className="panel relative flex outline-none h-[min(760px,calc(100dvh-1rem))] w-[min(1080px,100%)] flex-col sm:h-[min(760px,calc(100dvh-2rem))]">
+      <div role="dialog" aria-modal="true" aria-label="Settings" data-shell-modal="" tabIndex={-1} data-testid="view-drawer" data-view="settings" className="panel motion-dialog relative flex outline-none h-[min(760px,calc(100dvh-1rem))] w-[min(1080px,100%)] flex-col sm:h-[min(760px,calc(100dvh-2rem))]">
         <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
-          <div className="flex shrink-0 items-center gap-3 border-b-[3px] border-ink px-4 py-2">
+          <div className="flex shrink-0 items-center gap-3 border-b-2 border-ink px-4 py-2">
             <span className="min-w-0 flex-1 truncate text-[13px] text-muted"><kbd className="kbd">Esc</kbd> on the page closes</span>
             <a href={hrefFor('office')} className={CLOSE} aria-label="Close settings" data-testid="view-drawer-close">✕</a>
           </div>

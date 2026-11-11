@@ -1,4 +1,5 @@
-/* Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the pixel panel, button, chip and field rules and the font switch. */
+/* Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the names of the panel, button, chip, field, kbd and led building blocks and the Pixel/Clean/Mono
+   font switch. Their look (colours, borders, corners, shadows, paper edge) and the motion rules are SelariKru's own (H7). */
 @import "tailwindcss";
 @import "@fontsource/pixelify-sans/400.css";
 @import "@fontsource/pixelify-sans/600.css";
@@ -16,27 +17,27 @@
 @source "../../../packages/ui/src";
 
 /*
- * The reference theme, one theme only (owner decision, T5.12 round 2): its @theme colours and fonts as given, and SelariKru's semantic tokens
- * mapped onto them. Two reference colours fail WCAG AA as text and were adjusted minimally: muted #7d6b73 -> #625059 (3.80:1 on cream-2) and the
- * activity feed's time colour #7f8bb5 -> #8f9bc4 (4.11:1 on navy). The bright state colours (blue, red, orange, green) stay for pixels and
- * swatches; text in those tones uses the darker semantic values below. tests/quality.spec.ts measures the painted result.
+ * SelariKru's own theme (H7): a kedai (shophouse) studio. Cream paper panels with a kopi ink, terracotta and teal accents, deep green dark panels and
+ * a gold accent. The semantic tokens below are what text uses; the raw family colours are for pixels, swatches and surfaces. Every text tone is AA on
+ * every surface it sits on (lowest: 5.47:1, danger on the danger tint); tests/quality.spec.ts measures the painted result.
  */
 @theme {
-  --color-ink: #241a2e;
-  --color-cream: #fff6e9;
-  --color-cream-2: #f0dfc2;
-  --color-cream-3: #e2cba6;
-  --color-navy: #1d2b53;
-  --color-navy-2: #16213f;
-  --color-blue: #29adff;
-  --color-red: #ff004d;
-  --color-orange: #ffa300;
-  --color-green: #00e436;
-  --color-lav: #83769c;
-  --color-yellow: #ffec27;
-  --color-pink: #ff77a8;
-  --color-grass: #4a8f3d;
-  --color-edge: #241a2e;
+  --color-ink: #2b1d14;
+  --color-paper: #fbf3e4;
+  --color-paper-2: #f1e2c6;
+  --color-paper-3: #e4cfa8;
+  --color-terracotta: #c4532f;
+  --color-teal: #2a9d8f;
+  --color-kopi: #6b4226;
+  --color-deep: #173d3a;
+  --color-deep-2: #0f2b29;
+  --color-leaf: #5aa457;
+  --color-gold: #f5d47a;
+  --color-dusk: #9a8878;
+  --color-street: #4c3b30;
+  --color-edge: #2b1d14;
+  --color-feed-soft: #c9ddd6;
+  --color-feed-time: #a9c7bf;
   --font-ui: "Pixelify Sans", "Trebuchet MS", system-ui, sans-serif;
   --font-term: "VT323", ui-monospace, Menlo, Consolas, monospace;
 }
@@ -44,25 +45,25 @@
 :root,
 :root[data-theme] {
   color-scheme: light;
-  --color-bg: #fff6e9;
-  --color-panel: #fff6e9;
-  --color-panel-2: #f0dfc2;
-  --color-line: #e2cba6;
-  --color-line-strong: #241a2e;
-  --color-fg: #241a2e;
-  --color-muted: #625059;
-  --color-active: #1a5aa0;
-  --color-success: #0a6631;
-  --color-warning: #7f4600;
-  --color-danger: #b0003a;
-  --color-active-tint: #dcebfa;
-  --color-success-tint: #dcf2df;
-  --color-warning-tint: #fbe6c4;
-  --color-danger-tint: #fadbe3;
-  --color-backdrop: #241a2e8c;
-  --pixel-drop: rgba(36, 26, 46, 0.45);
-  --radius-card: 0px;
-  --radius-chip: 0px;
+  --color-bg: #fbf3e4;
+  --color-panel: #fffaf0;
+  --color-panel-2: #f1e2c6;
+  --color-line: #e4cfa8;
+  --color-line-strong: #2b1d14;
+  --color-fg: #2b1d14;
+  --color-muted: #6a5444;
+  --color-active: #11625c;
+  --color-success: #1f6335;
+  --color-warning: #874800;
+  --color-danger: #a3301a;
+  --color-active-tint: #d8ece8;
+  --color-success-tint: #dfeedd;
+  --color-warning-tint: #f7e6c4;
+  --color-danger-tint: #f8ded4;
+  --color-backdrop: #2b1d148c;
+  --pixel-drop: rgba(43, 29, 20, 0.22);
+  --radius-card: 4px;
+  --radius-chip: 3px;
   --font-sans: var(--font-ui);
   --font-mono: var(--font-term);
   --text-mono: 18px;
@@ -85,9 +86,9 @@ html[data-font="mono"] {
   --text-mono: 13px;
 }
 
-/* The office canvas paints the reference's grass behind the shell; the page itself is cream, so any surface without a panel still reads. */
+/* The office canvas paints the street and the shophouse behind the shell; the page itself is paper, so any surface without a panel still reads. */
 body {
-  background: var(--color-cream);
+  background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-sans);
   font-size: 15px;
@@ -109,12 +110,12 @@ h1, h2 {
   outline: none;
 }
 
-/* ---- Pixel look, applied to the shared building blocks so every view takes it without a rewrite. ---- */
+/* ---- The kedai look, applied to the shared building blocks so every view takes it without a rewrite. ---- */
 
 .rounded-card.border {
-  border-width: 3px;
+  border-width: 2px;
   border-color: var(--color-edge);
-  box-shadow: 0 4px 0 var(--pixel-drop);
+  box-shadow: 2px 3px 0 var(--pixel-drop);
 }
 .rounded-card.border.border-dashed {
   box-shadow: none;
@@ -123,14 +124,14 @@ button.rounded-chip,
 a.rounded-chip {
   border-width: 2px;
   border-style: solid;
-  box-shadow: 0 3px 0 var(--color-edge);
+  box-shadow: 0 2px 0 var(--color-edge);
 }
 button.rounded-chip:not([class*="border-"]),
 a.rounded-chip:not([class*="border-"]) {
   border-color: var(--color-edge);
 }
 button.rounded-chip:active:not(:disabled) {
-  transform: translateY(3px);
+  transform: translateY(2px);
   box-shadow: 0 0 0 var(--color-edge);
 }
 button.rounded-chip:disabled {
@@ -138,59 +139,64 @@ button.rounded-chip:disabled {
 }
 
 @layer components {
-  /* Chunky game panel: ink outline, light bevel, hard drop shadow (no blur) */
+  /*
+   * Paper panel: a 2 px ink border, rounded-off corners, a soft offset shadow and a paper edge (a light top fold and a warm inner rim). The paper is drawn
+   * with inset shadows, not an image, so text on a panel keeps a solid background that contrast checks can measure.
+   */
   .panel {
-    background: var(--color-cream);
-    border: 3px solid var(--color-ink);
+    background: var(--color-paper);
+    border: 2px solid var(--color-ink);
+    border-radius: 6px;
     box-shadow:
-      inset -3px -3px 0 var(--color-cream-2),
-      inset 3px 3px 0 #fff,
-      0 4px 0 rgba(36, 26, 46, 0.45);
+      inset 0 1px 0 rgba(255, 255, 255, 0.85),
+      inset 0 0 0 3px rgba(228, 207, 168, 0.35),
+      3px 4px 0 var(--pixel-drop);
   }
   .panel-dark {
-    background: var(--color-navy);
-    color: var(--color-cream);
-    border: 3px solid var(--color-ink);
+    background: var(--color-deep);
+    color: var(--color-paper);
+    border: 2px solid var(--color-ink);
+    border-radius: 6px;
     box-shadow:
-      inset -3px -3px 0 rgba(0, 0, 0, 0.25),
-      inset 3px 3px 0 rgba(255, 255, 255, 0.08),
-      0 4px 0 rgba(36, 26, 46, 0.45);
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -2px 0 rgba(0, 0, 0, 0.2),
+      3px 4px 0 var(--pixel-drop);
   }
   .btn {
     cursor: pointer;
-    border: 3px solid var(--color-ink);
-    background: var(--color-cream);
+    border: 2px solid var(--color-ink);
+    border-radius: 4px;
+    background: var(--color-paper);
     color: var(--color-ink);
     padding: 1px 10px;
     font-weight: 600;
     box-shadow:
-      inset -2px -2px 0 var(--color-cream-3),
-      0 3px 0 var(--color-ink);
+      inset 0 -2px 0 var(--color-paper-3),
+      0 2px 0 var(--color-ink);
     transition: transform 0.06s;
     white-space: nowrap;
   }
   .btn:hover {
-    background: #fff;
+    background: #fffdf8;
   }
   .btn:active,
   .btn[aria-pressed="true"],
   .btn[aria-current="page"],
   .btn[aria-expanded="true"] {
-    transform: translateY(3px);
+    transform: translateY(2px);
     box-shadow:
-      inset -2px -2px 0 var(--color-cream-3),
+      inset 0 -2px 0 var(--color-paper-3),
       0 0 0 var(--color-ink);
   }
   .btn[aria-pressed="true"],
   .btn[aria-current="page"] {
-    background: var(--color-yellow);
+    background: var(--color-gold);
   }
   .btn:disabled {
     cursor: not-allowed;
     opacity: 0.5;
     transform: none;
   }
-  /* The reference's blue ring is 2.30:1 on cream; the ring uses the active token, which meets 3:1 for a focus indicator. */
   .btn:focus-visible,
   .field:focus-visible {
     outline: 3px solid var(--color-active);
@@ -204,7 +210,8 @@ button.rounded-chip:disabled {
     font-weight: 600;
     padding: 0 6px 1px;
     border: 2px solid var(--color-ink);
-    background: var(--c, var(--color-cream-2));
+    border-radius: 3px;
+    background: var(--c, var(--color-paper-2));
     color: var(--color-ink);
     white-space: nowrap;
   }
@@ -212,11 +219,13 @@ button.rounded-chip:disabled {
     content: "";
     width: 6px;
     height: 6px;
+    border-radius: 1px;
     background: var(--color-ink);
   }
   .field {
-    border: 3px solid var(--color-ink);
-    background: #fff;
+    border: 2px solid var(--color-ink);
+    border-radius: 4px;
+    background: #fffdf8;
     padding: 2px 8px;
     font-size: 15px;
     width: 100%;
@@ -231,8 +240,9 @@ button.rounded-chip:disabled {
     font-size: 16px;
     line-height: 1;
     border: 2px solid var(--color-ink);
+    border-radius: 3px;
     padding: 0 4px;
-    background: #fff;
+    background: #fffdf8;
     color: var(--color-ink);
   }
   .swatch {
@@ -241,31 +251,62 @@ button.rounded-chip:disabled {
     width: 10px;
     height: 10px;
     border: 2px solid var(--color-ink);
+    border-radius: 2px;
   }
   .led {
     display: inline-block;
     width: 8px;
     height: 8px;
-    background: var(--color-green);
+    border-radius: 50%;
+    background: var(--color-leaf);
     box-shadow: 0 0 0 2px var(--color-ink);
-    animation: pixel-blink 1s steps(1) infinite;
+    animation: kedai-blink 1.2s steps(1) infinite;
   }
   .led[data-off] {
-    background: var(--color-lav);
+    background: var(--color-dusk);
     animation: none;
   }
 }
 
-@keyframes pixel-blink {
-  50% { opacity: 0.25; }
+/*
+ * Motion (H7): drawers and dialogs enter in 150 to 250 ms and leave at once (an exit is never slower than an entrance). Only transform and opacity
+ * animate. Under reduced motion nothing below runs; src/theme/motion.test.ts reads this file and checks those rules.
+ */
+@keyframes kedai-blink {
+  50% { opacity: 0.3; }
+}
+@keyframes kedai-drawer-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes kedai-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes kedai-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.motion-drawer {
+  animation: kedai-drawer-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.motion-dialog {
+  animation: kedai-dialog-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+.motion-menu {
+  animation: kedai-fade-in 150ms ease-out backwards;
 }
 .progress-fill {
-  transition: width 200ms ease-out;
+  transform-origin: left center;
+  transition: transform 200ms ease-out;
 }
 @media (prefers-reduced-motion: reduce) {
   .progress-fill,
   .led,
-  .btn {
+  .btn,
+  .motion-drawer,
+  .motion-dialog,
+  .motion-menu {
     transition: none;
     animation: none;
   }

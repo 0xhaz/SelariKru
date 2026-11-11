@@ -31,7 +31,7 @@ export function ModelCard({ onDownload }: { onDownload: () => void }) {
             {...(pct === null ? {} : { 'aria-valuenow': pct })}
             className="h-2 overflow-hidden rounded-chip bg-bg"
           >
-            <div className="progress-fill h-full bg-active" style={{ width: `${pct ?? 0}%` }} />
+            <div className="progress-fill h-full w-full bg-active" style={{ transform: `scaleX(${(pct ?? 0) / 100})` }} />
           </div>
         </div>
       ) : null}

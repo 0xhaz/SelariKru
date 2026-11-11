@@ -77,7 +77,7 @@ export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject
   // A named region, so the picture sits in a landmark; its role="img" label is the summary the office screen also shows in words.
   return (
     <section aria-label={subject ? 'Office floor' : undefined} aria-hidden={subject ? undefined : true} className="contents">
-      <div ref={host} data-testid="office-canvas" data-office-canvas="" role="img" aria-label={world?.summary ?? 'Office: no project data yet.'} className="fixed inset-0 z-0 overflow-hidden bg-grass" />
+      <div ref={host} data-testid="office-canvas" data-office-canvas="" role="img" aria-label={world?.summary ?? 'Office: no project data yet.'} className="fixed inset-0 z-0 overflow-hidden bg-street" />
     </section>
   );
 }
