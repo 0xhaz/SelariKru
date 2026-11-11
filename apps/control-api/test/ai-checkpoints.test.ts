@@ -89,6 +89,19 @@ describe('AI step checkpoints on the server (H12)', () => {
     await expect(t.db.insert(schema.aiCheckpoints).values({ tenantId: TENANT, projectId: PROJECT, checkpointId: 'ckp_direct_write', ownerUid: 'owner_uid_1', taskId: 't_open', status: 'waiting', body: cp({ partial: { issues: [], texts: [{ who: 'owner', text: 'x', classification: 'restricted' }] } }) as never, createdAt: new Date(), updatedAt: new Date() })).rejects.toThrow();
   });
 
+  it('fix 1 (I4): a checkpoint stored while its task was internal is withheld once the task is locked (by a Brain source, or the project)', async () => {
+    expect((await save(cp())).status).toBe(201);
+    await t.db.execute(sql`UPDATE projects SET classification = 'restricted' WHERE project_id = ${PROJECT}`);
+    expect((await list()).body.checkpoints).toEqual([]);
+    await t.db.execute(sql`UPDATE projects SET classification = 'internal' WHERE project_id = ${PROJECT}`);
+    expect((await list()).body.checkpoints).toHaveLength(1);
+    await t.db.insert(schema.brainSources).values({
+      tenantId: TENANT, projectId: PROJECT, sourceId: 'note:t_open', revision: 1, kind: 'note', title: 'n', standing: 'accepted', classification: 'restricted', allowedUse: ['local'],
+      provenance: { origin: 'owner', ref: 'x', recordedBy: 'u' }, taskId: 't_open', sections: [], contentSha256: 'a'.repeat(64), seq: 1, recordedAt: new Date(),
+    });
+    expect((await list()).body.checkpoints).toEqual([]);
+  });
+
   it('refuses secret-shaped text', async () => {
     const r = await save(cp({ partial: { issues: [], texts: [{ who: 'owner', text: 'use AKIAABCDEFGHIJKLMNOP', classification: 'internal' }] } }));
     expect(r.body.error.code).toBe('checkpoint_secret');

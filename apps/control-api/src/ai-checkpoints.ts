@@ -4,7 +4,7 @@ import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from './app.ts';
 import { AppError } from './errors.ts';
-import { loadTaskRoute } from './route-policy.ts';
+import { loadTaskRoute, taskRouteLocks } from './route-policy.ts';
 import { ownerOf, parseBody } from './routes-owner.ts';
 import { requireProject } from './store.ts';
 
@@ -58,7 +58,10 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const rows = await db.select().from(schema.aiCheckpoints)
       .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.ownerUid, uid)))
       .orderBy(desc(schema.aiCheckpoints.updatedAt)).limit(LIST_LIMIT);
-    return { checkpoints: rows.map(bodyOf) };
+    // Fix round 1 (I4): judged again by each task's lock now (computed as every route read computes it): a checkpoint stored while its task was internal is
+    // withheld once the task reads restricted data, so it never reaches a browser that would send it to the cloud.
+    const locks = await taskRouteLocks(db, tenantId, projectId, rows.map((r) => r.taskId));
+    return { checkpoints: rows.filter((r) => (locks.get(r.taskId) ?? null) === null).map(bodyOf) };
   });
 
   app.post('/v1/projects/:id/ai-checkpoints', guard, async (req, reply) => {

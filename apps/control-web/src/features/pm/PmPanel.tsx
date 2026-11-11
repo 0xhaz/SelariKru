@@ -4,6 +4,7 @@ import { create } from 'zustand';
 import type { BrowserInputs } from '../hybrid/model.ts';
 import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
 import { planRouteProposals, routeTargets } from './routes.ts';
+import { rememberedTurns } from './memory.ts';
 import { modeLabel } from '../hybrid/model.ts';
 import type { RoutePolicyMode } from '@selarikru/domain';
 import { pmReplyTurn, type PmTurn } from '@selarikru/inference-firebase-web';
@@ -171,9 +172,7 @@ export function PmPanel() {
   const turns = pmConversation((s) => s.turns);
   // H12: the PM's memory. Its earlier turns are checkpoints under the same split (restricted ones only in this browser), read back here with their labels.
   const kept = useStore(h?.checkpoints?.store ?? EMPTY_CHECKPOINT_STORE, (s) => s.checkpoints);
-  const remembered = useMemo(() => Object.values(kept)
-    .filter((cp) => cp.stepKind.startsWith('pm') && (cp.status === 'done' || cp.status === 'sent') && cp.createdAt < TAB_STARTED && (cp.partial?.texts.length ?? 0) > 0)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).flatMap((cp) => cp.partial!.texts), [kept]);
+  const remembered = useMemo(() => rememberedTurns(kept, h?.snapshot ?? null, TAB_STARTED), [kept, h?.snapshot]);
   const snap = h?.snapshot ?? null;
   const run = snap ? currentRun(snap) : null;
   const runTasks = snap && run ? Object.values(snap.tasks).filter((t) => t.runId === run.runId) : [];
@@ -196,7 +195,7 @@ export function PmPanel() {
     const add = pmConversation.getState().add;
     // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call. A reply from a call that read
     // restricted text is itself restricted (`pmReplyTurn`), so its paraphrase never reaches the cloud either (fix round 1, H2).
-    const history: PmTurn[] = [...remembered.map((t): PmTurn => ({ who: t.who, text: t.text, classification: t.classification }))].concat(pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
+    const history: PmTurn[] = [...remembered].concat(pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
       : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []));
     // A question about a locked task is restricted, whatever the checkbox says.
     const label = questionLabelFor(task, restricted);
