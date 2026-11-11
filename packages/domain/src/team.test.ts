@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkDelegation, quoteName, workerLabel, workerNameProblem, type DelegationScope } from './index.ts';
+import { checkDelegation, workerRoleOf, quoteName, workerLabel, workerNameProblem, type DelegationScope } from './index.ts';
 
 describe('worker names (H11)', () => {
   it('accepts 1 to 24 characters in any script, trimmed, unique per project', () => {
@@ -33,13 +33,13 @@ describe('the Project Manager delegates only inside the accepted plan (H11)', ()
   const scope: DelegationScope = {
     planRevision: 3,
     tasks: [
-      { taskId: 't1', role: 'backend', status: 'ready', repairsUsed: 0 },
-      { taskId: 't2', role: 'frontend', status: 'failed', repairsUsed: 1 },
-      { taskId: 't3', role: 'backend', status: 'failed', repairsUsed: 2 },
-      { taskId: 't4', role: 'backend', status: 'running', repairsUsed: 0 },
+      { taskId: 't1', role: 'backend', status: 'ready', attemptsUsed: 0, maxAttempts: 3 },
+      { taskId: 't2', role: 'frontend', status: 'failed', attemptsUsed: 2, maxAttempts: 3 },
+      { taskId: 't3', role: 'backend', status: 'failed', attemptsUsed: 3, maxAttempts: 3 },
+      { taskId: 't4', role: 'backend', status: 'running', attemptsUsed: 0, maxAttempts: 3 },
+      { taskId: 't5', role: 'backend', status: 'failed', attemptsUsed: 1, maxAttempts: 1 },
     ],
-    workers: [{ workerId: 'w1', role: 'backend', enabled: true }, { workerId: 'w2', role: 'frontend', enabled: true }, { workerId: 'w3', role: 'backend', enabled: false }],
-    repairLimit: 2,
+    workers: [{ workerId: 'w1', role: 'backend', enabled: true }, { workerId: 'w2', role: 'frontend', enabled: true }, { workerId: 'w3', role: 'backend', enabled: false }, { workerId: 'w4', role: null, enabled: true }],
   };
 
   it('applies assignments of the plan\'s tasks to enabled workers of the task\'s role', () => {
@@ -63,6 +63,18 @@ describe('the Project Manager delegates only inside the accepted plan (H11)', ()
       expect(r.apply).toEqual([]);
       expect(r.refuse[0]!.reason).toBe('outside_plan_field');
     }
+  });
+
+  it('M5: a failed task is retried only while its own attempt limit allows; I2: a worker with no known role gets nothing', () => {
+    const r = checkDelegation(scope, { planRevision: 3, assignments: [{ taskId: 't5', workerId: 'w1' }, { taskId: 't1', workerId: 'w4' }] });
+    expect(r.refuse.map((x) => x.reason)).toEqual(['retry_limit_reached', 'worker_role_unset']);
+  });
+
+  it('I2: workerRoleOf: a saved role wins, else the most recent claimed task\'s role, else none', () => {
+    const history = [{ workerId: 'w', role: 'frontend', at: '2026-11-01T00:00:00Z' }, { workerId: 'w', role: 'backend', at: '2026-11-02T00:00:00Z' }, { workerId: 'x', role: 'qa', at: '2026-11-03T00:00:00Z' }];
+    expect(workerRoleOf('w', [], history)).toBe('backend');
+    expect(workerRoleOf('w', [{ workerId: 'w', field: 'role', value: 'frontend' }], history)).toBe('frontend');
+    expect(workerRoleOf('z', [], history)).toBeNull();
   });
 
   it('one assignment per task', () => {

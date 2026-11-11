@@ -426,6 +426,9 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
       if (!workerId || planRevision === null) return commit(task);
       return commit({ ...task, delegation: { workerId, planRevision, actor: e.actor.kind === 'agent' ? 'agent' : 'human', at } });
     }
+    // H11 fix round 1: the delegation was released (its worker can no longer take the task); the task is claimed as usual.
+    case 'task.undelegated':
+      return commit({ ...task, delegation: null });
 
 
     default: {

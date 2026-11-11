@@ -211,12 +211,12 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
  * refused (`proposal_from_restricted_call`); and the context the server served it, recorded under the id the record names, must exist and hold nothing stronger than
  * internal (`proposal_from_restricted_context`). The last needs nothing the browser says about its lock, so a tampered client is still refused.
  */
-export async function agentOutputGuard(db: Executor, key: { tenantId: string; projectId: string; taskId: string }, routeRecordId: string, stepKind: string): Promise<{ readonly outputSha256: unknown }> {
+export async function agentOutputGuard(db: Executor, key: { tenantId: string; projectId: string; taskId: string }, routeRecordId: string, stepKind: string): Promise<{ readonly outputSha256: unknown; readonly planRevision: unknown }> {
   const [record] = await db.select({ payload: schema.clientReports.payload }).from(schema.clientReports).where(and(
     eq(schema.clientReports.tenantId, key.tenantId), eq(schema.clientReports.projectId, key.projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
     eq(schema.clientReports.subjectId, key.taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${routeRecordId}`,
   )).limit(1);
-  const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown; contextId?: unknown; taskRevision?: unknown; effectiveMode?: unknown } | undefined;
+  const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown; contextId?: unknown; taskRevision?: unknown; effectiveMode?: unknown; planRevision?: unknown } | undefined;
   if (!rec || rec.stepKind !== stepKind || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', `there is no record of where the ${stepKind} call that produced this ran, so it cannot be used`);
   // A call that ran locked to the device read restricted data: its output stays on the device, whatever the task's label says now.
   if (rec.locked === true) throw new AppError(409, 'proposal_from_restricted_call', RESTRICTED_APPLY_REFUSAL, { reason: 'locked_call' });
@@ -235,7 +235,7 @@ export async function agentOutputGuard(db: Executor, key: { tenantId: string; pr
   const named = await db.select({ id: schema.clientReports.reportId }).from(schema.clientReports).where(and(
     eq(schema.clientReports.tenantId, key.tenantId), eq(schema.clientReports.projectId, key.projectId), eq(schema.clientReports.kind, 'route'), sql`${schema.clientReports.payload} ->> 'contextId' = ${contextId}`)).limit(2);
   if (named.length !== 1) refuse('context_reused');
-  return { outputSha256: rec.outputSha256 };
+  return { outputSha256: rec.outputSha256, planRevision: rec.planRevision };
 }
 
 /** Context records older than this are pruned, unless their task has an accept waiting. */

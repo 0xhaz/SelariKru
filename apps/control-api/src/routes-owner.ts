@@ -37,7 +37,7 @@ export const budgetStatus = (budget: Record<string, unknown>): BudgetStatus => {
     : { status: 'missing', limitUsd: null, claimsDenied: true, reason: 'missing_limit:budget.limitUsd' };
 };
 
-const ownerOf = (req: FastifyRequest): string => {
+export const ownerOf = (req: FastifyRequest): string => {
   if (req.principal?.kind !== 'owner') throw new AppError(403, 'wrong_principal_type', 'owner credentials required');
   return req.principal.uid;
 };
@@ -240,10 +240,19 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow planning', { reason: gate.reason, decision: gate.decision });
     // A browser agent's criteria: refused when that call read restricted context (or the server cannot vouch for what it read).
     if (body.agentProposal) {
-      // An agent's criteria revise exactly the task whose call proposed them.
       const named = body.agentProposal.taskId;
-      if (!body.tasks.every((x) => x.taskId === named)) throw invalidRequest('an agent proposal revises only the task whose call proposed it', { reason: 'agent_proposal_task_mismatch' });
-      await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'criteria');
+      if (body.agentProposal.stepKind === 'pmPlan') {
+        // H11 fix round 1 (I4): a Project Manager plan is a revision of the run. Its call ran about one task of this run; it is judged by that call's record and
+        // served context (H5's guard), like any agent output that leaves the device.
+        const [subject] = await db.select({ runId: schema.taskRevisions.runId }).from(schema.taskRevisions)
+          .where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, projectId), eq(schema.taskRevisions.taskId, named))).limit(1);
+        if (!subject || subject.runId !== run.runId) throw invalidRequest('the Project Manager call names no task of this run', { reason: 'agent_proposal_task_mismatch' });
+        await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'pmPlan');
+      } else {
+        // An agent's criteria revise exactly the task whose call proposed them.
+        if (!body.tasks.every((x) => x.taskId === named)) throw invalidRequest('an agent proposal revises only the task whose call proposed it', { reason: 'agent_proposal_task_mismatch' });
+        await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: named }, body.agentProposal.routeRecordId, 'criteria');
+      }
     }
 
     const extra: PlanError[] = body.tasks.filter((t) => t.tenantId !== config.tenantId).map((t) => ({ kind: 'scope_mismatch', taskId: t.taskId, field: 'projectId' }));
@@ -494,13 +503,17 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
             if (!task || !status) throw new AppError(404, 'task_not_found', 'no such task');
             const effective = effectiveRoutePolicy({ call: body.callOverride, task: task.route.override, run: task.route.runDefault, lock: task.lock });
             const ran = body.status !== 'blocked' && body.status !== 'error';
-            const outcome = routeOutcome(effective.mode, ran ? body.observedSource : 'UNKNOWN', body.requestedMode, task.lock !== null);
+            // H11 fix round 1: the browser can only make a record stricter. A call that read restricted input the server cannot see (the Project Manager's
+            // restricted history on the device) is recorded locked, so nothing it produced leaves the device.
+            const locked = task.lock !== null || body.inputLabel === 'restricted' || body.inputLabel === 'secret';
+            const outcome = routeOutcome(effective.mode, ran ? body.observedSource : 'UNKNOWN', body.requestedMode, locked);
             const payload = {
               requestId: body.requestId, taskRevision: task.revision, stepKind: body.stepKind, callOverride: body.callOverride, requestedMode: body.requestedMode,
-              effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource,
+              effectiveMode: effective.mode, policySource: effective.source, locked, observedSource: body.observedSource,
               fellBack: ran ? outcome.fellBack : null, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
               status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
               validation: body.validation, blockedReason: body.blockedReason, ...(body.outputSha256 !== undefined ? { outputSha256: body.outputSha256 } : {}), ...(body.contextId !== undefined ? { contextId: body.contextId } : {}),
+              ...(body.inputLabel !== undefined ? { inputLabel: body.inputLabel } : {}), ...(body.planRevision !== undefined ? { planRevision: body.planRevision } : {}),
             };
             const [inserted] = await tx.insert(schema.clientReports).values({
               tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,

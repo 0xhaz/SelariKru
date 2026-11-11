@@ -17,6 +17,7 @@ import { checkFits, lockBudget, remainingMicros, reservationIdFor, reserve, toMi
 import { buildTaskState, loadAttempts, lockStatusRow, setStatus, type AttemptRow, type TaskKey } from './taskstate.ts';
 import { gateFor, loadRunGates, loadRunnerGate, pathsRevoked, type RunGate } from './settings.ts';
 import { resolveTaskSkills } from './skills.ts';
+import { delegationStale, releaseDelegation } from './delegation.ts';
 import { claimHold, heldTaskBlocked, placementRefused, startSuccessor, VISIBLE_HOLDS, type CheckpointRow } from './handover.ts';
 import type { SkillResolution } from '@selarikru/domain';
 import type { Caps, ClaimOutcome, Lease, Runner, SchedulerContext, SkippedCandidate } from './types.ts';
@@ -151,11 +152,20 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     const myRole = await loadRunnerRole(tx, runner.tenantId, runner.runnerId);
     const delegated = await loadDelegations(tx, runner.tenantId, candidates);
     for (const c of candidates) {
-      const to = delegated.get(`${c.projectId}:${c.taskId}:${c.currentRevision}`);
+      let to = delegated.get(`${c.projectId}:${c.taskId}:${c.currentRevision}`);
       const taskRole = typeof (c.spec as { role?: unknown } | null)?.role === 'string' ? (c.spec as { role: string }).role : null;
+      // H11 fix round 1 (I6): a delegation whose worker can no longer take the task (disabled, revoked, not polling, another role) is released, and the task is
+      // claimed as usual. A delegated task still passes the role gate.
+      if (to !== undefined && to !== runner.runnerId && myRole !== PROJECT_MANAGER_ROLE) {
+        const stale = await delegationStale(tx, { tenantId: runner.tenantId, projectId: c.projectId }, to, taskRole, now);
+        if (stale !== null) {
+          await releaseDelegation(tx, { tenantId: runner.tenantId, projectId: c.projectId, taskId: c.taskId }, c.runId, c.currentRevision, to, stale, now);
+          to = undefined;
+        }
+      }
       const gate: ClaimReason | null = myRole === PROJECT_MANAGER_ROLE ? 'project_manager_claims_no_task'
-        : to !== undefined && to !== runner.runnerId ? 'delegated_to_other_worker'
-          : to === undefined && myRole !== null && taskRole !== myRole ? 'role_not_this_worker' : null;
+        : myRole !== null && taskRole !== myRole ? 'role_not_this_worker'
+          : to !== undefined && to !== runner.runnerId ? 'delegated_to_other_worker' : null;
       if (gate) { skipped.push({ taskId: c.taskId, reason: gate }); continue; }
       const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now, gateFor(gates, c.projectId, c.runId));
       if ('lease' in r) {

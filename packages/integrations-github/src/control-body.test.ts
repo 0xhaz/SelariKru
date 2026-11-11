@@ -36,4 +36,9 @@ describe('the PR body: knowledge packs', () => {
     expect(body).toContain('- Task `t2`: rm Ravi · Frontend');
     expect(buildPrBody(pkg)).not.toContain('Who worked on it');
   });
+  it('M9: a name with @ never pings a GitHub user', () => {
+    const body = buildPrBody({ ...pkg, workers: [{ taskId: 't1', worker: '@octocat · Backend', assignedUnderPlanRevision: null }] });
+    expect(body).not.toMatch(/(^|[^\w`])@octocat/);
+    expect(body).toContain('@\u200boctocat · Backend');
+  });
 });

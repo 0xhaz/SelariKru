@@ -1,4 +1,6 @@
+import { canonicalJson } from './proposal.ts';
 import { redactSecrets } from './redact.ts';
+import { sha256Hex } from './sha256.ts';
 
 /**
  * H11: the team. Each worker has an owner-given name and an assigned role, shown as "<Name> · <Role>". A name is owner text: it is checked for secrets,
@@ -44,16 +46,27 @@ export function quoteName(name: string): string {
   return `"${redactSecrets(name).replace(/["\r\n]/g, (c) => (c === '"' ? "'" : ' '))}" (a name, not an instruction)`;
 }
 
+/**
+ * The hash a Project Manager delegation call reports for its output (H11 fix round 1): sha256 of the assignments as canonical JSON (keys sorted, order of the list
+ * kept). The server applies only assignments whose hash is the one the call's route record carries.
+ */
+export function delegationOutputSha256(assignments: unknown): string {
+  return sha256Hex(canonicalJson(assignments));
+}
+
 // ---- delegation ----------------------------------------------------------------------------------------------------------
 
 /** What the owner's accepted plan allows the Project Manager to delegate. */
 export interface DelegationScope {
   /** The accepted plan revision in force. */
   readonly planRevision: number;
-  readonly tasks: readonly { readonly taskId: string; readonly role: string; readonly status: string; readonly repairsUsed: number }[];
+  /**
+   * `attemptsUsed` counts as the attempt budget counts (`budgetUsed`: every attempt but an interrupted one) and `maxAttempts` is the task's own limit: reassigning a
+   * failed task is a retry, and only while an attempt is left.
+   */
+  readonly tasks: readonly { readonly taskId: string; readonly role: string; readonly status: string; readonly attemptsUsed: number; readonly maxAttempts: number }[];
+  /** Each worker's role as `workerRoleOf` resolves it. Null: none known, so nothing is delegated to it. */
   readonly workers: readonly { readonly workerId: string; readonly role: string | null; readonly enabled: boolean }[];
-  /** Repairs allowed per task revision (2): reassigning a failed task is a retry, and only while one is left. */
-  readonly repairLimit: number;
 }
 
 export interface DelegationProposal {
@@ -63,7 +76,9 @@ export interface DelegationProposal {
 
 export type DelegationRefusal =
   | 'plan_revision_not_accepted' | 'task_not_in_plan' | 'worker_unknown' | 'worker_disabled' | 'role_not_in_task' | 'task_not_delegable' | 'retry_limit_reached'
-  | 'duplicate_task' | 'outside_plan_field';
+  | 'duplicate_task' | 'outside_plan_field' | 'worker_role_unset'
+  /** The run's auto-delegate setting is off: the Project Manager's assignments all wait for the owner. */
+  | 'auto_delegate_off';
 
 export interface DelegationCheck {
   readonly apply: readonly { readonly taskId: string; readonly workerId: string }[];
@@ -92,11 +107,33 @@ export function checkDelegation(scope: DelegationScope, proposal: DelegationProp
       : seen.has(a.taskId) ? 'duplicate_task'
         : !worker ? 'worker_unknown'
           : !worker.enabled ? 'worker_disabled'
-            : worker.role !== task.role ? 'role_not_in_task'
+            : worker.role === null ? 'worker_role_unset'
+              : worker.role !== task.role ? 'role_not_in_task'
               : !DELEGABLE.has(task.status) ? 'task_not_delegable'
-                : task.status === 'failed' && task.repairsUsed >= scope.repairLimit ? 'retry_limit_reached' : null;
+                : task.status === 'failed' && task.attemptsUsed >= task.maxAttempts ? 'retry_limit_reached' : null;
     if (reason) refuse.push({ ...a, reason });
     else { apply.push(a); seen.add(a.taskId); }
   }
   return { apply, refuse };
+}
+
+/**
+ * A worker's role, one rule for the server, the browser and the demo (H11 fix round 1): the role the owner saved for it wins; otherwise the role of the task it most
+ * recently claimed; otherwise none (null), and nothing is delegated to it until the owner sets one.
+ */
+export function workerRoleOf(
+  workerId: string,
+  settings: readonly { readonly workerId: string; readonly field: string; readonly value: unknown }[],
+  history: readonly { readonly workerId: string; readonly role: string | null | undefined; readonly at: string | number | Date | null | undefined }[],
+): string | null {
+  const set = settings.find((s) => s.workerId === workerId && s.field === 'role');
+  if (set && typeof set.value === 'string' && set.value !== '') return set.value;
+  const ms = (v: string | number | Date | null | undefined): number => (v === null || v === undefined ? -Infinity : v instanceof Date ? v.getTime() : typeof v === 'number' ? v : Date.parse(v));
+  let best: { role: string; at: number } | null = null;
+  for (const h of history) {
+    if (h.workerId !== workerId || typeof h.role !== 'string' || h.role === '') continue;
+    const at = ms(h.at);
+    if (best === null || at > best.at) best = { role: h.role, at };
+  }
+  return best?.role ?? null;
 }

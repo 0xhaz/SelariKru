@@ -57,7 +57,7 @@ describe('the Project Manager\'s delegation', () => {
     expect(r!.refuse[0]!.reason).toBe('auto_delegate_off');
   });
 
-  it('a failed task is reassigned only while a repair is left', async () => {
+  it('a failed task is reassigned only while its attempt limit allows', async () => {
     await seedTask(t.db, specFor('t1', { role: 'backend' }), 'failed');
     for (const n of [1, 2, 3]) await t.db.insert(schema.attempts).values({ tenantId: TENANT, projectId: PROJECT, taskId: 't1', revision: 1, attemptId: `a${n}`, attemptNumber: n, fence: n, runner: 'w_back', outcome: 'failed', startedAt: clock.now(), endedAt: clock.now() } as never);
     expect((await delegate([{ taskId: 't1', workerId: 'w_back' }]))!.refuse[0]!.reason).toBe('retry_limit_reached');
@@ -79,5 +79,42 @@ describe('the claim honours delegation and roles', () => {
     expect(await sched().tryClaim(runner('w_front'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'role_not_this_worker' }] });
     expect(await sched().tryClaim(runner('w_pm'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'project_manager_claims_no_task' }] });
     expect(await sched().tryClaim(runner('w_back'), CAPS)).toMatchObject({ ok: true });
+  });
+
+  it('I6: a delegated task still passes the role gate at claim', async () => {
+    await seedTask(t.db, specFor('t1', { role: 'backend' }));
+    await delegate([{ taskId: 't1', workerId: 'w_back' }]);
+    await setting('w_back', 'role', 'frontend');
+    expect(await sched().tryClaim(runner('w_back'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'role_not_this_worker' }] });
+  });
+});
+
+describe('I6: a delegation never leaves its task stuck', () => {
+  const released = async () => (await t.db.execute(sql`SELECT actor_kind, payload FROM events WHERE type = 'task.undelegated'`)) as unknown as { actor_kind: string; payload: { workerId: string; reason: string } }[];
+  for (const [why, make] of [
+    ['disabled', async () => setting('w_back', 'enabled', false)],
+    ['revoked', async () => { await t.db.update(schema.runners).set({ revokedAt: clock.now() }).where(sql`runner_id = 'w_back'`); }],
+    ['not_polling', async () => { const old = new Date(clock.now().getTime() - 3_600_000); await t.db.update(schema.runners).set({ lastSeenAt: old, lastPolledAt: old }).where(sql`runner_id = 'w_back'`); }],
+    ['role_changed', async () => setting('w_back', 'role', 'frontend')],
+  ] as const) {
+    it(`released when the delegated worker is ${why}: task.undelegated by the system, then claimed as usual`, async () => {
+      await seedTask(t.db, specFor('t1', { role: 'backend' }));
+      await setting('w_front', 'role', 'backend');
+      await delegate([{ taskId: 't1', workerId: 'w_back' }]);
+      await make();
+      expect(await sched().tryClaim(runner('w_front'), CAPS)).toMatchObject({ ok: true });
+      const rows = await released();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ actor_kind: 'system', payload: { workerId: 'w_back', reason: why } });
+      expect(await t.db.execute(sql`SELECT 1 FROM task_delegations`)).toHaveLength(0);
+    });
+  }
+
+  it('a live, enabled delegated worker keeps its task', async () => {
+    await seedTask(t.db, specFor('t1', { role: 'backend' }));
+    await setting('w_front', 'role', 'backend');
+    await delegate([{ taskId: 't1', workerId: 'w_back' }]);
+    expect(await sched().tryClaim(runner('w_front'), CAPS)).toMatchObject({ ok: false, skipped: [{ taskId: 't1', reason: 'delegated_to_other_worker' }] });
+    expect(await released()).toHaveLength(0);
   });
 });

@@ -6,7 +6,7 @@ import { RoutePolicyModeSchema } from './route-policy.ts';
  * enforces it says so: the server, in the same transaction as the save, for policy it enforces itself; the runner, on its next claim poll or heartbeat,
  * for what it holds in its own loop. A save is never the same thing as applied.
  */
-export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate'] as const;
+export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate', 'web_research', 'pm_display_name'] as const;
 /** H11: a worker's owner-given name and its role (the role decides which tasks it may claim, from its next attempt). */
 export const RUNNER_SETTING_FIELDS = ['enabled', 'slots', 'display_name', 'role'] as const;
 /** A task's own settings. `route_override` replaces the run's `route_policy` for this task; null clears it. */
@@ -27,6 +27,8 @@ export const SETTING_ENFORCER: Readonly<Record<SettingField, SettingEnforcer>> =
   // H11: names are labels the server serves; a role is enforced by the server at the next claim (a running attempt keeps the role it was claimed under);
   // auto-delegation is the server's own switch.
   display_name: 'server', role: 'server', auto_delegate: 'server',
+  // H11 fix round 1: the owner's grant for web research (Google Search) and the Project Manager's name are served to the browser, in force when saved.
+  web_research: 'server', pm_display_name: 'server',
 };
 
 /** Upper bound on a runner's slots. The server's total concurrency cap still applies on top. */
@@ -52,6 +54,13 @@ export const SettingChangeSchema = z.discriminatedUnion('field', [
   z.object({ scope: z.literal('runner'), field: z.literal('role'), value: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/) }).strict(),
   /** H11: whether the Project Manager's assignments inside the accepted plan apply on their own (on by default, per the owner). */
   z.object({ scope: z.literal('run'), field: z.literal('auto_delegate'), value: z.boolean() }).strict(),
+  /**
+   * H11 fix round 1: the owner's grant for web research, a data destination of its own ("Google Search (web research)"). Off by default: only the owner's question
+   * is ever sent, and only while this is on.
+   */
+  z.object({ scope: z.literal('run'), field: z.literal('web_research'), value: z.boolean() }).strict(),
+  /** H11 fix round 1: the Project Manager's name, editable before any runner holds the role; null: "Project Manager". The same rules as a worker's name. */
+  z.object({ scope: z.literal('run'), field: z.literal('pm_display_name'), value: z.string().min(1).max(96).nullable() }).strict(),
 ]);
 export type SettingChange = z.infer<typeof SettingChangeSchema>;
 export type SettingValue = SettingChange['value'];
@@ -75,7 +84,10 @@ export function isReduction(field: SettingField, before: SettingValue | null, af
     // A name is a label; a role change is judged at the next claim; switching auto-delegation off takes nothing away from the owner.
     case 'display_name':
     case 'role':
-    case 'auto_delegate': return false;
+    case 'auto_delegate':
+    case 'pm_display_name': return false;
+    // Turning web research off takes a destination away; nothing the scheduler holds depends on it.
+    case 'web_research': return after === false && before !== false;
   }
 }
 

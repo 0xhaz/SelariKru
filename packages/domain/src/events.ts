@@ -14,7 +14,7 @@ export const EVENT_TYPES = [
   'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
   'product.recorded', 'product.proposed',
   'handover.requested', 'checkpoint.recorded', 'checkpoint.refused', 'attempt.fenced', 'attempt.route_changed', 'attempt.publish_refused', 'handover.decided',
-  'inference.reported', 'proposal.accepted', 'task.delegated',
+  'inference.reported', 'proposal.accepted', 'task.delegated', 'task.undelegated',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -122,6 +122,11 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
    * the owner. Ids and the plan revision only, never agent text.
    */
   'task.delegated': ['agent', H],
+  /**
+   * H11 fix round 1: a delegation was released because its worker can no longer take the task (disabled, revoked, not polling, or no longer of the task's role). The
+   * system, at the next claim; the task is claimed as usual after it. Ids and a reason code only.
+   */
+  'task.undelegated': ['system'],
 };
 
 export interface ActorNotPermitted {

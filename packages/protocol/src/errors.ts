@@ -86,6 +86,8 @@ export const ERROR_CODES = [
   'files_restricted', 'files_unavailable', 'file_request_not_found', 'no_checkout', 'too_many_file_requests',
   /** H11: a worker name that cannot be used. */
   'name_empty', 'name_too_long', 'name_invalid', 'name_secret', 'name_taken',
+  // H11 fix round 1: a Project Manager delegation bound to its call, and a worker role from the project's roles.
+  'delegation_output_mismatch', 'plan_revision_changed', 'route_record_used', 'role_unknown', 'role_pm_taken',
   'internal_error',
 ] as const;
 export const ErrorCodeSchema = z.enum(ERROR_CODES);

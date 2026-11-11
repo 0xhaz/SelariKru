@@ -92,6 +92,13 @@ export interface EngineeringDataSource {
    * what it refused, for the owner. Absent: this source cannot delegate.
    */
   delegate?(projectId: string, runId: string, request: DelegationRequest): Promise<DelegationReceipt>;
+  /** H11 fix round 1: the owner's own assignment (from Action items), through the same plan rule as the Project Manager's, recorded as the owner. */
+  assign?(projectId: string, runId: string, request: OwnerDelegationRequest): Promise<DelegationReceipt>;
+  /**
+   * H11 fix round 1 (I4): the owner accepts a Project Manager plan. The server reviews it into task specs (the Assistant's review) and records the plan revision only
+   * after H5's backstop judged the pmPlan call that produced it.
+   */
+  acceptPmPlan?(projectId: string, runId: string, request: PmPlanAcceptRequest): Promise<PmPlanAcceptReceipt>;
   disconnect(): void;
 }
 
@@ -109,6 +116,23 @@ export interface DelegationRequest {
   readonly subjectTaskId: string;
   readonly routeRecordId: string;
   readonly assignments: readonly Record<string, unknown>[];
+}
+export interface PmPlanAcceptRequest {
+  readonly expectedPlanRevision: number;
+  readonly subjectTaskId: string;
+  readonly routeRecordId: string;
+  /** The pmPlan output as the call gave it (the plan schema). */
+  readonly plan: { readonly tasks: readonly { readonly title: string; readonly description: string; readonly role?: string; readonly requirementIds: readonly string[] }[] };
+  readonly idempotencyKey: string;
+}
+export interface PmPlanAcceptReceipt {
+  readonly planRevision: number;
+  readonly taskIds: readonly string[];
+  readonly simulated: boolean;
+}
+export interface OwnerDelegationRequest {
+  readonly planRevision: number;
+  readonly assignments: readonly { readonly taskId: string; readonly workerId: string }[];
 }
 export interface DelegationReceipt {
   readonly applied: readonly { readonly taskId: string; readonly workerId: string }[];

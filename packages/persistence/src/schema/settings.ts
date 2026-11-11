@@ -29,7 +29,7 @@ export const runSettings = pgTable(
   { ...scope(), runId: text('run_id').notNull(), ...settingColumns() },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId, t.runId, t.field] }),
-    check('run_settings_field', sql`field IN ('paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate')`),
+    check('run_settings_field', sql`field IN ('paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate', 'web_research', 'pm_display_name')`),
     check('run_settings_enforcer', sql`enforcer IN ('server', 'runner')`),
   ],
 );

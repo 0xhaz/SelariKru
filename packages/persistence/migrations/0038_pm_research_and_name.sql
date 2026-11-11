@@ -1,0 +1,2 @@
+ALTER TABLE "run_settings" DROP CONSTRAINT "run_settings_field";--> statement-breakpoint
+ALTER TABLE "run_settings" ADD CONSTRAINT "run_settings_field" CHECK (field IN ('paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate', 'web_research', 'pm_display_name'));

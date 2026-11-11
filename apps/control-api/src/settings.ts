@@ -1,5 +1,5 @@
 import {
-  RUNNER_RECENT_SECONDS, RoutePolicyModeSchema, SETTING_ENFORCER, TaskSpecSchema, isCloudCapable, isReduction, policyRevokedReason, transition, workerNameProblem,
+  PROJECT_MANAGER_ROLE, RUNNER_RECENT_SECONDS, RoutePolicyModeSchema, SETTING_ENFORCER, TaskSpecSchema, isCloudCapable, isReduction, policyRevokedReason, transition, workerNameProblem,
   type TaskSpec, type TaskStatus,
   type RunnerConfig, type RunnerConfigAck, type SettingChange, type SettingField, type SettingValue,
 } from '@selarikru/domain';
@@ -106,6 +106,9 @@ async function configuredValue(tx: Executor, tenantId: string, projectId: string
     case 'display_name': return null;
     case 'role': return null;
     case 'auto_delegate': return true;
+    // H11 fix round 1: web research is a destination of its own, off until the owner grants it; the Project Manager is "Project Manager" until named.
+    case 'web_research': return false;
+    case 'pm_display_name': return null;
   }
 }
 
@@ -143,7 +146,9 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
       // config row, the run's task status rows in task order, and the event sequence (see the lock order in services/workflow/src/verification.ts).
       await schedulerLock(tx, config.tenantId);
       return idempotent(tx, { tenantId: config.tenantId, projectId, key: `setting:${body.change.scope}:${body.key}:${body.change.field}:${body.idempotencyKey}` }, fingerprint(body), async () => {
-        const change = body.change;
+        // A name is saved trimmed (fix round 1, M2), so "Aisyah " and "Aisyah" are one name.
+        const change = (body.change.field === 'display_name' || body.change.field === 'pm_display_name') && typeof body.change.value === 'string'
+          ? { ...body.change, value: body.change.value.trim() } as SettingChange : body.change;
         let run: typeof schema.runs.$inferSelect | null = null;
         let eventRunId: string;
         if (change.scope === 'run' || change.scope === 'task') {
@@ -175,7 +180,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         const current = row?.desiredRevision ?? 0;
         if (body.expectedRevision !== current) throw staleRevision(current, 'this setting');
         const before = (row ? row.desired : await configuredValue(tx, config.tenantId, projectId, run, change.field)) as SettingValue | null;
-        await validate(tx, change, run, before, at, body.key);
+        await validate(tx, change, run, before, at, body.key, projectId);
 
         const enforcer = SETTING_ENFORCER[change.field];
         const revision = current + 1;
@@ -235,7 +240,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
   });
 
   /** Checks a change against what the owner authorised and, for a resume, revalidates budget, policy and leases. Throws; writes nothing. */
-  async function validate(tx: Tx, change: SettingChange, run: typeof schema.runs.$inferSelect | null, before: SettingValue | null, at: Date, key: string): Promise<void> {
+  async function validate(tx: Tx, change: SettingChange, run: typeof schema.runs.$inferSelect | null, before: SettingValue | null, at: Date, key: string, projectId: string): Promise<void> {
     switch (change.field) {
       case 'allowed_paths': {
         const plan = await planPaths(tx, config.tenantId, run!.projectId, run!.runId);
@@ -286,9 +291,28 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         if (problem) throw new AppError(422, problem, problem === 'name_taken' ? 'Another worker already has this name.' : 'This name cannot be used.');
         return;
       }
-      // A role takes effect from the worker's next claim; a running attempt keeps the role it was claimed under.
-      case 'role':
+      // A role takes effect from the worker's next claim; a running attempt keeps the role it was claimed under. It must be one of the project's roles (those its
+      // tasks name), or the Project Manager's, which only one worker holds (fix round 1, M1). Checked under the scheduler lock, like a name.
+      case 'role': {
+        if (change.value === PROJECT_MANAGER_ROLE) {
+          const holders = await tx.select({ runnerId: schema.runnerSettings.runnerId }).from(schema.runnerSettings)
+            .where(and(eq(schema.runnerSettings.tenantId, config.tenantId), eq(schema.runnerSettings.field, 'role'), sql`${schema.runnerSettings.desired} = ${JSON.stringify(PROJECT_MANAGER_ROLE)}::jsonb`));
+          if (holders.some((r) => r.runnerId !== key)) throw new AppError(422, 'role_pm_taken', 'Another worker is already the Project Manager.');
+          return;
+        }
+        const specs = await tx.select({ spec: schema.taskRevisions.spec }).from(schema.taskRevisions).where(and(eq(schema.taskRevisions.tenantId, config.tenantId), eq(schema.taskRevisions.projectId, projectId)));
+        const roles = new Set(specs.map((s) => (s.spec as { role?: unknown }).role).filter((r): r is string => typeof r === 'string'));
+        if (!roles.has(change.value)) throw new AppError(422, 'role_unknown', 'Choose one of this project\'s roles: the roles its plan\'s tasks name.', { roles: [...roles].sort().slice(0, 40) });
+        return;
+      }
+      case 'pm_display_name': {
+        if (change.value === null) return;
+        const problem = workerNameProblem(change.value, []);
+        if (problem) throw new AppError(422, problem, 'This name cannot be used.');
+        return;
+      }
       case 'auto_delegate':
+      case 'web_research':
         return;
     }
   }

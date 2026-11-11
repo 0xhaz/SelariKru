@@ -71,8 +71,8 @@ export function buildPrBody(p: ReviewPackage): string {
     for (const g of p.grants) lines.push(`- \`${cell(g.operation)}\`${g.taskId !== null ? ` for task \`${cell(g.taskId)}\`` : ''}${g.approver !== null ? `, granted by ${cell(g.approver)}` : ''}`);
   }
   if (p.workers && p.workers.length > 0) {
-    lines.push('', '## Who worked on it', '', 'Worker names are labels the owner gave; they describe, they do not vouch for anything. The checks above are the verifier\'s.', '');
-    for (const w of p.workers) lines.push(`- Task \`${cell(w.taskId)}\`: ${cell(w.worker).replace(/[`*_[\]<>]/g, '')}${w.assignedUnderPlanRevision !== null ? `, assigned by the Project Manager under the accepted plan rev ${w.assignedUnderPlanRevision}` : ''}`);
+    lines.push('', '## Who worked on it', '', 'Worker names are labels the owner gave; they describe, they do not vouch for anything (an @ in a name is broken so it mentions no one). The checks above are the verifier\'s.', '');
+    for (const w of p.workers) lines.push(`- Task \`${cell(w.taskId)}\`: ${cell(w.worker).replace(/[`*_[\]<>]/g, '').replace(/@/g, '@\u200b')}${w.assignedUnderPlanRevision !== null ? `, assigned by the Project Manager under the accepted plan rev ${w.assignedUnderPlanRevision}` : ''}`);
   }
   if (p.humanIntervention && p.humanIntervention.length > 0) {
     lines.push('', '## Human intervention', '', 'A person opened a shell in these attempts\' sandboxes. The recorded model cannot vouch for what was run. Any change it made was still judged by the diff gate and the verifier.', '');
