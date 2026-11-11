@@ -4,7 +4,7 @@ import {
   type AiCheckpoint, type AiCheckpointResume, type AiCheckpointStage, type AiCheckpointText, type CheckpointProblem, type CheckpointRecheck, type RoutePolicyMode, type RouteStepKind,
 } from '@selarikru/domain';
 import type { AgentResult } from '@selarikru/inference-firebase-web';
-import type { EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
+import type { EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskBaseFiles, TaskRouteRead } from '@selarikru/view-protocol';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { AgentActionKind } from '../hybrid/model.ts';
 import type { StageMark } from '../hybrid/runner.ts';
@@ -48,6 +48,8 @@ export interface CheckpointEngineDeps {
   readonly server: Pick<EngineeringDataSource, 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation'> | null;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null, contextId: string) => Promise<TaskAgentContext>;
+  /** Fix round 1 (H2): the task's files at its base, to check a paused patch's chosen files are unchanged. Absent: they cannot be checked, so they count as changed. */
+  readonly getTaskFiles?: (taskId: string, paths: readonly string[]) => Promise<TaskBaseFiles>;
   readonly snapshot: () => ProjectViewSnapshot | null;
   readonly isOnline: () => boolean;
   readonly now?: () => Date;
@@ -207,7 +209,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
         }
         setFor('busy', id, undefined);
         await write(cp);
-        if (cp.status === 'waiting' && (cp.stopReason === 'local_failed_checks' || (prior === undefined && deps.isOnline() && cp.stopReason === 'offline'))) await process(id);
+        // A new pause is judged at once (escalation, or the owner's ask); offline ones wait for the connection inside `process`.
+        if (cp.status === 'waiting' && (cp.stopReason === 'local_failed_checks' || prior === undefined)) await process(id);
       },
     };
   }
@@ -220,7 +223,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     const mode = effectiveRoutePolicy({ call: cp.callOverride, task: read.route.override, run: read.route.runDefault, lock }).mode;
     const run = deps.snapshot()?.runs[cp.runId];
     const budget = checkpointBudget(run?.policy?.budgetLimitUsd ?? null, run !== undefined && (run.scopeAssessment !== null || run.lifecycle === 'cancelled'));
-    let inputs: CheckpointRecheck['inputs'] = {};
+    let inputs: { -readonly [K in keyof NonNullable<CheckpointRecheck['inputs']>]: NonNullable<CheckpointRecheck['inputs']>[K] } | null = {};
     let context: CheckpointRecheck['context'] = 'ok';
     if (PM_STEPS.has(cp.stepKind) && cp.stepKind === 'pmResearch') {
       inputs = {};
@@ -232,6 +235,13 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       } catch {
         context = 'refused';
       }
+    }
+    // Fix round 1 (H2): a patch's chosen files, read again at the base and hashed. Any read that fails, or a file gone, leaves them unchecked: inputs changed.
+    if (cp.inputs.files.length > 0 && inputs !== null) {
+      try {
+        const now = deps.getTaskFiles ? await deps.getTaskFiles(cp.taskId, cp.inputs.files.map((f) => f.path)) : null;
+        if (now) inputs = { ...inputs, files: now.files.map((f) => ({ path: f.path, sha256: sha256Hex(f.content) })) };
+      } catch { /* left unchecked: counts as changed */ }
     }
     return { route: { mode, lock: lock !== null }, taskRevision: read.revision, budget, inputs, context };
   }

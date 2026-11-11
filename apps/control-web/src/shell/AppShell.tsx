@@ -328,6 +328,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}) } : null,
       getTaskRoute: (taskId) => src.getTaskRoute!(projectId, taskId),
       getTaskContext: (taskId, destination, callOverride, contextId) => src.getTaskContext!(projectId, taskId, destination, callOverride, contextId),
+      ...(src.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => src.getTaskFiles!(projectId, taskId, paths) } : {}),
       snapshot: () => store.getState().projection?.snapshot ?? null, isOnline,
       // The projection's own clock: the demo's under demo data, so checkpoints sit in the same timeline as everything else.
       now: () => new Date(store.getState().nowMs),

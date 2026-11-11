@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AiCheckpoint } from '@selarikru/domain';
+import { sha256Hex, type AiCheckpoint } from '@selarikru/domain';
 import type { AgentResult, AssistantProposal } from '@selarikru/inference-firebase-web';
 import type { ProjectViewSnapshot, TaskAgentContext, TaskRouteRead, TaskRouteView } from '@selarikru/view-protocol';
 import { snapshotOf, task } from '../overview/testing.ts';
@@ -86,6 +86,49 @@ async function pauseOffline(h: ReturnType<typeof setup>, taskId = 't1', kind: 'c
   await rec.finish({ kind: 'result', result: r, context: ctx, simulated: true });
   return rec.id;
 }
+
+describe('fix 1 (H2): a paused patch step can be resumed; its files are read again and checked', () => {
+  const A = 'export const A = 1;\n';
+  const files = [{ path: 'src/a.ts', sha256: sha256Hex(A) }];
+  const filesNow = (content: string) => ({ getTaskFiles: async (_t: string, paths: readonly string[]) => ({ taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), files: paths.map((path) => ({ path, content })), omitted: [] }) });
+  async function pausedPatch(h: ReturnType<typeof setup>, blockedReason: string) {
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'patch', callOverride: null });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    rec.stage({ stage: 'file_choice', files });
+    const r = result(proposal({ status: 'blocked', blockedReason, observedSource: 'UNKNOWN', requestId: 'req_p' }), 'patch');
+    rec.stage({ stage: 'patch', result: r });
+    await rec.finish({ kind: 'result', result: r, context: context() });
+    return rec.id;
+  }
+
+  it('offline after the file choice, then reconnect: it is sent, with the same files', async () => {
+    const h = setup(filesNow(A));
+    h.setOnline(false);
+    const id = await pausedPatch(h, 'offline');
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.engine.store.getState().problems[id]).toBeUndefined();
+    expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', resume: expect.objectContaining({ checkpointId: id, kind: 'after_reconnect', files }) })]);
+  });
+
+  it('too large for the device on a cloud-capable route: the owner resumes it, and it is sent', async () => {
+    const h = setup(filesNow(A));
+    const id = await pausedPatch(h, 'input_too_large_for_device');
+    expect(h.engine.store.getState().asks[id]).toBe('resume');
+    await h.engine.resume(id);
+    expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', resume: expect.objectContaining({ checkpointId: id }) })]);
+  });
+
+  it('a file that changed since the pause refuses it as inputs_changed; nothing is sent', async () => {
+    const h = setup(filesNow('export const A = 2;\n'));
+    h.setOnline(false);
+    const id = await pausedPatch(h, 'offline');
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.runs).toEqual([]);
+    expect(h.engine.store.getState().problems[id]).toEqual(['inputs_changed']);
+  });
+});
 
 describe('the checkpoint engine (H12)', () => {
   it('a step that needs the cloud while offline is saved as offline: waiting for connection, on the server and on this device; not an error', async () => {
