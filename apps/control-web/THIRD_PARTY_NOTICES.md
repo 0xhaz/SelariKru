@@ -10,7 +10,7 @@ Adapted files:
 - `src/index.css` (the reference's @theme colours and its panel, panel-dark, button, chip, field, kbd and led rules, and the font switch)
 - `src/office/**` except `src/office/model.ts` (engine, layout, drawing, actors, scene, input; drawn on a 2D canvas instead of PixiJS)
 - `src/shell/AppShell.tsx` (the app's composition and keyboard handling, from the reference's App.tsx), `src/shell/ui-store.ts`, `src/shell/shortcuts.ts`
-- `src/shell/hud/TopBar.tsx`, `ActivityFeed.tsx`, `ConnectionBanner.tsx`, `Tooltip.tsx`, `ViewDrawer.tsx`, `Portrait.tsx`
+- `src/shell/hud/TopBar.tsx`, `ActivityFeed.tsx`, `ConnectionBanner.tsx`, `Tooltip.tsx`, `ViewDrawer.tsx`, `Portrait.tsx`, `DebugPanel.tsx`
 - `src/features/settings/SettingsPage.tsx` (the settings tab layout)
 - `src/features/team/TeamPanel.tsx` (the floating agent-card column; the panel's data and wording are SelariKru's)
 

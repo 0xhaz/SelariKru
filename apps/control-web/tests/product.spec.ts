@@ -18,7 +18,7 @@ const notice = (page: Page) => page.getByTestId('product-notice');
 test('confirm the brief, add an outcome plan with an unknown baseline, see the trace, record a release, see Awaiting observations', async ({ page }) => {
   const requests = await open(page);
   await expect(page.getByTestId('product-demo-badge')).toHaveText(/Demo data/);
-  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^More: Product/ })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards: Product/ })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText(/authorizes no customer outreach and no connection to production data/)).toBeVisible();
 
   // Before anything is recorded, every product link says it is missing; the evidence the run already has is present.
@@ -106,8 +106,8 @@ test('an outcome review records a decision and its follow-up is a proposal on De
   await expect(page.getByTestId('product-review')).toContainText('Result Unknown');
 
   // Decisions is a tab of the Mission Control drawer.
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /^Mission Control/ }).click();
-  await page.getByRole('navigation', { name: 'Mission Control' }).getByRole('link', { name: /^Decisions/ }).click();
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Mission Control: Decisions' }).click();
   const card = page.getByTestId('product-follow-up');
   await expect(card).toContainText('Show a triage age on each item');
   await expect(card).toContainText('It is not in any plan');

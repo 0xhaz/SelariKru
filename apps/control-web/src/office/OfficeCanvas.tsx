@@ -16,13 +16,15 @@ export interface OfficeCanvasProps {
   readonly subject: boolean;
   /** True while the office cannot be seen (a maximised drawer, the Settings modal): its animation stops. */
   readonly paused: boolean;
+  /** Demo only: 1x, 2x or 4x on the office animation. */
+  readonly speed: number;
 }
 
 /**
  * The pixel office behind every screen. A picture of what the team panel lists: it has role="img" and a summary label, and the team panel is
  * its keyboard path. Mounted once; it follows the world it is given.
  */
-export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject, paused }: OfficeCanvasProps) {
+export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject, paused, speed }: OfficeCanvasProps) {
   const host = useRef<HTMLDivElement>(null);
   const scene = useRef<OfficeScene | null>(null);
   const latest = useRef({ insets, onOpenWorker, onOpenPlace });
@@ -62,6 +64,10 @@ export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject
   useEffect(() => {
     scene.current?.setPaused(paused);
   }, [paused]);
+
+  useEffect(() => {
+    if (scene.current) scene.current.speed = speed;
+  }, [speed]);
 
   useEffect(() => {
     scene.current?.camera.apply();

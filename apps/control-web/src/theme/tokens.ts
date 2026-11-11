@@ -39,13 +39,28 @@ export interface StateStyle {
 
 export const stateStyle: Readonly<Record<RobotState, StateStyle>> = {
   working: { label: 'Working', glyph: '◆', color: colors.blue, dim: '#1d6fb8' },
-  needs_input: { label: 'Needs you', glyph: '▲', color: colors.red, dim: '#7e0f33' },
-  in_review: { label: 'Verifying', glyph: '◎', color: colors.orange, dim: '#a86a00' },
+  needs_input: { label: 'Needs input', glyph: '▲', color: colors.red, dim: '#7e0f33' },
+  in_review: { label: 'In review', glyph: '◎', color: colors.orange, dim: '#a86a00' },
   verified: { label: 'Verified', glyph: '✓', color: colors.green, dim: '#00873a' },
   idle: { label: 'Idle', glyph: '○', color: colors.lav, dim: '#5a5170' },
   blocked: { label: 'Blocked', glyph: '‖', color: colors.yellow, dim: '#8a7f14' },
-  offline: { label: 'Offline', glyph: '✕', color: '#5f5a66', dim: '#3b373e' },
+  offline: { label: 'Lost', glyph: '✕', color: '#5f5a66', dim: '#3b373e' },
   unknown: { label: 'Unknown', glyph: '?', color: '#8e8a96', dim: '#5f5a66' },
+};
+
+/**
+ * The team cards' state chips: the reference's chip colours. Where its ink text failed WCAG AA on a colour, that chip uses a darker shade of the
+ * same hue with white text instead: Needs input #ff004d -> #e0003f (4.95:1), Idle #83769c -> #6f6388 (5.50:1), Lost #5f5a66 (6.69:1).
+ */
+export const chipStyle: Readonly<Record<RobotState, { readonly bg: string; readonly fg: string }>> = {
+  working: { bg: colors.blue, fg: colors.ink },
+  needs_input: { bg: '#e0003f', fg: '#ffffff' },
+  in_review: { bg: colors.orange, fg: colors.ink },
+  verified: { bg: colors.green, fg: colors.ink },
+  idle: { bg: '#6f6388', fg: '#ffffff' },
+  blocked: { bg: colors.yellow, fg: colors.ink },
+  offline: { bg: '#5f5a66', fg: '#ffffff' },
+  unknown: { bg: '#8e8a96', fg: colors.ink },
 };
 
 /** Robot body colours, in order. */

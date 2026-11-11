@@ -22,10 +22,10 @@ test('the office is the default screen: a labelled picture of the team, with its
   await expect(page).toHaveTitle('Office · SelariKru');
   // No drawer is open: the office is the whole screen, with the top bar, the team cards and the activity feed floating over it.
   await expect(page.getByTestId('view-drawer')).toHaveCount(0);
-  await expect(page.getByRole('img', { name: /^Office for .*: 2 workers\. 1 needs you, 1 working\./ })).toBeVisible();
-  await expect(page.getByTestId('office-summary')).toContainText('1 needs you, 1 working');
+  await expect(page.getByRole('img', { name: /^Office for .*: 2 workers\. 1 needs input, 1 working\./ })).toBeVisible();
+  await expect(page.getByTestId('office-summary')).toContainText('1 needs input, 1 working');
   // Each robot's colour has its word beside it, on the worker's card.
-  await expect(page.locator('[data-testid="team-panel-row"][data-state="needs_you"]')).toContainText('Needs you');
+  await expect(page.locator('[data-testid="team-panel-row"][data-state="needs_you"]')).toContainText('Needs input');
   await expect(page.locator('[data-testid="team-panel-row"][data-state="working"]')).toContainText('Working');
   await expect(page.getByTestId('activity-item').first()).toBeVisible();
   // The reference's floating layout: the top bar and the team column sit over the office, not beside it.
@@ -81,8 +81,8 @@ test('+ and - zoom the office, and only on the office', async ({ page }) => {
   await expect.poll(() => zoom(page)).toBe(before);
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await expect.poll(() => zoom(page)).toBeGreaterThan(before);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /^Mission Control/ }).click();
-  await page.getByRole('navigation', { name: 'Mission Control' }).getByRole('link', { name: 'Pipeline' }).click();
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Mission Control: Pipeline' }).click();
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
   const onPipeline = await zoom(page);
   await page.keyboard.press('-');
@@ -107,7 +107,7 @@ test('Escape on the page goes back to the office; on a control it does nothing',
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page, 'human-wait', '#/overview');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Team' }).focus();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'PRs' }).focus();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   await page.locator('#main').focus();
@@ -115,21 +115,29 @@ test('Escape on the page goes back to the office; on a control it does nothing',
   await expect(page.getByRole('heading', { name: 'Office', level: 1 })).toBeVisible();
 });
 
-// Every screen that existed before T5.12 opens from the top bar over the office, and ✕ goes back to it.
+// Every screen that existed before T5.12 opens from the reference's top bar menus over the office, and ✕ goes back to it. Where each one sits is
+// the owner's interim arrangement (T5.12): Boards holds Mission Control, Team, Product, Brain and Benchmark; PRs is Evidence and PR; Settings'
+// menu holds the Assistant and New project.
 const SCREENS = [
-  ['Mission Control', 'overview', 'Mission Control', false], ['Team', 'team', 'Team', false], ['Evidence and PR', 'evidence', 'Evidence', false], ['Settings', 'settings', 'Settings', false],
-  ['Product', 'product', 'Product', true], ['Brain', 'brain', 'Project Brain', true], ['Benchmark', 'benchmark', 'Benchmark', true],
-  ['Assistant', 'assistant', 'The assistant is off in demo mode', true], ['New project', 'onboarding', null, true],
+  ['Boards', 'Mission Control: Overview', 'overview', 'Mission Control'], ['Boards', 'Mission Control: Pipeline', 'pipeline', 'Pipeline'], ['Boards', 'Mission Control: Decisions', 'decisions', 'Decisions'],
+  ['Boards', 'Team', 'team', 'Team'], ['Boards', 'Product', 'product', 'Product'], ['Boards', 'Brain', 'brain', 'Project Brain'], ['Boards', 'Benchmark', 'benchmark', 'Benchmark'],
+  ['Action items', 'Attention queue', 'overview', 'Mission Control'], ['Action items', 'Decisions', 'decisions', 'Decisions'],
+  [null, 'PRs', 'evidence', 'Evidence'], [null, 'Settings', 'settings', 'Settings'],
+  ['Settings', 'Assistant', 'assistant', 'The assistant is off in demo mode'], ['Settings', 'New project', 'onboarding', null],
 ] as const;
 
-test('every screen opens from the top bar over the office, which stays in view, and ✕ goes back to it', async ({ page }) => {
+test('every screen opens from the top bar\'s menus over the office, which stays in view, and ✕ goes back to it', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page);
   const nav = page.getByRole('navigation', { name: 'Primary' });
-  for (const [link, route, heading, inMore] of SCREENS) {
-    if (inMore) await nav.getByRole('button', { name: /^More/ }).click();
-    // A count can follow the name (Mission Control, 1 decision waiting).
-    await nav.getByRole('link', { name: new RegExp(`^${link}`) }).click();
+  for (const [menu, link, route, heading] of SCREENS) {
+    if (menu === 'Settings') {
+      await nav.getByRole('link', { name: 'Settings', exact: true }).click();
+      await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: link, exact: true }).click();
+    } else {
+      if (menu) await nav.getByRole('button', { name: new RegExp(`^${menu}`) }).click();
+      await nav.getByRole('link', { name: new RegExp(`^${link}`) }).click();
+    }
     await expect(page.getByTestId('view-drawer')).toHaveAttribute('data-view', route);
     if (heading) await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
     await expect(page.locator('#main')).toBeFocused();
@@ -150,6 +158,48 @@ test('every screen opens from the top bar over the office, which stays in view, 
   }
 });
 
+test('the top bar matches the reference: mark and name, Demo data, project, plan wall, demo speed, zoom, sandbox count and the main menus', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await spied(page, 'human-wait');
+  const bar = page.getByTestId('top-bar');
+  await expect(bar).toContainText('SelariKru');
+  await expect(bar.getByTestId('demo-badge')).toHaveText('Demo data');
+  await expect(bar.getByRole('combobox', { name: 'Run shown on the plan wall' })).toBeVisible();
+  await expect(bar.getByRole('group', { name: /speed/ }).getByRole('button')).toHaveText(['1x', '2x', '4x']);
+  await expect(bar.getByTestId('sandbox-chip')).toHaveText(/^Sandbox · 2 running$/);
+  const nav = bar.getByRole('navigation', { name: 'Primary' });
+  await expect(nav.locator(':scope > *')).toHaveText([/^Action items/, /^Boards/, 'PRs', /^Terminal/, 'Settings', 'Debug']);
+  // Terminal with no worker chosen lets you pick one; picking opens that worker's Terminal tab.
+  await nav.getByRole('button', { name: 'Terminal' }).click();
+  await nav.getByRole('link', { name: /terminal$/ }).first().click();
+  await expect(page.getByTestId('worker-drawer').getByRole('tab', { name: 'Terminal' })).toHaveAttribute('aria-selected', 'true');
+  // Debug (development builds only) opens the debug panel.
+  await page.keyboard.press('Escape');
+  await nav.getByRole('button', { name: 'Debug' }).click();
+  await expect(page.getByTestId('debug-panel')).toBeVisible();
+});
+
+test('the plan wall select chooses the run on the plan wall and its banner', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await spied(page, 'human-wait');
+  const select = page.getByRole('combobox', { name: 'Run shown on the plan wall' });
+  await expect(select).toBeVisible();
+  const runs = await select.locator('option').allTextContents();
+  expect(runs[0]).toBe('Current run');
+  expect(runs.length).toBeGreaterThan(1);
+  await select.selectOption({ index: 1 });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: { world: { planRunId: string | null } } }).__selarikruOffice.world.planRunId)).not.toBeNull();
+});
+
+test('in live mode the demo speed buttons are not shown', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'human-wait', observed: true }; });
+  await page.goto('/tests/harness/index.html');
+  await expect(page.getByTestId('top-bar')).toBeVisible();
+  await expect(page.getByRole('group', { name: /speed/ })).toHaveCount(0);
+  await expect(page.getByTestId('demo-badge')).toHaveCount(0);
+});
+
 test('Mission Control is one drawer with Overview, Pipeline and Decisions as its tabs', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page, 'decision-queue', '#/overview');
@@ -159,7 +209,7 @@ test('Mission Control is one drawer with Overview, Pipeline and Decisions as its
   await expect(page.getByRole('heading', { name: 'Pipeline', level: 1 })).toBeVisible();
   await tabs.getByRole('link', { name: /^Decisions/ }).click();
   await expect(page.getByRole('heading', { name: 'Decisions', level: 1 })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: /^Mission Control/ })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards: Decisions/ })).toHaveAttribute('aria-current', 'page');
 });
 
 test('the side drawer can be maximised and resized, and keeps its width in this browser', async ({ page }) => {
@@ -180,10 +230,12 @@ test('the side drawer can be maximised and resized, and keeps its width in this 
   expect(Number(await page.evaluate(() => localStorage.getItem('selarikru.drawerWidth')))).toBe(Math.round(before.width) - 200);
 });
 
-test('the action items entry in the top bar opens the attention queue', async ({ page }) => {
+test('the action items menu holds the attention queue and Decisions', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await spied(page);
   await page.getByTestId('action-items').click();
+  await expect(page.getByRole('link', { name: /^Decisions/ })).toBeVisible();
+  await page.getByRole('link', { name: 'Attention queue' }).click();
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   await expect(page.getByTestId('attention-item').first()).toBeVisible();
 });
@@ -193,7 +245,7 @@ test.describe('settings tabs', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work', '#/settings');
     const tabs = page.getByRole('navigation', { name: 'Settings sections' });
-    await expect(tabs.getByRole('link')).toHaveText([/^Team/, /Knowledge and skills/, /^Workflow/, /^Stack/, /^MCP/, /^Sandbox/, /^Boards/, /^Project/]);
+    await expect(tabs.getByRole('link')).toHaveText([/^Team/, /Knowledge and skills/, /^Workflow/, /^Stack/, /^MCP/, /^Sandbox/, /^Boards/, /^Project/, 'Assistant', 'New project']);
     // Team: workers, models and Bounded autonomy, with the same controls Overview has.
     await expect(tabs.getByRole('link', { name: 'Team', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByTestId('settings-workers').getByRole('listitem')).toHaveCount(2);
@@ -277,7 +329,7 @@ test.describe('closing Settings', () => {
     for (const [link, view] of [['Open the Team screen', 'team'], ['Product brief and roadmap', 'product']] as const) {
       if (view === 'product') {
         await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Settings' }).click();
-        await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Project' }).click();
+        await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Project', exact: true }).click();
       }
       await page.getByRole('link', { name: link }).click();
       await expect(page.getByTestId('view-drawer')).toHaveAttribute('data-view', view);
@@ -300,13 +352,13 @@ test.describe('closing Settings', () => {
     await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
   });
 
-  test('a screen picked from the More menu is named on the More button, and closing Settings from it focuses More', async ({ page }) => {
+  test('a screen picked from a menu is named on that menu\'s button, which carries aria-current', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work');
     const nav = page.getByRole('navigation', { name: 'Primary' });
-    await nav.getByRole('button', { name: /^More/ }).click();
+    await nav.getByRole('button', { name: /^Boards/ }).click();
     await nav.getByRole('link', { name: 'Brain' }).click();
-    const more = nav.getByRole('button', { name: /^More: Brain/ });
+    const more = nav.getByRole('button', { name: /^Boards: Brain/ });
     await expect(more).toBeVisible();
     await expect(more).toHaveAttribute('aria-current', 'page');
   });

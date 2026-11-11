@@ -73,8 +73,9 @@ test('Demo data badge persists in mock mode', async ({ page }) => {
   await expect(badge).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await expect(badge).toBeInViewport();
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(badge).toBeVisible();
 });
 
@@ -84,8 +85,9 @@ test('under demo data the live assistant is not mounted and Firebase is not cont
     if (!r.url().startsWith('http://127.0.0.1:5174/') && !r.url().startsWith('data:')) external.push(r.url());
   });
   await open(page);
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Generate draft' })).toHaveCount(0);
   expect(external).toEqual([]);
@@ -139,10 +141,13 @@ test('a view that fails to render is contained: shell and badge stay, and the ot
   await page.goto('/?demo&fault=corrupt#/overview');
   await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
   await expect(page.getByTestId('demo-badge')).toBeVisible();
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(page.getByRole('heading', { name: 'The assistant is off in demo mode' })).toBeVisible();
-  await page.getByRole('link', { name: /^Mission Control/ }).click();
+  // Mission Control is in the Boards menu for now (T5.12).
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
 });
 
 test('a failed Overview recovers once the failure clears', async ({ page }) => {
@@ -156,8 +161,9 @@ test('a failed Overview recovers once the failure clears', async ({ page }) => {
 test('changing route moves focus to the main content, and first load does not', async ({ page }) => {
   await open(page);
   await expect(page.locator('#main')).not.toBeFocused();
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(page.locator('#main')).toBeFocused();
 });
 
@@ -276,18 +282,22 @@ test('with no live source the shell is honest and the assistant still works', as
   await expect(page.getByRole('link', { name: 'Open the Assistant' })).toBeVisible();
   await expectNoAxeViolations(page);
 
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(page.getByRole('heading', { name: 'Assistant', level: 1 })).toBeVisible();
   await page.getByRole('button', { name: 'Generate draft' }).click();
   const output = page.getByRole('region', { name: 'Draft output' });
   await expect(output.getByTestId('output-list')).toBeVisible();
 
   // Moving between tabs does not discard the draft.
-  await page.getByRole('link', { name: /^Mission Control/ }).click();
+  // Mission Control is in the Boards menu for now (T5.12).
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
-  await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+  // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
   await expect(output.getByTestId('output-list')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 
@@ -304,10 +314,13 @@ for (const failure of ['render', 'chunk']) {
       (window as unknown as { __scenario: unknown }).__scenario = { shell: true, assistantFails: f };
     }, failure);
     await page.goto('/tests/harness/index.html');
-    await page.getByTestId('top-bar-more').click();
-  await page.getByRole('link', { name: 'Assistant' }).first().click();
+    // The Assistant is in the Settings menu for now (T5.12).
+  await page.getByRole('link', { name: 'Settings', exact: true }).first().click();
+  await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Assistant' }).click();
     await expect(page.getByRole('heading', { name: 'This view could not load' })).toBeVisible();
-    await page.getByRole('link', { name: /^Mission Control/ }).click();
+    // Mission Control is in the Boards menu for now (T5.12).
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Mission Control: Overview' }).click();
     await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
   });
 }

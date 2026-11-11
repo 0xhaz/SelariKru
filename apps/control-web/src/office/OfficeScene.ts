@@ -30,7 +30,10 @@ export class OfficeScene {
   belt: BeltPath | null = null;
   readonly bots = new Map<string, Bot>();
   private parcels: Parcel[] = [];
-  private prs = new Map<number, OfficeParcel>();
+  private stages = new Map<string, OfficeParcel>();
+  /** Demo only: 1x, 2x or 4x on the office animation (walking and the belt). Never on data. */
+  speed = 1;
+  private pulses = new Map<string, number>();
   private readonly notes = new PlanNotes();
   private readonly effects = new Effects();
   private gateMode: { mode: live.GateMode; at: number } = { mode: 'idle', at: 0 };
@@ -149,7 +152,7 @@ export class OfficeScene {
 
   setWorld(world: OfficeWorld): void {
     this.world = world;
-    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color })), projectName: world.projectName };
+    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color })), projectName: world.projectName, leadLabel: world.leadLabel };
     const key = layoutKey(input);
     const first = this.layout === null;
     if (!this.layout || this.layout.key !== key) {
@@ -182,26 +185,31 @@ export class OfficeScene {
       this.bots.set(a.id, bot);
     });
 
-    // Parcels: one per pull request. Closed-without-merge ones leave the office.
+    // Parcels: one per live candidate. A candidate seen for the first time already merged has nothing left to deliver.
     const belt = this.belt!;
-    const prev = this.prs;
-    this.prs = new Map(world.parcels.filter((p) => !p.closed).map((p) => [p.num, p]));
-    this.parcels = this.parcels.filter((p) => this.prs.has(p.num) && p.mode !== 'gone');
-    for (const pr of this.prs.values()) {
-      if (this.parcels.some((p) => p.num === pr.num)) continue;
-      if (pr.merged && !prev.has(pr.num)) continue; // already merged when first seen: nothing to deliver
+    const prev = this.stages;
+    this.stages = new Map(world.parcels.map((p) => [p.id, p]));
+    this.parcels = this.parcels.filter((p) => this.stages.has(p.id) && p.mode !== 'gone');
+    for (const c of this.stages.values()) {
+      if (this.parcels.some((p) => p.id === c.id)) continue;
+      if (c.stage === 'merged' && !prev.has(c.id)) continue;
       const fresh = first || this.reducedMotion;
-      this.parcels.push({ num: pr.num, mode: 'belt', s: fresh ? restingPlace(pr, belt) : 0 });
+      this.parcels.push({ id: c.id, label: c.label, mode: 'belt', s: fresh ? restingPlace(c, belt, false) : 0 });
     }
-    for (const pr of this.prs.values()) {
-      const before = prev.get(pr.num);
-      if (before && before.verification !== pr.verification && pr.verification === 'out_of_date') this.gateMode = { mode: 'changes', at: this.t };
+    for (const c of this.stages.values()) {
+      const before = prev.get(c.id);
+      if (before && before.stage === 'to_gate' && c.stage === 'verified') {
+        this.gateMode = { mode: 'passed', at: this.t };
+        const g = l.gate;
+        if (g) this.effects.text('VERIFIED', g.x + g.w / 2, g.y - 20, C.green);
+      }
     }
+    for (const prDone of world.prs) if (prDone.merged) this.pulses.set('main', 1);
     if (this.reducedMotion) {
       for (const p of this.parcels) {
-        const pr = this.prs.get(p.num)!;
-        if (pr.merged) p.mode = 'gone';
-        else p.s = restingPlace(pr, belt);
+        const c = this.stages.get(p.id)!;
+        if (c.stage === 'merged') p.mode = 'gone';
+        else p.s = restingPlace(c, belt, world.verifying);
       }
     }
     this.invalidate();
@@ -234,15 +242,16 @@ export class OfficeScene {
         bot.pause = 0;
       }
       think(bot, l, state, t, this.rand);
-      bot.move(dt, l);
+      bot.move(dt * this.speed, l);
     }
-    updateParcels(this.parcels, this.prs, this.belt, dt, (p) => {
+    updateParcels(this.parcels, this.stages, this.belt, dt * this.speed, this.world?.verifying ?? false, (p) => {
       const pos = this.belt!.pos(this.belt!.len);
-      this.effects.text(`#${p.num} MERGED`, pos.x, pos.y - 26, C.green);
+      this.effects.text(`${p.label} MERGED`, pos.x, pos.y - 26, C.green);
     });
+    for (const [k, v] of this.pulses) this.pulses.set(k, Math.max(0, v - dt * 0.6));
     this.effects.update(dt);
     const verifying = this.world?.verifying ?? false;
-    if (this.gateMode.mode === 'changes' && t - this.gateMode.at > 1.6) this.gateMode = { mode: 'idle', at: t };
+    if ((this.gateMode.mode === 'changes' || this.gateMode.mode === 'passed') && t - this.gateMode.at > 1.6) this.gateMode = { mode: 'idle', at: t };
     if (this.gateMode.mode === 'idle' && verifying) this.gateMode = { mode: 'reviewing', at: t };
     if (this.gateMode.mode === 'reviewing' && !verifying) this.gateMode = { mode: 'idle', at: t };
   }
@@ -285,19 +294,27 @@ export class OfficeScene {
 
     live.drawWindowAndClock(p, l, slow);
     for (const d of l.desks) live.drawScreen(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 12, this.stateOf(d.agentId), this.colorOf(d.agentId), slow, d.index);
-    live.drawPrBoard(p, l.prBoard, [...this.prs.values()].sort((a, b) => a.num - b.num));
+    // The plan desk's screens: busy while any task is in progress on the plan wall, resting otherwise.
+    const planState = world.notes.some((n) => n.column === 1 || n.column === 2) ? 'working' : 'idle';
+    live.drawScreen(p, l.ox + 224, l.oy + 72, planState, C.blue, slow, 0);
+    live.drawScreen(p, l.ox + 250, l.oy + 72, planState, C.blue, slow, 1);
+    live.drawLeadLamp(p, l.ox, l.oy, planState, this.reducedMotion ? 0 : t);
+    if (l.prBoard) live.drawPrBoard(p, l.prBoard, [...world.prs].filter((x) => !x.closed).sort((a, b) => a.num - b.num));
+    live.drawRacks(p, l.racks, world.racks, (id) => (id ? this.stateOf(id) : null), (n) => this.pulses.get(n) ?? 0, slow);
 
-    live.drawPlanTitle(p, l, 'CURRENT RUN');
+    if (world.banner) live.drawPlanTitle(p, l, world.banner);
     this.notes.update(world.notes, l.plan.board, this.dt, t, this.reducedMotion);
     this.notes.draw(p, world.notes, (id) => this.colorOf(id), t);
+    if (!this.reducedMotion) live.drawCables(p, l, (id) => this.stateOf(id), (id) => this.colorOf(id), t);
     for (const d of l.desks) live.drawDeskStrip(p, d, l.ox, l.oy, this.stateOf(d.agentId), t);
     live.drawBelt(p, l, t);
     for (const parcel of this.parcels) {
       if (parcel.mode === 'gone') continue;
       const pos = this.belt!.pos(parcel.s);
-      live.drawParcel(p, pos.x, pos.y, parcel.num, C.yellow, true);
+      const inGate = l.gate && this.stages.get(parcel.id)?.stage === 'to_gate' && Math.abs(parcel.s - this.belt!.gateCentre) < 1;
+      if (!inGate) live.drawParcelTagged(p, pos.x, pos.y, parcel.label, C.yellow);
     }
-    live.drawGate(p, l.gate, this.gateMode.mode, t - this.gateMode.at, t, 'VERIFY');
+    if (l.gate) live.drawGate(p, l.gate, this.gateMode.mode, t - this.gateMode.at, t, 'VERIFIER');
 
     const bots = [...this.bots.values()];
     for (const bot of bots) bot.render(t, this.stateOf(bot.config.id));
@@ -323,7 +340,7 @@ export class OfficeScene {
   }
 
   /** The words for what the pointer is over, for the tooltip. */
-  describe(kind: 'agent' | 'plan' | 'prs' | 'gate', id: string): { title: string; sub?: string } {
+  describe(kind: 'agent' | 'plan' | 'prs' | 'gate' | 'env' | 'lead', id: string): { title: string; sub?: string } {
     const w = this.world;
     if (!w) return { title: '' };
     if (kind === 'agent') {
@@ -331,9 +348,14 @@ export class OfficeScene {
       return a ? { title: `${a.name} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.taskTitle ?? 'No task' } : { title: id };
     }
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
-    const open = w.parcels.filter((x) => !x.merged && !x.closed).length;
-    if (kind === 'gate') return { title: 'Verification gate', sub: `${w.verifying ? 'A task is verifying' : 'Nothing is verifying'}. Opens Evidence and PR.` };
-    const verified = w.parcels.filter((x) => !x.merged && !x.closed && x.verification === 'verified').length;
+    if (kind === 'env') {
+      const r = w.racks.find((x) => x.agentId === id);
+      return { title: `Sandbox: ${r?.name ?? id}`, sub: r?.running ? 'Running an attempt' : 'Not running' };
+    }
+    if (kind === 'lead') return { title: 'Plan desk', sub: `${w.banner ?? 'No run yet'}. Opens Pipeline.` };
+    const open = w.prs.filter((x) => !x.merged && !x.closed).length;
+    if (kind === 'gate') return { title: 'Verifier', sub: `${w.verifying ? 'A task is verifying' : 'Nothing is verifying'}. Opens Evidence and PR.` };
+    const verified = w.prs.filter((x) => !x.merged && !x.closed && x.verification === 'verified').length;
     return { title: 'Pull requests', sub: `${open} open, ${verified} with a verified candidate. Opens Evidence and PR.` };
   }
 }

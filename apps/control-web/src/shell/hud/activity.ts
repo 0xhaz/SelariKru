@@ -23,7 +23,7 @@ const STATUS: Readonly<Record<TaskView['status'], { word: string; glyph: string;
   verifying: { word: 'verifying', glyph: '◎', tone: 'active' },
   verified: { word: 'verified, awaiting merge', glyph: '✓', tone: 'success' },
   merged: { word: 'merged', glyph: '⇢', tone: 'success' },
-  failed: { word: 'failed', glyph: '✕', tone: 'danger' },
+  failed: { word: 'failed', glyph: '✗', tone: 'danger' },
   cancelled: { word: 'cancelled', glyph: '–', tone: 'neutral' },
   superseded: { word: 'superseded', glyph: '–', tone: 'neutral' },
 };

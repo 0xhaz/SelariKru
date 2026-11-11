@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { hrefFor, type Route } from './route.ts';
 
 /**
@@ -25,14 +26,37 @@ export interface NavItem {
 /** Mission Control's three screens: one drawer, with these as its tabs. */
 export const MISSION_CONTROL: readonly NavItem[] = [{ label: 'Overview', route: 'overview' }, { label: 'Pipeline', route: 'pipeline' }, { label: 'Decisions', route: 'decisions' }];
 
-/** The top bar's buttons. Each opens a drawer over the office (Settings opens its modal); closing it is the way back to the office. */
-export const TOP_BAR: readonly NavItem[] = [
-  { label: 'Mission Control', route: 'overview' }, { label: 'Team', route: 'team' }, { label: 'Evidence and PR', route: 'evidence' }, { label: 'Product', route: 'product' },
-  { label: 'Brain', route: 'brain' }, { label: 'Benchmark', route: 'benchmark' }, { label: 'Assistant', route: 'assistant' }, { label: 'Settings', route: 'settings' }, { label: 'New project', route: 'onboarding' },
+export interface MenuEntry {
+  readonly label: string;
+  readonly route: Route;
+  /** A heading the entry sits under in the menu. */
+  readonly group?: string;
+  readonly badge?: ReactNode;
+}
+
+/**
+ * Where our screens sit in the reference's top bar for now (owner, T5.12): the owner will rearrange them later.
+ * Action items: the attention queue and Decisions. Boards: Mission Control, the Team screen, Product, Brain and Benchmark.
+ * PRs: Evidence and PR. Terminal: the selected worker's Terminal tab. Settings: the Settings modal, whose menu also holds Assistant and New project.
+ */
+export const ACTION_ITEMS_MENU: readonly MenuEntry[] = [{ label: 'Attention queue', route: 'overview' }, { label: 'Decisions', route: 'decisions' }];
+
+export const BOARDS_MENU: readonly MenuEntry[] = [
+  { label: 'Overview', route: 'overview', group: 'Mission Control' }, { label: 'Pipeline', route: 'pipeline', group: 'Mission Control' }, { label: 'Decisions', route: 'decisions', group: 'Mission Control' },
+  { label: 'Team', route: 'team' }, { label: 'Product', route: 'product' }, { label: 'Brain', route: 'brain' }, { label: 'Benchmark', route: 'benchmark' },
 ];
 
-/** The top bar button a route belongs to: Mission Control's tabs all light its button. */
-export const topBarRouteOf = (route: Route): Route | null => (MISSION_CONTROL.some((m) => m.route === route) ? 'overview' : TOP_BAR.some((t) => t.route === route) ? route : null);
+/** In the Settings modal's menu, beside the settings tabs. */
+export const SETTINGS_MENU_EXTRA: readonly MenuEntry[] = [{ label: 'Assistant', route: 'assistant' }, { label: 'New project', route: 'onboarding' }];
+
+/** Every route and the top-bar entry it is reached from. */
+export function topBarHomeOf(route: Route): 'office' | 'Action items' | 'Boards' | 'PRs' | 'Settings' {
+  if (route === 'office') return 'office';
+  if (route === 'evidence') return 'PRs';
+  if (route === 'settings' || SETTINGS_MENU_EXTRA.some((e) => e.route === route)) return 'Settings';
+  if (BOARDS_MENU.some((e) => e.route === route)) return 'Boards';
+  return 'Action items';
+}
 
 export type SettingsTab = 'team' | 'workflow' | 'stack' | 'mcp' | 'sandbox' | 'boards' | 'project';
 

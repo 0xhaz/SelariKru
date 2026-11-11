@@ -5,7 +5,7 @@ import { Panel, TONE_TEXT } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt, ProjectViewSnapshot } from '@selarikru/view-protocol';
 import { hrefFor, useHashQuery } from '../../shell/route.ts';
 import type { ConnectionState, SkillsPort, StackPort } from '../../shell/projection-store.ts';
-import { SETTINGS_TABS, settingsHref, settingsSection, type SettingsTab } from '../../shell/views.ts';
+import { SETTINGS_MENU_EXTRA, SETTINGS_TABS, settingsHref, settingsSection, type SettingsTab } from '../../shell/views.ts';
 import { FONT_STYLES, setFont, useFont } from '../../theme/fonts.ts';
 import { SkillsSettings } from '../skills/SkillsSettings.tsx';
 import { StackSettings } from '../stack/StackSettings.tsx';
@@ -195,6 +195,11 @@ export function SettingsPage({ stack, skills = null, connection, mode, projectLa
                 </a>
               ) : null}
             </span>
+          ))}
+          {/* For now Settings' menu also holds these two screens (owner, T5.12); each opens in its own drawer. */}
+          <span aria-hidden="true" className="hidden border-t-2 border-line md:block" />
+          {SETTINGS_MENU_EXTRA.map((e) => (
+            <a key={e.route} href={hrefFor(e.route)} className="btn shrink-0 justify-start! px-2.5 py-1 text-left whitespace-normal md:w-full"><span className="text-base">{e.label}</span></a>
           ))}
         </nav>
         <div className="min-w-0 flex-1">

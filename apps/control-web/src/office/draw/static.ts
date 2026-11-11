@@ -7,11 +7,11 @@ import { text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { box, CanvasPen, disc, ellipse, line, makeCanvas } from '../engine/pen.ts';
 import type { LayoutInput, OfficeLayout } from '../layout/layout.ts';
-import { beanbag, easel, partitions, plant, plate, tree, workDesk } from './furniture.ts';
+import { beanbag, easel, partitions, plant, plate, rackBody, tree, workDesk } from './furniture.ts';
 
-/** The sign on the back wall fits 19 small pixel letters (10 big ones). It names the project; with none, the product. */
+/** The sign on the back wall: the project's name, or the product's when there is none. Never another product's name. */
 export function officeSign(name: string): string {
-  return name.trim().slice(0, 19) || 'SELARIKRU';
+  return name.trim().slice(0, 19).toUpperCase() || 'SELARIKRU';
 }
 
 export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElement {
@@ -73,7 +73,7 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   const logo = 'SELARIKRU';
   text(p, logo, Math.round(mainPx / 2 - textW(logo, 2) / 2), 13 * 16 + 4, C.woodD, 2);
 
-  // stand-up carpet
+  // lead carpet
   p.rect(176, 64, 144, 96, C.carpetJ);
   p.rect(179, 67, 138, 90, C.carpetJD);
   p.rect(181, 69, 134, 86, C.carpetJ);
@@ -96,6 +96,29 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   ellipse(p, 88, 150, 30, 18, C.rugGD);
   ellipse(p, 88, 150, 28, 16, C.rugG);
 
+  // server room floor
+  const sr = l.serverRoom;
+  if (sr) {
+    const sx = sr.x0 * 16;
+    const sw = sr.w * 16;
+    p.rect(sx, 64, sw, bh - 80, C.grate);
+    for (let y = 64; y < bh - 16; y += 8) p.rect(sx, y, sw, 1, C.grateD);
+    for (let x = sx; x < sx + sw; x += 8) p.rect(x, 64, 1, bh - 80, C.grateD);
+  }
+
+  // cable channels
+  for (const cb of l.cables) {
+    const color = input.agents.find((a) => a.id === cb.agentId)?.color ?? C.blue;
+    for (let i = 0; i < cb.pts.length - 1; i++) {
+      const [x0, y0] = cb.pts[i]!;
+      const [x1, y1] = cb.pts[i + 1]!;
+      const ax = Math.min(x0, x1) - l.ox;
+      const ay = Math.min(y0, y1) - l.oy;
+      p.rect(ax - 1, ay - 1, Math.abs(x1 - x0) + 3, Math.abs(y1 - y0) + 3, '#2a2230');
+      p.rect(ax, ay, Math.abs(x1 - x0) + 1, Math.abs(y1 - y0) + 1, color, 0.55);
+    }
+  }
+
   // ------------------------------------------------ walls
   p.rect(0, 0, bw, 16, C.wallTop);
   p.rect(0, 15, bw, 1, C.wallTopL);
@@ -106,6 +129,13 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   for (let x = 8; x < mainPx; x += 16) p.rect(x, 47, 1, 11, '#365a50');
   p.rect(0, 60, bw, 4, C.base);
   p.rect(0, 60, bw, 1, '#8a6450');
+  if (sr) {
+    p.rect(mainPx, 16, bw - mainPx, 44, C.wallSrv);
+    for (let x = mainPx; x < bw; x += 8) p.rect(x, 16, 1, 44, C.wallSrvD);
+    const label = 'SERVER ROOM';
+    box(p, sr.x0 * 16 + (sr.w * 16) / 2 - textW(label) / 2 - 3, 3, textW(label) + 6, 9, C.ink);
+    text(p, label, sr.x0 * 16 + (sr.w * 16) / 2 - textW(label) / 2, 5, C.white);
+  }
   p.rect(0, 16, bw, 2, '#000000', 0.2);
   p.rect(0, 0, 16, bh, C.wallTop);
   p.rect(15, 16, 1, bh - 32, C.wallTopL);
@@ -117,6 +147,19 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   p.rect(0, doorY - l.oy, 16, 16, C.wood);
   p.rect(0, doorY - l.oy - 3, 20, 3, C.deskDD);
   p.rect(0, doorY - l.oy + 16, 20, 3, C.deskDD);
+  // glass wall
+  if (sr) {
+    const gx = sr.glassX * 16;
+    p.rect(gx, 64, 16, bh - 80, '#a8d8ea', 0.42);
+    p.rect(gx, 64, 1, bh - 80, C.metalD);
+    p.rect(gx + 15, 64, 1, bh - 80, C.metalD);
+    for (let y = 64; y < bh - 16; y += 44) {
+      p.rect(gx, y, 16, 2, C.metalD);
+      line(p, gx + 3, y + 16, gx + 12, y + 6, '#e3f6fb');
+      line(p, gx + 3, y + 22, gx + 7, y + 18, '#e3f6fb');
+    }
+  }
+
   // ------------------------------------------------ back-wall decor
   const B = { x: l.plan.board.x - l.ox, y: l.plan.board.y - l.oy, w: l.plan.board.w };
   box(p, B.x - 3, B.y - 2, B.w + 6, 46, C.deskD);
@@ -125,7 +168,7 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   p.rect(B.x + 6, B.y + 41, B.w - 12, 2, C.metalD);
   p.rect(B.x + 20, B.y + 40, 6, 1, C.red);
   p.rect(B.x + 28, B.y + 40, 6, 1, C.blue);
-  const heads: [string, string][] = [['TODO', C.lav], ['DOING', C.blue], ['VERIFY', C.orange], ['DONE', C.green]];
+  const heads: [string, string][] = [['TODO', C.lav], ['DOING', C.blue], ['REVIEW', C.orange], ['DONE', C.green]];
   heads.forEach(([h, col], k) => {
     const cx = B.x + k * 35;
     if (k) p.rect(cx, B.y + 2, 1, 35, '#ddd5c4');
@@ -135,7 +178,7 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   box(p, 208, 22, 80, 24, C.desk);
   p.rect(209, 23, 78, 1, C.woodL);
   // Office name: big letters when it fits the 80px sign, small ones when it's longer.
-  const sign = officeSign(input.projectName).toUpperCase();
+  const sign = officeSign(input.projectName);
   const ss = textW(sign, 2) <= 76 ? 2 : 1;
   text(p, sign, 249 - textW(sign, ss) / 2, ss === 2 ? 30 : 33, C.ink, ss);
   text(p, sign, 248 - textW(sign, ss) / 2, ss === 2 ? 29 : 32, C.white, ss);
@@ -149,7 +192,7 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
   box(p, L + 63, 19, 66, 34, C.white);
   p.rect(L + 62, 53, 68, 3, C.deskD);
 
-  // ------------------------------------------------ bookshelf corner
+  // ------------------------------------------------ lead corner
   box(p, 288, 30, 32, 44, C.deskD);
   p.rect(290, 32, 28, 40, '#6e4630');
   for (let s = 0; s < 3; s++) {
@@ -163,6 +206,19 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
     }
   }
   plant(p, 184, 78);
+  {
+    // The plan desk: always furnished, labelled with what it stands for. No robot sits here.
+    p.rect(210, 102, 76, 3, C.shadow, 0.25);
+    box(p, 208, 82, 80, 18, C.desk);
+    p.rect(209, 83, 78, 1, C.woodL);
+    box(p, 208, 98, 80, 7, C.deskD);
+    box(p, 222, 70, 22, 15, C.bezel);
+    box(p, 248, 70, 22, 15, C.bezel);
+    box(p, 230, 92, 30, 4, C.metal);
+    box(p, 212, 86, 6, 6, C.white);
+    p.rect(213, 87, 4, 2, '#7a4a2a');
+    plate(p, input.leadLabel.toUpperCase().slice(0, 8), 249, 99);
+  }
   // stand-up corner
   plant(p, 24, 76);
   beanbag(p, 56, 136, '#e05a47', '#b8443a');
@@ -211,12 +267,15 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
     plate(p, name, X + 64, Y + 4);
   }
 
-  // ------------------------------------------------ PR board, mailbox
-  easel(p, l.prBoard.x - l.ox, l.prBoard.y - l.oy, l.prBoard.w, l.prBoard.h, 'PULL REQS', R);
-  const m = { x: l.mailbox.x - l.ox, y: l.mailbox.y - l.oy };
-  box(p, m.x, m.y, 22, 30, '#5f6b80');
-  p.rect(m.x + 3, m.y + 10, 16, 6, '#1f1d26');
-  text(p, 'MAIN', m.x + 4, m.y + 3, C.white);
+  // ------------------------------------------------ PR board, racks, mailbox
+  if (l.prBoard) easel(p, l.prBoard.x - l.ox, l.prBoard.y - l.oy, l.prBoard.w, l.prBoard.h, 'PULL REQS', R);
+  for (const r of l.racks) rackBody(p, r.x - l.ox, r.y - l.oy, r.h, r.name);
+  if (l.mailbox) {
+    const m = { x: l.mailbox.x - l.ox, y: l.mailbox.y - l.oy };
+    box(p, m.x, m.y, 22, 30, '#5f6b80');
+    p.rect(m.x + 3, m.y + 10, 16, 6, '#1f1d26');
+    text(p, 'MAIN', m.x + 4, m.y + 3, C.white);
+  }
   g.restore();
   return canvas;
 }

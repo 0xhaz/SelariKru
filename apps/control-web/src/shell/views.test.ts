@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ROUTES } from './route.ts';
-import { MISSION_CONTROL, SETTINGS_TABS, TOP_BAR, frameOf, settingsSection, settingsHref, TITLES, topBarRouteOf } from './views.ts';
+import { ACTION_ITEMS_MENU, BOARDS_MENU, MISSION_CONTROL, SETTINGS_MENU_EXTRA, SETTINGS_TABS, frameOf, settingsSection, settingsHref, TITLES, topBarHomeOf } from './views.ts';
 
 describe('where each screen lives', () => {
   it('the office is always in view; every other screen opens in a drawer over it, and Settings in its modal', () => {
@@ -9,16 +9,23 @@ describe('where each screen lives', () => {
     for (const r of ROUTES.filter((x) => x !== 'office' && x !== 'settings')) expect(frameOf(r), r).toBe('drawer');
   });
 
-  it('every route can be reached from the top bar or Mission Control\'s tabs; the office is what closing a drawer leaves', () => {
-    const reachable = new Set([...TOP_BAR, ...MISSION_CONTROL].map((i) => i.route));
+  it('every route can be reached from the top bar\'s menus; the office is what closing a drawer leaves', () => {
+    const reachable = new Set([...ACTION_ITEMS_MENU, ...BOARDS_MENU, ...SETTINGS_MENU_EXTRA, ...MISSION_CONTROL].map((i) => i.route).concat(['evidence', 'settings']));
     for (const r of ROUTES.filter((x) => x !== 'office')) expect(reachable.has(r), r).toBe(true);
+  });
+
+  it('maps each screen to its main menu for now: Action items, Boards, PRs or Settings', () => {
+    expect(ACTION_ITEMS_MENU.map((e) => e.route)).toEqual(['overview', 'decisions']);
+    expect(BOARDS_MENU.map((e) => e.route)).toEqual(['overview', 'pipeline', 'decisions', 'team', 'product', 'brain', 'benchmark']);
+    expect(SETTINGS_MENU_EXTRA.map((e) => e.route)).toEqual(['assistant', 'onboarding']);
+    expect(topBarHomeOf('evidence')).toBe('PRs');
+    expect(topBarHomeOf('assistant')).toBe('Settings');
+    expect(topBarHomeOf('brain')).toBe('Boards');
+    expect(topBarHomeOf('office')).toBe('office');
   });
 
   it('Mission Control is one drawer whose tabs are Overview, Pipeline and Decisions, with their existing names', () => {
     expect(MISSION_CONTROL.map((i) => [i.label, i.route])).toEqual([['Overview', 'overview'], ['Pipeline', 'pipeline'], ['Decisions', 'decisions']]);
-    for (const r of ['overview', 'pipeline', 'decisions'] as const) expect(topBarRouteOf(r)).toBe('overview');
-    expect(topBarRouteOf('brain')).toBe('brain');
-    expect(topBarRouteOf('office')).toBeNull();
   });
 
   it('every route has a page title', () => {

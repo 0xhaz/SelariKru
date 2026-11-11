@@ -33,7 +33,12 @@ function hitTest(s: OfficeScene, sx: number, sy: number): Target | null {
 
 function activate(s: OfficeScene, hit: Hit): void {
   if (hit.kind === 'agent') s.hooks.onOpenWorker(hit.id);
-  else if (hit.kind === 'plan') s.hooks.onOpenPlace('plan');
+  else if (hit.kind === 'env') {
+    // A rack is a worker's sandbox: it opens that worker.
+    const id = s.layout?.racks.find((r) => r.name === hit.id)?.agentId;
+    if (id) s.hooks.onOpenWorker(id);
+  }
+  else if (hit.kind === 'plan' || hit.kind === 'lead') s.hooks.onOpenPlace('plan');
   else s.hooks.onOpenPlace('prs');
 }
 
@@ -51,7 +56,7 @@ export function attachInput(s: OfficeScene): () => void {
     const target = hitTest(s, p.x, p.y);
     s.hover = target ? { rect: target.rect, agentId: target.hit.kind === 'agent' ? target.hit.id : null } : null;
     el.style.cursor = down?.dragging ? 'grabbing' : target ? 'pointer' : 'grab';
-    s.hooks.onHover(target ? { ...s.describe(target.hit.kind, target.hit.id), x: e.clientX, y: e.clientY } : null);
+    s.hooks.onHover(target ? { ...s.describe(target.hit.kind, target.hit.kind === 'env' ? s.layout?.racks.find((r) => r.name === target.hit.id)?.agentId ?? target.hit.id : target.hit.id), x: e.clientX, y: e.clientY } : null);
     s.invalidate();
   };
 

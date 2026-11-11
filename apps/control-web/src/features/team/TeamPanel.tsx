@@ -4,6 +4,7 @@ import type { KeyboardEvent, ReactNode } from 'react';
 import { TONE_TEXT, formatClock, type Tone } from '@selarikru/ui';
 import type { PresenceState } from './model.ts';
 import { unknownText, type PanelRow, type TeamPanelModel } from './panel.ts';
+import { chipStyle, stateStyle, type RobotState } from '../../theme/tokens.ts';
 
 /** Each state has its own glyph as well as its word, so no two read alike in color, in grayscale or to a screen reader. */
 const GLYPH: Readonly<Record<PresenceState, string>> = { idle: '○', working: '◆', needs_you: '▲', blocked: '‖', lost: '✕', unknown: '?' };
@@ -18,8 +19,14 @@ function since(row: PanelRow): string {
   return row.state === 'lost' || row.state === 'unknown' ? row.since : `for ${row.since}`;
 }
 
-function WorkerRow({ row, selected, onOpen, mark }: { row: PanelRow; selected: boolean; onOpen: (id: string) => void; mark: ReactNode }) {
+const CHIP_OF: Readonly<Record<PresenceState, RobotState>> = { idle: 'idle', working: 'working', needs_you: 'needs_input', blocked: 'blocked', lost: 'offline', unknown: 'unknown' };
+
+/** The reference's agent card: portrait, name, role and model, number key, a coloured state chip with its word, time in state, and the task. */
+function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: boolean; onOpen: (id: string) => void; decor: RowDecor | null }) {
   const rail = RAIL[row.tone] ?? 'before:bg-transparent';
+  const chip = decor?.chip ?? CHIP_OF[row.state];
+  const style = chipStyle[chip];
+  const needs = row.state === 'needs_you';
   return (
     <li>
       <button
@@ -29,27 +36,38 @@ function WorkerRow({ row, selected, onOpen, mark }: { row: PanelRow; selected: b
         data-state={row.state}
         aria-current={selected ? 'true' : undefined}
         onClick={() => onOpen(row.workerId)}
-        className={`panel relative block w-full overflow-hidden py-2 pr-2.5 pl-3.5 text-left motion-safe:transition-transform before:absolute before:inset-y-0 before:left-0 before:w-[3px] hover:-translate-x-px hover:-translate-y-px ${rail} ${row.state === 'needs_you' ? 'outline-[3px] outline-red outline-solid' : ''} ${selected ? 'bg-[#fff]' : ''}`}
+        className={`panel relative grid w-full grid-cols-[40px_minmax(0,1fr)] gap-x-2.5 gap-y-1 overflow-hidden px-2.5 pt-2 pb-2.5 text-left motion-safe:transition-transform before:absolute before:inset-y-0 before:left-0 before:w-[3px] hover:-translate-x-px hover:-translate-y-px ${rail} ${needs ? 'outline-[3px] outline-red outline-solid' : ''} ${selected ? 'bg-[#fff]' : ''}`}
       >
-        <span className="flex items-baseline justify-between gap-2">
-          {mark ? <span aria-hidden="true" className="flex shrink-0 items-center gap-1.5 self-center">{mark}</span> : null}
-          <span className="min-w-0 flex-1 truncate font-semibold text-fg">{row.role}</span>
-          <span className="shrink-0 text-sm text-muted tabular-nums" data-testid="team-panel-since">{since(row)}</span>
+        {selected ? <span aria-hidden="true" className="absolute -left-0 top-4 text-[12px]">▶</span> : null}
+        <span aria-hidden="true" className="row-span-2 self-start">{decor?.portrait ?? null}</span>
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <b className="shrink-0 text-[17px] text-fg">{row.role}</b>
+          <span className="min-w-0 flex-1 truncate font-mono text-mono text-muted" data-testid="team-panel-model"><span className="sr-only">Recorded model: </span>{row.model}</span>
+          {decor?.key ? <kbd aria-hidden="true" className="kbd shrink-0 px-1 text-[13px]">{decor.key}</kbd> : null}
         </span>
-        <span className={`mt-0.5 flex items-center gap-1.5 text-sm font-medium ${TONE_TEXT[row.tone]}`} data-testid="team-panel-state">
-          <span aria-hidden="true" className="w-3 shrink-0 text-center">{GLYPH[row.state]}</span>
-          <span className="shrink-0 whitespace-nowrap">{row.label}</span>
-          {row.detail ? <span className="min-w-0 truncate font-normal text-muted"><span aria-hidden="true">· </span><span className="sr-only">, </span>{row.detail}</span> : null}
+        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5" data-testid="team-panel-state">
+          <span className="chip chip-dot" style={{ background: style.bg, color: style.fg }}><span aria-hidden="true" className="sr-only">{GLYPH[row.state]}</span>{stateStyle[chip].label}</span>
+          <span className="font-mono text-mono text-muted tabular-nums" data-testid="team-panel-since">{since(row)}</span>
+          {needs ? <span className="chip text-[11px]" style={{ background: '#ffec27', color: '#241a2e' }}>1 for you</span> : null}
+          {row.detail ? <span className="sr-only">, {row.detail}</span> : null}
         </span>
-        <span className="mt-1 block truncate text-sm text-fg" data-testid="team-panel-task"><span className="sr-only">Task: </span>{row.task}</span>
-        <span className="block truncate font-mono text-mono text-muted" data-testid="team-panel-model"><span className="sr-only">Recorded model: </span>{row.model}</span>
+        <span className={`col-span-2 mt-1 block truncate text-[13px] ${needs ? 'text-danger' : row.task === 'No task' ? 'text-muted' : 'text-fg'}`} data-testid="team-panel-task" title={row.detail ?? undefined}>
+          <span className="sr-only">Task: </span>{needs && row.detail ? <>{row.detail}<span className="sr-only">. </span><span className="text-fg"> · {row.task}</span></> : row.task}
+        </span>
       </button>
     </li>
   );
 }
 
-/** Decoration before a row's role, such as the office robot and its number key. Hidden from assistive technology: the row already names the worker. */
-export type RowMark = (workerId: string, index: number) => ReactNode;
+/** Decoration for a card: the office robot, the number key that opens it, and its robot state when the office knows it. */
+export interface RowDecor {
+  readonly portrait: ReactNode;
+  readonly key: string | null;
+  readonly chip: RobotState | null;
+}
+
+/** The card decoration for each worker. */
+export type RowMark = (workerId: string, index: number) => RowDecor;
 
 function Rows({ status, selectedId, onOpen, grid, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; grid: boolean; mark?: RowMark | undefined }) {
   if (status.kind === 'loading') return <p className="px-1 py-2 text-sm text-muted">Loading workers</p>;
@@ -59,7 +77,7 @@ function Rows({ status, selectedId, onOpen, grid, mark }: { status: PanelStatus;
     <>
       {status.stale ? <p className="panel mb-2 px-2 py-1 text-sm text-muted" data-testid="team-panel-stale">The connection is not live, so states are the last confirmed and shown as unknown.</p> : null}
       <ul className={grid ? 'grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3' : 'space-y-2.5'}>
-        {status.panel.rows.map((r, i) => <WorkerRow key={r.workerId} row={r} selected={r.workerId === selectedId} onOpen={onOpen} mark={mark ? mark(r.workerId, i) : null} />)}
+        {status.panel.rows.map((r, i) => <WorkerRow key={r.workerId} row={r} selected={r.workerId === selectedId} onOpen={onOpen} decor={mark ? mark(r.workerId, i) : null} />)}
       </ul>
     </>
   );
@@ -106,10 +124,14 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   return (
     <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[74px] z-10 flex w-[280px] flex-col gap-2">
-      <div className="panel px-2.5 py-1">
+      {/* The reference's "TEAM · N" header. On navy, not straight on the lawn, so its text meets AA. */}
+      <div className="panel-dark flex items-center justify-between gap-2 px-2.5 py-1">
         {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}
-        <p id="team-panel-title" className="text-[13px] font-semibold uppercase tracking-[0.12em] text-fg">Team</p>
-        <p className="text-sm" data-testid="team-panel-summary"><Count status={status} /></p>
+        <p className="min-w-0 text-[13px] font-semibold uppercase tracking-[0.12em] text-cream">
+          <span id="team-panel-title">Team</span><span aria-hidden="true"> · </span><span className="sr-only">: </span>
+          <span data-testid="team-panel-summary" className="[&_.text-muted]:text-[#b9c3e6] [&_.text-warning]:text-yellow"><Count status={status} /></span>
+        </p>
+        <a href="#/settings" className="btn shrink-0 px-2 text-[12px] normal-case tracking-normal">+ Agent</a>
       </div>
       <div className="scroll-thin -ml-4 flex min-h-0 flex-col overflow-y-auto pt-1 pr-1 pb-2 pl-4">
         {status.kind === 'ready' && status.panel.rows.length > 0 ? null : <div className="panel px-2.5 py-1"><Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /></div>}

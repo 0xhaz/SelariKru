@@ -1,6 +1,7 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 
 import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { useStore } from 'zustand';
 import { MissionControl } from '../features/overview/MissionControl.tsx';
 import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
@@ -10,7 +11,7 @@ import { buildOverview, type OverviewModel } from '../features/overview/model.ts
 import { TeamView } from '../features/team/TeamView.tsx';
 import { buildTeam, type TeamModel } from '../features/team/model.ts';
 import { panelOf } from '../features/team/panel.ts';
-import { TeamFoldRegion, TeamFoldToggle, TeamPanelSide, type PanelStatus } from '../features/team/TeamPanel.tsx';
+import { TeamFoldRegion, TeamFoldToggle, TeamPanelSide, type PanelStatus, type RowDecor } from '../features/team/TeamPanel.tsx';
 import { isTabId, type TabId } from '../features/team/WorkerDrawer.tsx';
 import { WorkerDrawerHost } from './WorkerDrawerHost.tsx';
 import { PANEL_WIDE, useMediaQuery } from './media.ts';
@@ -38,6 +39,7 @@ import { ConnectionBanner } from './hud/ConnectionBanner.tsx';
 import { OfficeHome } from './hud/OfficeHome.tsx';
 import { Tooltip } from './hud/Tooltip.tsx';
 import { Portrait } from './hud/Portrait.tsx';
+import { DebugPanel } from './hud/DebugPanel.tsx';
 import { CONNECTION, TopBar } from './hud/TopBar.tsx';
 import { SettingsModal, ViewDrawer } from './hud/ViewDrawer.tsx';
 import { shortcutFor } from './shortcuts.ts';
@@ -213,6 +215,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     }
   }, [route, snapshot, evidenceRun]);
   // The assistant mounts on first visit and then stays mounted, so moving between tabs does not discard a draft.
+  const assistantHost = useMemo(() => document.createElement('div'), []);
   const [assistantOpened, setAssistantOpened] = useState(route === 'assistant');
   useEffect(() => {
     if (route === 'assistant') setAssistantOpened(true);
@@ -255,20 +258,27 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const announcement = route === 'decisions' ? `${CONNECTION[connection].label}.` : `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
   // The office: a picture of the same team model the panel lists. Built only from facts in the snapshot; empty without one.
+  // The plan wall's run (the top bar's Plan wall select): the current run unless one is chosen.
+  const [planRunId, setPlanRunId] = useState<string | null>(null);
+  // Demo only: the office animation speed. Never touches data.
+  const [speed, setSpeed] = useState(1);
+  // Development only: the reference's debug panel.
+  // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
+  const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);
   const world = useMemo((): OfficeWorld | null => {
     if (!snapshot || !team) return null;
-    try { return buildOfficeWorld(snapshot, team, projectLabel); } catch { return null; }
-  }, [snapshot, team, projectLabel]);
+    try { return buildOfficeWorld(snapshot, team, projectLabel, planRunId); } catch { return null; }
+  }, [snapshot, team, projectLabel, planRunId]);
   const activity = useMemo(() => {
     if ((route !== 'office' && !panelWide) || !snapshot) return [];
     try { return recentActivity(snapshot, 7); } catch { return []; }
   }, [route, panelWide, snapshot]);
   const frame = frameOf(route);
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
-  const colorById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a.color]) ?? []), [world]);
-  const mark = (id: string, i: number): ReactNode => {
-    const color = colorById.get(id);
-    return <>{color ? <Portrait color={color} size={22} /> : null}{i < 9 ? <kbd className="kbd">{i + 1}</kbd> : null}</>;
+  const agentById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a]) ?? []), [world]);
+  const mark = (id: string, i: number): RowDecor => {
+    const a = agentById.get(id);
+    return { portrait: a ? <Portrait color={a.color} size={40} /> : null, key: i < 9 ? String(i + 1) : null, chip: a?.state ?? null };
   };
   const headerH = useHeaderHeight(headerRef);
   // On the office screen its own panels sit at the left of the canvas; the camera keeps the office clear of them where there is room.
@@ -389,13 +399,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           <RouteBoundary resetKey="onboarding">{onboarding ?? null}</RouteBoundary>
         ) : null}
         {route === 'assistant' && assistant === null ? <AssistantNotice leaveDemoHref={leaveDemoHref} /> : null}
-        {assistant !== null && assistantOpened ? (
-          <div hidden={route !== 'assistant'}>
-            <RouteBoundary resetKey="assistant">
-              <Suspense fallback={<p role="status" className="text-muted">Loading the assistant</p>}>{assistant}</Suspense>
-            </RouteBoundary>
-          </div>
-        ) : null}
+        {/* The assistant lives in a portal (below) so moving through the drawer and the Settings modal never discards a draft; this is where it shows. */}
+        {route === 'assistant' && assistant !== null ? <PortalSlot el={assistantHost} /> : null}
     </>
   );
 
@@ -408,12 +413,15 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   return (
     <div className="relative min-h-screen">
       <div ref={chromeRef}>
-        <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} paused={frame === 'settings' || (frame === 'drawer' && drawerMaximized && panelWide)} />
+        <OfficeCanvas world={world} insets={insets} onOpenWorker={openWorker} onOpenPlace={openPlace} subject={frame === 'office'} speed={mode === 'mock' ? speed : 1} paused={frame === 'settings' || (frame === 'drawer' && drawerMaximized && panelWide)} />
         <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-50 focus:bg-cream focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
         <Announcer message={announcement} />
         <TopBar
           ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
-          attentionCount={attentionCount} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
+          attentionCount={attentionCount} attentionNumber={attentionCount ? Number(/^\d+/.exec(attentionCount)?.[0] ?? NaN) || null : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
+          runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null}
+          workers={world?.agents.map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
+          debugOpen={debugOpen} onDebug={import.meta.env.DEV ? () => setDebugOpen((o) => !o) : null}
           teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
@@ -437,11 +445,17 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             {views}
           </ViewDrawer>
         )}
+        {/* Inside the page region, so it is inert like the rest of the page while a worker is open beside the team cards. */}
+        {import.meta.env.DEV && debugOpen ? <DebugPanel connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}>{devPanel}</DebugPanel> : null}
       </div>
       {/* The page under a worker open beside the team cards is inert, and an inert region is not hit-tested: this catcher gives the paused area its arrow pointer. */}
       {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}
-      {/* Demo controls (dev only): outside every landmark's content, at the bottom left of the office beside the activity feed. */}
-      {devPanel ? <div className="relative z-10 mx-3 my-3 max-w-[22rem] bg-cream xl:fixed xl:bottom-4 xl:left-[312px] xl:m-0 xl:w-[300px]">{devPanel}</div> : null}
+      {assistant !== null && assistantOpened ? createPortal(
+        <RouteBoundary resetKey="assistant">
+          <Suspense fallback={<p role="status" className="text-muted">Loading the assistant</p>}>{assistant}</Suspense>
+        </RouteBoundary>,
+        assistantHost,
+      ) : null}
       <Tooltip />
       {workerId !== null && team !== null && snapshot !== null ? (
         <WorkerDrawerHost
@@ -472,4 +486,16 @@ function useHeaderHeight(ref: RefObject<HTMLElement | null>): number {
     return () => observer.disconnect();
   }, [ref]);
   return h;
+}
+
+/** Shows a long-lived element here while mounted, and lets it go (without unmounting what React rendered into it) when not. */
+function PortalSlot({ el }: { el: HTMLElement }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    host.appendChild(el);
+    return () => { if (el.parentElement === host) host.removeChild(el); };
+  }, [el]);
+  return <div ref={ref} />;
 }

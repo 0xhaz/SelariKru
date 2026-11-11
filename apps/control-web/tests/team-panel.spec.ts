@@ -42,7 +42,8 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
     await expect(panel(page).getByTestId('team-needs-you')).toHaveText(/1 needs you$/);
     const waiting = panelRow(page, 'runner_local_1');
     await expect(waiting).toHaveAttribute('data-state', 'needs_you');
-    await expect(waiting.getByTestId('team-panel-state')).toContainText('Needs you');
+    // The card's chip uses the reference's word (T5.12).
+    await expect(waiting.getByTestId('team-panel-state')).toContainText('Needs input');
     await expect(waiting.getByTestId('team-panel-task')).toContainText('Add feedback table');
     await expect(waiting.getByTestId('team-panel-model')).toContainText('claude-sonnet-5-5');
     await expect(waiting.getByTestId('team-panel-since')).toHaveText(/^for \d+/);

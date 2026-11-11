@@ -33,6 +33,11 @@ export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> 
   return canvases;
 }
 
-/** The scanner eye on the verification gate. */
-export const SCANNER = ['..kkkkk..', '.kMMMMMk.', 'kMWWWWWMk', 'kMWkkkWMk', 'kMWWWWWMk', '.kMMMMMk.', '..kkkkk..', '....k....', '...kkk...'];
-export const SCANNER_PAL = { k: C.ink, M: C.metal, W: C.white };
+/**
+ * The verifier on the gate: SelariKru's own figure (an inspector with a green status bulb and a visor), drawn for this app. It is not any review
+ * product's mascot.
+ */
+const VERIFIER_ROWS = ['....kkk....', '...kGGGk...', '....kkk....', '.kkkkkkkkk.', '.kMMMMMMMk.', '.kMWWkWWMk.', '.kMMMMMMMk.', '.kMMkkkMMk.', '.kkkkkkkkk.', '..kMk.kMk..', '..kk...kk..'];
+export const VERIFIER = VERIFIER_ROWS;
+export const VERIFIER_BLINK = VERIFIER_ROWS.map((r, i) => (i === 5 ? '.kMkkkkkMk.' : r));
+export const VERIFIER_PAL = { k: C.ink, M: '#8fd3ff', W: C.white, G: C.green };

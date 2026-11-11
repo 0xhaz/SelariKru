@@ -3,12 +3,12 @@
 // Animated parts of the office, redrawn every frame.
 
 import { colors, stateStyle, type RobotState } from '../../theme/tokens.ts';
-import type { OfficeParcel } from '../model.ts';
+import type { OfficePr, OfficeRack } from '../model.ts';
 import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { box, disc, drawRows, line, type Pen } from '../engine/pen.ts';
-import type { DeskSpot, OfficeLayout, PxRect } from '../layout/layout.ts';
-import { SCANNER, SCANNER_PAL } from './robots.ts';
+import type { DeskSpot, OfficeLayout, PxRect, Rack } from '../layout/layout.ts';
+import { VERIFIER, VERIFIER_BLINK, VERIFIER_PAL } from './robots.ts';
 
 const blink = (t: number, hz: number) => Math.floor(t * hz) % 2 === 1;
 
@@ -69,21 +69,38 @@ export function drawDeskStrip(p: Pen, d: DeskSpot, ox: number, oy: number, state
   if (state === 'working') p.rect(X + (Math.floor(t * 40) % 112), Y, 8, 3, '#bfe9ff');
 }
 
+export function drawLeadLamp(p: Pen, ox: number, oy: number, state: RobotState, t: number) {
+  const st = stateStyle[state];
+  p.rect(ox + 278, oy + 90, 6, 2, C.ink);
+  p.rect(ox + 280, oy + 80, 1, 10, C.ink);
+  box(p, ox + 277, oy + 76, 8, 5, state === 'needs_input' && blink(t, 6) ? st.dim : st.color);
+}
+
 export function drawBelt(p: Pen, l: OfficeLayout, t: number) {
   const b = l.belt;
   const off = Math.floor(t * 26) % 6;
   const y = b.y - 9;
-  const x1 = b.x1;
+  const x1 = b.topY !== null ? b.x1 + 9 : b.x1;
   p.rect(b.x0 - 6, y, x1 - b.x0 + 6, 18, C.ink);
   p.rect(b.x0 - 4, y + 3, x1 - b.x0 + 2, 12, C.belt);
   for (let x = b.x0 - 4 + off; x < x1 - 2; x += 6) p.rect(x, y + 4, 1, 10, C.beltL);
   p.rect(b.x0 - 4, y + 2, x1 - b.x0 + 2, 1, C.rail);
   p.rect(b.x0 - 4, y + 15, x1 - b.x0 + 2, 1, C.rail);
   p.rect(b.x0 - 8, y + 1, 4, 16, C.metalD);
+  if (b.topY !== null) {
+    const vx = b.x1 - 9;
+    p.rect(vx, b.topY, 18, b.y - b.topY + 9, C.ink);
+    p.rect(vx + 3, b.topY + 2, 12, b.y - b.topY + 4, C.belt);
+    for (let yy = b.y - off; yy > b.topY + 2; yy -= 6) p.rect(vx + 4, yy, 10, 1, C.beltL);
+    p.rect(vx + 2, b.topY + 2, 1, b.y - b.topY, C.rail);
+    p.rect(vx + 15, b.topY + 2, 1, b.y - b.topY, C.rail);
+    p.rect(vx + 1, b.topY - 6, 16, 6, '#1f1d26');
+  }
 }
 
 export type GateMode = 'idle' | 'reviewing' | 'passed' | 'changes';
 
+/** The verifier gate. Its figure is SelariKru's own: a little inspector with a lens, not any review product's mascot. */
 export function drawGate(p: Pen, g: PxRect, mode: GateMode, since: number, t: number, label: string) {
   const x0 = g.x;
   const x1 = g.x + g.w;
@@ -120,10 +137,40 @@ export function drawGate(p: Pen, g: PxRect, mode: GateMode, since: number, t: nu
   if (mode === 'reviewing') hop = Math.round(Math.abs(Math.sin(t * 8)) * 3);
   else if (mode === 'passed') hop = Math.round(Math.sin(Math.min(1, since / 0.6) * Math.PI) * 8);
   disc(p, cx, top + 4, 4, C.ink, 0.25);
-  drawRows(p, SCANNER, SCANNER_PAL, cx - 4, top - 6 - hop);
+  drawRows(p, Math.floor(t * 10) % 31 === 0 ? VERIFIER_BLINK : VERIFIER, VERIFIER_PAL, cx - 5, top - 10 - hop);
 }
 
-export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficeParcel[]) {
+/** One rack per worker's sandbox: lit while its worker runs an attempt, dark otherwise. */
+export function drawRacks(
+  p: Pen, racks: Rack[], envs: readonly OfficeRack[], stateOf: (agentId: string | null) => RobotState | null,
+  pulse: (name: string) => number, t: number,
+) {
+  for (const r of racks) {
+    const env = envs.find((e) => e.agentId === r.agentId);
+    const st = stateOf(r.agentId);
+    const ACT: Record<RobotState, number> = { working: 0.8, in_review: 0.45, verified: 0.6, needs_input: 0.12, blocked: 0.12, idle: 0.1, offline: 0, unknown: 0.05 };
+    const activity = env && !env.running ? 0.03 : st ? ACT[st] : 0.35;
+    const seedT = Math.floor(t * 10);
+    const pz = pulse(r.name);
+    for (let i = 0; i < 8; i++)
+      for (let j = 0; j < 3; j++) {
+        const h = Math.sin((seedT + 1) * 12.9898 + (i * 3 + j) * 78.233 + r.x) * 43758.5453;
+        const rnd = h - Math.floor(h);
+        let col = '#2e2b36';
+        if (pz > 0.05) col = blink(t, 12) ? C.green : '#00873a';
+        else if (rnd < activity) col = j === 2 && rnd < 0.08 ? C.orange : (i + j) % 3 ? C.green : C.blue;
+        p.rect(r.x + 18 + j * 3, r.y + 15 + i * 10, 2, 1, col);
+      }
+    if (pz > 0.05) {
+      p.rect(r.x, r.y - 1, 32, 2, C.green, pz);
+      p.rect(r.x, r.y + r.h - 1, 32, 2, C.green, pz);
+      p.rect(r.x, r.y - 1, 2, r.h, C.green, pz);
+      p.rect(r.x + 30, r.y - 1, 2, r.h, C.green, pz);
+    }
+  }
+}
+
+export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficePr[]) {
   prs.slice(-6).forEach((pr, i) => {
     const x = b.x + 3 + (i % 3) * 20;
     const y = b.y + 11 + Math.floor(i / 3) * 14;
@@ -135,6 +182,29 @@ export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficeParcel[]) {
     p.rect(x + 2, y + 9, 14, 2, col);
     if (pr.verification === 'out_of_date' && !pr.merged) text(p, 'OLD', x + 3, y - 6, C.orange);
   });
+}
+
+export function drawCables(
+  p: Pen, l: OfficeLayout, stateOf: (agentId: string) => RobotState | null, colorOf: (id: string) => string, t: number,
+) {
+  for (const cb of l.cables) {
+    const st = stateOf(cb.agentId) ?? 'idle';
+    const SPEED: Record<RobotState, number> = { working: 60, in_review: 24, verified: 40, needs_input: 4, blocked: 4, idle: 8, offline: 0, unknown: 2 };
+    const speed = SPEED[st];
+    const phase = (t * speed) % 14;
+    let acc = 0;
+    for (let i = 0; i < cb.pts.length - 1; i++) {
+      const [x0, y0] = cb.pts[i]!;
+      const [x1, y1] = cb.pts[i + 1]!;
+      const len = Math.abs(x1 - x0) + Math.abs(y1 - y0);
+      for (let d = (14 - ((((acc - phase) % 14) + 14) % 14)) % 14; d < len; d += 14) {
+        const f = d / len;
+        const col = st === 'needs_input' ? C.red : st === 'idle' ? colorOf(cb.agentId) : C.white;
+        p.rect(Math.round(x0 + (x1 - x0) * f) - 1, Math.round(y0 + (y1 - y0) * f) - 1, 3, 3, col, st === 'idle' ? 0.5 : 0.9);
+      }
+      acc += len;
+    }
+  }
 }
 
 export function drawWindowAndClock(p: Pen, l: OfficeLayout, t: number) {
@@ -172,6 +242,18 @@ export function drawParcel(p: Pen, cx: number, cy: number, num: number, color: s
   p.rect(x + 3, y + 1, 2, 2, C.white);
   p.rect(x + 2, y + 4, 3, 1, color);
   if (showTag) tag(p, `#${num}`, cx, y - 8, C.ink, C.yellow);
+}
+
+/** A candidate on the belt, tagged with the start of its commit. */
+export function drawParcelTagged(p: Pen, cx: number, cy: number, label: string, color: string) {
+  const x = Math.round(cx) - 4;
+  const y = Math.round(cy) - 5;
+  p.rect(x, y, 8, 7, C.ink);
+  p.rect(x + 1, y + 1, 6, 2, '#f0c48a');
+  p.rect(x + 1, y + 3, 6, 3, '#c98a4e');
+  p.rect(x + 3, y + 1, 2, 2, C.white);
+  p.rect(x + 2, y + 4, 3, 1, color);
+  tag(p, label, cx, y - 8, C.ink, C.yellow);
 }
 
 export function drawPlanTitle(p: Pen, l: OfficeLayout, title: string) {

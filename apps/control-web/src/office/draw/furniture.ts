@@ -109,6 +109,22 @@ export function partitions(p: Pen, X: number, Y: number, tiles: number) {
   p.rect(gx + 15, Y - 1, 2, 17, C.ink);
 }
 
+export function rackBody(p: Pen, x: number, y: number, h: number, label: string) {
+  p.rect(x + 1, y + h - 1, 30, 3, '#000000', 0.3);
+  box(p, x + 1, y, 30, h, '#2a2833');
+  p.rect(x + 2, y + 1, 1, h - 2, '#3d3a48');
+  p.rect(x + 28, y + 1, 2, h - 2, '#1f1d26');
+  for (let i = 0; i < 8; i++) {
+    const yy = y + 12 + i * 10;
+    p.rect(x + 4, yy, 23, 8, '#36333f');
+    p.rect(x + 4, yy + 8, 23, 1, '#1f1d26');
+    p.rect(x + 6, yy + 3, 8, 1, '#4c4858');
+  }
+  const nm = label.toUpperCase().slice(0, 6);
+  box(p, x + 16 - textW(nm) / 2 - 3, y + 3, textW(nm) + 6, 8, C.white);
+  text(p, nm, x + 16 - textW(nm) / 2, y + 4, C.ink);
+}
+
 export function easel(p: Pen, x: number, y: number, w: number, h: number, title: string, seed: () => number) {
   p.rect(x + 4, y + h - 2, 3, 30, C.deskDD);
   p.rect(x + w - 7, y + h - 2, 3, 30, C.deskDD);

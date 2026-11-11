@@ -23,7 +23,9 @@ async function expectNoAxeViolations(page: Page): Promise<void> {
 test('the Team nav item is a real link and the page is titled', async ({ page }) => {
   await page.goto('/?demo#/overview');
   await expect(page.getByRole('heading', { name: 'Mission Control', level: 1 })).toBeVisible();
-  await page.getByRole('link', { name: 'Team' }).click();
+  // The Team screen is in the Boards menu for now (T5.12).
+  await page.getByTestId('top-bar-boards').click();
+  await page.getByRole('link', { name: 'Team', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
   await expect(page).toHaveTitle('Team · SelariKru');
   await expect(page.locator('#main')).toBeFocused();
