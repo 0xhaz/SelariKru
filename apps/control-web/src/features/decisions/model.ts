@@ -371,10 +371,12 @@ function budgetCard(run: RunView, snapshot: ProjectViewSnapshot, options: Decisi
 const PR_BODY_MAX = 20_000;
 
 /** The open request with the run's description from this tab (H5), trimmed and capped. Any other command, or no description, is unchanged. */
-export function withPrBody(command: AuthorizedViewCommand, bodies: Readonly<Record<string, string>>): AuthorizedViewCommand {
+export function withPrBody(command: AuthorizedViewCommand, bodies: Readonly<Record<string, string>>, from: Readonly<Record<string, { readonly taskId: string; readonly routeRecordId: string }>> = {}): AuthorizedViewCommand {
   if (command.command !== 'run.open_pull_request') return command;
   const body = bodies[command.args.runId]?.trim() ?? '';
-  return body === '' ? command : { ...command, args: { ...command.args, body: body.slice(0, PR_BODY_MAX) } };
+  const source = from[command.args.runId];
+  // An agent's description names the call it came from, so the server can refuse one built from restricted context.
+  return body === '' ? command : { ...command, args: { ...command.args, body: body.slice(0, PR_BODY_MAX), ...(source ? { bodyFrom: { taskId: source.taskId, routeRecordId: source.routeRecordId } } : {}) } };
 }
 
 const openPrAction = (run: RunView, paused: string | null, uncovered: boolean): DecisionAction => ({

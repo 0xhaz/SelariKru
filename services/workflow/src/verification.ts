@@ -109,7 +109,8 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  *   (`proposal.accepted`, the owner as actor). The claim reads the waiting row after it locked the status row and, when it starts the apply attempt, moves that row
  *   to `applying` right after its attempt row, inside its own order (`markApplying`), before its first event; the scheduler lock serialises it with an accept, and
  *   no other path writes the row. The runner's fetch (`fetchProposalForLease`) and the owner's context and change reads (`appliedProposalFor`) lock nothing. No
- *   proposal path takes a run row, the candidate row, this lock, the brain lock or `product_heads`.
+ *   proposal path takes a run row, the candidate row, this lock, the brain lock or `product_heads`. The owner's task context read (H5 fix round 4) inserts one
+ *   `agent_contexts` row (insert only, conflict ignored, no other lock); an accept, an agent criteria revision and an agent PR body read it without a lock.
  * - every path above that decides from a task's status reads it again after locking its row, and writes it at that locked revision (`bumpStatus` and
  *   `setBlock` refuse a row that moved), so a status changed by a path that held the row first is never written back.
  *

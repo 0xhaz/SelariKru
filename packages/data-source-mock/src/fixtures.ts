@@ -332,7 +332,7 @@ function featureDelivery(): Fixture {
         [scoped('feature-delivery', 'web')]: { inputChars: 2600, observed: { sec: 130, stepKind: 'patch', source: 'IN_CLOUD', totalMs: 2900 } },
         [scoped('feature-delivery', 'search')]: { inputChars: 1800 },
         [scoped('feature-delivery', 'e2e')]: { label: 'restricted', inputChars: 1500, observed: { sec: 95, stepKind: 'criteria', source: 'ON_DEVICE', totalMs: 1700 } },
-        [scoped('feature-delivery', 'integrate')]: { override: 'ONLY_ON_DEVICE', inputChars: 9000, observed: { sec: 150, stepKind: 'review', source: 'UNKNOWN', totalMs: 4100 } },
+        [scoped('feature-delivery', 'integrate')]: { override: 'ONLY_ON_DEVICE', inputChars: 9000, observed: { sec: 150, stepKind: 'review', source: 'UNKNOWN', totalMs: 4100 }, restrictedSiblingClaim: 'Plan: partner billing migration (restricted)' },
         [scoped('feature-delivery', 'review')]: { inputChars: 700 },
       },
     },

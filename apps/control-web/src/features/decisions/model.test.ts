@@ -622,3 +622,10 @@ describe('the PR description goes with the open request (H5)', () => {
     expect(withPrBody(other, { r1: 'x' })).toEqual(other);
   });
 });
+
+describe('an agent PR description names its call (H5 fix round 4)', () => {
+  it('adds bodyFrom when the run\'s description came from an agent call', () => {
+    const open = { command: 'run.open_pull_request' as const, expectedRevision: 2, idempotencyKey: 'k', args: { runId: 'r1' } };
+    expect(withPrBody(open, { r1: 'Add posting' }, { r1: { taskId: 't1', routeRecordId: 'req_1' } })).toEqual({ ...open, args: { runId: 'r1', body: 'Add posting', bodyFrom: { taskId: 't1', routeRecordId: 'req_1' } } });
+  });
+});

@@ -14,6 +14,7 @@ import type { AppContext } from './app.ts';
 import { AppError, invalidRequest, staleRevision } from './errors.ts';
 import { assertRunAllowed, onboardingPlanSettings, recordedBudgetCeiling } from './routes-onboarding.ts';
 import { assignmentState, boundedAutonomy, bumpConfigRevision, eventRunFor, loadSettingsView } from './settings.ts';
+import { agentOutputGuard } from './apply.ts';
 import { inheritedLabelsFor, loadProjectRouteInputs, loadRouteHistory, loadTaskRoute, taskRouteView } from './route-policy.ts';
 import { skillRunnerWaits } from './skills.ts';
 import { serveBundle } from './brain.ts';
@@ -237,6 +238,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
 
     const gate = evaluate({ kind: 'assign_replan_tasks' }, ctx.policy);
     if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow planning', { reason: gate.reason, decision: gate.decision });
+    // A browser agent's criteria: refused when that call read restricted context (or the server cannot vouch for what it read).
+    if (body.agentProposal) await agentOutputGuard(db, { tenantId: config.tenantId, projectId, taskId: body.agentProposal.taskId }, body.agentProposal.routeRecordId, 'criteria');
 
     const extra: PlanError[] = body.tasks.filter((t) => t.tenantId !== config.tenantId).map((t) => ({ kind: 'scope_mismatch', taskId: t.taskId, field: 'projectId' }));
     // A dependent on a merge could never start: the run cannot reach a pull request while it has an unfinished task, so nothing would ever merge.
@@ -485,7 +488,7 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource,
               fellBack: ran ? outcome.fellBack : null, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
               status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
-              validation: body.validation, blockedReason: body.blockedReason, ...(body.outputSha256 !== undefined ? { outputSha256: body.outputSha256 } : {}),
+              validation: body.validation, blockedReason: body.blockedReason, ...(body.outputSha256 !== undefined ? { outputSha256: body.outputSha256 } : {}), ...(body.contextId !== undefined ? { contextId: body.contextId } : {}),
             };
             const [inserted] = await tx.insert(schema.clientReports).values({
               tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,
@@ -554,8 +557,16 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
   }
 
   app.get('/v1/projects/:id/tasks/:taskId/context', auth, async (req) => {
-    const { taskId, task, spec, destination, bundle, change } = await agentContext(req);
+    const { projectId, taskId, task, spec, destination, bundle, change } = await agentContext(req);
     const classification = task.labels.reduce<string>((acc, l) => strongerLabel(acc, l), 'public');
+    // H5 fix round 4: what this context holds, recorded under the id the browser sends and reports with its route record. Ids and a label only. An accept, an agent
+    // criteria revision and an agent PR body are judged by it, whatever the browser says about its own lock. No id: nothing recorded, and nothing it led to is accepted.
+    const contextId = (req.query as { contextId?: unknown }).contextId;
+    if (contextId !== undefined) {
+      if (typeof contextId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(contextId)) throw invalidRequest('contextId must be a plain id');
+      const served = bundle.claims.length === 0 ? 'public' : (bundle.contentLabel ?? 'restricted');
+      await db.insert(schema.agentContexts).values({ tenantId: config.tenantId, projectId, contextId, taskId, revision: task.revision, destination, contentLabel: strongerLabel(classification, served), servedAt: now() }).onConflictDoNothing();
+    }
     const [run] = await db.select({ planRevision: schema.runs.planRevision }).from(schema.runs).where(and(eq(schema.runs.tenantId, config.tenantId), eq(schema.runs.runId, task.runId)));
     return {
       taskId, revision: task.revision, runId: task.runId, planRevision: run?.planRevision ?? 0, destination,

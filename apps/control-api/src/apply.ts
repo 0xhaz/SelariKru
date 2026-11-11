@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   AcceptedProposalSchema, BASE_FILE_LIMITS, checkAcceptedProposal, sha256Hex, BaseFileAnswerSchema, RESTRICTED_APPLY_REFUSAL, baseFileIssue, screenBaseFiles, screenBaseListing, type BaseFileAnswer, type BaseFileRequest,
 } from '@selarikru/domain';
-import { schema, withTx } from '@selarikru/persistence';
+import { schema, withTx, type Executor } from '@selarikru/persistence';
 import { LeaseRefSchema } from '@selarikru/protocol';
 import { acceptProposal, fetchProposalForLease, proposalReceipt, type Runner } from '@selarikru/workflow';
 import { and, eq, sql } from 'drizzle-orm';
@@ -109,14 +109,7 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
       throw new AppError(pre.code === 'base_mismatch' ? 409 : 422, 'proposal_refused', `the proposal did not pass the server's checks: ${pre.code}`, { reason: pre.code });
     }
     if (p.routeRecordId !== p.proposalId) throw new AppError(409, 'route_record_missing', 'the proposal does not name the route record of the call that produced it', { reason: 'route_record_mismatch' });
-    const [record] = await db.select({ payload: schema.clientReports.payload }).from(schema.clientReports).where(and(
-      eq(schema.clientReports.tenantId, tenantId), eq(schema.clientReports.projectId, projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
-      eq(schema.clientReports.subjectId, taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${p.routeRecordId}`,
-    )).limit(1);
-    const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown } | undefined;
-    if (!rec || rec.stepKind !== 'patch' || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', 'there is no record of where the patch call that produced this proposal ran, so it cannot be accepted');
-    // A call that ran locked to the device read restricted data: its output stays on the device, whatever the task's label says now.
-    if (rec.locked === true) throw new AppError(409, 'proposal_from_restricted_call', RESTRICTED_APPLY_REFUSAL, { reason: 'locked_call' });
+    const rec = await agentOutputGuard(db, { tenantId, projectId, taskId }, p.routeRecordId, 'patch');
     if (rec.outputSha256 !== sha256Hex(p.diff)) throw new AppError(409, 'route_record_missing', 'the route record of this call names another output, so this proposal is not what that call produced', { reason: 'route_record_output_mismatch' });
     // Not wrapped in a stored receipt: the proposal's own row holds the key that last queued it, and the same key again reads the proposal as it is now (never an
     // earlier receipt); a new key queues a proposal whose apply failed.
@@ -210,4 +203,27 @@ export function registerApplyRoutes(app: FastifyInstance, ctx: AppContext, relay
     if (!relay.answer(runner.tenantId, runner.runnerId, answer)) throw new AppError(404, 'file_request_not_found', 'no such file request is waiting for this runner');
     return { accepted: true };
   });
+}
+
+/**
+ * The server's own judgement of one browser agent call's output before it may leave the device's own use (H5 fix rounds 2 and 4): an accept, an agent criteria
+ * revision, an agent-written PR body. The call's route record must exist for this task and step and have run (`route_record_missing`); a call that ran locked is
+ * refused (`proposal_from_restricted_call`); and the context the server served it, recorded under the id the record names, must exist and hold nothing stronger than
+ * internal (`proposal_from_restricted_context`). The last needs nothing the browser says about its lock, so a tampered client is still refused.
+ */
+export async function agentOutputGuard(db: Executor, key: { tenantId: string; projectId: string; taskId: string }, routeRecordId: string, stepKind: string): Promise<{ readonly outputSha256: unknown }> {
+  const [record] = await db.select({ payload: schema.clientReports.payload }).from(schema.clientReports).where(and(
+    eq(schema.clientReports.tenantId, key.tenantId), eq(schema.clientReports.projectId, key.projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'),
+    eq(schema.clientReports.subjectId, key.taskId), sql`${schema.clientReports.payload} ->> 'requestId' = ${routeRecordId}`,
+  )).limit(1);
+  const rec = record?.payload as { stepKind?: unknown; status?: unknown; outputSha256?: unknown; locked?: unknown; contextId?: unknown } | undefined;
+  if (!rec || rec.stepKind !== stepKind || rec.status !== 'ok') throw new AppError(409, 'route_record_missing', `there is no record of where the ${stepKind} call that produced this ran, so it cannot be used`);
+  // A call that ran locked to the device read restricted data: its output stays on the device, whatever the task's label says now.
+  if (rec.locked === true) throw new AppError(409, 'proposal_from_restricted_call', RESTRICTED_APPLY_REFUSAL, { reason: 'locked_call' });
+  const [served] = typeof rec.contextId === 'string' ? await db.select({ label: schema.agentContexts.contentLabel, taskId: schema.agentContexts.taskId }).from(schema.agentContexts)
+    .where(and(eq(schema.agentContexts.tenantId, key.tenantId), eq(schema.agentContexts.projectId, key.projectId), eq(schema.agentContexts.contextId, rec.contextId))) : [];
+  if (!served || served.taskId !== key.taskId || !['public', 'internal'].includes(served.label)) {
+    throw new AppError(409, 'proposal_from_restricted_context', 'this came from a call whose context held restricted data, or whose context the server cannot vouch for, so it stays on the device', { reason: served ? 'restricted_context' : 'context_not_recorded' });
+  }
+  return { outputSha256: rec.outputSha256 };
 }

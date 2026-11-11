@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { RoutePolicyModeSchema, approvalUnavailableReason, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -56,6 +56,9 @@ interface Project {
   readonly criteria: Map<string, { id: string; text: string }[]>;
   /** Proposals accepted in the demo, by proposal id, with the key that accepted them. Nothing is applied. */
   readonly acceptedProposals: Map<string, { key: string; receipt: ProposalAcceptReceipt }>;
+  /** As the server's backstop: the label of each served context, by context id, and the context each reported call names, by request id. Simulated. */
+  readonly contextLabels: Map<string, string>;
+  readonly reportContexts: Map<string, { taskId: string; contextId: string | null; locked: boolean }>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -127,6 +130,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
       criteria: new Map(),
       acceptedProposals: new Map(),
+      contextLabels: new Map(),
+      reportContexts: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -558,6 +563,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (earlier.some((x) => x.recordId === recordId)) return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied', replayed: true });
       const record = routeRecordOf({ routes: p.fixture.routes ?? NO_ROUTES, settings: p.settings, runId: task.runId, taskId: task.taskId, taskRevision: task.revision, recordId, at: isoOf(timeOf(p)), report: c.args.report });
       p.routeRecords.set(task.taskId, [record, ...earlier]);
+      p.reportContexts.set(c.args.report.requestId, { taskId: task.taskId, contextId: c.args.report.contextId ?? null, locked: record.locked });
       appendCommandEvent(p, task.taskId, 'inference.reported', { revision: task.revision, record }, { revisionStep: 0 });
       return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied' });
     }
@@ -692,14 +698,16 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     },
 
     /** What the demo's task agents read: simulated, with a bundle built by the domain code for the asked destination. */
-    async getTaskContext(projectId, taskId, destination, callOverride) {
+    async getTaskContext(projectId, taskId, destination, callOverride, contextId) {
       const p = project(projectId);
       const t = p.state.snapshot.tasks[taskId];
       if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
       const call = callOverride ? RoutePolicyModeSchema.safeParse(callOverride) : null;
       if (call && !call.success) throw fail('invalid_event', 'callOverride must be a route mode');
       checkDestination(destination, routeViewOf(p, t), routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId), call?.data ?? null);
-      return demoTaskContext(contextState(p, t.runId), t, destination);
+      const served = demoTaskContext(contextState(p, t.runId), t, destination);
+      if (contextId) p.contextLabels.set(contextId, strongerLabel(served.task.classification, served.bundle.claims.length === 0 ? 'public' : (served.bundle.contentLabel ?? 'restricted')));
+      return served;
     },
 
     /** Counts only, refused like the context: the demo's input size for one destination. */
@@ -720,6 +728,13 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const t = p.state.snapshot.tasks[r.taskId];
       if (!t) throw fail('unavailable', `no task ${r.taskId} in this project`);
       const state = contextState(p, t.runId);
+      // An agent's criteria, as on the server: refused when that call read restricted context, or the demo cannot vouch for what it read.
+      if (r.routeRecordId) {
+        const call = p.reportContexts.get(r.routeRecordId);
+        const servedLabel = call?.contextId ? p.contextLabels.get(call.contextId) : undefined;
+        if (call?.locked) throw fail('unavailable', 'proposal_from_restricted_call: Restricted work is applied by the local runner on this device');
+        if (!call || servedLabel === undefined || !['public', 'internal'].includes(servedLabel)) throw fail('unavailable', 'proposal_from_restricted_context: these criteria came from a call whose context held restricted data');
+      }
       p.criteria.set(t.taskId, reviseDemoCriteria(state, t, r.expectedPlanRevision, r.criteria));
       // As the server's plan route: a new plan revision, the task back to planned at its next revision, and `plan.accepted` on the stream. Simulated.
       const planRevision = state.planRevision + 1;
@@ -758,6 +773,11 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (prior && prior.key === idempotencyKey) return prior.receipt;
       if (prior) throw fail('unavailable', 'proposal_already_accepted: this proposal is already waiting for the runner');
       const receipt = acceptDemoProposal(contextState(p, t.runId), t, proposal);
+      // The server's backstop, mirrored: the call that produced it must be recorded, not locked, and its served context no stronger than internal.
+      const call = p.reportContexts.get(proposal.routeRecordId);
+      if (call?.locked) throw fail('unavailable', 'proposal_from_restricted_call: Restricted work is applied by the local runner on this device');
+      const servedLabel = call?.contextId ? p.contextLabels.get(call.contextId) : undefined;
+      if (!call || call.taskId !== t.taskId || servedLabel === undefined || !['public', 'internal'].includes(servedLabel)) throw fail('unavailable', 'proposal_from_restricted_context: this came from a call whose context held restricted data, or whose context the demo cannot vouch for');
       p.acceptedProposals.set(proposal.proposalId, { key: idempotencyKey, receipt });
       appendCommandEvent(p, t.taskId, 'proposal.accepted', { proposalId: receipt.proposalId, routeRecordId: proposal.routeRecordId, revision: t.revision, baseSha: proposal.baseSha, digest: receipt.digest, fileCount: receipt.fileCount }, { revisionStep: 0 });
       return receipt;

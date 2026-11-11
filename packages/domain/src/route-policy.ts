@@ -200,6 +200,8 @@ export const RouteRecordReportSchema = z.strictObject({
   blockedReason: RouteCode.nullable(),
   /** An ok patch call only (H5): the sha256 of its diff, so an accepted proposal can be tied to the output this call produced. A hash, never the output. */
   outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The id of the task context the server served this call (H5 fix round 4), so the server can judge the output by what it was given to read. */
+  contextId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional(),
 });
 export type RouteRecordReport = z.infer<typeof RouteRecordReportSchema>;
 
@@ -228,6 +230,7 @@ export const RouteRecordSchema = z.strictObject({
   validation: z.enum(['passed', 'failed', 'not_run']),
   blockedReason: z.string().nullable(),
   outputSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contextId: z.string().optional(),
   reportedBy: z.literal('browser'),
   trust: z.literal('untrusted'),
   reportedAt: z.string(),

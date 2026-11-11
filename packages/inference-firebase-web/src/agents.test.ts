@@ -497,7 +497,7 @@ describe('fix round 1: the patch agent chooses files from a listing (I4)', () =>
     const { sdk, reports, catalog } = setup();
     sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
     // Labelled request text, so the call is not locked to the device (a locked call reports no hash).
-    await catalog.patch({ ...INPUTS.patch, requestClassification: 'internal' });
+    await catalog.patch({ ...INPUTS.patch, requestClassification: 'internal', bundle: bundle({ claims: bundle().claims.map((c) => ({ ...c, classification: 'internal' as const })), contentLabel: 'internal' }) });
     const { sha256Hex } = await import('@selarikru/domain');
     expect(reports[0]!.report.outputSha256).toBe(sha256Hex(DIFF));
     expect(JSON.stringify(reports[0]!.report)).not.toContain('line 2');
@@ -518,7 +518,8 @@ describe('fix round 2: a locked call reports no output hash (m1)', () => {
 
 describe('fix round 3: a device bundle is labelled by what it holds on a device-only route', () => {
   const LOCAL_ONLY: FreshRoute = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null };
-  const patchInput = (over: Partial<AgentInputs['patch']> = {}): AgentInputs['patch'] => ({ ...INPUTS.patch, request: undefined, bundle: bundle({ destination: 'local' }), ...over });
+  const labelled = (label: string | undefined) => bundle({ destination: 'local', claims: bundle().claims.map((c) => (label === undefined ? c : { ...c, classification: label as 'internal' })), ...(label === undefined ? {} : { contentLabel: label as 'internal' }) });
+  const patchInput = (over: Partial<AgentInputs['patch']> = {}): AgentInputs['patch'] => ({ ...INPUTS.patch, request: undefined, bundle: labelled('internal'), ...over });
 
   it('an internal task on Local only, with a device bundle holding internal claims and internal files, is not locked; it stays on the device and its report carries the hash', async () => {
     const { sdk, reports, catalog } = setup(LOCAL_ONLY);
@@ -547,5 +548,30 @@ describe('fix round 3: a device bundle is labelled by what it holds on a device-
     const r = await catalog.patch(patchInput());
     expect(r.locked).toBe(true);
     expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+  });
+});
+
+describe('fix round 4: claim labels decide a device bundle on a device-only route', () => {
+  const LOCAL_ONLY: FreshRoute = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null };
+  const withClaims = (claims: unknown[], contentLabel?: string) => bundle({ destination: 'local', claims: claims as never, ...(contentLabel ? { contentLabel: contentLabel as 'internal' } : {}) });
+  const claim = (label?: string) => ({ ...bundle().claims[0]!, ...(label ? { classification: label } : {}) });
+  for (const [what, b] of [
+    ['a claim with no label', withClaims([claim()], 'internal')],
+    ['a restricted claim from a sibling', withClaims([claim('internal'), { ...claim('restricted'), claimId: 'c2' }], 'restricted')],
+    ['labelled claims but no content label', withClaims([claim('internal')])],
+  ] as const) {
+    it(`${what} locks the call, with no hash`, async () => {
+      const { sdk, reports, catalog } = setup(LOCAL_ONLY);
+      sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+      const r = await catalog.patch({ ...INPUTS.patch, request: undefined, bundle: b });
+      expect(r.locked).toBe(true);
+      expect(reports[0]!.report).not.toHaveProperty('outputSha256');
+    });
+  }
+  it('the route report names the context the server served', async () => {
+    const { sdk, reports, catalog } = setup(LOCAL_ONLY);
+    sdk.result = { text: JSON.stringify(GOOD.patch), inferenceSource: 'on_device' };
+    await catalog.patch({ ...INPUTS.patch, request: undefined, bundle: withClaims([claim('internal')], 'internal'), contextId: 'ctx_1' });
+    expect(reports[0]!.report.contextId).toBe('ctx_1');
   });
 });

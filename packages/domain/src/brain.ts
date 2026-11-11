@@ -355,6 +355,8 @@ export const BrainBundleClaimSchema = z.strictObject({
   /** `accepted` only when a cited, live source is accepted. A proposal is shown to the worker as proposed, never as accepted scope. */
   standing: z.enum(BRAIN_STANDINGS),
   citations: z.array(BrainCitationSchema).min(1),
+  /** The claim's label: the strongest of the sources it rests on (H5 fix round 4). Absent on bundles built before it, and an absent label reads as restricted. */
+  classification: BrainClassificationSchema.optional(),
 });
 export type BrainBundleClaim = z.infer<typeof BrainBundleClaimSchema>;
 
@@ -386,6 +388,8 @@ export const BrainBundleSchema = z.strictObject({
   pinned: z.array(BrainRevisionRefSchema),
   claims: z.array(BrainBundleClaimSchema),
   omissions: z.array(BrainOmissionSchema),
+  /** The strongest label among the served claims (a claim with no known label counts as restricted); `public` when none is served. Absent on older bundles: restricted. */
+  contentLabel: BrainClassificationSchema.optional(),
 });
 export type BrainBundle = z.infer<typeof BrainBundleSchema>;
 
@@ -480,7 +484,8 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
       const citations = cl.citations.filter((x) => !isDead(x));
       for (const x of citations) { pinned.set(refKey(x), { sourceId: x.sourceId, revision: x.revision }); servedFrom.add(x.sourceId); }
       const standing = citations.some((x) => all.get(refKey(x))?.standing === 'accepted') ? 'accepted' : 'proposed';
-      served.push({ claimId: cl.claimId, page: cl.page, key: cl.key, heading: cl.heading, text: cl.text, status: cl.status === 'disputed' ? 'disputed' : 'current', standing, citations });
+      const label = BrainClassificationSchema.safeParse(cl.classification);
+      served.push({ claimId: cl.claimId, page: cl.page, key: cl.key, heading: cl.heading, text: cl.text, status: cl.status === 'disputed' ? 'disputed' : 'current', standing, citations, classification: label.success ? label.data : 'restricted' });
     }
   }
 
@@ -499,18 +504,24 @@ export function buildContextBundle(input: BundleInput): BrainBundle {
     watermark: c?.watermark ?? 0, sourceHead: input.sourceHead, compiledAt: c?.generatedAt ?? null,
     indexLag: Math.max(input.recordsPending === true ? 1 : 0, input.sourceHead - (c?.watermark ?? 0)), recordsPending: input.recordsPending === true,
     pinned: [...pinned.values()].sort((a, b) => byString(a.sourceId, b.sourceId) || a.revision - b.revision),
-    claims: served, omissions,
+    claims: served, omissions, contentLabel: contentLabelOf(served),
   };
 }
 
+/** The strongest label among served claims; one with no known label counts as restricted. `public` when there are none. */
+export const contentLabelOf = (claims: readonly { readonly classification?: unknown }[]): BrainClassification =>
+  claims.reduce<BrainClassification>((acc, c) => strongerLabel(acc, BrainClassificationSchema.safeParse(c.classification).success ? c.classification : 'restricted'), 'public');
+
 /**
- * The labels of what a context bundle actually holds (H5 fix round 3), for a call whose route keeps it on the device. A bundle that cannot be read is restricted. A
- * claim carries no label of its own yet (a carry), so each served claim counts as internal; restricted or secret sources reach a task's own label, which the call
- * counts separately. A bundle with no claims carries no content. A device bundle on a cloud-capable route is judged by where it was built instead: restricted.
+ * The labels of what a context bundle actually holds, for a call whose route keeps it on the device (H5 fix rounds 3 and 4): each served claim's own label, and the
+ * bundle's recorded content label. Anything unknown is restricted: an unreadable bundle, a claim with no label (a bundle built before claims carried one), a bundle
+ * with claims and no content label. A bundle with no claims carries no content. A device bundle on a cloud-capable route is judged by where it was built: restricted.
  */
 export function bundleContentLabels(bundle: unknown): string[] {
   if (bundle === null || bundle === undefined) return [];
   const b = BrainBundleSchema.safeParse(bundle);
   if (!b.success) return ['restricted'];
-  return b.data.claims.length === 0 ? [] : ['internal'];
+  if (b.data.claims.length === 0) return [];
+  const own = contentLabelOf(b.data.claims);
+  return [own, b.data.contentLabel ?? 'restricted'];
 }

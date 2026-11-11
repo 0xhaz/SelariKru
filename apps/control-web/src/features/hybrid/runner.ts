@@ -13,7 +13,9 @@ export interface AgentRunnerDeps {
   readonly projectId: string;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   /** The server checks the destination against the route with this call's override, and refuses `cloud` when the route keeps the task on the device. */
-  readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null) => Promise<TaskAgentContext>;
+  readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null, contextId?: string) => Promise<TaskAgentContext>;
+  /** A new id for the context of one step. The server records what it served under it; the route record names it. Default: a random id. */
+  readonly newContextId?: () => string;
   readonly catalog: {
     run<K extends AgentActionKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>>;
     /** The patch agent's file choice from a listing, when no name matched. */
@@ -70,9 +72,10 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
   } catch {
     return { kind: 'refused', code: 'route_fetch_failed' };
   }
+  const contextId = (deps.newContextId ?? (() => `ctx_${crypto.randomUUID().replace(/-/g, '')}`))();
   let context: TaskAgentContext;
   try {
-    context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride);
+    context = await deps.getTaskContext(req.taskId, destinationFor(read, req.callOverride), req.callOverride, contextId);
   } catch (e) {
     // A refusal the source names keeps its code; only a read that failed is `context_unavailable`.
     const code = /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1];
@@ -87,6 +90,7 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
     sources: [{ id: sourceId, classification: t.classification }],
     policy: taskAgentPolicy(sourceId),
     callOverride: req.callOverride,
+    contextId,
   };
   const done = (result: AgentResult): AgentRunOutcome => ({ kind: 'result', result, context });
   switch (req.kind) {

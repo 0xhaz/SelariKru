@@ -466,10 +466,11 @@ function routeOf(req: CallRequest, fresh: FreshRoute | null): { lock: RouteLock 
   const policyWith = (lock: RouteLock | null) => effectiveRoutePolicy({ call: req.route!.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock });
   // H5 fix round 3: when the route keeps the call on the device anyway (device only, with the content as it is), what the call reads is judged by its content, so an
   // internal task's device bundle does not lock it. Any cloud-capable route judges a device bundle by where it was built: restricted, so the call locks to the device.
-  if (req.deviceLabels) {
+  // "Keeps it on the device anyway" is judged from the route alone (the server's lock and the call's sources, not what this call reads), so a content lock can never be
+  // what makes a route device-only and so select the content labels.
+  if (req.deviceLabels && policyWith(lockFrom([])).mode === 'ONLY_ON_DEVICE') {
     const lock = lockFrom(req.deviceLabels);
-    const effective = policyWith(lock);
-    if (effective.mode === 'ONLY_ON_DEVICE') return { lock, effective };
+    return { lock, effective: policyWith(lock) };
   }
   const lock = lockFrom(req.labels ?? []);
   return { lock, effective: policyWith(lock) };

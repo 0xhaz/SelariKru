@@ -46,6 +46,8 @@ export interface AgentBaseInput {
   readonly policy: Policy | undefined;
   /** This call only. Never stored, and never relaxes the lock. */
   readonly callOverride?: InferenceMode | null;
+  /** The id the server recorded the served context under (H5 fix round 4). Reported with the route record, so the server judges the output by what it was given. */
+  readonly contextId?: string;
 }
 
 export interface AgentInputs {
@@ -468,7 +470,8 @@ export class AgentCatalog {
       labels: [labelOf(input.task.classification), ...bundleLabels(input.bundle)],
       deviceLabels: [labelOf(input.task.classification), ...bundleContentLabels(input.bundle)],
     });
-    const report = routeReportOf(proposal);
+    const plainReport = routeReportOf(proposal);
+    const report = plainReport !== null && input.contextId !== undefined ? { ...plainReport, contextId: input.contextId } : plainReport;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try { await this.opts.reportRoute(input.projectId, input.task.taskId, report); reported = 'sent'; } catch { reported = 'failed'; }
@@ -513,7 +516,8 @@ export class AgentCatalog {
     // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output. Never for a locked call: a
     // restricted result stays on the device, and even its hash is not sent.
     const diff = kind === 'patch' && proposal.status === 'ok' && proposal.route?.locked !== true ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
-    const report = base !== null && typeof diff === 'string' ? { ...base, outputSha256: sha256Hex(diff) } : base;
+    const withContext = base !== null && input.contextId !== undefined ? { ...base, contextId: input.contextId } : base;
+    const report = withContext !== null && typeof diff === 'string' ? { ...withContext, outputSha256: sha256Hex(diff) } : withContext;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try {

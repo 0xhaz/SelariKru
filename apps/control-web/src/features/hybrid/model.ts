@@ -210,6 +210,7 @@ export const PATCH_ACCEPT_CONSEQUENCE = 'The server checks the change again. The
 const PATCH_ACCEPT_REFUSALS: Readonly<Record<string, string>> = {
   proposal_restricted: `${RESTRICTED_APPLY_REFUSAL}. Nothing was sent.`,
   proposal_from_restricted_call: `This change came from a call that read restricted data. ${RESTRICTED_APPLY_REFUSAL}.`,
+  proposal_from_restricted_context: `This change came from a call whose context held restricted data. ${RESTRICTED_APPLY_REFUSAL}.`,
   route_record_missing: 'The server has no record of where this call ran, so the proposal was not accepted. Propose the change again.',
   task_not_applicable: 'The task is not waiting to start, so the change was not accepted.',
   stale_revision: 'The task has a newer revision. Propose the change again against it.',
@@ -297,6 +298,8 @@ const REVISION_REFUSALS: Readonly<Record<string, string>> = {
   stale_revision: 'The plan changed since this was read, so nothing was recorded. Draft the criteria again.',
   task_not_replannable: 'This task cannot take a new revision in its current state, so nothing was recorded.',
   route_locked_restricted: 'This task reads restricted data, so a browser proposal does not revise it. Nothing was recorded.',
+  proposal_from_restricted_context: 'These criteria came from a call whose context held restricted data, so they stay on this device. Nothing was recorded.',
+  proposal_from_restricted_call: 'These criteria came from a call that read restricted data, so they stay on this device. Nothing was recorded.',
   criterion_unknown: 'A criterion in the proposal is not one this task has, so nothing was recorded.',
   // The plan route's own checks. None of these changes on a retry: the plan, the run's settings or the policy has to change first.
   plan_invalid: 'The revised plan did not pass the plan checks, so the revision was not recorded.',

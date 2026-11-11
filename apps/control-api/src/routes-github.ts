@@ -3,6 +3,7 @@ import { ownerPrDescription } from '@selarikru/domain';
 import { evaluate } from '@selarikru/policy';
 import { z } from 'zod';
 import { parseBody } from './routes-owner.ts';
+import { agentOutputGuard } from './apply.ts';
 import { runUsageLines } from '@selarikru/workflow';
 import type { FastifyInstance } from 'fastify';
 import type { AppContext, GithubDeps } from './app.ts';
@@ -17,7 +18,11 @@ import { requireRun } from './store.ts';
  * - `POST /v1/runs/:id/pull-request` (owner, gated by the `create_draft_pr` policy) pushes the run's verified candidate and opens the draft PR. The repository comes from the
  *   project row; the request carries no target.
  */
-const PullRequestBodySchema = z.object({ body: z.string().max(20_000).optional() });
+const PullRequestBodySchema = z.object({
+  body: z.string().max(20_000).optional(),
+  /** Set when the description is a browser agent's (H5 fix round 4): the task and route record of that call, judged before anything is sent. */
+  bodyFrom: z.object({ taskId: z.string().min(1).max(200), routeRecordId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/) }).strict().optional(),
+});
 
 export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, github: GithubDeps): void {
   const secret = github.webhookSecret;
@@ -39,7 +44,9 @@ export function registerGithubRoutes(app: FastifyInstance, ctx: AppContext, gith
       if (req.principal?.kind !== 'owner') throw new AppError(403, 'wrong_principal_type', 'owner credentials required');
       const run = await requireRun(ctx.db, ctx.config.tenantId, (req.params as { id: string }).id);
       // The owner's description (H5): untrusted text, redacted and capped, placed ahead of the recorded sections. Any other field is ignored: the target comes from the project.
-      const description = ownerPrDescription(parseBody(PullRequestBodySchema, req.body).body);
+      const parsed = parseBody(PullRequestBodySchema, req.body);
+      if (parsed.bodyFrom && parsed.body) await agentOutputGuard(ctx.db, { tenantId: ctx.config.tenantId, projectId: run.projectId, taskId: parsed.bodyFrom.taskId }, parsed.bodyFrom.routeRecordId, 'prDescription');
+      const description = ownerPrDescription(parsed.body);
       // Evaluated right before the push and PR creation. An absent policy denies.
       const gate = evaluate({ kind: 'create_draft_pr' }, ctx.policy);
       if (gate.decision !== 'allow') throw new AppError(403, 'policy_denied', 'policy does not allow opening a draft pull request', { reason: gate.reason, decision: gate.decision });

@@ -77,6 +77,8 @@ export const PlanRevisionRequestSchema = z
     expectedRevision: Revision,
     idempotencyKey: Key.optional(),
     tasks: z.array(PlanTaskSchema).min(1).max(200),
+    /** Set when the revision carries a browser agent's proposal (H5 fix round 4): the task and the route record of the call. The server judges that call's context. */
+    agentProposal: z.object({ taskId: z.string().min(1).max(200), routeRecordId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/) }).strict().optional(),
   })
   .strict();
 export type PlanRevisionRequest = z.infer<typeof PlanRevisionRequestSchema>;

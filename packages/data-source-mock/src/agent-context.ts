@@ -80,10 +80,15 @@ export function demoTaskContext(state: DemoContextState, task: TaskView, destina
     compilation: null, revisions: [], revocations: [], sourceHead: 0, destination, streamable: destination === 'cloud',
     task: { taskId: task.taskId, baseSha: 'demo', criteria: criteria.map((c) => c.id), dependsOn: task.dependsOn ?? [], paths: allowedPaths },
   });
+  // A restricted sibling's project-wide plan claim (simulated): served to the device context only, labelled restricted, as the server's bundle would carry it.
+  const sibling = state.routes?.tasks[task.taskId]?.restrictedSiblingClaim;
+  const served = sibling !== undefined && destination === 'local'
+    ? { ...bundle, claims: [...bundle.claims, { claimId: `demo_sibling_${localOf(task.taskId)}`, page: 'overview' as const, key: 'task:demo-sibling', heading: sibling, text: 'Simulated: a sibling task\'s plan, labelled restricted.', status: 'current' as const, standing: 'accepted' as const, citations: [{ sourceId: 'plan:demo:sibling', revision: 1, anchor: 'tasks/sibling' }], classification: 'restricted' as const }], contentLabel: 'restricted' as const }
+    : sibling !== undefined ? { ...bundle, omissions: [...bundle.omissions, { kind: 'source' as const, id: 'plan:demo:sibling', reason: 'restricted_for_destination' as const }] } : bundle;
   return {
     taskId: task.taskId, revision: task.revision, runId: task.runId, planRevision: state.planRevision, destination,
     task: { title: task.title ?? task.taskId, description: null, criteria, allowedPaths, classification: label },
-    bundle, change: task.attemptIds.length > 0 ? demoChange(task.taskId) : null, simulated: true,
+    bundle: served, change: task.attemptIds.length > 0 ? demoChange(task.taskId) : null, simulated: true,
   };
 }
 

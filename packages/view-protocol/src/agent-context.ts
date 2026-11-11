@@ -44,6 +44,8 @@ export const CriteriaRevisionRequestSchema = z.strictObject({
   expectedPlanRevision: z.number().int().min(0),
   idempotencyKey: Id,
   criteria: z.array(z.strictObject({ id: Id, text: z.string().trim().min(1).max(400) })).min(1),
+  /** The route record of the agent call that proposed these criteria (H5 fix round 4): the server judges what that call was given to read. */
+  routeRecordId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/).optional(),
 });
 export type CriteriaRevisionRequest = z.infer<typeof CriteriaRevisionRequestSchema>;
 

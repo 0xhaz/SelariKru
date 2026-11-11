@@ -82,8 +82,11 @@ export interface HybridResults {
   readonly results: Readonly<Record<string, StepResult>>;
   /** The pull request description field, per run: filled from an accepted proposal, then the owner's to edit. */
   readonly prBody: Readonly<Record<string, string>>;
+  /** Where each run's description came from, when an agent wrote it: the task and its call's route record, which the server judges before sending it (fix round 4). */
+  readonly prBodyFrom: Readonly<Record<string, { readonly taskId: string; readonly routeRecordId: string }>>;
   set(key: string, r: StepResult | null): void;
-  setPrBody(runId: string, body: string): void;
+  /** `from`: the agent call it came from; omitted to keep the one already set (the owner editing the agent's text). */
+  setPrBody(runId: string, body: string, from?: { readonly taskId: string; readonly routeRecordId: string }): void;
 }
 
 export const resultKey = (taskId: string, kind: AgentActionKind): string => `${taskId}|${kind}`;
@@ -91,13 +94,14 @@ export const resultKey = (taskId: string, kind: AgentActionKind): string => `${t
 export const hybridResults: StoreApi<HybridResults> = createStore<HybridResults>()((set) => ({
   results: {},
   prBody: {},
+  prBodyFrom: {},
   set: (key, r) => set((s) => {
     const next = { ...s.results };
     if (r === null) delete next[key];
     else next[key] = r;
     return { results: next };
   }),
-  setPrBody: (runId, body) => set((s) => ({ prBody: { ...s.prBody, [runId]: body } })),
+  setPrBody: (runId, body, from) => set((s) => ({ prBody: { ...s.prBody, [runId]: body }, prBodyFrom: from ? { ...s.prBodyFrom, [runId]: from } : s.prBodyFrom })),
 }));
 
 export const useHybridResults = <T,>(pick: (s: HybridResults) => T): T => useStore(hybridResults, pick);

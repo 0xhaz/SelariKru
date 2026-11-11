@@ -107,7 +107,7 @@ function routeOf(c: AuthorizedViewCommand): Route {
     case 'approval.deny': return { path: `/v1/approvals/${enc(c.args.approvalId)}/resolve`, body: { decision: 'deny', scopeHash: c.args.scopeHash, expectedRevision: c.expectedRevision, ...key } };
     case 'run.accept_reduced_scope': return { path: `/v1/runs/${enc(c.args.runId)}/accept-reduced-scope`, body: { expectedPlanRevision: c.expectedRevision, notDeliveredHash: c.args.notDeliveredHash, ...(c.args.note !== undefined ? { note: c.args.note } : {}), ...key } };
     case 'run.reverify': return { path: `/v1/runs/${enc(c.args.runId)}/reverify`, body: { expectedPlanRevision: c.expectedRevision, ...key } };
-    case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: c.args.body !== undefined && c.args.body.trim() !== '' ? { body: c.args.body } : {} };
+    case 'run.open_pull_request': return { path: `/v1/runs/${enc(c.args.runId)}/pull-request`, body: c.args.body !== undefined && c.args.body.trim() !== '' ? { body: c.args.body, ...(c.args.bodyFrom ? { bodyFrom: c.args.bodyFrom } : {}) } : {} };
     // Needs the project's recorded setup first, so `execute` builds this route itself.
     case 'run.start_new': throw new Error('run.start_new is routed by execute');
     case 'assignment.set': return { path: `/v1/projects/${enc(c.args.projectId)}/model-assignments`, body: { scope: c.args.scope, key: c.args.key, selection: c.args.selection, expectedRevision: c.expectedRevision, ...key } };
@@ -195,8 +195,8 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
     }
   }
 
-  const readTaskContext = (projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null): Promise<TaskAgentContext> =>
-    readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context?destination=${destination}${callOverride ? `&callOverride=${encodeURIComponent(callOverride)}` : ''}`, {
+  const readTaskContext = (projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null, contextId?: string): Promise<TaskAgentContext> =>
+    readJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/context?destination=${destination}${callOverride ? `&callOverride=${encodeURIComponent(callOverride)}` : ''}${contextId ? `&contextId=${encodeURIComponent(contextId)}` : ''}`, {
       parse: (v: unknown) => {
         const c = TaskAgentContextSchema.parse(v);
         if (c.destination !== destination || c.taskId !== taskId) throw new Error('context for another destination or task');
@@ -315,7 +315,7 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       if (r.criteria.some((c) => !ids.has(c.id))) throw fail({ code: 'invalid_event', message: 'criterion_unknown: a criterion is not one this task has; nothing was sent', retryable: false });
       const reworded = new Map(r.criteria.map((c) => [c.id, c.text]));
       const tasks = [{ ...spec, revision: context.revision + 1, criteria: current.map((c) => ({ ...c, text: reworded.get(c.id) ?? c.text })) }];
-      const done = await readJson(`/v1/runs/${encodeURIComponent(context.runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false, { expectedRevision: r.expectedPlanRevision, idempotencyKey: r.idempotencyKey, tasks }, true);
+      const done = await readJson(`/v1/runs/${encodeURIComponent(context.runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false, { expectedRevision: r.expectedPlanRevision, idempotencyKey: r.idempotencyKey, tasks, ...(r.routeRecordId ? { agentProposal: { taskId: r.taskId, routeRecordId: r.routeRecordId } } : {}) }, true);
       return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
     },
 

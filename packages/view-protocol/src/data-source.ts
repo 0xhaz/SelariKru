@@ -71,7 +71,7 @@ export interface EngineeringDataSource {
    * What a task's AI agents read, with the context bundle served for `destination` (`cloud` for any cloud-capable route). The source refuses `cloud` when the
    * task's route, with this call's override, keeps it on the device (`context_destination_refused`). Owner only. Absent: this source cannot run the task agents.
    */
-  getTaskContext?(projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null): Promise<TaskAgentContext>;
+  getTaskContext?(projectId: string, taskId: string, destination: 'local' | 'cloud', callOverride?: string | null, contextId?: string): Promise<TaskAgentContext>;
   /** The task's agent input size and whether it has a change, for one destination: counts only, refused like the context. */
   getTaskContextSize?(projectId: string, taskId: string, destination: 'local' | 'cloud'): Promise<TaskContextSize>;
   /** An accepted criteria proposal, through the replan path: a new revision of the task with its criteria reworded. Absent: this source cannot replan. */

@@ -214,7 +214,7 @@ function ProposalBody({ h, task, kind, outcome }: { h: HybridValue; task: TaskVi
           <dt className="text-muted">Next step</dt><dd className="m-0 text-fg">{String(data['nextStep'] ?? '')}</dd>
         </dl>
       );
-    case 'prDescription': return <PrProposal task={task} title={String(data['title'] ?? '')} body={String(data['body'] ?? '')} locked={outcome.result.locked} />;
+    case 'prDescription': return <PrProposal task={task} title={String(data['title'] ?? '')} body={String(data['body'] ?? '')} locked={outcome.result.locked} routeRecordId={outcome.result.report?.requestId ?? null} />;
   }
 }
 
@@ -229,7 +229,7 @@ function CriteriaProposal({ h, task, data, outcome }: { h: HybridValue; task: Ta
     setConfirm(null);
     setState({ phase: 'working' });
     try {
-      const r = await revise({ taskId: task.taskId, expectedPlanRevision: outcome.context.planRevision, idempotencyKey: `criteria-${outcome.result.proposal.requestId}`, criteria: data.acceptanceCriteria.map((c) => ({ id: c.requirementId, text: c.text })) });
+      const r = await revise({ taskId: task.taskId, expectedPlanRevision: outcome.context.planRevision, idempotencyKey: `criteria-${outcome.result.proposal.requestId}`, criteria: data.acceptanceCriteria.map((c) => ({ id: c.requirementId, text: c.text })), ...(outcome.result.report ? { routeRecordId: outcome.result.report.requestId } : {}) });
       h.refresh();
       setState({ phase: 'done', text: r.simulated ? `Criteria revision recorded in the demo as plan revision ${r.planRevision}. Demo data, not evidence.` : `Plan revision ${r.planRevision} created with the reworded criteria. The task is planned again from its new revision.` });
     } catch (e) {
@@ -323,14 +323,14 @@ function PatchProposal({ h, task, data, outcome }: { h: HybridValue; task: TaskV
   );
 }
 
-function PrProposal({ task, title, body, locked }: { task: TaskView; title: string; body: string; locked: boolean }) {
+function PrProposal({ task, title, body, locked, routeRecordId }: { task: TaskView; title: string; body: string; locked: boolean; routeRecordId: string | null }) {
   const id = useId();
   const field = useHybridResults((s) => s.prBody[task.runId]);
   return (
     <div className="space-y-1.5">
       <p className="font-medium text-fg">{title}</p>
       <p className="whitespace-pre-wrap text-fg">{body}</p>
-      <button type="button" className={buttonQuiet} disabled={locked} onClick={() => hybridResults.getState().setPrBody(task.runId, `${title}\n\n${body}`)}>Use as PR description</button>
+      <button type="button" className={buttonQuiet} disabled={locked} onClick={() => hybridResults.getState().setPrBody(task.runId, `${title}\n\n${body}`, routeRecordId !== null ? { taskId: task.taskId, routeRecordId } : undefined)}>Use as PR description</button>
       {locked ? <p className="text-sm text-muted" data-testid="pr-locked">This text came from restricted data. It stays on this device, so it is not used as a pull request description.</p> : null}
       {field !== undefined ? (
         <div>

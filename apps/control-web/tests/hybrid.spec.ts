@@ -88,7 +88,7 @@ test('run an agent on demo data, see its proposal with checks, source and timing
   // The route record went through the route.report command, metadata only.
   const reports = (await commands(page)).filter((c) => c.command === 'route.report');
   expect(reports).toHaveLength(1);
-  expect(Object.keys(reports[0]!.args['report'] as object).sort()).toEqual(['blockedReason', 'callOverride', 'kind', 'model', 'observedSource', 'requestId', 'requestedMode', 'status', 'stepKind', 'timing', 'validation']);
+  expect(Object.keys(reports[0]!.args['report'] as object).sort()).toEqual(['blockedReason', 'callOverride', 'contextId', 'kind', 'model', 'observedSource', 'requestId', 'requestedMode', 'status', 'stepKind', 'timing', 'validation']);
   // The office's activity feed and the row's chip follow the record.
   await expect(runsOnIn(page, T('search'))).toContainText('Ran on this device');
   // A one-call override sends this call to the cloud and nothing else changes.
@@ -145,6 +145,17 @@ test('a restricted task\'s proposed change is never accepted: it is applied by t
   await expect(patch.getByRole('button', { name: 'Accept and apply' })).toBeDisabled();
   await expect(patch.getByTestId('patch-accept-note')).toHaveText('Restricted work is applied by the local runner on this device. This proposal stays here and is not sent.');
   await axe(page);
+});
+
+test('an internal task on Local only whose context holds a restricted sibling plan claim locks its call, and its change cannot be accepted (H5 fix round 4)', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  await row(page, T('integrate')).getByRole('button', { name: 'Integrate feedback board' }).click();
+  const patch = action(page, 'patch');
+  await patch.getByRole('button', { name: 'Propose change' }).click();
+  await expect(patch.getByTestId('agent-result')).toHaveAttribute('data-status', 'ok');
+  await expect(patch.getByRole('button', { name: 'Accept and apply' })).toBeDisabled();
+  await expect(patch.getByTestId('patch-accept-note')).toHaveText('Restricted work is applied by the local runner on this device. This proposal stays here and is not sent.');
 });
 
 test('the run default is set in Settings › Workflow, seeded from setup', async ({ page }) => {

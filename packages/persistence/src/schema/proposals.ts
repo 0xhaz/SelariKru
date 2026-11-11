@@ -51,3 +51,26 @@ export const acceptedProposals = pgTable(
     check('accepted_proposals_state', sql`${t.state} IN ('accepted', 'applying', 'applied', 'failed', 'superseded')`),
   ],
 );
+
+/**
+ * What the server served one browser agent call to read (H5 fix round 4): the strongest label in the task context it handed out (the task's own label and every
+ * served claim's), keyed by the context id the browser sent and later reports with its route record. Ids and a label only. Insert-only, no lock: an accept, an agent
+ * criteria revision and an agent-written PR body read it to refuse output built from restricted context, whatever the browser says about its own lock.
+ */
+export const agentContexts = pgTable(
+  'agent_contexts',
+  {
+    ...scope(),
+    contextId: text('context_id').notNull(),
+    taskId: text('task_id').notNull(),
+    revision: integer('revision').notNull(),
+    destination: text('destination').notNull(),
+    contentLabel: text('content_label').notNull(),
+    servedAt: tstz('served_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.contextId] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+    check('agent_contexts_destination', sql`${t.destination} IN ('local', 'cloud')`),
+  ],
+);

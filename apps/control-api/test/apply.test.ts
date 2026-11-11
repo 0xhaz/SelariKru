@@ -3,7 +3,7 @@ import { APPLY_HARNESS_REPORT, APPLY_LIMITS, RESTRICTED_APPLY_REFUSAL, sha256Hex
 import { schema } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import { FileRelay } from '../src/apply.ts';
-import { PROJECT, TENANT, TEST_RUNNER_REPORT, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
+import { PROJECT, RUN, TENANT, TEST_RUNNER_REPORT, bearer, enrolRunner, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
 
 let t: TestDb;
 let h: Harness;
@@ -26,10 +26,14 @@ const proposal = (over: Partial<AcceptedProposal> = {}): AcceptedProposal => ({
 const URL = `/v1/projects/${PROJECT}/tasks/t1/proposals/accept`;
 const accept = (p: unknown, key = `k-${Math.random()}`) => post(h.app, URL, { idempotencyKey: key, proposal: p });
 let rid = 0;
-const routeRecord = (requestId = 'req_1', over: Record<string, unknown> = {}, diff = DIFF) => t.db.insert(schema.clientReports).values({
-  tenantId: TENANT, projectId: PROJECT, reportId: `rpt_${(rid += 1)}`, subjectKind: 'task', subjectId: 't1', kind: 'route', trust: 'untrusted',
-  payload: { requestId, stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(diff), ...over }, reportedBy: 'owner_uid_1',
-});
+/** The browser's route record of a call, and the context the server served it (internal unless said otherwise), as the context read records it. */
+const routeRecord = async (requestId = 'req_1', over: Record<string, unknown> = {}, diff = DIFF, served: string | null = 'internal', taskId = 't1') => {
+  if (served !== null) await t.db.insert(schema.agentContexts).values({ tenantId: TENANT, projectId: PROJECT, contextId: `ctx_${requestId}`, taskId, revision: 1, destination: 'local', contentLabel: served, servedAt: new Date() });
+  await t.db.insert(schema.clientReports).values({
+    tenantId: TENANT, projectId: PROJECT, reportId: `rpt_${(rid += 1)}`, subjectKind: 'task', subjectId: taskId, kind: 'route', trust: 'untrusted',
+    payload: { requestId, stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(diff), contextId: `ctx_${requestId}`, ...over }, reportedBy: 'owner_uid_1',
+  });
+};
 
 describe('accepting a patch proposal (H5)', () => {
   beforeEach(async () => {
@@ -257,5 +261,57 @@ describe('fix round 1: the relay (I4, M3)', () => {
       expect([third.status, third.body.error.code]).toEqual([429, 'too_many_file_requests']);
     }, { timeout: 300, interval: 20 });
     await Promise.all(waiting);
+  });
+});
+
+describe('fix round 4: output from a call that read restricted context is refused by the server (backstop)', () => {
+  beforeEach(async () => { await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'] })); });
+
+  it('a tampered client that reports locked: false is still refused when the served context was restricted, or was never recorded', async () => {
+    await routeRecord('req_1', { locked: false }, DIFF, 'restricted');
+    const restricted = await accept(proposal());
+    expect([restricted.status, restricted.body.error.code, restricted.body.error.details.reason]).toEqual([409, 'proposal_from_restricted_context', 'restricted_context']);
+    await routeRecord('req_2', { locked: false }, DIFF, null);
+    const unrecorded = await accept(proposal({ proposalId: 'req_2', routeRecordId: 'req_2' }));
+    expect([unrecorded.body.error.code, unrecorded.body.error.details.reason]).toEqual(['proposal_from_restricted_context', 'context_not_recorded']);
+    await routeRecord('req_3', { locked: false, contextId: undefined }, DIFF, null);
+    expect((await accept(proposal({ proposalId: 'req_3', routeRecordId: 'req_3' }))).body.error.code).toBe('proposal_from_restricted_context');
+    expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM accepted_proposals`))[0]!['n'])).toBe(0);
+  });
+
+  it('an agent criteria revision is refused the same way', async () => {
+    await routeRecord('req_c', { stepKind: 'criteria', locked: false }, DIFF, 'restricted');
+    const spec = specFor('t1', { baseSha: BASE, allowedPaths: ['src'], criteria: [{ id: 'R1', text: 'x' }], requirementIds: ['R1'] });
+    const res = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 0, idempotencyKey: 'k', tasks: [{ ...spec, revision: 2 }], agentProposal: { taskId: 't1', routeRecordId: 'req_c' } });
+    expect([res.status, res.body.error.code]).toEqual([409, 'proposal_from_restricted_context']);
+  });
+});
+
+describe('fix round 4: a restricted sibling\'s project-wide plan claim, through the real API', () => {
+  it('the internal task\'s device context records restricted content; its claims carry their labels; accept refuses the tampered unlocked call', async () => {
+    await seedTask(t.db, specFor('t1', { baseSha: BASE, allowedPaths: ['src'] }));
+    await t.db.execute(sql`UPDATE runs SET setup_snapshot = ${JSON.stringify({ blueprintVersion: 1, execution: 'local', inference: 'ONLY_ON_DEVICE', agentBudgetUsd: 10, repository: null, defaultBranch: null, baseSha: null })}::jsonb WHERE run_id = ${RUN}`);
+    // A restricted sibling in the same plan: the Brain snapshots the plan into project-wide plan sources, one per task, each with its task's label.
+    await seedTask(t.db, specFor('t2', { title: 'SECRET merger codename Falcon', baseSha: BASE, allowedPaths: ['src'], classification: 'restricted' }));
+    // The periodic pass compiles the project's records into the Brain, as it does in the product.
+    await t.db.execute(sql`UPDATE runs SET plan_revision = 1 WHERE run_id = ${RUN}`);
+    expect((await get(h.app, `/v1/projects/${PROJECT}/brain`)).status).toBe(200);
+    const ctx = await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/context?destination=local&contextId=ctx_sib`);
+    expect(ctx.status).toBe(200);
+    expect(ctx.body.task.classification).toBe('internal');
+    expect(ctx.body.bundle.claims.find((c: { key: string }) => c.key === 'task:t2')).toMatchObject({ classification: 'restricted' });
+    expect(JSON.stringify(ctx.body.bundle)).toContain('Falcon');
+    expect(ctx.body.bundle.contentLabel).toBe('restricted');
+    const [row] = await t.db.execute(sql`SELECT content_label FROM agent_contexts WHERE context_id = 'ctx_sib'`);
+    expect(row!['content_label']).toBe('restricted');
+    // A client that says its call was not locked, and names that context.
+    await t.db.insert(schema.clientReports).values({ tenantId: TENANT, projectId: PROJECT, reportId: 'rpt_sib', subjectKind: 'task', subjectId: 't1', kind: 'route', trust: 'untrusted', payload: { requestId: 'req_1', stepKind: 'patch', status: 'ok', locked: false, outputSha256: sha256Hex(DIFF), contextId: 'ctx_sib' }, reportedBy: 'owner_uid_1' });
+    expect((await accept(proposal())).body.error.code).toBe('proposal_from_restricted_context');
+    // The cloud context of the same task leaves the restricted claim out and is internal.
+    await t.db.execute(sql`UPDATE runs SET setup_snapshot = ${JSON.stringify({ blueprintVersion: 1, execution: 'local', inference: 'PREFER_ON_DEVICE', agentBudgetUsd: 10, repository: null, defaultBranch: null, baseSha: null })}::jsonb WHERE run_id = ${RUN}`);
+    const cloud = await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/context?destination=cloud&contextId=ctx_cloud`);
+    expect(cloud.body.bundle.claims.map((c: { key: string }) => c.key)).not.toContain('task:t2');
+    expect(JSON.stringify(cloud.body.bundle)).not.toContain('Falcon');
+    expect((await t.db.execute(sql`SELECT content_label FROM agent_contexts WHERE context_id = 'ctx_cloud'`))[0]!['content_label']).toBe('internal');
   });
 });

@@ -19,6 +19,11 @@ export interface FixtureTaskRoute {
   readonly override?: RoutePolicyMode;
   readonly inputChars?: number | null;
   readonly observed?: { readonly sec: number; readonly stepKind: RouteStepKind; readonly source: RouteRecord['observedSource']; readonly totalMs: number };
+  /**
+   * H5 fix round 4: the demo of a restricted sibling's project-wide plan claim. The task's own label stays internal, but its device context serves that claim, so on a
+   * device-only route its calls lock to the device and nothing they produce is accepted. The cloud context leaves the claim out.
+   */
+  readonly restrictedSiblingClaim?: string;
 }
 
 /** The demo's stand-in for a model id: what the pinned Firebase AI Logic cloud model would report. Never a real call. */

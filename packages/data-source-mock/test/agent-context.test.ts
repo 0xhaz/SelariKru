@@ -10,6 +10,16 @@ const setup = async () => {
 };
 const id = (local: string) => scoped('feature-delivery', local);
 
+/** What the browser does before an accept: read the context under an id, then report the call with that id. */
+async function prime(ds: Awaited<ReturnType<typeof setup>>['ds'], projectId: string, taskId: string, requestId: string, stepKind = 'patch'): Promise<void> {
+  await ds.getTaskContext!(projectId, taskId, 'local', null, `ctx_${requestId}`);
+  const receipt = await ds.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: `r-${requestId}`, args: { projectId, taskId, report: {
+    kind: 'route', requestId, stepKind, callOverride: null, requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE', status: 'ok', model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' },
+    timing: { totalMs: 10, firstOutputMs: null }, validation: 'passed', blockedReason: null, contextId: `ctx_${requestId}`,
+  } } } as never);
+  expect(receipt.accepted).toBe(true);
+}
+
 describe('mock task context for the agents (H4)', () => {
   it('serves simulated context for the asked destination, with the task\'s label, criteria and allowed paths', async () => {
     const { ds, projectId } = await setup();
@@ -105,7 +115,7 @@ describe('mock accepted proposals and base files (H5)', () => {
     const ctx = await ds.getTaskContext!(projectId, taskId, 'local');
     const path = `${ctx.task.allowedPaths[0]}/demo-proposal.ts`;
     const content = 'export const DEMO_LIMIT = 50;\n';
-    return { proposalId: 'req_demo', taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'rr_demo', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+export const DEMO_LIMIT = 50;\n`, results: [{ path, sha256: sha256Hex(content), content }] };
+    return { proposalId: 'req_demo', taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'req_demo', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+export const DEMO_LIMIT = 50;\n`, results: [{ path, sha256: sha256Hex(content), content }] };
   };
 
   it('serves demo base files for a task, and none for a restricted one', async () => {
@@ -121,6 +131,7 @@ describe('mock accepted proposals and base files (H5)', () => {
     const snap = await ds.getSnapshot(projectId);
     const waiting = Object.values(snap.tasks).find((t) => (t.status === 'ready' || t.status === 'planned') && t.taskId !== id('e2e'))!;
     const p = await demoProposal(ds, projectId, waiting.taskId);
+    await prime(ds, projectId, waiting.taskId, 'req_demo');
     const seen: string[] = [];
     const stop = ds.subscribe(projectId, snap.meta.cursor, (e) => seen.push(e.type), () => {});
     expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toMatchObject({ proposalId: 'req_demo', state: 'accepted', fileCount: 1, simulated: true });
@@ -152,9 +163,28 @@ describe('fix round 1: mock listing and repeated accepts (H5)', () => {
     const path = `${ctx.task.allowedPaths[0]}/x.ts`;
     const p = { proposalId: 'req_x', taskId: waiting.taskId, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'req_x', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+x\n`, results: [{ path, sha256: sha256Hex('x\n'), content: 'x\n' }] };
     expect(await ds.getProposalState!(projectId, waiting.taskId, 'req_x')).toBeNull();
+    await prime(ds, projectId, waiting.taskId, 'req_x');
     const first = await ds.acceptPatchProposal!(projectId, p, 'k1');
     expect(await ds.acceptPatchProposal!(projectId, p, 'k1')).toEqual(first);
     expect(await ds.getProposalState!(projectId, waiting.taskId, 'req_x')).toEqual(first);
     await expect(ds.acceptPatchProposal!(projectId, p, 'k2')).rejects.toThrow(/^proposal_already_accepted:/);
+  });
+});
+
+describe('fix round 4: the demo shows a restricted sibling claim locking a Local only task', () => {
+  it('the integrate task\'s device context serves a restricted sibling plan claim; the cloud context leaves it out; a proposal from it is refused', async () => {
+    const { ds, projectId } = await setup();
+    const t = id('integrate');
+    const local = await ds.getTaskContext!(projectId, t, 'local');
+    expect(local.task.classification).toBe('internal');
+    expect(local.bundle.claims.some((c) => c.classification === 'restricted')).toBe(true);
+    expect(local.bundle.contentLabel).toBe('restricted');
+    const { bundleContentLabels } = await import('@selarikru/domain');
+    expect(bundleContentLabels(local.bundle)).toContain('restricted');
+    await prime(ds, projectId, t, 'req_sib');
+    const { sha256Hex } = await import('@selarikru/domain');
+    const files = await ds.getTaskFiles!(projectId, t);
+    const path = `${local.task.allowedPaths[0]}/x.ts`;
+    await expect(ds.acceptPatchProposal!(projectId, { proposalId: 'req_sib', taskId: t, taskRevision: files.revision, baseSha: files.baseSha, routeRecordId: 'req_sib', diff: `--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+x\n`, results: [{ path, sha256: sha256Hex('x\n'), content: 'x\n' }] }, 'k')).rejects.toThrow(/^proposal_from_restricted_context:/);
   });
 });

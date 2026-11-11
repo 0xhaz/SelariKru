@@ -92,9 +92,10 @@ describe('a proposal accepted in the browser becomes a verified candidate, with 
         proposalId: 'req_e2e', taskId: 'T1', taskRevision: 1, baseSha: w.sha, routeRecordId: 'req_e2e', diff: DIFF,
         results: [...checked.results].map(([path, content]) => ({ path, sha256: content === null ? null : sha256Hex(content), content })),
       };
-      // The browser's route record of the patch call (route.report).
+      // The browser's route record of the patch call (route.report), naming the context the server served it (read under that id).
+      expect((await app.inject({ method: 'GET', url: `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_e2e`, headers: owner })).statusCode).toBe(200);
       await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by)
-        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_e2e', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(DIFF) })}::jsonb, 'owner')`);
+        VALUES (${TENANT}, ${PROJECT}, 'rpt_e2e', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_e2e', stepKind: 'patch', status: 'ok', outputSha256: sha256Hex(DIFF), contextId: 'ctx_e2e' })}::jsonb, 'owner')`);
 
       // 3. Accept.
       const accepted = await app.inject({ method: 'POST', url: `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, headers: owner, payload: { idempotencyKey: 'e2e', proposal } });
@@ -173,7 +174,7 @@ describe('a local agent\'s change on Local only is accepted and applied (H5 fix 
       const fetchRoute = async (_p: string, taskId: string) => (await call('GET', `/v1/projects/${PROJECT}/tasks/${taskId}/route`)).body.route;
       const route = await fetchRoute(PROJECT, 'T1');
       expect(route).toMatchObject({ effective: 'ONLY_ON_DEVICE', lock: null });
-      const ctx = (await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local`)).body;
+      const ctx = (await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_local`)).body;
       const listing = (await call('POST', `/v1/projects/${PROJECT}/tasks/T1/files/list`, {})).body;
       const read = (await call('POST', `/v1/projects/${PROJECT}/tasks/T1/files`, { paths: selectFilesByName(listing.entries, [ctx.task.title, ...ctx.task.criteria.map((c: { text: string }) => c.text)]) })).body;
       const specs: { mode: string }[] = [];
@@ -188,7 +189,7 @@ describe('a local agent\'s change on Local only is accepted and applied (H5 fix 
         projectId: PROJECT, task: { taskId: 'T1', title: ctx.task.title, description: ctx.task.description, criteria: ctx.task.criteria, allowedPaths: ctx.task.allowedPaths, classification: ctx.task.classification },
         bundle: ctx.bundle, sources: [{ id: sourceId, classification: ctx.task.classification }],
         policy: { policyVersion: 'task-route.1', selectedSources: [sourceId], destinations: [{ destination: 'firebase-ai-logic-cloud', purpose: 'inference', classifications: ['public', 'internal'] }] } as never,
-        files: read.files.map((f: { path: string; content: string }) => ({ ...f, classification: ctx.task.classification })),
+        files: read.files.map((f: { path: string; content: string }) => ({ ...f, classification: ctx.task.classification })), contextId: 'ctx_local',
       });
       expect(r.proposal.status).toBe('ok');
       expect(r.locked).toBe(false);
@@ -210,6 +211,63 @@ describe('a local agent\'s change on Local only is accepted and applied (H5 fix 
     } finally {
       stop.abort();
       await running;
+      await app.close();
+    }
+  });
+});
+
+describe('a restricted sibling\'s project-wide plan claim keeps a Local only task\'s output on the device (H5 fix round 4)', () => {
+  it('through the real API, adapter and catalog: the call locks, sends no hash, and accept, criteria and a tampered unlocked report are all refused', async () => {
+    await resetDb(t.db);
+    const clock = testClock(new Date().toISOString());
+    const config = testConfig({ codingWorkers: 'off' });
+    const app = buildApp({ config, db: t.db, verifier: fakeVerifier, now: clock.now, policy: { ...POLICY, operations: { assign_replan_tasks: 'allow' } } as typeof POLICY, scheduler: createScheduler({ catalog: TEST_CATALOG, db: t.db, now: clock.now, policy: POLICY, codingWorkers: 'off' }), catalog: TEST_CATALOG });
+    try {
+      const owner = { authorization: `Bearer ${OWNER_TOKEN}` };
+      const call = async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
+        const res = await app.inject({ method, url, headers: owner, ...(payload !== undefined ? { payload: payload as object } : {}) });
+        return { status: res.statusCode, body: res.json() as any };
+      };
+      const base = 'e'.repeat(40);
+      await seedTask(t.db, specFor('T1', { baseSha: base, allowedPaths: ['src'], projectId: PROJECT, title: 'Add posts', criteria: [{ id: 'R1', text: 'Posts appear.' }], requirementIds: ['R1'] }));
+      await seedTask(t.db, specFor('T2', { baseSha: base, allowedPaths: ['src'], projectId: PROJECT, title: 'SECRET merger codename Falcon', classification: 'restricted' }));
+      await t.db.execute(sql`UPDATE runs SET plan_revision = 1 WHERE run_id = ${RUN}`);
+      expect((await call('POST', `/v1/projects/${PROJECT}/settings`, { key: RUN, change: { scope: 'run', field: 'route_policy', value: 'ONLY_ON_DEVICE' }, expectedRevision: 0, idempotencyKey: 'local-only' })).status).toBe(200);
+      expect((await call('GET', `/v1/projects/${PROJECT}/brain`)).status).toBe(200);
+      const fetchRoute = async (_p: string, taskId: string) => (await call('GET', `/v1/projects/${PROJECT}/tasks/${taskId}/route`)).body.route;
+      expect(await fetchRoute(PROJECT, 'T1')).toMatchObject({ effective: 'ONLY_ON_DEVICE', lock: null });
+      const ctx = (await call('GET', `/v1/projects/${PROJECT}/tasks/T1/context?destination=local&contextId=ctx_sib`)).body;
+      expect(ctx.task.classification).toBe('internal');
+      expect(JSON.stringify(ctx.bundle)).toContain('Falcon');
+      const sdk = { availability: async () => 'available' as const, initializeDeviceModel: async () => {}, createModel: () => ({ generate: async (prompt: string) => ({ text: prompt.includes('unified diff') ? JSON.stringify({ summary: 'Add posts.', diff: '--- /dev/null\n+++ b/src/posts.ts\n@@ -0,0 +1 @@\n+export const posts = [];\n' }) : JSON.stringify({ acceptanceCriteria: [{ requirementId: 'R1', text: 'Posts appear in the list.' }] }), inferenceSource: 'on_device' as const }) }) };
+      const adapter = new FirebaseHybridAssistantAdapter({ sdk: sdk as never, fetchRoute });
+      const catalog = new AgentCatalog(adapter, { reportRoute: async (_p, taskId, report) => { expect((await call('POST', `/v1/tasks/${taskId}/client-reports`, report)).status).toBe(201); } });
+      const sourceId = 'task:T1';
+      const input = {
+        projectId: PROJECT, task: { taskId: 'T1', title: ctx.task.title, description: ctx.task.description, criteria: ctx.task.criteria, allowedPaths: ctx.task.allowedPaths, classification: ctx.task.classification },
+        bundle: ctx.bundle, sources: [{ id: sourceId, classification: ctx.task.classification }], contextId: 'ctx_sib',
+        policy: { policyVersion: 'task-route.1', selectedSources: [sourceId], destinations: [{ destination: 'firebase-ai-logic-cloud', purpose: 'inference', classifications: ['public', 'internal'] }] } as never,
+      };
+      const patch = await catalog.patch({ ...input, files: [] });
+      expect(patch.proposal.status).toBe('ok');
+      expect(patch.locked).toBe(true);
+      expect(patch.report).not.toHaveProperty('outputSha256');
+      const diff = String((patch.proposal.data as { diff: string }).diff);
+      const content = 'export const posts = [];\n';
+      const proposal: AcceptedProposal = { proposalId: patch.proposal.requestId, taskId: 'T1', taskRevision: 1, baseSha: base, routeRecordId: patch.proposal.requestId, diff, results: [{ path: 'src/posts.ts', sha256: sha256Hex(content), content }] };
+      // The server records the call against its own route (the task is not locked there); what refuses it is the context it served.
+      expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a1', proposal })).body.error.code).toBe('proposal_from_restricted_context');
+      // A tampered client: the same output, reported as an unlocked call with its hash, naming the same served context. The server's own record refuses it.
+      await t.db.execute(sql`INSERT INTO client_reports (tenant_id, project_id, report_id, subject_kind, subject_id, kind, trust, payload, reported_by) VALUES (${TENANT}, ${PROJECT}, 'rpt_tamper', 'task', 'T1', 'route', 'untrusted', ${JSON.stringify({ requestId: 'req_tamper', stepKind: 'patch', status: 'ok', locked: false, outputSha256: sha256Hex(diff), contextId: 'ctx_sib' })}::jsonb, 'owner')`);
+      expect((await call('POST', `/v1/projects/${PROJECT}/tasks/T1/proposals/accept`, { idempotencyKey: 'a2', proposal: { ...proposal, proposalId: 'req_tamper', routeRecordId: 'req_tamper' } })).body.error.code).toBe('proposal_from_restricted_context');
+      // Criteria from an agent call on the same context are refused as well.
+      const criteria = await catalog.criteria(input);
+      expect(criteria.locked).toBe(true);
+      const spec = ctx.spec;
+      const revised = await call('POST', `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 1, idempotencyKey: 'c1', tasks: [{ ...spec, revision: 2, criteria: [{ id: 'R1', text: 'Posts appear in the list.' }] }], agentProposal: { taskId: 'T1', routeRecordId: criteria.proposal.requestId } });
+      expect(revised.body.error.code).toBe('proposal_from_restricted_context');
+      expect(Number((await t.db.execute(sql`SELECT count(*)::int AS n FROM accepted_proposals`))[0]!['n'])).toBe(0);
+    } finally {
       await app.close();
     }
   });

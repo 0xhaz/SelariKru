@@ -20,7 +20,7 @@ export const AuthorizedViewCommandSchema = z.discriminatedUnion('command', [
   // Starts a new run in a project whose earlier run has spent its budget. `expectedRevision` is not used (a new run has none) and is sent as 0; the server sets the budget at the project's recorded ceiling.
   z.object({ command: z.literal('run.start_new'), ...base, args: z.object({ projectId: Id, title: z.string().trim().min(1).max(200) }).strict() }).strict(),
   // `body`: the owner's pull request description (a browser proposal the owner chose). The server redacts secret-shaped values, caps it and puts it ahead of the recorded sections.
-  z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id, body: z.string().max(20_000).optional() }).strict() }).strict(),
+  z.object({ command: z.literal('run.open_pull_request'), ...base, args: z.object({ runId: Id, body: z.string().max(20_000).optional(), bodyFrom: z.object({ taskId: Id, routeRecordId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/) }).strict().optional() }).strict() }).strict(),
   // Sets or removes one assignment; `expectedRevision` is that assignment's revision (0 if never set). It applies to the next attempt only, and has no secret fields.
   z.object({ command: z.literal('assignment.set'), ...base, args: z.object({ projectId: Id, scope: z.enum(ASSIGNMENT_SCOPES), key: Id, selection: ModelSelectionSchema.nullable() }).strict() }).strict(),
   // Saves one setting; `expectedRevision` is its desired revision (0 if never saved). `key` is the run id or the runner id. A receipt's `applied` is the server's

@@ -163,7 +163,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     const idempotencyKey = keys.current.get(keyId) ?? `decision-${crypto.randomUUID()}`;
     keys.current.set(keyId, idempotencyKey);
     // The pull request description chosen in a task's AI actions goes with the open request (H5).
-    const command = withPrBody({ ...action.intent, idempotencyKey } as AuthorizedViewCommand, hybridResults.getState().prBody);
+    const command = withPrBody({ ...action.intent, idempotencyKey } as AuthorizedViewCommand, hybridResults.getState().prBody, hybridResults.getState().prBodyFrom);
     // The next item in the order shown: what workers ask first, then the rest.
     const shown = cards ? [...cards.filter((c) => FROM_WORKERS.has(c.kind)), ...cards.filter((c) => !FROM_WORKERS.has(c.kind))] : [];
     const index = shown.findIndex((c) => c.id === card.id);
