@@ -4,3 +4,4 @@ export * from './readiness.ts';
 export type * from './sdk.ts';
 export { createFirebaseSdk, type FirebaseSdkConfig } from './firebase-sdk.ts';
 export { RestrictedDraftHold, publishDraft, type LocalDraft, type HoldInput, type PublishedDraft, type ReclassificationGrant, type ReclassificationRequest, draftContentSha256, reclassificationRequest } from './restricted.ts';
+export { AGENT_CATALOG, AgentCatalog, agentJsonSchema, type AgentBaseInput, type AgentCatalogOptions, type AgentDefinition, type AgentFile, type AgentInputs, type AgentOmission, type AgentResult, type AgentTask } from './agents.ts';

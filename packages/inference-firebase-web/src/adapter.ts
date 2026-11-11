@@ -1,5 +1,8 @@
 import { Ajv } from 'ajv';
-import { RoutePolicyModeSchema, effectiveRoutePolicy, routeLockFor, routeOutcome, type RouteConformance, type RoutePolicySource, type RouteRecordReport, type RouteStepKind } from '@selarikru/domain';
+import {
+  DEFAULT_NANO_INPUT_BUDGET_CHARS, RoutePolicyModeSchema, effectiveRoutePolicy, redactSecrets, routeLockFor, routeOutcome, strongerLabel,
+  type EffectiveRoutePolicy, type RouteConformance, type RouteLock, type RoutePolicySource, type RouteRecordReport, type RouteStepKind,
+} from '@selarikru/domain';
 import { resolveInferenceMode, type InferenceMode, type Policy, type Source } from '@selarikru/policy';
 import {
   MODEL_METADATA,
@@ -9,12 +12,13 @@ import {
   payloadSha256,
   systemInstructionFor,
   type ObservedSource,
+  type OnboardingOperation,
   type Operation,
 } from './models.ts';
 import { ReadinessTracker, type Readiness } from './readiness.ts';
 import type { AssistantSdk, SdkModel } from './sdk.ts';
 
-export type { ObservedSource, Operation };
+export type { ObservedSource, OnboardingOperation, Operation };
 
 export interface AssistRequest {
   readonly projectId: string;
@@ -37,6 +41,39 @@ export interface AssistRoute {
   readonly stepKind: RouteStepKind;
   /** This call only. Never stored, and never relaxes the lock. */
   readonly callOverride?: InferenceMode | null;
+}
+
+/**
+ * One single-turn call as the adapter runs it. The onboarding operations and every catalog agent are one of these. The prompt is built only once the route is
+ * known, so what goes into it can depend on where it may run (a cloud-capable call gets only what may leave the device).
+ */
+export interface CallSpec {
+  readonly op: Operation;
+  readonly systemInstruction: string;
+  /** JSON Schema the SDK constrains the output to; Ajv checks the response against it. Already narrowed to this call's criterion IDs. */
+  readonly schema: Readonly<Record<string, unknown>>;
+  /** Tells model instances apart: the operation and its narrowing. */
+  readonly schemaKey: string;
+  /** The output cites criterion IDs, so a call with none is refused. */
+  readonly citesCriteria: boolean;
+  /** Builds the prompt for the route in force. `cloudCapable`: the model may answer from the cloud. A refusal is a code, and blocks the call. */
+  prompt(at: { readonly mode: InferenceMode; readonly cloudCapable: boolean }): { readonly prompt: string } | { readonly refused: string };
+  /** Checks a schema-valid response against the call's context. Codes and JSON paths only, never the response's text. Any entry makes the response invalid. */
+  check?(data: unknown): readonly string[];
+}
+
+/** A catalog agent's request. It always names its task: there is no agent call without a route. */
+export interface AgentCallRequest extends Omit<AssistRequest, 'taskText' | 'route'> {
+  readonly route: AssistRoute;
+  /** Labels of everything else the prompt reads (the task, the files). Restricted locks the call to the device; secret, or anything that is not a label, blocks it. */
+  readonly labels?: readonly unknown[];
+}
+
+/** The prompt's size against the device model's input budget, in characters (system instruction plus prompt). */
+export interface ProposalInput {
+  readonly chars: number;
+  readonly budgetChars: number;
+  readonly overDeviceBudget: boolean;
 }
 
 /** What the adapter needs from a fresh route read. A view-protocol `TaskRouteView` is one. */
@@ -105,6 +142,8 @@ export interface AssistantProposal {
   readonly errorCode: string | null;
   /** Where this call was meant to run and where it did. Absent or null: the request carried no task route, or its route could not be read. */
   readonly route?: ProposalRoute | null;
+  /** Set once a prompt was built. Local only: never part of the route report. */
+  readonly input?: ProposalInput | null;
 }
 
 /**
@@ -132,6 +171,8 @@ export interface AdapterOptions {
   readonly now?: () => number;
   readonly newRequestId?: () => string;
   readonly onTelemetry?: (e: TelemetryEvent) => void;
+  /** The device model's input budget in characters. Default `DEFAULT_NANO_INPUT_BUDGET_CHARS`. Anything but a positive number leaves no room: missing is never unlimited. */
+  readonly nanoInputBudgetChars?: number;
 }
 
 export interface AdapterState {
@@ -154,6 +195,7 @@ export class FirebaseHybridAssistantAdapter {
   private readonly now: () => number;
   private readonly newRequestId: () => string;
   private readonly onTelemetry: ((e: TelemetryEvent) => void) | undefined;
+  private readonly budgetChars: number;
   private readonly ajv = new Ajv({ strict: false, allErrors: true });
   private readonly readiness = new ReadinessTracker();
   private models = new Map<string, SdkModel>();
@@ -167,16 +209,23 @@ export class FirebaseHybridAssistantAdapter {
     this.now = opts.now ?? (() => performance.now());
     this.newRequestId = opts.newRequestId ?? (() => crypto.randomUUID());
     this.onTelemetry = opts.onTelemetry;
+    const b = opts.nanoInputBudgetChars ?? DEFAULT_NANO_INPUT_BUDGET_CHARS;
+    this.budgetChars = Number.isFinite(b) && b > 0 ? Math.floor(b) : 0;
   }
 
   draftBrief(req: AssistRequest): Promise<AssistantProposal> {
-    return this.run('draftBrief', req);
+    return this.run(onboardingSpec('draftBrief', req), req);
   }
   suggestCriteria(req: AssistRequest): Promise<AssistantProposal> {
-    return this.run('suggestCriteria', req);
+    return this.run(onboardingSpec('suggestCriteria', req), req);
   }
   draftTaskPlan(req: AssistRequest): Promise<AssistantProposal> {
-    return this.run('draftTaskPlan', req);
+    return this.run(onboardingSpec('draftTaskPlan', req), req);
+  }
+
+  /** Runs one catalog agent (see agents.ts). The task's route is read before the call and again inside the queue, right before generate. */
+  runAgent(spec: CallSpec, req: AgentCallRequest): Promise<AssistantProposal> {
+    return this.run(spec, req, true);
   }
 
   async getReadiness(): Promise<Readiness> {
@@ -205,11 +254,14 @@ export class FirebaseHybridAssistantAdapter {
     return { projectId: this.projectId, modelInstances: this.models.size, lastProposal: this.last };
   }
 
-  private async run(op: Operation, req: AssistRequest): Promise<AssistantProposal> {
+  private async run(spec: CallSpec, req: CallRequest, needsRoute = false): Promise<AssistantProposal> {
+    const op = spec.op;
     if (req.projectId !== this.projectId) this.setProject(req.projectId);
     const requestId = this.newRequestId();
     const start = this.now();
-    const proposal = await this.execute(op, req, requestId, start);
+    const proposal = needsRoute && !req.route
+      ? this.base(op, req, requestId, start)({ status: 'blocked', blockedReason: 'route_required' })
+      : await this.execute(spec, req, requestId, start);
     this.last = proposal;
     this.onTelemetry?.({
       kind: 'assistant_request',
@@ -226,7 +278,7 @@ export class FirebaseHybridAssistantAdapter {
     return proposal;
   }
 
-  private base(op: Operation, req: AssistRequest, requestId: string, start: number) {
+  private base(op: Operation, req: CallRequest, requestId: string, start: number) {
     return (over: Partial<Mutable<AssistantProposal>>): AssistantProposal => ({
       trust: 'untrusted_proposal',
       status: 'error',
@@ -246,28 +298,35 @@ export class FirebaseHybridAssistantAdapter {
       errorName: null,
       errorCode: null,
       route: null,
+      input: null,
       ...over,
     });
   }
 
-  private async execute(op: Operation, req: AssistRequest, requestId: string, start: number): Promise<AssistantProposal> {
+  /** Reads the task's route fresh. Null when the request names no task; a code when the read failed or cannot be acted on. */
+  private async readRoute(req: CallRequest): Promise<{ fresh: FreshRoute | null } | { failed: 'route_fetch_failed' | 'route_unreadable' }> {
+    if (!req.route) return { fresh: null };
+    let fresh: unknown;
+    try {
+      fresh = await this.fetchRoute(req.projectId, req.route.taskId);
+    } catch {
+      return { failed: 'route_fetch_failed' };
+    }
+    return readableRoute(fresh) ? { fresh } : { failed: 'route_unreadable' };
+  }
+
+  private async execute(spec: CallSpec, req: CallRequest, requestId: string, start: number): Promise<AssistantProposal> {
+    const op = spec.op;
     const plain = this.base(op, req, requestId, start);
     // The task's route, read fresh from the server immediately before this call. A failed or unreadable read blocks: no cached or snapshot route is ever used.
-    let fresh: FreshRoute | null = null;
-    if (req.route) {
-      try {
-        fresh = await this.fetchRoute(req.projectId, req.route.taskId);
-      } catch {
-        return plain({ status: 'blocked', blockedReason: 'route_fetch_failed' });
-      }
-      if (!readableRoute(fresh)) return plain({ status: 'blocked', blockedReason: 'route_unreadable' });
-    }
-    // The lock follows the strongest label of what this call reads, or the server's word.
-    const lock = req.route && fresh ? routeLockFor([...req.sources.map((s) => s.classification), ...(fresh.lock ? ['restricted'] : [])]) : null;
-    const effective = req.route && fresh ? effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock }) : null;
+    const read = await this.readRoute(req);
+    if ('failed' in read) return plain({ status: 'blocked', blockedReason: read.failed });
+    // The lock follows the strongest label of what this call reads, or the server's word. It and the effective policy are replaced if the in-queue read changes them.
+    let current = routeOf(req, read.fresh);
     const make = (over: Partial<Mutable<AssistantProposal>>): AssistantProposal => {
       const p = plain(over);
-      if (!req.route || !effective) return p;
+      if (!req.route || !current) return p;
+      const { lock, effective } = current;
       const ran = p.status === 'ok' || p.status === 'invalid' || p.status === 'route_violation' || p.status === 'unverified_source';
       const outcome = ran ? routeOutcome(effective.mode, p.observedSource, p.requestedMode, lock !== null) : { fellBack: null, conformance: 'unverified' as const, requestModeMismatch: false };
       return {
@@ -280,43 +339,74 @@ export class FirebaseHybridAssistantAdapter {
       };
     };
 
+    // Secret material never goes into a prompt, on any route; a value that is not a label counts as secret.
+    if (req.labels && req.labels.length > 0 && req.labels.reduce<string>((acc, l) => strongerLabel(acc, l), 'public') === 'secret') {
+      return make({ status: 'blocked', blockedReason: 'secret_excluded_from_model_context' });
+    }
     // Policy first, before any SDK call.
-    const routed = resolveInferenceMode(req.sources, req.policy, effective ? effective.mode : undefined);
+    const routed = resolveInferenceMode(req.sources, req.policy, current ? current.effective.mode : undefined);
     if (routed.blocked) return make({ status: 'blocked', blockedReason: routed.reason });
-    if (req.allowedRequirementIds.length === 0) {
+    if (spec.citesCriteria && req.allowedRequirementIds.length === 0) {
       return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: 'no_allowed_requirement_ids' });
     }
 
     // Never let the SDK choose the cloud when policy has no approved fallback.
     const deviceMustServe = routed.mode === 'ONLY_ON_DEVICE' || (routed.mode === 'PREFER_ON_DEVICE' && !routed.allowFallback);
+    const built = spec.prompt({ mode: routed.mode, cloudCapable: !deviceMustServe });
+    if ('refused' in built) return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: built.refused });
+    const systemInstruction = spec.systemInstruction;
+    const prompt = built.prompt;
+    if (redactSecrets(prompt) !== prompt || redactSecrets(systemInstruction) !== systemInstruction) {
+      return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: 'secret_in_input' });
+    }
+
+    // The device model's input budget. Over it, a call that must run on the device is refused, never cut. Local first with an approved fallback goes to the cloud,
+    // as the SDK would when the device cannot serve, and records it: the request says ONLY_IN_CLOUD and the route record shows the fallback.
+    const chars = systemInstruction.length + prompt.length;
+    const input: ProposalInput = { chars, budgetChars: this.budgetChars, overDeviceBudget: chars > this.budgetChars };
+    if (input.overDeviceBudget && deviceMustServe) return make({ status: 'blocked', requestedMode: routed.mode, input, blockedReason: 'input_too_large_for_device' });
+    const requestedMode: InferenceMode = input.overDeviceBudget && routed.mode === 'PREFER_ON_DEVICE' ? 'ONLY_IN_CLOUD' : routed.mode;
+
     if (deviceMustServe) {
       const device = this.readiness.observe(await this.sdk.availability());
       if (device !== 'available') {
-        return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: `device_${device}` });
+        return make({ status: 'blocked', requestedMode, input, blockedReason: `device_${device}` });
       }
     }
 
-    const systemInstruction = systemInstructionFor(op);
-    const schema = narrowSchema(op, req.allowedRequirementIds);
-    const prompt = composePrompt(req.taskText, req.allowedRequirementIds);
     const hash = await payloadSha256(systemInstruction, prompt);
-    const effectiveMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : routed.mode;
-    const key = `${effectiveMode}|${deviceMustServe ? 'nocloud' : 'cloud'}|${op}|${[...req.allowedRequirementIds].join(',')}`;
+    const sdkMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : requestedMode;
+    const key = `${sdkMode}|${deviceMustServe ? 'nocloud' : 'cloud'}|${spec.schemaKey}`;
     let model = this.models.get(key);
     if (!model) {
-      model = this.sdk.createModel({ mode: effectiveMode, allowCloud: !deviceMustServe, systemInstruction, schema });
+      model = this.sdk.createModel({ mode: sdkMode, allowCloud: !deviceMustServe, systemInstruction, schema: spec.schema });
       this.models.set(key, model);
     }
     const m = model;
+    const before = current;
 
     let result;
     try {
-      // Single-turn, one generation at a time.
-      const job = this.queue.then(() => m.generate(prompt));
+      // Single-turn, one generation at a time. The route is read again inside the queue, right before generate: a lock raised, or any other change made, while this
+      // call waited blocks it rather than let it run on the route it was built for.
+      const job = this.queue.then(async (): Promise<{ recheck: string } | { result: Awaited<ReturnType<SdkModel['generate']>> }> => {
+        if (req.route) {
+          const again = await this.readRoute(req);
+          if ('failed' in again) return { recheck: again.failed };
+          const now = routeOf(req, again.fresh);
+          if (!now || !before || now.effective.mode !== before.effective.mode || (now.lock === null) !== (before.lock === null)) {
+            current = now;
+            return { recheck: 'route_changed_in_queue' };
+          }
+        }
+        return { result: await m.generate(prompt) };
+      });
       this.queue = job.catch(() => undefined);
-      result = await job;
+      const done = await job;
+      if ('recheck' in done) return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: done.recheck });
+      result = done.result;
     } catch (e) {
-      return make({ status: 'error', requestedMode: routed.mode, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
+      return make({ status: 'error', requestedMode, input, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
     }
 
     const observedSource = mapInferenceSource(result.inferenceSource);
@@ -326,7 +416,7 @@ export class FirebaseHybridAssistantAdapter {
       u && (u.inputTokens !== undefined || u.outputTokens !== undefined || u.totalTokens !== undefined)
         ? { status: 'observed', inputTokens: u.inputTokens ?? null, outputTokens: u.outputTokens ?? null, totalTokens: u.totalTokens ?? null }
         : UNAVAILABLE_USAGE;
-    const common = { requestedMode: routed.mode, observedSource, rawInferenceSource, usage, payloadSha256: hash };
+    const common = { requestedMode, observedSource, rawInferenceSource, usage, payloadSha256: hash, input };
 
     // A response is on-device only if it says so. Withhold data otherwise.
     if (deviceMustServe && observedSource !== 'ON_DEVICE') {
@@ -341,13 +431,33 @@ export class FirebaseHybridAssistantAdapter {
     } catch {
       return make({ ...common, status: 'invalid', validation: { status: 'failed', errors: ['output is not valid JSON'] } });
     }
-    const validate = this.ajv.compile(schema);
+    const validate = this.ajv.compile(spec.schema);
     if (!validate(parsed)) {
       const errors = (validate.errors ?? []).map((er) => `${er.instancePath || '/'} ${er.message ?? 'invalid'}`);
       return make({ ...common, status: 'invalid', validation: { status: 'failed', errors } });
     }
+    const semantic = spec.check?.(parsed) ?? [];
+    if (semantic.length > 0) return make({ ...common, status: 'invalid', validation: { status: 'failed', errors: [...semantic] } });
     return make({ ...common, status: 'ok', data: parsed, validation: { status: 'passed', errors: [] } });
   }
+}
+
+type CallRequest = Omit<AssistRequest, 'taskText'> & { readonly labels?: readonly unknown[] };
+
+/** The lock and the effective policy for a request, from a fresh read. Null when the request names no task. */
+function routeOf(req: CallRequest, fresh: FreshRoute | null): { lock: RouteLock | null; effective: EffectiveRoutePolicy } | null {
+  if (!req.route || !fresh) return null;
+  const lock = routeLockFor([...req.sources.map((s) => s.classification), ...(req.labels ?? []), ...(fresh.lock ? ['restricted'] : [])]);
+  return { lock, effective: effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock }) };
+}
+
+/** An onboarding operation as a call: its fixed instruction and schema, and the request's own text then the allowed IDs. */
+function onboardingSpec(op: OnboardingOperation, req: AssistRequest): CallSpec {
+  const ids = req.allowedRequirementIds;
+  return {
+    op, systemInstruction: systemInstructionFor(op), schema: narrowSchema(op, ids), schemaKey: `${op}|${[...ids].join(',')}`, citesCriteria: true,
+    prompt: () => ({ prompt: composePrompt(req.taskText, ids) }),
+  };
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };

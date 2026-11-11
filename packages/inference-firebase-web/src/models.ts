@@ -5,8 +5,12 @@ export const SDK_VERSION = '13.1.0';
 export const CLOUD_MODEL = 'gemini-3.5-flash-lite';
 export const MODEL_METADATA = { cloudModel: CLOUD_MODEL, sdkVersion: SDK_VERSION } as const;
 
+/** The onboarding operations (draft wording, criteria and a plan before any task exists). */
 export const OPERATIONS = ['draftBrief', 'suggestCriteria', 'draftTaskPlan'] as const;
-export type Operation = (typeof OPERATIONS)[number];
+export type OnboardingOperation = (typeof OPERATIONS)[number];
+/** The catalog agents that have no onboarding twin. The brief and criteria agents reuse `draftBrief` and `suggestCriteria`. */
+export const AGENT_ONLY_OPERATIONS = ['planTasks', 'breakDownTask', 'proposePatch', 'reviewChange', 'triageFailure', 'describePullRequest'] as const;
+export type Operation = OnboardingOperation | (typeof AGENT_ONLY_OPERATIONS)[number];
 
 type Schema = Record<string, unknown>;
 
@@ -23,7 +27,7 @@ const criterion = {
 const criteria = { type: 'array', minItems: 1, maxItems: 8, items: criterion };
 
 /** Base schemas. `requirementId(s)` is narrowed per request by `narrowSchema`; never sent un-narrowed. */
-const SCHEMAS: Record<Operation, Schema> = {
+const SCHEMAS: Record<OnboardingOperation, Schema> = {
   draftBrief: {
     type: 'object',
     additionalProperties: false,
@@ -61,7 +65,7 @@ const SCHEMAS: Record<Operation, Schema> = {
   },
 };
 
-const SYSTEM_INSTRUCTIONS: Record<Operation, string> = {
+const SYSTEM_INSTRUCTIONS: Record<OnboardingOperation, string> = {
   draftBrief:
     'Draft a concise summary and 1–8 testable acceptance criteria using only the supplied scope. Return JSON matching the schema. Use the supplied requirement IDs. Do not add mandatory integrations, accounts or new features.',
   suggestCriteria:
@@ -70,12 +74,12 @@ const SYSTEM_INSTRUCTIONS: Record<Operation, string> = {
     'Draft a short ordered task plan using only the supplied scope. Return JSON matching the schema. Each task cites the supplied requirement IDs it serves and names its role: backend for the API and storage, frontend for the screen. Do not add mandatory integrations, accounts or new features.',
 };
 
-export function systemInstructionFor(op: Operation): string {
+export function systemInstructionFor(op: OnboardingOperation): string {
   return SYSTEM_INSTRUCTIONS[op];
 }
 
 /** Deep copy of the operation's schema with every requirementId(s) enum narrowed to the allowed IDs. */
-export function narrowSchema(op: Operation, allowedIds: readonly string[]): Schema {
+export function narrowSchema(op: OnboardingOperation, allowedIds: readonly string[]): Schema {
   const copy = structuredClone(SCHEMAS[op]);
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) return node.forEach(walk);

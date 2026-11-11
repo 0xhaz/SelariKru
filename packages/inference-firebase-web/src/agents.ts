@@ -1,0 +1,332 @@
+import {
+  AGENT_CITES_CRITERIA, AGENT_LIMITS, BrainBundleSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, checkAgentOutput, diffSummary, insideAllowedPaths,
+  parseUnifiedDiff, secretFileReason, strongerLabel,
+  type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
+} from '@selarikru/domain';
+import type { InferenceMode, Policy, Source } from '@selarikru/policy';
+import { routeReportOf, type AssistantProposal, type CallSpec, type FirebaseHybridAssistantAdapter } from './adapter.ts';
+import { narrowSchema, systemInstructionFor, type Operation } from './models.ts';
+
+/**
+ * The agent catalog (plan.md §4.3). Each AI step of a task is one Firebase AI Logic agent: a role prompt, the task's route (read fresh by the adapter before the call
+ * and again in the queue), bounded read-only inputs built from the task context bundle, and a schema-validated proposal. An agent has no shell and no tool that acts.
+ * Every call is single-turn and names its task; what comes back is an untrusted proposal for the accept and approve flows.
+ */
+
+export interface AgentTask {
+  readonly taskId: string;
+  readonly title: string;
+  readonly description?: string | null;
+  /** The criteria this task is judged on. Their IDs are the only ones an output may cite. */
+  readonly criteria: readonly { readonly id: string; readonly text: string }[];
+  /** The paths the task may change. None: it may change nothing. */
+  readonly allowedPaths: readonly string[];
+  /** The task's strongest label, as the server derives it. */
+  readonly classification: unknown;
+}
+
+/** One file's current contents, read-only, with its label. */
+export interface AgentFile {
+  readonly path: string;
+  readonly content: string;
+  readonly classification: unknown;
+}
+
+export interface AgentBaseInput {
+  readonly projectId: string;
+  readonly task: AgentTask;
+  /** The task context bundle (T6.3) served for this call's destination. Null: none was served. */
+  readonly bundle: BrainBundle | null;
+  /** Classified sources feeding the prompt, for the policy's cloud grant. */
+  readonly sources: readonly Source[];
+  readonly policy: Policy | undefined;
+  /** This call only. Never stored, and never relaxes the lock. */
+  readonly callOverride?: InferenceMode | null;
+}
+
+export interface AgentInputs {
+  readonly brief: AgentBaseInput;
+  readonly criteria: AgentBaseInput;
+  readonly plan: AgentBaseInput;
+  readonly breakdown: AgentBaseInput;
+  readonly patch: AgentBaseInput & { readonly files: readonly AgentFile[]; /** What the person asked for, if anything beyond the task. */ readonly request?: string };
+  readonly review: AgentBaseInput & { readonly diff: string; /** The changed files before the change. */ readonly files: readonly AgentFile[] };
+  readonly triage: AgentBaseInput & { readonly check: { readonly checkId: string; readonly output: string } };
+  readonly prDescription: AgentBaseInput & { readonly diff: string };
+}
+
+/** Something the call did not give the agent, and why. Ids and codes only. */
+export interface AgentOmission {
+  readonly kind: 'claim' | 'source' | 'section' | 'file';
+  readonly id: string;
+  readonly reason: BrainOmissionReason;
+}
+
+export interface AgentResult<K extends AgentKind = AgentKind> {
+  readonly kind: K;
+  /** Requested and observed source, timing and validation are on the proposal. */
+  readonly proposal: AssistantProposal;
+  /** The metadata-only route record (H2). Null only if the call named no task, which a catalog call never does. */
+  readonly report: RouteRecordReport | null;
+  readonly reported: 'sent' | 'failed' | 'not_sent';
+  readonly omissions: readonly AgentOmission[];
+  /** The task was locked to the device: hold the result on the device (RestrictedDraftHold). */
+  readonly locked: boolean;
+}
+
+export interface AgentDefinition {
+  readonly kind: AgentKind;
+  readonly operation: Operation;
+  /** The system instruction. Product content: plain, specific, and it names the JSON output. Never sent anywhere but the model. */
+  readonly rolePrompt: string;
+  readonly scope: 'bounded' | 'broad';
+}
+
+const NO_INVENTION = 'Use only what is given here. Do not add accounts, integrations or features the task does not ask for.';
+const NO_AUTHORITY = 'You propose; a person decides. Never include shell commands to run, credentials, or claims that something is approved, granted or verified.';
+
+export const AGENT_CATALOG: Readonly<Record<AgentKind, AgentDefinition>> = {
+  brief: { kind: 'brief', operation: 'draftBrief', scope: ROUTE_STEP_SCOPE.brief, rolePrompt: systemInstructionFor('draftBrief') },
+  criteria: { kind: 'criteria', operation: 'suggestCriteria', scope: ROUTE_STEP_SCOPE.criteria, rolePrompt: systemInstructionFor('suggestCriteria') },
+  plan: {
+    kind: 'plan', operation: 'planTasks', scope: ROUTE_STEP_SCOPE.plan,
+    rolePrompt: [
+      'You are the planner for one piece of software work. Split it into at most 12 tasks a single developer could each finish and test.',
+      'Return JSON matching the schema. Give each task a key T1, T2 and so on, a short title, a one-paragraph description, its role (backend for API and storage, frontend for screens), the criterion IDs it serves, the repository paths it will change (plain relative paths, no wildcards), and the keys of the tasks it depends on.',
+      'Order tasks so dependencies come first, and never make a task depend on itself or on a later chain that leads back to it.',
+      NO_INVENTION, NO_AUTHORITY,
+    ].join(' '),
+  },
+  breakdown: {
+    kind: 'breakdown', operation: 'breakDownTask', scope: ROUTE_STEP_SCOPE.breakdown,
+    rolePrompt: [
+      'You break one task into at most 10 ordered steps. Each step is something a developer does and can check before the next one.',
+      'Return JSON matching the schema: for each step a short title, a one or two sentence detail, the paths it touches (only inside the allowed paths), and the criterion IDs it moves forward.',
+      NO_INVENTION, NO_AUTHORITY,
+    ].join(' '),
+  },
+  patch: {
+    kind: 'patch', operation: 'proposePatch', scope: ROUTE_STEP_SCOPE.patch,
+    rolePrompt: [
+      'You propose one code change for one task. You are given the task, its criteria, project context, and the full current contents of the files you may change.',
+      'Return JSON matching the schema: a one or two sentence summary, and the change as a unified diff.',
+      'Diff rules: use "--- a/<path>" and "+++ b/<path>" headers ("--- /dev/null" for a new file); copy every context and removed line exactly from the given contents, at the line numbers in the hunk header; change only the files given, or create new files inside the allowed paths; no renames, permission changes or binary files.',
+      `Keep the whole change under ${AGENT_LIMITS.patchChangedLines} changed lines across at most ${AGENT_LIMITS.patchFiles} files.`,
+      NO_INVENTION, NO_AUTHORITY,
+    ].join(' '),
+  },
+  review: {
+    kind: 'review', operation: 'reviewChange', scope: ROUTE_STEP_SCOPE.review,
+    rolePrompt: [
+      'You review one change against its task and acceptance criteria. You are given the diff and the changed files as they were before it.',
+      'Return JSON matching the schema: an outcome (no_issues, changes_suggested or blocking_issues), a short summary, and findings.',
+      'Each finding names a file from the diff and a line number in that file after the change, a severity (blocker, major, minor or nit), the criterion ID it concerns if any, and one plain sentence saying what is wrong and what to do.',
+      'Report only problems you can point to in the diff. Your review is advice: it approves nothing.',
+      NO_AUTHORITY,
+    ].join(' '),
+  },
+  triage: {
+    kind: 'triage', operation: 'triageFailure', scope: ROUTE_STEP_SCOPE.triage,
+    rolePrompt: [
+      'You explain why one check failed. You are given the task and the check\'s output.',
+      'Return JSON matching the schema: a one sentence summary, a category, the likely cause in plain words, one next step a developer could take, and the file and line the output points to if it names one.',
+      'Base everything on the output shown. If the output does not say, use category unknown and say what more would be needed.',
+      NO_AUTHORITY,
+    ].join(' '),
+  },
+  prDescription: {
+    kind: 'prDescription', operation: 'describePullRequest', scope: ROUTE_STEP_SCOPE.prDescription,
+    rolePrompt: [
+      'You write the description of one pull request from its task, its criteria and a summary of the files it changes.',
+      `Return JSON matching the schema: a title of at most ${AGENT_LIMITS.prTitleChars} characters in the imperative ("Add …", "Fix …"), a body in plain Markdown that says what changed and why and how a reviewer can check it, and the criterion IDs the change covers.`,
+      'Describe only what the summary shows. Do not claim tests passed or the change was verified.',
+      NO_AUTHORITY,
+    ].join(' '),
+  },
+};
+
+/** The JSON Schema the SDK constrains each agent's output to. Brief and criteria keep the onboarding schemas; the others are the domain schemas. */
+export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[]): Record<string, unknown> {
+  if (kind === 'brief') return narrowSchema('draftBrief', criteriaIds);
+  if (kind === 'criteria') return narrowSchema('suggestCriteria', criteriaIds);
+  return agentOutputJsonSchema(kind, criteriaIds);
+}
+
+// ---- input builders -----------------------------------------------------------------------------------------------------------
+
+type Built = { readonly prompt: string; readonly check: AgentCheckContext } | { readonly refused: string };
+interface At { readonly cloudCapable: boolean }
+
+/** Files the agent may read: inside the allowed paths, not a credentials file by name, not secret, and within the size caps. The rest is listed, never cut. */
+function selectFiles(all: readonly AgentFile[], allowed: readonly string[], cloudCapable: boolean): { included: AgentFile[]; omitted: AgentOmission[] } {
+  const included: AgentFile[] = [];
+  const omitted: AgentOmission[] = [];
+  let total = 0;
+  for (const f of [...all].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    const omit = (reason: BrainOmissionReason): void => void omitted.push({ kind: 'file', id: f.path, reason });
+    const label = strongerLabel('public', f.classification);
+    if (allowedPathProblem(f.path) !== null || !insideAllowedPaths(f.path, allowed)) { omit('out_of_scope'); continue; }
+    // Secret by name or label never goes into a prompt; restricted never into one that may reach the cloud (its label locks the call to the device first).
+    if (secretFileReason(f.path) !== null || label === 'secret' || (cloudCapable && label === 'restricted')) { omit('restricted_for_destination'); continue; }
+    if (f.content.length > AGENT_LIMITS.fileChars || total + f.content.length > AGENT_LIMITS.filesTotalChars) { omit('too_large'); continue; }
+    total += f.content.length;
+    included.push(f);
+  }
+  return { included, omitted };
+}
+
+/** Labels of the files that may enter the prompt, known before the route: a restricted one locks the call to the device. */
+function fileLabels(all: readonly AgentFile[], allowed: readonly string[]): unknown[] {
+  return selectFiles(all, allowed, false).included.map((f) => f.classification);
+}
+
+const fileBlock = (f: AgentFile): string => `----- BEGIN FILE ${f.path} -----\n${f.content}${f.content.endsWith('\n') || f.content === '' ? '' : '\n'}----- END FILE ${f.path} -----`;
+
+/** The task, its criteria, its allowed paths, then the served context and what it left out. Fixed order and headings. */
+function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { lines: string[] } | { refused: string } {
+  const t = input.task;
+  const lines = [
+    '# Task', `Task ID: ${t.taskId}`, `Title: ${t.title}`, `Description: ${t.description?.trim() || '(none)'}`, '',
+    '# Acceptance criteria', ...(t.criteria.length > 0 ? t.criteria.map((c) => `- ${c.id}: ${c.text}`) : ['(none)']), '',
+    '# Allowed paths', ...(t.allowedPaths.length > 0 ? t.allowedPaths.map((p) => `- ${p}`) : ['(none: this task may not change any file)']), '',
+    '# Project context',
+  ];
+  if (input.bundle === null) {
+    lines.push('No project context was served for this task.');
+    return { lines };
+  }
+  const parsed = BrainBundleSchema.safeParse(input.bundle);
+  if (!parsed.success) return { refused: 'context_bundle_unreadable' };
+  const b = parsed.data;
+  if (b.taskId !== t.taskId) return { refused: 'context_bundle_task_mismatch' };
+  // A bundle served for the device may hold restricted claims: it never goes into a prompt that may reach the cloud.
+  if (at.cloudCapable && b.destination !== 'cloud') return { refused: 'context_bundle_not_for_cloud' };
+  if (b.claims.length === 0) lines.push('(no claims)');
+  for (const c of b.claims) lines.push(`- [${c.standing}${c.status === 'disputed' ? ', disputed' : ''}] ${c.heading} (${c.key}): ${c.text}`);
+  if (b.indexLag > 0) lines.push(`Note: the context may be out of date (${b.indexLag} newer changes not yet read).`);
+  for (const o of b.omissions) omissions.push({ kind: o.kind, id: o.id, reason: o.reason });
+  return { lines };
+}
+
+function leftOut(omissions: readonly AgentOmission[]): string[] {
+  if (omissions.length === 0) return [];
+  const named = omissions.filter((o) => o.kind !== 'file' || o.reason !== 'restricted_for_destination');
+  const withheld = omissions.length - named.length;
+  return [
+    '', '# Left out of this context',
+    ...named.map((o) => `- ${o.kind} ${o.id}: ${o.reason}`),
+    ...(withheld > 0 ? [`- ${withheld} file${withheld === 1 ? ' was' : 's were'} withheld under the data rules.`] : []),
+  ];
+}
+
+const idsLine = (ids: readonly string[]): string => `Allowed criterion IDs: ${ids.join(', ')}. Use only these IDs.`;
+
+function build<K extends AgentKind>(kind: K, input: AgentInputs[K], at: At, omissions: AgentOmission[]): Built {
+  const head = header(input, at, omissions);
+  if ('refused' in head) return head;
+  const t = input.task;
+  const ids = t.criteria.map((c) => c.id);
+  const base: AgentCheckContext = { criteriaIds: ids, allowedPaths: t.allowedPaths };
+  const out = [...head.lines];
+  const finish = (ask: string[], check: AgentCheckContext = base): Built => ({ prompt: [...out, ...leftOut(omissions), '', '# What to do', ...ask].join('\n'), check });
+  switch (kind) {
+    case 'brief':
+      return finish(['Draft the problem and goal wording for this task as a short summary, and its acceptance criteria.', idsLine(ids)]);
+    case 'criteria':
+      return finish(['Suggest bounded, testable acceptance criteria for this task.', idsLine(ids)]);
+    case 'plan':
+      return finish(['Draft a task plan for this work.', idsLine(ids)]);
+    case 'breakdown':
+      return finish(['Split this task into ordered steps.', idsLine(ids)]);
+    case 'patch': {
+      const i = input as AgentInputs['patch'];
+      const sel = selectFiles(i.files, t.allowedPaths, at.cloudCapable);
+      omissions.push(...sel.omitted);
+      out.push('', '# Files you may change', ...(sel.included.length > 0 ? sel.included.map(fileBlock) : ['(none)']));
+      return finish(['Propose the change for this task as a unified diff.', ...(i.request?.trim() ? [`The person asked: ${i.request.trim()}`] : [])], { ...base, files: new Map(sel.included.map((f) => [f.path, f.content])) });
+    }
+    case 'review': {
+      const i = input as AgentInputs['review'];
+      if (i.diff.length > AGENT_LIMITS.patchDiffChars) return { refused: 'diff_too_large' };
+      if (!parseUnifiedDiff(i.diff).ok) return { refused: 'diff_unreadable' };
+      const sel = selectFiles(i.files, t.allowedPaths, at.cloudCapable);
+      omissions.push(...sel.omitted);
+      out.push('', '# The change', '----- BEGIN DIFF -----', i.diff.replace(/\n$/, ''), '----- END DIFF -----', '', '# Changed files before the change', ...(sel.included.length > 0 ? sel.included.map(fileBlock) : ['(none)']));
+      return finish(['Review this change against the task and its criteria.', idsLine(ids)], { ...base, reviewedDiff: i.diff, files: new Map(sel.included.map((f) => [f.path, f.content])) });
+    }
+    case 'triage': {
+      const i = input as AgentInputs['triage'];
+      if (i.check.output.length > AGENT_LIMITS.checkOutputChars) return { refused: 'check_output_too_large' };
+      out.push('', `# Failed check: ${i.check.checkId}`, '----- BEGIN OUTPUT -----', i.check.output.replace(/\n$/, ''), '----- END OUTPUT -----');
+      return finish(['Explain why this check failed and suggest one next step.']);
+    }
+    case 'prDescription': {
+      const i = input as AgentInputs['prDescription'];
+      const parsed = parseUnifiedDiff(i.diff);
+      if (!parsed.ok) return { refused: 'diff_unreadable' };
+      out.push('', '# Files changed', ...diffSummary(parsed.files).map((f) => `- ${f.change} ${f.path} (+${f.added} -${f.removed})`));
+      return finish(['Write the pull request description.', idsLine(ids)]);
+    }
+  }
+  return { refused: 'unknown_agent' };
+}
+
+// ---- running an agent ---------------------------------------------------------------------------------------------------------
+
+export interface AgentCatalogOptions {
+  /** Records the route record with the server (a data source's `route.report`). Metadata only. A failure is shown on the result and changes nothing else. */
+  readonly reportRoute?: (projectId: string, taskId: string, report: RouteRecordReport) => Promise<void>;
+}
+
+/** The entry points. Each one names its task, so the adapter reads the task's route fresh before the call and again inside the queue. */
+export class AgentCatalog {
+  constructor(private readonly adapter: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>, private readonly opts: AgentCatalogOptions = {}) {}
+
+  brief(input: AgentInputs['brief']): Promise<AgentResult<'brief'>> { return this.run('brief', input); }
+  criteria(input: AgentInputs['criteria']): Promise<AgentResult<'criteria'>> { return this.run('criteria', input); }
+  plan(input: AgentInputs['plan']): Promise<AgentResult<'plan'>> { return this.run('plan', input); }
+  breakdown(input: AgentInputs['breakdown']): Promise<AgentResult<'breakdown'>> { return this.run('breakdown', input); }
+  patch(input: AgentInputs['patch']): Promise<AgentResult<'patch'>> { return this.run('patch', input); }
+  review(input: AgentInputs['review']): Promise<AgentResult<'review'>> { return this.run('review', input); }
+  triage(input: AgentInputs['triage']): Promise<AgentResult<'triage'>> { return this.run('triage', input); }
+  prDescription(input: AgentInputs['prDescription']): Promise<AgentResult<'prDescription'>> { return this.run('prDescription', input); }
+
+  async run<K extends AgentKind>(kind: K, input: AgentInputs[K]): Promise<AgentResult<K>> {
+    const def = AGENT_CATALOG[kind];
+    const ids = input.task.criteria.map((c) => c.id);
+    let omissions: AgentOmission[] = [];
+    let checkCtx: AgentCheckContext | null = null;
+    const spec: CallSpec = {
+      op: def.operation, systemInstruction: def.rolePrompt, schema: agentJsonSchema(kind, ids), schemaKey: `${kind}|${ids.join(',')}`, citesCriteria: AGENT_CITES_CRITERIA[kind],
+      prompt: (at) => {
+        omissions = [];
+        const b = build(kind, input, at, omissions);
+        if ('refused' in b) return { refused: b.refused };
+        checkCtx = b.check;
+        return { prompt: b.prompt };
+      },
+      check: (data) => {
+        if (checkCtx === null) return ['/ context_missing'];
+        const r = checkAgentOutput(kind, data, checkCtx);
+        return r.ok ? [] : r.issues.map((i) => `${i.path} ${i.code}`);
+      },
+    };
+    const files = 'files' in input ? (input as { files: readonly AgentFile[] }).files : [];
+    const proposal = await this.adapter.runAgent(spec, {
+      projectId: input.projectId, allowedRequirementIds: ids, sources: input.sources, policy: input.policy,
+      route: { taskId: input.task.taskId, stepKind: kind, callOverride: input.callOverride ?? null },
+      labels: [input.task.classification, ...fileLabels(files, input.task.allowedPaths)],
+    });
+    const report = routeReportOf(proposal);
+    let reported: AgentResult['reported'] = 'not_sent';
+    if (report && this.opts.reportRoute) {
+      try {
+        await this.opts.reportRoute(input.projectId, input.task.taskId, report);
+        reported = 'sent';
+      } catch {
+        reported = 'failed';
+      }
+    }
+    return { kind, proposal, report, reported, omissions, locked: proposal.route?.locked ?? false };
+  }
+}

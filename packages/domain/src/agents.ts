@@ -1,0 +1,410 @@
+import { z } from 'zod';
+import { insideAllowedPaths, secretFileReason } from './checkpoint.ts';
+import { allowedPathProblem, validatePlanRevision } from './plan.ts';
+import { PLAN_TASK_ROLES } from './proposal.ts';
+import { ROUTE_STEP_KINDS, type RouteStepKind } from './route-policy.ts';
+import type { TaskSpec } from './task.ts';
+
+/**
+ * The agent catalog's outputs (plan.md §4.3). Each AI step of a task is one Firebase AI Logic agent: a role prompt, the task's route, bounded read-only inputs, and one
+ * of these outputs. An output is an untrusted proposal: it goes through the accept and approve flows, and nothing here runs, grants or authorizes anything.
+ *
+ * Pure and browser-safe. The browser adapter validates every response against these before it calls a response `ok`; the server can run the same checks on anything a
+ * person submits from a proposal.
+ */
+export const AGENT_KINDS = ROUTE_STEP_KINDS;
+export type AgentKind = RouteStepKind;
+
+export const AGENT_LIMITS = {
+  criteria: 8,
+  planTasks: 12,
+  pathsPerItem: 8,
+  breakdownSteps: 10,
+  reviewFindings: 20,
+  /** A patch proposal's diff text, in characters. */
+  patchDiffChars: 20_000,
+  patchFiles: 8,
+  /** Added plus removed lines across the whole patch. */
+  patchChangedLines: 400,
+  prTitleChars: 72,
+  prBodyChars: 4_000,
+  /** One file's contents given to an agent, in characters. A larger file is left out and listed, never cut. */
+  fileChars: 20_000,
+  /** All file contents given to one call. */
+  filesTotalChars: 60_000,
+  /** A failed check's output given to triage. Larger output is refused, never cut. */
+  checkOutputChars: 16_000,
+} as const;
+
+/** Whether the agent's output cites the task's criterion IDs, so a call without any is refused before it reaches a model. */
+export const AGENT_CITES_CRITERIA: Readonly<Record<AgentKind, boolean>> = {
+  brief: true, criteria: true, plan: true, breakdown: true, patch: false, review: true, triage: false, prDescription: true,
+};
+
+export const REVIEW_OUTCOMES = ['no_issues', 'changes_suggested', 'blocking_issues'] as const;
+export const REVIEW_SEVERITIES = ['blocker', 'major', 'minor', 'nit'] as const;
+export const TRIAGE_CATEGORIES = ['test_failure', 'build_error', 'type_error', 'lint', 'timeout', 'environment', 'flaky', 'unknown'] as const;
+
+const text = (max: number) => z.string().min(1).max(max);
+const path = z.string().min(1).max(200);
+const planKey = z.string().regex(/^T[0-9]{1,2}$/);
+
+/** The output schema for one agent, with criterion IDs narrowed to the ones this call allows. No IDs: no criterion can be cited. */
+export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[]): z.ZodType {
+  const id: z.ZodType = criteriaIds.length > 0 ? z.enum(criteriaIds as [string, ...string[]]) : z.never();
+  const criteria = z.array(z.strictObject({ requirementId: id, text: text(400) })).min(1).max(AGENT_LIMITS.criteria);
+  switch (kind) {
+    case 'brief':
+      return z.strictObject({ summary: text(400), acceptanceCriteria: criteria });
+    case 'criteria':
+      return z.strictObject({ acceptanceCriteria: criteria });
+    case 'plan':
+      return z.strictObject({
+        tasks: z.array(z.strictObject({
+          key: planKey, title: text(120), description: text(600), role: z.enum(PLAN_TASK_ROLES),
+          requirementIds: z.array(id).min(1).max(AGENT_LIMITS.criteria), paths: z.array(path).min(1).max(AGENT_LIMITS.pathsPerItem),
+          dependsOn: z.array(planKey).max(AGENT_LIMITS.planTasks - 1),
+        })).min(1).max(AGENT_LIMITS.planTasks),
+      });
+    case 'breakdown':
+      return z.strictObject({
+        steps: z.array(z.strictObject({ title: text(120), detail: text(400), paths: z.array(path).max(AGENT_LIMITS.pathsPerItem), criteriaIds: z.array(id).max(AGENT_LIMITS.criteria) }))
+          .min(1).max(AGENT_LIMITS.breakdownSteps),
+      });
+    case 'patch':
+      return z.strictObject({ summary: text(400), diff: text(AGENT_LIMITS.patchDiffChars) });
+    case 'review':
+      return z.strictObject({
+        outcome: z.enum(REVIEW_OUTCOMES), summary: text(600),
+        findings: z.array(z.strictObject({ file: path, line: z.int().min(1).max(1_000_000), severity: z.enum(REVIEW_SEVERITIES), criterionId: id.optional(), message: text(400) }))
+          .max(AGENT_LIMITS.reviewFindings),
+      });
+    case 'triage':
+      return z.strictObject({
+        summary: text(400), category: z.enum(TRIAGE_CATEGORIES), likelyCause: text(600), nextStep: text(400),
+        location: z.strictObject({ file: path, line: z.int().min(1).max(1_000_000).optional() }).optional(),
+      });
+    case 'prDescription':
+      return z.strictObject({ title: text(AGENT_LIMITS.prTitleChars), body: text(AGENT_LIMITS.prBodyChars), criteriaCovered: z.array(id).max(AGENT_LIMITS.criteria) });
+  }
+}
+
+/** The same schema as JSON Schema, for the model's structured output. No `$schema` key: the SDK and Ajv take the object as is. */
+export function agentOutputJsonSchema(kind: AgentKind, criteriaIds: readonly string[]): Record<string, unknown> {
+  const { $schema: _drop, ...schema } = z.toJSONSchema(agentOutputSchema(kind, criteriaIds)) as Record<string, unknown>;
+  return schema;
+}
+
+// ---- checks -------------------------------------------------------------------------------------------------------------------
+
+export const AGENT_ISSUE_CODES = [
+  'schema_invalid', 'path_invalid', 'path_secret', 'path_outside_allowed', 'duplicate_key', 'missing_dependency', 'self_dependency', 'cycle',
+  'diff_empty', 'diff_unparseable', 'diff_unsupported', 'diff_duplicate_file', 'diff_too_large', 'diff_file_not_provided', 'diff_file_exists', 'diff_does_not_apply',
+  'review_diff_unreadable', 'finding_file_not_in_diff', 'finding_line_out_of_range',
+] as const;
+export type AgentIssueCode = (typeof AGENT_ISSUE_CODES)[number];
+/** A code and a JSON path into the output. Never the output's text, and never a path name the model chose. */
+export interface AgentIssue {
+  readonly code: AgentIssueCode;
+  readonly path: string;
+}
+
+export interface AgentCheckContext {
+  /** The criterion IDs this call may cite. */
+  readonly criteriaIds: readonly string[];
+  /** The task's allowed paths. A breakdown or patch path must be inside them (none allows nothing); a plan's paths must be when any are given. */
+  readonly allowedPaths: readonly string[];
+  /** The file contents the agent was given, by path. A patch may change only these, or create a file that is not among them. */
+  readonly files?: ReadonlyMap<string, string>;
+  /** The diff a review was asked about. */
+  readonly reviewedDiff?: string;
+}
+
+export type AgentCheck = { readonly ok: true; readonly data: unknown } | { readonly ok: false; readonly issues: readonly AgentIssue[] };
+
+const jsonPath = (p: readonly PropertyKey[]): string => `/${p.map((x) => (typeof x === 'symbol' ? '*' : String(x))).join('/')}`;
+
+/** Why a proposed path is not usable, or null. Plain repo-relative, no `.git`, not a credentials file by name, and inside `allowed` when that is a bound. */
+function pathIssue(p: string, allowed: readonly string[] | null): AgentIssueCode | null {
+  if (allowedPathProblem(p) !== null) return 'path_invalid';
+  if (secretFileReason(p.replace(/\/+$/, '')) !== null) return 'path_secret';
+  if (allowed !== null && !insideAllowedPaths(p.replace(/^(\.\/)+/, '').replace(/\/+$/, ''), allowed)) return 'path_outside_allowed';
+  return null;
+}
+
+/** Schema first, then the checks that need the call's context. */
+export function checkAgentOutput(kind: AgentKind, data: unknown, ctx: AgentCheckContext): AgentCheck {
+  const parsed = agentOutputSchema(kind, ctx.criteriaIds).safeParse(data);
+  if (!parsed.success) return { ok: false, issues: parsed.error.issues.map((i) => ({ code: 'schema_invalid', path: jsonPath(i.path) })) };
+  const issues: AgentIssue[] = [];
+  const add = (code: AgentIssueCode, ...p: PropertyKey[]): void => void issues.push({ code, path: jsonPath(p) });
+  const out = parsed.data as Record<string, unknown>;
+  switch (kind) {
+    case 'plan':
+      checkPlan(out as unknown as PlanOutput, ctx, add);
+      break;
+    case 'breakdown':
+      (out as unknown as BreakdownOutput).steps.forEach((s, i) => s.paths.forEach((p, j) => { const c = pathIssue(p, ctx.allowedPaths); if (c) add(c, 'steps', i, 'paths', j); }));
+      break;
+    case 'patch': {
+      const r = checkPatch((out as { diff: string }).diff, ctx);
+      if (!r.ok) for (const i of r.issues) issues.push({ code: i.code, path: `/diff${i.path === '/' ? '' : i.path}` });
+      break;
+    }
+    case 'review':
+      checkReview(out as unknown as ReviewOutput, ctx, add);
+      break;
+    case 'triage': {
+      const loc = (out as { location?: { file: string } }).location;
+      if (loc && allowedPathProblem(loc.file) !== null) add('path_invalid', 'location', 'file');
+      break;
+    }
+    default:
+      break;
+  }
+  return issues.length === 0 ? { ok: true, data: parsed.data } : { ok: false, issues };
+}
+
+interface PlanOutput { tasks: { key: string; paths: string[]; dependsOn: string[] }[] }
+interface BreakdownOutput { steps: { paths: string[] }[] }
+interface ReviewOutput { findings: { file: string; line: number }[] }
+
+/** The structural rules are the plan validator's own: each proposed task becomes a stand-in task spec so duplicate IDs, missing dependencies and cycles read the same as an accepted plan's. */
+function checkPlan(out: PlanOutput, ctx: AgentCheckContext, add: (code: AgentIssueCode, ...p: PropertyKey[]) => void): void {
+  const bound = ctx.allowedPaths.length > 0 ? ctx.allowedPaths : null;
+  out.tasks.forEach((t, i) => {
+    t.paths.forEach((p, j) => { const c = pathIssue(p, bound); if (c) add(c, 'tasks', i, 'paths', j); });
+    if (t.dependsOn.includes(t.key)) add('self_dependency', 'tasks', i, 'dependsOn');
+  });
+  const standIn = (t: PlanOutput['tasks'][number]) => ({
+    projectId: 'proposal', runId: 'proposal', taskId: t.key, revision: 1, limits: { maxAttempts: 1, timeoutSeconds: 1, maxCostUsd: 1 },
+    // Paths are checked above with their index; the stand-in carries none so they are not reported twice.
+    allowedPaths: [], contractRefs: [], dependencies: t.dependsOn.map((d) => ({ taskId: d, revision: 1, condition: 'artifact_verified' as const })),
+  }) as unknown as TaskSpec;
+  const v = validatePlanRevision({ projectId: 'proposal', runId: 'proposal', revision: 1, tasks: out.tasks.map(standIn) }, { projectId: 'proposal', runId: 'proposal' });
+  if (v.ok) return;
+  const index = (key: string): number => out.tasks.findIndex((t) => t.key === key);
+  for (const e of v.errors) {
+    if (e.kind === 'duplicate_task_id') add('duplicate_key', 'tasks', index(e.taskId), 'key');
+    else if (e.kind === 'missing_dependency') add('missing_dependency', 'tasks', index(e.taskId), 'dependsOn');
+    else if (e.kind === 'cycle' && !(e.path.length === 2 && e.path[0] === e.path[1])) add('cycle', 'tasks', index(e.path[0]!), 'dependsOn');
+  }
+}
+
+function checkReview(out: ReviewOutput, ctx: AgentCheckContext, add: (code: AgentIssueCode, ...p: PropertyKey[]) => void): void {
+  const parsed = ctx.reviewedDiff === undefined ? null : parseUnifiedDiff(ctx.reviewedDiff);
+  if (parsed === null || !parsed.ok) { add('review_diff_unreadable'); return; }
+  const byPath = new Map(parsed.files.map((f) => [f.path, f]));
+  out.findings.forEach((f, i) => {
+    const fd = byPath.get(f.file);
+    if (!fd) { add('finding_file_not_in_diff', 'findings', i, 'file'); return; }
+    if (!lineExists(fd, f.line, ctx.files?.get(fd.path) ?? null)) add('finding_line_out_of_range', 'findings', i, 'line');
+  });
+}
+
+/** A line a review may point at: in the file after the change (before it, for a deleted file). Without the base contents, a line inside one of the hunks. */
+function lineExists(fd: FileDiff, line: number, base: string | null): boolean {
+  if (base !== null || fd.change === 'create') {
+    const applied = applyFileDiff(base, fd);
+    if (applied.ok) return line <= splitLines(applied.content ?? base ?? '').lines.length;
+  }
+  return fd.hunks.some((h) => (fd.change === 'delete' ? line >= h.oldStart && line < h.oldStart + h.oldCount : line >= h.newStart && line < h.newStart + h.newCount));
+}
+
+// ---- unified diff ---------------------------------------------------------------------------------------------------------------
+
+export interface DiffLine {
+  readonly op: ' ' | '-' | '+';
+  readonly text: string;
+}
+export interface DiffHunk {
+  readonly oldStart: number;
+  readonly oldCount: number;
+  readonly newStart: number;
+  readonly newCount: number;
+  readonly lines: readonly DiffLine[];
+  /** `\ No newline at end of file` followed the last line of the old side, or of the new side. */
+  readonly oldNoEol: boolean;
+  readonly newNoEol: boolean;
+}
+export interface FileDiff {
+  readonly path: string;
+  readonly change: 'modify' | 'create' | 'delete';
+  readonly hunks: readonly DiffHunk[];
+}
+export type DiffParse = { readonly ok: true; readonly files: readonly FileDiff[] } | { readonly ok: false; readonly code: 'diff_empty' | 'diff_unparseable' | 'diff_unsupported' | 'diff_duplicate_file' };
+
+const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+/** Extended git headers a plain text change may carry. Anything else (renames, copies, mode changes, binary patches) is not a change this flow applies. */
+const PLAIN_GIT_HEADER = /^(?:index [0-9a-f]{4,64}\.\.[0-9a-f]{4,64}(?: 100644)?|new file mode 100644|deleted file mode 100644)$/;
+
+const stripPrefix = (raw: string, prefix: 'a/' | 'b/'): string => {
+  const p = raw.split('\t')[0]!.trimEnd();
+  return p !== '/dev/null' && p.startsWith(prefix) ? p.slice(2) : p;
+};
+
+/**
+ * A unified diff of text files: `--- a/<path>` and `+++ b/<path>` headers, `/dev/null` for a created or deleted file, and hunks whose line counts match their headers.
+ * Strict: prose around the diff, renames, copies, mode changes and binary patches are refused, as is a file named twice.
+ */
+export function parseUnifiedDiff(diffText: string): DiffParse {
+  const L = diffText.split('\n');
+  if (L.at(-1) === '') L.pop();
+  if (L.every((l) => l.trim() === '')) return { ok: false, code: 'diff_empty' };
+  const files: FileDiff[] = [];
+  const seen = new Set<string>();
+  let i = 0;
+  const bad = (code: 'diff_unparseable' | 'diff_unsupported' | 'diff_duplicate_file'): DiffParse => ({ ok: false, code });
+  while (i < L.length) {
+    const line = L[i]!;
+    if (line.trim() === '') { i++; continue; }
+    if (line.startsWith('diff --git ')) {
+      i++;
+      while (i < L.length && !L[i]!.startsWith('--- ') && !L[i]!.startsWith('diff --git ')) {
+        if (!PLAIN_GIT_HEADER.test(L[i]!)) return bad('diff_unsupported');
+        i++;
+      }
+      if (i >= L.length || !L[i]!.startsWith('--- ')) return bad('diff_unparseable');
+      continue;
+    }
+    if (!line.startsWith('--- ') || !(L[i + 1] ?? '').startsWith('+++ ')) return bad('diff_unparseable');
+    const oldPath = stripPrefix(line.slice(4), 'a/');
+    const newPath = stripPrefix(L[i + 1]!.slice(4), 'b/');
+    i += 2;
+    if (oldPath === '/dev/null' && newPath === '/dev/null') return bad('diff_unparseable');
+    if (oldPath !== '/dev/null' && newPath !== '/dev/null' && oldPath !== newPath) return bad('diff_unsupported');
+    const change = oldPath === '/dev/null' ? 'create' : newPath === '/dev/null' ? 'delete' : 'modify';
+    const filePath = change === 'create' ? newPath : oldPath;
+    if (filePath === '') return bad('diff_unparseable');
+    const hunks: DiffHunk[] = [];
+    while (i < L.length && L[i]!.startsWith('@@')) {
+      const m = HUNK.exec(L[i]!);
+      if (!m) return bad('diff_unparseable');
+      const oldStart = Number(m[1]), oldCount = m[2] === undefined ? 1 : Number(m[2]), newStart = Number(m[3]), newCount = m[4] === undefined ? 1 : Number(m[4]);
+      i++;
+      const lines: DiffLine[] = [];
+      let o = 0, n = 0, oldNoEol = false, newNoEol = false;
+      while (o < oldCount || n < newCount || L[i]?.startsWith('\\')) {
+        const l = L[i];
+        if (l === undefined) return bad('diff_unparseable');
+        if (l.startsWith('\\')) {
+          const prev = lines.at(-1);
+          if (!prev) return bad('diff_unparseable');
+          if (prev.op !== '+') oldNoEol = true;
+          if (prev.op !== '-') newNoEol = true;
+          i++;
+          continue;
+        }
+        const op = l === '' ? ' ' : l[0];
+        if (op !== ' ' && op !== '-' && op !== '+') return bad('diff_unparseable');
+        if (op !== '+') o++;
+        if (op !== '-') n++;
+        if (o > oldCount || n > newCount) return bad('diff_unparseable');
+        lines.push({ op, text: l.slice(1) });
+        i++;
+      }
+      // More body lines than the header counted: the header is wrong.
+      const next = L[i];
+      if (next !== undefined && (next.startsWith(' ') || next.startsWith('+') || (next.startsWith('-') && !(next.startsWith('--- ') && (L[i + 1] ?? '').startsWith('+++ '))))) return bad('diff_unparseable');
+      hunks.push({ oldStart, oldCount, newStart, newCount, lines, oldNoEol, newNoEol });
+    }
+    if (hunks.length === 0) return bad('diff_unparseable');
+    if (change === 'create' && (hunks.length !== 1 || hunks[0]!.oldCount !== 0)) return bad('diff_unparseable');
+    if (change === 'delete' && hunks.some((h) => h.newCount !== 0)) return bad('diff_unparseable');
+    if (seen.has(filePath)) return bad('diff_duplicate_file');
+    seen.add(filePath);
+    files.push({ path: filePath, change, hunks });
+  }
+  return files.length === 0 ? { ok: false, code: 'diff_empty' } : { ok: true, files };
+}
+
+function splitLines(s: string): { lines: string[]; eol: boolean } {
+  if (s === '') return { lines: [], eol: false };
+  return s.endsWith('\n') ? { lines: s.slice(0, -1).split('\n'), eol: true } : { lines: s.split('\n'), eol: false };
+}
+
+export type FileApply = { readonly ok: true; readonly content: string | null } | { readonly ok: false; readonly code: 'diff_does_not_apply' };
+
+/**
+ * Applies one file's hunks to its contents (null: the file does not exist). Exact: every context and removed line must match at the line its hunk names, hunks must be in
+ * order, and the end-of-file newline must agree. No fuzz and no offset search, so what a person reviews is exactly what applies. Content null in the result: deleted.
+ */
+export function applyFileDiff(base: string | null, fd: FileDiff): FileApply {
+  const fail: FileApply = { ok: false, code: 'diff_does_not_apply' };
+  if (fd.change === 'create') {
+    if (base !== null) return fail;
+    const h = fd.hunks[0]!;
+    const lines = h.lines.map((l) => l.text);
+    return { ok: true, content: lines.length === 0 ? '' : `${lines.join('\n')}${h.newNoEol ? '' : '\n'}` };
+  }
+  if (base === null) return fail;
+  const old = splitLines(base);
+  const out: string[] = [];
+  let pos = 0;
+  let endEol = old.eol;
+  for (const h of fd.hunks) {
+    const start = h.oldCount === 0 ? h.oldStart : h.oldStart - 1;
+    if (start < pos || start > old.lines.length) return fail;
+    out.push(...old.lines.slice(pos, start));
+    pos = start;
+    for (const l of h.lines) {
+      if (l.op === '+') { out.push(l.text); continue; }
+      if (old.lines[pos] !== l.text) return fail;
+      if (l.op === ' ') out.push(l.text);
+      pos++;
+    }
+    const atEnd = pos === old.lines.length;
+    if (h.oldNoEol && (!atEnd || old.eol)) return fail;
+    if (atEnd && h.oldCount > 0 && !h.oldNoEol && !old.eol) return fail;
+    if (atEnd) endEol = !h.newNoEol;
+  }
+  out.push(...old.lines.slice(pos));
+  if (fd.change === 'delete') return out.length === 0 ? { ok: true, content: null } : fail;
+  return { ok: true, content: out.length === 0 ? '' : `${out.join('\n')}${endEol ? '\n' : ''}` };
+}
+
+export interface DiffFileSummary {
+  readonly path: string;
+  readonly change: FileDiff['change'];
+  readonly added: number;
+  readonly removed: number;
+}
+/** Paths, change kinds and line counts: what a PR description reads instead of the code. */
+export function diffSummary(files: readonly FileDiff[]): DiffFileSummary[] {
+  return files.map((f) => ({
+    path: f.path, change: f.change,
+    added: f.hunks.reduce((a, h) => a + h.lines.filter((l) => l.op === '+').length, 0),
+    removed: f.hunks.reduce((a, h) => a + h.lines.filter((l) => l.op === '-').length, 0),
+  }));
+}
+
+export type PatchCheck =
+  | { readonly ok: true; readonly files: readonly DiffFileSummary[]; /** The contents after the change, by path. Null: deleted. */ readonly results: ReadonlyMap<string, string | null> }
+  | { readonly ok: false; readonly issues: readonly AgentIssue[] };
+
+/**
+ * A patch proposal is usable only when its diff parses, stays within the size caps, touches only paths inside the task's allowed paths (never `.git` or a credentials
+ * file), changes only files whose contents the agent was given or creates files that do not exist among them, and applies exactly to those contents.
+ */
+export function checkPatch(diff: string, ctx: Pick<AgentCheckContext, 'allowedPaths' | 'files'>): PatchCheck {
+  const issue = (code: AgentIssueCode, p = '/'): PatchCheck => ({ ok: false, issues: [{ code, path: p }] });
+  if (diff.length > AGENT_LIMITS.patchDiffChars) return issue('diff_too_large');
+  const parsed = parseUnifiedDiff(diff);
+  if (!parsed.ok) return issue(parsed.code);
+  const summary = diffSummary(parsed.files);
+  if (parsed.files.length > AGENT_LIMITS.patchFiles || summary.reduce((a, f) => a + f.added + f.removed, 0) > AGENT_LIMITS.patchChangedLines) return issue('diff_too_large');
+  const issues: AgentIssue[] = [];
+  const results = new Map<string, string | null>();
+  const files = ctx.files ?? new Map<string, string>();
+  parsed.files.forEach((fd, i) => {
+    const at = `/files/${i}`;
+    const p = pathIssue(fd.path, ctx.allowedPaths);
+    if (p) { issues.push({ code: p, path: at }); return; }
+    if (fd.change === 'create' && files.has(fd.path)) { issues.push({ code: 'diff_file_exists', path: at }); return; }
+    if (fd.change !== 'create' && !files.has(fd.path)) { issues.push({ code: 'diff_file_not_provided', path: at }); return; }
+    const applied = applyFileDiff(fd.change === 'create' ? null : files.get(fd.path)!, fd);
+    if (!applied.ok) { issues.push({ code: applied.code, path: at }); return; }
+    results.set(fd.path, applied.content);
+  });
+  return issues.length === 0 ? { ok: true, files: summary, results } : { ok: false, issues };
+}

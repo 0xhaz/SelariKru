@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FirebaseHybridAssistantAdapter, errorCodeOf, routeReportOf, type AssistRequest, type FetchRoute, type FreshRoute, type TelemetryEvent } from './adapter.ts';
 import { RouteRecordReportSchema } from '@selarikru/domain';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
@@ -12,6 +12,9 @@ class FakeSdk implements AssistantSdk {
   generateCalls = 0;
   initCalls = 0;
   result: SdkGenerateResult = { text: GOOD, inferenceSource: 'on_device' };
+  /** When set, every generate waits on it after it has started: lets a test hold the queue. */
+  gate: Promise<void> | null = null;
+  entered = 0;
   async availability() {
     return this.availabilityValue;
   }
@@ -25,6 +28,8 @@ class FakeSdk implements AssistantSdk {
     this.specs.push(spec);
     return {
       generate: async (prompt: string) => {
+        this.entered++;
+        if (this.gate) await this.gate;
         this.generateCalls++;
         this.prompts.push(prompt);
         return this.result;
@@ -52,7 +57,7 @@ const fetchRoute: FetchRoute = async () => {
   return fresh.route;
 };
 
-function make(sdk = new FakeSdk(), events: TelemetryEvent[] = []) {
+function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number } = {}) {
   let t = 0;
   fresh.route = null;
   fresh.fail = false;
@@ -66,6 +71,7 @@ function make(sdk = new FakeSdk(), events: TelemetryEvent[] = []) {
       return () => `req-${++n}`;
     })(),
     onTelemetry: (e) => events.push(e),
+    ...extra,
   });
   return { adapter, sdk, events };
 }
@@ -476,7 +482,8 @@ describe('route policy per task', () => {
     const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route() }));
     expect(r.requestedMode).toBe('ONLY_ON_DEVICE');
     expect(r.route).toMatchObject({ policySource: 'run' });
-    expect(fresh.calls).toBe(3);
+    // Read before the call and again inside the queue, right before generate.
+    expect(fresh.calls).toBe(6);
   });
 
   it('a stale view that says unlocked and cloud first never reaches IN_CLOUD when the fresh read says locked', async () => {
@@ -544,5 +551,158 @@ describe('route policy per task', () => {
     const calls = fresh.calls;
     expect(routeReportOf(await adapter.draftBrief(req()))).toBeNull();
     expect(fresh.calls).toBe(calls);
+  });
+});
+
+describe('route re-read inside the queue', () => {
+  const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'ONLY_IN_CLOUD', override: null, lock: null, ...over });
+  const route = { taskId: 't1', stepKind: 'patch' as const };
+  const LOCK = { label: 'restricted' as const, reason: 'This task reads restricted data.' };
+
+  /** Holds the queue with a first call, starts a second that passes its own route read, then changes the route while the second waits. */
+  async function heldQueue(change: () => void) {
+    const { adapter, sdk } = make();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    fresh.route = server();
+    let release!: () => void;
+    sdk.gate = new Promise<void>((r) => { release = r; });
+    const first = adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }));
+    await vi.waitFor(() => expect(sdk.entered).toBe(1));
+    const readsBefore = fresh.calls;
+    const second = adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }));
+    // The second call's own read happened with the unlocked route; it now waits behind the first.
+    await vi.waitFor(() => expect(fresh.calls).toBe(readsBefore + 1));
+    change();
+    release();
+    return { first: await first, second: await second, sdk };
+  }
+
+  it('a label raised while a call waits in the queue blocks it before generate: it never reaches the cloud', async () => {
+    const { first, second, sdk } = await heldQueue(() => { fresh.route = server({ lock: LOCK }); });
+    expect(first.status).toBe('ok');
+    expect(second).toMatchObject({ status: 'blocked', blockedReason: 'route_changed_in_queue', data: null, observedSource: 'UNKNOWN' });
+    expect(second.route).toMatchObject({ locked: true, effectiveMode: 'ONLY_ON_DEVICE', policySource: 'lock' });
+    expect(sdk.entered).toBe(1);
+    expect(sdk.generateCalls).toBe(1);
+  });
+
+  it('a route read that fails inside the queue blocks the call', async () => {
+    const { second, sdk } = await heldQueue(() => { fresh.fail = true; });
+    expect(second).toMatchObject({ status: 'blocked', blockedReason: 'route_fetch_failed' });
+    expect(sdk.entered).toBe(1);
+  });
+
+  it('a route changed in any direction while queued blocks the call rather than run on what it was built for', async () => {
+    const { second, sdk } = await heldQueue(() => { fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' }); });
+    expect(second).toMatchObject({ status: 'blocked', blockedReason: 'route_changed_in_queue' });
+    expect(sdk.entered).toBe(1);
+  });
+
+  it('an unchanged route passes the in-queue read and runs', async () => {
+    const { second, sdk } = await heldQueue(() => {});
+    expect(second.status).toBe('ok');
+    expect(sdk.generateCalls).toBe(2);
+  });
+});
+
+describe('input size against the device budget', () => {
+  const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'ONLY_ON_DEVICE', override: null, lock: null, ...over });
+  const route = { taskId: 't1', stepKind: 'review' as const };
+  const long = 'x'.repeat(200);
+
+  it('device only: an input over the budget is refused with input_too_large_for_device and never cut', async () => {
+    const { adapter, sdk } = make(new FakeSdk(), [], { nanoInputBudgetChars: 150 });
+    fresh.route = server();
+    const p = await adapter.draftBrief(req({ taskText: long, route }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'input_too_large_for_device', requestedMode: 'ONLY_ON_DEVICE' });
+    expect(p.input).toMatchObject({ budgetChars: 150, overDeviceBudget: true });
+    expect(p.input!.chars).toBeGreaterThan(200);
+    expect(sdk.specs).toHaveLength(0);
+    expect(sdk.generateCalls).toBe(0);
+  });
+
+  it('a locked task over the budget is refused even when the person asked for the cloud', async () => {
+    const { adapter, sdk } = make(new FakeSdk(), [], { nanoInputBudgetChars: 150 });
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE', lock: { label: 'restricted', reason: 'r' } });
+    const p = await adapter.draftBrief(req({ taskText: long, policy: cloud('PREFER_ON_DEVICE'), route: { ...route, callOverride: 'ONLY_IN_CLOUD' } }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'input_too_large_for_device' });
+    expect(sdk.generateCalls).toBe(0);
+  });
+
+  it('local first without an approved fallback is refused; with one, the oversized call goes to the cloud and is recorded as a fallback', async () => {
+    const { adapter, sdk } = make(new FakeSdk(), [], { nanoInputBudgetChars: 150 });
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect(await adapter.draftBrief(req({ taskText: long, policy: policy({ preferredMode: 'PREFER_ON_DEVICE' }), route }))).toMatchObject({ status: 'blocked', blockedReason: 'input_too_large_for_device' });
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const p = await adapter.draftBrief(req({ taskText: long, policy: cloud('PREFER_ON_DEVICE'), route }));
+    expect(p).toMatchObject({ status: 'ok', requestedMode: 'ONLY_IN_CLOUD', observedSource: 'IN_CLOUD' });
+    expect(p.route).toMatchObject({ effectiveMode: 'PREFER_ON_DEVICE', fellBack: true, conformance: 'conforms', requestModeMismatch: true });
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_IN_CLOUD', allowCloud: true });
+  });
+
+  it('a missing or invalid budget leaves no room on the device: missing is never unlimited', async () => {
+    const { adapter } = make(new FakeSdk(), [], { nanoInputBudgetChars: Number.NaN });
+    fresh.route = server();
+    expect(await adapter.draftBrief(req({ route }))).toMatchObject({ status: 'blocked', blockedReason: 'input_too_large_for_device' });
+  });
+
+  it('an input within the default budget runs on the device', async () => {
+    const { adapter } = make();
+    fresh.route = server();
+    const p = await adapter.draftBrief(req({ route }));
+    expect(p.status).toBe('ok');
+    expect(p.input).toMatchObject({ budgetChars: 6000, overDeviceBudget: false });
+  });
+});
+
+describe('secret-shaped input', () => {
+  it('is never sent to a model, on any route', async () => {
+    const events: TelemetryEvent[] = [];
+    const { adapter, sdk } = make(new FakeSdk(), events);
+    const p = await adapter.draftBrief(req({ taskText: 'use ghp_abcdefghijklmnopqrstuvwxyz0123 to push', policy: cloud('ONLY_IN_CLOUD') }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'secret_in_input' });
+    expect(sdk.generateCalls).toBe(0);
+    expect(JSON.stringify(events)).not.toContain('ghp_');
+  });
+});
+
+describe('runAgent', () => {
+  const spec = {
+    op: 'triageFailure' as const, systemInstruction: 'Explain the failure. Return JSON.', schema: { type: 'object' }, schemaKey: 'triage|', citesCriteria: false,
+    prompt: () => ({ prompt: 'the check output' }),
+  };
+
+  it('refuses a call that names no task, before any read or model', async () => {
+    const { adapter, sdk } = make();
+    const p = await adapter.runAgent(spec, { projectId: 'proj-1', allowedRequirementIds: [], sources: [{ id: 's1', classification: 'public' }], policy: policy() } as never);
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'route_required' });
+    expect(fresh.calls).toBe(0);
+    expect(sdk.specs).toHaveLength(0);
+  });
+
+  it('labels of what the prompt reads lock the call to the device, and a secret label blocks it', async () => {
+    const { adapter, sdk } = make();
+    fresh.route = { runDefault: 'ONLY_IN_CLOUD', override: null, lock: null };
+    sdk.result = { text: '{}', inferenceSource: 'on_device' };
+    const base = { projectId: 'proj-1', allowedRequirementIds: [], sources: [{ id: 's1', classification: 'public' as const }], policy: cloud('ONLY_IN_CLOUD'), route: { taskId: 't1', stepKind: 'triage' as const } };
+    const p = await adapter.runAgent(spec, { ...base, labels: ['internal', 'restricted'] });
+    expect(p.requestedMode).toBe('ONLY_ON_DEVICE');
+    expect(p.route).toMatchObject({ locked: true, policySource: 'lock' });
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+    const generated = sdk.generateCalls;
+    expect(await adapter.runAgent(spec, { ...base, labels: ['secret'] })).toMatchObject({ status: 'blocked', blockedReason: 'secret_excluded_from_model_context' });
+    expect(await adapter.runAgent(spec, { ...base, labels: ['top-secret?'] })).toMatchObject({ status: 'blocked', blockedReason: 'secret_excluded_from_model_context' });
+    expect(sdk.generateCalls).toBe(generated);
+  });
+
+  it("a prompt builder's refusal blocks with its code; a failed check makes the response invalid", async () => {
+    const { adapter, sdk } = make();
+    fresh.route = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null };
+    const base = { projectId: 'proj-1', allowedRequirementIds: [], sources: [{ id: 's1', classification: 'public' as const }], policy: policy(), route: { taskId: 't1', stepKind: 'triage' as const } };
+    expect(await adapter.runAgent({ ...spec, prompt: () => ({ refused: 'check_output_too_large' }) }, base)).toMatchObject({ status: 'blocked', blockedReason: 'check_output_too_large' });
+    expect(sdk.generateCalls).toBe(0);
+    sdk.result = { text: '{"a":1}', inferenceSource: 'on_device' };
+    const p = await adapter.runAgent({ ...spec, check: () => ['/a path_invalid'] }, base);
+    expect(p).toMatchObject({ status: 'invalid', data: null, validation: { status: 'failed', errors: ['/a path_invalid'] } });
   });
 });
