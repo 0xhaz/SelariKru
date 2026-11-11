@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_KINDS, BrainBundleSchema, RouteRecordReportSchema, type AgentKind, type BrainBundle, type RouteRecordReport } from '@selarikru/domain';
+import { AGENT_KINDS, BrainBundleSchema, RouteRecordReportSchema, canonicalJson, sha256Hex, type AgentKind, type BrainBundle, type RouteRecordReport } from '@selarikru/domain';
 import { FirebaseHybridAssistantAdapter, type AgentCallRequest, type CallSpec, type FetchRoute, type FreshRoute, type TelemetryEvent } from './adapter.ts';
 import { AGENT_CATALOG, AgentCatalog, PM_RESEARCH_MAX_CHARS, delegationOutputSha256, pmReplyTurn, type AgentInputs } from './agents.ts';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
@@ -777,5 +777,18 @@ describe('the Project Manager (H11)', () => {
     expect(rd.locked).toBe(false);
     for (const part of ['WARD-NAMES', 'patients']) expect(d.sdk.prompts[0]).not.toContain(part);
     expect(rd.proposal.status).toBe('invalid');
+  });
+
+  it('fix round 3: an ok, unlocked plan call reports the hash of its plan (canonical JSON); a locked one reports none', async () => {
+    const good = { tasks: [{ key: 'T1', title: 'API', description: 'Add the route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [] }] };
+    const c = setup(cloud);
+    c.sdk.result = { text: JSON.stringify(good), inferenceSource: 'in_cloud' };
+    const r = await c.catalog.pmPlan({ ...INPUTS.pmPlan, policy: policy('ONLY_IN_CLOUD') });
+    expect(r.report?.outputSha256).toBe(sha256Hex(canonicalJson(r.proposal.data)));
+    const l = setup({ runDefault: 'PREFER_IN_CLOUD', override: null, lock: null });
+    l.sdk.result = { text: JSON.stringify(good), inferenceSource: 'on_device' };
+    const locked = await l.catalog.pmPlan({ ...INPUTS.pmPlan, questionClassification: 'restricted', policy: policy('PREFER_IN_CLOUD') });
+    expect(locked.locked).toBe(true);
+    expect(locked.report?.outputSha256).toBeUndefined();
   });
 });

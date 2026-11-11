@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, delegationOutputSha256, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, canonicalJson, delegationOutputSha256, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, quoteName, reservedPath, roleLabel, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -688,7 +688,9 @@ export class AgentCatalog {
     const report = labelled === null ? null
       : typeof diff === 'string' ? { ...labelled, outputSha256: sha256Hex(diff) }
         : assignments !== undefined ? { ...labelled, outputSha256: delegationOutputSha256(assignments), planRevision: (input as AgentInputs['pmDelegate']).plan.planRevision }
-          : labelled;
+          // Fix round 3: an ok, unlocked plan binds its output too, so only this plan can be accepted from this call.
+          : kind === 'pmPlan' && proposal.status === 'ok' && proposal.route?.locked !== true ? { ...labelled, outputSha256: sha256Hex(canonicalJson(proposal.data)) }
+            : labelled;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try {

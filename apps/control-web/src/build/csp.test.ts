@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CONTENT_SECURITY_POLICY, cspMeta } from './csp.ts';
 
@@ -15,5 +16,13 @@ describe('the Content-Security-Policy meta tag', () => {
     expect(plugin.apply).toBe('build');
     const out = (plugin.transformIndexHtml as (html: string) => string)('<html><head><meta charset="UTF-8" /></head><body></body></html>');
     expect(out).toMatch(/^<html><head><meta charset="UTF-8" \/>\s*<meta http-equiv="Content-Security-Policy" content="[^"]+" \/>/);
+  });
+
+  it('fix round 3: on the real index.html it injects the tag, and a page without the injection point fails the build', () => {
+    const plugin = cspMeta();
+    const transform = plugin.transformIndexHtml as (html: string) => string;
+    const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
+    expect(transform(html)).toContain(`<meta http-equiv="Content-Security-Policy" content="${CONTENT_SECURITY_POLICY}" />`);
+    expect(() => transform('<html><head></head><body></body></html>')).toThrow(/Content-Security-Policy/);
   });
 });

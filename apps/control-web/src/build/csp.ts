@@ -14,7 +14,10 @@ export function cspMeta(): Plugin {
     name: 'selarikru-csp-meta',
     apply: 'build',
     transformIndexHtml(html: string): string {
-      return html.replace(/<meta charset="UTF-8" \/>/i, (m) => `${m}\n    <meta http-equiv="Content-Security-Policy" content="${CONTENT_SECURITY_POLICY}" />`);
+      // Fix round 3: a page without the injection point fails the build rather than ship with no policy.
+      const at = /<meta charset="UTF-8"\s*\/?>/i;
+      if (!at.test(html)) throw new Error('selarikru-csp-meta: no <meta charset="UTF-8"> to put the Content-Security-Policy after; the build would ship without one');
+      return html.replace(at, (m) => `${m}\n    <meta http-equiv="Content-Security-Policy" content="${CONTENT_SECURITY_POLICY}" />`);
     },
   };
 }

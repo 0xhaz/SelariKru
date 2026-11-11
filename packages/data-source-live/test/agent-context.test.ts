@@ -132,8 +132,9 @@ describe('live Project Manager plan accept (H11 fix round 2, I4)', () => {
     const live = source([() => ({ status: 200, body: { expectedRevision: 2, tasks: reviewed } }), () => ({ status: 201, body: { planRevision: 3, taskIds: ['t_back'] } })]);
     const plan = { tasks: [{ key: 'T1', title: 'API', description: 'D', role: 'docs', requirementIds: ['FB-1'], paths: ['apps/docs/x'], dependsOn: [], revises: 't_back' }] };
     const r = await live.s.acceptPmPlan!('p', 'r1', { expectedPlanRevision: 2, subjectTaskId: 't_back', routeRecordId: 'req_plan', plan, idempotencyKey: 'k' });
-    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/runs/r1/proposals/review', body: { envelope: { operation: 'pmPlan', status: 'ok', data: plan } } });
-    expect(live.calls[1]).toMatchObject({ url: 'http://x/v1/runs/r1/plan-revisions', body: { expectedRevision: 2, tasks: reviewed, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan', stepKind: 'pmPlan' } } });
+    // Fix round 3: both name the call, and plan-revisions carries the plan so the server can re-derive and bind it.
+    expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/runs/r1/proposals/review', body: { envelope: { operation: 'pmPlan', status: 'ok', data: plan }, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan' } } });
+    expect(live.calls[1]).toMatchObject({ url: 'http://x/v1/runs/r1/plan-revisions', body: { expectedRevision: 2, tasks: reviewed, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan', stepKind: 'pmPlan' }, pmPlan: plan } });
     expect(r).toEqual({ planRevision: 3, taskIds: ['t_back'], simulated: false });
   });
 });

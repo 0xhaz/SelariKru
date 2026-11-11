@@ -270,10 +270,10 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
      */
     async acceptPmPlan(projectId, runId, request): Promise<PmPlanAcceptReceipt> {
       // Sent as the call gave it (fix round 2, I4): the server's review maps `revises` onto the run's tasks, keeping roles, paths and dependencies.
-      const review = await readJson(`/v1/runs/${encodeURIComponent(runId)}/proposals/review`, { parse: (v: unknown) => v as { expectedRevision: number; tasks: unknown[] } }, 'a plan review', false, { envelope: { operation: 'pmPlan', status: 'ok', data: request.plan } }, true);
+      const review = await readJson(`/v1/runs/${encodeURIComponent(runId)}/proposals/review`, { parse: (v: unknown) => v as { expectedRevision: number; tasks: unknown[] } }, 'a plan review', false, { envelope: { operation: 'pmPlan', status: 'ok', data: request.plan }, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId } }, true);
       if (review.expectedRevision !== request.expectedPlanRevision) throw fail({ code: 'unavailable', message: 'stale_revision: the plan changed since the Project Manager drafted this', retryable: false });
       const done = await readJson(`/v1/runs/${encodeURIComponent(runId)}/plan-revisions`, { parse: (v: unknown) => PlanRevisionReplySchema.parse(v) }, 'a plan revision', false,
-        { expectedRevision: review.expectedRevision, idempotencyKey: request.idempotencyKey, tasks: review.tasks, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId, stepKind: 'pmPlan' } }, true);
+        { expectedRevision: review.expectedRevision, idempotencyKey: request.idempotencyKey, tasks: review.tasks, agentProposal: { taskId: request.subjectTaskId, routeRecordId: request.routeRecordId, stepKind: 'pmPlan' }, pmPlan: request.plan }, true);
       return { planRevision: done.planRevision, taskIds: done.taskIds, simulated: false };
     },
 

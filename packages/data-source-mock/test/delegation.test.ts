@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { delegationOutputSha256 } from '@selarikru/domain';
+import { canonicalJson, delegationOutputSha256, sha256Hex } from '@selarikru/domain';
 import type { ProjectViewEvent } from '@selarikru/view-protocol';
 import { buildFixture, createMockDataSource, createSeededClock, demoMaxAttempts, demoNameFor, fixtureTime, scoped } from '../src/index.ts';
 
@@ -97,11 +97,24 @@ describe('the demo\'s Project Manager delegation (H11)', () => {
     ] };
     const req = (p: unknown, key: string) => ({ expectedPlanRevision: run.planRevision, subjectTaskId: subject, routeRecordId: 'req-plan', plan: p as never, idempotencyKey: key });
     await expect(ds.acceptPmPlan!(f.projectId, runId, req(plan, 'p0'))).rejects.toThrow(/route_record_missing/);
-    await ds.getTaskContext!(f.projectId, subject, 'local', null, 'ctx_plan');
-    await ds.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: 'rp', args: { projectId: f.projectId, taskId: subject, report: report('req-plan', { stepKind: 'pmPlan', contextId: 'ctx_plan' }) } });
-    await expect(ds.acceptPmPlan!(f.projectId, runId, req({ tasks: [{ ...plan.tasks[0], revises: 'nope' }] }, 'p1'))).rejects.toThrow(/revises_unknown/);
-    await expect(ds.acceptPmPlan!(f.projectId, runId, req({ tasks: [{ ...plan.tasks[0], revises: locked.taskId, role: locked.role }] }, 'p2'))).rejects.toThrow(/revises_locked/);
-    const r = await ds.acceptPmPlan!(f.projectId, runId, req(plan, 'p3'));
+    // Each call's record carries the hash of its plan (fix round 3); one record per plan tried here.
+    let n = 0;
+    const recorded = async (p: unknown) => {
+      n += 1;
+      await ds.getTaskContext!(f.projectId, subject, 'local', null, `ctx_plan_${n}`);
+      await ds.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: `rp${n}`, args: { projectId: f.projectId, taskId: subject, report: report(`req-plan-${n}`, { stepKind: 'pmPlan', contextId: `ctx_plan_${n}`, outputSha256: sha256Hex(canonicalJson(p)) }) } });
+      return `req-plan-${n}`;
+    };
+    const accept = async (p: unknown, key: string) => ds.acceptPmPlan!(f.projectId, runId, { ...req(p, key), routeRecordId: await recorded(p) });
+    await expect(accept({ tasks: [{ ...plan.tasks[0], revises: 'nope' }] }, 'p1')).rejects.toThrow(/revises_unknown/);
+    await expect(accept({ tasks: [{ ...plan.tasks[0], revises: locked.taskId, role: locked.role }] }, 'p2')).rejects.toThrow(/revises_locked/);
+    await expect(accept({ tasks: [{ ...plan.tasks[0], paths: ['src/api/../../infra/deploy'] }] }, 'p4')).rejects.toThrow(/path_invalid/);
+    await expect(accept({ tasks: [{ ...plan.tasks[0], paths: ['infra/deploy'] }] }, 'p5')).rejects.toThrow(/path_outside_role/);
+    await expect(accept({ tasks: [{ ...plan.tasks[1], dependsOn: [], role: 'designer' }] }, 'p6')).rejects.toThrow(/role_unknown/);
+    // Bound to the record: another plan than the one it hashed is refused.
+    const other = await recorded(plan);
+    await expect(ds.acceptPmPlan!(f.projectId, runId, { ...req({ tasks: [{ ...plan.tasks[0], title: 'Tampered' }] }, 'p7'), routeRecordId: other })).rejects.toThrow(/plan_output_mismatch/);
+    const r = await ds.acceptPmPlan!(f.projectId, runId, { ...req(plan, 'p3'), routeRecordId: other });
     expect(r).toMatchObject({ planRevision: run.planRevision + 1, simulated: true });
     await expect.poll(async () => (await ds.getSnapshot(f.projectId)).runs[runId]!.planRevision).toBe(run.planRevision + 1);
     const after = await ds.getSnapshot(f.projectId);

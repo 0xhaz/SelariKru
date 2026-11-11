@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type DelegationReceipt, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { MAX_ATTEMPTS_CAP, mapPmPlan, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { MAX_ATTEMPTS_CAP, canonicalJson, mapPmPlan, sha256Hex, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -823,9 +823,13 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (request.expectedPlanRevision !== run.planRevision) throw fail('unavailable', 'stale_revision: the plan changed since the Project Manager drafted this');
       // The server's mapping (fix round 2, I4): `revises` makes the next revision of that task, a task without it is new, T-key dependencies map to the final ids,
       // and tasks the plan does not mention stay as they are.
+      // Bound to the call's output, as on the server (fix round 3): the plan must be the one its record hashed.
+      if (rec.outputSha256 !== sha256Hex(canonicalJson(request.plan))) throw fail('unavailable', 'plan_output_mismatch: this is not the plan the Project Manager call produced');
+      // The demo's real plan paths (it has no per-role paths), so a path outside them is refused, as is any path that is not plain (fix round 3, N3).
       const existing = Object.values(p.state.snapshot.tasks).filter((t) => t.runId === runId && t.status !== 'cancelled' && t.status !== 'superseded')
-        .map((t) => ({ taskId: t.taskId, revision: t.revision, role: t.role ?? '', locked: (t.route?.lock ?? routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId)) !== null, allowedPaths: ['**'] }));
-      const mapped = mapPmPlan(request.plan.tasks as never, existing, { newTaskId: (i) => `${runId}.pm-${seededId(prng, 't')}-${i + 1}`, allowedPaths: ['**'] });
+        .map((t) => ({ taskId: t.taskId, revision: t.revision, role: t.role ?? '', locked: (t.route?.lock ?? routeLockOf(p.fixture.routes ?? NO_ROUTES, t.taskId)) !== null, allowedPaths: [...DEMO_PLAN_PATHS] }));
+      const projectRoles = [...new Set(Object.values(p.state.snapshot.tasks).map((t) => t.role).filter((r): r is string => typeof r === 'string'))];
+      const mapped = mapPmPlan(request.plan.tasks as never, existing, { newTaskId: (i) => `${runId}.pm-${seededId(prng, 't')}-${i + 1}`, allowedPaths: DEMO_PLAN_PATHS, projectRoles });
       if (!mapped.ok) throw fail('unavailable', `${mapped.reason}: the plan's ${mapped.key} cannot be accepted`);
       const planRevision = run.planRevision + 1;
       const taskIds = mapped.items.map((m) => m.taskId);
