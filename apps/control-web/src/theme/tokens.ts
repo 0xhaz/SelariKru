@@ -38,7 +38,7 @@ export const colors = {
 export const ROBOT_STATES = ['idle', 'working', 'needs_input', 'in_review', 'verified', 'blocked', 'offline', 'unknown'] as const;
 export type RobotState = (typeof ROBOT_STATES)[number];
 
-export interface StateStyle {
+export interface StateLook {
   /** The word shown beside the colour. Colour is never the only signal. */
   readonly label: string;
   readonly glyph: string;
@@ -46,7 +46,7 @@ export interface StateStyle {
   readonly dim: string;
 }
 
-export const stateStyle: Readonly<Record<RobotState, StateStyle>> = {
+export const stateStyle: Readonly<Record<RobotState, StateLook>> = {
   working: { label: 'Working', glyph: '◆', color: '#3fa596', dim: '#256e64' },
   needs_input: { label: 'Needs input', glyph: '▲', color: '#d2532e', dim: '#7d2a14' },
   in_review: { label: 'In review', glyph: '◎', color: '#e2a93a', dim: '#8a6118' },
@@ -73,12 +73,12 @@ export const chipStyle: Readonly<Record<RobotState, { readonly bg: string; reado
 };
 
 /** Each worker's accent colour, in order: kedai tones (terracotta, teal, gold, pandan, kopi, batik indigo, rose, sage, peacock, sand, mangosteen, papaya). */
-export const agentPalette = [
+export const workerAccents = [
   '#d0643c', '#2fa39a', '#e8b33a', '#5f9a4e', '#a8714a', '#5867a8', '#c9677a', '#86b06c', '#3f86a6', '#d9a46b', '#9d5a8c', '#e07f52',
 ] as const;
 
 /** Lighter (amount > 0) or darker (amount < 0) variants of a colour, for sprite shading. */
-export function shade(hex: string, amount: number): string {
+export function toneShift(hex: string, amount: number): string {
   const toward = amount >= 0 ? 255 : 0;
   const t = Math.min(1, Math.abs(amount));
   const channels = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));

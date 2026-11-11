@@ -1,6 +1,6 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: which overlay a robot shows for its state (the emote choice and the name tag on hover).
-// The drawing itself (the cap lamp, the eyes on the face screen, the device or cloud badge, the signboard bubbles and the corner brackets) is
-// SelariKru's own, redrawn for the kedai crew in H7.
+// The drawing itself (the foot shadow, the cap lamp, the eyes on the face screen, the device or cloud badge, the signboard bubbles, the emote
+// pictures and the corner marks) is SelariKru's own, redrawn for the kedai crew in H7.
 
 import { stateStyle, type RobotState } from '../../theme/tokens.ts';
 import type { Bot } from '../actors/bots.ts';
@@ -10,7 +10,8 @@ import { C } from '../engine/palette.ts';
 import { ellipse, type Pen } from '../engine/pen.ts';
 import type { PxRect } from '../layout/layout.ts';
 
-export function drawShadow(p: Pen, bot: Bot) {
+/** The soft shadow under a robot's feet. */
+export function footShadow(p: Pen, bot: Bot) {
   ellipse(p, Math.round(bot.x), Math.round(bot.y), 5, 1, C.shadow, 0.28);
 }
 
@@ -120,13 +121,13 @@ export function drawNameTag(p: Pen, bot: Bot) {
   tag(p, bot.config.name.toUpperCase().slice(0, 10), Math.round(bot.x), bot.headY - 9, C.ink, bot.color);
 }
 
-/** Corner brackets around what the pointer is over, in gold; they pulse when motion is allowed. */
-export function drawSelection(p: Pen, r: PxRect, t: number) {
-  if (Math.floor(t * 3) % 3 === 0) return;
-  const { x, y, w, h } = r;
-  const L = 5;
-  for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]] as const) {
-    p.rect(sx > 0 ? cx - 2 : cx - L + 2, sy > 0 ? cy - 2 : cy, L, 2, C.gold);
-    p.rect(sx > 0 ? cx - 2 : cx, sy > 0 ? cy - 2 : cy - L + 2, 2, L, C.gold);
+/** Gold corner marks around what the pointer is over; they pulse when motion is allowed. */
+export function cornerMarks(p: Pen, r: PxRect, time: number) {
+  if (((time * 3) | 0) % 3 === 0) return;
+  const arm = 5;
+  const corners = [[r.x - 2, r.y - 2, 1, 1], [r.x + r.w, r.y - 2, -1, 1], [r.x - 2, r.y + r.h, 1, -1], [r.x + r.w, r.y + r.h, -1, -1]] as const;
+  for (const [cx, cy, dx, dy] of corners) {
+    p.rect(dx > 0 ? cx : cx - arm + 2, cy, arm, 2, C.gold);
+    p.rect(cx, dy > 0 ? cy : cy - arm + 2, 2, arm, C.gold);
   }
 }

@@ -170,7 +170,7 @@ export function aiCounterText(c: AiRunCounts): string {
 function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | null }) {
   const why = `Counted from each task's last route record${runId ? ` in ${runId}` : ''}, as reported by the browser. Calls still in flight are not counted.`;
   return (
-    <span data-testid="ai-counter" className="chip shrink-0 justify-center whitespace-normal text-[12px] leading-[16px]" title={why}>
+    <span data-testid="ai-counter" className="chip shrink-0 justify-center whitespace-normal text-[11px] leading-[15px]" title={why}>
       <span aria-hidden="true">{aiCounterText(counts)}</span>
       <span className="sr-only">{`${aiCounterText(counts)}. ${why}`}</span>
     </span>
@@ -196,7 +196,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
         <span className="contents" data-testid="top-bar-demo-chip">{mode === 'mock' ? <span role="status" data-testid="demo-badge" className="chip shrink-0 text-[12px]" style={{ background: 'var(--color-gold)' }}>Demo data</span> : null}</span>
-        <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
+        <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[7rem] 2xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
       {runs.length > 0 ? (
         <label className="hidden items-center gap-2 text-[14px] 2xl:flex">

@@ -2,12 +2,12 @@
 // apron band and two legs it walks on. Outlines are a dark shade of the worker's own accent colour rather than one black ink line, so each robot reads
 // as one shape in its colour. Nothing here is taken from another product's sprites.
 
-import { shade } from '../../theme/tokens.ts';
+import { toneShift } from '../../theme/tokens.ts';
 import { C } from '../engine/palette.ts';
 import { flipCanvas, spriteCanvas } from '../engine/pen.ts';
 
 /*
- * Legend: o outline (accent, much darker), B body (accent), b body shade, h highlight, C cap (deep green), c cap shine, F face screen, A apron band
+ * Legend: o outline (accent, much darker), B body (accent), b body toneShift, h highlight, C cap (deep green), c cap shine, F face screen, A apron band
  * (gold), G boots. 12 wide, 15 tall. The face screen sits on rows 5 and 6; the cap lamp on row 1, columns 5 and 6 (both drawn live).
  */
 const CAP = ['....oooo....', '...oCCCCo...', '..oCcCCCCo..', '.oooooooooo.'];
@@ -46,7 +46,7 @@ const cache = new Map<string, Record<Facing, HTMLCanvasElement>>();
 export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> {
   const hit = cache.get(color);
   if (hit) return hit;
-  const pal = { o: shade(color, -0.62), B: color, b: shade(color, -0.22), h: shade(color, 0.5), C: C.deep, c: '#2f6b66', F: C.screen, A: C.gold, G: C.deskDD };
+  const pal = { o: toneShift(color, -0.62), B: color, b: toneShift(color, -0.22), h: toneShift(color, 0.5), C: C.deep, c: '#2f6b66', F: C.screen, A: C.gold, G: C.deskDD };
   const side = spriteCanvas(SIDE, pal);
   const canvases: Record<Facing, HTMLCanvasElement> = {
     front: spriteCanvas(FRONT, pal),

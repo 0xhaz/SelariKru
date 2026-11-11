@@ -2,7 +2,7 @@ import type { ChangeRequestView, ProjectViewSnapshot, TaskView } from '@selarikr
 import { verifiedState } from '../features/evidence/model.ts';
 import { currentRun } from '../features/settings/model.ts';
 import type { TeamModel, TeamRow } from '../features/team/model.ts';
-import { agentPalette, stateStyle, type RobotState } from '../theme/tokens.ts';
+import { workerAccents, stateStyle, type RobotState } from '../theme/tokens.ts';
 
 /**
  * What the office canvas shows, read from SelariKru's own snapshot and team model. It is a picture of the same facts the team panel
@@ -138,7 +138,7 @@ const roleName = (role: string | null): string => (role ? role.charAt(0).toUpper
 export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel, projectName: string, planRunId: string | null = null, calls: readonly OfficeCall[] = []): OfficeWorld {
   // Colours follow the worker's id, not its place in the attention order, so a robot keeps its colour as the order changes.
   const ids = Object.keys(snapshot.workers).sort();
-  const colorOf = (id: string): string => agentPalette[Math.max(0, ids.indexOf(id)) % agentPalette.length]!;
+  const colorOf = (id: string): string => workerAccents[Math.max(0, ids.indexOf(id)) % workerAccents.length]!;
   const seen = new Map<string, number>();
   const roles = new Map<string, number>();
   for (const r of team.rows) roles.set(roleName(r.role), (roles.get(roleName(r.role)) ?? 0) + 1);

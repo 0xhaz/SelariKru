@@ -9,7 +9,7 @@ import { Effects } from './actors/effects.ts';
 import { BeltPath, restingPlace, updateParcels, type Parcel } from './actors/parcels.ts';
 import { PlanNotes } from './actors/planNotes.ts';
 import * as live from './draw/live.ts';
-import { drawBadge, drawEmote, drawFace, drawNameTag, drawSelection, drawShadow } from './draw/overlay.ts';
+import { drawBadge, drawEmote, drawFace, drawNameTag, cornerMarks, footShadow } from './draw/overlay.ts';
 import { buildStatic } from './draw/static.ts';
 import { Camera, type Insets, type WorldTransform } from './engine/camera.ts';
 import { C } from './engine/palette.ts';
@@ -36,7 +36,7 @@ export class OfficeScene {
   private pulses = new Map<string, number>();
   private readonly notes = new PlanNotes();
   private readonly effects = new Effects();
-  private gateMode: { mode: live.GateMode; at: number } = { mode: 'idle', at: 0 };
+  private gateMode: { mode: live.GateLook; at: number } = { mode: 'idle', at: 0 };
   hover: { rect: PxRect; agentId: string | null } | null = null;
   private t = 0;
   private dt = 0;
@@ -291,39 +291,40 @@ export class OfficeScene {
     g.drawImage(this.staticCanvas, 0, 0);
     const p = new CanvasPen(g);
 
-    live.drawWindowAndClock(p, l, slow);
-    for (const d of l.desks) live.drawScreen(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 12, this.stateOf(d.agentId), this.colorOf(d.agentId), slow, d.index);
+    live.skyAndClock(p, l, slow);
+    for (const d of l.desks) live.screenFace(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 12, this.stateOf(d.agentId), this.colorOf(d.agentId), slow, d.index);
     // The plan desk's screens: busy while any task is in progress on the plan wall, resting otherwise.
     const planState = world.notes.some((n) => n.column === 1 || n.column === 2) ? 'working' : 'idle';
-    live.drawScreen(p, l.ox + 224, l.oy + 72, planState, C.teal, slow, 0);
-    live.drawScreen(p, l.ox + 250, l.oy + 72, planState, C.teal, slow, 1);
-    live.drawLeadLamp(p, l.ox, l.oy, planState, this.reducedMotion ? 0 : t);
-    if (l.prBoard) live.drawPrBoard(p, l.prBoard, [...world.prs].filter((x) => !x.closed).sort((a, b) => a.num - b.num));
-    live.drawRacks(p, l.racks, world.racks, (id) => (id ? this.stateOf(id) : null), (n) => this.pulses.get(n) ?? 0, slow);
+    live.screenFace(p, l.ox + 224, l.oy + 72, planState, C.teal, slow, 0);
+    live.screenFace(p, l.ox + 250, l.oy + 72, planState, C.teal, slow, 1);
+    live.planLamp(p, l.ox, l.oy, planState, this.reducedMotion ? 0 : t);
+    if (l.prBoard) live.prTins(p, l.prBoard, [...world.prs].filter((x) => !x.closed).sort((a, b) => a.num - b.num));
+    live.rackLamps(p, l.racks, world.racks, (id) => (id ? this.stateOf(id) : null), (n) => this.pulses.get(n) ?? 0, slow);
 
-    if (world.banner) live.drawPlanTitle(p, l, world.banner);
+    if (world.banner) live.planBanner(p, l, world.banner);
     this.notes.update(world.notes, l.plan.board, this.dt, t, this.reducedMotion);
     this.notes.draw(p, world.notes, (id) => this.colorOf(id), t);
-    if (!this.reducedMotion) live.drawCables(p, l, (id) => this.stateOf(id), (id) => this.colorOf(id), t);
-    for (const d of l.desks) live.drawDeskStrip(p, d, l.ox, l.oy, this.stateOf(d.agentId), t);
+    if (!this.reducedMotion) live.cablePulses(p, l, (id) => this.stateOf(id), t);
+    for (const d of l.desks) live.deskLanterns(p, d, l.ox, l.oy, this.stateOf(d.agentId), t);
     for (const d of l.desks) {
       const ai = world.agents.find((a) => a.id === d.agentId)?.ai ?? null;
-      if (ai) live.drawAiMark(p, d, l.ox, l.oy, ai, this.reducedMotion ? 0 : t);
+      if (ai) live.aiPlate(p, d, l.ox, l.oy, ai, this.reducedMotion ? 0 : t);
+      if (ai?.state === 'expected' && ai.place === 'device') live.deviceGlow(p, d, l.ox, l.oy, this.reducedMotion ? 0 : t);
     }
-    live.drawCloudDeck(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
-    live.drawFallbacks(p, l, world.agents, this.reducedMotion ? 0 : t);
-    live.drawBelt(p, l, t);
+    live.cloudDeck(p, l, world.cloudCall, this.reducedMotion ? 0 : t);
+    live.fallbackRoutes(p, l, world.agents, this.reducedMotion ? 0 : t);
+    live.deliveryLane(p, l, t);
     for (const parcel of this.parcels) {
       if (parcel.mode === 'gone') continue;
       const pos = this.belt!.pos(parcel.s);
       const inGate = l.gate && this.stages.get(parcel.id)?.stage === 'to_gate' && Math.abs(parcel.s - this.belt!.gateCentre) < 1;
-      if (!inGate) live.drawParcelTagged(p, pos.x, pos.y, parcel.label, C.yellow);
+      if (!inGate) live.tiffin(p, pos.x, pos.y, parcel.label);
     }
-    if (l.gate) live.drawGate(p, l.gate, this.gateMode.mode, t - this.gateMode.at, t, 'VERIFIER');
+    if (l.gate) live.verifierGate(p, l.gate, this.gateMode.mode, t - this.gateMode.at, t, 'VERIFIER');
 
     const bots = [...this.bots.values()];
     for (const bot of bots) bot.render(t, this.stateOf(bot.config.id));
-    for (const bot of bots) drawShadow(p, bot);
+    for (const bot of bots) footShadow(p, bot);
     for (const bot of [...bots].sort((a, b) => a.y - b.y)) g.drawImage(bot.sprite, bot.spriteX, bot.spriteY);
     for (const bot of bots) {
       const state = this.stateOf(bot.config.id);
@@ -335,7 +336,7 @@ export class OfficeScene {
     // Under reduced motion every name shows, so no robot has to be hovered to be told apart.
     for (const bot of bots) if (this.reducedMotion || bot.path.length || this.hover?.agentId === bot.config.id) drawNameTag(p, bot);
     this.effects.draw(p, (id) => { const b = this.bots.get(id); return b ? { x: b.x, y: b.headY + 10 } : null; });
-    if (this.hover) drawSelection(p, this.hover.rect, this.reducedMotion ? 0.5 : t);
+    if (this.hover) cornerMarks(p, this.hover.rect, this.reducedMotion ? 0.5 : t);
   }
 
   /** Where a robot is on screen, in CSS pixels relative to the canvas. For tests and the camera; null when it is not in the office. */

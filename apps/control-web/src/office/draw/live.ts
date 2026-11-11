@@ -1,355 +1,366 @@
-// The live layer of the kedai studio (H7), redrawn every frame: desk screens and lamps, the delivery path with its tiffin carriers, the verifier's
-// gate, the local racks, the pull request shelves, the louvre window and clock, the desk AI marks, the rooftop cloud deck and the fallback path.
-// The drawing is SelariKru's own; the rack lights' flicker and the cable dots' timing per state are adapted from jsm-hq (MIT), see
-// THIRD_PARTY_NOTICES.md. What each part shows is read from the office world (model.ts); nothing here decides a state.
+// The live layer of the kedai studio (H7), redrawn every frame. SelariKru's own drawing: desk screens and lanterns, the paved delivery lane with its
+// tiffin carriers, the verifier's gate, the almari rack lamps, the pull request tins, the sky between the louvres and the wall clock, the desk AI
+// plates, the rooftop CLOUD sign and dish, and the fallback route up the stair. What each part shows is read from the office world (model.ts).
 
 import { stateStyle, type RobotState } from '../../theme/tokens.ts';
 import type { OfficeAgent, OfficePr, OfficeRack } from '../model.ts';
 import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
-import { box, disc, drawRows, line, type Pen } from '../engine/pen.ts';
-import type { DeskSpot, OfficeLayout, PxRect, Rack } from '../layout/layout.ts';
+import { disc, drawRows, line, type Pen } from '../engine/pen.ts';
+import { STAIR_X, type DeskSpot, type OfficeLayout, type PxRect, type Rack } from '../layout/layout.ts';
+import { framed } from './furniture.ts';
 import { VERIFIER, VERIFIER_BLINK, VERIFIER_PAL } from './robots.ts';
-import { dishSpot } from './static.ts';
+import { cloudSignSpot, dishSpot } from './static.ts';
 
-const blink = (t: number, hz: number) => Math.floor(t * hz) % 2 === 1;
+/** True on the second half of each period of `rate` per second. */
+const pulseOn = (time: number, rate: number): boolean => ((time * rate) | 0) % 2 === 1;
 
-/** A desk's monitor: lines of code while working, otherwise a picture of the state. */
-export function drawScreen(p: Pen, sx: number, sy: number, state: RobotState, color: string, t: number, variant: number) {
-  p.rect(sx, sy, 18, 11, C.screen);
-  const st = stateStyle[state];
-  if (state === 'needs_input') {
-    p.rect(sx, sy, 18, 11, blink(t, 4) ? st.dim : C.screen);
-    p.rect(sx + 8, sy + 2, 2, 5, blink(t, 4) ? C.white : st.color);
-    p.rect(sx + 8, sy + 8, 2, 1, blink(t, 4) ? C.white : st.color);
-  } else if (state === 'in_review') {
-    // An hourglass.
-    const c = st.color;
-    p.rect(sx + 6, sy + 2, 6, 1, c); p.rect(sx + 7, sy + 3, 4, 1, c); p.rect(sx + 8, sy + 4, 2, 2, c); p.rect(sx + 7, sy + 6, 4, 1, c); p.rect(sx + 6, sy + 7, 6, 1, c);
-  } else if (state === 'verified') {
-    for (let i = 0; i < 8; i++) p.rect(sx + 5 + i, sy + (i < 3 ? 5 + i : 10 - i), 1, 1, st.color);
-  } else if (state === 'offline') {
-    p.rect(sx, sy, 18, 11, C.deep2);
-  } else if (state === 'unknown') {
-    text(p, '?', sx + 8, sy + 3, C.lav);
-  } else if (state === 'blocked') {
-    p.rect(sx + 6, sy + 2, 2, 7, st.color);
-    p.rect(sx + 10, sy + 2, 2, 7, st.color);
-  } else if (state === 'idle') {
-    // A screensaver: a kopi cup with steam, in the worker's colour.
-    p.rect(sx + 6, sy + 5, 5, 4, color);
-    p.rect(sx + 11, sy + 6, 1, 2, color);
-    const k = Math.floor(t * 2 + variant) % 3;
-    p.rect(sx + 7 + (k % 2), sy + 2 - (k === 2 ? 1 : 0), 1, 2, C.lav);
-  } else {
-    // Scrolling code in kedai colours.
-    const step = Math.floor(t * 3);
-    for (let i = 0; i < 5; i++) {
-      const n = (step + i) * 7 + variant * 13;
-      const indent = (n % 3) * 2;
-      const len = 3 + ((n * 5) % 9);
-      p.rect(sx + 1 + indent, sy + 1 + i * 2, len, 1, [C.teal, C.gold, C.cream, C.leafL, C.peach][n % 5]!);
+/** What a desk's screen shows: lines of code while working, otherwise a small picture of the state. */
+export function screenFace(p: Pen, sx: number, sy: number, state: RobotState, accent: string, time: number, seed: number) {
+  const look = stateStyle[state];
+  p.rect(sx, sy, 18, 11, state === 'offline' ? C.deep2 : C.screen);
+  switch (state) {
+    case 'needs_input': {
+      const flash = pulseOn(time, 4);
+      if (flash) p.rect(sx, sy, 18, 11, look.dim);
+      p.rect(sx + 8, sy + 2, 2, 5, flash ? C.white : look.color);
+      p.rect(sx + 8, sy + 8, 2, 1, flash ? C.white : look.color);
+      return;
     }
-    if (blink(t, 3)) p.rect(sx + 1, sy + 10, 2, 1, C.white);
+    case 'in_review':
+      for (const [dx, dy, w] of [[6, 2, 6], [7, 3, 4], [8, 4, 2], [8, 5, 2], [7, 6, 4], [6, 7, 6]] as const) p.rect(sx + dx, sy + dy, w, 1, look.color);
+      return;
+    case 'verified':
+      for (const [dx, dy] of [[5, 5], [6, 6], [7, 7], [8, 6], [9, 5], [10, 4], [11, 3], [12, 2]] as const) p.rect(sx + dx, sy + dy, 1, 1, look.color);
+      return;
+    case 'unknown':
+      text(p, '?', sx + 8, sy + 3, C.lav);
+      return;
+    case 'blocked':
+      for (const bar of [6, 10]) p.rect(sx + bar, sy + 2, 2, 7, look.color);
+      return;
+    case 'idle': {
+      // A kopi glass with rising steam, in the worker's colour.
+      p.rect(sx + 7, sy + 4, 4, 5, accent);
+      p.rect(sx + 11, sy + 5, 1, 2, accent);
+      const wisp = ((time * 2 + seed) | 0) % 3;
+      p.rect(sx + 8 + (wisp & 1), sy + 1 + (wisp >> 1), 1, 2, C.lav);
+      return;
+    }
+    case 'offline':
+      return;
+    default: {
+      const rows = (time * 3) | 0;
+      const inks = [C.teal, C.gold, C.cream, C.leafL, C.peach];
+      for (let r = 0; r < 5; r++) {
+        const code = (rows + r) * 11 + seed * 7;
+        p.rect(sx + 1 + (code % 4), sy + 1 + r * 2, 4 + ((code * 3) % 8), 1, inks[code % inks.length]!);
+      }
+      if (pulseOn(time, 3)) p.rect(sx + 1, sy + 10, 2, 1, C.white);
+    }
   }
 }
 
-/** A row of small lanterns along the top louvre, in the state's colour. Needs input blinks; a working desk has one lantern brighter, moving along. */
-export function drawDeskStrip(p: Pen, d: DeskSpot, ox: number, oy: number, state: RobotState, t: number) {
-  const st = stateStyle[state];
+/** Small lanterns along a cubicle's top rail, in the state's colour. Needs input flashes; a working desk has one lantern brighter, moving along. */
+export function deskLanterns(p: Pen, d: DeskSpot, ox: number, oy: number, state: RobotState, time: number) {
+  const look = stateStyle[state];
   const quiet = state === 'idle' || state === 'offline' || state === 'unknown';
-  const col = state === 'needs_input' && blink(t, 6) ? C.white : quiet ? st.dim : st.color;
-  const X = ox + d.x0 * 16;
-  const Y = oy + d.y0 * 16;
-  const run = Math.floor(t * 6) % 7;
-  for (let tx = 0; tx < 7; tx++) {
-    if (tx === 1) continue;
-    p.rect(X + tx * 16, Y, 16, 2, C.ink);
-    for (const lx of [4, 11]) {
-      p.rect(X + tx * 16 + lx, Y + 1, 3, 3, C.ink);
-      p.rect(X + tx * 16 + lx + 1, Y + 1, 1, 2, state === 'working' && tx === run ? C.white : col);
+  const glow = state === 'needs_input' && pulseOn(time, 6) ? C.white : quiet ? look.dim : look.color;
+  const lead = ((time * 5) | 0) % 12;
+  let n = 0;
+  for (const seg of [0, 2, 3, 4, 5, 6]) {
+    for (const off of [3, 10]) {
+      const lx = ox + (d.x0 + seg) * 16 + off;
+      const ly = oy + d.y0 * 16;
+      p.rect(lx, ly, 3, 4, C.ink);
+      p.rect(lx + 1, ly + 1, 1, 2, state === 'working' && n === lead ? C.white : glow);
+      n += 1;
     }
   }
 }
 
 /** The plan table's pendant lamp, in the colour of what the plan board shows. */
-export function drawLeadLamp(p: Pen, ox: number, oy: number, state: RobotState, t: number) {
-  const st = stateStyle[state];
-  p.rect(ox + 280, oy + 64, 1, 12, C.ink);
-  box(p, ox + 276, oy + 75, 9, 5, C.ink, C.ink);
-  p.rect(ox + 277, oy + 76, 7, 3, state === 'needs_input' && blink(t, 6) ? st.dim : st.color);
+export function planLamp(p: Pen, ox: number, oy: number, state: RobotState, time: number) {
+  const look = stateStyle[state];
+  line(p, ox + 280, oy + 64, ox + 280, oy + 75, C.ink);
+  framed(p, ox + 276, oy + 75, 9, 5, C.ink, state === 'needs_input' && pulseOn(time, 6) ? look.dim : look.color, 1);
 }
 
-/** The delivery path: a timber roller lane from the desks to the verifier and on into the rack room. */
-export function drawBelt(p: Pen, l: OfficeLayout, t: number) {
-  const b = l.belt;
-  const off = Math.floor(t * 26) % 6;
-  const y = b.y - 9;
-  const x1 = b.topY !== null ? b.x1 + 9 : b.x1;
-  p.rect(b.x0 - 6, y, x1 - b.x0 + 6, 18, C.ink);
-  p.rect(b.x0 - 4, y + 2, x1 - b.x0 + 2, 14, C.woodD);
-  for (let x = b.x0 - 4 + off; x < x1 - 2; x += 6) { p.rect(x, y + 3, 2, 12, C.wood); p.rect(x, y + 3, 1, 12, C.woodL); }
-  p.rect(b.x0 - 4, y + 2, x1 - b.x0 + 2, 1, C.gold);
-  p.rect(b.x0 - 4, y + 15, x1 - b.x0 + 2, 1, C.gold);
-  p.rect(b.x0 - 8, y + 1, 4, 16, C.terracotta);
-  if (b.topY !== null) {
-    const vx = b.x1 - 9;
-    p.rect(vx, b.topY, 18, b.y - b.topY + 9, C.ink);
-    p.rect(vx + 2, b.topY + 2, 14, b.y - b.topY + 4, C.woodD);
-    for (let yy = b.y - off; yy > b.topY + 2; yy -= 6) { p.rect(vx + 3, yy, 12, 2, C.wood); p.rect(vx + 3, yy, 12, 1, C.woodL); }
-    p.rect(vx + 2, b.topY + 2, 1, b.y - b.topY, C.gold);
-    p.rect(vx + 15, b.topY + 2, 1, b.y - b.topY, C.gold);
-    p.rect(vx + 1, b.topY - 6, 16, 6, C.deskDD);
+/**
+ * The delivery lane: terracotta pavers between gold kerbs, with a running line of chevrons showing which way the tiffins go, up the chute into the
+ * rack room at the far end.
+ */
+export function deliveryLane(p: Pen, l: OfficeLayout, time: number) {
+  const lane = l.belt;
+  const shift = ((time * 24) | 0) % 8;
+  const far = lane.topY !== null ? lane.x1 + 9 : lane.x1;
+  const top = lane.y - 9;
+  framed(p, lane.x0 - 6, top, far - lane.x0 + 6, 18, C.goldDark, C.tileTD, 2);
+  for (let px = lane.x0 - 4; px < far - 2; px += 8) p.rect(px, top + 2, 1, 14, C.grout);
+  for (let cx = lane.x0 + shift; cx < far - 6; cx += 8) { p.rect(cx, top + 7, 2, 1, C.tileTL); p.rect(cx + 1, top + 8, 2, 2, C.tileTL); p.rect(cx, top + 10, 2, 1, C.tileTL); }
+  if (lane.topY !== null) {
+    const cx = lane.x1 - 9;
+    framed(p, cx, lane.topY, 18, lane.y - lane.topY + 9, C.goldDark, C.tileTD, 2);
+    for (let cy = lane.y - shift; cy > lane.topY + 4; cy -= 8) { p.rect(cx + 7, cy, 1, 2, C.tileTL); p.rect(cx + 8, cy - 1, 2, 2, C.tileTL); p.rect(cx + 10, cy, 1, 2, C.tileTL); }
+    p.rect(cx + 1, lane.topY - 6, 16, 6, C.deskDD);
   }
 }
 
-export type GateMode = 'idle' | 'reviewing' | 'passed' | 'changes';
+/** How the gate looks: resting, scanning a candidate while a task verifies, a pass, or changes requested. */
+export type GateLook = 'idle' | 'reviewing' | 'passed' | 'changes';
 
-/** The verifier's gate: a timber gateway with a signboard, a scanning window, and the inspector on top. */
-export function drawGate(p: Pen, g: PxRect, mode: GateMode, since: number, t: number, label: string) {
-  const x0 = g.x;
-  const w = g.w;
-  const cx = Math.round(x0 + w / 2);
-  const top = g.y;
-  p.rect(x0, top, w, 46, C.ink);
-  p.rect(x0 + 1, top + 1, w - 2, 11, C.roof);
-  for (let x = x0 + 2; x < x0 + w - 2; x += 4) p.rect(x, top + 2, 2, 9, C.roofD);
-  p.rect(x0 + 1, top + 12, w - 2, 33, C.wood);
-  p.rect(x0 + 1, top + 12, 6, 33, C.deskD);
-  p.rect(x0 + w - 7, top + 12, 6, 33, C.deskD);
-  p.rect(x0 + 12, top + 15, 44, 22, C.ink);
-  p.rect(x0 + 13, top + 16, 42, 20, C.screen);
-  for (let y = top + 18; y < top + 35; y += 4) p.rect(x0 + 14, y, 40, 1, C.deep);
-  if (mode === 'reviewing') {
-    p.rect(cx - 5, top + 21, 10, 9, C.gold);
-    p.rect(cx - 4, top + 22, 8, 7, C.screen);
-    p.rect(cx - 1, top + 22, 2, 7, C.gold);
-    p.rect(x0 + 13 + Math.floor((t * 30) % 42), top + 16, 1, 20, C.teal);
-  } else if (mode === 'passed') text(p, 'OK', cx - 3, top + 23, C.leafL);
-  else if (mode === 'changes') text(p, 'FIX', cx - 5, top + 23, C.red);
-  const lbl = fit(label.toUpperCase(), w - 6);
-  box(p, cx - textW(lbl) / 2 - 3, top + 37, textW(lbl) + 6, 8, C.deep, C.ink);
-  text(p, lbl, cx - textW(lbl) / 2, top + 38, C.gold);
-  [5, 15, w - 18, w - 8].forEach((lx, i) => {
-    let col: string = C.deskDD;
-    if (mode === 'reviewing') col = i === Math.floor(t * 8) % 4 ? C.gold : C.goldDark;
-    else if (mode === 'passed') col = blink(t, 8) ? C.leafL : C.leafD;
-    else if (mode === 'changes') col = blink(t, 8) ? C.red : C.roofD;
-    p.rect(x0 + lx, top + 3, 6, 5, C.ink);
-    p.rect(x0 + lx + 1, top + 4, 4, 3, col);
+/** The verifier's gate: a timber gateway under a clay roof, its scanning window, its signboard, and the inspector standing on top. */
+export function verifierGate(p: Pen, g: PxRect, look: GateLook, since: number, time: number, label: string) {
+  const mid = Math.round(g.x + g.w / 2);
+  framed(p, g.x, g.y, g.w, 46, C.wood, C.wood, 1);
+  p.rect(g.x + 1, g.y + 1, g.w - 2, 11, C.roof);
+  for (let tile = g.x + 3; tile < g.x + g.w - 3; tile += 5) p.rect(tile, g.y + 2, 3, 9, C.roofD);
+  for (const post of [g.x + 1, g.x + g.w - 8]) p.rect(post, g.y + 12, 7, 33, C.deskD);
+  framed(p, g.x + 12, g.y + 15, 44, 22, C.ink, C.screen, 1);
+  for (let scan = g.y + 18; scan < g.y + 35; scan += 4) p.rect(g.x + 14, scan, 40, 1, C.deep);
+  if (look === 'reviewing') {
+    framed(p, mid - 5, g.y + 21, 10, 9, C.gold, C.screen, 1);
+    p.rect(mid - 1, g.y + 22, 2, 7, C.gold);
+    p.rect(g.x + 13 + ((time * 30) % 42 | 0), g.y + 16, 1, 20, C.teal);
+  } else if (look === 'passed') text(p, 'OK', mid - 3, g.y + 23, C.leafL);
+  else if (look === 'changes') text(p, 'FIX', mid - 5, g.y + 23, C.red);
+  const word = fit(label.toUpperCase(), g.w - 6);
+  framed(p, mid - textW(word) / 2 - 3, g.y + 37, textW(word) + 6, 8, C.deep, C.deep, 1);
+  text(p, word, mid - textW(word) / 2, g.y + 38, C.gold);
+  const lamps = [6, 16, g.w - 22, g.w - 12];
+  lamps.forEach((lx, k) => {
+    const lit = look === 'reviewing' ? (k === ((time * 8) | 0) % 4 ? C.gold : C.goldDark)
+      : look === 'passed' ? (pulseOn(time, 8) ? C.leafL : C.leafD)
+        : look === 'changes' ? (pulseOn(time, 8) ? C.red : C.roofD) : C.deskDD;
+    framed(p, g.x + lx, g.y + 3, 6, 5, C.ink, lit, 1);
   });
-  let hop = 0;
-  if (mode === 'reviewing') hop = Math.round(Math.abs(Math.sin(t * 8)) * 2);
-  else if (mode === 'passed') hop = Math.round(Math.sin(Math.min(1, since / 0.6) * Math.PI) * 6);
-  disc(p, cx, top + 1, 4, C.ink, 0.25);
-  drawRows(p, Math.floor(t * 10) % 31 === 0 ? VERIFIER_BLINK : VERIFIER, VERIFIER_PAL, cx - 5, top - 10 - hop);
+  const hop = look === 'reviewing' ? Math.round(Math.abs(Math.sin(time * 8)) * 2) : look === 'passed' ? Math.round(Math.sin(Math.min(1, since / 0.6) * Math.PI) * 6) : 0;
+  disc(p, mid, g.y + 1, 4, C.ink, 0.25);
+  drawRows(p, ((time * 10) | 0) % 31 === 0 ? VERIFIER_BLINK : VERIFIER, VERIFIER_PAL, mid - 5, g.y - 10 - hop);
 }
 
-/** One local rack per worker's sandbox: its lights run while its worker holds an attempt, and stay dark otherwise. */
-export function drawRacks(
-  p: Pen, racks: Rack[], envs: readonly OfficeRack[], stateOf: (agentId: string | null) => RobotState | null,
-  pulse: (name: string) => number, t: number,
+/**
+ * The lamps on each worker's almari rack: they chase down the panel while its worker holds an attempt, faster for busier states, and stay dark
+ * otherwise. A running rack also wears a gold lamp on top, so "running" never rests on the moving lights alone.
+ */
+export function rackLamps(
+  p: Pen, racks: Rack[], envs: readonly OfficeRack[], stateOf: (agentId: string | null) => RobotState | null, pulse: (name: string) => number, time: number,
 ) {
+  const PACE: Record<RobotState, number> = { working: 9, in_review: 5, verified: 6, needs_input: 2, blocked: 2, idle: 1, offline: 0, unknown: 1 };
   for (const r of racks) {
     const env = envs.find((e) => e.agentId === r.agentId);
-    const st = stateOf(r.agentId);
-    const ACT: Record<RobotState, number> = { working: 0.8, in_review: 0.45, verified: 0.6, needs_input: 0.12, blocked: 0.12, idle: 0.1, offline: 0, unknown: 0.05 };
-    const activity = env && !env.running ? 0.03 : st ? ACT[st] : 0.35;
-    const seedT = Math.floor(t * 10);
-    const pz = pulse(r.name);
-    for (let i = 0; i < 8; i++)
-      for (let j = 0; j < 3; j++) {
-        const h = Math.sin((seedT + 1) * 12.9898 + (i * 3 + j) * 78.233 + r.x) * 43758.5453;
-        const rnd = h - Math.floor(h);
-        let col: string = C.deep2;
-        if (pz > 0.05) col = blink(t, 12) ? C.leafL : C.leafD;
-        else if (rnd < activity) col = j === 2 && rnd < 0.08 ? C.gold : (i + j) % 3 ? C.leafL : C.teal;
-        p.rect(r.x + 17 + j * 3, r.y + 14 + i * 10, 2, 2, col);
+    const pace = env?.running ? PACE[stateOf(r.agentId) ?? 'idle'] : 0;
+    const head = (time * pace) | 0;
+    const flash = pulse(r.name);
+    for (let row = 0; row < 8; row++) {
+      for (let col = 0; col < 3; col++) {
+        const step = row * 3 + col;
+        let lamp: string = C.deep2;
+        if (flash > 0.05) lamp = pulseOn(time, 12) ? C.leafL : C.leafD;
+        else if (pace > 0 && (step + head) % 6 < 2) lamp = col === 2 ? C.gold : row % 2 ? C.teal : C.leafL;
+        p.rect(r.x + 17 + col * 3, r.y + 14 + row * 10, 2, 2, lamp);
       }
-    if (env?.running) {
-      // A lit rack wears a gold lamp on top, so "running" does not rest on the blinking lights alone.
-      p.rect(r.x + 13, r.y - 4, 6, 4, C.ink);
-      p.rect(r.x + 14, r.y - 3, 4, 2, C.gold);
     }
-    if (pz > 0.05) {
-      p.rect(r.x, r.y - 1, 32, 2, C.leafL, pz);
-      p.rect(r.x, r.y + r.h - 1, 32, 2, C.leafL, pz);
-      p.rect(r.x, r.y - 1, 2, r.h, C.leafL, pz);
-      p.rect(r.x + 30, r.y - 1, 2, r.h, C.leafL, pz);
-    }
+    if (env?.running) framed(p, r.x + 13, r.y - 4, 6, 4, C.ink, C.gold, 1);
+    if (flash > 0.05) for (const [x, y, w, h] of [[r.x, r.y - 1, 32, 2], [r.x, r.y + r.h - 1, 32, 2], [r.x, r.y - 1, 2, r.h], [r.x + 30, r.y - 1, 2, r.h]] as const) p.rect(x, y, w, h, C.leafL, flash);
   }
 }
 
-/** Pull requests as labelled tins on the shelves. Colour only from the run's verification record: green verified, grey not verified, amber out of date. */
-export function drawPrBoard(p: Pen, b: PxRect, prs: readonly OfficePr[]) {
-  prs.slice(-6).forEach((pr, i) => {
-    const x = b.x + 3 + (i % 3) * 20;
-    const y = b.y + 11 + Math.floor(i / 3) * 14;
-    const col = pr.merged ? C.leafD : pr.verification === 'verified' ? C.green : pr.verification === 'out_of_date' ? C.orange : C.metalD;
-    p.rect(x + 1, y + 1, 18, 12, C.ink, 0.3);
-    box(p, x, y, 18, 12, pr.merged ? C.tileD : C.cream, C.ink);
-    text(p, `#${pr.num % 1000}`, x + 2, y + 2, C.ink);
-    p.rect(x + 2, y + 8, 14, 3, col);
-    if (pr.verification === 'out_of_date' && !pr.merged) text(p, 'OLD', x + 3, y - 6, C.goldDark);
-  });
+/**
+ * Pull requests as round biscuit tins on the shelves, newest last, three to a shelf. Colour only from the run's verification record: green verified,
+ * grey not verified, amber out of date (with OLD above it).
+ */
+export function prTins(p: Pen, b: PxRect, prs: readonly OfficePr[]) {
+  const shown = prs.slice(Math.max(0, prs.length - 6));
+  for (let k = 0; k < shown.length; k++) {
+    const pr = shown[k]!;
+    const left = b.x + 4 + (k % 3) * 20;
+    const top = b.y + 10 + ((k / 3) | 0) * 14;
+    const band = pr.merged ? C.leafD : pr.verification === 'verified' ? C.green : pr.verification === 'out_of_date' ? C.orange : C.metalD;
+    framed(p, left, top, 17, 13, pr.merged ? C.tileD : C.cream, pr.merged ? C.tileD : C.cream, 1);
+    p.rect(left + 1, top + 1, 15, 2, C.metalL);
+    text(p, `#${pr.num % 1000}`, left + 2, top + 3, C.ink);
+    p.rect(left + 2, top + 9, 13, 2, band);
+    if (pr.verification === 'out_of_date' && !pr.merged) text(p, 'OLD', left + 3, top - 6, C.goldDark);
+  }
 }
 
-/** Dots moving along each desk's cable tray to its rack, faster while the worker works. */
-export function drawCables(
-  p: Pen, l: OfficeLayout, stateOf: (agentId: string) => RobotState | null, colorOf: (id: string) => string, t: number,
-) {
-  for (const cb of l.cables) {
-    const st = stateOf(cb.agentId) ?? 'idle';
-    const SPEED: Record<RobotState, number> = { working: 60, in_review: 24, verified: 40, needs_input: 4, blocked: 4, idle: 8, offline: 0, unknown: 2 };
-    const phase = (t * SPEED[st]) % 14;
-    let acc = 0;
-    for (let i = 0; i < cb.pts.length - 1; i++) {
-      const [x0, y0] = cb.pts[i]!;
-      const [x1, y1] = cb.pts[i + 1]!;
-      const len = Math.abs(x1 - x0) + Math.abs(y1 - y0);
-      for (let d = (14 - ((((acc - phase) % 14) + 14) % 14)) % 14; d < len; d += 14) {
-        const f = d / len;
-        const col = st === 'needs_input' ? C.red : st === 'idle' ? colorOf(cb.agentId) : C.cream;
-        p.rect(Math.round(x0 + (x1 - x0) * f) - 1, Math.round(y0 + (y1 - y0) * f) - 1, 3, 3, col, st === 'idle' ? 0.5 : 0.9);
-      }
-      acc += len;
+/** One bright pulse travels each cable tray from desk to rack while its worker is active; idle and offline trays stay still. */
+export function cablePulses(p: Pen, l: OfficeLayout, stateOf: (agentId: string) => RobotState | null, time: number) {
+  const PACE: Record<RobotState, number> = { working: 70, in_review: 30, verified: 45, needs_input: 0, blocked: 0, idle: 0, offline: 0, unknown: 0 };
+  for (const cable of l.cables) {
+    const st = stateOf(cable.agentId) ?? 'idle';
+    if (PACE[st] === 0) continue;
+    const legs = cable.pts.slice(1).map(([x, y], k) => ({ from: cable.pts[k]!, to: [x, y] as const, len: Math.abs(x - cable.pts[k]![0]) + Math.abs(y - cable.pts[k]![1]) }));
+    const total = legs.reduce((sum, leg) => sum + leg.len, 0);
+    let left = (time * PACE[st]) % Math.max(1, total);
+    for (const leg of legs) {
+      if (left > leg.len) { left -= leg.len; continue; }
+      const f = leg.len === 0 ? 0 : left / leg.len;
+      p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f) - 1, Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f) - 1, 3, 3, C.cream);
+      break;
     }
   }
 }
 
-/** The sky between the louvres (day or night by the local clock) and the clock's hands. */
-export function drawWindowAndClock(p: Pen, l: OfficeLayout, t: number) {
-  const W = { x: l.ox + l.lounge.x0 * 16 + 81, y: l.oy + 22, w: 30, h: 28 };
-  const hour = new Date().getHours();
-  const night = hour < 7 || hour >= 19;
-  p.rect(W.x, W.y, W.w, W.h, night ? C.skyN : C.sky);
-  if (night) {
-    for (const [sx, sy] of [[4, 5], [19, 12], [9, 20], [25, 7]] as const) p.rect(W.x + sx, W.y + sy, 1, 1, Math.sin(t * 2 + sx) > -0.3 ? C.cream : C.lav);
-    disc(p, W.x + 22, W.y + 8, 3, C.cream);
-  } else {
-    const cx = W.x + ((t * 3) % (W.w - 12));
-    p.rect(cx, W.y + 8, 12, 3, C.cloud);
-    p.rect(cx + 3, W.y + 6, 6, 2, C.cloud);
-    p.rect(W.x, W.y + W.h - 6, W.w, 6, C.leafD);
-    for (let x = W.x; x < W.x + W.w; x += 5) p.rect(x, W.y + W.h - 9, 3, 3, C.leaf);
+/** The hour hand's tip for each hour on the 7 px clock face, and the minute hand's for each five minutes. */
+const HOUR_TIP: readonly (readonly [number, number])[] = [[0, -3], [1, -3], [2, -2], [3, 0], [2, 2], [1, 3], [0, 3], [-1, 3], [-2, 2], [-3, 0], [-2, -2], [-1, -3]];
+const MINUTE_TIP: readonly (readonly [number, number])[] = [[0, -5], [2, -4], [4, -3], [5, 0], [4, 3], [2, 4], [0, 5], [-2, 4], [-4, 3], [-5, 0], [-4, -3], [-2, -4]];
+
+/** The sky between the louvres, by the local hour (day, dusk or night), and the wall clock's hands. */
+export function skyAndClock(p: Pen, l: OfficeLayout, time: number) {
+  const pane = { x: l.ox + l.lounge.x0 * 16 + 81, y: l.oy + 22, w: 30, h: 28 };
+  const now = new Date();
+  const hour = now.getHours();
+  const night = hour >= 20 || hour < 6;
+  const dusk = hour === 18 || hour === 19 || hour === 6;
+  const skyTop = night ? C.skyN : dusk ? C.terracotta : C.sky;
+  const skyLow = night ? C.deep2 : dusk ? C.gold : C.skyL;
+  for (let row = 0; row < pane.h; row += 2) p.rect(pane.x, pane.y + row, pane.w, 2, row < pane.h / 2 ? skyTop : skyLow);
+  if (night) for (const [sx, sy] of [[4, 4], [12, 9], [20, 3], [26, 11]] as const) p.rect(pane.x + sx, pane.y + sy, 1, 1, Math.sin(time * 2 + sx) > -0.3 ? C.cream : C.lav);
+  else {
+    const drift = (time * 3) % (pane.w + 14);
+    p.rect(pane.x + drift - 14, pane.y + 7, 12, 3, C.cloud);
+    p.rect(pane.x + drift - 11, pane.y + 5, 6, 2, C.cloud);
   }
-  p.rect(W.x + W.w / 2 - 1, W.y, 2, W.h, C.louvreD);
+  // A row of shophouse roofs across the street, under the sky.
+  for (let rx = 0; rx < pane.w; rx += 10) { p.rect(pane.x + rx, pane.y + pane.h - 7, 9, 7, C.wallD); p.rect(pane.x + rx, pane.y + pane.h - 9, 9, 2, C.roof); }
   const cx = l.ox + l.lounge.x0 * 16 - 8;
   const cy = l.oy + 36;
-  const d = new Date();
-  const m = d.getMinutes();
-  const am = (m / 60) * Math.PI * 2 - Math.PI / 2;
-  const ah = (((d.getHours() % 12) + m / 60) / 12) * Math.PI * 2 - Math.PI / 2;
-  line(p, cx, cy, cx + Math.cos(am) * 5, cy + Math.sin(am) * 5, C.ink);
-  line(p, cx, cy, cx + Math.cos(ah) * 3, cy + Math.sin(ah) * 3, C.terracotta);
+  const [hx, hy] = HOUR_TIP[hour % 12]!;
+  const [mx, my] = MINUTE_TIP[Math.floor(now.getMinutes() / 5) % 12]!;
+  line(p, cx, cy, cx + mx, cy + my, C.ink);
+  line(p, cx, cy, cx + hx, cy + hy, C.terracotta);
 }
 
-/** A candidate on the delivery path: a three-tier tiffin carrier, tagged with the start of its commit. */
-export function drawParcelTagged(p: Pen, cx: number, cy: number, label: string, _color?: string) {
+/** A candidate on the lane: a three-tier tiffin carrier with its handle, tagged with the start of its commit. */
+export function tiffin(p: Pen, cx: number, cy: number, label: string) {
   const x = Math.round(cx) - 4;
   const y = Math.round(cy) - 8;
-  p.rect(x + 3, y - 2, 3, 1, C.ink);
-  p.rect(x + 2, y - 1, 1, 2, C.ink);
-  p.rect(x + 6, y - 1, 1, 2, C.ink);
+  p.rect(x + 2, y - 2, 5, 1, C.ink);
+  for (const side of [x + 2, x + 6]) p.rect(side, y - 1, 1, 2, C.ink);
+  const tiers = [C.teal, C.terracotta, C.gold];
   p.rect(x, y + 1, 9, 9, C.ink);
-  for (let i = 0; i < 3; i++) {
-    p.rect(x + 1, y + 2 + i * 3, 7, 2, [C.teal, C.terracotta, C.gold][i]!);
-    p.rect(x + 1, y + 2 + i * 3, 2, 1, C.white);
-  }
+  tiers.forEach((tier, k) => { p.rect(x + 1, y + 2 + k * 3, 7, 2, tier); p.rect(x + 1, y + 2 + k * 3, 2, 1, C.white); });
   tag(p, label, cx, y - 9, C.ink, C.gold);
 }
 
-export function drawPlanTitle(p: Pen, l: OfficeLayout, title: string) {
-  const b = l.plan.board;
-  tag(p, fit(title.toUpperCase(), b.w), b.x + b.w / 2, b.y - 11, C.deep, C.gold);
+/** The run's name on a gold-lettered strip over the plan board. */
+export function planBanner(p: Pen, l: OfficeLayout, title: string) {
+  const board = l.plan.board;
+  tag(p, fit(title.toUpperCase(), board.w), board.x + board.w / 2, board.y - 11, C.deep, C.gold);
 }
 
 /**
- * The desk's AI mark (H4, enlarged in H7 for video): a chip for this device or a cloud for Gemini in the cloud, on a plate with its word (DEVICE or
- * CLOUD) beside it. An observed mark is filled. An expected one, for a call still in flight, is only outlined with a "?" beside it, so the two differ
- * without motion; it also blinks when motion is allowed. Paired with words in the office summary and the team cards.
+ * The desk's AI plate (H4, enlarged for video in H7): a chip for this device or a cloud for Gemini in the cloud, with its word (DEVICE or CLOUD).
+ * Observed is filled; expected (a call still in flight) is outlined with a "?" beside it, so the two differ without motion, and it flashes when motion
+ * is allowed. The office summary and the team cards say the same in words.
  */
-export function drawAiMark(p: Pen, d: DeskSpot, ox: number, oy: number, ai: NonNullable<OfficeAgent['ai']>, t: number) {
-  const word = ai.place === 'device' ? 'DEVICE' : 'CLOUD';
-  const X = ox + d.x0 * 16 + 3 * 16 + 4;
-  const Y = oy + d.y0 * 16 - 15;
+export function aiPlate(p: Pen, d: DeskSpot, ox: number, oy: number, ai: NonNullable<OfficeAgent['ai']>, time: number) {
   const expected = ai.state === 'expected';
-  if (expected && blink(t, 4)) return;
-  const fill = ai.place === 'device' ? C.device : C.cloudMark;
-  const light = ai.place === 'device' ? C.deviceL : C.cloudMarkL;
-  const w = 18 + textW(word) + 4 + (expected ? 6 : 0);
-  // The plate.
-  p.rect(X - 1, Y - 1, w + 2, 14, C.ink);
-  p.rect(X, Y, w, 12, expected ? C.cream : fill);
-  // The icon box.
-  p.rect(X + 2, Y + 2, 14, 8, expected ? C.white : light);
-  if (expected) for (let i = 0; i < 14; i += 2) { p.rect(X + 2 + i, Y + 2, 1, 1, fill); p.rect(X + 2 + i, Y + 9, 1, 1, fill); }
-  const ink = fill;
-  if (ai.place === 'device') {
-    // A chip: a square with legs.
-    p.rect(X + 6, Y + 3, 6, 6, ink);
-    p.rect(X + 7, Y + 4, 4, 4, expected ? C.white : light);
-    for (const ly of [4, 6]) { p.rect(X + 4, Y + ly, 2, 1, ink); p.rect(X + 12, Y + ly, 2, 1, ink); }
+  if (expected && pulseOn(time, 4)) return;
+  const device = ai.place === 'device';
+  const word = device ? 'DEVICE' : 'CLOUD';
+  const ink = device ? C.device : C.cloudMark;
+  const paleInk = device ? C.deviceL : C.cloudMarkL;
+  const x = ox + d.x0 * 16 + 52;
+  const y = oy + d.y0 * 16 - 15;
+  const w = 22 + textW(word) + (expected ? 6 : 0);
+  framed(p, x - 1, y - 1, w + 2, 14, C.ink, expected ? C.cream : ink, 1);
+  const icon = { x: x + 2, y: y + 2 };
+  p.rect(icon.x, icon.y, 14, 8, expected ? C.white : paleInk);
+  if (expected) for (let dash = 0; dash < 14; dash += 2) { p.rect(icon.x + dash, icon.y, 1, 1, ink); p.rect(icon.x + dash, icon.y + 7, 1, 1, ink); }
+  if (device) {
+    framed(p, icon.x + 4, icon.y + 1, 6, 6, ink, expected ? C.white : paleInk, 1);
+    for (const pin of [2, 4]) { p.rect(icon.x + 2, icon.y + pin, 2, 1, ink); p.rect(icon.x + 10, icon.y + pin, 2, 1, ink); }
   } else {
-    // A cloud.
-    p.rect(X + 4, Y + 6, 10, 3, ink);
-    p.rect(X + 5, Y + 4, 4, 2, ink);
-    p.rect(X + 8, Y + 3, 4, 3, ink);
+    p.rect(icon.x + 2, icon.y + 4, 10, 3, ink);
+    p.rect(icon.x + 3, icon.y + 2, 4, 2, ink);
+    p.rect(icon.x + 6, icon.y + 1, 4, 3, ink);
   }
-  text(p, word, X + 18, Y + 4, expected ? fill : C.white);
-  if (expected) text(p, '?', X + 18 + textW(word) + 3, Y + 4, C.ink);
+  text(p, word, x + 18, y + 4, expected ? ink : C.white);
+  if (expected) text(p, '?', x + 19 + textW(word) + 2, y + 4, C.ink);
 }
 
 /**
- * The rooftop cloud deck: the CLOUD sign and the uplink dish. While a cloud call is in flight the sign is lit gold and the dish sends a beam; otherwise
- * both are dark. The word is always drawn, so the state never rests on colour alone.
+ * The rooftop: the CLOUD sign and the uplink dish's lamp and beam. While a cloud call is in flight the sign lights gold and the dish sends a beam to
+ * the sky; otherwise both are dark. The word is always drawn, so the state never rests on colour alone.
  */
-export function drawCloudDeck(p: Pen, l: OfficeLayout, lit: boolean, t: number) {
+export function cloudDeck(p: Pen, l: OfficeLayout, lit: boolean, time: number) {
+  const s = cloudSignSpot(l);
+  const sx = l.ox + s.x;
+  const sy = l.oy + s.y;
+  framed(p, sx, sy, 60, 18, C.ink, lit ? C.cloudMark : C.deep2, 1);
+  const icon = lit ? C.cloudMarkL : C.metalDD;
+  p.rect(sx + 4, sy + 7, 12, 6, icon);
+  p.rect(sx + 6, sy + 4, 5, 3, icon);
+  p.rect(sx + 10, sy + 5, 4, 2, icon);
+  text(p, 'CLOUD', sx + 22, sy + 7, lit ? C.gold : C.metalD, 1);
   const d = dishSpot(l);
-  const x = l.ox + d.x;
-  const y = l.oy + d.y;
-  // The sign, to the left of the dish.
-  const sx = x - 62;
-  const sy = y + 4;
-  p.rect(sx - 1, sy - 1, 54, 16, C.ink);
-  p.rect(sx, sy, 52, 14, lit ? C.cloudMark : C.deep2);
-  p.rect(sx + 3, sy + 4, 10, 6, lit ? C.cloudMarkL : C.metalDD);
-  p.rect(sx + 5, sy + 2, 4, 2, lit ? C.cloudMarkL : C.metalDD);
-  text(p, 'CLOUD', sx + 18, sy + 5, lit ? C.gold : C.metalD);
-  // The dish's lamp and its beam.
-  p.rect(x + 13, y - 1, 4, 4, C.ink);
-  p.rect(x + 14, y, 2, 2, lit ? C.gold : C.metalDD);
-  if (lit) {
-    const k = Math.floor(t * 6) % 3;
-    for (let i = 0; i < 3; i++) {
-      const r = 4 + i * 4;
-      const a = i === k ? 1 : 0.45;
-      p.rect(x + 16 + r, y - 2 - r, 2, 1, C.gold, a);
-      p.rect(x + 17 + r, y - 1 - r, 1, 2, C.gold, a);
-    }
+  const tipX = l.ox + d.x + 17;
+  const tipY = l.oy + d.y + 1;
+  p.rect(tipX, tipY, 1, 1, lit ? C.gold : C.metalDD);
+  if (!lit) return;
+  p.rect(tipX - 1, tipY - 1, 3, 3, C.gold);
+  const ring = ((time * 6) | 0) % 4;
+  for (let k = 0; k < 4; k++) {
+    const r = 5 + k * 5;
+    const strength = k === ring ? 1 : 0.4;
+    p.rect(tipX + r, tipY - r, 3, 1, C.gold, strength);
+    p.rect(tipX + r + 2, tipY - r + 1, 1, 2, C.gold, strength);
   }
 }
 
 /**
- * A fallback, read from a desk's observed record: a dashed path from the desk to the rooftop (fell back to the cloud) or from the rooftop down (fell
- * back to this device), with its words at the top. When motion is allowed one dot travels along it.
+ * A fallback, from a desk's observed and conforming record: a dashed route from the desk along the floor to the stair, up through the back wall, and
+ * across the roof to the dish (fell back to the cloud), or the same route downwards (fell back to this device). Its words sit beside the CLOUD sign.
+ * When motion is allowed one gold dot travels along it.
  */
-export function drawFallbacks(p: Pen, l: OfficeLayout, agents: readonly OfficeAgent[], t: number) {
-  const roofY = l.roof.y + l.roof.h - 6;
+export function fallbackRoutes(p: Pen, l: OfficeLayout, agents: readonly OfficeAgent[], time: number) {
+  const d = dishSpot(l);
+  const s = cloudSignSpot(l);
+  const stairX = l.ox + STAIR_X * 16 + 8;
+  const corridorY = l.oy + 12 * 16 + 8;
+  const roofY = l.oy - 2 * 16 + 8;
+  let labelled = 0;
   for (const a of agents) {
     if (a.ai?.state !== 'observed' || !a.ai.fellBack) continue;
-    const d = l.desks.find((x) => x.agentId === a.id);
-    if (!d) continue;
-    const x = l.ox + d.x0 * 16 + 2 * 16 + 4;
-    const fromY = l.oy + d.y0 * 16 - 16;
+    const desk = l.desks.find((x) => x.agentId === a.id);
+    if (!desk) continue;
+    const fromX = l.ox + desk.x0 * 16 + 40;
+    const fromY = l.oy + desk.y0 * 16 - 2;
+    const route: (readonly [number, number])[] = [[fromX, fromY], [fromX, corridorY], [stairX, corridorY], [stairX, roofY], [l.ox + d.x + 6, roofY]];
     const up = a.ai.place === 'cloud';
-    for (let y = roofY; y < fromY; y += 4) p.rect(x, y, 2, 2, C.cloudMark);
-    const tip = up ? roofY : fromY;
-    // The arrow head points the way the call went.
-    for (let i = 0; i < 4; i++) p.rect(x - i + (up ? 0 : 0), tip + (up ? i : -i), 2 + i * 2, 1, C.cloudMark);
-    const len = fromY - roofY;
-    const k = ((t * 40) % len + len) % len;
-    if (t > 0) p.rect(x - 1, up ? fromY - k : roofY + k, 4, 4, C.gold);
-    tag(p, up ? 'FELL BACK TO CLOUD' : 'FELL BACK TO DEVICE', x + 1, roofY - 12, C.cloudMark, C.white);
+    const legs = route.slice(1).map((to, k) => ({ from: route[k]!, to, len: Math.abs(to[0] - route[k]![0]) + Math.abs(to[1] - route[k]![1]) }));
+    for (const leg of legs) {
+      const steps = Math.max(1, Math.floor(leg.len / 4));
+      for (let k = 0; k <= steps; k += 2) {
+        const f = k / steps;
+        p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f), Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f), 2, 2, C.cloudMark);
+      }
+    }
+    if (time > 0) {
+      const total = legs.reduce((sum, leg) => sum + leg.len, 0);
+      let at = (time * 50) % total;
+      if (!up) at = total - at;
+      for (const leg of legs) {
+        if (at > leg.len) { at -= leg.len; continue; }
+        const f = at / leg.len;
+        p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f) - 1, Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f) - 1, 4, 4, C.gold);
+        break;
+      }
+    }
+    const end = up ? route[route.length - 1]! : route[0]!;
+    for (let k = 0; k < 3; k++) p.rect(end[0] - k, end[1] + (up ? -k - 2 : k + 2), 2 + k * 2, 1, C.cloudMark);
+    if (labelled === 0) tag(p, up ? `${a.name.toUpperCase().slice(0, 10)} FELL BACK TO CLOUD` : `${a.name.toUpperCase().slice(0, 10)} FELL BACK TO DEVICE`, l.ox + s.x - 4 - 50, l.oy + s.y + 26, C.cloudMark, C.white);
+    labelled += 1;
   }
+}
+
+/** A device call in flight: a soft green glow round the worker's desk screen, so a call that stays on the device is seen too. */
+export function deviceGlow(p: Pen, d: DeskSpot, ox: number, oy: number, time: number) {
+  const sx = ox + (d.x0 + 2) * 16 + 15;
+  const sy = oy + d.y0 * 16 + 12;
+  const strength = time > 0 ? 0.35 + 0.25 * Math.sin(time * 5) : 0.5;
+  for (const [x, y, w, h] of [[sx - 4, sy - 4, 26, 2], [sx - 4, sy + 13, 26, 2], [sx - 4, sy - 4, 2, 19], [sx + 20, sy - 4, 2, 19]] as const) p.rect(x, y, w, h, C.leafL, strength);
 }

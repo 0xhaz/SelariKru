@@ -2,7 +2,7 @@
 //
 // Sticky notes on the plan wall, one per task of the current run. They glide between columns as tasks move.
 
-import { shade } from '../../theme/tokens.ts';
+import { toneShift } from '../../theme/tokens.ts';
 import type { OfficeNote } from '../model.ts';
 import { C } from '../engine/palette.ts';
 import type { Pen } from '../engine/pen.ts';
@@ -64,8 +64,8 @@ export class PlanNotes {
         p.rect(x + 5, y + 1, 1, 1, C.leafD);
       } else {
         p.rect(x, y, 7, 6, color);
-        p.rect(x, y, 7, 1, shade(color, 0.5));
-        p.rect(x + 1, y + 3, 4, 1, shade(color, -0.3));
+        p.rect(x, y, 7, 1, toneShift(color, 0.5));
+        p.rect(x + 1, y + 3, 4, 1, toneShift(color, -0.3));
         if (task.column === 2) p.rect(x + 5, y + 4, 1, 1, C.ink);
         if (task.status === 'blocked') p.rect(x + 5, y + 1, 2, 2, C.red);
       }

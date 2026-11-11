@@ -32,7 +32,9 @@ export interface LayoutInput {
 export const TS = 16;
 export const MARGIN = 3;
 /** Tiles of open rooftop deck above the building (H7): where cloud calls go. */
-export const ROOF = 4;
+export const ROOF = 6;
+/** The building tile column of the stair up to the rooftop: robots climb it on a cloud errand (H7 fix). */
+export const STAIR_X = 10;
 
 const LEAD_W = 20;
 const MIN_LOUNGE_W = 9;
@@ -94,6 +96,11 @@ export interface OfficeLayout {
   serverRoom: { glassX: number; x0: number; w: number } | null; // tiles
   /** The rooftop deck above the building, in world px. */
   roof: PxRect;
+  /**
+   * The way up (H7 fix): `foot` is the floor tile at the bottom of the stair, `top` the deck tile at its head, and `spots` where robots stand by
+   * the uplink dish (one per worker, in tile coordinates; a negative row is on the roof). The roof is outside the walk grid, so a robot climbs in a straight line.
+   */
+  roofWalk: { foot: Tile; top: Tile; spots: Tile[] };
   racks: Rack[];
   mailbox: PxRect | null;
   cables: { agentId: string; pts: [number, number][] }[];
@@ -255,6 +262,7 @@ export function generateLayout(input: LayoutInput): OfficeLayout {
     prBoard,
     serverRoom: hasServer ? { glassX, x0: glassX + 1, w: srW } : null,
     roof: { x: ox, y: MARGIN * TS, w: W * TS, h: ROOF * TS },
+    roofWalk: { foot: [STAIR_X, TOP_Y], top: [STAIR_X, -2], spots: workers.map((_, i): Tile => [Math.max(STAIR_X + 2, W - 8 - (i % 6) * 2), -2 - (Math.floor(i / 6) % 2)]) },
     racks,
     mailbox,
     cables,

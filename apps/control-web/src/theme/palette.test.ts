@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { agentPalette, chipStyle, colors, stateStyle } from './tokens.ts';
+import { workerAccents, chipStyle, colors, stateStyle } from './tokens.ts';
 
 /**
  * H7: SelariKru's own palette. The office is a kedai (shophouse) studio, so none of the reference template's colours may remain in this app's source.
@@ -16,7 +16,7 @@ const REFERENCE_HEX = [
   '#4a8f3d', '#fff1e8',
   // tokens.ts state and review dims
   '#1d6fb8', '#7e0f33', '#a86a00', '#00873a', '#5a5170',
-  // tokens.ts agentPalette
+  // tokens.ts workerAccents
   '#ffd23a', '#ff8a3d', '#a98bff', '#3ee0d0', '#ff5c5c', '#c2c3c7', '#b0e04a', '#f0a6ff', '#6fa8ff',
 ] as const;
 
@@ -71,7 +71,7 @@ describe('the palette is SelariKru\'s own', () => {
   it('defines the kedai families: terracotta, teal, kopi brown, cream paper, deep green, gold and its own ink', () => {
     for (const key of ['terracotta', 'teal', 'kopi', 'paper', 'deepGreen', 'gold', 'ink'] as const) expect(colors[key]).toMatch(/^#[0-9a-f]{6}$/);
     expect(colors.ink).not.toBe('#241a2e');
-    const used = [...Object.values(colors), ...agentPalette, ...Object.values(stateStyle).flatMap((s) => [s.color, s.dim]), ...Object.values(chipStyle).flatMap((c) => [c.bg, c.fg])];
+    const used = [...Object.values(colors), ...workerAccents, ...Object.values(stateStyle).flatMap((s) => [s.color, s.dim]), ...Object.values(chipStyle).flatMap((c) => [c.bg, c.fg])];
     expect(used.filter((h) => (REFERENCE_HEX as readonly string[]).includes(h.toLowerCase()))).toEqual([]);
   });
 });

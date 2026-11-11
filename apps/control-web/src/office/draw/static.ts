@@ -1,319 +1,321 @@
-// The static layer of the kedai (shophouse) studio (H7), drawn once per layout: the street and the five-foot way, the rooftop deck, the tiled
-// ground floor, the lime-washed walls with timber louvres, and the furniture. SelariKru's own drawing.
+// The static layer of the kedai (shophouse) studio (H7), drawn once per layout. SelariKru's own drawing: the street and five-foot way, the sky and the
+// open rooftop deck with its railing and uplink, the Peranakan-style floor tiles, the lime-washed walls with timber louvres, and the furniture.
 
 import { mulberry32 } from '../engine/random.ts';
 import { text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
-import { box, CanvasPen, disc, ellipse, makeCanvas } from '../engine/pen.ts';
-import { ROOF, type LayoutInput, type OfficeLayout } from '../layout/layout.ts';
-import { arch, batikRug, dishBody, louvreScreens, louvreWindow, plant, plate, prShelves, rackBody, signboard, stool, streetPot, workDesk } from './furniture.ts';
+import { CanvasPen, disc, ellipse, makeCanvas, type Pen } from '../engine/pen.ts';
+import { MARGIN, ROOF, STAIR_X, TS, type LayoutInput, type OfficeLayout } from '../layout/layout.ts';
+import {
+  almariRack, batikCloth, framed, kedaiDesk, louvreScreens, louvreWindow, nameCard, pandanJar, prShelves, rattanStool, signboard, slab, stair, streetJar, uplinkDish, walkArch,
+} from './furniture.ts';
 
 /** The sign on the shop front: the project's name, or the product's when there is none. Never another product's name. */
 export function officeSign(name: string): string {
   return name.trim().slice(0, 19).toUpperCase() || 'SELARIKRU';
 }
 
-/** Where the rooftop's dish stands, in building px (its base is on the deck). Shared with the live layer. */
+/** Where the uplink dish stands, in building px. Shared with the live layer, which lights it. */
 export function dishSpot(l: OfficeLayout): { x: number; y: number } {
-  return { x: l.W * 16 - 64, y: -ROOF * 16 + 12 };
+  return { x: l.W * 16 - 56, y: -ROOF * 16 + 22 };
+}
+
+/** Where the CLOUD sign hangs on the rooftop, in building px. */
+export function cloudSignSpot(l: OfficeLayout): { x: number; y: number } {
+  const d = dishSpot(l);
+  return { x: d.x - 70, y: d.y + 6 };
+}
+
+/** One floor tile. Terracotta plain, or a Peranakan teal tile with a four-petal flower, by a fixed pattern. */
+function floorTile(p: Pen, x: number, y: number, tx: number, ty: number): void {
+  const peranakan = (tx * 5 + ty * 3) % 11 === 0;
+  p.rect(x, y, 16, 16, C.grout);
+  if (!peranakan) {
+    p.rect(x + 1, y + 1, 15, 15, (tx ^ ty) & 1 ? C.tileT : C.tileTD);
+    if ((tx * 7 + ty) % 5 === 0) p.rect(x + 4, y + 11, 3, 1, C.tileTL);
+    return;
+  }
+  p.rect(x + 1, y + 1, 15, 15, C.cream);
+  p.rect(x + 2, y + 2, 13, 13, C.tileTeal);
+  for (const [dx, dy] of [[0, -4], [4, 0], [0, 4], [-4, 0]] as const) disc(p, x + 8 + dx, y + 8 + dy, 2, C.tileTealD);
+  disc(p, x + 8, y + 8, 2, C.gold);
+  p.rect(x + 8, y + 8, 1, 1, C.terracotta);
 }
 
 export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElement {
-  const canvas = makeCanvas(l.worldW, l.worldH);
-  const g = canvas.getContext('2d') as CanvasRenderingContext2D;
-  const p = new CanvasPen(g);
-  const R = mulberry32(7);
-  const pick = <T,>(arr: readonly T[]): T => arr[Math.floor(R() * arr.length)]!;
-  const bw = l.W * 16; // building px
-  const bh = l.H * 16;
-  const roofH = ROOF * 16;
+  const surface = makeCanvas(l.worldW, l.worldH);
+  const ctx = surface.getContext('2d') as CanvasRenderingContext2D;
+  const p = new CanvasPen(ctx);
+  const rand = mulberry32(11);
+  const width = l.W * TS;
+  const depth = l.H * TS;
+  const roofDepth = ROOF * TS;
+  const shopFront = l.oy + l.door[1] * TS;
 
-  // ------------------------------------------------ the street, kerbs and street pots
-  p.rect(0, 0, l.worldW, l.worldH, C.street);
-  for (let i = 0; i < (l.worldW * l.worldH) / 180; i++) p.rect(Math.floor(R() * l.worldW), Math.floor(R() * l.worldH), 1, 1, R() < 0.5 ? C.streetD : C.streetL);
-  // A kerb around the plot, and lane dashes on the street below it.
-  p.rect(l.ox - 34, l.oy - roofH - 6, bw + 40, bh + roofH + 12, C.kerb);
-  p.rect(l.ox - 32, l.oy - roofH - 4, bw + 36, bh + roofH + 8, C.wayD);
-  for (let x = 12; x < l.worldW - 12; x += 28) p.rect(x, l.worldH - 14, 14, 2, C.gold, 0.7);
-  const doorY = l.oy + l.door[1] * 16;
-
-  // ------------------------------------------------ the five-foot way: a covered walk along the shop front, with its arches
-  const wayX = l.ox - 30;
-  p.rect(wayX, l.oy, 30, bh, C.way);
-  for (let y = l.oy; y < l.oy + bh; y += 8) for (let x = wayX; x < l.ox; x += 8) if (((x + y) / 8) % 2 === 0) p.rect(x, y, 8, 8, C.wayL);
-  p.rect(wayX - 6, l.oy - 2, 6, bh + 4, C.roofD);
-  for (let y = l.oy; y < l.oy + bh; y += 4) p.rect(wayX - 6, y, 6, 1, C.roof);
-  for (let y = l.oy + 8; y < l.oy + bh - 24; y += 48) {
-    if (Math.abs(y + 12 - doorY) < 24) continue;
-    arch(p, wayX - 2, y, 6, 22);
+  // ------------------------------------------------ the sky above the roofline, then the street below it
+  const skyBottom = MARGIN * TS;
+  for (let band = 0; band < skyBottom; band += 4) p.rect(0, band, l.worldW, 4, band < skyBottom / 2 ? C.sky : C.skyL);
+  for (const [cx, cy, cw] of [[40, 14, 26], [l.worldW * 0.45, 22, 34], [l.worldW - 90, 10, 22]] as const) {
+    ellipse(p, Math.round(cx), cy, Math.round(cw / 2), 4, C.cloud);
+    ellipse(p, Math.round(cx) + 6, cy - 3, Math.round(cw / 4), 3, C.cloud);
   }
-  p.rect(0, doorY, wayX, 16, C.wayD);
-  for (let x = 2; x < wayX; x += 6) p.rect(x, doorY + 7, 3, 2, C.wayL);
-  streetPot(p, wayX - 14, doorY - 6);
-  streetPot(p, wayX - 14, doorY + 34);
-  for (let x = l.ox + 40; x < l.ox + bw - 20; x += 96 + Math.floor(R() * 40)) streetPot(p, x, l.oy + bh + 30);
-  for (let y = l.oy + 40; y < l.oy + bh; y += 110) streetPot(p, l.ox + bw + 22, y);
+  p.rect(0, skyBottom, l.worldW, l.worldH - skyBottom, C.street);
+  for (let sy = skyBottom; sy < l.worldH; sy += 32) {
+    p.rect(0, sy, l.worldW, 1, C.streetD);
+    for (let sx = (sy / 32) % 2 ? 16 : 0; sx < l.worldW; sx += 32) p.rect(sx, sy, 1, 32, C.streetD);
+  }
+  for (let speck = 0; speck < 260; speck++) p.rect(Math.floor(rand() * l.worldW), skyBottom + Math.floor(rand() * (l.worldH - skyBottom)), 2, 1, C.streetL);
+  for (let dash = 10; dash < l.worldW - 20; dash += 30) p.rect(dash, l.worldH - 14, 16, 2, C.goldDark);
+  // The kerb round the plot.
+  framed(p, l.ox - 34, l.oy - roofDepth - 2, width + 40, depth + roofDepth + 8, C.kerb, C.wayD, 2);
 
-  g.save();
-  g.translate(l.ox, l.oy);
-  const mainPx = (l.mainW + 1) * 16;
-  const L = l.lounge.x0 * 16;
+  // ------------------------------------------------ the five-foot way: a covered walk along the shop front with its arches
+  const walkX = l.ox - 30;
+  for (let wy = l.oy; wy < l.oy + depth; wy += 8) for (let wx = walkX; wx < l.ox; wx += 8) p.rect(wx, wy, 8, 8, ((wx - walkX) / 8 + (wy - l.oy) / 8) % 2 ? C.way : C.wayL);
+  framed(p, walkX - 7, l.oy - 2, 7, depth + 4, C.roof, C.roof, 1);
+  for (let ry = l.oy + 2; ry < l.oy + depth; ry += 5) p.rect(walkX - 6, ry, 5, 1, C.roofD);
+  for (let ay = l.oy + 10; ay + 22 < l.oy + depth; ay += 46) if (Math.abs(ay + 11 - shopFront) > 26) walkArch(p, walkX - 1, ay, 7, 22);
+  p.rect(0, shopFront, walkX, TS, C.wayD);
+  for (let step = 3; step < walkX; step += 7) p.rect(step, shopFront + 7, 4, 2, C.wayL);
+  streetJar(p, walkX - 14, shopFront - 6);
+  streetJar(p, walkX - 14, shopFront + 36);
+  for (let jx = l.ox + 50; jx < l.ox + width - 24; jx += 120) streetJar(p, jx, l.oy + depth + 30);
+  for (let jy = l.oy + 50; jy < l.oy + depth; jy += 120) streetJar(p, l.ox + width + 22, jy);
 
-  // ------------------------------------------------ the rooftop deck ("Cloud"): planks, parapet, plants, string lights, a water tank and the dish
+  ctx.save();
+  ctx.translate(l.ox, l.oy);
+  const hall = (l.mainW + 1) * TS;
+  const kopiX = l.lounge.x0 * TS;
+
+  // ------------------------------------------------ the rooftop: clay deck tiles, a railing, plants, a water tank, the hatch and the uplink dish
   {
-    const y0 = -roofH;
-    p.rect(0, y0, bw, roofH, C.deck);
-    for (let y = y0 + 2; y < 0; y += 6) {
-      p.rect(0, y, bw, 1, C.deckD);
-      for (let x = (y % 12 === 0 ? 0 : 24); x < bw; x += 48) p.rect(x, y - 5, 1, 5, C.deckD);
+    const deckTop = -roofDepth;
+    for (let ty = 0; ty < ROOF; ty++) {
+      for (let tx = 0; tx < l.W; tx++) {
+        const x = tx * TS;
+        const y = deckTop + ty * TS;
+        p.rect(x, y, TS, TS, C.deckD);
+        p.rect(x + 1, y + 1, TS - 1, TS - 1, (tx + ty) % 3 === 0 ? C.deckL : C.deck);
+      }
     }
-    p.rect(0, y0, bw, 3, C.ink);
-    p.rect(0, y0 + 3, bw, 2, C.wallL);
-    p.rect(0, y0, 3, roofH, C.ink);
-    p.rect(bw - 3, y0, 3, roofH, C.ink);
-    // String lights from one end to the other.
-    for (let x = 6; x < bw - 6; x += 2) {
-      const sag = Math.round(Math.sin(((x % 96) / 96) * Math.PI) * 4);
-      p.rect(x, y0 + 8 + sag, 1, 1, C.ink);
-      if (x % 12 === 0) p.rect(x - 1, y0 + 9 + sag, 3, 2, C.gold);
+    // The railing on the roof's edges: posts and a rail, the sky beyond.
+    p.rect(0, deckTop, width, 3, C.ink);
+    for (let post = 0; post <= width; post += 12) p.rect(Math.min(post, width - 2), deckTop - 6, 2, 8, C.ink);
+    p.rect(0, deckTop - 6, width, 2, C.metalL);
+    for (const edge of [0, width - 3]) p.rect(edge, deckTop, 3, roofDepth, C.ink);
+    // String lights across the deck.
+    for (let lx = 6; lx < width - 6; lx += 3) {
+      const sag = Math.round(Math.sin(((lx % 120) / 120) * Math.PI) * 5);
+      p.rect(lx, deckTop + 10 + sag, 1, 1, C.ink);
+      if (lx % 15 === 0) { p.rect(lx - 1, deckTop + 11 + sag, 3, 3, C.ink); p.rect(lx, deckTop + 12 + sag, 1, 1, C.gold); }
     }
-    // The stair hatch, a water tank and pots.
-    box(p, 12, y0 + 24, 26, 18, C.roofD, C.ink);
-    for (let i = 0; i < 4; i++) p.rect(15, y0 + 27 + i * 4, 20, 1, C.roof);
-    box(p, 52, y0 + 18, 22, 26, C.metalL, C.ink);
-    p.rect(54, y0 + 22, 18, 1, C.metalD);
-    p.rect(54, y0 + 34, 18, 1, C.metalD);
-    plant(p, 90, y0 + 44);
-    plant(p, mainPx - 40, y0 + 44, false);
+    // The hatch at the head of the stair, a water tank, pots and a bench.
+    framed(p, STAIR_X * TS - 2, -TS * 2 + 2, TS + 4, TS * 2 - 2, C.roofD, C.deskD, 2);
+    text(p, 'UP', STAIR_X * TS + 4, -TS * 2 + 6, C.cream);
+    slab(p, 24, deckTop + 30, 26, 34, C.metalL, C.white, C.metalD);
+    for (const band of [40, 52]) p.rect(25, deckTop + band, 24, 1, C.metalD);
+    pandanJar(p, 70, deckTop + 74);
+    pandanJar(p, width - 22, deckTop + 74, false);
+    slab(p, 100, deckTop + 56, 40, 8, C.wood, C.woodL, C.woodD);
     const d = dishSpot(l);
-    dishBody(p, d.x, d.y);
+    uplinkDish(p, d.x, d.y);
   }
 
-  // ------------------------------------------------ floors: terracotta tiles with teal tiles set in, on the whole ground floor
-  g.save();
-  g.beginPath();
-  g.rect(16, 64, mainPx - 16, bh - 80);
-  g.clip();
-  for (let ty = 0; ty * 16 < bh; ty++) {
-    for (let tx = 1; tx * 16 < mainPx; tx++) {
-      const x = tx * 16;
-      const y = 64 + ty * 16;
-      const teal = (tx + ty * 3) % 7 === 0;
-      p.rect(x, y, 16, 16, C.grout);
-      p.rect(x + 1, y + 1, 15, 15, teal ? C.tileTeal : (tx + ty) % 2 ? C.tileT : C.tileTD);
-      if (teal) {
-        p.rect(x + 7, y + 3, 2, 10, C.tileTealD);
-        p.rect(x + 3, y + 7, 10, 2, C.tileTealD);
-        p.rect(x + 7, y + 7, 2, 2, C.gold);
-      } else if (R() < 0.18) p.rect(x + 3 + Math.floor(R() * 9), y + 3 + Math.floor(R() * 9), 2, 1, C.tileTL);
-    }
-  }
-  g.restore();
-
-  // The name set into the floor in teal tiles.
-  const logo = 'SELARIKRU';
-  text(p, logo, Math.round(mainPx / 2 - textW(logo, 2) / 2), 13 * 16 + 4, C.tileTealD, 2);
-
-  // The plan table's batik rug.
-  batikRug(p, 176, 64, 144, 96, C.batikA, C.batikAD, C.gold);
-  // Each desk's batik rug.
-  for (const d of l.desks) batikRug(p, (d.x0 + 1) * 16, (d.y0 + 1) * 16, 80, 96, d.carpet[0], d.carpet[1], C.cream);
-  // The kopi corner: cream and kopi tiles, and a round marble table.
-  for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx * 8 < mainPx - L; tx++) p.rect(L + tx * 8, 64 + ty * 8, 8, 8, (tx + ty) % 2 ? C.tileD : C.tileL);
-  batikRug(p, L + 16, 112, 96, 80, C.rugG, C.rugGD, C.gold);
-  // The stand-up corner: a round mat.
-  ellipse(p, 88, 150, 42, 28, C.ink);
-  ellipse(p, 88, 150, 41, 27, C.batikB);
-  ellipse(p, 88, 150, 34, 21, C.terracotta);
-  ellipse(p, 88, 150, 26, 15, C.batikB);
-  for (let a = 0; a < 12; a++) p.rect(88 + Math.round(Math.cos((a / 12) * Math.PI * 2) * 30), 150 + Math.round(Math.sin((a / 12) * Math.PI * 2) * 18), 2, 2, C.cream);
-
-  // The rack room's floor: dark timber.
-  const sr = l.serverRoom;
-  if (sr) {
-    const sx = sr.x0 * 16;
-    const sw = sr.w * 16;
-    p.rect(sx, 64, sw, bh - 80, C.deskD);
-    for (let y = 64; y < bh - 16; y += 6) { p.rect(sx, y, sw, 1, C.deskDD); p.rect(sx + ((y / 6) % 3) * 13, y + 1, 1, 5, C.deskDD); }
-  }
-
-  // Cable trays from each desk to its rack, in the worker's colour.
-  for (const cb of l.cables) {
-    const color = input.agents.find((a) => a.id === cb.agentId)?.color ?? C.teal;
-    for (let i = 0; i < cb.pts.length - 1; i++) {
-      const [x0, y0] = cb.pts[i]!;
-      const [x1, y1] = cb.pts[i + 1]!;
-      const ax = Math.min(x0, x1) - l.ox;
-      const ay = Math.min(y0, y1) - l.oy;
-      p.rect(ax - 1, ay - 1, Math.abs(x1 - x0) + 3, Math.abs(y1 - y0) + 3, C.deskDD);
-      p.rect(ax, ay, Math.abs(x1 - x0) + 1, Math.abs(y1 - y0) + 1, color, 0.6);
-    }
-  }
-
-  // ------------------------------------------------ walls: a timber beam on top, lime wash, a teal dado and a kopi skirting
-  p.rect(0, 0, bw, 16, C.wallTop);
-  for (let x = 0; x < bw; x += 12) p.rect(x, 2, 8, 1, C.wallTopL);
-  p.rect(0, 15, bw, 1, C.roofD);
-  p.rect(0, 16, mainPx, 44, C.wall);
-  for (let i = 0; i < mainPx / 6; i++) p.rect(Math.floor(R() * mainPx), 17 + Math.floor(R() * 26), 2, 1, C.wallD);
-  p.rect(0, 44, mainPx, 2, C.wallTrimD);
-  p.rect(0, 46, mainPx, 14, C.wallTrim);
-  for (let x = 6; x < mainPx; x += 12) { p.rect(x, 49, 4, 4, C.tileTealD); p.rect(x + 1, 50, 2, 2, C.gold); }
-  p.rect(0, 60, bw, 4, C.base);
-  p.rect(0, 60, bw, 1, C.woodL);
-  if (sr) {
-    p.rect(mainPx, 16, bw - mainPx, 44, C.wallD);
-    for (let x = mainPx; x < bw; x += 8) p.rect(x, 16, 1, 44, C.wall);
-    signboard(p, sr.x0 * 16 + 4, 2, sr.w * 16 - 8, 'ON THIS DEVICE', C.deep, C.gold);
-  }
-  p.rect(0, 16, bw, 2, C.ink, 0.25);
-  p.rect(0, 0, 16, bh, C.wallTop);
-  p.rect(15, 16, 1, bh - 32, C.wallTopL);
-  p.rect(bw - 16, 0, 16, bh, C.wallTop);
-  p.rect(bw - 16, 16, 1, bh - 32, C.wallTopL);
-  p.rect(0, bh - 16, bw, 16, C.wallTop);
-  p.rect(16, bh - 16, bw - 32, 1, C.wallTopL);
-  // The shop door: folding timber doors, open.
-  p.rect(0, doorY - l.oy, 16, 16, C.wayD);
-  p.rect(0, doorY - l.oy - 3, 20, 3, C.louvreD);
-  p.rect(0, doorY - l.oy + 16, 20, 3, C.louvreD);
-  // The rack room's timber screen.
-  if (sr) {
-    const gx = sr.glassX * 16;
-    p.rect(gx, 64, 16, bh - 80, C.wood);
-    for (let y = 64; y < bh - 16; y += 3) p.rect(gx + 2, y, 12, 1, C.woodD);
-    p.rect(gx, 64, 1, bh - 80, C.ink);
-    p.rect(gx + 15, 64, 1, bh - 80, C.ink);
-  }
-
-  // ------------------------------------------------ back-wall decor
-  // The plan board: a timber frame on paper, with its four columns.
-  const B = { x: l.plan.board.x - l.ox, y: l.plan.board.y - l.oy, w: l.plan.board.w };
-  box(p, B.x - 3, B.y - 2, B.w + 6, 46, C.shelfD, C.ink);
-  p.rect(B.x, B.y, B.w, 40, C.cream);
-  p.rect(B.x, B.y + 38, B.w, 2, C.tileD);
-  p.rect(B.x + 6, B.y + 41, B.w - 12, 2, C.woodD);
-  const heads: [string, string][] = [['TODO', C.lav], ['DOING', C.teal], ['REVIEW', C.goldDark], ['DONE', C.leafD]];
-  heads.forEach(([h, col], k) => {
-    const cx = B.x + k * 35;
-    if (k) p.rect(cx, B.y + 2, 1, 35, C.tileD);
-    text(p, h, cx + (35 - textW(h)) / 2 + 1, B.y + 2, C.ink);
-    p.rect(cx + 3, B.y + 8, 30, 1, col);
-  });
-  // The shop's signboard: deep green with gold letters.
-  box(p, 206, 20, 84, 28, C.deep, C.ink);
-  p.rect(208, 22, 80, 1, C.goldDark);
-  p.rect(208, 45, 80, 1, C.goldDark);
-  const sign = officeSign(input.projectName);
-  const ss = textW(sign, 2) <= 76 ? 2 : 1;
-  text(p, sign, 249 - textW(sign, ss) / 2, ss === 2 ? 30 : 33, C.deep2, ss);
-  text(p, sign, 248 - textW(sign, ss) / 2, ss === 2 ? 29 : 32, C.gold, ss);
-  // A batik banner.
-  box(p, 180, 20, 22, 34, C.batikC, C.ink);
-  for (let y = 24; y < 50; y += 6) { p.rect(184, y, 14, 1, C.gold); p.rect(188 + ((y / 6) % 2) * 4, y + 2, 2, 2, C.cream); }
-  p.rect(179, 18, 24, 2, C.woodD);
-  // The clock.
-  disc(p, L - 8, 36, 8, C.ink);
-  disc(p, L - 8, 36, 7, C.cream);
-  for (const [dx, dy] of [[0, -5], [5, 0], [0, 5], [-5, 0]] as const) p.rect(L - 8 + dx, 36 + dy, 1, 1, C.ink);
-  // Timber louvre windows over the kopi corner.
-  louvreWindow(p, L + 66, 22, 60, 28);
-  p.rect(L + 62, 53, 68, 3, C.woodD);
-
-  // ------------------------------------------------ the lead corner: a kedai shelf of jars, plants and the plan table
-  box(p, 288, 30, 32, 44, C.shelfD, C.ink);
-  p.rect(290, 32, 28, 40, C.woodD);
-  for (let s = 0; s < 3; s++) {
-    const sy = 34 + s * 13;
-    p.rect(290, sy + 10, 28, 2, C.shelfD);
-    for (let bx = 291; bx < 315; bx += 7) {
-      // Glass jars (balang) with red lids, holding biscuits.
-      p.rect(bx, sy + 3, 6, 7, C.ink);
-      p.rect(bx + 1, sy + 4, 4, 6, C.skyL);
-      p.rect(bx + 1, sy + 7, 4, 3, pick([C.gold, C.kopiL, C.peach, C.tileTL]));
-      p.rect(bx, sy + 2, 6, 2, C.terracotta);
-    }
-  }
-  plant(p, 184, 78);
+  // ------------------------------------------------ the ground floor: Peranakan tiles, with an entrance mat that carries the name
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(TS, 64, hall - TS, depth - 80);
+  ctx.clip();
+  for (let row = 0; row * TS < depth; row++) for (let col = 1; col * TS < hall; col++) floorTile(p, col * TS, 64 + row * TS, col, row);
+  ctx.restore();
   {
-    // The plan table: always furnished, labelled with what it stands for. No robot sits here.
-    p.rect(210, 102, 76, 3, C.shadow, 0.25);
-    box(p, 208, 82, 80, 18, C.desk, C.ink);
-    for (let x = 214; x < 286; x += 10) p.rect(x, 83, 1, 16, C.woodL);
-    box(p, 208, 98, 80, 7, C.deskD, C.ink);
-    box(p, 222, 70, 22, 15, C.bezel, C.ink);
-    box(p, 248, 70, 22, 15, C.bezel, C.ink);
-    box(p, 230, 92, 30, 4, C.metalL, C.ink);
-    box(p, 212, 86, 6, 6, C.white, C.ink);
-    p.rect(213, 87, 4, 2, C.kopi);
-    plate(p, input.leadLabel.toUpperCase().slice(0, 8), 249, 99);
-  }
-  // The stand-up corner: rattan stools with batik cushions, and a tiffin stand.
-  plant(p, 24, 76);
-  stool(p, 56, 136, C.batikA);
-  stool(p, 136, 136, C.batikD);
-  stool(p, 88, 168, C.batikC);
-  box(p, 18, 172, 13, 12, C.metalL, C.ink);
-  for (let i = 0; i < 3; i++) p.rect(19, 174 + i * 3, 11, 1, C.teal);
-  p.rect(23, 169, 3, 3, C.ink);
-
-  // ------------------------------------------------ the kopi corner
-  box(p, L, 54, 48, 10, C.cream, C.ink);
-  box(p, L, 63, 48, 14, C.wood, C.ink);
-  for (let x = L + 4; x < L + 46; x += 8) p.rect(x, 65, 1, 10, C.woodD);
-  // The kopi urn and cups.
-  box(p, L + 17, 34, 14, 22, C.metalL, C.ink);
-  p.rect(L + 18, 40, 12, 2, C.metalD);
-  p.rect(L + 23, 31, 2, 3, C.ink);
-  p.rect(L + 22, 50, 4, 2, C.ink);
-  for (const cx of [L + 4, L + 9, L + 36, L + 41]) { box(p, cx, 56, 4, 5, C.white, C.ink); p.rect(cx + 1, 57, 2, 1, C.kopi); }
-  signboard(p, L + 1, 22, 20, 'KOPI', C.terracotta, C.cream);
-  // A drinks chiller.
-  box(p, L + 49, 26, 14, 50, C.cream, C.ink);
-  p.rect(L + 51, 30, 10, 18, C.skyL);
-  for (let y = 32; y < 48; y += 5) for (let x = L + 52; x < L + 60; x += 3) p.rect(x, y, 2, 3, pick([C.terracotta, C.gold, C.leafL, C.teal]));
-  p.rect(L + 52, 52, 3, 3, C.terracotta);
-  // A water dispenser by the wall.
-  const right = mainPx - 16;
-  box(p, right + 1, 48, 12, 26, C.cream, C.ink);
-  box(p, right + 2, 36, 10, 13, C.skyL, C.ink);
-  // A long timber bench and a marble kopitiam table.
-  p.rect(L + 32, 140, 66, 3, C.shadow, 0.25);
-  box(p, L + 30, 122, 68, 8, C.woodD, C.ink);
-  box(p, L + 32, 128, 64, 10, C.wood, C.ink);
-  for (let x = L + 36; x < L + 94; x += 6) p.rect(x, 129, 1, 8, C.woodD);
-  disc(p, L + 64, 166, 9, C.ink);
-  disc(p, L + 64, 166, 8, C.metalL);
-  p.rect(L + 60, 163, 3, 1, C.metal);
-  box(p, L + 61, 160, 5, 5, C.white, C.ink);
-  // A radio cabinet.
-  box(p, right + 1, 100, 14, 34, C.deskD, C.ink);
-  p.rect(right + 3, 103, 10, 8, C.wood);
-  for (let y = 104; y < 110; y += 2) p.rect(right + 4, y, 8, 1, C.woodLine);
-  disc(p, right + 6, 117, 2, C.gold);
-  disc(p, right + 11, 117, 2, C.gold);
-  plant(p, L - 8, 76);
-  plant(p, right + 8, 204, false);
-
-  // ------------------------------------------------ desks
-  for (const d of l.desks) {
-    const X = d.x0 * 16;
-    const Y = d.y0 * 16;
-    workDesk(p, (d.x0 + 2) * 16, Y + 16, d.index);
-    louvreScreens(p, X, Y, 7);
-    const name = input.agents.find((a) => a.id === d.agentId)?.name.toUpperCase().slice(0, 10) ?? '';
-    plate(p, name, X + 64, Y + 4);
+    // The entrance mat just inside the door: no desk or label ever sits here.
+    const matY = l.door[1] * TS - 3;
+    framed(p, TS + 2, matY, 46, 22, C.kopi, C.kopiL, 2);
+    for (let mx = TS + 5; mx < TS + 46; mx += 4) p.rect(mx, matY + 3, 2, 1, C.kopi);
+    text(p, 'SELARIKRU', TS + 7, matY + 9, C.cream);
   }
 
-  // ------------------------------------------------ PR shelves, racks, the post box
+  // Batik cloths under the plan table, under each desk and in the kopi corner.
+  batikCloth(p, 176, 64, 144, 96, C.batikA, C.batikAD, C.gold);
+  for (const desk of l.desks) batikCloth(p, (desk.x0 + 1) * TS, (desk.y0 + 1) * TS, 80, 96, desk.carpet[0], desk.carpet[1], C.cream);
+  // Kopi corner floor: cream and kopi chequers.
+  for (let cy = 64; cy < 96; cy += 8) for (let cx = kopiX; cx < hall; cx += 8) p.rect(cx, cy, 8, 8, ((cx - kopiX) / 8 + (cy - 64) / 8) % 2 ? C.tileD : C.tileL);
+  batikCloth(p, kopiX + 16, 112, 96, 80, C.rugG, C.rugGD, C.gold);
+  // The stand-up corner: a round woven mat.
+  for (const [rx, ry, col] of [[42, 28, C.ink], [41, 27, C.batikB], [33, 20, C.terracotta], [25, 14, C.batikB]] as const) ellipse(p, 88, 150, rx, ry, col);
+  for (let k = 0; k < 16; k++) p.rect(88 + Math.round(Math.cos((k / 16) * Math.PI * 2) * 29), 150 + Math.round(Math.sin((k / 16) * Math.PI * 2) * 17), 2, 2, C.cream);
+
+  // The rack room: dark timber boards.
+  const racks = l.serverRoom;
+  if (racks) {
+    const left = racks.x0 * TS;
+    const span = racks.w * TS;
+    for (let by = 64; by < depth - TS; by += 8) {
+      p.rect(left, by, span, 8, C.deskD);
+      p.rect(left, by + 7, span, 1, C.deskDD);
+      p.rect(left + ((by / 8) % 4) * 11, by, 1, 7, C.deskDD);
+    }
+  }
+
+  // Cable trays, each in its worker's colour, laid along the cable's corners.
+  for (const cable of l.cables) {
+    const tint = input.agents.find((a) => a.id === cable.agentId)?.color ?? C.teal;
+    cable.pts.slice(1).forEach(([toX, toY], k) => {
+      const [fromX, fromY] = cable.pts[k]!;
+      const x = Math.min(fromX, toX) - l.ox - 1;
+      const y = Math.min(fromY, toY) - l.oy - 1;
+      const w = Math.abs(toX - fromX) + 3;
+      const h = Math.abs(toY - fromY) + 3;
+      p.rect(x, y, w, h, C.deskDD);
+      p.rect(x + 1, y + 1, w - 2, h - 2, tint, 0.6);
+    });
+  }
+
+  // ------------------------------------------------ the walls: a timber frame round the shop, lime wash and a teal dado on the back wall
+  const beam = (x: number, y: number, w: number, h: number): void => {
+    p.rect(x, y, w, h, C.wallTop);
+    if (w > h) for (let bx = x + 3; bx < x + w; bx += 14) p.rect(bx, y + 3, 8, 1, C.wallTopL);
+    else for (let by = y + 3; by < y + h; by += 14) p.rect(x + 3, by, 1, 8, C.wallTopL);
+  };
+  beam(0, 0, width, TS);
+  beam(0, 0, TS, depth);
+  beam(width - TS, 0, TS, depth);
+  beam(0, depth - TS, width, TS);
+  p.rect(TS, 16, hall - TS, 28, C.wall);
+  for (let stroke = 0; stroke < hall / 4; stroke++) p.rect(TS + Math.floor(rand() * (hall - TS)), 18 + Math.floor(rand() * 24), 1, 3, C.wallD);
+  p.rect(TS, 44, hall - TS, 16, C.wallTrim);
+  p.rect(TS, 44, hall - TS, 2, C.wallTrimD);
+  for (let stud = TS + 6; stud < hall; stud += 12) { p.rect(stud, 49, 4, 4, C.tileTealD); p.rect(stud + 1, 50, 2, 2, C.gold); }
+  p.rect(TS, 60, width - TS * 2, 4, C.kopi);
+  p.rect(TS, 60, width - TS * 2, 1, C.woodL);
+  if (racks) {
+    p.rect(hall, 16, width - hall - TS, 44, C.wallD);
+    for (let plank = hall; plank < width - TS; plank += 6) p.rect(plank, 16, 1, 44, C.wall);
+    signboard(p, racks.x0 * TS + 4, 2, racks.w * TS - 8, 'ON THIS DEVICE', C.deep, C.gold);
+    // The rack room's timber screen, slatted.
+    const screenX = racks.glassX * TS;
+    framed(p, screenX, 64, TS, depth - 80, C.wood, C.wood, 1);
+    for (let slat = 66; slat < depth - 18; slat += 3) p.rect(screenX + 2, slat, 12, 1, C.woodD);
+  }
+  // The stair from the floor up through the back wall to the roof hatch.
+  stair(p, STAIR_X * TS, 0, 64);
+  // The shop's folding doors, open.
+  p.rect(0, shopFront - l.oy, TS, TS, C.wayD);
+  for (const jamb of [-3, TS]) p.rect(0, shopFront - l.oy + jamb, 20, 3, C.louvreD);
+
+  // ------------------------------------------------ the back wall's fittings
+  // The plan board: a timber frame on cream paper with its four columns. The notes on it are drawn live.
+  const board = l.plan.board;
+  const bx = board.x - l.ox;
+  const by = board.y - l.oy;
+  framed(p, bx - 3, by - 2, board.w + 6, 46, C.shelfD, C.cream, 3);
+  p.rect(bx, by + 38, board.w, 2, C.tileD);
+  p.rect(bx + 6, by + 41, board.w - 12, 2, C.woodD);
+  const columns = [['TODO', C.lav], ['DOING', C.teal], ['REVIEW', C.goldDark], ['DONE', C.leafD]] as const;
+  for (let k = 0; k < columns.length; k++) {
+    const [word, rule] = columns[k]!;
+    const colLeft = bx + 35 * k;
+    if (k > 0) p.rect(colLeft, by + 2, 1, 35, C.tileD);
+    text(p, word, colLeft + 1 + Math.floor((35 - textW(word)) / 2), by + 2, C.ink);
+    p.rect(colLeft + 3, by + 8, 30, 1, rule);
+  }
+  // The shop signboard: deep green, gold letters with a shadow.
+  framed(p, 206, 20, 84, 28, C.deep, C.deep, 1);
+  for (const rule of [22, 45]) p.rect(208, rule, 80, 1, C.goldDark);
+  const sign = officeSign(input.projectName);
+  const scale = textW(sign, 2) > 76 ? 1 : 2;
+  const signY = scale === 2 ? 29 : 32;
+  text(p, sign, 249 - textW(sign, scale) / 2, signY + 1, C.deep2, scale);
+  text(p, sign, 248 - textW(sign, scale) / 2, signY, C.gold, scale);
+  // A batik banner on a rod.
+  p.rect(179, 18, 24, 2, C.woodD);
+  framed(p, 180, 20, 22, 34, C.batikC, C.batikC, 1);
+  for (let k = 0; k < 4; k++) { p.rect(184, 24 + k * 7, 14, 1, C.gold); p.rect(189 + (k % 2) * 3, 26 + k * 7, 2, 2, C.cream); }
+  // The wall clock (its hands are drawn live).
+  disc(p, kopiX - 8, 36, 8, C.ink);
+  disc(p, kopiX - 8, 36, 7, C.cream);
+  for (let mark = 0; mark < 12; mark += 3) p.rect(kopiX - 8 + Math.round(Math.sin((mark / 12) * Math.PI * 2) * 5), 36 - Math.round(Math.cos((mark / 12) * Math.PI * 2) * 5), 1, 1, C.ink);
+  // Louvre windows over the kopi corner, with a sill.
+  louvreWindow(p, kopiX + 66, 22, 60, 28);
+  p.rect(kopiX + 62, 53, 68, 3, C.woodD);
+
+  // ------------------------------------------------ the lead corner: a shelf of balang jars, plants and the PLAN table
+  framed(p, 288, 30, 32, 44, C.shelfD, C.woodD, 2);
+  for (let shelf = 0; shelf < 3; shelf++) {
+    const sy = 34 + shelf * 13;
+    p.rect(290, sy + 10, 28, 2, C.shelfD);
+    for (let jar = 0; jar < 4; jar++) {
+      const jx = 291 + jar * 7;
+      framed(p, jx, sy + 3, 6, 7, C.skyL, [C.gold, C.kopiL, C.peach, C.tileTL][(jar + shelf) % 4]!, 1);
+      p.rect(jx, sy + 2, 6, 2, C.terracotta);
+    }
+  }
+  pandanJar(p, 184, 78);
+  // The plan table: always furnished, labelled with what it stands for. No robot sits here.
+  p.rect(212, 104, 72, 2, C.shadow, 0.22);
+  slab(p, 208, 82, 80, 18, C.desk, C.woodL, C.deskD);
+  for (let plank = 218; plank < 286; plank += 12) p.rect(plank, 83, 1, 16, C.deskD);
+  framed(p, 208, 98, 80, 7, C.deskD, C.wood, 1);
+  for (const sx of [224, 250]) framed(p, sx - 2, 70, 22, 15, C.tealDark, C.screen, 2);
+  framed(p, 230, 92, 30, 4, C.metalL, C.metalL, 1);
+  framed(p, 212, 86, 6, 6, C.white, C.kopi, 2);
+  nameCard(p, input.leadLabel.toUpperCase().slice(0, 8), 249, 99);
+  // The stand-up corner: rattan stools and a tiffin stand.
+  pandanJar(p, 24, 76);
+  rattanStool(p, 56, 136, C.batikA);
+  rattanStool(p, 136, 136, C.batikD);
+  rattanStool(p, 88, 168, C.batikC);
+  framed(p, 18, 172, 13, 12, C.metalL, C.metalL, 1);
+  for (let tier = 0; tier < 3; tier++) p.rect(19, 174 + tier * 3, 11, 1, C.teal);
+
+  // ------------------------------------------------ the kopi corner: counter and urn, glasses, a chiller, water, a bench, a marble table, a radio
+  slab(p, kopiX, 54, 48, 10, C.cream, C.white, C.tileD);
+  slab(p, kopiX, 63, 48, 14, C.wood, C.woodL, C.woodD);
+  for (let panel = kopiX + 4; panel < kopiX + 46; panel += 8) p.rect(panel, 65, 1, 10, C.woodD);
+  slab(p, kopiX + 17, 34, 14, 22, C.metalL, C.white, C.metalD);
+  p.rect(kopiX + 23, 31, 2, 3, C.ink);
+  p.rect(kopiX + 22, 50, 4, 2, C.ink);
+  for (const gx of [kopiX + 4, kopiX + 9, kopiX + 36, kopiX + 41]) framed(p, gx, 56, 4, 5, C.white, C.kopiL, 1);
+  signboard(p, kopiX + 1, 22, 20, 'KOPI', C.terracotta, C.cream);
+  framed(p, kopiX + 49, 26, 14, 50, C.cream, C.skyL, 2);
+  for (let cy = 30; cy < 46; cy += 5) for (let cx = kopiX + 52; cx < kopiX + 60; cx += 3) p.rect(cx, cy, 2, 3, [C.terracotta, C.gold, C.leafL, C.teal][(cx + cy) % 4]!);
+  const east = hall - TS;
+  framed(p, east + 1, 48, 12, 26, C.cream, C.cream, 1);
+  framed(p, east + 2, 36, 10, 13, C.skyL, C.skyL, 1);
+  p.rect(kopiX + 32, 140, 66, 2, C.shadow, 0.22);
+  slab(p, kopiX + 30, 122, 68, 8, C.woodD, C.wood, C.deskDD);
+  slab(p, kopiX + 32, 128, 64, 10, C.wood, C.woodL, C.woodD);
+  for (let slat = kopiX + 36; slat < kopiX + 94; slat += 6) p.rect(slat, 129, 1, 8, C.woodD);
+  disc(p, kopiX + 64, 166, 9, C.ink);
+  disc(p, kopiX + 64, 166, 8, C.metalL);
+  framed(p, kopiX + 61, 160, 5, 5, C.white, C.kopiL, 1);
+  framed(p, east + 1, 100, 14, 34, C.deskD, C.deskD, 1);
+  framed(p, east + 3, 103, 10, 8, C.wood, C.wood, 1);
+  for (let grille = 104; grille < 110; grille += 2) p.rect(east + 4, grille, 8, 1, C.woodLine);
+  for (const knob of [east + 6, east + 11]) disc(p, knob, 117, 2, C.gold);
+  pandanJar(p, kopiX - 8, 76);
+  pandanJar(p, east + 8, 204, false);
+
+  // ------------------------------------------------ desks with their louvre screens and name cards
+  for (const desk of l.desks) {
+    const left = desk.x0 * TS;
+    const top = desk.y0 * TS;
+    kedaiDesk(p, left + 2 * TS, top + TS, desk.index);
+    louvreScreens(p, left, top, 7);
+    nameCard(p, input.agents.find((a) => a.id === desk.agentId)?.name.toUpperCase().slice(0, 10) ?? '', left + 64, top + 4);
+  }
+
+  // ------------------------------------------------ PR shelves, the racks, the post box
   if (l.prBoard) prShelves(p, l.prBoard.x - l.ox, l.prBoard.y - l.oy, l.prBoard.w, l.prBoard.h, 'PULL REQS');
-  for (const r of l.racks) rackBody(p, r.x - l.ox, r.y - l.oy, r.h, r.name);
+  for (const rack of l.racks) almariRack(p, rack.x - l.ox, rack.y - l.oy, rack.h, rack.name);
   if (l.mailbox) {
-    const m = { x: l.mailbox.x - l.ox, y: l.mailbox.y - l.oy };
-    box(p, m.x, m.y, 22, 30, C.terracotta, C.ink);
-    p.rect(m.x + 3, m.y + 10, 16, 6, C.ink);
-    text(p, 'MAIN', m.x + 4, m.y + 3, C.cream);
+    const mx = l.mailbox.x - l.ox;
+    const my = l.mailbox.y - l.oy;
+    framed(p, mx, my, 22, 30, C.terracotta, C.terracotta, 1);
+    p.rect(mx + 3, my + 10, 16, 6, C.ink);
+    text(p, 'MAIN', mx + 4, my + 3, C.cream);
   }
-  g.restore();
-  return canvas;
+  ctx.restore();
+  return surface;
 }
