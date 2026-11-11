@@ -792,3 +792,17 @@ describe('the Project Manager (H11)', () => {
     expect(locked.report?.outputSha256).toBeUndefined();
   });
 });
+
+describe('H12: a resumed call', () => {
+  it('reports how it continued a paused step, and which checkpoint, on its route record', async () => {
+    const { sdk, reports, catalog } = setup();
+    sdk.result = { text: JSON.stringify(GOOD.criteria), inferenceSource: 'on_device' };
+    const r = await catalog.criteria({ ...INPUTS.criteria, resume: { kind: 'after_reconnect', checkpointId: 'ckp_0123456789abcdef' } });
+    expect(r.report).toMatchObject({ resumed: 'after_reconnect', checkpointId: 'ckp_0123456789abcdef' });
+    expect(RouteRecordReportSchema.safeParse(r.report).success).toBe(true);
+    expect(reports[0]!.report).toMatchObject({ resumed: 'after_reconnect' });
+    // An ordinary call says nothing of the kind.
+    const plain = await catalog.criteria(INPUTS.criteria);
+    expect(plain.report).not.toHaveProperty('resumed');
+  });
+});

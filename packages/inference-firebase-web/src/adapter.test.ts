@@ -57,7 +57,7 @@ const fetchRoute: FetchRoute = async () => {
   return fresh.route;
 };
 
-function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number } = {}) {
+function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void } = {}) {
   let t = 0;
   fresh.route = null;
   fresh.fail = false;
@@ -725,5 +725,47 @@ describe('labels against the cloud grant', () => {
     // A covered label changes nothing.
     sdk.result = { text: '{}', inferenceSource: 'in_cloud' };
     expect(await adapter.runAgent(spec, { ...base('PREFER_IN_CLOUD'), labels: ['public'] })).toMatchObject({ status: 'ok', requestedMode: 'PREFER_IN_CLOUD' });
+  });
+});
+
+describe('H12: offline', () => {
+  const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'ONLY_IN_CLOUD', override: null, lock: null, ...over });
+  const route = { taskId: 't1', stepKind: 'review' as const };
+
+  it('a call that needs the cloud while offline is not sent: blocked as offline, so it can wait for the connection; no model is made', async () => {
+    const { adapter, sdk } = make(new FakeSdk(), [], { isOnline: () => false });
+    fresh.route = server();
+    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'offline', requestedMode: 'ONLY_IN_CLOUD' });
+    expect(sdk.specs).toHaveLength(0);
+    // Local first over the device budget would go to the cloud: offline, it waits too.
+    const big = make(new FakeSdk(), [], { isOnline: () => false, nanoInputBudgetChars: 150 });
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect(await big.adapter.draftBrief(req({ taskText: 'x'.repeat(200), policy: cloud('PREFER_ON_DEVICE'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline' });
+  });
+
+  it('offline, a device call still runs: Local only, and Local first while the device model is ready', async () => {
+    const { adapter } = make(new FakeSdk(), [], { isOnline: () => false });
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ route }))).status).toBe('ok');
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).status).toBe('ok');
+    // Local first with the device model not ready would fall back to the cloud: offline it waits instead.
+    const sdk = new FakeSdk();
+    sdk.availabilityValue = 'downloadable';
+    const off = make(sdk, [], { isOnline: () => false });
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect(await off.adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline' });
+  });
+
+  it('a cloud call whose request fails on the network is offline too, and says so', async () => {
+    const sdk = new FakeSdk();
+    sdk.gate = Promise.reject(new TypeError('Failed to fetch'));
+    sdk.gate.catch(() => undefined);
+    let failures = 0;
+    const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
+    fresh.route = server();
+    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorName: 'TypeError' });
+    expect(failures).toBe(1);
   });
 });

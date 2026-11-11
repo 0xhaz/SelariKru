@@ -184,6 +184,19 @@ export interface AdapterOptions {
   readonly onTelemetry?: (e: TelemetryEvent) => void;
   /** The device model's input budget in characters. Default `DEFAULT_NANO_INPUT_BUDGET_CHARS`. Anything but a positive number leaves no room: missing is never unlimited. */
   readonly nanoInputBudgetChars?: number;
+  /**
+   * H12: whether this browser can reach the cloud now (navigator.onLine, and no recent network failure). A call that needs the cloud while offline is not sent: it is
+   * blocked as `offline`, so the caller can keep it as a checkpoint that waits for the connection. Absent: always online.
+   */
+  readonly isOnline?: () => boolean;
+  /** H12: told when a cloud request failed on the network, so the browser counts as offline until it reconnects. */
+  readonly onNetworkFailure?: () => void;
+}
+
+/** H12: an SDK error that means the request never reached the cloud. A code or a name only; the message is never read. */
+export function isNetworkFailure(e: unknown): boolean {
+  const code = errorCodeOf(e) ?? '';
+  return (e instanceof TypeError) || /fetch-error|network|offline|unavailable/i.test(code);
 }
 
 export interface AdapterState {
@@ -207,6 +220,8 @@ export class FirebaseHybridAssistantAdapter {
   private readonly newRequestId: () => string;
   private readonly onTelemetry: ((e: TelemetryEvent) => void) | undefined;
   private readonly budgetChars: number;
+  private readonly isOnline: () => boolean;
+  private readonly onNetworkFailure: (() => void) | undefined;
   private readonly ajv = new Ajv({ strict: false, allErrors: true });
   private readonly readiness = new ReadinessTracker();
   private models = new Map<string, SdkModel>();
@@ -222,6 +237,8 @@ export class FirebaseHybridAssistantAdapter {
     this.onTelemetry = opts.onTelemetry;
     const b = opts.nanoInputBudgetChars ?? DEFAULT_NANO_INPUT_BUDGET_CHARS;
     this.budgetChars = Number.isFinite(b) && b > 0 ? Math.floor(b) : 0;
+    this.isOnline = opts.isOnline ?? (() => true);
+    this.onNetworkFailure = opts.onNetworkFailure;
   }
 
   draftBrief(req: AssistRequest): Promise<AssistantProposal> {
@@ -403,6 +420,12 @@ export class FirebaseHybridAssistantAdapter {
       if (device !== 'available') {
         return make({ status: 'blocked', requestedMode, input, blockedReason: `device_${device}` });
       }
+    } else if (!this.isOnline()) {
+      // H12: offline, a call that needs the cloud is not sent, and never silently answered elsewhere: it waits for the connection. Cloud only, and Local first when
+      // the input is over the device budget or the device model is not ready, need the cloud. Cloud first may still be answered on the device, as the SDK does.
+      const needsCloud = requestedMode === 'ONLY_IN_CLOUD'
+        || (requestedMode === 'PREFER_ON_DEVICE' && this.readiness.observe(await this.sdk.availability()) !== 'available');
+      if (needsCloud) return make({ status: 'blocked', requestedMode, input, blockedReason: 'offline' });
     }
 
     const hash = await payloadSha256(systemInstruction, prompt);
@@ -437,6 +460,11 @@ export class FirebaseHybridAssistantAdapter {
       if ('recheck' in done) return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: done.recheck });
       result = done.result;
     } catch (e) {
+      // H12: a cloud request that failed on the network never reached the cloud. It is offline, not an error: the step can wait for the connection.
+      if (!deviceMustServe && isNetworkFailure(e)) {
+        this.onNetworkFailure?.();
+        return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: 'offline', errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
+      }
       return make({ status: 'error', requestedMode, input, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
     }
 

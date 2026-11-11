@@ -49,6 +49,8 @@ export interface AgentBaseInput {
   readonly callOverride?: InferenceMode | null;
   /** The id the server recorded the served context under (H5 fix round 4). Reported with the route record, so the server judges the output by what it was given. */
   readonly contextId?: string;
+  /** H12: this call continues a paused step (a checkpoint): sent after reconnecting, escalated, or moved to device only. Reported with the route record. */
+  readonly resume?: { readonly kind: 'after_reconnect' | 'escalated' | 'device_only'; readonly checkpointId: string };
 }
 
 export interface AgentInputs {
@@ -634,7 +636,8 @@ export class AgentCatalog {
       deviceLabels: [labelOf(input.task.classification), ...bundleContentLabels(input.bundle)],
     });
     const plainReport = routeReportOf(proposal);
-    const report = plainReport !== null && input.contextId !== undefined ? { ...plainReport, contextId: input.contextId } : plainReport;
+    const withId = plainReport !== null && input.contextId !== undefined ? { ...plainReport, contextId: input.contextId } : plainReport;
+    const report = withId !== null && input.resume ? { ...withId, resumed: input.resume.kind, checkpointId: input.resume.checkpointId } : withId;
     let reported: AgentResult['reported'] = 'not_sent';
     if (report && this.opts.reportRoute) {
       try { await this.opts.reportRoute(input.projectId, input.task.taskId, report); reported = 'sent'; } catch { reported = 'failed'; }
@@ -680,7 +683,8 @@ export class AgentCatalog {
     // An ok patch's report carries its diff's hash (never the diff), so the server can tie an accepted proposal to this call's output. Never for a locked call: a
     // restricted result stays on the device, and even its hash is not sent.
     const diff = kind === 'patch' && proposal.status === 'ok' && proposal.route?.locked !== true ? (proposal.data as { diff?: unknown } | null)?.diff : undefined;
-    const withContext = base !== null && input.contextId !== undefined ? { ...base, contextId: input.contextId } : base;
+    const withContextOnly = base !== null && input.contextId !== undefined ? { ...base, contextId: input.contextId } : base;
+    const withContext = withContextOnly !== null && input.resume ? { ...withContextOnly, resumed: input.resume.kind, checkpointId: input.resume.checkpointId } : withContextOnly;
     // H11 fix round 1: a locked call read restricted text; the record says so, so the server keeps its output on the device whatever else it knows.
     const labelled = withContext !== null && proposal.route?.locked === true ? { ...withContext, inputLabel: 'restricted' as const } : withContext;
     // An ok, unlocked delegation call binds its output: the hash of its assignments and the plan revision its prompt listed.
