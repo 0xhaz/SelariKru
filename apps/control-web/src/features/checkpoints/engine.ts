@@ -120,14 +120,19 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     patch((s) => ({ checkpoints: { ...s.checkpoints, [cp.checkpointId]: cp } }));
     const prev = writes.get(cp.checkpointId) ?? Promise.resolve();
     const next = prev.then(async () => {
-      try { await deps.device.put(deps.ownerKey, cp); } catch { /* No device storage: the screen still holds it for this tab. */ }
       const toServer = deps.server?.saveAiCheckpoint && checkpointStorage(cp) === 'server' && !store.getState().deviceOnly[cp.checkpointId];
+      // Fix round 1 (I3): a device-only checkpoint says so itself, so the mark survives a reload.
+      const kept = toServer ? cp : { ...cp, deviceOnly: true };
+      try { await deps.device.put(deps.ownerKey, kept); } catch { /* No device storage: the screen still holds it for this tab. */ }
       if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); return; }
       try {
         await deps.server!.saveAiCheckpoint!(deps.projectId, cp);
       } catch (e) {
         // The server judged it restricted (its own backstop): it stays on this device from now on. Any other failure keeps it here until the next write.
-        if (codeOf(e) === 'checkpoint_restricted') setFor('deviceOnly', cp.checkpointId, true);
+        if (codeOf(e) === 'checkpoint_restricted') {
+          setFor('deviceOnly', cp.checkpointId, true);
+          try { await deps.device.put(deps.ownerKey, { ...cp, deviceOnly: true }); } catch { /* as above */ }
+        }
       }
     });
     writes.set(cp.checkpointId, next);
@@ -168,6 +173,9 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
           // A resume keeps the checkpoint it continues (its inputs as they were); a new step starts its own here.
           if (!draft) draft = { ...base(mark.context, mark.contextId), ...pending, labels: labelsOf(mark.context) };
           else draft = { ...draft, labels: [...new Set([...draft.labels, ...labelsOf(mark.context)])] as AiCheckpoint['labels'], updatedAt: now() };
+          // Fix round 1 (I3): the route the step read decides first. A lock (a restricted predecessor, a Brain source, the project) makes it locked and device-only
+          // before its first write, whatever the context's own labels say.
+          if (mark.route?.lock) draft = { ...draft, locked: true, deviceOnly: true, continuation: 'device_only' };
         } else if (mark.files) {
           update({ stage: 'file_choice', inputs: { ...(draft?.inputs ?? { contextId: null, bundleSha256: null, files: [], inputChars: null }), files: mark.files.map((f) => ({ ...f })) } });
         } else if (mark.result) {
@@ -338,7 +346,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
         merged[cp.checkpointId] = { ...pick, escalatedAt: had?.escalatedAt ?? cp.escalatedAt };
       }
       patch(() => ({ checkpoints: merged }));
-      for (const cp of mine) if (checkpointStorage(cp) !== 'server') setFor('deviceOnly', cp.checkpointId, true);
+      for (const cp of mine) if (cp.deviceOnly === true || checkpointStorage(cp) !== 'server') setFor('deviceOnly', cp.checkpointId, true);
     },
     async reconnect() {
       for (const cp of Object.values(store.getState().checkpoints)) if (cp.status === 'waiting') await process(cp.checkpointId);

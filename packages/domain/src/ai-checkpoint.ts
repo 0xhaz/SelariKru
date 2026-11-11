@@ -87,6 +87,8 @@ export const AiCheckpointSchema = z.strictObject({
   /** Set once, when the step was escalated to the cloud: a reload can never escalate it again. */
   escalatedAt: Iso.nullable(),
   resumedAs: z.enum(AI_CHECKPOINT_RESUMES).nullable(),
+  /** Fix round 1 (I3): kept on this device only, whatever its labels say now (its route was locked, or the server judged it restricted). Never sent. */
+  deviceOnly: z.boolean().optional(),
   createdAt: Iso,
   updatedAt: Iso,
 });
@@ -99,9 +101,9 @@ export function checkpointLabel(cp: Pick<AiCheckpoint, 'labels' | 'locked' | 'pa
 }
 
 /** Where a checkpoint is kept: on the server only when everything it carries is public or internal and its call was not locked. */
-export function checkpointStorage(cp: Pick<AiCheckpoint, 'labels' | 'locked' | 'partial'>): 'device' | 'server' {
+export function checkpointStorage(cp: Pick<AiCheckpoint, 'labels' | 'locked' | 'partial'> & { readonly deviceOnly?: boolean | undefined }): 'device' | 'server' {
   const l = checkpointLabel(cp);
-  return !cp.locked && (l === 'public' || l === 'internal') ? 'server' : 'device';
+  return !cp.locked && cp.deviceOnly !== true && (l === 'public' || l === 'internal') ? 'server' : 'device';
 }
 
 /** Why the server refuses to store a checkpoint, or null. Restricted first, then secret-shaped text anywhere it carries text. */

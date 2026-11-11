@@ -191,6 +191,13 @@ describe('H12: stage checkpoints and resuming from a stage', () => {
     expect(single).toEqual(['context', 'review']);
   });
 
+  it('fix 1 (I3): the first stage mark carries the route the step read, lock included, before anything is written', async () => {
+    const marks: { stage: string; route?: unknown }[] = [];
+    const lock = { label: 'restricted', reason: 'downstream of a restricted task' };
+    await runAgentStep(harness(route({ lock: lock as never, effective: 'ONLY_ON_DEVICE' }), { onStage: (m) => marks.push(m) }).deps, { taskId: 't1', kind: 'criteria', callOverride: null });
+    expect(marks[0]).toMatchObject({ stage: 'context', route: { lock } });
+  });
+
   it('a resumed patch continues from its stage: the same files (hashes checked), the earlier issue codes, no file choice; changed files refuse it', async () => {
     const marks: { files?: readonly { path: string; sha256: string | null }[] | undefined }[] = [];
     const first = harness(route(), { listTaskFiles: async () => listing(['src/t1/searchIndex.ts']), getTaskFiles: async (_t, paths) => filesFor(paths), onStage: (m) => marks.push(m) });

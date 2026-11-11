@@ -140,6 +140,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       const callId = next++;
       // H12: one PM turn is one checkpoint: the owner's question with its label, then the reply with its label.
       const contextId = `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
+      let subjectRoute: TaskRouteRead['route'] | undefined;
       const rec = opts.checkpoints?.begin({
         taskId: req.subjectTaskId, stepKind: req.kind, callOverride: req.callOverride,
         texts: [{ who: 'owner', text: req.question.slice(0, 2000), classification: req.questionClassification }],
@@ -152,6 +153,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           webResearch: () => { const s = opts.snapshot(); return webResearchGranted(s, s?.tasks[req.subjectTaskId]?.runId ?? null); },
           getTaskRoute: async (taskId) => {
             const read = await getTaskRoute(projectId, taskId);
+            if (taskId === req.subjectTaskId) subjectRoute = read.route;
             // Only the subject's read is the call in flight; a plan scope's fresh read of each listed task (H12 step 0) is not.
             if (taskId === req.subjectTaskId && !calls.some((c) => c.callId === callId)) publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);
             return read;
@@ -159,7 +161,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
           getTaskContext: (taskId, destination, callOverride, contextId) => getTaskContext(projectId, taskId, destination, callOverride, contextId),
         }, req);
         if (rec) {
-          if (out.kind === 'result' && out.context) rec.stage({ stage: 'context', context: out.context, contextId });
+          if (out.kind === 'result' && out.context) rec.stage({ stage: 'context', context: out.context, contextId, ...(subjectRoute ? { route: subjectRoute } : {}) });
           await rec.finish(out as ChainOutcome, out.kind === 'result' ? pmReplyText(out) : undefined);
         }
         const done = { ...out, simulated: opts.simulated, ...(req.resume ? { resumed: req.resume.kind } : {}) };

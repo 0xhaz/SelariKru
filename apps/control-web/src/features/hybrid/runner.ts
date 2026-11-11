@@ -41,6 +41,8 @@ export interface StageMark {
   readonly stage: AiCheckpointStage;
   readonly context?: TaskAgentContext;
   readonly contextId?: string;
+  /** Fix round 1 (I3): the route the step read before anything else, lock included, so the checkpoint knows it is locked before its first write. */
+  readonly route?: TaskRouteRead['route'];
   readonly files?: readonly { readonly path: string; readonly sha256: string | null }[];
   readonly result?: AgentResult;
 }
@@ -121,7 +123,7 @@ export async function runAgentStep(deps: AgentRunnerDeps, req: AgentRunRequest):
     contextId,
     ...(req.resume ? { resume: { kind: req.resume.kind, checkpointId: req.resume.checkpointId } } : {}),
   };
-  deps.onStage?.({ stage: 'context', context, contextId });
+  deps.onStage?.({ stage: 'context', context, contextId, route: read.route });
   const done = (result: AgentResult): AgentRunOutcome => {
     deps.onStage?.({ stage: STAGE_OF[req.kind], result });
     return { kind: 'result', result, context };

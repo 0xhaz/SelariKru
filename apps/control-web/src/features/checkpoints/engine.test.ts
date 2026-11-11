@@ -132,6 +132,28 @@ describe('fix 1 (H2): a paused patch step can be resumed; its files are read aga
   });
 });
 
+describe('fix 1 (I3): nothing is sent before the lock is known', () => {
+  for (const [why, reason] of [['a predecessor', 'This task depends on a restricted task.'], ['a Brain source', 'A Brain source for this task is restricted.']] as const) {
+    it(`canary: a task locked by ${why}, whose context and bundle read internal: no POST at any stage, and it stays device-only after a reload`, async () => {
+      const h = setup();
+      h.setOnline(false);
+      const lockedRoute = route({ lock: { label: 'restricted', reason } as never, effective: 'ONLY_ON_DEVICE' });
+      const rec = h.engine.begin({ taskId: 't1', stepKind: 'pmAnswer', callOverride: null, texts: [{ who: 'owner', text: CANARY, classification: 'internal' }] });
+      rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1', route: lockedRoute });
+      const r = offline('pmAnswer');
+      rec.stage({ stage: 'pm_turn', result: r });
+      await rec.finish({ kind: 'result', result: r, context: context() });
+      expect(h.server.saved).toEqual([]);
+      const kept = await h.device.list('owner_1', 'p');
+      expect(kept).toEqual([expect.objectContaining({ locked: true, deviceOnly: true })]);
+      // A reload: the device-only mark is read back from the checkpoint itself, so a later write never goes to the server.
+      const again = createCheckpointEngine({ ...h.deps });
+      await again.load();
+      expect(again.store.getState().deviceOnly[rec.id]).toBe(true);
+    });
+  }
+});
+
 describe('the checkpoint engine (H12)', () => {
   it('a step that needs the cloud while offline is saved as offline: waiting for connection, on the server and on this device; not an error', async () => {
     const h = setup();
