@@ -316,15 +316,27 @@ test('round 2: every top-bar menu is fully on screen and on top at 390 px and at
     await page.setViewportSize({ width, height: 844 });
     await open(page, '#/office');
     const nav = page.getByRole('navigation', { name: 'Primary' });
-    await nav.getByRole('button', { name: /^Boards/ }).click();
-    const benchmark = nav.getByRole('link', { name: 'Benchmark' });
-    await expect(benchmark).toBeInViewport({ ratio: 1 });
-    expect(await onTop(benchmark), `Boards at ${width}`).toBe(true);
+    // Round 3: each control is scrolled into view in the sideways nav first, then it and what it opens must be on screen and on top.
+    const reach = async (control: import('@playwright/test').Locator, what: string): Promise<void> => {
+      await control.scrollIntoViewIfNeeded();
+      await expect(control, what).toBeInViewport({ ratio: 1 });
+      expect(await onTop(control), `${what} at ${width}`).toBe(true);
+    };
+    const boards = nav.getByRole('button', { name: /^Boards/ });
+    await reach(boards, 'Boards');
+    await boards.click();
+    await reach(nav.getByRole('link', { name: 'Benchmark' }), 'Boards › Benchmark');
+    // The open menu's both edges stay inside the 8 px gutter.
+    const edges = await nav.getByRole('link', { name: 'Benchmark' }).evaluate((el) => { const r = el.closest('ul')!.getBoundingClientRect(); return { left: r.left, right: r.right, width: window.innerWidth }; });
+    expect(edges.left, `menu left at ${width}`).toBeGreaterThanOrEqual(8);
+    expect(edges.right, `menu right at ${width}`).toBeLessThanOrEqual(edges.width - 8);
     await page.keyboard.press('Escape');
-    await nav.getByRole('button', { name: 'Terminal' }).click();
-    const first = nav.getByRole('link', { name: /terminal$/ }).first();
-    await expect(first).toBeInViewport({ ratio: 1 });
-    expect(await onTop(first), `Terminal at ${width}`).toBe(true);
+    const terminal = nav.getByRole('button', { name: 'Terminal' });
+    await reach(terminal, 'Terminal');
+    await terminal.click();
+    await reach(nav.getByRole('link', { name: /terminal$/ }).first(), 'Terminal › first worker');
     await page.keyboard.press('Escape');
+    await reach(nav.getByRole('link', { name: 'Settings', exact: true }), 'Settings');
+    await reach(nav.getByTestId('action-items'), 'Action items');
   }
 });

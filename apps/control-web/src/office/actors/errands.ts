@@ -61,6 +61,17 @@ export class ErrandQueue {
     this.errands = this.errands.filter((e) => e.length > 0);
   }
 
+  /** Drops every errand, held ones included (round 3: a new epoch starts with no errand at all). */
+  clear(): void {
+    this.errands = [];
+    this.arrivedAt = null;
+  }
+
+  /** Follows the world: a held roof step whose cloud call is no longer in flight is released (round 3), so no robot is left on the roof. */
+  follow(world: { readonly cloudCall: boolean }): void {
+    if (!world.cloudCall && this.errands.some((e) => e.some((s) => s.hold === 'cloud'))) this.release('cloud');
+  }
+
   /** A worker that needs you stops its walks and goes back to its desk. A held roof visit is dropped too: the call ended or will be released. */
   needsYou(): void {
     this.errands = [[{ to: 'seat' }]];

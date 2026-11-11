@@ -49,4 +49,26 @@ describe('a robot\'s errands run one at a time (H7 fix)', () => {
     expect(q.settle()).toBe('roof');
     expect(q.current()).toEqual({ to: 'roof', hold: 'cloud' });
   });
+
+  it('round 3: clear() drops everything, held roof steps included, so a loop never leaves a robot on the roof', () => {
+    const q = new ErrandQueue();
+    q.push([{ to: 'roof', hold: 'cloud' }]);
+    q.push([{ to: 'prs' }]);
+    q.arrived(0);
+    q.clear();
+    expect(q.current()).toBeNull();
+    expect(q.there).toBe(false);
+  });
+
+  it('round 3: a held roof step is released when the world says the worker has no cloud call', () => {
+    const q = new ErrandQueue();
+    q.push([{ to: 'roof', hold: 'cloud' }]);
+    q.arrived(0);
+    q.follow({ cloudCall: false });
+    expect(q.current()?.to).toBe('seat');
+    const kept = new ErrandQueue();
+    kept.push([{ to: 'roof', hold: 'cloud' }]);
+    kept.follow({ cloudCall: true });
+    expect(kept.current()).toEqual({ to: 'roof', hold: 'cloud' });
+  });
 });

@@ -214,9 +214,21 @@ export class OfficeScene {
       const was = prev.get(c.id);
       if (!newEpoch && was && was.stage === 'to_gate' && c.stage === 'verified') this.gateMode = { mode: 'passed', at: this.t };
     }
-    // Errands and effects, each from a real change between the last world and this one (H7 fix). A new epoch starts afresh: queued errands are dropped.
-    if (newEpoch) for (const b of this.bots.values()) b.queue.settle();
-    else if (!first) this.dispatch(officeEvents(before, world), l);
+    // Errands and effects, each from a real change between the last world and this one (H7 fix). A new epoch starts afresh (round 3): every errand is
+    // dropped, held roof steps included, and each robot is placed at its desk as on a first render, with no walk in from the door.
+    if (newEpoch) {
+      for (const b of this.bots.values()) {
+        b.queue.clear();
+        b.errand = null;
+        b.path = [];
+        b.carry = null;
+        b.emote = null;
+        b.pause = 0;
+        Object.assign(b, tileCentre(l, seatOf(b, l) ?? l.door));
+      }
+    } else if (!first) this.dispatch(officeEvents(before, world), l);
+    // A held roof visit ends when the world has no cloud call for that worker, whatever the events said.
+    for (const c of world.cues) this.bots.get(c.agentId)?.queue.follow(c);
     if (this.reducedMotion) {
       for (const p of this.parcels) {
         const c = this.stages.get(p.id)!;

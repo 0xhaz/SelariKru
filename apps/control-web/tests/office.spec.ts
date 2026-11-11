@@ -487,3 +487,39 @@ test('H7 fix round 2: the demo plays at 1x and pauses when reduced motion turns 
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect(page.getByTestId('demo-play')).toHaveText('Play');
 });
+
+test.describe('H7 fix round 3: a loop never strands a robot', () => {
+  test.use({ reducedMotion: 'no-preference' });
+  type Live = {
+    world: { epoch: string; cues: { agentId: string; cloudCall: boolean }[] };
+    layout: { ox: number; oy: number; desks: { agentId: string; seat: [number, number] }[] };
+    bots: Map<string, { x: number; y: number; path: unknown[]; queue: { current(): unknown } }>;
+    setWorld(w: unknown): void;
+  };
+  test('a robot on the roof for a cloud call is back at its desk at once when a new epoch starts, with no walk in from the door', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
+    const id = await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+      const w = s.world;
+      const who = w.cues[0]!.agentId;
+      s.setWorld({ ...w, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: true } : c)) });
+      return who;
+    });
+    // It heads up the stair and holds there while the call is in flight.
+    await expect.poll(() => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(who)!.queue.current(), id), { timeout: 5000 }).toEqual({ to: 'roof', hold: 'cloud' });
+    const after = await page.evaluate((who) => {
+      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+      const w = s.world;
+      // The loop wraps: a fresh session still reports the call in flight for a moment; the new epoch must still clear the roof visit.
+      s.setWorld({ ...w, epoch: `${w.epoch}-loop`, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: false } : c)) });
+      const b = s.bots.get(who)!;
+      const seat = s.layout.desks.find((d) => d.agentId === who)!.seat;
+      return { errand: b.queue.current(), walking: b.path.length, x: Math.round(b.x), y: Math.round(b.y), seatX: s.layout.ox + seat[0] * 16 + 8, seatY: s.layout.oy + seat[1] * 16 + 8 };
+    }, id);
+    expect(after.errand).toBeNull();
+    expect(after.walking).toBe(0);
+    expect([after.x, after.y]).toEqual([after.seatX, after.seatY]);
+  });
+});

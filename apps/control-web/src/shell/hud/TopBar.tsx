@@ -59,22 +59,29 @@ function Mark() {
  * Where an open top-bar menu sits (round 2): fixed to the viewport under its button, right-aligned to it and kept inside the screen, so the nav's
  * sideways scroll never clips it and nothing in the page covers it, at every width.
  */
-function useMenuPlace(open: boolean, button: RefObject<HTMLButtonElement | null>): CSSProperties | undefined {
+function useMenuPlace(open: boolean, button: RefObject<HTMLButtonElement | null>, minWidth: number): CSSProperties | undefined {
   const [place, setPlace] = useState<CSSProperties | undefined>(undefined);
   useLayoutEffect(() => {
     if (!open) return;
+    const gutter = 8;
     const measure = (): void => {
       const r = button.current?.getBoundingClientRect();
       if (!r) return;
-      const gutter = 8;
-      const right = Math.max(gutter, window.innerWidth - r.right);
-      setPlace({ position: 'fixed', top: r.bottom + 8, right, maxWidth: window.innerWidth - right - gutter, maxHeight: window.innerHeight - r.bottom - 16, overflowY: 'auto' });
+      // Right-aligned to the button, and both edges kept inside the gutter (round 3): the right edge by `right`, the left by the width it may take.
+      const right = Math.min(Math.max(gutter, window.innerWidth - r.right), window.innerWidth - gutter - Math.min(minWidth, window.innerWidth - gutter * 2));
+      const maxWidth = Math.max(0, window.innerWidth - right - gutter);
+      setPlace({ position: 'fixed', top: r.bottom + 8, right, maxWidth, minWidth: Math.min(minWidth, maxWidth), maxHeight: Math.max(120, window.innerHeight - r.bottom - 16), overflowY: 'auto' });
     };
     measure();
+    // Re-measured when the bar re-wraps or the button moves, as well as on resize and scroll.
+    const watch = new ResizeObserver(measure);
+    const header = button.current?.closest('header');
+    if (header) watch.observe(header);
+    if (button.current) watch.observe(button.current);
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', measure, true);
-    return () => { window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true); };
-  }, [open, button]);
+    return () => { watch.disconnect(); window.removeEventListener('resize', measure); window.removeEventListener('scroll', measure, true); };
+  }, [open, button, minWidth]);
   return open ? place : undefined;
 }
 
@@ -97,14 +104,14 @@ function Menu({ label, testId, entries, route, extra, urgent, note }: { label: s
     if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); }
   };
   const current = entries.find((e) => e.route === route) ?? null;
-  const place = useMenuPlace(open, button);
+  const place = useMenuPlace(open, button, 208);
   return (
     <div ref={box} className="relative" data-more="" onKeyDown={onKey}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid={testId}
         onClick={() => setOpen((o) => !o)} style={urgent ? { background: 'var(--color-gold)' } : undefined}>
         {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
       </button>
-      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max list-none flex-col gap-1.5 p-2">
         {note ? <li className="px-1 text-[12px] leading-snug text-fg sm:hidden" data-testid="menu-ai-counts">{note}</li> : null}
         {entries.map((e) => (
           <li key={e.route} className="flex flex-col">
@@ -131,12 +138,12 @@ function TerminalMenu({ workers, selectedId }: { workers: readonly { id: string;
     return () => document.removeEventListener('pointerdown', away);
   }, [open]);
   const go = (workerId: string): string => hashWith('wtab', 'terminal', hashWith('worker', workerId));
-  const place = useMenuPlace(open, button);
+  const place = useMenuPlace(open, button, 192);
   if (selectedId !== null) return <a href={go(selectedId)} className="btn text-[14px]" data-testid="top-bar-terminal">Terminal</a>;
   return (
     <div ref={box} className="relative" onKeyDown={(e) => { if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); setOpen(false); button.current?.focus(); } }}>
       <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} data-testid="top-bar-terminal" onClick={() => setOpen((o) => !o)}>Terminal</button>
-      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max min-w-[12rem] list-none flex-col gap-1.5 p-2">
+      <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max list-none flex-col gap-1.5 p-2">
         {workers.length === 0 ? <li className="px-1 text-[13px] text-muted">No worker has a terminal yet.</li> : workers.map((w) => (
           <li key={w.id}><a href={go(w.id)} onClick={() => setOpen(false)} className="btn block text-left text-[14px]">{w.name}<span className="sr-only"> terminal</span></a></li>
         ))}
