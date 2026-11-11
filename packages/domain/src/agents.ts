@@ -141,14 +141,15 @@ export function canonicalPath(raw: string): string | null {
 
 /**
  * Paths no agent output may touch, whatever the task's allowed paths say: the skills workspace (`.claude/skills`), SelariKru's own `.selarikru`, `.git` anywhere, and
- * `.env*` files anywhere. Matched case-insensitively, since a case-insensitive file system makes `.Env` and `.env` one file.
+ * `.env` or `.env.*` anywhere. Matched case-insensitively, since a case-insensitive file system makes `.Env` and `.env` one file.
  */
 export function reservedPath(path: string): boolean {
   const segs = path.normalize('NFC').toLowerCase().replace(/^(\.\/)+/, '').replace(/\/+$/, '').split('/');
   const root = SKILL_WORKSPACE_ROOT.toLowerCase().split('/');
   if (root.every((r, i) => segs[i] === r)) return true;
   if (segs[0] === '.selarikru') return true;
-  return segs.some((x) => x === '.git' || x.startsWith('.env'));
+  // `.env` and `.env.*` exactly, as a segment. `.envrc` or `.environment/` are not this rule's; credential-shaped names are `secretFileReason`'s.
+  return segs.some((x) => x === '.git' || x === '.env' || x.startsWith('.env.'));
 }
 
 /**

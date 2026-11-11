@@ -355,7 +355,7 @@ export class FirebaseHybridAssistantAdapter {
     let mode: InferenceMode = routed.mode;
     let allowFallback = routed.allowFallback;
     if (mode !== 'ONLY_ON_DEVICE' && !(req.labels ?? []).every((l) => isDestinationGranted('inference', FIREBASE_CLOUD_ROUTE, l, req.policy))) {
-      if (mode === 'ONLY_IN_CLOUD') return make({ status: 'blocked', blockedReason: 'cloud_not_granted_for_label' });
+      if (mode === 'ONLY_IN_CLOUD') return make({ status: 'blocked', requestedMode: mode, blockedReason: 'cloud_not_granted_for_label' });
       if (mode === 'PREFER_IN_CLOUD') mode = 'ONLY_ON_DEVICE';
       allowFallback = false;
     }

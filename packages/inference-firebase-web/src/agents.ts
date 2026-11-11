@@ -228,8 +228,9 @@ function bundleLabels(bundle: unknown): unknown[] {
   if (bundle === null || bundle === undefined) return [];
   const b = BrainBundleSchema.safeParse(bundle);
   if (!b.success) return ['restricted'];
-  if (b.data.claims.length === 0) return [];
-  return [b.data.destination === 'cloud' ? 'internal' : 'restricted'];
+  // A device bundle is restricted whatever it holds, so it always locks the call to the device. A cloud bundle with no claims carries no content.
+  if (b.data.destination !== 'cloud') return ['restricted'];
+  return b.data.claims.length === 0 ? [] : ['internal'];
 }
 
 /** The given files' labels the prompt may carry, plus any value that is not a label at all: that blocks the call rather than be read as anything. */
@@ -277,7 +278,7 @@ const block = (kind: string, name: string, content: string, nonce: string): stri
   `----- BEGIN ${kind}${name ? ` ${name}` : ''} ${nonce} -----\n${content}${content.endsWith('\n') || content === '' ? '' : '\n'}----- END ${kind}${name ? ` ${name}` : ''} ${nonce} -----`;
 
 /** The task, its criteria, its allowed paths, then the served context and what it left out. Fixed order and headings. */
-function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { lines: string[] } | { refused: string } {
+function header(input: AgentBaseInput, omissions: AgentOmission[]): { lines: string[] } | { refused: string } {
   const t = input.task;
   const lines = [
     '# Task', `Task ID: ${t.taskId}`, `Title: ${t.title}`, `Description: ${t.description?.trim() || '(none)'}`, '',
@@ -293,8 +294,6 @@ function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { li
   if (!parsed.success) return { refused: 'context_bundle_unreadable' };
   const b = parsed.data;
   if (b.taskId !== t.taskId) return { refused: 'context_bundle_task_mismatch' };
-  // A bundle served for the device may hold restricted claims. Its label locks the call to the device first; this is the backstop.
-  if (at.cloudCapable && b.destination !== 'cloud') return { refused: 'context_bundle_not_for_cloud' };
   if (b.claims.length === 0) lines.push('(no claims)');
   for (const c of b.claims) lines.push(`- [${c.standing}${c.status === 'disputed' ? ', disputed' : ''}] ${c.heading} (${c.key}): ${c.text}`);
   if (b.indexLag > 0) lines.push(`Note: the context may be out of date (${b.indexLag} newer changes not yet read).`);
@@ -327,7 +326,7 @@ function fencedContent(kind: AgentKind, input: AgentInputs[AgentKind]): string[]
 }
 
 function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions: AgentOmission[], nonce: string): Built {
-  const head = header(input, at, omissions);
+  const head = header(input, omissions);
   if ('refused' in head) return head;
   const t = input.task;
   const ids = t.criteria.map((c) => c.id);

@@ -433,3 +433,24 @@ describe('fix round 1: in-queue recheck through a catalog agent', () => {
     expect(r.report).toMatchObject({ status: 'blocked', blockedReason: 'route_changed_in_queue' });
   });
 });
+
+describe('fix round 2', () => {
+  it('a device bundle locks the call to the device on a cloud route, with or without claims', async () => {
+    for (const claims of [bundle().claims, []]) {
+      const { sdk, catalog } = setup(CLOUD_ROUTE);
+      sdk.result = { text: JSON.stringify(GOOD.brief), inferenceSource: 'on_device' };
+      const r = await catalog.brief({ ...cloudCommon, bundle: bundle({ destination: 'local', claims }) });
+      expect(r.proposal.status).toBe('ok');
+      expect(r.locked).toBe(true);
+      expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+    }
+  });
+
+  it('a call refused for an ungranted label records the mode it refused', async () => {
+    const publicOnly = { policyVersion: 'p1', preferredMode: 'ONLY_IN_CLOUD', selectedSources: ['s1'], destinations: [{ destination: 'firebase-ai-logic-cloud', purpose: 'inference', classifications: ['public'] }] } as never;
+    const { reports, catalog } = setup(CLOUD_ROUTE);
+    const r = await catalog.criteria({ ...common, policy: publicOnly });
+    expect(r.proposal).toMatchObject({ status: 'blocked', blockedReason: 'cloud_not_granted_for_label', requestedMode: 'ONLY_IN_CLOUD' });
+    expect(reports[0]!.report).toMatchObject({ requestedMode: 'ONLY_IN_CLOUD', blockedReason: 'cloud_not_granted_for_label' });
+  });
+});

@@ -244,3 +244,14 @@ describe('fix round 1: reserved roots, whatever the allowed paths say', () => {
     expect(r.ok ? [] : r.issues.map((i) => i.code)).toContain('path_reserved');
   });
 });
+
+describe('fix round 2: .env reservation is exact', () => {
+  const plan = (paths: string[]) => ({ tasks: [{ key: 'T1', title: 't', description: 'd', role: 'backend', requirementIds: ['AC-1'], paths, dependsOn: [] }] });
+  const codes = (p: string) => { const r = checkAgentOutput('plan', plan([p]), { criteriaIds: IDS, allowedPaths: [] }); return r.ok ? [] : r.issues.map((i) => i.code); };
+  it.each(['.env', '.ENV', 'web/.env', '.env.local', 'web/.Env.production'])('%s is reserved', (p) => {
+    expect(codes(p)).toContain('path_reserved');
+  });
+  it.each(['.envrc', '.environment/config.ts', '.envoy/proxy.yaml', 'web/.envrc'])('%s is not reserved by this rule', (p) => {
+    expect(codes(p)).not.toContain('path_reserved');
+  });
+});
