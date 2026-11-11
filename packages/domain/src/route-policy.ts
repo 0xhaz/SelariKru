@@ -145,12 +145,33 @@ export type RouteObservedSource = (typeof ROUTE_OBSERVED_SOURCES)[number];
 export const ROUTE_CONFORMANCE = ['conforms', 'violation', 'unverified'] as const;
 export type RouteConformance = (typeof ROUTE_CONFORMANCE)[number];
 
-/** Whether a response fell back, and whether its source is one the effective mode allows. An unknown source is never counted as either side. */
-export function routeOutcome(mode: RoutePolicyMode | null, observed: RouteObservedSource): { readonly fellBack: boolean | null; readonly conformance: RouteConformance } {
-  if (mode === null || observed === 'UNKNOWN') return { fellBack: null, conformance: 'unverified' };
+/** The sources each mode allows. A request is stricter than the effective mode when it allows no source the effective mode does not. */
+const ALLOWED_SOURCES: Readonly<Record<RoutePolicyMode, readonly RouteObservedSource[]>> = {
+  ONLY_ON_DEVICE: ['ON_DEVICE'], PREFER_ON_DEVICE: ['ON_DEVICE', 'IN_CLOUD'], ONLY_IN_CLOUD: ['IN_CLOUD'], PREFER_IN_CLOUD: ['ON_DEVICE', 'IN_CLOUD'],
+};
+const within = (requested: RoutePolicyMode, effective: RoutePolicyMode): boolean => ALLOWED_SOURCES[requested].every((s) => ALLOWED_SOURCES[effective].includes(s));
+
+export interface RouteOutcome {
+  /** Null when the source is unknown or no policy was in force. */
+  readonly fellBack: boolean | null;
+  readonly conformance: RouteConformance;
+  /** The `request_mode_mismatch` flag: the mode asked of the SDK is not the effective mode. Stricter is flagged but conforms; wider is a violation. */
+  readonly requestModeMismatch: boolean;
+}
+
+/**
+ * Whether a response fell back, and whether the call conforms to the effective mode. The requested mode counts as much as the observed source: a cloud-capable request on a
+ * device-only or locked route is a violation whatever the source says, and any request wider than the effective mode is one too. An unknown source is never counted as
+ * either side.
+ */
+export function routeOutcome(mode: RoutePolicyMode | null, observed: RouteObservedSource, requested: RoutePolicyMode | null = null, locked = false): RouteOutcome {
+  const requestModeMismatch = requested !== null && mode !== null && requested !== mode;
+  const wideRequest = requested !== null && (((locked || mode === 'ONLY_ON_DEVICE') && isCloudCapable(requested)) || (mode !== null && !within(requested, mode)));
+  if (mode === null || observed === 'UNKNOWN') return { fellBack: null, conformance: wideRequest ? 'violation' : 'unverified', requestModeMismatch };
   const primary = mode === 'ONLY_ON_DEVICE' || mode === 'PREFER_ON_DEVICE' ? 'ON_DEVICE' : 'IN_CLOUD';
   const fellBack = observed !== primary;
-  return { fellBack, conformance: fellBack && (mode === 'ONLY_ON_DEVICE' || mode === 'ONLY_IN_CLOUD') ? 'violation' : 'conforms' };
+  const sourceViolation = fellBack && (mode === 'ONLY_ON_DEVICE' || mode === 'ONLY_IN_CLOUD');
+  return { fellBack, conformance: wideRequest || sourceViolation ? 'violation' : 'conforms', requestModeMismatch };
 }
 
 export const ROUTE_CALL_STATUSES = ['ok', 'invalid', 'blocked', 'route_violation', 'unverified_source', 'error'] as const;
@@ -197,6 +218,8 @@ export const RouteRecordSchema = z.strictObject({
   /** Derived by the server from the effective mode and the observed source; never taken from the report. Null when the source is unknown. */
   fellBack: z.boolean().nullable(),
   conformance: z.enum(ROUTE_CONFORMANCE),
+  /** The requested mode is not the effective mode (`request_mode_mismatch`). Rows written before the flag read as false. */
+  requestModeMismatch: z.boolean().default(false),
   status: z.enum(ROUTE_CALL_STATUSES),
   model: z.strictObject({ cloudModel: z.string(), sdkVersion: z.string() }),
   timing: z.strictObject({ totalMs: z.number().int().min(0), firstOutputMs: z.number().int().min(0).nullable() }),

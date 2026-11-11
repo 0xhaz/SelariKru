@@ -211,6 +211,21 @@ describe('route policy', () => {
     expect(v.assistant).toEqual({ mode: 'ONLY_ON_DEVICE', observedSource: 'on_device' });
   });
 
+  it('reads a task route fresh, with its history, and a read it cannot parse is an error, never a guess', async () => {
+    const rec = {
+      recordId: 'rte_1', taskId: 't1', taskRevision: 1, requestId: 'req-1', stepKind: 'triage', callOverride: null, requestedMode: 'ONLY_ON_DEVICE', effectiveMode: 'ONLY_ON_DEVICE', policySource: 'lock', locked: true,
+      observedSource: 'ON_DEVICE', fellBack: false, conformance: 'conforms', requestModeMismatch: false, status: 'ok', model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' }, timing: { totalMs: 5, firstOutputMs: null },
+      validation: 'passed', blockedReason: null, reportedBy: 'browser', trust: 'untrusted', reportedAt: T,
+    };
+    const calls: string[] = [];
+    const answer = (body: unknown) => createLiveDataSource({ baseUrl: 'http://x', getToken: async () => 't', fetch: (async (url: string) => { calls.push(String(url)); return new Response(JSON.stringify(body), { status: 200 }); }) as unknown as typeof fetch });
+    const read = await answer({ taskId: 't1', revision: 1, runId: 'r', route, records: [rec] }).getTaskRoute!('p', 't1');
+    expect(calls[0]).toBe('http://x/v1/projects/p/tasks/t1/route');
+    expect(read.route.lock).toMatchObject({ label: 'restricted' });
+    expect(read.records).toHaveLength(1);
+    await expect(answer({ taskId: 't1', revision: 1, runId: 'r', route: { ...route, effective: 'PREFER_IN_CLOUD' }, records: [] }).getTaskRoute!('p', 't1')).rejects.toBeInstanceOf(DataSourceException);
+  });
+
   it('reports a route record to the task, and a locked override keeps its refusal name', async () => {
     const { source, calls } = recording({ reportId: 'rte_t1_req-1', trust: 'untrusted' }, 201);
     expect(await source.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: 'k1', args: { projectId: 'p', taskId: 't1', report } })).toMatchObject({ accepted: true, execution: 'applied', operationId: 'rte_t1_req-1' });
@@ -218,5 +233,7 @@ describe('route policy', () => {
     const refused = recording({ error: { code: 'route_locked_restricted', message: 'locked', details: { label: 'restricted', reason: 'This task reads restricted data.' } } }, 409);
     expect(await refused.source.execute({ command: 'setting.set', expectedRevision: 0, idempotencyKey: 'k2', args: { projectId: 'p', key: 't1', change: { scope: 'task', field: 'route_override', value: 'ONLY_IN_CLOUD' } } }))
       .toMatchObject({ accepted: false, rejection: 'route_locked_restricted' });
+    const mismatch = recording({ error: { code: 'replay_mismatch', message: 'different body' } }, 409);
+    expect(await mismatch.source.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: 'k3', args: { projectId: 'p', taskId: 't1', report } })).toMatchObject({ accepted: false, rejection: 'invalid_command' });
   });
 });

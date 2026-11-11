@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { connectAuthEmulator, getAuth } from 'firebase/auth';
-import { FirebaseHybridAssistantAdapter, createFirebaseSdk } from '@selarikru/inference-firebase-web';
+import { FirebaseHybridAssistantAdapter, createFirebaseSdk, type FetchRoute } from '@selarikru/inference-firebase-web';
 
 // Public web client config (not a secret), as in spikes/firebase-hybrid.
 const firebaseConfig = {
@@ -22,9 +22,13 @@ if (usingAuthEmulator) {
 }
 
 /** App Check (reCAPTCHA Enterprise) is set up inside createFirebaseSdk; the debug provider exists only when import.meta.env.DEV. */
-export function createAdapter(): FirebaseHybridAssistantAdapter {
+/**
+ * `fetchRoute` reads a task's route fresh before every AI call that names a task (a data source's `getTaskRoute`). Until H4 wires one, a call that names a task is
+ * blocked (`route_fetch_failed`); calls that name no task, such as onboarding drafts, are unaffected.
+ */
+export function createAdapter(fetchRoute: FetchRoute = async () => { throw new Error('no task route source is wired'); }): FirebaseHybridAssistantAdapter {
   const siteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;
-  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }) });
+  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }), fetchRoute });
 }
 
 export const getOwnerToken = async (): Promise<string> => {

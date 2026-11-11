@@ -1,5 +1,5 @@
 import {
-  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema,
+  AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CursorSchema, DataSourceException, ProjectViewEventSchema, REJECTION_REASONS, RunFailuresViewSchema, TaskRouteReadSchema, type TaskRouteRead,
   AttemptContextViewSchema, AttemptSkillsViewSchema, BrainSourceRevisionViewSchema, BrainViewSchema, HandoverDiffViewSchema, HandoversViewSchema, ProductViewSchema, SkillsViewSchema, StackViewSchema,
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type TerminalControlChannel, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type ProjectViewEvent, type ProjectViewSnapshot, type RejectionReason, type RunFailuresView,
 } from '@selarikru/view-protocol';
@@ -75,7 +75,7 @@ function rejectionOf(e: WireError): RejectionReason {
   const reason = typeof e.details?.['reason'] === 'string' ? e.details['reason'] : null;
   if (reason !== null && DETAIL_REASONS.includes(reason)) return reason as RejectionReason;
   if (e.code === 'pull_request_not_allowed') return 'pull_request_refused';
-  if (e.code === 'invalid_request' || e.code === 'plan_invalid' || e.code === 'idempotency_key_conflict') return 'invalid_command';
+  if (e.code === 'invalid_request' || e.code === 'plan_invalid' || e.code === 'idempotency_key_conflict' || e.code === 'replay_mismatch') return 'invalid_command';
   if ((REJECTION_REASONS as readonly string[]).includes(e.code)) return e.code as RejectionReason;
   if (e.code === 'command_not_allowed' || e.code === 'command_not_supported') return 'not_allowed';
   return 'not_allowed';
@@ -200,6 +200,23 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       }
       for (const a of Object.values(snapshot.attempts)) attemptOwners.set(a.attemptId, { taskId: a.taskId, projectId });
       return snapshot;
+    },
+
+    /** One task's route, read fresh for the browser adapter before an AI call. Anything it cannot read is an error, so the call is blocked rather than guessed. */
+    async getTaskRoute(projectId, taskId): Promise<TaskRouteRead> {
+      assertOpen();
+      let res: Response;
+      try {
+        res = await request(`/v1/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/route`);
+      } catch (e) {
+        throw fail(fromThrown(e));
+      }
+      if (!res.ok) throw fail(toDataSourceError(await readWireError(res)));
+      try {
+        return TaskRouteReadSchema.parse(await res.json());
+      } catch {
+        throw fail({ code: 'invalid_event', message: 'the server sent a task route this build cannot read', retryable: false });
+      }
     },
 
     async getRunFailures(projectId, runId): Promise<RunFailuresView> {

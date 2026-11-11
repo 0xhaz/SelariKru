@@ -318,7 +318,8 @@ function featureDelivery(): Fixture {
   return done(b, {
     id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE,
     // Every route mode is in use: the run default is Local first from onboarding; the contract runs Cloud only, the API Cloud first, the integration Local only, and
-    // the search index reads restricted data, so it is locked to the device. The list UI fell back to the cloud once; the integration's last source is unknown.
+    // the end-to-end checks read restricted data, so their AI steps are locked to the device (a planned local task, never one headed to a cloud worker). The list
+    // UI fell back to the cloud once; the integration's last source is unknown.
     routes: {
       runDefault: 'PREFER_ON_DEVICE',
       tasks: {
@@ -326,7 +327,8 @@ function featureDelivery(): Fixture {
         [scoped('feature-delivery', 'contract')]: { override: 'ONLY_IN_CLOUD', inputChars: 4200, observed: { sec: 60, stepKind: 'criteria', source: 'IN_CLOUD', totalMs: 1300 } },
         [scoped('feature-delivery', 'api')]: { override: 'PREFER_IN_CLOUD', inputChars: 12000, observed: { sec: 120, stepKind: 'patch', source: 'IN_CLOUD', totalMs: 3100 } },
         [scoped('feature-delivery', 'web')]: { inputChars: 2600, observed: { sec: 130, stepKind: 'patch', source: 'IN_CLOUD', totalMs: 2900 } },
-        [scoped('feature-delivery', 'search')]: { label: 'restricted', inputChars: 1800, observed: { sec: 95, stepKind: 'triage', source: 'ON_DEVICE', totalMs: 1700 } },
+        [scoped('feature-delivery', 'search')]: { inputChars: 1800 },
+        [scoped('feature-delivery', 'e2e')]: { label: 'restricted', inputChars: 1500, observed: { sec: 95, stepKind: 'criteria', source: 'ON_DEVICE', totalMs: 1700 } },
         [scoped('feature-delivery', 'integrate')]: { override: 'ONLY_ON_DEVICE', inputChars: 9000, observed: { sec: 150, stepKind: 'review', source: 'UNKNOWN', totalMs: 4100 } },
         [scoped('feature-delivery', 'review')]: { inputChars: 700 },
       },

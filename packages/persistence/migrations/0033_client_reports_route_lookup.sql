@@ -1,0 +1,1 @@
+CREATE INDEX "client_reports_route_lookup" ON "client_reports" USING btree ("tenant_id","project_id","kind","subject_id","created_at");

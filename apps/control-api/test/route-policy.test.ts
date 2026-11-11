@@ -169,7 +169,7 @@ describe('route records reported by the browser', () => {
     expect(all).not.toContain('RESTRICTED-CANARY');
     // Every stored key is one of the closed metadata fields.
     const keys = Object.keys(stored[0]!['payload'] as object).sort();
-    expect(keys).toEqual(['blockedReason', 'callOverride', 'conformance', 'effectiveMode', 'fellBack', 'locked', 'model', 'observedSource', 'policySource', 'requestId', 'requestedMode', 'status', 'stepKind', 'taskRevision', 'timing', 'validation'].sort());
+    expect(keys).toEqual(['blockedReason', 'callOverride', 'conformance', 'effectiveMode', 'fellBack', 'locked', 'model', 'observedSource', 'policySource', 'requestId', 'requestModeMismatch', 'requestedMode', 'status', 'stepKind', 'taskRevision', 'timing', 'validation'].sort());
   });
 
   it('an unknown source stays unknown', async () => {
@@ -187,5 +187,71 @@ describe('route records reported by the browser', () => {
     const reports = (await snapshot()).clientReports;
     expect(reports.every((r: any) => r.kind === 'inference')).toBe(true);
     expect(reports[0].payload).toMatchObject({ mode: 'ONLY_ON_DEVICE', observedSource: 'on_device' });
+  });
+});
+
+describe('route records: fix round 1', () => {
+  it('R1: report ids cannot collide across tasks whose ids share an underscore prefix', async () => {
+    await seedTask(t.db, specFor('a'));
+    await seedTask(t.db, specFor('a_b'));
+    const r1 = await sendReport('a', report({ requestId: 'b_x' }));
+    const r2 = await sendReport('a_b', report({ requestId: 'x' }));
+    expect(r1.status).toBe(201);
+    expect(r2.status).toBe(201);
+    expect(r1.body.reportId).not.toBe(r2.body.reportId);
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/a_b/route`)).body.records).toHaveLength(1);
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/a/route`)).body.records).toHaveLength(1);
+  });
+
+  it('R2: a replay with the same request id but a different body is refused, and the first record stands', async () => {
+    await seedTask(t.db, specFor('t1'));
+    const body = report({ requestId: 'same', observedSource: 'IN_CLOUD' });
+    expect((await sendReport('t1', body)).status).toBe(201);
+    expect((await sendReport('t1', body)).status).toBe(200);
+    const r = await sendReport('t1', { ...body, observedSource: 'ON_DEVICE' });
+    expect(r.status).toBe(409);
+    expect(r.body.error.code).toBe('replay_mismatch');
+    const records = (await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`)).body.records;
+    expect(records.map((x: any) => x.observedSource)).toEqual(['IN_CLOUD']);
+    expect(await events('inference.reported')).toHaveLength(1);
+  });
+
+  it('R3: on a locked task a forged device answer to a cloud request is a violation, flagged as a request mode mismatch', async () => {
+    await onboardingChoice('PREFER_IN_CLOUD');
+    await seedTask(t.db, specFor('t1', { classification: 'restricted' }));
+    await sendReport('t1', report({ requestedMode: 'ONLY_IN_CLOUD', callOverride: 'ONLY_IN_CLOUD', observedSource: 'ON_DEVICE' }));
+    const [rec] = (await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`)).body.records;
+    expect(rec).toMatchObject({ effectiveMode: 'ONLY_ON_DEVICE', locked: true, conformance: 'violation', requestModeMismatch: true });
+  });
+
+  it('a stricter request is flagged but conforms', async () => {
+    await onboardingChoice('PREFER_ON_DEVICE');
+    await seedTask(t.db, specFor('t1'));
+    await sendReport('t1', report({ requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE' }));
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`)).body.records[0]).toMatchObject({ conformance: 'conforms', requestModeMismatch: true });
+  });
+
+  it('R4: an override saved before the label was raised reads as locked in the settings list, matching the route', async () => {
+    await onboardingChoice('PREFER_ON_DEVICE');
+    await seedTask(t.db, specFor('t1'));
+    expect((await save('t1', { scope: 'task', field: 'route_override', value: 'ONLY_IN_CLOUD' })).status).toBe(200);
+    await t.db.execute(sql`UPDATE projects SET classification = 'restricted' WHERE project_id = ${PROJECT}`);
+    const snap = await snapshot();
+    expect(snap.tasks[0].route).toMatchObject({ effective: 'ONLY_ON_DEVICE', source: 'lock' });
+    expect(snap.settings.find((x: any) => x.scope === 'task')).toMatchObject({ desired: 'ONLY_IN_CLOUD', effective: 'ONLY_ON_DEVICE', state: 'locked' });
+  });
+
+  it('R5: a spec that cannot be read fails closed to a secret lock', async () => {
+    await seedTask(t.db, specFor('t1'));
+    await t.db.execute(sql`UPDATE task_revisions SET spec = '{}'::jsonb WHERE task_id = 't1'`);
+    expect((await get(h.app, `/v1/projects/${PROJECT}/tasks/t1/route`)).body.route).toMatchObject({ effective: 'ONLY_ON_DEVICE', lock: { label: 'secret' } });
+  });
+
+  it('the event carries the status row revision as it stands when the report is written', async () => {
+    await seedTask(t.db, specFor('t1'));
+    await t.db.execute(sql`UPDATE task_status SET row_revision = 7 WHERE task_id = 't1'`);
+    await sendReport('t1', report());
+    const [e] = await t.db.execute(sql`SELECT aggregate_revision FROM events WHERE type = 'inference.reported'`);
+    expect(Number(e!['aggregate_revision'])).toBe(7);
   });
 });

@@ -41,28 +41,39 @@ export function routeRecordOf(input: {
   const lock = routeLockOf(input.routes, input.taskId);
   const override = input.settings.find((s) => s.scope === 'task' && s.key === input.taskId && s.field === 'route_override');
   const effective = effectiveRoutePolicy({ call: report.callOverride, task: (override?.desired as RoutePolicyMode | null | undefined) ?? null, run: runRouteDefaultOf(input.routes, input.settings, input.runId).value, lock });
-  const outcome = report.status === 'blocked' || report.status === 'error' ? { fellBack: null, conformance: 'unverified' as const } : routeOutcome(effective.mode, report.observedSource);
+  const outcome = report.status === 'blocked' || report.status === 'error'
+    ? { ...routeOutcome(effective.mode, 'UNKNOWN', report.requestedMode, lock !== null), fellBack: null }
+    : routeOutcome(effective.mode, report.observedSource, report.requestedMode, lock !== null);
   return {
     recordId: input.recordId, taskId: input.taskId, taskRevision: input.taskRevision, requestId: report.requestId, stepKind: report.stepKind, callOverride: report.callOverride, requestedMode: report.requestedMode,
-    effectiveMode: effective.mode, policySource: effective.source, locked: lock !== null, observedSource: report.observedSource, fellBack: outcome.fellBack, conformance: outcome.conformance,
+    effectiveMode: effective.mode, policySource: effective.source, locked: lock !== null, observedSource: report.observedSource, fellBack: outcome.fellBack, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
     status: report.status, model: { ...report.model }, timing: { totalMs: Math.round(report.timing.totalMs), firstOutputMs: report.timing.firstOutputMs === null ? null : Math.round(report.timing.firstOutputMs) },
     validation: report.validation, blockedReason: report.blockedReason, reportedBy: 'browser', trust: 'untrusted', reportedAt: input.at,
   };
 }
 
 /** The fixture's own reports, as records: what the browser said before the demo's first snapshot. */
-export function seededRouteRecords(routes: FixtureRoutes, settings: readonly SettingView[], runId: string): Map<string, RouteRecord> {
-  const out = new Map<string, RouteRecord>();
+export function seededRouteRecords(routes: FixtureRoutes, settings: readonly SettingView[], runId: string): Map<string, RouteRecord[]> {
+  const out = new Map<string, RouteRecord[]>();
   for (const [taskId, t] of Object.entries(routes.tasks)) {
     if (!t.observed) continue;
     const lock = routeLockOf(routes, taskId);
     const requested = effectiveRoutePolicy({ task: t.override ?? null, run: routes.runDefault, lock }).mode;
-    out.set(taskId, routeRecordOf({
+    out.set(taskId, [routeRecordOf({
       routes, settings, runId, taskId, taskRevision: 1, recordId: `${taskId}.route_1`, at: fixtureTime(t.observed.sec),
       report: { requestId: `${taskId}.req_1`, stepKind: t.observed.stepKind, callOverride: null, requestedMode: requested, observedSource: t.observed.source, status: 'ok', model: DEMO_MODEL, timing: { totalMs: t.observed.totalMs, firstOutputMs: null }, validation: 'passed', blockedReason: null },
-    }));
+    })]);
   }
   return out;
+}
+
+/**
+ * The settings list as the server shows it: a task override the data lock overrides reads `locked`, in force as ONLY_ON_DEVICE, so the list never contradicts the
+ * task's route. A saved ONLY_ON_DEVICE is not overridden.
+ */
+export function withRouteLocks(routes: FixtureRoutes, settings: readonly SettingView[]): SettingView[] {
+  return settings.map((x) => x.scope === 'task' && x.field === 'route_override' && x.desired !== 'ONLY_ON_DEVICE' && routeLockOf(routes, x.key)
+    ? { ...x, effective: 'ONLY_ON_DEVICE', state: 'locked' as const } : { ...x });
 }
 
 /** Task overrides as the task settings the real table would hold. */

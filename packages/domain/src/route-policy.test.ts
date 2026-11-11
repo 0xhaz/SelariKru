@@ -91,15 +91,27 @@ describe('suggestRoute: each row of the plan table', () => {
 
 describe('route outcome: where a response actually ran', () => {
   it('a preference that ran on the other side fell back; an only that did is a violation', () => {
-    expect(routeOutcome('PREFER_ON_DEVICE', 'IN_CLOUD')).toEqual({ fellBack: true, conformance: 'conforms' });
-    expect(routeOutcome('PREFER_IN_CLOUD', 'ON_DEVICE')).toEqual({ fellBack: true, conformance: 'conforms' });
-    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE')).toEqual({ fellBack: false, conformance: 'conforms' });
-    expect(routeOutcome('ONLY_ON_DEVICE', 'IN_CLOUD')).toEqual({ fellBack: true, conformance: 'violation' });
-    expect(routeOutcome('ONLY_IN_CLOUD', 'IN_CLOUD')).toEqual({ fellBack: false, conformance: 'conforms' });
+    expect(routeOutcome('PREFER_ON_DEVICE', 'IN_CLOUD')).toEqual({ fellBack: true, conformance: 'conforms', requestModeMismatch: false });
+    expect(routeOutcome('PREFER_IN_CLOUD', 'ON_DEVICE')).toEqual({ fellBack: true, conformance: 'conforms', requestModeMismatch: false });
+    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE')).toEqual({ fellBack: false, conformance: 'conforms', requestModeMismatch: false });
+    expect(routeOutcome('ONLY_ON_DEVICE', 'IN_CLOUD')).toEqual({ fellBack: true, conformance: 'violation', requestModeMismatch: false });
+    expect(routeOutcome('ONLY_IN_CLOUD', 'IN_CLOUD')).toEqual({ fellBack: false, conformance: 'conforms', requestModeMismatch: false });
+  });
+  it('the requested mode counts: a cloud-capable request on a device-only or locked route is a violation, whatever the source said', () => {
+    expect(routeOutcome('ONLY_ON_DEVICE', 'ON_DEVICE', 'ONLY_IN_CLOUD')).toMatchObject({ conformance: 'violation', requestModeMismatch: true });
+    expect(routeOutcome('ONLY_ON_DEVICE', 'UNKNOWN', 'PREFER_ON_DEVICE')).toMatchObject({ conformance: 'violation', requestModeMismatch: true });
+    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE', 'PREFER_IN_CLOUD', true)).toMatchObject({ conformance: 'violation' });
+  });
+  it('a request that differs is flagged; a stricter one is not a violation, a wider one is', () => {
+    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE', 'ONLY_ON_DEVICE')).toEqual({ fellBack: false, conformance: 'conforms', requestModeMismatch: true });
+    expect(routeOutcome('PREFER_IN_CLOUD', 'IN_CLOUD', 'ONLY_IN_CLOUD')).toMatchObject({ conformance: 'conforms', requestModeMismatch: true });
+    expect(routeOutcome('ONLY_IN_CLOUD', 'IN_CLOUD', 'PREFER_IN_CLOUD')).toMatchObject({ conformance: 'violation', requestModeMismatch: true });
+    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE', 'PREFER_ON_DEVICE')).toMatchObject({ conformance: 'conforms', requestModeMismatch: false });
+    expect(routeOutcome('PREFER_ON_DEVICE', 'ON_DEVICE', null)).toMatchObject({ requestModeMismatch: false });
   });
   it('an unknown source is unknown: never counted as either side', () => {
-    expect(routeOutcome('ONLY_ON_DEVICE', 'UNKNOWN')).toEqual({ fellBack: null, conformance: 'unverified' });
-    expect(routeOutcome(null, 'ON_DEVICE')).toEqual({ fellBack: null, conformance: 'unverified' });
+    expect(routeOutcome('ONLY_ON_DEVICE', 'UNKNOWN')).toEqual({ fellBack: null, conformance: 'unverified', requestModeMismatch: false });
+    expect(routeOutcome(null, 'ON_DEVICE')).toEqual({ fellBack: null, conformance: 'unverified', requestModeMismatch: false });
   });
 });
 

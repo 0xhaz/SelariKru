@@ -3,7 +3,7 @@ import {
   type RouteLock, type RoutePolicyMode, type RouteRecord, type TaskSpec,
 } from '@selarikru/domain';
 import { schema, type Executor } from '@selarikru/persistence';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 
 /**
  * Route policy per task, as the server holds and serves it (plan.md §4.1). The run default is the run setting `route_policy`, or else the choice recorded at onboarding
@@ -89,23 +89,24 @@ export async function loadProjectRouteInputs(db: Executor, tenantId: string, pro
   const only = taskIds ? [...taskIds] : null;
   const overrides = await db.select({ taskId: schema.taskSettings.taskId, desired: schema.taskSettings.desired, desiredRevision: schema.taskSettings.desiredRevision }).from(schema.taskSettings)
     .where(and(eq(schema.taskSettings.tenantId, tenantId), eq(schema.taskSettings.projectId, projectId), eq(schema.taskSettings.field, 'route_override'), ...(only ? [inArray(schema.taskSettings.taskId, only)] : [])));
-  // The latest revision of every Brain source recorded for a task.
-  const brain = await db.execute(sql`
-    SELECT DISTINCT ON (source_id) source_id, task_id, classification FROM brain_sources
-    WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND task_id IS NOT NULL
-    ORDER BY source_id, revision DESC`);
-  const last = await db.execute(sql`
-    SELECT DISTINCT ON (subject_id) report_id, subject_id, payload, created_at FROM client_reports
-    WHERE tenant_id = ${tenantId} AND project_id = ${projectId} AND kind = 'route' AND subject_kind = 'task'
-    ORDER BY subject_id, created_at DESC, report_id DESC`);
+  // The latest revision of every Brain source recorded for a task, and each task's latest route record: only for the tasks asked about, when given.
+  const bs = schema.brainSources;
+  const brain = await db.selectDistinctOn([bs.sourceId], { sourceId: bs.sourceId, taskId: bs.taskId, classification: bs.classification }).from(bs)
+    .where(and(eq(bs.tenantId, tenantId), eq(bs.projectId, projectId), only ? inArray(bs.taskId, only) : isNotNull(bs.taskId)))
+    .orderBy(bs.sourceId, desc(bs.revision));
+  const cr = schema.clientReports;
+  // Served by `client_reports_route_lookup` (project, kind, subject, created_at).
+  const last = await db.selectDistinctOn([cr.subjectId], { reportId: cr.reportId, subjectId: cr.subjectId, payload: cr.payload, createdAt: cr.createdAt }).from(cr)
+    .where(and(eq(cr.tenantId, tenantId), eq(cr.projectId, projectId), eq(cr.kind, 'route'), eq(cr.subjectKind, 'task'), ...(only ? [inArray(cr.subjectId, only)] : [])))
+    .orderBy(cr.subjectId, desc(cr.createdAt), desc(cr.reportId));
   const brainLabels = new Map<string, unknown[]>();
   for (const b of brain) {
-    const id = String(b['task_id']);
-    brainLabels.set(id, [...(brainLabels.get(id) ?? []), b['classification']]);
+    if (b.taskId === null) continue;
+    brainLabels.set(b.taskId, [...(brainLabels.get(b.taskId) ?? []), b.classification]);
   }
   const lastObserved = new Map<string, RouteRecord>();
   for (const r of last) {
-    const rec = routeRecordOf({ reportId: String(r['report_id']), subjectId: String(r['subject_id']), payload: r['payload'] as Record<string, unknown>, createdAt: new Date(r['created_at'] as string | Date) });
+    const rec = routeRecordOf(r);
     if (rec) lastObserved.set(rec.taskId, rec);
   }
   return {
@@ -141,4 +142,24 @@ export async function loadRouteHistory(db: Executor, tenantId: string, projectId
     .where(and(eq(schema.clientReports.tenantId, tenantId), eq(schema.clientReports.projectId, projectId), eq(schema.clientReports.kind, 'route'), eq(schema.clientReports.subjectKind, 'task'), eq(schema.clientReports.subjectId, taskId)))
     .orderBy(desc(schema.clientReports.createdAt), asc(schema.clientReports.reportId)).limit(limit);
   return rows.flatMap((r) => { const rec = routeRecordOf(r); return rec ? [rec] : []; });
+}
+
+/**
+ * The lock on each of these tasks, from their current specs and labels. For the settings list: an override the lock overrides is shown as `locked`, so the list never
+ * contradicts the task's route.
+ */
+export async function taskRouteLocks(db: Executor, tenantId: string, projectId: string, taskIds: readonly string[]): Promise<Map<string, RouteLock | null>> {
+  const out = new Map<string, RouteLock | null>();
+  if (taskIds.length === 0) return out;
+  const ids = [...new Set(taskIds)];
+  const rows = await db.select({ taskId: schema.taskStatus.taskId, spec: schema.taskRevisions.spec }).from(schema.taskStatus)
+    .innerJoin(schema.taskRevisions, and(eq(schema.taskRevisions.tenantId, schema.taskStatus.tenantId), eq(schema.taskRevisions.projectId, schema.taskStatus.projectId), eq(schema.taskRevisions.taskId, schema.taskStatus.taskId), eq(schema.taskRevisions.revision, schema.taskStatus.currentRevision)))
+    .where(and(eq(schema.taskStatus.tenantId, tenantId), eq(schema.taskStatus.projectId, projectId), inArray(schema.taskStatus.taskId, ids)));
+  const inputs = await loadProjectRouteInputs(db, tenantId, projectId, ids);
+  for (const id of ids) {
+    const row = rows.find((r) => r.taskId === id);
+    const parsed = TaskSpecSchema.safeParse(row?.spec);
+    out.set(id, routeLockFor(lockLabels(inputs.projectLabel, parsed.success ? parsed.data : null, inputs.brainLabels.get(id) ?? [])));
+  }
+  return out;
 }

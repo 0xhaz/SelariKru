@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { NO_HARNESS_CATALOG, effectiveRoutePolicy, routeOutcome, isHandoverReason, availableCatalog, restrictedStoredPayload, restrictedStoredReason, newTaskStateFromSpec, transition, validatePlanRevision, TaskSpecSchema, budgetUsed, type AttemptRecord, type PlanError, type TaskSpec, type TaskStatus } from '@selarikru/domain';
 import { readUsageEntries, schema, withTx, type Executor, type Tx } from '@selarikru/persistence';
 import { evaluate, type Operation } from '@selarikru/policy';
@@ -463,28 +464,42 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
     if (body.kind === 'route') {
       // A route record for one AI call. The server works out the effective route, the fallback and whether the source conforms from its own rows; the browser's
       // report supplies only what it observed. Metadata only: the shape has no field for prompt or output text. One request id is one record, and one event.
-      const reportId = `rte_${row.taskId}_${body.requestId}`.slice(0, 200);
+      // Collision-proof: a digest over the task id and the request id, separated by a byte neither alphabet allows.
+      const reportId = `rte_${createHash('sha256').update(`${row.taskId}\u0000${body.requestId}`).digest('hex').slice(0, 40)}`;
+      let created = false;
       const result = await withTx(db, async (tx) => {
-        const task = await loadTaskRoute(tx, config.tenantId, row.projectId, row.taskId, config.nanoInputBudgetChars);
-        if (!task) throw new AppError(404, 'task_not_found', 'no such task');
-        const effective = effectiveRoutePolicy({ call: body.callOverride, task: task.route.override, run: task.route.runDefault, lock: task.lock });
-        const outcome = body.status === 'blocked' || body.status === 'error' ? { fellBack: null, conformance: 'unverified' as const } : routeOutcome(effective.mode, body.observedSource);
-        const payload = {
-          requestId: body.requestId, taskRevision: task.revision, stepKind: body.stepKind, callOverride: body.callOverride, requestedMode: body.requestedMode,
-          effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource, fellBack: outcome.fellBack, conformance: outcome.conformance,
-          status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
-          validation: body.validation, blockedReason: body.blockedReason,
-        };
-        // Insert first, then the event sequence: no other lock is held.
-        const inserted = await tx.insert(schema.clientReports).values({
-          tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,
-        }).onConflictDoNothing().returning({ reportId: schema.clientReports.reportId, createdAt: schema.clientReports.createdAt });
-        if (inserted.length === 0) return { reportId, replayed: true };
-        const record = { ...payload, recordId: reportId, taskId: row.taskId, reportedBy: 'browser', trust: 'untrusted', reportedAt: inserted[0]!.createdAt.toISOString() };
-        await writeEvent(tx, now(), { projectId: row.projectId, runId: task.runId, taskId: row.taskId, aggregateRevision: task.rowRevision, type: 'inference.reported', actor: { kind: 'human', id: uid }, payload: { revision: task.revision, record } });
-        return { reportId, replayed: false };
+        try {
+          // The same request id with the same body replays the first answer; with a different body it is refused, so a record cannot be rewritten by a retry.
+          return await idempotent(tx, { tenantId: config.tenantId, projectId: row.projectId, key: `route_report:${reportId}` }, fingerprint(body), async () => {
+            // The status row first, shared: its revision is the one the event carries, and no writer can move it before the event is appended.
+            const [status] = await tx.select({ rowRevision: schema.taskStatus.rowRevision }).from(schema.taskStatus)
+              .where(and(eq(schema.taskStatus.tenantId, config.tenantId), eq(schema.taskStatus.projectId, row.projectId), eq(schema.taskStatus.taskId, row.taskId))).for('share');
+            const task = await loadTaskRoute(tx, config.tenantId, row.projectId, row.taskId, config.nanoInputBudgetChars);
+            if (!task || !status) throw new AppError(404, 'task_not_found', 'no such task');
+            const effective = effectiveRoutePolicy({ call: body.callOverride, task: task.route.override, run: task.route.runDefault, lock: task.lock });
+            const ran = body.status !== 'blocked' && body.status !== 'error';
+            const outcome = routeOutcome(effective.mode, ran ? body.observedSource : 'UNKNOWN', body.requestedMode, task.lock !== null);
+            const payload = {
+              requestId: body.requestId, taskRevision: task.revision, stepKind: body.stepKind, callOverride: body.callOverride, requestedMode: body.requestedMode,
+              effectiveMode: effective.mode, policySource: effective.source, locked: task.lock !== null, observedSource: body.observedSource,
+              fellBack: ran ? outcome.fellBack : null, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
+              status: body.status, model: body.model, timing: { totalMs: Math.round(body.timing.totalMs), firstOutputMs: body.timing.firstOutputMs === null ? null : Math.round(body.timing.firstOutputMs) },
+              validation: body.validation, blockedReason: body.blockedReason,
+            };
+            const [inserted] = await tx.insert(schema.clientReports).values({
+              tenantId: config.tenantId, projectId: row.projectId, reportId, subjectKind: 'task', subjectId: row.taskId, kind: 'route', trust: 'untrusted', payload, reportedBy: uid,
+            }).returning({ createdAt: schema.clientReports.createdAt });
+            const record = { ...payload, recordId: reportId, taskId: row.taskId, reportedBy: 'browser', trust: 'untrusted', reportedAt: inserted!.createdAt.toISOString() };
+            await writeEvent(tx, now(), { projectId: row.projectId, runId: task.runId, taskId: row.taskId, aggregateRevision: status.rowRevision, type: 'inference.reported', actor: { kind: 'human', id: uid }, payload: { revision: task.revision, record } });
+            created = true;
+            return { reportId };
+          });
+        } catch (e) {
+          if (e instanceof AppError && e.code === 'idempotency_key_conflict') throw new AppError(409, 'replay_mismatch', 'this request id was already reported with a different body; the first record stands');
+          throw e;
+        }
       });
-      return reply.code(result.replayed ? 200 : 201).send({ reportId: result.reportId, trust: 'untrusted', reportedBy: 'browser' });
+      return reply.code(created ? 201 : 200).send({ reportId: result.reportId, trust: 'untrusted', reportedBy: 'browser' });
     }
     const reportId = newId('rpt');
     await db.insert(schema.clientReports).values({

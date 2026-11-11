@@ -15,7 +15,7 @@ import { createDemoStack } from './stack.ts';
 import { createDemoSkills } from './skills.ts';
 import { createDemoProduct } from './product.ts';
 import { createDemoHandover } from './handover.ts';
-import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, type FixtureRoutes } from './routes.ts';
+import { routeLockOf, routeRecordOf, runRouteDefaultOf, seededRouteRecords, seededRouteSettings, taskRouteOf, withRouteLocks, type FixtureRoutes } from './routes.ts';
 
 interface Subscriber {
   cursor: number;
@@ -49,8 +49,8 @@ interface Project {
   /** Scripted events held back while their run is paused: an attempt start, and everything after it for that task. Released, in order, on resume. */
   held: ProjectViewEvent[];
   readonly heldTasks: Set<string>;
-  /** The latest route record per task, as the browser reported it. */
-  readonly routeRecords: Map<string, RouteRecord>;
+  /** Every route record per task, newest first, as the browser reported them. */
+  readonly routeRecords: Map<string, RouteRecord[]>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -371,10 +371,14 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       ...r, criteria: criteriaOf(p, id), evidence: evidenceOf(p, id), scopeAssessment: scopeAssessmentOf(p, id), policy: policyOf(p, r, workers),
       ...(routes ? { routePolicy: runRouteDefaultOf(routes, p.settings, id) } : {}),
     }]));
-    const tasks = routes ? Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, route: taskRouteOf(routes, p.settings, t.runId, id, p.routeRecords.get(id)) }])) : s.tasks;
-    return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: p.settings.map((x) => ({ ...x })), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
+    const tasks = routes ? Object.fromEntries(Object.entries(s.tasks).map(([id, t]) => [id, { ...t, route: routeViewOf(p, t) }])) : s.tasks;
+    return { ...s, runs, tasks, attempts, workers, modelCatalog: p.modelCatalog, modelAssignments: p.modelAssignments.map((a) => ({ ...a })), settings: withRouteLocks(p.fixture.routes ?? NO_ROUTES, p.settings), meta: { ...s.meta, observedAt: isoOf(timeOf(p)) }, assistant: p.fixture.assistant, usage: [...p.fixture.usage], changeRequests: p.changeRequests.map((c) => ({ ...c })), approvalHistory: historyOf(s), limits: { maxConcurrentTotal: 2 },
       runners: [...new Set(Object.values(workers).map((w) => w.workerId))].sort().map((runnerId) => ({ runnerId, location: runnerId.includes('cloud') ? ('cloud' as const) : ('local' as const), label: null, lastSeenAt: isoOf(Date.parse(Object.values(workers).find((w) => w.workerId === runnerId)!.lastHeartbeatAt ?? isoOf(timeOf(p)))) })),
     };
+  }
+
+  function routeViewOf(p: Project, t: { taskId: string; runId: string }) {
+    return taskRouteOf(p.fixture.routes ?? NO_ROUTES, p.settings, t.runId, t.taskId, p.routeRecords.get(t.taskId)?.[0]);
   }
 
   /** The demo run's effective policy, built the way the server builds it from its rows. Simulated; never a real limit. */
@@ -532,9 +536,10 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const task = snap.tasks[c.args.taskId];
       if (!task) return rejected(c.idempotencyKey, 'unknown_target');
       const recordId = `${c.args.taskId}.route_${c.args.report.requestId}`;
-      if (p.routeRecords.get(c.args.taskId)?.recordId === recordId) return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied', replayed: true });
+      const earlier = p.routeRecords.get(c.args.taskId) ?? [];
+      if (earlier.some((x) => x.recordId === recordId)) return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied', replayed: true });
       const record = routeRecordOf({ routes: p.fixture.routes ?? NO_ROUTES, settings: p.settings, runId: task.runId, taskId: task.taskId, taskRevision: task.revision, recordId, at: isoOf(timeOf(p)), report: c.args.report });
-      p.routeRecords.set(task.taskId, record);
+      p.routeRecords.set(task.taskId, [record, ...earlier]);
       appendCommandEvent(p, task.taskId, 'inference.reported', { revision: task.revision, record }, { revisionStep: 0 });
       return receipt(c.idempotencyKey, { operationId: recordId, accepted: true, execution: 'applied' });
     }
@@ -659,6 +664,14 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     getHandovers: (projectId) => handover.get(project(projectId).fixture.projectId),
     handoverAction: (projectId, action) => handover.act(project(projectId).fixture.projectId, action),
     getHandoverDiff: (projectId, taskId, checkpointId, path) => handover.diff(project(projectId).fixture.projectId, taskId, checkpointId, path),
+
+    /** One task's route, as fresh as the mock's own rows: the effective policy, the lock, the suggestion, and every record, newest first. Simulated. */
+    async getTaskRoute(projectId, taskId) {
+      const p = project(projectId);
+      const t = p.state.snapshot.tasks[taskId];
+      if (!t) throw fail('unavailable', `no task ${taskId} in this project`);
+      return { taskId, revision: t.revision, runId: t.runId, route: routeViewOf(p, t), records: [...(p.routeRecords.get(taskId) ?? [])] };
+    },
 
     async getRunFailures(projectId, runId) {
       const p = project(projectId);

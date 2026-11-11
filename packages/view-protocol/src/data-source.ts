@@ -1,6 +1,6 @@
 import type { AuthorizedTerminalRequest, AuthorizedViewCommand, CommandReceipt, TerminalChannel, TerminalControlChannel } from './commands.ts';
 import type { ProjectViewEvent } from './events.ts';
-import type { ProjectViewSnapshot, RunFailuresView } from './snapshot.ts';
+import type { ProjectViewSnapshot, RunFailuresView, TaskRouteRead } from './snapshot.ts';
 import type { AttemptContextView, BrainAction, BrainSourceRevisionView, BrainView } from './brain.ts';
 import type { StackActionRequestView, StackView } from './stack.ts';
 import type { AttemptSkillsView, SkillActionView, SkillsView } from './skills.ts';
@@ -60,6 +60,11 @@ export interface EngineeringDataSource {
   handoverAction?(projectId: string, action: HandoverAction): Promise<HandoversView>;
   /** One file's review diff of a checkpoint waiting for the owner. Owner only; redacted. */
   getHandoverDiff?(projectId: string, taskId: string, checkpointId: string, path: string): Promise<HandoverDiffView>;
+  /**
+   * One task's route, read fresh: the effective policy, its source, the lock and its reason, the suggestion, the last observed source and the route history. The
+   * browser adapter calls this immediately before every AI call and never routes from a snapshot. Absent: this source has no route policy.
+   */
+  getTaskRoute?(projectId: string, taskId: string): Promise<TaskRouteRead>;
   disconnect(): void;
 }
 

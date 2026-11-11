@@ -171,6 +171,12 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
   if (hinted !== null && hinted > existing.revision) return needs('unknown_revision');
   if (hinted !== null && hinted < existing.revision) return null;
   if (e.aggregateRevision < existing.aggregateRevision) return null;
+  // Where an AI call ran is a fact about the task whatever its status: a finished task can still have had a step run on it.
+  if (e.type === 'inference.reported') {
+    const record = RouteRecordSchema.safeParse(p['record']);
+    if (!record.success || !existing.route || record.data.taskId !== existing.taskId) return null;
+    return { ...snap, tasks: put(snap.tasks, existing.taskId, { ...existing, route: { ...existing.route, lastObserved: record.data } }) };
+  }
   if (TERMINAL.includes(existing.status)) {
     // The task takes no more events, but an approval decision is still a fact about the approval (and frees the worker waiting on it).
     if (e.type === 'approval.granted' || e.type === 'approval.denied') {
@@ -409,12 +415,6 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'handover.decided':
       return commit(task);
 
-    // The browser's route record for one AI call: the last observed source on a task whose route the snapshot carries. A record that does not read changes nothing.
-    case 'inference.reported': {
-      const record = RouteRecordSchema.safeParse(p['record']);
-      if (!record.success || !task.route || record.data.taskId !== task.taskId) return commit(task);
-      return commit({ ...task, route: { ...task.route, lastObserved: record.data } });
-    }
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.

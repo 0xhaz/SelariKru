@@ -232,6 +232,13 @@
       "when": 1794375533293,
       "tag": "0032_route_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794377423663,
+      "tag": "0033_client_reports_route_lookup",
+      "breakpoints": true
     }
   ]
 }

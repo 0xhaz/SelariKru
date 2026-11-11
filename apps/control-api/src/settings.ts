@@ -13,7 +13,7 @@ import type { AppContext } from './app.ts';
 import { AppError, staleRevision } from './errors.ts';
 import { recordedBudgetCeiling } from './routes-onboarding.ts';
 import { parseBody } from './routes-owner.ts';
-import { loadTaskRoute } from './route-policy.ts';
+import { loadTaskRoute, taskRouteLocks } from './route-policy.ts';
 import { bumpStatus, fingerprint, idempotent, newId, requireProject, requireRun, writeEvent } from './store.ts';
 
 /**
@@ -552,7 +552,7 @@ export async function eventRunFor(tx: Executor, tenantId: string, projectId: str
 
 // ---- snapshot ----------------------------------------------------------------------------------------------------
 
-export type SettingState = 'applied' | 'applying' | 'waiting_for_runner' | 'waiting_for_runner_update';
+export type SettingState = 'applied' | 'applying' | 'waiting_for_runner' | 'waiting_for_runner_update' | 'locked';
 
 export interface SettingView {
   readonly scope: 'run' | 'runner' | 'task';
@@ -592,6 +592,7 @@ export async function loadSettingsView(tx: Executor, tenantId: string, projectId
   const runRows = await tx.select().from(schema.runSettings).where(and(eq(schema.runSettings.tenantId, tenantId), eq(schema.runSettings.projectId, projectId))).orderBy(asc(schema.runSettings.runId), asc(schema.runSettings.field));
   const runnerRows = await tx.select().from(schema.runnerSettings).where(eq(schema.runnerSettings.tenantId, tenantId)).orderBy(asc(schema.runnerSettings.runnerId), asc(schema.runnerSettings.field));
   const taskRows = await tx.select().from(schema.taskSettings).where(and(eq(schema.taskSettings.tenantId, tenantId), eq(schema.taskSettings.projectId, projectId))).orderBy(asc(schema.taskSettings.taskId), asc(schema.taskSettings.field));
+  const locks = await taskRouteLocks(tx, tenantId, projectId, taskRows.map((r) => r.taskId));
   const ofRunner = (runnerId: string): Pending => {
     const r = recentRows.find((x) => x.runnerId === runnerId);
     return !r ? { state: 'waiting_for_runner' } : r.ack === null ? { state: 'waiting_for_runner_update', waitingOn: [runnerId] } : { state: 'applying' };
@@ -608,7 +609,11 @@ export async function loadSettingsView(tx: Executor, tenantId: string, projectId
     settings: [
       ...runRows.map((r) => view('run', r.runId, r, everyone)),
       ...runnerRows.map((r) => view('runner', r.runnerId, r, ofRunner(r.runnerId))),
-      ...taskRows.map((r) => view('task', r.taskId, r, everyone)),
+      // A route override the data lock overrides is shown as such: in force as ONLY_ON_DEVICE, the same as the task's route. A saved ONLY_ON_DEVICE is not overridden.
+      ...taskRows.map((r) => {
+        const v = view('task', r.taskId, r, everyone);
+        return r.field === 'route_override' && locks.get(r.taskId) && r.desired !== 'ONLY_ON_DEVICE' ? { ...v, effective: 'ONLY_ON_DEVICE', state: 'locked' as const } : v;
+      }),
     ],
     everyone,
   };

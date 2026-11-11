@@ -45,9 +45,10 @@ export const UNKNOWN_MODEL_CATALOG: ModelCatalogView = { status: 'unknown', deta
 /**
  * Whether a saved change is in force. `applied`: its enforcer acknowledged it. `applying`: saved, and the server already gates claims on it, but the runner
  * has not confirmed it yet. `waiting_for_runner`: no runner is connected to confirm it. `waiting_for_runner_update`: a connected runner runs a build that never
- * acknowledges, so it must be updated; it is named in `waitingOn`. A save is never `applied` by being saved.
+ * acknowledges, so it must be updated; it is named in `waitingOn`. `locked`: a task's route override that the data lock overrides; `effective` is then ONLY_ON_DEVICE,
+ * as the task's route says. A save is never `applied` by being saved.
  */
-export const SETTING_STATES = ['applied', 'applying', 'waiting_for_runner', 'waiting_for_runner_update'] as const;
+export const SETTING_STATES = ['applied', 'applying', 'waiting_for_runner', 'waiting_for_runner_update', 'locked'] as const;
 export type SettingState = (typeof SETTING_STATES)[number];
 
 /** The current assignment for a role or task. `revision` is what a change must send back. Null provider and model: removed, listed only for its revision. */
@@ -215,7 +216,14 @@ export type RunRoutePolicyView = z.infer<typeof RunRoutePolicyViewSchema>;
 /**
  * Where a task's AI steps run, from the server. `effective` is the task override, else the run default, after the lock; a call override applies to one call only and is
  * never here. `lock` is set when the task's data is restricted or secret: `effective` is then always ONLY_ON_DEVICE, and only a reclassification decision lifts it.
- * `suggestion` is shown beside the policy, never applied. `lastObserved` is the latest route record, reported by the browser and untrusted.
+ * `lastObserved` is the latest route record, reported by the browser and untrusted.
+ *
+ * DISPLAY ONLY. A snapshot can be stale: no AI call is ever routed from this. The browser adapter reads the route fresh through `getTaskRoute` immediately before every
+ * call, and blocks the call if that read fails.
+ *
+ * `suggestion` is the server's, for the task's change proposal step (`patch`) and the task's own text, without the browser-only inputs. It is shown, never applied. H4 must
+ * call `suggestRoute` (@selarikru/domain) itself for each AI step, with that step's kind, its estimated input, and the browser's own knowledge of whether it is offline
+ * and whether the cloud budget is used up: those rows of the plan table are only known in the browser.
  */
 export const TaskRouteViewSchema = z
   .object({
@@ -234,6 +242,10 @@ export const TaskRouteViewSchema = z
     if (r.lock !== null && r.effective !== 'ONLY_ON_DEVICE') ctx.addIssue({ code: 'custom', path: ['effective'], message: 'a locked task runs on the device only' });
   });
 export type TaskRouteView = z.infer<typeof TaskRouteViewSchema>;
+
+/** A fresh read of one task's route (`getTaskRoute`): what the adapter routes from, and where its calls ran, newest first. Metadata only. */
+export const TaskRouteReadSchema = z.object({ taskId: Id, revision: z.number().int().min(1), runId: Id, route: TaskRouteViewSchema, records: z.array(RouteRecordSchema) }).strict();
+export type TaskRouteRead = z.infer<typeof TaskRouteReadSchema>;
 
 export const RunViewSchema = z
   .object({

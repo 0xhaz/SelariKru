@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { RouteRecord } from '@selarikru/domain';
 import {
-  AuthorizedViewCommandSchema, ProjectViewSnapshotSchema, REJECTION_REASONS, RunViewSchema, SettingViewSchema, TaskRouteViewSchema, TaskViewSchema, applyEvent, emptySnapshot, projectionFromSnapshot,
+  AuthorizedViewCommandSchema, ProjectViewSnapshotSchema, REJECTION_REASONS, RunViewSchema, SettingViewSchema, TaskRouteReadSchema, TaskRouteViewSchema, TaskViewSchema, applyEvent, emptySnapshot, projectionFromSnapshot,
   taskRouteLabel, type TaskRouteView, type TaskView,
 } from './index.ts';
 
 const AT = '2026-11-11T09:00:00.000Z';
 const record = (over: Partial<RouteRecord> = {}): RouteRecord => ({
   recordId: 'rpt_1', taskId: 't1', taskRevision: 1, requestId: 'req-1', stepKind: 'triage', callOverride: null, requestedMode: 'PREFER_ON_DEVICE', effectiveMode: 'PREFER_ON_DEVICE',
-  policySource: 'run', locked: false, observedSource: 'IN_CLOUD', fellBack: true, conformance: 'conforms', status: 'ok', model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' },
+  policySource: 'run', locked: false, observedSource: 'IN_CLOUD', fellBack: true, conformance: 'conforms', requestModeMismatch: false, status: 'ok', model: { cloudModel: 'gemini-2.5-flash-lite', sdkVersion: '12.5.0' },
   timing: { totalMs: 900, firstOutputMs: null }, validation: 'passed', blockedReason: null, reportedBy: 'browser', trust: 'untrusted', reportedAt: AT, ...over,
 });
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
@@ -81,5 +81,27 @@ describe('route commands and events', () => {
     // A record that does not read leaves the view as it was.
     const bad = applyEvent(state, { ...e, payload: { revision: 1, record: { ...record(), prompt: 'x' } } });
     expect(bad.state.snapshot.tasks['t1']!.route!.lastObserved).toBeNull();
+  });
+});
+
+describe('fresh task route reads', () => {
+  it('a route read carries the route and the history; a locked override setting reads as locked', () => {
+    expect(TaskRouteReadSchema.safeParse({ taskId: 't1', revision: 1, runId: 'r1', route: route(), records: [record()] }).success).toBe(true);
+    expect(TaskRouteReadSchema.safeParse({ taskId: 't1', revision: 1, runId: 'r1', route: route(), records: [{ ...record(), prompt: 'x' }] }).success).toBe(false);
+    expect(SettingViewSchema.safeParse({
+      scope: 'task', key: 't1', field: 'route_override', desired: 'ONLY_IN_CLOUD', effective: 'ONLY_ON_DEVICE', desiredRevision: 1, effectiveRevision: 1, enforcer: 'server', state: 'locked', updatedBy: 'u', updatedAt: AT, appliedAt: AT,
+    }).success).toBe(true);
+  });
+
+  it('a terminal task still takes its last observed source', () => {
+    const s = emptySnapshot({ projectId: 'p1', observedAt: AT, provenance: 'observed' });
+    const state = projectionFromSnapshot(ProjectViewSnapshotSchema.parse({
+      ...s, runs: { r1: { runId: 'r1', lifecycle: 'running', planRevision: 1, latestEvidence: null } }, tasks: { t1: task({ status: 'merged', route: route() }) },
+    }));
+    const r = applyEvent(state, {
+      schemaVersion: 1 as const, eventId: 'evt_2', projectId: 'p1', runId: 'r1', taskId: 't1', attemptId: null, type: 'inference.reported' as const, sequence: 1, aggregateRevision: 1,
+      actor: { kind: 'human' as const, id: 'u' }, occurredAt: AT, receivedAt: AT, causationId: null, traceId: 'tr', payload: { revision: 1, record: record() }, provenance: 'observed' as const,
+    });
+    expect(r.state.snapshot.tasks['t1']!.route!.lastObserved).toMatchObject({ observedSource: 'IN_CLOUD' });
   });
 });

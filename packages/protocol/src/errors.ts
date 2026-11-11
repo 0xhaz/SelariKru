@@ -56,6 +56,8 @@ export const ERROR_CODES = [
   'run_closed', 'runner_not_found', 'outside_plan_scope', 'resume_refused', 'no_run', 'path_not_allowed',
   /** Route policy: a cloud-capable mode asked for a task whose data is restricted or secret. It stays on the device until a reclassification decision lowers the label. */
   'route_locked_restricted',
+  /** A route record replayed with the same request id but a different body. The first record stands. */
+  'replay_mismatch',
   /** The database aborted the transaction to break a deadlock or a serialization conflict. Nothing was recorded; the same request may be sent again. */
   'transaction_conflict',
   /** Project Brain: no such source, revision or conflict; a source already revoked; a conflict already settled; a manifest from work whose data stays on the device. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FirebaseHybridAssistantAdapter, errorCodeOf, routeReportOf, type AssistRequest, type TelemetryEvent } from './adapter.ts';
+import { FirebaseHybridAssistantAdapter, errorCodeOf, routeReportOf, type AssistRequest, type FetchRoute, type FreshRoute, type TelemetryEvent } from './adapter.ts';
 import { RouteRecordReportSchema } from '@selarikru/domain';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
 
@@ -44,10 +44,22 @@ const policy = (over: Record<string, unknown> = {}) =>
     ...over,
   }) as never;
 
+/** What the server says now. Tests set it per call; a test that routes nothing never reaches it. */
+const fresh = { route: null as FreshRoute | null, fail: false, calls: 0 };
+const fetchRoute: FetchRoute = async () => {
+  fresh.calls += 1;
+  if (fresh.fail || fresh.route === null) throw new Error('network');
+  return fresh.route;
+};
+
 function make(sdk = new FakeSdk(), events: TelemetryEvent[] = []) {
   let t = 0;
+  fresh.route = null;
+  fresh.fail = false;
+  fresh.calls = 0;
   const adapter = new FirebaseHybridAssistantAdapter({
     sdk,
+    fetchRoute,
     now: () => (t += 10),
     newRequestId: (() => {
       let n = 0;
@@ -446,68 +458,91 @@ describe('project change', () => {
 });
 
 describe('route policy per task', () => {
-  const route = (over: Partial<NonNullable<AssistRequest['route']>> = {}): NonNullable<AssistRequest['route']> => ({
-    taskId: 't1', stepKind: 'triage', runDefault: 'PREFER_ON_DEVICE', taskOverride: null, locked: false, ...over,
-  });
+  const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'PREFER_ON_DEVICE', override: null, lock: null, ...over });
+  const route = (over: Partial<NonNullable<AssistRequest['route']>> = {}): NonNullable<AssistRequest['route']> => ({ taskId: 't1', stepKind: 'triage', ...over });
+  const LOCK = { label: 'restricted' as const, reason: 'This task reads restricted data.' };
 
-  it('uses the effective policy: call override, else task override, else run default, in place of the policy default', async () => {
+  it('reads the route fresh before every call and uses its effective policy: call override, else task override, else run default', async () => {
     const { adapter, sdk } = make();
     sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
-    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route({ runDefault: 'ONLY_ON_DEVICE', taskOverride: 'PREFER_IN_CLOUD' }) }));
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE', override: 'PREFER_IN_CLOUD' });
+    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route() }));
     expect(p.requestedMode).toBe('PREFER_IN_CLOUD');
     expect(p.route).toMatchObject({ taskId: 't1', effectiveMode: 'PREFER_IN_CLOUD', policySource: 'task', locked: false, fellBack: false, conformance: 'conforms' });
-    const q = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route({ runDefault: 'ONLY_ON_DEVICE', taskOverride: 'PREFER_IN_CLOUD', callOverride: 'ONLY_IN_CLOUD' }) }));
+    const q = await adapter.draftBrief(req({ policy: cloud('ONLY_ON_DEVICE'), route: route({ callOverride: 'ONLY_IN_CLOUD' }) }));
     expect(q.requestedMode).toBe('ONLY_IN_CLOUD');
     expect(q.route).toMatchObject({ policySource: 'call', callOverride: 'ONLY_IN_CLOUD' });
-    const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route({ runDefault: 'ONLY_ON_DEVICE' }) }));
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
+    const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route() }));
     expect(r.requestedMode).toBe('ONLY_ON_DEVICE');
     expect(r.route).toMatchObject({ policySource: 'run' });
+    expect(fresh.calls).toBe(3);
+  });
+
+  it('a stale view that says unlocked and cloud first never reaches IN_CLOUD when the fresh read says locked', async () => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    // The caller's snapshot was cloud first and unlocked; the server has since locked the task.
+    fresh.route = server({ runDefault: 'PREFER_IN_CLOUD', override: 'ONLY_IN_CLOUD', lock: LOCK });
+    const p = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'PREFER_IN_CLOUD' }) }));
+    expect(p.requestedMode).toBe('ONLY_ON_DEVICE');
+    expect(p).toMatchObject({ status: 'route_violation', data: null });
+    expect(p.route).toMatchObject({ effectiveMode: 'ONLY_ON_DEVICE', policySource: 'lock', locked: true, conformance: 'violation' });
+    expect(sdk.specs.every((x) => x.mode === 'ONLY_ON_DEVICE' && x.allowCloud === false)).toBe(true);
+  });
+
+  it('a failed or unreadable route read blocks the call with no SDK call, never a cached route', async () => {
+    const { adapter, sdk } = make();
+    fresh.route = server();
+    expect((await adapter.draftBrief(req({ route: route() }))).status).toBe('ok');
+    fresh.fail = true;
+    const p = await adapter.draftBrief(req({ route: route() }));
+    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'route_fetch_failed', requestedMode: null });
+    fresh.fail = false;
+    fresh.route = { runDefault: 'CLOUD', override: null, lock: null } as never;
+    expect(await adapter.draftBrief(req({ route: route() }))).toMatchObject({ status: 'blocked', blockedReason: 'route_unreadable' });
+    expect(sdk.generateCalls).toBe(1);
   });
 
   it('an unset route policy blocks with no SDK call', async () => {
     const { adapter, sdk } = make();
-    const p = await adapter.draftBrief(req({ route: route({ runDefault: null }) }));
-    expect(p).toMatchObject({ status: 'blocked', blockedReason: 'route_policy_unset' });
+    fresh.route = server({ runDefault: null });
+    expect(await adapter.draftBrief(req({ route: route() }))).toMatchObject({ status: 'blocked', blockedReason: 'route_policy_unset' });
     expect(sdk.generateCalls).toBe(0);
   });
 
-  it('a restricted task never reaches IN_CLOUD, even when the call override asks for cloud', async () => {
-    const { adapter, sdk } = make();
-    // Locked by its own sources.
-    const p = await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'restricted' }], policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'ONLY_IN_CLOUD', taskOverride: 'PREFER_IN_CLOUD' }) }));
+  it("restricted sources lock the call even if the server's read does not", async () => {
+    const { adapter } = make();
+    fresh.route = server({ runDefault: 'ONLY_IN_CLOUD' });
+    const p = await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'restricted' }], policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'ONLY_IN_CLOUD' }) }));
     expect(p.requestedMode).toBe('ONLY_ON_DEVICE');
-    expect(p.route).toMatchObject({ effectiveMode: 'ONLY_ON_DEVICE', policySource: 'lock', locked: true, callOverride: 'ONLY_IN_CLOUD' });
-    // Locked by the server's word, though the browser's sources say internal.
-    const q = await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'public' }], policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'PREFER_IN_CLOUD', locked: true }) }));
-    expect(q.requestedMode).toBe('ONLY_ON_DEVICE');
-    expect(sdk.specs.every((s) => s.mode === 'ONLY_ON_DEVICE' && s.allowCloud === false)).toBe(true);
-    // And if the SDK still answered from the cloud, the data is withheld and the record says it was a violation.
-    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
-    const r = await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route: route({ callOverride: 'ONLY_IN_CLOUD', locked: true }) }));
-    expect(r).toMatchObject({ status: 'route_violation', data: null });
-    expect(r.route).toMatchObject({ conformance: 'violation', locked: true });
+    expect(p.route).toMatchObject({ policySource: 'lock', locked: true });
   });
 
   it('records a fallback and an unknown source as such', async () => {
     const { adapter, sdk } = make();
     sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
-    const p = await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route: route({ runDefault: 'PREFER_ON_DEVICE' }) }));
-    expect(p.route).toMatchObject({ effectiveMode: 'PREFER_ON_DEVICE', fellBack: true, conformance: 'conforms' });
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route: route() }))).route).toMatchObject({ effectiveMode: 'PREFER_ON_DEVICE', fellBack: true, conformance: 'conforms' });
     sdk.result = { text: GOOD };
-    const q = await adapter.draftBrief(req({ policy: cloud('PREFER_IN_CLOUD'), route: route({ runDefault: 'PREFER_IN_CLOUD' }) }));
+    fresh.route = server({ runDefault: 'PREFER_IN_CLOUD' });
+    const q = await adapter.draftBrief(req({ policy: cloud('PREFER_IN_CLOUD'), route: route() }));
     expect(q.observedSource).toBe('UNKNOWN');
     expect(q.route).toMatchObject({ fellBack: null, conformance: 'unverified' });
   });
 
   it('the report for the server is metadata only and parses as the closed shape', async () => {
     const { adapter } = make();
-    const p = await adapter.draftBrief(req({ route: route({ runDefault: 'ONLY_ON_DEVICE' }) }));
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
+    const p = await adapter.draftBrief(req({ route: route() }));
     const report = routeReportOf(p);
     expect(RouteRecordReportSchema.safeParse(report).success).toBe(true);
     expect(report).toMatchObject({ kind: 'route', requestId: 'req-1', stepKind: 'triage', requestedMode: 'ONLY_ON_DEVICE', observedSource: 'ON_DEVICE', status: 'ok', validation: 'passed' });
     expect(JSON.stringify(report)).not.toContain('SECRET-PROMPT-BODY');
     expect(JSON.stringify(report)).not.toContain('Add a board');
-    // A call with no route has nothing to report.
+    // A call with no task route makes no route read and has nothing to report.
+    const calls = fresh.calls;
     expect(routeReportOf(await adapter.draftBrief(req()))).toBeNull();
+    expect(fresh.calls).toBe(calls);
   });
 });

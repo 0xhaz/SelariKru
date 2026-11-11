@@ -45,7 +45,7 @@ describe('restricted draft never reaches network, storage, analytics or checkpoi
       createModel: (): SdkModel => ({ generate: async (p) => { prompts.push(p); return { text: OUT, inferenceSource: 'on_device' }; } }),
     };
     const events: TelemetryEvent[] = [];
-    const adapter = new FirebaseHybridAssistantAdapter({ sdk, onTelemetry: (e) => events.push(e) });
+    const adapter = new FirebaseHybridAssistantAdapter({ sdk, fetchRoute: async () => { throw new Error('no route read in this test'); }, onTelemetry: (e) => events.push(e) });
     const proposal = await adapter.draftBrief({
       projectId: 'p', taskText: fixture.taskText, allowedRequirementIds: fixture.allowedRequirementIds,
       sources: [{ id: 's1', classification: 'restricted' }], policy: policy(),

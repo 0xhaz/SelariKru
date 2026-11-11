@@ -1,5 +1,5 @@
 import { Ajv } from 'ajv';
-import { effectiveRoutePolicy, routeLockFor, routeOutcome, type RouteConformance, type RoutePolicySource, type RouteRecordReport, type RouteStepKind } from '@selarikru/domain';
+import { RoutePolicyModeSchema, effectiveRoutePolicy, routeLockFor, routeOutcome, type RouteConformance, type RoutePolicySource, type RouteRecordReport, type RouteStepKind } from '@selarikru/domain';
 import { resolveInferenceMode, type InferenceMode, type Policy, type Source } from '@selarikru/policy';
 import {
   MODEL_METADATA,
@@ -25,8 +25,9 @@ export interface AssistRequest {
   readonly sources: readonly Source[];
   readonly policy: Policy | undefined;
   /**
-   * The task's route policy, as the server serves it (the snapshot's task route). When present, the effective policy (this call's override, else the task override,
-   * else the run default, after the lock) replaces the policy's preferred mode. The lock is the server's word or the strongest label of `sources`, whichever locks.
+   * The task this call is a step of. When present, the adapter reads the task's route fresh from the server (`fetchRoute`) immediately before the call, and the
+   * effective policy (this call's override, else the task override, else the run default, after the lock) replaces the policy's preferred mode. Nothing about the
+   * route is taken from the caller or a snapshot: only which task, which step, and this call's own override.
    */
   readonly route?: AssistRoute;
 }
@@ -34,13 +35,19 @@ export interface AssistRequest {
 export interface AssistRoute {
   readonly taskId: string;
   readonly stepKind: RouteStepKind;
-  readonly runDefault: InferenceMode | null;
-  readonly taskOverride: InferenceMode | null;
-  /** True when the server says restricted data locks this task to the device. */
-  readonly locked: boolean;
   /** This call only. Never stored, and never relaxes the lock. */
   readonly callOverride?: InferenceMode | null;
 }
+
+/** What the adapter needs from a fresh route read. A view-protocol `TaskRouteView` is one. */
+export interface FreshRoute {
+  readonly runDefault: InferenceMode | null;
+  readonly override: InferenceMode | null;
+  /** Set when the server says restricted or secret data locks the task to the device. */
+  readonly lock: { readonly label: string; readonly reason: string } | null;
+}
+/** Reads one task's route from the server, fresh. A data source's `getTaskRoute(...).route` fits. Any failure blocks the call. */
+export type FetchRoute = (projectId: string, taskId: string) => Promise<FreshRoute>;
 
 /** Where this call was meant to run and where it did. Metadata only. */
 export interface ProposalRoute {
@@ -54,6 +61,8 @@ export interface ProposalRoute {
   /** Null when the source is unknown or nothing ran. */
   readonly fellBack: boolean | null;
   readonly conformance: RouteConformance;
+  /** The mode asked of the SDK is not the effective mode. */
+  readonly requestModeMismatch: boolean;
 }
 
 export type ProposalStatus = 'ok' | 'invalid' | 'blocked' | 'route_violation' | 'unverified_source' | 'error';
@@ -94,7 +103,7 @@ export interface AssistantProposal {
   readonly errorName: string | null;
   /** The SDK's stable error code (for example `AI/api-not-enabled`) when it gave one. Never the message: that can quote the request. */
   readonly errorCode: string | null;
-  /** Where this call was meant to run and where it did. Absent or null: the request carried no task route. */
+  /** Where this call was meant to run and where it did. Absent or null: the request carried no task route, or its route could not be read. */
   readonly route?: ProposalRoute | null;
 }
 
@@ -117,6 +126,8 @@ export interface TelemetryEvent {
 
 export interface AdapterOptions {
   readonly sdk: AssistantSdk;
+  /** Required: every call with a task route reads it fresh through this, and is blocked if it fails. */
+  readonly fetchRoute: FetchRoute;
   /** Monotonic millisecond clock (performance.now). */
   readonly now?: () => number;
   readonly newRequestId?: () => string;
@@ -139,6 +150,7 @@ export function errorCodeOf(error: unknown): string | null {
 
 export class FirebaseHybridAssistantAdapter {
   private readonly sdk: AssistantSdk;
+  private readonly fetchRoute: FetchRoute;
   private readonly now: () => number;
   private readonly newRequestId: () => string;
   private readonly onTelemetry: ((e: TelemetryEvent) => void) | undefined;
@@ -151,6 +163,7 @@ export class FirebaseHybridAssistantAdapter {
 
   constructor(opts: AdapterOptions) {
     this.sdk = opts.sdk;
+    this.fetchRoute = opts.fetchRoute;
     this.now = opts.now ?? (() => performance.now());
     this.newRequestId = opts.newRequestId ?? (() => crypto.randomUUID());
     this.onTelemetry = opts.onTelemetry;
@@ -239,20 +252,30 @@ export class FirebaseHybridAssistantAdapter {
 
   private async execute(op: Operation, req: AssistRequest, requestId: string, start: number): Promise<AssistantProposal> {
     const plain = this.base(op, req, requestId, start);
-    // The task's route policy, when there is one. The lock follows the strongest label of what this call reads, or the server's word.
-    const lock = req.route ? routeLockFor([...req.sources.map((s) => s.classification), ...(req.route.locked ? ['restricted'] : [])]) : null;
-    const effective = req.route ? effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: req.route.taskOverride, run: req.route.runDefault, lock }) : null;
+    // The task's route, read fresh from the server immediately before this call. A failed or unreadable read blocks: no cached or snapshot route is ever used.
+    let fresh: FreshRoute | null = null;
+    if (req.route) {
+      try {
+        fresh = await this.fetchRoute(req.projectId, req.route.taskId);
+      } catch {
+        return plain({ status: 'blocked', blockedReason: 'route_fetch_failed' });
+      }
+      if (!readableRoute(fresh)) return plain({ status: 'blocked', blockedReason: 'route_unreadable' });
+    }
+    // The lock follows the strongest label of what this call reads, or the server's word.
+    const lock = req.route && fresh ? routeLockFor([...req.sources.map((s) => s.classification), ...(fresh.lock ? ['restricted'] : [])]) : null;
+    const effective = req.route && fresh ? effectiveRoutePolicy({ call: req.route.callOverride ?? null, task: fresh.override, run: fresh.runDefault, lock }) : null;
     const make = (over: Partial<Mutable<AssistantProposal>>): AssistantProposal => {
       const p = plain(over);
       if (!req.route || !effective) return p;
       const ran = p.status === 'ok' || p.status === 'invalid' || p.status === 'route_violation' || p.status === 'unverified_source';
-      const outcome = ran ? routeOutcome(effective.mode, p.observedSource) : { fellBack: null, conformance: 'unverified' as const };
+      const outcome = ran ? routeOutcome(effective.mode, p.observedSource, p.requestedMode, lock !== null) : { fellBack: null, conformance: 'unverified' as const, requestModeMismatch: false };
       return {
         ...p,
         route: {
           taskId: req.route.taskId, stepKind: req.route.stepKind, callOverride: req.route.callOverride ?? null, effectiveMode: effective.mode, policySource: effective.source,
           locked: lock !== null,
-          fellBack: outcome.fellBack, conformance: outcome.conformance,
+          fellBack: outcome.fellBack, conformance: outcome.conformance, requestModeMismatch: outcome.requestModeMismatch,
         },
       };
     };
@@ -328,6 +351,14 @@ export class FirebaseHybridAssistantAdapter {
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+const modeOrNull = (v: unknown): boolean => v === null || RoutePolicyModeSchema.safeParse(v).success;
+/** A route read the adapter can act on: modes it knows (or null), and a lock that is null or names a reason. Anything else blocks. */
+function readableRoute(r: unknown): r is FreshRoute {
+  const x = r as Partial<FreshRoute> | null;
+  if (!x || typeof x !== 'object' || !modeOrNull(x.runDefault) || !modeOrNull(x.override)) return false;
+  return x.lock === null || (typeof x.lock === 'object' && x.lock !== undefined && typeof x.lock.reason === 'string');
+}
 
 /** What the browser sends the server about one call with a task route: identifiers, modes, the observed source, timing and validation. Never prompt or output. */
 export function routeReportOf(p: AssistantProposal): RouteRecordReport | null {

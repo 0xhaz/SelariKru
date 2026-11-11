@@ -1,4 +1,4 @@
-import { boolean, check, foreignKey, integer, jsonb, pgTable, primaryKey, text, unique } from 'drizzle-orm/pg-core';
+import { boolean, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, unique } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { createdAt, detail, scope, tstz } from './common.ts';
 import { projects } from './projects.ts';
@@ -93,5 +93,7 @@ export const clientReports = pgTable(
     primaryKey({ columns: [t.tenantId, t.projectId, t.reportId] }),
     foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
     check('client_reports_untrusted', sql`${t.trust} = 'untrusted'`),
+    /** A task's route history and its latest route record, without a scan of the project's reports. */
+    index('client_reports_route_lookup').on(t.tenantId, t.projectId, t.kind, t.subjectId, t.createdAt),
   ],
 );
