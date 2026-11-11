@@ -2,7 +2,7 @@
 // open rooftop deck with its railing and uplink, the Peranakan-style floor tiles, the lime-washed walls with timber louvres, and the furniture.
 
 import { mulberry32 } from '../engine/random.ts';
-import { text, textW } from '../engine/font.ts';
+import { clipGraphemes, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { CanvasPen, disc, ellipse, makeCanvas, type Pen } from '../engine/pen.ts';
 import { MARGIN, ROOF, STAIR_X, TS, type LayoutInput, type OfficeLayout } from '../layout/layout.ts';
@@ -297,9 +297,10 @@ export function buildStatic(l: OfficeLayout, input: LayoutInput): HTMLCanvasElem
     const agent = input.agents.find((a) => a.id === desk.agentId);
     if (agent?.active === false) {
       p.rect(left + 6, top, 7 * TS - 12, 7 * TS + 4, C.ink, 0.5);
-      text(p, 'NOT ACTIVE', left + 56 - textW('NOT ACTIVE') / 2, top + 4 * TS, C.metalL);
+      const word = agent.notStarted ? 'NOT STARTED' : 'NOT ACTIVE';
+      text(p, word, left + 56 - textW(word) / 2, top + 4 * TS, C.metalL);
     }
-    nameCard(p, input.agents.find((a) => a.id === desk.agentId)?.name.toUpperCase().slice(0, 10) ?? '', left + 64, top + 4);
+    nameCard(p, input.agents.find((a) => a.id === desk.agentId)?.name ? clipGraphemes(input.agents.find((a) => a.id === desk.agentId)!.name.toUpperCase(), 10) : '', left + 64, top + 4);
   }
 
   // ------------------------------------------------ PR shelves, the racks, the post box

@@ -1,5 +1,8 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 
+import { settingsHref } from './views.ts';
+import { PmProposals } from '../features/pm/PmProposals.tsx';
+import { pmProposals, proposalRows } from '../features/pm/proposals.ts';
 import { workerIdentity } from '../features/team/identity.ts';
 import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -186,6 +189,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const opener = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const openWorker = (id: string): void => {
+    // H11 fix round 1 (M10): a "not started" desk has no worker yet: it opens Team settings, where a worker is given that role.
+    if (id.startsWith('role:')) { window.location.hash = settingsHref('team').replace(/^#/, ''); return; }
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     replaceHashQuery({ wtab: null, worker: id });
   };
@@ -292,6 +297,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     execute: (c) => store.getState().execute(c), snapshot: () => store.getState().projection?.snapshot ?? null,
   }) : null), [agentRuntime, state.agentSource, state.projectId, store]);
   const calls = useInFlight(agents);
+  const pmItems = pmProposals((x) => x.items);
   const online = useOnline();
   const hybrid = useMemo((): HybridValue => ({
     projectId: state.projectId, snapshot, live: connection === 'live', mode, execute: state.execute, refresh: state.refresh, resync: state.resync, agents,
@@ -329,7 +335,9 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     if (!w) return null;
     return { id: w.workerId, label: workerIdentity(snapshot, w.workerId, snapshot.tasks[taskId!]?.role ?? null).label };
   };
-  const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length;
+  // H11 fix round 1 (I3): the Project Manager's assignments waiting for the owner count as waiting too.
+  const pmWaiting = proposalRows(snapshot, pmItems).length;
+  const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length + pmWaiting;
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
   const agentById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a]) ?? []), [world]);
   const mark = (id: string, i: number): RowDecor => {
@@ -420,7 +428,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
               elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
               counted={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId !== null).length : 0}
               onRestart={state.restart} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync}
-              brain={<><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /><HandoverDecisions port={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} live={connection === 'live'} titleOf={(id) => snapshot?.tasks[id]?.title ?? null} /></>}
+              brain={<><PmProposals /><BrainConflicts port={state.brain} /><ProductFollowUps port={state.product} /><HandoverDecisions port={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} live={connection === 'live'} titleOf={(id) => snapshot?.tasks[id]?.title ?? null} /></>}
             />
           </RouteBoundary>
         ) : null}
@@ -486,7 +494,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
           attentionCount={attentionCount} attentionNumber={builtDecisions.decisions ? waitingCount : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
           runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null} aiCounts={aiCounts}
-          workers={world?.agents.map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
+          workers={world?.agents.filter((a) => !a.notStarted).map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
           debugOpen={debugOpen} onDebug={import.meta.env.DEV ? () => setDebugOpen((o) => !o) : null}
           teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}

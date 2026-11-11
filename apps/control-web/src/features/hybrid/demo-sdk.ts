@@ -70,7 +70,7 @@ function answer(kind: string, prompt: string): unknown {
     case 'pmPlan':
       return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: ids.slice(0, 1), paths: [root], dependsOn: [] }] };
     case 'pmDelegate': {
-      const tasks = section(prompt, `Accepted plan, revision ${/# Accepted plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^:]+): .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]!, status: m[3]! }] : []; });
+      const tasks = section(prompt, `Accepted plan, revision ${/# Accepted plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^\s:]+)(?::| ·) .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]!, status: m[3]! }] : []; });
       const workers = section(prompt, 'Workers').flatMap((l) => { const m = /^- ([^:]+): .*, role (.+)$/.exec(l); return m ? [{ workerId: m[1]!, role: m[2]!.toLowerCase().replace(/ /g, '_') }] : []; });
       const open = tasks.filter((t) => ['planned', 'ready', 'blocked', 'failed'].includes(t.status));
       const assignments = open.flatMap((t) => { const w = workers.find((x) => x.role === t.role); return w ? [{ taskId: t.taskId, workerId: w.workerId, why: `Demo: ${t.role} work for a ${t.role} worker.` }] : []; });

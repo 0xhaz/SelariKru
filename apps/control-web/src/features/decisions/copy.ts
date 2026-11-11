@@ -64,6 +64,8 @@ const REJECTION: Readonly<Record<NonNullable<CommandReceipt['rejection']>, Rejec
   name_invalid: { text: 'A name cannot contain line breaks or hidden characters. Nothing was saved.', changed: false },
   name_secret: { text: 'That looks like a secret, so it cannot be a name. Nothing was saved.', changed: false },
   name_taken: { text: 'Another worker already has this name. Names are unique in a project. Nothing was saved.', changed: false },
+  role_unknown: { text: 'That role is not one of this project\'s roles. Choose one its plan\'s tasks name.', changed: false },
+  role_pm_taken: { text: 'Another worker is already the Project Manager.', changed: false },
 };
 
 export const rejectionView = (rejection: CommandReceipt['rejection']): RejectionView => REJECTION[rejection ?? 'not_allowed'];

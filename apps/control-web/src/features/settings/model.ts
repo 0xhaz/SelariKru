@@ -233,6 +233,43 @@ export function autoDelegateModel(snapshot: ProjectViewSnapshot, live: boolean):
   };
 }
 
+/**
+ * H11 fix round 1 (I5): the owner's grant for web research, a data destination of its own ("Google Search (web research)"). Off by default. While on, the Project
+ * Manager may send the owner's question, and only that, to Google Search through the cloud model.
+ */
+export function webResearchModel(snapshot: ProjectViewSnapshot, live: boolean): AutoDelegateModel | null {
+  const run = currentRun(snapshot);
+  if (!run) return null;
+  const closed = TERMINAL.includes(run.lifecycle);
+  const s = find(snapshot, 'run', run.runId, 'web_research');
+  const on = s ? s.desired === true : false;
+  return {
+    on, status: settingStatus(s),
+    action: {
+      id: 'web-research', label: on ? 'Turn off Google Search (web research)' : 'Turn on Google Search (web research)', confirm: null,
+      disabledReason: !live ? SETTINGS_OFF : closed ? `This run is ${run.lifecycle}, so its settings no longer change.` : null,
+      intent: save(snapshot.meta.projectId, run.runId, s, { scope: 'run', field: 'web_research', value: !on }),
+    },
+  };
+}
+
+/** H11 fix round 1 (M10): the Project Manager's name, a run setting, so it can be set before any worker holds the role. Empty: "Project Manager". */
+export interface PmNameModel {
+  readonly runId: string;
+  readonly projectId: string;
+  readonly value: string;
+  readonly revision: number;
+  readonly status: FieldStatus | null;
+  readonly disabledReason: string | null;
+}
+
+export function pmNameModel(snapshot: ProjectViewSnapshot, live: boolean): PmNameModel | null {
+  const run = currentRun(snapshot);
+  if (!run) return null;
+  const s = find(snapshot, 'run', run.runId, 'pm_display_name');
+  return { runId: run.runId, projectId: snapshot.meta.projectId, value: typeof s?.desired === 'string' ? s.desired : '', revision: s?.desiredRevision ?? 0, status: settingStatus(s), disabledReason: live ? null : SETTINGS_OFF };
+}
+
 /** A worker's own settings, changed in its drawer. The server refuses a disabled worker's claims from the save; its current attempt finishes. */
 export function workerControls(snapshot: ProjectViewSnapshot, workerId: string, live: boolean): WorkerControlsModel {
   const projectId = snapshot.meta.projectId;

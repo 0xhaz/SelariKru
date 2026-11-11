@@ -5,7 +5,7 @@
 import { stateStyle, type RobotState } from '../../theme/tokens.ts';
 import type { Bot } from '../actors/bots.ts';
 import type { OfficeAgent } from '../model.ts';
-import { tag, text } from '../engine/font.ts';
+import { clipGraphemes, tag, text } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { ellipse, type Pen } from '../engine/pen.ts';
 import type { PxRect } from '../layout/layout.ts';
@@ -125,7 +125,7 @@ export function drawEmote(p: Pen, bot: Bot, state: RobotState, t: number, simT: 
 }
 
 export function drawNameTag(p: Pen, bot: Bot) {
-  tag(p, bot.config.name.toUpperCase().slice(0, 10), Math.round(bot.x), bot.headY - 9, C.ink, bot.color);
+  tag(p, clipGraphemes(bot.config.name.toUpperCase(), 10), Math.round(bot.x), bot.headY - 9, C.ink, bot.color);
 }
 
 /** Gold corner marks around what the pointer is over; they pulse when motion is allowed. */

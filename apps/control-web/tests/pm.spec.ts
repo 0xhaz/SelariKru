@@ -74,3 +74,77 @@ test('a worker is renamed in its drawer and shown as "Name · Role"', async ({ p
   await drawer.getByRole('button', { name: 'Save name' }).click();
   await expect(drawer.getByRole('heading', { level: 2 })).toHaveText(/^Nurul · /);
 });
+
+test('I4: the PM drafts a plan, the owner accepts it, and the PM then assigns inside it (envelopes in the office)', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
+  await page.getByTestId('pm-question').fill('Plan the rest of the work.');
+  await page.getByRole('button', { name: 'Draft a plan' }).click();
+  const reply = page.getByTestId('pm-turn-reply').first();
+  await reply.getByRole('button', { name: 'Accept plan' }).click();
+  await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Accepted as plan rev 2');
+  // With auto-delegation on, the PM assigns under the new revision.
+  await expect(page.getByTestId('pm-applied').first()).toContainText('under your accepted plan rev 2');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.recentEvents.map((e) => e.kind))).toContain('delegated');
+});
+
+test('I3: with auto-delegate off the PM\'s assignments wait in Action items, and Assign applies them as the owner', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/settings?section=workflow');
+  await page.getByTestId('auto-delegate').getByRole('button', { name: 'Turn off auto-delegate' }).click();
+  await expect(page.getByTestId('auto-delegate')).toHaveAttribute('data-on', 'false');
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-question').fill('Who should take the open tasks?');
+  await page.getByRole('button', { name: 'Propose assignments' }).click();
+  await expect(page.getByTestId('pm-needs-you').first()).toBeVisible();
+  await page.evaluate(() => { window.location.hash = '#/actions'; });
+  const row = page.getByTestId('pm-proposal').first();
+  await expect(row).toContainText(/^Assign .+ to .+ · .+\? \(proposed by the PM\)/);
+  await row.getByRole('button', { name: 'Assign' }).click();
+  await expect(page.getByTestId('pm-proposal')).toHaveCount(0);
+});
+
+test('H2: a question about a locked task is restricted, and the checkbox cannot lower it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.e2e');
+  await expect(page.getByTestId('pm-restricted')).toBeChecked();
+  await expect(page.getByTestId('pm-restricted')).toBeDisabled();
+  await page.getByTestId('pm-question').fill('What is left?');
+  await page.getByRole('button', { name: 'Ask', exact: true }).click();
+  await expect(page.getByTestId('pm-turn-owner').first()).toContainText('restricted, kept on this device');
+});
+
+test('I5: web research is off until the owner turns on Google Search in Settings › Workflow', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-question').fill('How do others sort feedback?');
+  await expect(page.getByRole('button', { name: 'Research the web' })).toBeDisabled();
+  await expect(page.getByTestId('pm-research-off')).toContainText('Settings › Workflow');
+  await page.evaluate(() => { window.location.hash = '#/settings?section=workflow'; });
+  await page.getByTestId('web-research').getByRole('button', { name: 'Turn on Google Search (web research)' }).click();
+  await expect(page.getByTestId('web-research')).toHaveAttribute('data-on', 'true');
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-question').fill('How do others sort feedback?');
+  await expect(page.getByRole('button', { name: 'Research the web' })).toBeEnabled();
+});
+
+test('M10: the PM is named in Settings before any worker holds the role, and the office shows the name', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/settings?section=workflow');
+  await page.getByTestId('pm-name-input').fill('Puan Zara');
+  await page.getByTestId('pm-name').getByRole('button', { name: 'Save name' }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world.pm.name)).toBe('Puan Zara');
+});
+
+test('M11: Search Suggestions keep their markup but nothing that runs', async ({ page }) => {
+  await open(page, '#/pm');
+  const out = await page.evaluate(async () => {
+    const m = await import('/src/features/pm/suggestions.ts' as string) as { sanitizeSuggestions: (h: string) => string };
+    return m.sanitizeSuggestions('<style>.c{color:red}</style><div class="c"><a href="https://www.google.com/search?q=x">x</a><img src="x" onerror="window.__pwned=1"><a href=" javascript:alert(1)">y</a><script>window.__pwned=2</script></div>');
+  });
+  expect(out).toContain('<style>.c{color:red}</style>');
+  expect(out).toContain('href="https://www.google.com/search?q=x"');
+  expect(out).not.toMatch(/onerror|javascript:|<script/i);
+});

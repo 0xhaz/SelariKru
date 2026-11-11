@@ -5,7 +5,14 @@
 
 export interface Pen {
   rect(x: number, y: number, w: number, h: number, color: string, alpha?: number): void;
+  /** H11 fix round 1 (M3): text the bitmap font has no glyphs for (a name in any script), drawn with the canvas font, its top at y, `px` tall. */
+  glyphs?(str: string, x: number, y: number, color: string, px: number): void;
+  /** Its width at `px`. */
+  measure?(str: string, px: number): number;
 }
+
+/** The canvas font for names in any script: a system face, so no font file is fetched. */
+export const GLYPH_FONT = '"Noto Sans", "Segoe UI", "Hiragino Sans", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif';
 
 export class CanvasPen implements Pen {
   constructor(public g: CanvasRenderingContext2D) {
@@ -17,6 +24,16 @@ export class CanvasPen implements Pen {
     this.g.fillStyle = color;
     this.g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
     this.g.globalAlpha = 1;
+  }
+  glyphs(str: string, x: number, y: number, color: string, px: number): void {
+    this.g.font = `${px}px ${GLYPH_FONT}`;
+    this.g.textBaseline = 'top';
+    this.g.fillStyle = color;
+    this.g.fillText(str, Math.round(x), Math.round(y));
+  }
+  measure(str: string, px: number): number {
+    this.g.font = `${px}px ${GLYPH_FONT}`;
+    return Math.ceil(this.g.measureText(str).width);
   }
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BoundedAutonomy, SettingView } from '@selarikru/view-protocol';
 import { iso, snapshotOf, task, worker } from '../overview/testing.ts';
-import { assignmentStatus, autonomyModel, settingStatus, workerControls } from './model.ts';
+import { assignmentStatus, autonomyModel, pmNameModel, settingStatus, webResearchModel, workerControls } from './model.ts';
 
 const v = <T,>(value: T, basis: 'configured' | 'recommended' | 'unresolved' = 'configured') => ({ value, basis });
 const POLICY: BoundedAutonomy = {
@@ -117,5 +117,25 @@ describe('worker controls', () => {
     expect(m.enabled).toMatchObject({ value: false, status: { label: 'Applying' }, action: { label: 'Enable worker', intent: { expectedRevision: 1, args: { key: 'w', change: { scope: 'runner', field: 'enabled', value: true } } } } });
     expect(m.slots).toMatchObject({ value: null, revision: 0, options: [1, 2] });
     expect(m.enabled.detail).toMatch(/current attempt/);
+  });
+});
+
+describe('H11 fix round 1: the Project Manager\'s settings in Settings › Workflow', () => {
+  it('I5: web research is off until the owner grants it, and the grant is a run setting the server holds', () => {
+    const off = webResearchModel(withRun(), true)!;
+    expect(off.on).toBe(false);
+    expect(off.action.label).toBe('Turn on Google Search (web research)');
+    expect(off.action.intent).toMatchObject({ command: 'setting.set', args: { change: { scope: 'run', field: 'web_research', value: true } } });
+    const on = webResearchModel(withRun({}, [setting({ scope: 'run', key: 'run', field: 'web_research', desired: true, effective: true })]), true)!;
+    expect(on.on).toBe(true);
+    expect(on.action.intent).toMatchObject({ args: { change: { value: false } } });
+  });
+
+  it('M10: the Project Manager\'s name is editable before any worker holds the role', () => {
+    const m = pmNameModel(withRun(), true)!;
+    expect(m.value).toBe('');
+    expect(m.runId).toBe('run');
+    const named = pmNameModel(withRun({}, [setting({ scope: 'run', key: 'run', field: 'pm_display_name', desired: 'Puan Zara', effective: 'Puan Zara' })]), true)!;
+    expect(named.value).toBe('Puan Zara');
   });
 });

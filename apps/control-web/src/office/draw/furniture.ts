@@ -1,7 +1,7 @@
 // Kedai (shophouse) furniture and decor for the static layer (H7). SelariKru's own designs: nothing here is taken from another product's art.
 // Every piece is built from a few helpers (`slab`, `framed`) so the shapes read as timber, tile and enamel rather than flat boxes.
 
-import { text, textW } from '../engine/font.ts';
+import { clipGraphemes, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { disc, ellipse, line, type Pen } from '../engine/pen.ts';
 
@@ -137,7 +137,7 @@ export function almariRack(p: Pen, x: number, top: number, h: number, name: stri
   for (const door of [x + 3, x + 17]) for (let y = top + 12; y < top + h - 4; y += 20) framed(p, door, y, 12, 18, C.deskDD, C.deskD, 1);
   p.rect(x + 13, top + h / 2, 1, 3, C.gold);
   p.rect(x + 18, top + h / 2, 1, 3, C.gold);
-  nameCard(p, name.toUpperCase().slice(0, 6), x + 16, top + 2);
+  nameCard(p, clipGraphemes(name.toUpperCase(), 6), x + 16, top + 2);
 }
 
 /** Wooden shelves for the pull requests, under a PULL REQS signboard. The tins on them are drawn live. */

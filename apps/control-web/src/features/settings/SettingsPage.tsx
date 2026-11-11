@@ -12,7 +12,7 @@ import { SkillsSettings } from '../skills/SkillsSettings.tsx';
 import { StackSettings } from '../stack/StackSettings.tsx';
 import { ASSIGNMENTS_OFF, ModelAssignmentsPanel } from '../team/ModelAssignments.tsx';
 import type { TeamModel } from '../team/model.ts';
-import { autoDelegateModel, autonomyModel } from './model.ts';
+import { autoDelegateModel, autonomyModel, pmNameModel, webResearchModel } from './model.ts';
 import { AutoDelegatePanel } from './SettingsPanel.tsx';
 
 export interface SettingsPageProps {
@@ -90,6 +90,8 @@ function TeamTab({ team, connection, autonomy, onOpenWorker, onExecute, onRefres
 
 function WorkflowTab({ snapshot, connection, onExecute, onRefresh, onResync }: { snapshot: ProjectViewSnapshot | null; connection: ConnectionState } & Pick<SettingsPageProps, 'onExecute' | 'onRefresh' | 'onResync'>) {
   const delegate = useMemo(() => (snapshot ? autoDelegateModel(snapshot, connection === 'live') : null), [snapshot, connection]);
+  const research = useMemo(() => (snapshot ? webResearchModel(snapshot, connection === 'live') : null), [snapshot, connection]);
+  const pmName = useMemo(() => (snapshot ? pmNameModel(snapshot, connection === 'live') : null), [snapshot, connection]);
   const policy = useMemo(() => { try { return snapshot ? autonomyModel(snapshot, connection === 'live') : null; } catch { return null; } }, [snapshot, connection]);
   const pick = (key: string) => policy?.rows.find((r) => r.key === key);
   const rows = ['merge', 'repairAttempts', 'attemptTimeoutSeconds'].flatMap((k) => { const r = pick(k); return r ? [{ label: r.label, value: r.value, note: `${r.basis}${r.note ? `. ${r.note}` : ''}` }] : []; });
@@ -100,7 +102,7 @@ function WorkflowTab({ snapshot, connection, onExecute, onRefresh, onResync }: {
         {rows.length > 0 ? <Facts rows={rows} /> : <p className="text-muted">The server reports no policy for this run, so its merge and repair rules are not shown.</p>}
         <p className="mt-3 text-sm text-muted">Change these in Bounded autonomy, under <a className={link} href={settingsHref('team')}>Team</a>. Agents never merge: a person merges on GitHub.</p>
       </Panel>
-      {delegate && onExecute && onRefresh && onResync ? <AutoDelegatePanel model={delegate} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} /> : null}
+      {delegate && onExecute && onRefresh && onResync ? <AutoDelegatePanel model={delegate} research={research} name={pmName} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} /> : null}
       <RunDefaultPanel />
       <Panel title="Pull requests" labelId="settings-prs-title">
         <p className="text-fg">{prs === 0 ? 'No pull request has been opened for this project.' : `${prs} pull request${prs === 1 ? '' : 's'} on record.`} Each one and its evidence are in <a className={link} href={hrefFor('evidence')}>Evidence and PR</a>.</p>

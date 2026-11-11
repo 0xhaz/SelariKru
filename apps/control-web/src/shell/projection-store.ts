@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate'>;
+export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -232,6 +232,15 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         ...(source.delegate ? { delegate: async (p: string, runId: string, request: Parameters<NonNullable<EngineeringDataSource['delegate']>>[2]) => {
           if (connectionOf(get()) !== 'live') throw new CommandNotSent();
           return source.delegate!(p, runId, request);
+        } } : {}),
+        // H11 fix round 1: the owner's own assignment (Action items) and accepting a PM plan, sent only while live.
+        ...(source.assign ? { assign: async (p: string, runId: string, request: Parameters<NonNullable<EngineeringDataSource['assign']>>[2]) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.assign!(p, runId, request);
+        } } : {}),
+        ...(source.acceptPmPlan ? { acceptPmPlan: async (p: string, runId: string, request: Parameters<NonNullable<EngineeringDataSource['acceptPmPlan']>>[2]) => {
+          if (connectionOf(get()) !== 'live') throw new CommandNotSent();
+          return source.acceptPmPlan!(p, runId, request);
         } } : {}),
       } : null,
       stack: source?.getStack && source.stackAction ? {

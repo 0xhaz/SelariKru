@@ -2,9 +2,9 @@ import { sha256Hex, type AcceptedProposal, type RouteRecordReport } from '@selar
 import { effectiveStep } from './model.ts';
 import type { TaskFacts } from './facts.ts';
 import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from '@selarikru/inference-firebase-web';
-import type { DelegationReceipt, DelegationRequest, AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
+import type { DelegationReceipt, DelegationRequest, OwnerDelegationRequest, PmPlanAcceptReceipt, PmPlanAcceptRequest, AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
-import { runPmStep, type PmKind, type PmOutcome, type PmRequest } from '../pm/runner.ts';
+import { runPmStep, webResearchGranted, type PmKind, type PmOutcome, type PmRequest } from '../pm/runner.ts';
 
 /** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the rooftop cloud deck. */
 export interface InFlightCall {
@@ -35,6 +35,10 @@ export interface AgentsPort {
   pm(req: PmRequest): Promise<PmOutcome & { readonly simulated: boolean }>;
   /** H11: sends the PM's delegation for the server to apply inside the accepted plan. Absent: the source cannot delegate. */
   readonly delegate: ((runId: string, request: DelegationRequest) => Promise<DelegationReceipt>) | null;
+  /** H11 fix round 1 (I3): the owner's own assignment, from Action items. Absent: the source cannot assign. */
+  readonly assign: ((runId: string, request: OwnerDelegationRequest) => Promise<DelegationReceipt>) | null;
+  /** H11 fix round 1 (I4): accepts a Project Manager plan through the plan-revision path and the server's backstop. Absent: the source cannot. */
+  readonly acceptPlan: ((runId: string, request: PmPlanAcceptRequest) => Promise<PmPlanAcceptReceipt>) | null;
 }
 
 /**
@@ -53,7 +57,7 @@ export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate'>;
+  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -123,11 +127,15 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       return { hasChange: size.hasChange, inputChars: size.inputChars };
     },
     delegate: source.delegate ? (runId, request) => source.delegate!(projectId, runId, request) : null,
+    assign: source.assign ? (runId, request) => source.assign!(projectId, runId, request) : null,
+    acceptPlan: source.acceptPmPlan ? (runId, request) => source.acceptPmPlan!(projectId, runId, request) : null,
     async pm(req) {
       const callId = next++;
       try {
         const out = await runPmStep({
           projectId, catalog, snapshot: opts.snapshot,
+          // The owner's grant for web research, read from the run's settings at the time of the call.
+          webResearch: () => { const s = opts.snapshot(); return webResearchGranted(s, s?.tasks[req.subjectTaskId]?.runId ?? null); },
           getTaskRoute: async (taskId) => {
             const read = await getTaskRoute(projectId, taskId);
             publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);

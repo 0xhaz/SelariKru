@@ -66,7 +66,9 @@ describe('the office world', () => {
     const s = snapshot();
     const team = buildTeam(s, NOW, NOW);
     const world = buildOfficeWorld(s, team, 'Clinic queue');
-    expect(world.agents.map((a) => a.id)).toEqual(team.rows.map((r) => r.workerId));
+    // One robot per worker; a role no worker holds has a "not started" desk after them (no robot).
+    expect(world.agents.filter((a) => !a.notStarted).map((a) => a.id)).toEqual(team.rows.map((r) => r.workerId));
+    expect(world.agents.filter((a) => a.notStarted).map((a) => a.id)).toEqual(['role:frontend']);
     expect(world.agents.find((a) => a.id === 'w2')).toMatchObject({ state: 'in_review', label: 'In review' });
     expect(world.agents.find((a) => a.id === 'w3')).toMatchObject({ state: 'idle', label: 'Idle', taskTitle: null });
     const again = buildOfficeWorld(s, buildTeam(s, NOW + 1_000, NOW + 1_000), 'Clinic queue');
@@ -160,7 +162,7 @@ describe('the office world', () => {
 
   it('says what it shows in words, for the canvas label', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Team: Backend 1, Backend 2, Worker. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
+    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Team: Backend 1, Backend 2, Worker. 1 role not started (Frontend): an empty desk until a worker holds it. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
   });
 
   it('says so when there are no workers', () => {
@@ -281,6 +283,17 @@ describe('the team in the office (H11)', () => {
     expect(w.pm).toEqual({ id: 'pm1', name: 'Puan Rahmah', busy: true });
     const none = buildOfficeWorld(snapshotOf({}), buildTeam(snapshotOf({}), NOW, NOW, {}), 'P');
     expect(none.pm).toEqual({ id: null, name: 'Project Manager', busy: false });
+  });
+
+  it('M10: a role of the run with no worker gets a "not started" desk with the role nameplate and no robot; the PM\'s name comes from Settings before any worker holds it', () => {
+    const s = snapshotOf({ tasks: [task('a', { role: 'backend' }), task('b', { role: 'frontend' })], workers: [worker('w1', { taskId: 'a' })] });
+    s.settings = [{ ...setting('run', 'pm_display_name', 'Puan Zara'), scope: 'run' }] as never;
+    const w = buildOfficeWorld(s, buildTeam(s, NOW, NOW, {}), 'P');
+    const placeholder = w.agents.find((a) => a.id === 'role:frontend');
+    expect(placeholder).toMatchObject({ name: 'Frontend', roleLabel: 'Frontend', active: false, notStarted: true });
+    expect(w.agents.find((a) => a.id === 'w1')!.notStarted).toBeUndefined();
+    expect(w.pm.name).toBe('Puan Zara');
+    expect(w.summary).toContain('1 role not started');
   });
 
   it('a delegation is on the worker\'s cue, from the record', () => {

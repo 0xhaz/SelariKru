@@ -181,7 +181,7 @@ export class OfficeScene {
   setWorld(world: OfficeWorld): void {
     const before = this.world;
     this.world = world;
-    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color, active: a.active !== false })), projectName: world.projectName, leadLabel: world.leadLabel };
+    const input: LayoutInput = { agents: world.agents.map((a) => ({ id: a.id, name: a.name, color: a.color, active: a.active !== false, notStarted: a.notStarted === true })), projectName: world.projectName, leadLabel: world.leadLabel };
     const key = layoutKey(input);
     const first = this.layout === null;
     const newEpoch = before !== null && before.epoch !== world.epoch;
@@ -470,7 +470,7 @@ export class OfficeScene {
     if (!w) return { title: '' };
     if (kind === 'agent') {
       const a = w.agents.find((x) => x.id === id);
-      return a ? { title: `${a.name}${a.roleLabel && a.roleLabel !== a.name ? ` · ${a.roleLabel}` : ''} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.active === false ? 'Not active: no runner is running for this worker' : a.taskTitle ?? 'No task' } : { title: id };
+      return a ? { title: `${a.name}${a.roleLabel && a.roleLabel !== a.name ? ` · ${a.roleLabel}` : ''} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.notStarted ? 'Not started: no worker holds this role yet. Enrol a runner and give it this role in Team settings.' : a.active === false ? 'Not active: no runner is running for this worker' : a.taskTitle ?? 'No task' } : { title: id };
     }
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
     if (kind === 'env') {

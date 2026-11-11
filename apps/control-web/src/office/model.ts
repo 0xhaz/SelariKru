@@ -19,6 +19,8 @@ export interface OfficeAgent {
   readonly roleLabel?: string;
   /** False: not started, disabled, or its runner is not running. Its desk is empty and dimmed, with its nameplate and no robot (H11). */
   readonly active?: boolean;
+  /** H11 fix round 1 (M10): a desk for a role of the plan that no worker holds yet. Its id is `role:<role>`; it is a desk only, never a robot, rack or count. */
+  readonly notStarted?: true;
   readonly color: string;
   readonly state: RobotState;
   readonly label: string;
@@ -229,7 +231,14 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const active = !disabled(r.workerId) && state !== 'offline' && state !== 'unknown';
     return { id: r.workerId, name, roleLabel: roleLabel(r.role), active, color: colorOf(r.workerId), state, label: stateStyle[state].label, taskTitle: r.task?.title ?? null, ai: aiMark(r.task?.taskId ?? null) };
   });
-  const pm = { id: pmRow?.workerId ?? null, name: pmRow?.name ?? 'Project Manager', busy: calls.some((c) => typeof c.stepKind === 'string' && c.stepKind.startsWith('pm')) };
+  // M10: a role the plan names that no worker holds yet has a desk too, "not started", with the role on its plate.
+  const runNow = (planRunId !== null ? snapshot.runs[planRunId] ?? null : null) ?? currentRun(snapshot);
+  const held = new Set(team.rows.filter((r) => r !== pmRow).map((r) => r.role).filter((r): r is string => typeof r === 'string'));
+  const planRoles = [...new Set(Object.values(snapshot.tasks).filter((t) => runNow === null || t.runId === runNow.runId).map((t) => t.role).filter((r): r is string => typeof r === 'string' && r !== '' && r !== PROJECT_MANAGER_ROLE))].sort();
+  const notStarted = planRoles.filter((r) => !held.has(r)).map((r): OfficeAgent => ({ id: `role:${r}`, name: roleLabel(r), roleLabel: roleLabel(r), active: false, notStarted: true, color: '#8a7a6a', state: 'unknown', label: 'Not started', taskTitle: null, ai: null }));
+  // The PM's name: its worker's, else the one the owner gave in Settings › Workflow (before any worker holds the role), else "Project Manager".
+  const savedPmName = runNow ? snapshot.settings.find((x) => x.scope === 'run' && x.key === runNow.runId && x.field === 'pm_display_name')?.desired : undefined;
+  const pm = { id: pmRow?.workerId ?? null, name: pmRow?.name ?? (typeof savedPmName === 'string' && savedPmName.trim() ? savedPmName.trim() : 'Project Manager'), busy: calls.some((c) => typeof c.stepKind === 'string' && c.stepKind.startsWith('pm')) };
 
   const chosen = planRunId !== null ? snapshot.runs[planRunId] ?? null : null;
   const run = chosen ?? currentRun(snapshot);
@@ -275,6 +284,7 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const inactive = agents.filter((a) => a.active === false).length;
     if (inactive > 0) summary += ` ${inactive} inactive (empty desk).`;
   }
+  if (notStarted.length > 0) summary += ` ${notStarted.length} role${notStarted.length === 1 ? '' : 's'} not started (${notStarted.map((a) => a.name).join(', ')}): an empty desk until a worker holds ${notStarted.length === 1 ? 'it' : 'them'}.`;
   const cloudCall = calls.some((c) => c.place === 'cloud');
   // The desk marks in words: a call in flight is where its route sends it, expected until its record says where it ran.
   const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'expected'
@@ -311,5 +321,5 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       : failed ? 'failed' : verifiedState(r, r.evidence).established ? 'passed' : 'pending';
     return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), outcome }];
   });
-  return { projectName, agents, planRunId: run?.runId ?? null, planRevision: run?.planRevision ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, pm, delegations: Object.values(snapshot.tasks).flatMap((t) => (t.delegation ? [{ taskId: t.taskId, workerId: t.delegation.workerId, planRevision: t.delegation.planRevision, at: t.delegation.at }] : [])), epoch: epoch || snapshot.meta.projectId };
+  return { projectName, agents: [...agents, ...notStarted], planRunId: run?.runId ?? null, planRevision: run?.planRevision ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, pm, delegations: Object.values(snapshot.tasks).flatMap((t) => (t.delegation ? [{ taskId: t.taskId, workerId: t.delegation.workerId, planRevision: t.delegation.planRevision, at: t.delegation.at }] : [])), epoch: epoch || snapshot.meta.projectId };
 }

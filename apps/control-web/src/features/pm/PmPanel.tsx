@@ -1,21 +1,30 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { create } from 'zustand';
 import type { RoutePolicyMode } from '@selarikru/domain';
-import type { PmTurn } from '@selarikru/inference-firebase-web';
+import { pmReplyTurn, type PmTurn } from '@selarikru/inference-firebase-web';
 import { Chip, buttonPrimary, buttonQuiet } from '@selarikru/ui';
 import { DataSourceException, type DelegationReceipt, type ProjectViewSnapshot } from '@selarikru/view-protocol';
 import { useHybrid } from '../hybrid/context.tsx';
-import { PERSON_ACCEPTS, observedChip, proposalAttribution, refusalText, stepRoute } from '../hybrid/model.ts';
+import { PERSON_ACCEPTS, observedChip, proposalAttribution, stepRoute } from '../hybrid/model.ts';
+import { hrefFor } from '../../shell/route.ts';
+import { settingsHref } from '../../shell/views.ts';
+import { pmRefusal } from './copy.ts';
+import { pmProposals } from './proposals.ts';
+import { sanitizeSuggestions } from './suggestions.ts';
 import { workerIdentity } from '../team/identity.ts';
 import { currentRun } from '../settings/model.ts';
-import { planScopeFor, type PmKind, type PmOutcome } from './runner.ts';
+import { planScopeFor, questionLabelFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
 
 /**
  * H11: Talk to the Project Manager. One single-turn Firebase AI Logic call per question, about one task of the run (its route, lock and context apply), with a
  * bounded and label-filtered part of this conversation. The conversation lives in this tab only and is never stored: a restricted turn stays on this device.
  * Every reply is a proposal until accepted; the PM's assignments apply on their own only inside the accepted plan, and only while auto-delegation is on.
  */
-type Reply = { readonly kind: PmKind; readonly outcome: PmOutcome & { readonly simulated: boolean }; readonly delegation?: DelegationReceipt | { readonly error: string } };
+type Reply = {
+  readonly kind: PmKind; readonly subjectTaskId: string; readonly outcome: PmOutcome & { readonly simulated: boolean }; readonly delegation?: DelegationReceipt | { readonly error: string };
+  /** I4: where accepting this plan stands. */
+  readonly accepted?: { readonly planRevision: number } | { readonly error: string } | 'sending' | undefined;
+};
 type NewTurn = { readonly who: 'owner'; readonly text: string; readonly restricted: boolean; readonly kind: PmKind } | { readonly who: 'pm'; readonly reply: Reply };
 type Turn = NewTurn & { readonly id: number };
 
@@ -39,31 +48,16 @@ const ASKS: readonly { kind: PmKind; label: string; what: string }[] = [
   { kind: 'pmDelegate', label: 'Propose assignments', what: 'Who takes each task of the accepted plan. Applied on their own only inside that plan.' },
 ];
 
-const REFUSAL: Readonly<Record<string, string>> = {
-  research_locked: 'This task reads restricted data, so the Project Manager does not search the web for it.',
-  research_cloud_only: 'Web research runs only in the cloud, and this call could not go there.',
-  question_empty: 'Write a question first.',
-  auto_delegate_off: 'Auto-delegation is off in Settings › Workflow, so this waits for you.',
-  plan_revision_not_accepted: 'It is not for the accepted plan revision in force.',
-  task_not_in_plan: 'That task is not in the accepted plan.',
-  worker_unknown: 'No such worker.',
-  worker_disabled: 'That worker is disabled.',
-  role_not_in_task: 'That worker\'s role is not the task\'s role.',
-  task_not_delegable: 'That task is already running or done.',
-  retry_limit_reached: 'That task has no repair left.',
-  duplicate_task: 'The task was named twice.',
-  outside_plan_field: 'It named something the accepted plan does not cover (a path, a budget or a role).',
-};
-const say = (code: string): string => REFUSAL[code] ?? refusalText(code);
+const say = (code: string, name?: string): string => pmRefusal(code, name);
 
-/** Search Suggestions from Grounding with Google Search, rendered exactly as given, in a shadow root so its styles stay its own (the terms require showing it). */
+/** Search Suggestions from Grounding with Google Search, rendered as given (less anything that runs), in a shadow root so its styles stay its own (the terms require showing it). */
 function SearchSuggestions({ html }: { html: string }) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = host.current;
     if (!el) return;
     const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' });
-    root.innerHTML = html;
+    root.innerHTML = sanitizeSuggestions(html);
   }, [html]);
   return <div ref={host} data-testid="pm-search-suggestions" />;
 }
@@ -74,7 +68,7 @@ function nameOf(snap: ProjectViewSnapshot | null, workerId: string): string {
   return w ? workerIdentity(snap, workerId, w.role).label : workerId;
 }
 
-function ReplyView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapshot | null }) {
+function ReplyView({ reply, snap, onAcceptPlan }: { reply: Reply; snap: ProjectViewSnapshot | null; onAcceptPlan?: (() => void) | null }) {
   const o = reply.outcome;
   if (o.kind === 'refused') return <p className="text-fg" data-testid="pm-refused">{say(o.code)}</p>;
   const p = o.result.proposal;
@@ -107,7 +101,14 @@ function ReplyView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapshot | 
           {Array.isArray(data['tasks']) ? (
             <div>
               <ol className="list-decimal pl-5 text-fg">{(data['tasks'] as { key: string; title: string; role: string }[]).map((t) => <li key={t.key}>{t.title} <span className="text-sm text-muted">({t.role})</span></li>)}</ol>
-              <p className="text-sm text-muted">To make this the plan, accept it through the replan step in the Assistant. Until then it changes nothing.</p>
+              <p className="text-sm text-muted">Until you accept it, it changes nothing. Accepting records it as the next plan revision; the server checks the call it came from first.</p>
+              {reply.accepted === undefined ? (
+                o.result.locked ? <p className="text-sm text-muted" data-testid="pm-plan-locked">This plan came from restricted data. It stays on this device, so it cannot become the run\'s plan.</p>
+                  : onAcceptPlan ? <button type="button" className={buttonPrimary} onClick={onAcceptPlan}>Accept plan</button>
+                    : <p className="text-sm text-muted">Accept it through the replan step in the Assistant.</p>
+              ) : reply.accepted === 'sending' ? <p role="status" className="text-sm text-fg">Accepting…</p>
+                : 'error' in reply.accepted ? <p className="text-sm text-danger" data-testid="pm-plan-refused">{reply.accepted.error}</p>
+                  : <p className="text-sm text-fg" data-testid="pm-plan-accepted">Accepted as plan rev {reply.accepted.planRevision}. The Project Manager assigns its tasks next, inside it.</p>}
             </div>
           ) : null}
           {Array.isArray(data['assignments']) ? <DelegationView reply={reply} snap={snap} /> : null}
@@ -128,7 +129,7 @@ function DelegationView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapsh
       {d === undefined ? <p className="text-sm text-muted">Applying inside the accepted plan…</p> : 'error' in d ? <p className="text-sm text-danger">{d.error}</p> : (
         <>
           {d.applied.map((a) => <p key={a.taskId} className="text-sm text-fg" data-testid="pm-applied">{title(a.taskId)}: assigned by the Project Manager under your accepted plan rev {o.planRevision}.</p>)}
-          {d.refused.map((a) => <p key={`${a.taskId}:${a.workerId}`} className="text-sm text-warning" data-testid="pm-needs-you">{title(a.taskId)} → {nameOf(snap, a.workerId)}: not applied. {say(a.reason)} This needs you.</p>)}
+          {d.refused.map((a) => <p key={`${a.taskId}:${a.workerId}`} className="text-sm text-warning" data-testid="pm-needs-you">{title(a.taskId)} → {nameOf(snap, a.workerId)}: not applied. {say(a.reason, nameOf(snap, a.workerId))} It waits for you in <a className="underline" href={hrefFor('actions')}>Action items</a>.</p>)}
           {d.simulated ? <p className="text-sm text-muted">Demo data: simulated, never evidence.</p> : null}
         </>
       )}
@@ -153,37 +154,66 @@ export function PmPanel() {
   const sr = task?.route ? stepRoute(task.route, override) : null;
   const offer = task?.route ? stepRoute(task.route, null).override : null;
   const locked = task?.route?.lock !== null && task?.route?.lock !== undefined;
+  const deviceOnly = task?.route?.override === 'ONLY_ON_DEVICE';
+  const researchGranted = webResearchGranted(snap, task?.runId ?? null);
+  const autoDelegate = !(snap && run && snap.settings.some((x) => x.scope === 'run' && x.key === run.runId && x.field === 'auto_delegate' && x.desired === false));
 
-  async function ask(kind: PmKind): Promise<void> {
+  async function ask(kind: PmKind, asked: string = question): Promise<void> {
     if (!h?.agents || !subjectId) return;
     const add = pmConversation.getState().add;
-    // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call.
+    // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call. A reply from a call that read
+    // restricted text is itself restricted (`pmReplyTurn`), so its paraphrase never reaches the cloud either (fix round 1, H2).
     const history: PmTurn[] = pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
-      : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [{ who: 'pm', text: String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''), classification: t.reply.outcome.result.locked ? 'restricted' : 'internal' }] : []);
-    add({ who: 'owner', text: question, restricted, kind });
+      : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []);
+    // A question about a locked task is restricted, whatever the checkbox says.
+    const label = questionLabelFor(task, restricted);
+    add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
     setBusy(true);
     try {
-      const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question, questionClassification: restricted ? 'restricted' : 'internal', history, callOverride: override });
-      const rid = add({ who: 'pm', reply: { kind, outcome } });
+      const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question: asked, questionClassification: label, history, callOverride: override });
+      const rid = add({ who: 'pm', reply: { kind, subjectTaskId: subjectId, outcome } });
       // H11: the PM's assignments apply on their own, inside the accepted plan only; the server re-checks them and refuses anything else, for you.
       if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && !h.agents.delegate) {
-        pmConversation.getState().update(rid, { kind, outcome, delegation: { error: 'This source cannot apply assignments, so they wait for you.' } });
+        pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: { error: 'This source cannot apply assignments, so they wait for you.' } });
       } else if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && !outcome.result.report) {
-        pmConversation.getState().update(rid, { kind, outcome, delegation: { error: 'Where this call ran was not recorded, so its assignments cannot be applied.' } });
+        pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: { error: 'Where this call ran was not recorded, so its assignments cannot be applied.' } });
       } else if (kind === 'pmDelegate' && outcome.kind === 'result' && outcome.result.proposal.status === 'ok' && outcome.result.report && h.agents.delegate) {
         const assignments = (outcome.result.proposal.data as { assignments: Record<string, unknown>[] }).assignments;
         try {
           const receipt = await h.agents.delegate(outcome.runId, { planRevision: outcome.planRevision ?? 0, subjectTaskId: subjectId, routeRecordId: outcome.result.report.requestId, assignments });
-          pmConversation.getState().update(rid, { kind, outcome, delegation: receipt });
+          pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: receipt });
+          // What was not applied waits for the owner in Action items (fix round 1, I3).
+          if (receipt.refused.length > 0) pmProposals.getState().addRefused(outcome.runId, outcome.planRevision ?? 0, receipt.refused);
           h.refresh();
         } catch (e) {
-          pmConversation.getState().update(rid, { kind, outcome, delegation: { error: say(/^([a-z_]+):/.exec(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '')?.[1] ?? 'delegation_failed') } });
+          pmConversation.getState().update(rid, { kind, subjectTaskId: subjectId, outcome, delegation: { error: say(/^([a-z_]+):/.exec(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '')?.[1] ?? 'delegation_failed') } });
         }
       }
       setQuestion('');
       setOverride(null);
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** I4: accepts a Project Manager plan through the plan-revision path (the server judges the call first); then, with auto-delegation on, the PM assigns inside it. */
+  async function acceptPlan(turnId: number, reply: Reply): Promise<void> {
+    const o = reply.outcome;
+    if (!h?.agents?.acceptPlan || o.kind !== 'result' || !o.result.report) return;
+    const update = (accepted: Reply['accepted']) => pmConversation.getState().update(turnId, { ...reply, accepted });
+    update('sending');
+    try {
+      const r = await h.agents.acceptPlan(o.runId, { expectedPlanRevision: o.planRevision ?? 0, subjectTaskId: reply.subjectTaskId, routeRecordId: o.result.report.requestId, plan: o.result.proposal.data as never, idempotencyKey: `pm-plan-${o.result.proposal.requestId}` });
+      update({ planRevision: r.planRevision });
+      h.refresh();
+      if (autoDelegate) {
+        // Wait for the new revision to be in the snapshot the PM reads, then let it assign inside it.
+        for (let i = 0; i < 40 && (h.snapshot?.runs[o.runId]?.planRevision ?? 0) < r.planRevision; i++) await new Promise((res) => setTimeout(res, 50));
+        await ask('pmDelegate', `Assign the tasks of plan rev ${r.planRevision}.`);
+      }
+    } catch (e) {
+      const code = /^([a-z_]+):/.exec(e instanceof DataSourceException ? e.detail.message : e instanceof Error ? e.message : '')?.[1];
+      update({ error: `Not accepted. ${say(code ?? 'unknown')}` });
     }
   }
 
@@ -211,14 +241,18 @@ export function PmPanel() {
             <span className="font-medium text-fg">Your question</span>
             <textarea className="mt-1 block w-full rounded-chip border border-line-strong bg-bg p-2 text-fg" rows={3} value={question} onChange={(e) => setQuestion(e.target.value)} data-testid="pm-question" />
           </label>
-          <label className="flex items-start gap-2 text-sm text-fg"><input type="checkbox" className="mt-0.5" checked={restricted} onChange={(e) => setRestricted(e.target.checked)} /><span>This question is restricted: keep it, and the reply, on this device</span></label>
+          <label className="flex items-start gap-2 text-sm text-fg"><input type="checkbox" className="mt-0.5" data-testid="pm-restricted" checked={restricted || locked} disabled={locked} onChange={(e) => setRestricted(e.target.checked)} /><span>This question is restricted: keep it, and the reply, on this device{locked ? '. This task reads restricted data, so every question about it is.' : ''}</span></label>
           <div className="flex flex-wrap gap-2">
             {ASKS.map((a) => {
-              const off = busy ? 'Waiting for the last reply.' : !question.trim() ? 'Write a question first.' : a.kind === 'pmResearch' && (locked || restricted) ? 'Web research is never used for restricted work.' : null;
+              const off = busy ? 'Waiting for the last reply.' : !question.trim() ? 'Write a question first.'
+                : a.kind === 'pmResearch' && (locked || restricted) ? 'Web research is never used for restricted work.'
+                  : a.kind === 'pmResearch' && deviceOnly ? say('research_device_only')
+                    : a.kind === 'pmResearch' && !researchGranted ? say('research_not_granted') : null;
               return <button key={a.kind} type="button" className={a.kind === 'pmAnswer' ? buttonPrimary : buttonQuiet} disabled={off !== null} title={off ?? a.what} onClick={() => void ask(a.kind)}>{a.label}</button>;
             })}
           </div>
           <p className="text-sm text-muted">{ASKS.map((a) => `${a.label}: ${a.what}`).join(' ')}</p>
+          {!researchGranted ? <p className="text-sm text-muted" data-testid="pm-research-off">Web research is off for this run. To allow it, turn on &quot;Google Search (web research)&quot; in <a className="text-active underline underline-offset-2" href={settingsHref('workflow')}>Settings › Workflow</a>. Only your question is sent, never the task or its context.</p> : null}
           {busy ? <p role="status" className="text-sm text-fg">The Project Manager is answering.</p> : null}
         </div>
       )}
@@ -226,7 +260,7 @@ export function PmPanel() {
         {turns.map((t) => (
           <li key={t.id} className={`rounded-card border p-3 ${t.who === 'owner' ? 'border-line bg-panel-2' : 'border-line-strong bg-panel'}`} data-testid={t.who === 'owner' ? 'pm-turn-owner' : 'pm-turn-reply'}>
             <p className="text-sm font-medium text-muted">{t.who === 'owner' ? `You${t.restricted ? ' (restricted, kept on this device)' : ''}` : 'Project Manager'}</p>
-            {t.who === 'owner' ? <p className="whitespace-pre-wrap text-fg">{t.text}</p> : <ReplyView reply={t.reply} snap={snap} />}
+            {t.who === 'owner' ? <p className="whitespace-pre-wrap text-fg">{t.text}</p> : <ReplyView reply={t.reply} snap={snap} onAcceptPlan={t.reply.kind === 'pmPlan' && h?.agents?.acceptPlan ? () => void acceptPlan(t.id, t.reply) : null} />}
           </li>
         ))}
       </ol>

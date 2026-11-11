@@ -6,7 +6,7 @@ import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { NETWORK_MESSAGE, NOT_SENT_MESSAGE, rejectionView } from '../decisions/copy.ts';
 import { roleLabel } from '@selarikru/domain';
 import { suggestedName } from '../team/name-suggestions.ts';
-import type { AutonomyModel, AutoDelegateModel, FieldStatus, SettingAction, WorkerControlsModel } from './model.ts';
+import type { AutonomyModel, AutoDelegateModel, FieldStatus, PmNameModel, SettingAction, WorkerControlsModel } from './model.ts';
 
 export interface SendProps {
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
@@ -253,18 +253,49 @@ export function WorkerSettingControls({ model, workerId, ...send }: SendProps & 
   );
 }
 
-/** H11: Settings › Workflow. On, the Project Manager's assignments apply by themselves, only inside your accepted plan; off, each one waits for you. */
-export function AutoDelegatePanel({ model, ...send }: SendProps & { model: AutoDelegateModel }) {
+/**
+ * H11: Settings › Workflow. On, the Project Manager's assignments apply by themselves, only inside your accepted plan; off, each one waits for you. Fix round 1: the
+ * Project Manager's name (before any worker holds the role) and the owner's grant for web research live here too.
+ */
+export function AutoDelegatePanel({ model, research, name, ...send }: SendProps & { model: AutoDelegateModel; research?: AutoDelegateModel | null; name?: PmNameModel | null }) {
   const { busy, feedback, send: dispatch } = useSender(send);
+  const nameId = useId();
+  const [pmName, setPmName] = useState(name?.value ?? '');
+  useEffect(() => { setPmName(name?.value ?? ''); }, [name?.value, name?.revision]);
+  const trimmed = pmName.trim();
+  const nameAction: SettingAction | null = name ? {
+    id: 'pm-name', label: 'Save name', confirm: null,
+    disabledReason: name.disabledReason ?? ([...trimmed].length > 24 ? 'At most 24 characters.' : trimmed === name.value ? 'Change the name to save it.' : null),
+    intent: { command: 'setting.set', expectedRevision: name.revision, args: { projectId: name.projectId, key: name.runId, change: { scope: 'run', field: 'pm_display_name', value: trimmed === '' ? null : trimmed } } },
+  } : null;
   return (
     <Panel title="Project Manager" labelId="settings-auto-delegate-title" aside={model.on ? 'Auto-delegate on' : 'Auto-delegate off'}>
       <div className="space-y-3" data-testid="auto-delegate" data-on={model.on ? 'true' : 'false'}>
+        {name && nameAction ? (
+          <div className="flex flex-wrap items-end gap-3" data-testid="pm-name">
+            <div>
+              <label htmlFor={nameId} className="mb-1 block text-sm text-muted">Name (shown at the PLAN desk; empty: Project Manager)</label>
+              <input id={nameId} data-testid="pm-name-input" maxLength={48} placeholder="Project Manager" className="w-48 rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg" value={pmName} onChange={(e) => setPmName(e.target.value)} />
+            </div>
+            <ActionButton action={nameAction} busy={busy} onClick={() => void dispatch(nameAction)} />
+          </div>
+        ) : null}
         <p className="text-sm text-fg">{model.on
           ? 'Auto-delegate is on: the Project Manager assigns tasks to workers by itself, only among your accepted plan\'s tasks, to enabled workers of the task\'s role. It never changes a path, a budget or a task. Anything outside the plan waits for you.'
           : 'Auto-delegate is off: the Project Manager\'s assignments are proposals only. Nothing is assigned until you do it.'}</p>
         <Feedback feedback={feedback} />
         <StatusLine status={model.status} />
         <ActionButton action={model.action} busy={busy} onClick={() => void dispatch(model.action)} />
+        {research ? (
+          <section aria-label="Web research" className="space-y-2 rounded-chip border border-line p-3" data-testid="web-research" data-on={research.on ? 'true' : 'false'}>
+            <h3 className="font-medium text-fg">Google Search (web research)</h3>
+            <p className="text-sm text-fg">{research.on
+              ? 'On: the Project Manager may send your question, and only your question, to Google Search through the cloud model. Never for restricted work or a task you set to device only.'
+              : 'Off: the Project Manager does not search the web. Turning it on lets it send only your question to Google Search through the cloud model; never a task, its context or restricted work.'}</p>
+            <StatusLine status={research.status} />
+            <ActionButton action={research.action} busy={busy} onClick={() => void dispatch(research.action)} />
+          </section>
+        ) : null}
       </div>
     </Panel>
   );
