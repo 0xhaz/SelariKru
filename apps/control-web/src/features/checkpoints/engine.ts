@@ -269,6 +269,19 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     }
   }
 
+  /**
+   * Re-validates before a cloud send (fix round 1, I1): an escalation skips only the route comparison. Says why when it fails; a budget that blocks it becomes the
+   * checkpoint's stop reason (`budget`), so the queue shows it as waiting on the budget, not on the connection.
+   */
+  async function revalidated(cp: AiCheckpoint, escalation: boolean): Promise<boolean> {
+    const v = revalidateCheckpoint(cp, await recheck(cp), 'cloud', { escalation });
+    if (v.ok) return true;
+    setFor('problems', cp.checkpointId, v.problems);
+    setFor('asks', cp.checkpointId, undefined);
+    if (v.problems.some((p) => p === 'budget_missing' || p === 'budget_exhausted') && cp.stopReason !== 'budget') await write({ ...cp, stopReason: 'budget', updatedAt: now() });
+    return false;
+  }
+
   async function process(id: string): Promise<void> {
     const cp = store.getState().checkpoints[id];
     if (!cp || cp.status !== 'waiting' || store.getState().busy[id]) return;
@@ -280,13 +293,14 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       const d = escalationDecision(cp, { mode, lock: lock !== null });
       if (!d.ok) { setFor('problems', id, [d.reason]); return; }
       if (!deps.isOnline()) { setFor('problems', id, undefined); return; }
+      // Fix round 1 (I1): the full re-validation, as for any cloud send, before it is offered or done.
+      if (!(await revalidated(cp, true))) return;
       if (resumeDisposition(cp, planOf(cp)) === 'automatic') await escalate(id);
       else { setFor('problems', id, undefined); setFor('asks', id, 'escalate'); }
       return;
     }
     if (cp.continuation !== 'cloud_capable' || !deps.isOnline()) return;
-    const v = revalidateCheckpoint(cp, await recheck(cp));
-    if (!v.ok) { setFor('problems', id, v.problems); setFor('asks', id, undefined); return; }
+    if (!(await revalidated(cp, false))) return;
     setFor('problems', id, undefined);
     if (cp.stopReason === 'offline' && resumeDisposition(cp, planOf(cp)) === 'automatic') await send(cp, 'after_reconnect', cp.callOverride);
     else setFor('asks', id, 'resume');
@@ -298,6 +312,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       if (cp && cp.status === 'waiting') setFor('problems', id, [cp.escalatedAt !== null ? 'already_escalated' : 'locked']);
       return;
     }
+    if (!(await revalidated(cp, true))) return;
     // Claimed once, by the server: a reload or a second tab cannot escalate it again.
     let claimed: AiCheckpoint;
     try { claimed = await deps.server.claimAiCheckpointEscalation(deps.projectId, id); } catch (e) {
@@ -332,8 +347,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     async resume(id) {
       const cp = store.getState().checkpoints[id];
       if (!cp || cp.status !== 'waiting' || cp.continuation !== 'cloud_capable') return;
-      const v = revalidateCheckpoint(cp, await recheck(cp));
-      if (!v.ok) { setFor('problems', id, v.problems); return; }
+      if (!(await revalidated(cp, false))) return;
       await send(cp, 'after_reconnect', cp.callOverride);
     },
     escalate,

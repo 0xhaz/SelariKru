@@ -7,6 +7,7 @@ import { createCheckpointEngine, type CheckpointEngineDeps, type CheckpointRunne
 import { memoryDeviceStore } from './device-store.ts';
 
 const CANARY = 'CANARY-H12-PATIENT-LIST-91c2';
+const BASE_FILE = 'export const BASE = 1;\n';
 const route = (over: Partial<TaskRouteView> = {}): TaskRouteView => ({
   effective: 'ONLY_IN_CLOUD', source: 'task', runDefault: 'PREFER_ON_DEVICE', override: 'ONLY_IN_CLOUD', overrideRevision: 1, lock: null, suggestion: null, lastObserved: null, ...over,
 }) as TaskRouteView;
@@ -53,6 +54,7 @@ function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRou
     },
     getTaskRoute: async (taskId) => ({ taskId, revision: 1, runId: 'run', route: taskId === 't2' ? route({ lock: { label: 'restricted', reason: 'r' } as never, effective: 'ONLY_ON_DEVICE' }) : routeNow(), records: [] }) as TaskRouteRead,
     getTaskContext: async () => context(),
+    getTaskFiles: async (_t, paths) => ({ taskId: 't1', revision: 1, baseSha: 'a'.repeat(40), files: paths.map((path) => ({ path, content: BASE_FILE })), omitted: [] }),
     snapshot: () => snapshot,
     isOnline: () => online,
     now: () => new Date('2026-11-12T00:00:00.000Z'),
@@ -216,7 +218,7 @@ describe('the checkpoint engine (H12)', () => {
     const localFailed = async (h: ReturnType<typeof setup>, taskId = 't1') => {
       const rec = h.engine.begin({ taskId, stepKind: 'patch', callOverride: null });
       rec.stage({ stage: 'context', context: context({ taskId }), contextId: 'ctx_1' });
-      rec.stage({ stage: 'file_choice', files: [{ path: 'src/a.ts', sha256: 'a'.repeat(64) }] });
+      rec.stage({ stage: 'file_choice', files: [{ path: 'src/a.ts', sha256: sha256Hex(BASE_FILE) }] });
       const r = result(proposal({ status: 'invalid', observedSource: 'ON_DEVICE', requestedMode: 'PREFER_ON_DEVICE', validation: { status: 'failed', errors: ['/diff diff_does_not_apply'] }, route: { ...proposal().route!, effectiveMode: 'PREFER_ON_DEVICE' } }), 'patch');
       rec.stage({ stage: 'reask', result: r });
       await rec.finish({ kind: 'result', result: r, context: context({ taskId }), simulated: true });
@@ -227,7 +229,7 @@ describe('the checkpoint engine (H12)', () => {
     it('a local result that failed its checks continues in the cloud from its stage, once, inside the plan: same files, the issue codes', async () => {
       const h = setup({}, localFirst);
       const id = await localFailed(h);
-      expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', callOverride: 'ONLY_IN_CLOUD', resume: { checkpointId: id, kind: 'escalated', files: [{ path: 'src/a.ts', sha256: 'a'.repeat(64) }], priorIssues: ['/diff diff_does_not_apply'] } })]);
+      expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', callOverride: 'ONLY_IN_CLOUD', resume: { checkpointId: id, kind: 'escalated', files: [{ path: 'src/a.ts', sha256: sha256Hex(BASE_FILE) }], priorIssues: ['/diff diff_does_not_apply'] } })]);
       expect(h.server.claims).toBe(1);
       expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'escalated', resumedAs: 'escalated' });
       // Never twice: asking again is refused by the one-time claim.
@@ -257,6 +259,35 @@ describe('the checkpoint engine (H12)', () => {
       expect(locked.runs).toEqual([]);
       expect(locked.server.claims).toBe(0);
       expect(locked.engine.store.getState().problems[lid]).toEqual(['locked']);
+    });
+
+    it('fix 1 (I1): escalation runs the full re-validation first: a run with no budget does not escalate, and the checkpoint says budget', async () => {
+      const h = setup({}, localFirst);
+      h.setSnap(snap({ budget: { value: 25, basis: 'recommended' } }));
+      const id = await localFailed(h);
+      expect(h.runs).toEqual([]);
+      expect(h.server.claims).toBe(0);
+      expect(h.engine.store.getState().problems[id]).toEqual(['budget_missing']);
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'waiting', stopReason: 'budget' });
+      expect(h.server.rows.get(id)).toMatchObject({ stopReason: 'budget' });
+    });
+
+    it('fix 1 (I1): escalation is refused when the inputs changed since the pause', async () => {
+      const h = setup({ getTaskContext: async () => context({ bundle: { ...context().bundle, claims: [{ key: 'criterion:AC-1' }] as never } }) }, localFirst);
+      const id = await localFailed(h);
+      expect(h.runs).toEqual([]);
+      expect(h.engine.store.getState().problems[id]).toContain('inputs_changed');
+    });
+
+    it('fix 1 (I1): a cloud resume the budget blocks records the stop reason budget', async () => {
+      const h = setup();
+      h.setOnline(false);
+      const id = await pauseOffline(h);
+      h.setSnap(snap({ budget: { value: null, basis: 'unresolved' } }));
+      h.setOnline(true);
+      await h.engine.reconnect();
+      expect(h.runs).toEqual([]);
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ stopReason: 'budget' });
     });
 
     it('outside the plan it waits for the owner', async () => {

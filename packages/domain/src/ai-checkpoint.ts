@@ -151,11 +151,12 @@ export type CheckpointRevalidation = { readonly ok: true } | { readonly ok: fals
  * Re-validates a waiting checkpoint before anything is sent. Every change is named; any one stops the send. `to`: where the resume would run. The budget only
  * matters for the cloud. A lock now in force is always a problem: the checkpoint was made without it.
  */
-export function revalidateCheckpoint(cp: AiCheckpoint, now: CheckpointRecheck, to: 'cloud' | 'device' = 'cloud'): CheckpointRevalidation {
+/** `escalation`: the step is escalated, so its mode changes on purpose (Local first to the cloud); every other check still applies. */
+export function revalidateCheckpoint(cp: AiCheckpoint, now: CheckpointRecheck, to: 'cloud' | 'device' = 'cloud', opts: { readonly escalation?: boolean } = {}): CheckpointRevalidation {
   if (cp.status !== 'waiting') return { ok: false, problems: ['not_waiting'] };
   if (now.route === null) return { ok: false, problems: ['route_unreadable'] };
   const problems: CheckpointProblem[] = [];
-  if (to === 'cloud' ? now.route.mode !== cp.routeMode : now.route.mode === null) problems.push('route_changed');
+  if (opts.escalation ? now.route.mode === null : to === 'cloud' ? now.route.mode !== cp.routeMode : now.route.mode === null) problems.push('route_changed');
   if (now.route.lock && !cp.locked) problems.push('locked');
   if (now.taskRevision !== null && now.taskRevision !== cp.taskRevision) problems.push('revision_changed');
   const i = now.inputs;

@@ -71,6 +71,14 @@ describe('AI step checkpoints (H12)', () => {
     expect(revalidateCheckpoint(cp({ status: 'sent' }), fine)).toEqual({ ok: false, problems: ['not_waiting'] });
   });
 
+  it('fix 1 (I1): an escalation skips only the route comparison; the budget, the lock and the inputs still apply', () => {
+    const failed = cp({ stopReason: 'local_failed_checks', routeMode: 'PREFER_ON_DEVICE' });
+    const now = { ...fine, route: { mode: 'PREFER_ON_DEVICE' as const, lock: false } };
+    expect(revalidateCheckpoint(failed, { ...now, route: { mode: 'ONLY_IN_CLOUD', lock: false } }, 'cloud', { escalation: true })).toEqual({ ok: true });
+    expect(revalidateCheckpoint(failed, { ...now, budget: 'missing' }, 'cloud', { escalation: true })).toEqual({ ok: false, problems: ['budget_missing'] });
+    expect(revalidateCheckpoint(failed, { ...now, route: { mode: 'PREFER_ON_DEVICE', lock: true } }, 'cloud', { escalation: true })).toEqual({ ok: false, problems: ['locked'] });
+  });
+
   it('the budget: a configured, unspent run budget is ok; missing is never unlimited, and a stopped run is spent', () => {
     expect(checkpointBudget({ value: 10, basis: 'configured' }, false)).toBe('ok');
     expect(checkpointBudget({ value: 25, basis: 'recommended' }, false)).toBe('missing');
