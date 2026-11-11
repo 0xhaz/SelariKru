@@ -3,9 +3,9 @@ import { Chip, EmptyState, Panel, Timestamp, formatAge } from '@selarikru/ui';
 import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import { CommandNotSent, type ConnectionState } from '../../shell/projection-store.ts';
-import { hrefFor } from '../../shell/route.ts';
+import { hashWith } from '../../shell/route.ts';
 import { ConfirmDialog } from './ConfirmDialog.tsx';
-import { DecisionCard } from './DecisionCard.tsx';
+import { ActionControl, DecisionCard } from './DecisionCard.tsx';
 import { CHANGED_NOT_SENT_MESSAGE, GONE_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from './copy.ts';
 import { CHANGED_ON_SCREEN, holdActions, useChangedCards } from './useChangedCards.ts';
 import { confirmIsStale, type DecisionAction, type DecisionCardModel, type DecisionsModel } from './model.ts';
@@ -18,17 +18,40 @@ function focusById(id: string): void {
   requestAnimationFrame(() => document.getElementById(id)?.focus());
 }
 
-function Heading({ count, paused, elsewhere, counted }: { count: number; paused: boolean; elsewhere: number; counted: number }) {
+function Heading({ count, paused, counted }: { count: number; paused: boolean; counted: number }) {
   return (
     <div className="mb-5">
-      <h1 id="decisions-heading" tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">Decisions</h1>
+      <h1 id="decisions-heading" tabIndex={-1} className="text-2xl font-semibold tracking-tight outline-none">Action items</h1>
       <p className="mt-1 text-lg text-muted" data-testid="decisions-summary">
-        {count === 0 ? 'Nothing is waiting for you.' : `${count} ${count === 1 ? 'decision is' : 'decisions are'} waiting for you.`}
-        {paused ? ' Decisions are paused until the connection is live.' : ''}
+        {count === 0 ? 'Nothing is waiting on you.' : `${count} waiting on you.`}
+        {paused ? ' Actions are paused until the connection is live.' : ''}
       </p>
-      {elsewhere > 0 ? <p className="mt-1 text-sm text-muted" data-testid="decisions-elsewhere">{elsewhere} more {elsewhere === 1 ? 'item needs' : 'items need'} you but {elsewhere === 1 ? 'has' : 'have'} no decision here: <a className="text-active underline underline-offset-2" href={hrefFor('overview')}>see Mission Control</a>.</p> : null}
-      {counted > count ? <p className="mt-1 text-sm text-muted" data-testid="decisions-grouped">The header counts {counted} items; some share one decision here.</p> : null}
+      {counted > count ? <p className="mt-1 text-sm text-muted" data-testid="decisions-grouped">Some items share one decision here.</p> : null}
     </div>
+  );
+}
+
+/** A group heading in the reference's style. */
+function GroupTitle({ id, children }: { id: string; children: ReactNode }) {
+  return <h2 id={id} className="mb-2 text-[13px] font-semibold uppercase tracking-[0.12em] text-muted">{children}</h2>;
+}
+
+/**
+ * One row in "Also waiting on you": the card's chip, one line, and its primary action, which goes through exactly the same handler, confirmation
+ * and rules as the full card. "Details" opens the full card with its other actions.
+ */
+function CompactRow({ card, actions, primary, open, onToggle, children, onCommand, busyId }: { card: DecisionCardModel; actions: readonly DecisionAction[]; primary: DecisionAction | null; open: boolean; onToggle: () => void; children: ReactNode; onCommand: (a: CommandAction) => void; busyId: string | null }) {
+  return (
+    <li>
+      <div className="panel flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2" data-testid="action-row" data-row-kind={card.kind}>
+        <span className="chip shrink-0" style={{ background: 'var(--color-cream-2)' }}>{card.chip}</span>
+        <span className="min-w-0 flex-1 truncate font-semibold text-fg" title={card.title}>{card.title}</span>
+        {/* Once open, the full card below carries every action, this one included. */}
+        {primary && !open ? <span className="shrink-0"><ActionControl action={primary} busyId={busyId} cardId={card.id} describedBy={undefined} onCommand={onCommand} /></span> : null}
+        <button type="button" className="btn shrink-0 text-[13px]" aria-expanded={open} onClick={onToggle}>{open ? 'Hide details' : actions.length > (primary ? 1 : 0) ? 'Details and more actions' : 'Details'}</button>
+      </div>
+      {open ? <div className="mt-2">{children}</div> : null}
+    </li>
   );
 }
 
@@ -43,23 +66,32 @@ export interface DecisionsViewProps {
   readonly leaveDemoHref?: string | undefined;
   /** What the run is doing while the queue is empty, so a quiet screen still answers "are we progressing?". */
   readonly delivery: { readonly criteria: string; readonly blocker: string | null } | null;
-  /** Items needing a person that this queue has no card for, so the header's attention count and this one can be told apart. */
+  /** What workers ask that has no decision card of its own (a question, a wait on a person): shown under "From workers", with a way to open the worker. */
+  readonly fromWorkers?: ReactNode;
+  /** How many of those there are, for the count. */
   readonly elsewhere: number;
+  /** Records that need nothing from you now, kept visible so nothing that was on the old queue disappears. */
+  readonly noted?: ReactNode;
+  /** The worker a card's request came from, for the name link; null when the record does not say. */
+  readonly workerOf?: (card: DecisionCardModel) => { readonly id: string; readonly label: string } | null;
   /** How many of the attention items that need a person do have a card. Several can share one, such as two tasks stopped by one budget. */
   readonly counted: number;
   readonly onRestart: () => void;
   readonly onExecute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly onRefresh: () => void;
   readonly onResync: () => void;
-  /** The Project Brain's open conflicts, shown below the queue. */
+  /** The Project Brain's open conflicts, Product follow-ups and handover offers, shown under "Also waiting on you". */
   readonly brain?: ReactNode;
 }
+
+/** Cards a worker raised: approval requests. Everything else is a decision about the run, under "Also waiting on you". */
+const FROM_WORKERS: ReadonlySet<DecisionCardModel['kind']> = new Set(['approval']);
 
 /**
  * The queue of things only a person can decide. Inspecting never resolves anything: a command is sent only by pressing a button that names its outcome, and
  * a button is on only while the session is live and the card still matches what the person last looked at.
  */
-export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync, brain }: DecisionsViewProps) {
+export function DecisionsView({ connection, error, model, failure, confirmedAt, nowMs, mode, leaveDemoHref, delivery, elsewhere, counted, onRestart, onExecute, onRefresh, onResync, brain, fromWorkers = null, noted = null, workerOf }: DecisionsViewProps) {
   if (failure !== undefined) throw failure;
 
   const [refused, setRefused] = useState<Readonly<Record<string, string>>>({});
@@ -67,6 +99,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
   // Ids only: the dialog always reads the live card, so it can never confirm something that has changed.
   const [confirming, setConfirming] = useState<{ cardId: string; actionId: string; fingerprint: string | null } | null>(null);
   const [status, setStatus] = useState('');
+  const [openRows, setOpenRows] = useState<ReadonlySet<string>>(new Set());
   // One key per intended outcome, kept across a network failure so a retry cannot apply twice.
   const keys = useRef(new Map<string, string>());
   const cards = model?.cards ?? null;
@@ -81,6 +114,8 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     if (target && hashHandled.current !== window.location.hash && cards?.some((c) => c.id === target)) {
       hashHandled.current = window.location.hash;
       requestAnimationFrame(() => {
+        // A deep link to a compact row opens its full card.
+        setOpenRows((o) => new Set(o).add(target));
         document.getElementById(`card-${target}`)?.scrollIntoView({ block: 'center' });
         document.getElementById(`${target}-title`)?.focus();
       });
@@ -155,7 +190,7 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     if (connection === 'unavailable' || connection === 'dead') {
       return (
         <>
-          <Heading count={0} paused elsewhere={0} counted={0} />
+          <Heading count={0} paused counted={0} />
           <section aria-label="Connection" className="rounded-card border border-line bg-panel">
             <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>
@@ -167,58 +202,95 @@ export function DecisionsView({ connection, error, model, failure, confirmedAt, 
     }
     return (
       <>
-        <h1 className="text-2xl font-semibold tracking-tight">Decisions</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Action items</h1>
         <p role="status" className="mt-4 text-muted">Loading project state</p>
       </>
     );
   }
 
   const live = connection === 'live';
+  const renderCard = (card: DecisionCardModel, without: string | null) => {
+    const changedOnScreen = changedHere.has(card.id);
+    const actions = holdActions(card.actions, changedOnScreen).filter((x) => x.id !== without);
+    const who = workerOf?.(card) ?? null;
+    return (
+      <>
+        {who ? <p className="mb-1 text-sm text-muted" data-testid="card-worker">From <a className="font-semibold text-active underline underline-offset-2" href={hashWith('worker', who.id)}>{who.label}</a> · {formatAge(nowMs - Date.parse(card.since))} ago</p> : null}
+        <DecisionCard
+          card={card}
+          actions={actions}
+          changedNotice={changedOnScreen ? CHANGED_ON_SCREEN : null}
+          busyId={busy[card.id] ?? null}
+          nowMs={nowMs}
+          feedback={refused[card.id] ?? null}
+          onCommand={(x) => onCommand(card, x)}
+          onReview={() => review(card)}
+        />
+      </>
+    );
+  };
+  const onCommand = (card: DecisionCardModel, x: CommandAction): void => { if (x.confirm) setConfirming({ cardId: card.id, actionId: x.id, fingerprint: card.fingerprint }); else void dispatch(card, x); };
+  const workerCards = model.cards.filter((c) => FROM_WORKERS.has(c.kind));
+  const otherCards = model.cards.filter((c) => !FROM_WORKERS.has(c.kind));
+  const waiting = model.waiting + elsewhere;
+  const nothing = model.cards.length === 0 && elsewhere === 0;
   return (
     <>
-      <Heading count={model.waiting} paused={model.paused !== null} elsewhere={elsewhere} counted={counted} />
+      <Heading count={waiting} paused={model.paused !== null} counted={counted} />
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
       {/* One polite line per decision. Clock ticks and heartbeats write nothing here. */}
       <p role="status" aria-live="polite" data-testid="decision-status" className={status ? 'mb-4 rounded-chip border border-active bg-active-tint p-3 text-fg' : 'sr-only'}>{status}</p>
       {model.empty ? (
         <section aria-label="Queue" className="rounded-card border border-line bg-panel">
           <EmptyState title="No run in this project yet" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} primary />}>
-            <p>Decisions appear here once a run needs one.</p>
+            <p>Action items appear here once a run needs you.</p>
           </EmptyState>
         </section>
-      ) : model.cards.length === 0 ? (
+      ) : nothing ? (
         <section aria-label="Queue" className="rounded-card border border-line bg-panel" data-testid="decisions-empty">
-          <EmptyState title="No decisions waiting">
+          <EmptyState title="Nothing is waiting on you.">
             {live
               ? <p>Work continues without you. {delivery?.criteria ? `${delivery.criteria}.` : ''}{delivery?.blocker ? ` Top blocker: ${delivery.blocker}` : ''}</p>
               : <p>Whether anything is waiting is unknown until the connection returns.</p>}
           </EmptyState>
         </section>
       ) : (
-        <ol className="space-y-4" aria-label="Decisions waiting">
-          {model.cards.map((card) => {
-            const changedOnScreen = changedHere.has(card.id);
-            const actions = holdActions(card.actions, changedOnScreen);
-            const feedback = refused[card.id] ?? null;
-            return (
-              <li key={card.id}>
-                <DecisionCard
-                  card={card}
-                  actions={actions}
-                  changedNotice={changedOnScreen ? CHANGED_ON_SCREEN : null}
-                  busyId={busy[card.id] ?? null}
-                  nowMs={nowMs}
-                  feedback={feedback}
-                  onCommand={(a) => { if (a.confirm) setConfirming({ cardId: card.id, actionId: a.id, fingerprint: card.fingerprint }); else void dispatch(card, a); }}
-                  onReview={() => review(card)}
-                />
-              </li>
-            );
-          })}
-        </ol>
+        <div className="space-y-6">
+          {workerCards.length > 0 || fromWorkers ? (
+            <section aria-labelledby="from-workers-title" data-testid="from-workers">
+              <GroupTitle id="from-workers-title">From workers</GroupTitle>
+              {workerCards.length > 0 ? (
+                <ol className="space-y-4" aria-label="Decisions waiting">
+                  {workerCards.map((card, i) => <li key={card.id} className={i === 0 ? 'outline-[3px] outline-orange outline-solid' : ''}>{renderCard(card, null)}</li>)}
+                </ol>
+              ) : null}
+              {fromWorkers ? <div className="mt-4">{fromWorkers}</div> : null}
+            </section>
+          ) : null}
+          {otherCards.length > 0 ? (
+            <section aria-labelledby="also-waiting-title" data-testid="also-waiting">
+              <GroupTitle id="also-waiting-title">Also waiting on you</GroupTitle>
+              <ol className="space-y-2" aria-label={workerCards.length > 0 ? 'Also waiting on you' : 'Decisions waiting'}>
+                {otherCards.map((card) => {
+                  const actions = holdActions(card.actions, changedHere.has(card.id));
+                  const primary = actions.find((x) => x.style === 'primary') ?? null;
+                  const open = openRows.has(card.id);
+                  return (
+                    <CompactRow key={card.id} card={card} actions={actions} primary={primary} open={open} busyId={busy[card.id] ?? null}
+                      onToggle={() => setOpenRows((o) => { const n = new Set(o); if (n.has(card.id)) n.delete(card.id); else n.add(card.id); return n; })}
+                      onCommand={(x) => onCommand(card, x)}>
+                      {renderCard(card, null)}
+                    </CompactRow>
+                  );
+                })}
+              </ol>
+            </section>
+          ) : null}
+        </div>
       )}
 
-      {brain ?? null}
+      {brain ? <section aria-label="Also waiting on you: Brain, Product and handovers" className="mt-6">{brain}</section> : null}
+      {noted ? <div className="mt-6">{noted}</div> : null}
 
       {model.history.length > 0 ? (
         <div className="mt-6">

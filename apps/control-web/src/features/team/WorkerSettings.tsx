@@ -136,7 +136,7 @@ export function WorkerSettings({ row, settings, assign, live, onExecute, onRefre
                   <p className="text-sm text-muted"><span className="font-medium text-fg">If you do nothing: </span>{card.consequence}</p>
                   {actions.length > 0 ? <div className="grid gap-2 sm:grid-cols-2">{actions.map((a) => <ActionControl key={a.id} action={a} busyId={busy} cardId={card.id} describedBy={describedBy} onCommand={(x) => request(card.id, card, x)} />)}</div> : null}
                   {describedBy ? <p id={describedBy} data-testid="disabled-reason" className="text-sm text-muted">{reasons.join(' ')}</p> : null}
-                  <a className="inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(card.id)}>See the full card in Decisions</a>
+                  <a className="inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(card.id)}>See the full card in Action items</a>
                 </li>
               );
             })}

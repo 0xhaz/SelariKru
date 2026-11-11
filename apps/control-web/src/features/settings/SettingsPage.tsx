@@ -21,7 +21,7 @@ export interface SettingsPageProps {
   readonly projectLabel?: string;
   readonly snapshot?: ProjectViewSnapshot | null;
   readonly team?: TeamModel | null;
-  /** The run's Bounded autonomy panel, the same one Overview and Team show. Null when the server reports no policy. */
+  /** The run's Bounded autonomy panel, the same one the Run summary and Team show. Null when the server reports no policy. */
   readonly autonomy?: ReactNode;
   readonly onOpenWorker?: ((workerId: string) => void) | undefined;
   readonly onExecute?: ((command: AuthorizedViewCommand) => Promise<CommandReceipt>) | undefined;

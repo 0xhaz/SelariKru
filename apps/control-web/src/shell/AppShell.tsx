@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from 'zustand';
-import { MissionControl } from '../features/overview/MissionControl.tsx';
+import { AttentionRow, MissionControl } from '../features/overview/MissionControl.tsx';
 import { BoundedAutonomyPanel } from '../features/settings/SettingsPanel.tsx';
 import { SettingsPage } from '../features/settings/SettingsPage.tsx';
 import { autonomyModel } from '../features/settings/model.ts';
@@ -12,7 +12,7 @@ import { TeamView } from '../features/team/TeamView.tsx';
 import { buildTeam, type TeamModel } from '../features/team/model.ts';
 import { panelOf } from '../features/team/panel.ts';
 import { TeamFoldRegion, TeamFoldToggle, TeamPanelSide, type PanelStatus, type RowDecor } from '../features/team/TeamPanel.tsx';
-import { isTabId, type TabId } from '../features/team/WorkerDrawer.tsx';
+import { tabOf, type TabId } from '../features/team/WorkerDrawer.tsx';
 import { WorkerDrawerHost } from './WorkerDrawerHost.tsx';
 import { PANEL_WIDE, useMediaQuery } from './media.ts';
 import { PipelineView } from '../features/pipeline/PipelineView.tsx';
@@ -255,7 +255,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const attentionCount = showCount ? overview.attentionCount : null;
   const attentionBadge = showCount ? overview.attentionBadge : null;
   // On Decisions the view speaks for itself, one line per decision; the shell keeps to the connection there, so a decision is not announced twice.
-  const announcement = route === 'decisions' ? `${CONNECTION[connection].label}.` : `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
+  const announcement = route === 'actions' ? `${CONNECTION[connection].label}.` : `${CONNECTION[connection].label}.${showCount ? ` ${overview.announcement}` : ''}`;
 
   // The office: a picture of the same team model the panel lists. Built only from facts in the snapshot; empty without one.
   // The plan wall's run (the top bar's Plan wall select): the current run unless one is chosen.
@@ -274,6 +274,26 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     try { return recentActivity(snapshot, 7); } catch { return []; }
   }, [route, panelWide, snapshot]);
   const frame = frameOf(route);
+  // The Action items drawer: what workers ask with no card of its own goes under "From workers"; records needing nothing from you stay visible as "Noted".
+  const titles = useMemo(() => Object.fromEntries(Object.values(snapshot?.tasks ?? {}).map((t) => [t.taskId, t.title ?? t.taskId])), [snapshot]);
+  const asks = overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null) : [];
+  const notes = overview ? overview.attention.filter((i) => !i.needsOperator) : [];
+  const actionsFromWorkers = asks.length > 0 ? <ol className="space-y-3" aria-label="Asks from workers">{asks.map((i, n) => <AttentionRow key={i.id} item={i} top={n === 0} titles={titles} nowMs={state.nowMs} />)}</ol> : null;
+  const actionsNoted = notes.length > 0 ? (
+    <section aria-labelledby="noted-title" data-testid="actions-noted">
+      <h2 id="noted-title" className="mb-2 text-[13px] font-semibold uppercase tracking-[0.12em] text-muted">Noted, nothing for you to do</h2>
+      <ol className="space-y-3">{notes.map((i) => <AttentionRow key={i.id} item={i} top={false} titles={titles} nowMs={state.nowMs} />)}</ol>
+    </section>
+  ) : null;
+  // An approval card's worker: the one holding the task the request is about.
+  const workerOfCard = (card: { id: string }): { id: string; label: string } | null => {
+    if (!snapshot || !card.id.startsWith('decision:')) return null;
+    const taskId = snapshot.approvals[card.id.slice('decision:'.length)]?.taskId ?? null;
+    const w = taskId ? Object.values(snapshot.workers).find((x) => x.taskId === taskId) : undefined;
+    if (!w) return null;
+    return { id: w.workerId, label: agentById.get(w.workerId)?.name ?? w.workerId };
+  };
+  const waitingCount = (builtDecisions.decisions?.waiting ?? 0) + asks.length;
   // Each panel row shows its office robot and, for the first nine, the number key that opens it.
   const agentById = useMemo(() => new Map(world?.agents.map((a) => [a.id, a]) ?? []), [world]);
   const mark = (id: string, i: number): RowDecor => {
@@ -337,7 +357,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
 
   const views = (
     <>
-        {route === 'overview' ? (
+        {route === 'summary' ? (
           <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
             <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} autonomy={autonomyPanel} />
           </RouteBoundary>
@@ -352,9 +372,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
             <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} handover={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} />
           </RouteBoundary>
         ) : null}
-        {route === 'decisions' ? (
-          <RouteBoundary resetKey={`decisions:${builtDecisions.failure === undefined ? 'ok' : 'failed'}`}>
+        {route === 'actions' ? (
+          <RouteBoundary resetKey={`actions:${builtDecisions.failure === undefined ? 'ok' : 'failed'}`}>
             <DecisionsView
+              fromWorkers={actionsFromWorkers} noted={actionsNoted} workerOf={workerOfCard}
               connection={connection} error={state.error} model={builtDecisions.decisions} failure={builtDecisions.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} leaveDemoHref={leaveDemoHref}
               delivery={overview ? { criteria: overview.delivery.criteriaLabel, blocker: overview.delivery.blocker } : null}
               elsewhere={overview ? overview.attention.filter((i) => i.needsOperator && i.decisionId === null).length : 0}
@@ -418,7 +439,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         <Announcer message={announcement} />
         <TopBar
           ref={headerRef} route={route} projectLabel={projectLabel} mode={mode} connection={connection} confirmedAt={confirmedAt} nowMs={state.nowMs} account={account}
-          attentionCount={attentionCount} attentionNumber={attentionCount ? Number(/^\d+/.exec(attentionCount)?.[0] ?? NaN) || null : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
+          attentionCount={attentionCount} attentionNumber={builtDecisions.decisions ? waitingCount : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
           runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null}
           workers={world?.agents.map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
           debugOpen={debugOpen} onDebug={import.meta.env.DEV ? () => setDebugOpen((o) => !o) : null}
@@ -441,7 +462,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         ) : frame === 'settings' ? (
           <SettingsModal paused={pausedHint}>{views}</SettingsModal>
         ) : (
-          <ViewDrawer view={route} title={TITLES[route]} route={route} decisionCount={decisionCount} paused={pausedHint}>
+          <ViewDrawer view={route} title={TITLES[route]} paused={pausedHint} aside={route === 'actions' && builtDecisions.decisions ? `${waitingCount} waiting on you` : null}>
             {views}
           </ViewDrawer>
         )}
@@ -459,7 +480,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       <Tooltip />
       {workerId !== null && team !== null && snapshot !== null ? (
         <WorkerDrawerHost
-          workerId={workerId} tab={isTabId(workerTab) ? workerTab : undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
+          look={agentById.get(workerId) ?? null} workerId={workerId} tab={tabOf(workerTab) ?? undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}
           onClose={closeWorker} onTab={(t: TabId) => replaceHashQuery({ wtab: t === 'task' ? null : t })}
           onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenTerminal={state.openTerminal} onOpenTerminalControl={state.openTerminalControl} brain={state.brain} skills={state.skills} handover={state.handover}
         />

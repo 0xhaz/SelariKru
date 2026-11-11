@@ -76,7 +76,7 @@ function Row({ row, selected, showStage, onOpen, handovers, live }: { row: Pipel
       <td className="px-3 py-3">{row.branch ?? <Muted>Not reported</Muted>}</td>
       <td className="px-3 py-3">{checksCell(row)}</td>
       <td className="whitespace-nowrap px-3 py-3 text-sm text-muted"><Timestamp iso={row.since} tabStop={false}>{row.age}</Timestamp></td>
-      <td className="px-3 py-3 text-sm text-fg">{row.nextAction}{row.decisionId ? <> <a data-testid="decision-link" onClick={(e) => e.stopPropagation()} className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</td>
+      <td className="px-3 py-3 text-sm text-fg">{row.nextAction}{row.decisionId ? <> <a data-testid="decision-link" onClick={(e) => e.stopPropagation()} className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Action items</a></> : null}</td>
     </tr>
   );
 }
@@ -123,7 +123,7 @@ function Card({ row, selected, showStage, onOpen, handovers, live }: { row: Pipe
         {row.branch ? <Field label="Branch or candidate">{row.branch}</Field> : null}
         {row.predecessors === null || row.predecessors.length > 0 ? <Field label="Predecessors" className="col-span-2 @3xl:col-span-1"><PredecessorList row={row} /></Field> : null}
         {row.checks ? <Field label="Checks" className="col-span-2 @3xl:col-span-1"><div>{checksCell(row)}</div></Field> : null}
-        <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span>{row.decisionId ? <a onClick={(e) => e.stopPropagation()} data-testid="decision-link" className="mt-1 block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a> : null}</Field>
+        <Field label="Next action" className="col-span-2"><span className="text-sm text-fg">{row.nextAction}</span>{row.decisionId ? <a onClick={(e) => e.stopPropagation()} data-testid="decision-link" className="mt-1 block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Action items</a> : null}</Field>
       </dl>
     </li>
   );

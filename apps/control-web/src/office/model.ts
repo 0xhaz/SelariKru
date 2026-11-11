@@ -51,7 +51,7 @@ export interface OfficeParcel {
   readonly stage: 'to_gate' | 'verified' | 'merged';
 }
 
-/** A worker's sandbox in the server room. Lit while the worker is running an attempt. */
+/** A worker's sandbox in the server room. Lit while the worker holds an attempt with no end recorded. */
 export interface OfficeRack {
   readonly agentId: string;
   readonly name: string;
@@ -74,7 +74,7 @@ export interface OfficeWorld {
   /** The plan desk: SelariKru has no lead agent, so it is labelled PLAN and has no robot. */
   readonly leadLabel: string;
   readonly racks: readonly OfficeRack[];
-  /** How many sandboxes are running an attempt now. */
+  /** How many workers hold an attempt with no end recorded: the top bar's "Sandbox · N running". */
   readonly running: number;
   readonly prs: readonly OfficePr[];
   readonly parcels: readonly OfficeParcel[];
@@ -159,8 +159,13 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const stage = merged ? 'merged' : verifiedState(r, r.evidence).established ? 'verified' : 'to_gate';
     return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), stage }];
   });
-  const RUNNING: ReadonlySet<RobotState> = new Set(['working', 'needs_input', 'in_review', 'blocked']);
-  const racks = agents.map((a): OfficeRack => ({ agentId: a.id, name: a.name, running: RUNNING.has(a.state) }));
+  // A sandbox is running when its worker holds an attempt that has not ended: read from the attempt record, not inferred from the robot's state.
+  const holdsLiveAttempt = (workerId: string): boolean => {
+    const attemptId = snapshot.workers[workerId]?.attemptId ?? null;
+    const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
+    return attempt !== undefined && attempt.endedAt === null;
+  };
+  const racks = agents.map((a): OfficeRack => ({ agentId: a.id, name: a.name, running: holdsLiveAttempt(a.id) }));
   const verifying = Object.values(snapshot.tasks).some((t) => t.status === 'verifying');
 
   let summary: string;

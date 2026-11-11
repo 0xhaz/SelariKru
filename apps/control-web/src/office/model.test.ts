@@ -143,10 +143,16 @@ describe('the office world', () => {
     expect(at()).toEqual([]);
   });
 
-  it('has one sandbox rack per worker, lit while it runs, a plan desk with no robot, and a phase banner for the run', () => {
-    const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.racks.map((r) => [r.agentId, r.running])).toEqual(world.agents.map((a) => [a.id, a.state !== 'idle']));
-    expect(world.running).toBe(2);
+  it('has one sandbox rack per worker, lit only while it holds an attempt with no end, a plan desk with no robot, and a phase banner for the run', () => {
+    const s = snapshot();
+    const attempt = (id: string, endedAt: string | null) => ({ attemptId: id, taskId: 'a', number: 1, fence: 1, outcome: endedAt ? 'succeeded' as const : 'running' as const, exitReason: null, runnerId: 'r', startedAt: iso(50), endedAt, lastHeartbeatAt: iso(1), assignment: null });
+    s.attempts = { x1: attempt('x1', null), x2: attempt('x2', iso(5)) };
+    s.workers['w1'] = { ...s.workers['w1']!, attemptId: 'x1' };
+    s.workers['w2'] = { ...s.workers['w2']!, attemptId: 'x2' };
+    const world = buildOfficeWorld(s, buildTeam(s, NOW, NOW), 'Clinic queue');
+    // Working robots both, but only w1's attempt is still open; an idle worker with no attempt is dark.
+    expect(Object.fromEntries(world.racks.map((r) => [r.agentId, r.running]))).toEqual({ w1: true, w2: false, w3: false });
+    expect(world.running).toBe(1);
     expect(world.leadLabel).toBe('PLAN');
     expect(world.banner).toBe('run · plan rev 1');
     expect(world.runs).toEqual([{ runId: 'run', label: 'run · running' }]);

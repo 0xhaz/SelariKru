@@ -94,7 +94,7 @@ export function verifiedState(run: RunView, evidence: RunEvidenceView | null): D
   if (evidence.candidate && !evidence.candidate.recordValid && evidence.criteria.some((c) => c.state === 'passed')) {
     // A closed run has nothing left to re-verify, so it is told what happened and offered nothing.
     const open = !isClosedRun(run);
-    return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count.${open ? ' Re-verifying judges the same commit again and runs no worker.' : ''} 0 of ${total} approved criteria verified.`, established: false, link: open ? { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Decisions', external: false } : null };
+    return { ...base, value: 'Record no longer valid', tone: 'warning', detail: `The verifier, its suite or the stored record changed after candidate ${shortSha(evidence.candidate.sha)} was judged, so its passes do not count.${open ? ' Re-verifying judges the same commit again and runs no worker.' : ''} 0 of ${total} approved criteria verified.`, established: false, link: open ? { href: decisionHref(`reverify:${run.runId}`), label: 'Re-verify in Action items', external: false } : null };
   }
   // Verified is established only on a sound record: something passed, on a live candidate whose record stands, with one row per approved criterion.
   // A count that disagrees with its rows, or that has no standing candidate behind it, is never read as verified.

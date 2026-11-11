@@ -12,3 +12,12 @@ describe('hashWith', () => {
     expect(hashWith('worker', 'w', '')).toBe('#/office?worker=w');
   });
 });
+
+describe('old links', () => {
+  it('#/overview, #/decisions and #/attention are no longer routes of their own: they open the Action items drawer', async () => {
+    const { ROUTES, decisionHref } = await import('./route.ts');
+    for (const old of ['overview', 'decisions', 'attention']) expect(ROUTES).not.toContain(old);
+    expect(ROUTES).toContain('actions');
+    expect(decisionHref('decision:a')).toBe('#/actions?card=decision%3Aa');
+  });
+});

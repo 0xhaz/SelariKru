@@ -22,7 +22,7 @@ const TINT: Readonly<Record<Tone, string>> = { neutral: '', active: 'bg-active-t
 /** Only a verified segment is filled, so zero verified can never look complete. */
 const CELL: Readonly<Record<CriterionCell, string>> = { verified: 'border-success bg-success', failed: 'border-danger', held: 'border-warning', active: 'border-active', pending: 'border-line-strong' };
 
-function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: boolean; titles: Readonly<Record<string, string>>; nowMs: number }) {
+export function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: boolean; titles: Readonly<Record<string, string>>; nowMs: number }) {
   const k = KIND[item.kind];
   const n = item.affectedTaskIds.length;
   return (
@@ -44,7 +44,7 @@ function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: 
         <div className="md:border-l md:border-line-strong md:pl-4">
           <p className="text-sm font-medium text-muted">Next action</p>
           <p className="mt-0.5 font-semibold text-fg">{item.nextAction}</p>
-          {item.decisionId && item.needsOperator ? <a data-testid="decision-link" className="mt-1 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(item.decisionId)}>Open in Decisions</a> : null}
+          {item.decisionId && item.needsOperator ? <a data-testid="decision-link" className="mt-1 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(item.decisionId)}>Open in Action items</a> : null}
         </div>
       </div>
       <details className="mt-2 text-sm text-muted">
@@ -61,20 +61,6 @@ function AttentionRow({ item, top, titles, nowMs }: { item: AttentionItem; top: 
         </dl>
       </details>
     </li>
-  );
-}
-
-function AttentionQueue({ items, titles, nowMs, stale }: { items: readonly AttentionItem[]; titles: Readonly<Record<string, string>>; nowMs: number; stale: boolean }) {
-  return (
-    <Panel title="Attention" labelId="attention-title">
-      {items.length === 0 ? (
-        <p className="text-muted">{stale ? 'Attention is unknown until the connection returns.' : 'No decisions waiting.'}</p>
-      ) : (
-        <ol className="space-y-3">
-          {items.map((item, i) => <AttentionRow key={item.id} item={item} top={i === 0 && item.needsOperator} titles={titles} nowMs={nowMs} />)}
-        </ol>
-      )}
-    </Panel>
   );
 }
 
@@ -268,7 +254,7 @@ function EmptyProject({ mode, leaveDemoHref }: { mode: 'mock' | 'live'; leaveDem
       <EmptyState title="No run in this project yet" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} primary />}>
         {mode === 'mock'
           ? <p>This demo project has no run. Choose another fixture in the demo controls below, or leave demo mode to start real work in the Assistant.</p>
-          : <p>Start by drafting acceptance criteria and a task plan. Mission Control fills in once a plan is accepted and work begins.</p>}
+          : <p>Start by drafting acceptance criteria and a task plan. The run summary fills in once a plan is accepted and work begins.</p>}
       </EmptyState>
     </section>
   );
@@ -298,11 +284,13 @@ export interface MissionControlProps {
 
 export function MissionControl({ connection, error, overview, snapshot, confirmedAt, nowMs, mode, onRestart, leaveDemoHref, failure, fleetInPanel = false, autonomy = null }: MissionControlProps) {
   if (failure !== undefined) throw failure;
+  // The Run summary: delivery, evidence, fleet, resources and limits. What waits on a person is in the Action items drawer.
+  const title = 'Run summary';
   if (!overview || !snapshot) {
     if (connection === 'unavailable' || connection === 'dead') {
       return (
         <>
-          <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           <section aria-label="Connection" className="mt-4 rounded-card border border-line bg-panel">
             <EmptyState title="Project data is unavailable" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>
               <p>{STATE_COPY.unavailable[mode]}</p>
@@ -314,7 +302,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
     }
     return (
       <>
-        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         <p role="status" className="mt-4 text-muted">Loading project state</p>
       </>
     );
@@ -322,7 +310,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
   if (overview.empty) {
     return (
       <>
-        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
         <div className="mt-4"><EmptyProject mode={mode} leaveDemoHref={leaveDemoHref} /></div>
       </>
@@ -333,7 +321,7 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
   return (
     <>
       <div className="mb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">Mission Control</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         {overview.headline ? (
           <p className="mt-1 text-lg text-muted" data-testid="headline">
             {overview.needsYou > 0 ? <span aria-hidden="true" className="mr-1.5 text-glyph text-warning">{toneGlyph('warning')}</span> : null}
@@ -342,8 +330,8 @@ export function MissionControl({ connection, error, overview, snapshot, confirme
         ) : null}
       </div>
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
+      {overview.needsYou > 0 ? <p className="mb-4 text-fg" data-testid="summary-actions-link">{overview.attentionCount}: <a className="font-medium text-active underline underline-offset-2" href={hrefFor('actions')}>open Action items</a>.</p> : null}
       <div className="grid gap-4">
-        <AttentionQueue items={overview.attention} titles={titlesOf(snapshot)} nowMs={nowMs} stale={stale} />
         <div className="grid items-start gap-4 @3xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
           <div className="grid gap-4">
             <DeliverySummary model={overview.delivery} stale={stale} />

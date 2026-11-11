@@ -6,8 +6,6 @@ import type { PresenceState } from './model.ts';
 import { unknownText, type PanelRow, type TeamPanelModel } from './panel.ts';
 import { chipStyle, stateStyle, type RobotState } from '../../theme/tokens.ts';
 
-/** Each state has its own glyph as well as its word, so no two read alike in color, in grayscale or to a screen reader. */
-const GLYPH: Readonly<Record<PresenceState, string>> = { idle: '○', working: '◆', needs_you: '▲', blocked: '‖', lost: '✕', unknown: '?' };
 const RAIL: Readonly<Partial<Record<Tone, string>>> = { warning: 'before:bg-warning', danger: 'before:bg-danger' };
 
 export type PanelStatus =
@@ -19,6 +17,7 @@ function since(row: PanelRow): string {
   return row.state === 'lost' || row.state === 'unknown' ? row.since : `for ${row.since}`;
 }
 
+/** Each card's chip names the state in words on its own colour, so no two read alike in colour, in grayscale or to a screen reader. */
 const CHIP_OF: Readonly<Record<PresenceState, RobotState>> = { idle: 'idle', working: 'working', needs_you: 'needs_input', blocked: 'blocked', lost: 'offline', unknown: 'unknown' };
 
 /** The reference's agent card: portrait, name, role and model, number key, a coloured state chip with its word, time in state, and the task. */
@@ -27,6 +26,7 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
   const chip = decor?.chip ?? CHIP_OF[row.state];
   const style = chipStyle[chip];
   const needs = row.state === 'needs_you';
+  const waiting = needs || row.state === 'blocked';
   return (
     <li>
       <button
@@ -46,14 +46,13 @@ function WorkerRow({ row, selected, onOpen, decor }: { row: PanelRow; selected: 
           {decor?.key ? <kbd aria-hidden="true" className="kbd shrink-0 px-1 text-[13px]">{decor.key}</kbd> : null}
         </span>
         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5" data-testid="team-panel-state">
-          <span className="chip chip-dot" style={{ background: style.bg, color: style.fg }}><span aria-hidden="true" className="sr-only">{GLYPH[row.state]}</span>{stateStyle[chip].label}</span>
+          <span className="chip chip-dot" style={{ background: style.bg, color: style.fg }}>{stateStyle[chip].label}</span>
           <span className="font-mono text-mono text-muted tabular-nums" data-testid="team-panel-since">{since(row)}</span>
           {needs ? <span className="chip text-[11px]" style={{ background: '#ffec27', color: '#241a2e' }}>1 for you</span> : null}
-          {row.detail ? <span className="sr-only">, {row.detail}</span> : null}
         </span>
-        <span className={`col-span-2 mt-1 block truncate text-[13px] ${needs ? 'text-danger' : row.task === 'No task' ? 'text-muted' : 'text-fg'}`} data-testid="team-panel-task" title={row.detail ?? undefined}>
-          <span className="sr-only">Task: </span>{needs && row.detail ? <>{row.detail}<span className="sr-only">. </span><span className="text-fg"> · {row.task}</span></> : row.task}
-        </span>
+        {/* Why it waits, in brief: a decision, a block or a dependency. The full text is in its drawer. */}
+        {waiting && row.detail ? <span className={`col-span-2 block truncate text-[13px] ${needs ? 'text-danger' : 'text-warning'}`} data-testid="team-panel-reason" title={row.detail}><span className="sr-only">Why: </span>{row.detail}</span> : null}
+        <span className={`col-span-2 block truncate text-[13px] ${row.task === 'No task' ? 'text-muted' : 'text-fg'}`} data-testid="team-panel-task"><span className="sr-only">Task: </span>{row.task}</span>
       </button>
     </li>
   );
@@ -131,7 +130,7 @@ export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: Pa
           <span id="team-panel-title">Team</span><span aria-hidden="true"> · </span><span className="sr-only">: </span>
           <span data-testid="team-panel-summary" className="[&_.text-muted]:text-[#b9c3e6] [&_.text-warning]:text-yellow"><Count status={status} /></span>
         </p>
-        <a href="#/settings" className="btn shrink-0 px-2 text-[12px] normal-case tracking-normal">+ Agent</a>
+        <a href="#/settings" className="btn shrink-0 px-2 text-[12px] normal-case tracking-normal">Team settings</a>
       </div>
       <div className="scroll-thin -ml-4 flex min-h-0 flex-col overflow-y-auto pt-1 pr-1 pb-2 pl-4">
         {status.kind === 'ready' && status.panel.rows.length > 0 ? null : <div className="panel px-2.5 py-1"><Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /></div>}

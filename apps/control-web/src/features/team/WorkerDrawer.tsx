@@ -9,12 +9,30 @@ import { TerminalPanel } from './TerminalPanel.tsx';
 
 /** A key name, drawn as a key. */
 const KBD = 'rounded-chip border border-line-strong px-1 font-mono text-mono text-fg';
+/**
+ * The reference's tab order (T5.12): Terminal (read-only stream), Shell (control mode), Task (task, criteria, artifacts, Context and packs),
+ * Sandbox (runtime, handover, usage), Messages (requests and activity), Settings. The tabs that existed before are folded in, so nothing is lost.
+ */
 const TABS = [
-  { id: 'task', label: 'Task' }, { id: 'settings', label: 'Settings' }, { id: 'terminal', label: 'Terminal' }, { id: 'timeline', label: 'Timeline' }, { id: 'checks', label: 'Checks' }, { id: 'artifacts', label: 'Artifacts' },
-  { id: 'permissions', label: 'Permissions' }, { id: 'context', label: 'Context' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'usage', label: 'Usage' },
+  { id: 'terminal', label: 'Terminal' }, { id: 'shell', label: 'Shell' }, { id: 'task', label: 'Task' }, { id: 'sandbox', label: 'Sandbox' }, { id: 'messages', label: 'Messages' }, { id: 'settings', label: 'Settings' },
 ] as const;
 export type TabId = (typeof TABS)[number]['id'];
+/** Old links name tabs that are now part of another one. */
+const LEGACY_TAB: Readonly<Record<string, TabId>> = { timeline: 'messages', permissions: 'messages', checks: 'task', artifacts: 'task', context: 'task', usage: 'sandbox' };
+export const tabOf = (v: string | null): TabId | null => (v === null ? null : TABS.some((t) => t.id === v) ? (v as TabId) : LEGACY_TAB[v] ?? null);
 export const isTabId = (v: string | null): v is TabId => TABS.some((t) => t.id === v);
+
+/** The reference's header and session bar, from the host's reading of the worker and its attempt. */
+export interface DrawerIdentity {
+  readonly portrait: ReactNode;
+  readonly name: string;
+  readonly chip: { readonly label: string; readonly bg: string; readonly fg: string };
+  /** "<role> · <coding agent> <model> · <runtime>". */
+  readonly line: string;
+  readonly session: { readonly state: 'running' | 'idle' | 'stopped'; readonly label: string; readonly workspace: string };
+  /** What it is doing now: the latest tool or task, or for restricted work only the server's category. */
+  readonly activity: string;
+}
 
 const Exact = ({ iso }: { iso: string }) => <time dateTime={iso}>{formatExact(iso)}</time>;
 
@@ -163,7 +181,7 @@ function PermissionsPanel({ detail }: { detail: WorkerDetail }) {
                 {p.expiresAt ? <><dt>Expires</dt><dd className="m-0"><Exact iso={p.expiresAt} /></dd></> : null}
                 {p.resolvedAt ? <><dt>Resolved</dt><dd className="m-0"><Exact iso={p.resolvedAt} /></dd></> : null}
               </dl>
-              {p.state === 'Pending' || p.state === 'Expired' ? <a className="mt-2 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(`decision:${p.approvalId}`)}>Open in Decisions</a> : null}
+              {p.state === 'Pending' || p.state === 'Expired' ? <a className="mt-2 inline-block text-sm font-medium text-active underline underline-offset-2" href={decisionHref(`decision:${p.approvalId}`)}>Open in Action items</a> : null}
             </li>
           ))}
         </ul>
@@ -216,11 +234,14 @@ export interface WorkerDrawerProps {
   readonly onOpenTerminalControl: ((request: AuthorizedTerminalRequest) => TerminalControlChannel) | undefined;
   /** The Context tab's content: the Project Brain bundle the attempt received. Absent: the tab says none is connected. */
   readonly context?: ReactNode;
-  /** "Continue in cloud" for this worker's task, on the Task tab. Absent: the source has no handovers. */
+  /** "Continue in cloud" for this worker's task, on the Sandbox tab. Absent: the source has no handovers. */
   readonly handover?: ReactNode;
+  readonly identity?: DrawerIdentity | null;
+  /** This worker's requests, as the same cards the Action items drawer shows. */
+  readonly messages?: ReactNode;
 }
 
-export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context, handover }: WorkerDrawerProps) {
+export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, onClose, initialTab = 'task', onTab, settings, onOpenTerminal, onOpenTerminalControl, context, handover, identity = null, messages = null }: WorkerDrawerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
   const titleId = useId();
@@ -364,11 +385,18 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
         ) : null}
 
       <div className="flex h-full flex-col overflow-y-auto overscroll-contain">
-        <div className="border-b border-line p-4 sm:pl-6">
+        <div className="border-b-[3px] border-ink p-3 sm:pl-6">
           <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
-            <div className="min-w-0">
-              <h2 id={titleId} className="text-lg font-semibold text-fg">{roleName(row.role)} worker</h2>
-              <p className="break-all font-mono text-mono text-muted">{row.workerId}</p>
+            <div className="flex min-w-0 items-start gap-3">
+              {identity?.portrait ?? null}
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 id={titleId} className="text-lg font-bold text-fg">{identity ? `${identity.name} worker` : `${roleName(row.role)} worker`}</h2>
+                  {identity ? <span className="chip chip-dot" data-testid="drawer-state-chip" style={{ background: identity.chip.bg, color: identity.chip.fg }}>{identity.chip.label}</span> : null}
+                </div>
+                {identity ? <p className="text-[13px] text-muted wrap-anywhere" data-testid="drawer-identity">{identity.line}</p> : null}
+                <p className="break-all font-mono text-mono text-muted">{row.workerId}</p>
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-2">
               <DemoBadge mode={mode} testId="drawer-demo-badge" />
@@ -376,6 +404,17 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
               <button type="button" className={buttonQuiet} onClick={() => dialogRef.current?.close()}>Close</button>
             </div>
           </div>
+          {identity ? (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-2" data-testid="drawer-session">
+              <span className="chip" style={{ background: identity.session.state === 'running' ? '#00e436' : identity.session.state === 'stopped' ? '#f0dfc2' : '#e2cba6', color: '#241a2e' }}>{identity.session.label}</span>
+              <span className="min-w-0 truncate font-mono text-mono text-muted" title={identity.session.workspace}>{identity.session.workspace}</span>
+              {identity.session.state === 'running' ? (
+                // The stop request and its states are the Settings tab's; this takes you to it.
+                <button type="button" className={`${buttonQuiet} ml-auto`} data-testid="drawer-stop" onClick={() => { selectTab('settings', false); requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-testid="settings-stop"] [data-action]')?.focus()); }}>Stop…</button>
+              ) : null}
+            </div>
+          ) : null}
+          {identity ? <p className="mt-1 truncate text-[13px] text-fg" data-testid="drawer-activity" title={identity.activity}><span className="sr-only">Now: </span>{identity.activity}</p> : null}
           {detail.summary !== row.activity.label ? <p className="mt-2 wrap-anywhere text-fg" data-testid="drawer-summary">{detail.summary}</p> : null}
           <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div><dt className="mb-1 text-sm font-medium text-muted">Activity</dt><dd className="m-0"><ActivitySignalView row={row} /></dd></div>
@@ -410,17 +449,39 @@ export function WorkerDrawer({ row, mode, simulated, wide, modal = true, nowMs, 
 
         {row.humanIntervenedAt !== null ? <p className="border-b border-line px-4 py-2 text-sm text-fg sm:px-6" data-testid="drawer-human-intervened"><Chip tone="warning">Human-intervened</Chip> <span className="ml-2 text-muted">A person opened a shell in this attempt's sandbox. The recorded model cannot vouch for what was run.</span></p> : null}
         <div role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-${tab}`} tabIndex={0} className="flex-1 p-4 sm:px-6" data-testid="drawer-panel">
-          {tab === 'task' ? <>{handover ?? null}<TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} /></> : null}
+          {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} humanIntervenedAt={row.humanIntervenedAt} /> : null}
+          {tab === 'shell' ? (
+            <div className="space-y-3" data-testid="drawer-shell">
+              {onOpenTerminalControl
+                ? <p className="text-sm text-muted">Control mode lets you type into this worker's sandbox, one line at a time, after you confirm. It is refused for restricted work and for benchmark trials.</p>
+                : <p className="text-sm text-fg" data-testid="shell-unavailable">Control mode is not available from this source, so there is no shell to type into. The read-only output is on Terminal.</p>}
+              <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} onOpenControl={onOpenTerminalControl} humanIntervenedAt={row.humanIntervenedAt} />
+            </div>
+          ) : null}
+          {tab === 'task' ? (
+            <div className="space-y-6">
+              <TaskPanel detail={detail} row={row} onSettings={() => selectTab('settings', true)} />
+              <section aria-label="Checks and criteria"><h3 className="mb-2 font-semibold text-fg">Checks and criteria</h3><ChecksPanel detail={detail} simulated={simulated} /></section>
+              <section aria-label="Artifacts"><h3 className="mb-2 font-semibold text-fg">Artifacts</h3><ArtifactsPanel detail={detail} simulated={simulated} /></section>
+              <section aria-label="Context and knowledge"><h3 className="mb-2 font-semibold text-fg">Context and knowledge packs</h3>{context ?? <Empty>The Project Brain is not connected here.</Empty>}</section>
+            </div>
+          ) : null}
+          {tab === 'sandbox' ? (
+            <div className="space-y-6">
+              <Facts facts={[...detail.sandbox]} />
+              {handover ?? null}
+              <section aria-label="Usage figures"><h3 className="mb-2 font-semibold text-fg">Usage</h3><UsagePanel detail={detail} /></section>
+            </div>
+          ) : null}
+          {tab === 'messages' ? (
+            <div className="space-y-6">
+              {messages ? <section aria-label="Waiting on you"><h3 className="mb-2 font-semibold text-fg">Waiting on you</h3>{messages}</section> : null}
+              <section aria-label="Permission requests"><h3 className="mb-2 font-semibold text-fg">Requests</h3><PermissionsPanel detail={detail} /></section>
+              <section aria-label="Activity events"><h3 className="mb-2 font-semibold text-fg">Activity events</h3><TimelinePanel detail={detail} /></section>
+            </div>
+          ) : null}
           {/* Kept mounted while another tab shows, so a retry's idempotency key, a reported outcome and an unsaved choice survive a look at another tab. */}
-          <div hidden={tab !== 'settings'}>{settings(() => selectTab('terminal', true))}</div>
-          {tab === 'timeline' ? <TimelinePanel detail={detail} /> : null}
-          {tab === 'checks' ? <ChecksPanel detail={detail} simulated={simulated} /> : null}
-          {tab === 'artifacts' ? <ArtifactsPanel detail={detail} simulated={simulated} /> : null}
-          {tab === 'terminal' ? <TerminalPanel target={row.terminalTarget} onOpen={onOpenTerminal} onOpenControl={onOpenTerminalControl} humanIntervenedAt={row.humanIntervenedAt} /> : null}
-          {tab === 'permissions' ? <PermissionsPanel detail={detail} /> : null}
-          {tab === 'context' ? (context ?? <Empty>The Project Brain is not connected here.</Empty>) : null}
-          {tab === 'sandbox' ? <Facts facts={[...detail.sandbox]} /> : null}
-          {tab === 'usage' ? <UsagePanel detail={detail} /> : null}
+          <div hidden={tab !== 'settings'}>{settings(() => selectTab('shell', true))}</div>
         </div>
 
         <footer className="border-t border-line px-4 py-2 text-sm text-muted sm:px-6">

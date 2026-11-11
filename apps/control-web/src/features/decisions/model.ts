@@ -379,7 +379,7 @@ function changeCards(run: RunView, snapshot: ProjectViewSnapshot, options: Decis
   const uncovered = tasks.some((t) => isBudgetStopped(t, run) && !reducedScopeCovers(run, t));
   const cancelled = tasks.filter((t) => t.status === 'cancelled').length;
   const scopeNote = run.reducedScope ? `Accepted at reduced scope: ${run.reducedScope.notDelivered.tasks.length} planned task${run.reducedScope.notDelivered.tasks.length === 1 ? ' is' : 's are'} not delivered.` : uncovered ? 'Some planned work was stopped for budget and is not delivered.' : cancelled > 0 ? `${cancelled} planned task${cancelled === 1 ? ' was' : 's were'} cancelled and ${cancelled === 1 ? 'is' : 'are'} not delivered.` : null;
-  // The same count Mission Control shows: a deliberately cancelled task is out of scope, and is named beside the figure so the gap can be read.
+  // The same count the Run summary shows: a deliberately cancelled task is out of scope, and is named beside the figure so the gap can be read.
   const counts = verifiedCounts(snapshot, run.runId);
   const deliberate = tasks.filter((t) => t.status === 'cancelled' && t.cancelReason !== 'budget_exhausted' && !isBudgetStopped(t, run)).length;
   const dropped = deliberate > 0 ? `; ${deliberate} deliberately cancelled task${deliberate === 1 ? ' is' : 's are'} not counted` : '';

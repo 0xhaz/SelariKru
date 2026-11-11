@@ -1,15 +1,21 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['office', 'overview', 'team', 'pipeline', 'decisions', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding'] as const;
+export const ROUTES = ['office', 'actions', 'summary', 'team', 'pipeline', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding'] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** The office is the centre and the default; every other route opens over it. A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */
 const pathOf = (hash: string): string => hash.replace(/^#\/?/, '').split('?')[0]!;
-const parse = (hash: string): Route => ((ROUTES as readonly string[]).includes(pathOf(hash)) ? (pathOf(hash) as Route) : 'office');
+/** Old links keep working: the attention queue and Decisions are now one Action items drawer, and the rest of the old overview is the Run summary. */
+const LEGACY: Readonly<Record<string, Route>> = { overview: 'actions', decisions: 'actions', attention: 'actions' };
+const parse = (hash: string): Route => {
+  const p = pathOf(hash);
+  if ((ROUTES as readonly string[]).includes(p)) return p as Route;
+  return LEGACY[p] ?? 'office';
+};
 
 export const hrefFor = (route: Route): string => `#/${route}`;
-/** A deep link to one card on the Decisions screen. */
-export const decisionHref = (cardId: string): string => `#/decisions?card=${encodeURIComponent(cardId)}`;
+/** A deep link to one card in the Action items drawer. */
+export const decisionHref = (cardId: string): string => `#/actions?card=${encodeURIComponent(cardId)}`;
 
 /** The query of the current route, read fresh from the hash. */
 export const hashQuery = (hash: string = window.location.hash): URLSearchParams => new URLSearchParams(hash.split('?')[1] ?? '');

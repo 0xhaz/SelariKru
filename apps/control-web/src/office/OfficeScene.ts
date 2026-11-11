@@ -204,7 +204,6 @@ export class OfficeScene {
         if (g) this.effects.text('VERIFIED', g.x + g.w / 2, g.y - 20, C.green);
       }
     }
-    for (const prDone of world.prs) if (prDone.merged) this.pulses.set('main', 1);
     if (this.reducedMotion) {
       for (const p of this.parcels) {
         const c = this.stages.get(p.id)!;

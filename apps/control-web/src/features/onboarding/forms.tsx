@@ -551,7 +551,7 @@ const GUIDANCE: readonly { route: string; label: string; text: string }[] = [
   { route: 'team', label: 'Team', text: 'Who owns the current task, and why a worker is waiting.' },
   { route: 'pipeline', label: 'Pipeline', text: 'How independent tasks run side by side.' },
   { route: 'evidence', label: 'Evidence', text: 'What the checks actually verified.' },
-  { route: 'decisions', label: 'Decisions', text: 'Where a decision or pull request needs you. People merge; agents never do.' },
+  { route: 'actions', label: 'Action items', text: 'Where a decision or pull request needs you. People merge; agents never do.' },
 ];
 
 export function StartStep(p: StepProps) {
@@ -569,7 +569,7 @@ export function StartStep(p: StepProps) {
       intro={activated ? <p>The run exists but has no tasks yet. Next, plan it in the Assistant: draft the tasks, have the server check them, and accept the plan. Accepted does not mean your app is delivered or released.</p> : <p>This starts one bounded run under the limits below. No compute starts before you confirm.</p>}
       footer={activated ? (<>
         <a className={buttonPrimary} href={`?project=${encodeURIComponent(view.projectId)}#/assistant?run=${encodeURIComponent(view.firstRunId ?? '')}`}>Plan the run</a>
-        <a className={buttonQuiet} href={`?project=${encodeURIComponent(view.projectId)}#/overview`}>Open Mission Control</a>
+        <a className={buttonQuiet} href={`?project=${encodeURIComponent(view.projectId)}#/office`}>Open the project</a>
       </>) : (<>
         {backTo(onGo, 'readiness')}
         <button type="button" className={buttonPrimary} disabled={busy || !ready} onClick={() => void start()}>Start first run</button>

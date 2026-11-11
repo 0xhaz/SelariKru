@@ -460,7 +460,7 @@ function TrackTotals({ label, testId, totals }: { label: string; testId: string;
   );
 }
 
-/** Mission Control's Benchmark panel: reads one results file, and shows only what that file measured. */
+/** The Benchmark panel: reads one results file, and shows only what that file measured. */
 export function BenchmarkView({ mode, loader = loadBenchmark }: { mode: 'mock' | 'live'; loader?: () => Promise<BenchmarkLoad> }) {
   const [load, setLoad] = useState<BenchmarkLoad | null>(null);
   const [tab, setTab] = useState<Tab>('assistant');

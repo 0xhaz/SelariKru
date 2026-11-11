@@ -357,7 +357,7 @@ function NotesSection({ view, live, act }: { view: ProductViewData; live: boolea
   );
 }
 
-/** Mission Control → Product: the brief, outcome plans, the trace, milestone summaries and outcome notes. */
+/** Product: the brief, outcome plans, the trace, milestone summaries and outcome notes. */
 export function ProductView({ port, connection, mode }: ProductViewProps) {
   const product = useProduct(port);
   const live = connection === 'live' && !product.busy;

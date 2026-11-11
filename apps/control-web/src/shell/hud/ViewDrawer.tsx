@@ -1,9 +1,8 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md: the side drawer (resize handle, maximise) and the centred settings modal.
 
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
-import { hrefFor, type Route } from '../route.ts';
+import { hrefFor } from '../route.ts';
 import { DRAWER_DEFAULT, ui, useUi } from '../ui-store.ts';
-import { MISSION_CONTROL } from '../views.ts';
 
 function MaximizeButton() {
   const max = useUi((s) => s.drawerMaximized);
@@ -55,10 +54,9 @@ const CLOSE = 'btn grid h-[30px] place-items-center px-2.5';
  * A screen in the reference's right-side drawer, over the office. It is the screen's route, so it can be linked to; ✕ or Escape on the page go
  * back to the office. Below the floating layout's width it is a full-width panel in the page.
  */
-export function ViewDrawer({ view, title, route, decisionCount, paused, children, after }: { view: string; title: string; route: Route; decisionCount: number; paused: ReactNode; children: ReactNode; after?: ReactNode }) {
+export function ViewDrawer({ view, title, paused, children, after, aside = null }: { view: string; title: string; paused: ReactNode; children: ReactNode; after?: ReactNode; aside?: string | null }) {
   const width = useUi((s) => s.drawerWidth);
   const maximized = useUi((s) => s.drawerMaximized);
-  const mc = MISSION_CONTROL.some((m) => m.route === route);
   return (
     <div
       data-testid="view-drawer" data-view={view}
@@ -68,17 +66,7 @@ export function ViewDrawer({ view, title, route, decisionCount, paused, children
       {maximized ? null : <ResizeHandle />}
       <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none">
         <div className="flex shrink-0 flex-wrap items-center gap-2.5 border-b-[3px] border-ink px-3 py-2">
-          {mc ? (
-            <nav aria-label="Mission Control" className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-              <span className="mr-1 text-[15px] font-bold text-fg">Mission Control</span>
-              {MISSION_CONTROL.map((m) => (
-                <a key={m.route} href={hrefFor(m.route)} aria-current={route === m.route ? 'page' : undefined} className="btn text-sm">
-                  {m.label}
-                  {m.route === 'decisions' && decisionCount > 0 ? <span className="ml-1.5 text-warning"><span className="sr-only">, </span>{decisionCount}<span className="sr-only"> waiting</span></span> : null}
-                </a>
-              ))}
-            </nav>
-          ) : <span className="min-w-0 flex-1 truncate text-[15px] font-bold text-fg" aria-hidden="true">{title}</span>}
+          <span className="flex min-w-0 flex-1 items-baseline gap-2 truncate" aria-hidden="true"><b className="text-[15px] text-fg">{title}</b>{aside ? <span className="text-[13px] text-muted" data-testid="view-drawer-aside">{aside}</span> : null}</span>
           <span className="hidden text-[13px] text-muted 2xl:inline" data-testid="view-drawer-keys"><kbd className="kbd">Esc</kbd> on the page closes</span>
           <MaximizeButton />
           <a href={hrefFor('office')} className={CLOSE} aria-label="Close, back to the office" data-testid="view-drawer-close">✕</a>

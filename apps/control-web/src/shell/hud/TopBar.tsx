@@ -6,7 +6,7 @@ import type { OfficeRunChoice } from '../../office/model.ts';
 import type { ConnectionState } from '../projection-store.ts';
 import { hashWith, hrefFor, type Route } from '../route.ts';
 import { ui } from '../ui-store.ts';
-import { ACTION_ITEMS_MENU, BOARDS_MENU, type MenuEntry } from '../views.ts';
+import { BOARDS_MENU, topBarHomeOf, type MenuEntry } from '../views.ts';
 
 export const CONNECTION: Readonly<Record<ConnectionState, { label: string; tone: Tone }>> = {
   connecting: { label: 'Connecting', tone: 'neutral' },
@@ -77,11 +77,10 @@ function Menu({ label, testId, entries, route, extra, urgent }: { label: string;
         {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
       </button>
       <ul id={id} hidden={!open} className="panel absolute right-0 top-[calc(100%+8px)] z-50 m-0 flex w-max min-w-[13rem] list-none flex-col gap-1.5 p-2">
-        {entries.map((e, i) => (
-          <li key={`${e.route}-${i}`} className="flex flex-col">
-            {e.group && (i === 0 || entries[i - 1]!.group !== e.group) ? <span aria-hidden="true" className="px-1 pt-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">{e.group}</span> : null}
+        {entries.map((e) => (
+          <li key={e.route} className="flex flex-col">
             <a href={hrefFor(e.route)} aria-current={e.route === route ? 'page' : undefined} onClick={() => setOpen(false)} className="btn text-left text-[14px]">
-              {e.group ? <span className="sr-only">{e.group}: </span> : null}{e.label}{e.badge}
+              {e.label}{e.badge}
             </a>
           </li>
         ))}
@@ -161,8 +160,6 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
   useEffect(() => {
     navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
   }, [route]);
-  const decisionsBadge = decisionCount > 0 ? <span data-testid="decisions-count" className="ml-1.5 text-warning"><span className="sr-only">, </span>{decisionCount}<span className="sr-only"> waiting</span></span> : null;
-  const actionEntries = ACTION_ITEMS_MENU.map((e) => (e.route === 'decisions' ? { ...e, badge: decisionsBadge } : e));
   return (
     <header ref={ref} data-testid="top-bar" className="panel sticky top-0 z-40 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 xl:fixed xl:left-4 xl:right-4 xl:top-[10px] xl:h-[50px] xl:flex-nowrap xl:gap-x-2.5 xl:py-0">
       <p className="flex min-w-0 flex-1 items-center gap-2 xl:flex-none">
@@ -197,23 +194,30 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         </span>
       ) : null}
       <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:w-auto xl:flex-1 xl:justify-end xl:overflow-visible xl:p-0">
-        <Menu label="Action items" testId="action-items" entries={actionEntries} route={route} urgent={attentionUrgent}
-          extra={<>
-            {attentionNumber !== null && attentionNumber > 0 ? <span aria-hidden="true" className="hidden sm:inline"> · {attentionNumber}</span> : null}
-            {attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="ml-1 text-warning sm:hidden">{attentionBadge}</span> : null}
-            {attentionCount && panelWide ? <span data-testid="attention-count" className="sr-only">{attentionCount}</span> : null}
-          </>} />
+        {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
+        <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-yellow)' } : undefined}>
+          Action items
+          {attentionNumber !== null && attentionNumber > 0 ? <span className="hidden sm:inline"> · {attentionNumber}<span className="sr-only"> waiting on you</span></span> : null}
+          {attentionBadge ? <span data-testid="attention-badge" aria-label={attentionCount ?? undefined} className="ml-1 text-warning sm:hidden">{attentionBadge}</span> : null}
+          {attentionCount && panelWide ? <span data-testid="attention-count" className="sr-only">{attentionCount}</span> : null}
+          {decisionCount > 0 ? <span data-testid="decisions-count" className="sr-only">, {decisionCount} decision{decisionCount === 1 ? '' : 's'}</span> : null}
+        </a>
         <Menu label="Boards" testId="top-bar-boards" entries={BOARDS_MENU} route={route} />
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
-        <a href={hrefFor('settings')} aria-current={route === 'settings' || route === 'assistant' || route === 'onboarding' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
+        <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
         {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title="Development only">Debug</button> : null}
       </nav>
       <div className="ml-auto flex shrink-0 items-center gap-2 xl:ml-0">
         {panelWide ? null : teamToggle}
         {/* Setting up a first project has no live data to be fresh about. */}
         {route === 'onboarding' && connection === 'unavailable' ? null : <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={nowMs} />}
-        {account ? <button type="button" className="btn text-[14px]" onClick={account.onSignOut} title={account.label}>Sign out</button> : null}
+        {account ? (
+          <span className="flex min-w-0 items-center gap-2 text-[13px]" data-testid="top-bar-account">
+            <span className="max-w-[12rem] truncate text-muted" title={account.label}><span className="sr-only">Signed in as </span>{account.label}</span>
+            <button type="button" className="btn text-[14px]" onClick={account.onSignOut}>Sign out</button>
+          </span>
+        ) : null}
       </div>
       {panelWide ? null : <div className="order-4 w-full">{teamFold}</div>}
     </header>

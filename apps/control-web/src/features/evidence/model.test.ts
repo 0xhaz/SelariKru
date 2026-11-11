@@ -110,7 +110,7 @@ describe('buildEvidence', () => {
     // It says why, and where to act: re-verifying runs no worker.
     expect(states(m)['verified']!.detail).toMatch(/verifier, its suite or the stored record changed/i);
     expect(states(m)['verified']!.detail).toMatch(/no worker/i);
-    expect(states(m)['verified']!.link).toMatchObject({ href: '#/decisions?card=reverify%3Ar1', label: 'Re-verify in Decisions', external: false });
+    expect(states(m)['verified']!.link).toMatchObject({ href: '#/actions?card=reverify%3Ar1', label: 'Re-verify in Action items', external: false });
   });
 
   it('a passing row with a valid record but an unfinished carrier reads as waiting, not as invalid', () => {

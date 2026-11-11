@@ -109,10 +109,10 @@ export function TaskInspector({ row, mode, simulated, canShowGraph, onClose, onO
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 text-sm text-muted">Next: <span className="text-fg">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</p>
+              <p className="mt-2 text-sm text-muted">Next: <span className="text-fg">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Action items</a></> : null}</p>
             </section>
           ) : (
-            <Section title="Status"><p className="text-fg">{row.reason ?? 'Nothing is holding this task.'} <span className="text-muted">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Decisions</a></> : null}</p></Section>
+            <Section title="Status"><p className="text-fg">{row.reason ?? 'Nothing is holding this task.'} <span className="text-muted">{row.nextAction}</span>{row.decisionId ? <> <a className="font-medium text-active underline underline-offset-2" href={decisionHref(row.decisionId)}>Open in Action items</a></> : null}</p></Section>
           )}
 
           {row.ifApproved ? (

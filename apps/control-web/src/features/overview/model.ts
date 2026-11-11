@@ -276,7 +276,7 @@ export interface OverviewOptions {
   readonly stale?: boolean;
 }
 
-/** Everything Mission Control shows, derived from one snapshot. Pure; time and liveness are parameters. */
+/** Everything the Needs you and Run summary screens show, derived from one snapshot. Pure; time and liveness are parameters. */
 export function buildOverview(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: OverviewOptions = {}): OverviewModel {
   const attention = buildAttention(snapshot, nowMs, livenessAsOfMs, options.lastConfirmedMs ?? null);
   const needsYou = attention.filter((i) => i.needsOperator).length;

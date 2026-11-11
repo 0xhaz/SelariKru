@@ -111,7 +111,7 @@ function Entry({ api, mode, onResume, onNew }: { api: OnboardingApi; mode: 'mock
                   <p className="wrap-anywhere font-medium text-fg">{item.name}</p>
                   <p className="text-sm text-muted">{STATE_LABELS[item.state]}{item.condition ? `, ${item.condition.replace('_', ' ')}` : ''}</p>
                 </div>
-                {item.state === 'activated' ? <a className={buttonQuiet} href={`?project=${encodeURIComponent(item.projectId)}#/overview`}>Open project</a> : <button type="button" className={buttonQuiet} onClick={() => onResume(item.projectId)}>Continue setup</button>}
+                {item.state === 'activated' ? <a className={buttonQuiet} href={`?project=${encodeURIComponent(item.projectId)}#/office`}>Open project</a> : <button type="button" className={buttonQuiet} onClick={() => onResume(item.projectId)}>Continue setup</button>}
               </li>
             ))}
           </ul>

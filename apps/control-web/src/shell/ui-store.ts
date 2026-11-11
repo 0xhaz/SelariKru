@@ -26,7 +26,7 @@ interface UiState {
 
 const WIDTH_KEY = 'selarikru.drawerWidth';
 export const DRAWER_MIN = 420;
-/** Wider than the reference's 520 px: Mission Control's tables and the pipeline graph need the room. */
+/** Wider than the reference's 520 px: the run summary's tables and the pipeline graph need the room. */
 export const DRAWER_DEFAULT = 760;
 
 /** Room left for the team panel when the drawer is as wide as it gets. */
