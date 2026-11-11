@@ -110,7 +110,7 @@ describe('POST delegations (H11)', () => {
     expect((ev as { actor_kind: string }).actor_kind).toBe('human');
   });
 
-  it('I4: a Project Manager plan is accepted through the plan-revision route only from an unlocked pmPlan call on clean context', async () => {
+  it('I4: a Project Manager plan reaches the plan-revision route only from an unlocked pmPlan call on clean context, bound to its output', async () => {
     const spec = specFor('t9', { role: 'backend' });
     const revise = (routeRecordId: string) => post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 2, idempotencyKey: `k-${routeRecordId}`, tasks: [spec], agentProposal: { taskId: 't1', routeRecordId, stepKind: 'pmPlan' } });
     // No pmPlan record: refused (a pmDelegate record does not count).
@@ -124,8 +124,7 @@ describe('POST delegations (H11)', () => {
     expect((await revise('req_pm')).body.error.code).toBe('proposal_from_restricted_call');
     await resetRecord();
     await record('internal', 'pmPlan');
-    const ok = await revise('req_pm');
-    expect(ok.status).toBe(201);
-    expect(ok.body.planRevision).toBe(3);
+    // Fix round 3: a clean record is not enough. The plan must be the call's own output, re-derived by the server (pm-plan.test.ts covers the accepted path).
+    expect((await revise('req_pm')).body.error.code).toBe('plan_output_mismatch');
   });
 });
