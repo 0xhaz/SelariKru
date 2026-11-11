@@ -706,3 +706,24 @@ describe('runAgent', () => {
     expect(p).toMatchObject({ status: 'invalid', data: null, validation: { status: 'failed', errors: ['/a path_invalid'] } });
   });
 });
+
+describe('labels against the cloud grant', () => {
+  const spec = { op: 'triageFailure' as const, systemInstruction: 'Explain. Return JSON.', schema: { type: 'object' }, schemaKey: 'triage|', citesCriteria: false, prompt: () => ({ prompt: 'p' }) };
+  const base = (mode: string) => ({ projectId: 'proj-1', allowedRequirementIds: [], sources: [{ id: 's1', classification: 'public' as const }], policy: cloud(mode), route: { taskId: 't1', stepKind: 'triage' as const } });
+
+  it('a label the grant does not cover refuses a cloud-only route and keeps a device-capable one on the device', async () => {
+    const { adapter, sdk } = make();
+    sdk.result = { text: '{}', inferenceSource: 'on_device' };
+    fresh.route = { runDefault: 'ONLY_IN_CLOUD', override: null, lock: null };
+    expect(await adapter.runAgent(spec, { ...base('ONLY_IN_CLOUD'), labels: ['internal'] })).toMatchObject({ status: 'blocked', blockedReason: 'cloud_not_granted_for_label' });
+    expect(sdk.specs).toHaveLength(0);
+    fresh.route = { runDefault: 'PREFER_IN_CLOUD', override: null, lock: null };
+    const p = await adapter.runAgent(spec, { ...base('PREFER_IN_CLOUD'), labels: ['internal'] });
+    expect(p).toMatchObject({ status: 'ok', requestedMode: 'ONLY_ON_DEVICE' });
+    expect(p.route).toMatchObject({ effectiveMode: 'PREFER_IN_CLOUD', fellBack: true, conformance: 'conforms' });
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+    // A covered label changes nothing.
+    sdk.result = { text: '{}', inferenceSource: 'in_cloud' };
+    expect(await adapter.runAgent(spec, { ...base('PREFER_IN_CLOUD'), labels: ['public'] })).toMatchObject({ status: 'ok', requestedMode: 'PREFER_IN_CLOUD' });
+  });
+});

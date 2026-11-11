@@ -1,6 +1,6 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_LIMITS, BrainBundleSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, checkAgentOutput, diffSummary, insideAllowedPaths,
-  parseUnifiedDiff, secretFileReason, strongerLabel,
+  AGENT_CITES_CRITERIA, AGENT_LIMITS, BrainBundleSchema, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  insideAllowedPaths, parseUnifiedDiff, reservedPath, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
 import type { InferenceMode, Policy, Source } from '@selarikru/policy';
@@ -25,11 +25,15 @@ export interface AgentTask {
   readonly classification: unknown;
 }
 
-/** One file's current contents, read-only, with its label. */
-export interface AgentFile {
+/** A path and its label. A path with no label, or a missing label, counts as restricted: the call stays on the device. */
+export interface AgentPathLabel {
   readonly path: string;
-  readonly content: string;
   readonly classification: unknown;
+}
+
+/** One file's current contents, read-only, with its label. */
+export interface AgentFile extends AgentPathLabel {
+  readonly content: string;
 }
 
 export interface AgentBaseInput {
@@ -49,10 +53,19 @@ export interface AgentInputs {
   readonly criteria: AgentBaseInput;
   readonly plan: AgentBaseInput;
   readonly breakdown: AgentBaseInput;
-  readonly patch: AgentBaseInput & { readonly files: readonly AgentFile[]; /** What the person asked for, if anything beyond the task. */ readonly request?: string };
-  readonly review: AgentBaseInput & { readonly diff: string; /** The changed files before the change. */ readonly files: readonly AgentFile[] };
-  readonly triage: AgentBaseInput & { readonly check: { readonly checkId: string; readonly output: string } };
-  readonly prDescription: AgentBaseInput & { readonly diff: string };
+  readonly patch: AgentBaseInput & {
+    readonly files: readonly AgentFile[];
+    /** What the person asked for, if anything beyond the task. */
+    readonly request?: string | undefined;
+    /** The request text's label. Missing: restricted, so the call stays on the device. */
+    readonly requestClassification?: unknown;
+  };
+  /** `files`: the changed files before the change, with their labels. Every path the diff touches takes its label from here; a path not here counts as restricted. */
+  readonly review: AgentBaseInput & { readonly diff: string; readonly files: readonly AgentFile[] };
+  /** The check's output carries its own label. Missing: restricted. */
+  readonly triage: AgentBaseInput & { readonly check: { readonly checkId: string; readonly output: string; readonly classification?: unknown } };
+  /** `files`: labels of the changed paths. Only allowed, labelled paths are listed. */
+  readonly prDescription: AgentBaseInput & { readonly diff: string; readonly files?: readonly AgentPathLabel[] };
 }
 
 /** Something the call did not give the agent, and why. Ids and codes only. */
@@ -157,30 +170,111 @@ export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[])
 type Built = { readonly prompt: string; readonly check: AgentCheckContext } | { readonly refused: string };
 interface At { readonly cloudCapable: boolean }
 
-/** Files the agent may read: inside the allowed paths, not a credentials file by name, not secret, and within the size caps. The rest is listed, never cut. */
+/** Missing information never counts as allowed: an input with no label is restricted, so it can only run on the device. */
+const labelOf = (l: unknown): unknown => (l === undefined || l === null ? 'restricted' : l);
+
+/** At most this many changed paths are named in a PR description prompt; the rest are counted. */
+export const PR_SUMMARY_MAX_PATHS = 20;
+
+/** A path the task's change may name: plain, not reserved, not a credentials file, inside the allowed paths. */
+function safePath(path: string, allowed: readonly string[]): boolean {
+  const p = canonicalPath(path);
+  return p !== null && allowedPathProblem(p) === null && !reservedPath(p) && secretFileReason(p) === null && insideAllowedPaths(p, allowed);
+}
+
+const labelFor = (path: string, given: readonly AgentPathLabel[]): unknown => {
+  const p = canonicalPath(path);
+  const hit = p === null ? undefined : given.find((g) => canonicalPath(g.path) === p);
+  return labelOf(hit?.classification);
+};
+
+/**
+ * Files the agent may read. Labels are decided before scope: a secret file (by label or by name) or a restricted one on a cloud-capable call is withheld first, then a
+ * path that is invalid, reserved or outside the allowed paths, then anything past the size caps. Withheld and out-of-scope files are counted in the prompt, never named;
+ * only a too-large file in scope is named. Nothing is cut.
+ */
 function selectFiles(all: readonly AgentFile[], allowed: readonly string[], cloudCapable: boolean): { included: AgentFile[]; omitted: AgentOmission[] } {
   const included: AgentFile[] = [];
   const omitted: AgentOmission[] = [];
   let total = 0;
   for (const f of [...all].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     const omit = (reason: BrainOmissionReason): void => void omitted.push({ kind: 'file', id: f.path, reason });
-    const label = strongerLabel('public', f.classification);
-    if (allowedPathProblem(f.path) !== null || !insideAllowedPaths(f.path, allowed)) { omit('out_of_scope'); continue; }
-    // Secret by name or label never goes into a prompt; restricted never into one that may reach the cloud (its label locks the call to the device first).
+    const label = strongerLabel('public', labelOf(f.classification));
     if (secretFileReason(f.path) !== null || label === 'secret' || (cloudCapable && label === 'restricted')) { omit('restricted_for_destination'); continue; }
+    if (!safePath(f.path, allowed)) { omit('out_of_scope'); continue; }
     if (f.content.length > AGENT_LIMITS.fileChars || total + f.content.length > AGENT_LIMITS.filesTotalChars) { omit('too_large'); continue; }
     total += f.content.length;
-    included.push(f);
+    included.push({ ...f, path: canonicalPath(f.path)! });
   }
   return { included, omitted };
 }
 
-/** Labels of the files that may enter the prompt, known before the route: a restricted one locks the call to the device. */
-function fileLabels(all: readonly AgentFile[], allowed: readonly string[]): unknown[] {
-  return selectFiles(all, allowed, false).included.map((f) => f.classification);
+/** The changed paths a PR description may name (allowed and labelled), and how many it may not. */
+function prPaths(diff: string, allowed: readonly string[], given: readonly AgentPathLabel[]): { listed: { line: string; label: unknown }[]; hidden: number } | null {
+  const parsed = parseUnifiedDiff(diff);
+  if (!parsed.ok) return null;
+  const listed: { line: string; label: unknown }[] = [];
+  let hidden = 0;
+  for (const f of diffSummary(parsed.files)) {
+    const hit = given.find((g) => canonicalPath(g.path) === f.path);
+    if (!safePath(f.path, allowed) || hit === undefined || hit.classification === undefined || hit.classification === null || strongerLabel('public', hit.classification) === 'secret') { hidden++; continue; }
+    listed.push({ line: `- ${f.change} ${f.path} (+${f.added} -${f.removed})`, label: hit.classification });
+  }
+  return { listed, hidden };
 }
 
-const fileBlock = (f: AgentFile): string => `----- BEGIN FILE ${f.path} -----\n${f.content}${f.content.endsWith('\n') || f.content === '' ? '' : '\n'}----- END FILE ${f.path} -----`;
+/** A device bundle may hold restricted claims, and a cloud bundle's claims may be internal: unknown per claim, so the strongest each could be. */
+function bundleLabels(bundle: unknown): unknown[] {
+  if (bundle === null || bundle === undefined) return [];
+  const b = BrainBundleSchema.safeParse(bundle);
+  if (!b.success) return ['restricted'];
+  if (b.data.claims.length === 0) return [];
+  return [b.data.destination === 'cloud' ? 'internal' : 'restricted'];
+}
+
+/** The given files' labels the prompt may carry, plus any value that is not a label at all: that blocks the call rather than be read as anything. */
+const givenFileLabels = (files: readonly AgentFile[], allowed: readonly string[]): unknown[] => [
+  ...selectFiles(files, allowed, false).included.map((f) => labelOf(f.classification)),
+  ...files.filter((f) => f.classification !== undefined && f.classification !== null && !BrainClassificationSchema.safeParse(f.classification).success).map((f) => f.classification),
+];
+
+/** Labels of everything the prompt may read, known before the route: the task, the bundle, the files, the diff's paths and any free text. */
+function labelsFor(kind: AgentKind, input: AgentInputs[AgentKind]): unknown[] {
+  const labels: unknown[] = [labelOf(input.task.classification), ...bundleLabels(input.bundle)];
+  const allowed = input.task.allowedPaths;
+  switch (kind) {
+    case 'patch': {
+      const i = input as AgentInputs['patch'];
+      labels.push(...givenFileLabels(i.files, allowed));
+      if (i.request?.trim()) labels.push(labelOf(i.requestClassification));
+      break;
+    }
+    case 'review': {
+      const i = input as AgentInputs['review'];
+      labels.push(...givenFileLabels(i.files, allowed));
+      const parsed = parseUnifiedDiff(i.diff);
+      // The diff carries each touched file's content: each path takes its file's label, and a path with none is restricted.
+      if (parsed.ok) for (const f of parsed.files) labels.push(safePath(f.path, allowed) ? labelFor(f.path, i.files) : 'restricted');
+      break;
+    }
+    case 'triage':
+      labels.push(labelOf((input as AgentInputs['triage']).check.classification));
+      break;
+    case 'prDescription': {
+      const i = input as AgentInputs['prDescription'];
+      const paths = prPaths(i.diff, allowed, i.files ?? []);
+      if (paths) labels.push(...paths.listed.slice(0, PR_SUMMARY_MAX_PATHS).map((x) => x.label));
+      break;
+    }
+    default:
+      break;
+  }
+  return labels;
+}
+
+/** Fenced content between markers that carry a per-call nonce, so the content cannot end its own block. */
+const block = (kind: string, name: string, content: string, nonce: string): string =>
+  `----- BEGIN ${kind}${name ? ` ${name}` : ''} ${nonce} -----\n${content}${content.endsWith('\n') || content === '' ? '' : '\n'}----- END ${kind}${name ? ` ${name}` : ''} ${nonce} -----`;
 
 /** The task, its criteria, its allowed paths, then the served context and what it left out. Fixed order and headings. */
 function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { lines: string[] } | { refused: string } {
@@ -199,7 +293,7 @@ function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { li
   if (!parsed.success) return { refused: 'context_bundle_unreadable' };
   const b = parsed.data;
   if (b.taskId !== t.taskId) return { refused: 'context_bundle_task_mismatch' };
-  // A bundle served for the device may hold restricted claims: it never goes into a prompt that may reach the cloud.
+  // A bundle served for the device may hold restricted claims. Its label locks the call to the device first; this is the backstop.
   if (at.cloudCapable && b.destination !== 'cloud') return { refused: 'context_bundle_not_for_cloud' };
   if (b.claims.length === 0) lines.push('(no claims)');
   for (const c of b.claims) lines.push(`- [${c.standing}${c.status === 'disputed' ? ', disputed' : ''}] ${c.heading} (${c.key}): ${c.text}`);
@@ -208,20 +302,31 @@ function header(input: AgentBaseInput, at: At, omissions: AgentOmission[]): { li
   return { lines };
 }
 
+/** Context entries by id and reason; files by name only when they were in scope and only too large. Every other withheld file is a count. */
 function leftOut(omissions: readonly AgentOmission[]): string[] {
   if (omissions.length === 0) return [];
-  const named = omissions.filter((o) => o.kind !== 'file' || o.reason !== 'restricted_for_destination');
+  const named = omissions.filter((o) => o.kind !== 'file' || o.reason === 'too_large');
   const withheld = omissions.length - named.length;
   return [
     '', '# Left out of this context',
     ...named.map((o) => `- ${o.kind} ${o.id}: ${o.reason}`),
-    ...(withheld > 0 ? [`- ${withheld} file${withheld === 1 ? ' was' : 's were'} withheld under the data rules.`] : []),
+    ...(withheld > 0 ? [`- ${withheld} file${withheld === 1 ? ' was' : 's were'} withheld under the data rules or the task's scope.`] : []),
   ];
 }
 
 const idsLine = (ids: readonly string[]): string => `Allowed criterion IDs: ${ids.join(', ')}. Use only these IDs.`;
 
-function build<K extends AgentKind>(kind: K, input: AgentInputs[K], at: At, omissions: AgentOmission[]): Built {
+/** Everything the prompt fences, so a nonce found in any of it is drawn again. */
+function fencedContent(kind: AgentKind, input: AgentInputs[AgentKind]): string[] {
+  if (kind === 'patch' || kind === 'review') {
+    const files = (input as { files: readonly AgentFile[] }).files.map((f) => f.content);
+    return kind === 'review' ? [...files, (input as AgentInputs['review']).diff] : files;
+  }
+  if (kind === 'triage') return [(input as AgentInputs['triage']).check.output];
+  return [];
+}
+
+function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions: AgentOmission[], nonce: string): Built {
   const head = header(input, at, omissions);
   if ('refused' in head) return head;
   const t = input.task;
@@ -242,38 +347,53 @@ function build<K extends AgentKind>(kind: K, input: AgentInputs[K], at: At, omis
       const i = input as AgentInputs['patch'];
       const sel = selectFiles(i.files, t.allowedPaths, at.cloudCapable);
       omissions.push(...sel.omitted);
-      out.push('', '# Files you may change', ...(sel.included.length > 0 ? sel.included.map(fileBlock) : ['(none)']));
+      out.push('', '# Files you may change', ...(sel.included.length > 0 ? sel.included.map((f) => block('FILE', f.path, f.content, nonce)) : ['(none)']));
       return finish(['Propose the change for this task as a unified diff.', ...(i.request?.trim() ? [`The person asked: ${i.request.trim()}`] : [])], { ...base, files: new Map(sel.included.map((f) => [f.path, f.content])) });
     }
     case 'review': {
       const i = input as AgentInputs['review'];
       if (i.diff.length > AGENT_LIMITS.patchDiffChars) return { refused: 'diff_too_large' };
-      if (!parseUnifiedDiff(i.diff).ok) return { refused: 'diff_unreadable' };
+      const parsed = parseUnifiedDiff(i.diff);
+      if (!parsed.ok) return { refused: 'diff_unreadable' };
+      // A code only: the refusal never names the path.
+      if (parsed.files.some((f) => !safePath(f.path, t.allowedPaths))) return { refused: 'review_unsafe_path' };
+      // Backstop: the labels lock a restricted or unlabelled diff to the device before this runs.
+      if (at.cloudCapable && parsed.files.some((f) => ['restricted', 'secret'].includes(strongerLabel('public', labelFor(f.path, i.files))))) return { refused: 'review_unsafe_path' };
       const sel = selectFiles(i.files, t.allowedPaths, at.cloudCapable);
       omissions.push(...sel.omitted);
-      out.push('', '# The change', '----- BEGIN DIFF -----', i.diff.replace(/\n$/, ''), '----- END DIFF -----', '', '# Changed files before the change', ...(sel.included.length > 0 ? sel.included.map(fileBlock) : ['(none)']));
+      out.push('', '# The change', block('DIFF', '', i.diff, nonce), '', '# Changed files before the change', ...(sel.included.length > 0 ? sel.included.map((f) => block('FILE', f.path, f.content, nonce)) : ['(none)']));
       return finish(['Review this change against the task and its criteria.', idsLine(ids)], { ...base, reviewedDiff: i.diff, files: new Map(sel.included.map((f) => [f.path, f.content])) });
     }
     case 'triage': {
       const i = input as AgentInputs['triage'];
       if (i.check.output.length > AGENT_LIMITS.checkOutputChars) return { refused: 'check_output_too_large' };
-      out.push('', `# Failed check: ${i.check.checkId}`, '----- BEGIN OUTPUT -----', i.check.output.replace(/\n$/, ''), '----- END OUTPUT -----');
+      out.push('', `# Failed check: ${i.check.checkId}`, block('OUTPUT', '', i.check.output, nonce));
       return finish(['Explain why this check failed and suggest one next step.']);
     }
     case 'prDescription': {
       const i = input as AgentInputs['prDescription'];
-      const parsed = parseUnifiedDiff(i.diff);
-      if (!parsed.ok) return { refused: 'diff_unreadable' };
-      out.push('', '# Files changed', ...diffSummary(parsed.files).map((f) => `- ${f.change} ${f.path} (+${f.added} -${f.removed})`));
+      const paths = prPaths(i.diff, t.allowedPaths, i.files ?? []);
+      if (paths === null) return { refused: 'diff_unreadable' };
+      const shown = paths.listed.slice(0, PR_SUMMARY_MAX_PATHS);
+      const more = paths.listed.length - shown.length;
+      out.push('', '# Files changed', ...(shown.length > 0 ? shown.map((x) => x.line) : ['(none listed)']), ...(more > 0 ? [`- and ${more} more`] : []),
+        ...(paths.hidden > 0 ? [`- ${paths.hidden} other file${paths.hidden === 1 ? '' : 's'} changed (not listed)`] : []));
       return finish(['Write the pull request description.', idsLine(ids)]);
     }
   }
-  return { refused: 'unknown_agent' };
 }
+
+const randomNonce = (): string => {
+  const b = new Uint8Array(12);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+};
 
 // ---- running an agent ---------------------------------------------------------------------------------------------------------
 
 export interface AgentCatalogOptions {
+  /** The per-call delimiter nonce. Default: 96 random bits. Tests pass a fixed sequence. */
+  readonly newNonce?: () => string;
   /** Records the route record with the server (a data source's `route.report`). Metadata only. A failure is shown on the result and changes nothing else. */
   readonly reportRoute?: (projectId: string, taskId: string, report: RouteRecordReport) => Promise<void>;
 }
@@ -300,7 +420,13 @@ export class AgentCatalog {
       op: def.operation, systemInstruction: def.rolePrompt, schema: agentJsonSchema(kind, ids), schemaKey: `${kind}|${ids.join(',')}`, citesCriteria: AGENT_CITES_CRITERIA[kind],
       prompt: (at) => {
         omissions = [];
-        const b = build(kind, input, at, omissions);
+        const fenced = fencedContent(kind, input);
+        let nonce = (this.opts.newNonce ?? randomNonce)();
+        for (let tries = 0; fenced.some((c) => c.includes(nonce)); tries++) {
+          if (tries >= 4) return { refused: 'delimiter_collision' };
+          nonce = (this.opts.newNonce ?? randomNonce)();
+        }
+        const b = build(kind, input, at, omissions, nonce);
         if ('refused' in b) return { refused: b.refused };
         checkCtx = b.check;
         return { prompt: b.prompt };
@@ -311,11 +437,10 @@ export class AgentCatalog {
         return r.ok ? [] : r.issues.map((i) => `${i.path} ${i.code}`);
       },
     };
-    const files = 'files' in input ? (input as { files: readonly AgentFile[] }).files : [];
     const proposal = await this.adapter.runAgent(spec, {
       projectId: input.projectId, allowedRequirementIds: ids, sources: input.sources, policy: input.policy,
       route: { taskId: input.task.taskId, stepKind: kind, callOverride: input.callOverride ?? null },
-      labels: [input.task.classification, ...fileLabels(files, input.task.allowedPaths)],
+      labels: labelsFor(kind, input),
     });
     const report = routeReportOf(proposal);
     let reported: AgentResult['reported'] = 'not_sent';

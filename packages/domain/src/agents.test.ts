@@ -73,7 +73,8 @@ describe('plan checks', () => {
   it('refuses invalid paths, secret paths and paths outside the task', () => {
     expect(codes({ tasks: [task('T1', [], ['../etc'])] })).toContain('path_invalid');
     expect(codes({ tasks: [task('T1', [], ['src/.git/config'])] })).toContain('path_invalid');
-    expect(codes({ tasks: [task('T1', [], ['src/.env'])] })).toContain('path_secret');
+    expect(codes({ tasks: [task('T1', [], ['src/.env'])] })).toContain('path_reserved');
+    expect(codes({ tasks: [task('T1', [], ['src/id_rsa'])] })).toContain('path_secret');
     expect(codes({ tasks: [task('T1', [], ['docs/readme.md'])] })).toContain('path_outside_allowed');
   });
 });
@@ -137,7 +138,8 @@ describe('patch check', () => {
     const at = (path: string) => GOOD_DIFF.replaceAll('src/app.ts', path);
     expect(codes(at('docs/app.ts'), ctx({ files: new Map([['docs/app.ts', BASE]]) }))).toContain('path_outside_allowed');
     expect(codes(at('src/.git/config'), ctx({ files: new Map([['src/.git/config', BASE]]) }))).toContain('path_invalid');
-    expect(codes(at('src/.env'), ctx({ files: new Map([['src/.env', BASE]]) }))).toContain('path_secret');
+    expect(codes(at('src/.env'), ctx({ files: new Map([['src/.env', BASE]]) }))).toContain('path_reserved');
+    expect(codes(at('src/id_rsa'), ctx({ files: new Map([['src/id_rsa', BASE]]) }))).toContain('path_secret');
     expect(codes(at('../outside.ts'))).toContain('path_invalid');
   });
 
@@ -162,7 +164,83 @@ describe('review checks', () => {
 
   it('a finding names a file in the diff and a line that exists after the change', () => {
     expect(codes(find('src/app.ts', 3))).toEqual([]);
+    expect(codes(find('./src/app.ts', 3))).toEqual([]);
     expect(codes(find('src/util.ts', 1))).toContain('finding_file_not_in_diff');
     expect(codes(find('src/app.ts', 40))).toContain('finding_line_out_of_range');
+  });
+});
+
+describe('fix round 1: canonical paths in patches (reviewer repro patch.mts)', () => {
+  const f = new Map([['src/a.ts', 'one\ntwo\n']]);
+  const c = (allowedPaths: string[] = ['src']) => ({ allowedPaths, files: f });
+  const codes = (d: string, x = c()) => { const r = checkPatch(d, x); return r.ok ? ['ok'] : r.issues.map((i) => i.code); };
+  const create = (p: string) => `--- /dev/null\n+++ ${p}\n@@ -0,0 +1 @@\n+x\n`;
+
+  it.each([
+    ['a create over an existing file spelled with ./', create('b/./src/a.ts'), 'diff_file_exists'],
+    ['a create over an existing file in another case', create('b/src/A.ts'), 'diff_file_exists'],
+    ['a create under a path that is an existing file', create('b/src/a.ts/x'), 'diff_file_exists'],
+    ['a duplicate spelled with ./', `--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-one\n+uno\n${create('b/./src/a.ts')}`, 'diff_duplicate_file'],
+    ['a duplicate in another case', `--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-one\n+uno\n${create('b/src/A.TS')}`, 'diff_duplicate_file'],
+    ['a parent segment', create('b/src/../x'), 'path_invalid'],
+    ['an absolute path', create('/etc/x'), 'path_invalid'],
+    ['a quoted path', create('"b/src/x y"'), 'path_invalid'],
+    ['a trailing slash', create('b/src/newdir/'), 'path_invalid'],
+    ['an empty segment', create('b/src//x.ts'), 'path_invalid'],
+    ['a carriage return in the path', `--- /dev/null\r\n+++ b/src/z.ts\r\n@@ -0,0 +1 @@\r\n+x\r\n`, 'path_invalid'],
+    ['a NUL in the path', create('b/src/z\0.ts'), 'path_invalid'],
+    ['.git in any case', create('b/src/.GIT/hooks/pre-commit'), 'path_invalid'],
+    ['an .env file in any case', create('b/src/.Env'), 'path_reserved'],
+    ['a git header naming another file', `diff --git a/src/a.ts b/src/evil.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-one\n+uno\n`, 'diff_header_mismatch'],
+    ['a rename', `diff --git a/src/a.ts b/src/b.ts\nsimilarity index 100%\nrename from src/a.ts\nrename to src/b.ts\n`, 'diff_unsupported'],
+    ['a binary patch', `diff --git a/src/x.png b/src/x.png\nnew file mode 100644\nBinary files /dev/null and b/src/x.png differ\n`, 'diff_unsupported'],
+    ['a symlink', `diff --git a/src/l b/src/l\nnew file mode 120000\n--- /dev/null\n+++ b/src/l\n@@ -0,0 +1 @@\n+/etc/passwd\n`, 'diff_unsupported'],
+    ['an executable', `diff --git a/src/l b/src/l\nnew file mode 100755\n--- /dev/null\n+++ b/src/l\n@@ -0,0 +1 @@\n+x\n`, 'diff_unsupported'],
+    ['a change that changes nothing', `--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,0 +1,0 @@\n`, 'diff_empty'],
+    ['prose before the diff', `Here is the diff:\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-one\n+uno\n`, 'diff_unparseable'],
+    ['a hunk at the wrong line', `--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2 +2 @@\n-one\n+uno\n`, 'diff_does_not_apply'],
+    ['no newline claimed on a file that has one', `--- a/src/a.ts\n+++ b/src/a.ts\n@@ -2 +2 @@\n-two\n\\ No newline at end of file\n+deux\n`, 'diff_does_not_apply'],
+  ])('refuses %s', (_name, diff, code) => {
+    expect(codes(diff)).toContain(code);
+  });
+
+  it('a trailing timestamp after a tab is not part of the path', () => {
+    expect(codes(create('b/src/z.ts\t2020-01-01'))).toEqual(['ok']);
+  });
+
+  it('no allowed paths allows nothing', () => {
+    expect(codes(create('b/src/q'), c([]))).toContain('path_outside_allowed');
+  });
+
+  it('results are keyed by the canonical path', () => {
+    const r = checkPatch(`--- a/./src/a.ts\n+++ b/./src/a.ts\n@@ -1 +1 @@\n-one\n+uno\n`, c());
+    expect(r.ok && [...r.results.keys()]).toEqual(['src/a.ts']);
+  });
+});
+
+describe('fix round 1: reserved roots, whatever the allowed paths say', () => {
+  const create = (p: string) => `--- /dev/null\n+++ b/${p}\n@@ -0,0 +1 @@\n+x\n`;
+  it.each([
+    ['.claude/skills/x/SKILL.md', ['.claude']],
+    ['.selarikru/approval.json', ['.selarikru']],
+    ['.CLAUDE/Skills/x.md', ['.CLAUDE']],
+    ['app/.env.local', ['app']],
+  ])('a patch may not touch %s', (p, allowed) => {
+    const r = checkPatch(create(p), { allowedPaths: allowed, files: new Map() });
+    expect(r.ok ? [] : r.issues.map((i) => i.code)).toContain('path_reserved');
+  });
+
+  it('a plan, even with no allowed paths to bound it, may not propose them', () => {
+    const plan = (paths: string[]) => ({ tasks: [{ key: 'T1', title: 't', description: 'd', role: 'backend', requirementIds: ['AC-1'], paths, dependsOn: [] }] });
+    for (const p of ['.claude/skills', '.claude/skills/x', '.selarikru', '.env', 'web/.env.production']) {
+      const r = checkAgentOutput('plan', plan([p]), { criteriaIds: IDS, allowedPaths: [] });
+      expect(r.ok ? [] : r.issues.map((i) => i.code)).toContain('path_reserved');
+    }
+    expect(checkAgentOutput('plan', plan(['.claude/commands']), { criteriaIds: IDS, allowedPaths: [] }).ok).toBe(true);
+  });
+
+  it('a breakdown step may not name one inside an allowed root', () => {
+    const r = checkAgentOutput('breakdown', { steps: [{ title: 't', detail: 'd', paths: ['.claude/skills/x'], criteriaIds: [] }] }, { criteriaIds: IDS, allowedPaths: ['.claude'] });
+    expect(r.ok ? [] : r.issues.map((i) => i.code)).toContain('path_reserved');
   });
 });

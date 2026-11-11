@@ -3,6 +3,7 @@ import { insideAllowedPaths, secretFileReason } from './checkpoint.ts';
 import { allowedPathProblem, validatePlanRevision } from './plan.ts';
 import { PLAN_TASK_ROLES } from './proposal.ts';
 import { ROUTE_STEP_KINDS, type RouteStepKind } from './route-policy.ts';
+import { SKILL_WORKSPACE_ROOT } from './skills.ts';
 import type { TaskSpec } from './task.ts';
 
 /**
@@ -98,7 +99,7 @@ export function agentOutputJsonSchema(kind: AgentKind, criteriaIds: readonly str
 // ---- checks -------------------------------------------------------------------------------------------------------------------
 
 export const AGENT_ISSUE_CODES = [
-  'schema_invalid', 'path_invalid', 'path_secret', 'path_outside_allowed', 'duplicate_key', 'missing_dependency', 'self_dependency', 'cycle',
+  'schema_invalid', 'path_invalid', 'path_reserved', 'path_secret', 'path_outside_allowed', 'diff_header_mismatch', 'duplicate_key', 'missing_dependency', 'self_dependency', 'cycle',
   'diff_empty', 'diff_unparseable', 'diff_unsupported', 'diff_duplicate_file', 'diff_too_large', 'diff_file_not_provided', 'diff_file_exists', 'diff_does_not_apply',
   'review_diff_unreadable', 'finding_file_not_in_diff', 'finding_line_out_of_range',
 ] as const;
@@ -124,11 +125,42 @@ export type AgentCheck = { readonly ok: true; readonly data: unknown } | { reado
 
 const jsonPath = (p: readonly PropertyKey[]): string => `/${p.map((x) => (typeof x === 'symbol' ? '*' : String(x))).join('/')}`;
 
-/** Why a proposed path is not usable, or null. Plain repo-relative, no `.git`, not a credentials file by name, and inside `allowed` when that is a bound. */
-function pathIssue(p: string, allowed: readonly string[] | null): AgentIssueCode | null {
-  if (allowedPathProblem(p) !== null) return 'path_invalid';
-  if (secretFileReason(p.replace(/\/+$/, '')) !== null) return 'path_secret';
-  if (allowed !== null && !insideAllowedPaths(p.replace(/^(\.\/)+/, '').replace(/\/+$/, ''), allowed)) return 'path_outside_allowed';
+/**
+ * The one spelling every check uses: leading `./` removed and Unicode NFC. Null when the path cannot be one plain repo-relative file path: empty, absolute, a trailing
+ * `/`, an empty, `.` or `..` segment, a quote, a backslash, or a control character (NUL, CR, tab and the rest).
+ */
+export function canonicalPath(raw: string): string | null {
+  // eslint-disable-next-line no-control-regex
+  if (raw === '' || /[\u0000-\u001f\u007f"\\]/.test(raw)) return null;
+  const p = raw.replace(/^(\.\/)+/, '').normalize('NFC');
+  if (p === '' || p.endsWith('/')) return null;
+  const segs = p.split('/');
+  if (segs.some((x) => x === '' || x === '.' || x === '..')) return null;
+  return p;
+}
+
+/**
+ * Paths no agent output may touch, whatever the task's allowed paths say: the skills workspace (`.claude/skills`), SelariKru's own `.selarikru`, `.git` anywhere, and
+ * `.env*` files anywhere. Matched case-insensitively, since a case-insensitive file system makes `.Env` and `.env` one file.
+ */
+export function reservedPath(path: string): boolean {
+  const segs = path.normalize('NFC').toLowerCase().replace(/^(\.\/)+/, '').replace(/\/+$/, '').split('/');
+  const root = SKILL_WORKSPACE_ROOT.toLowerCase().split('/');
+  if (root.every((r, i) => segs[i] === r)) return true;
+  if (segs[0] === '.selarikru') return true;
+  return segs.some((x) => x === '.git' || x.startsWith('.env'));
+}
+
+/**
+ * Why a proposed path is not usable, or null. Plain repo-relative, not reserved, not a credentials file by name, and inside `allowed` when that is a bound. A plan or
+ * breakdown names directory prefixes, so a trailing `/` is dropped first; a patch's paths come canonical from the parser.
+ */
+function pathIssue(raw: string, allowed: readonly string[] | null): AgentIssueCode | null {
+  const p = canonicalPath(raw.replace(/\/+$/, ''));
+  if (p === null || allowedPathProblem(p) !== null) return 'path_invalid';
+  if (reservedPath(p)) return 'path_reserved';
+  if (secretFileReason(p) !== null) return 'path_secret';
+  if (allowed !== null && !insideAllowedPaths(p, allowed)) return 'path_outside_allowed';
   return null;
 }
 
@@ -196,7 +228,7 @@ function checkReview(out: ReviewOutput, ctx: AgentCheckContext, add: (code: Agen
   if (parsed === null || !parsed.ok) { add('review_diff_unreadable'); return; }
   const byPath = new Map(parsed.files.map((f) => [f.path, f]));
   out.findings.forEach((f, i) => {
-    const fd = byPath.get(f.file);
+    const fd = byPath.get(canonicalPath(f.file) ?? '');
     if (!fd) { add('finding_file_not_in_diff', 'findings', i, 'file'); return; }
     if (!lineExists(fd, f.line, ctx.files?.get(fd.path) ?? null)) add('finding_line_out_of_range', 'findings', i, 'line');
   });
@@ -232,16 +264,20 @@ export interface FileDiff {
   readonly change: 'modify' | 'create' | 'delete';
   readonly hunks: readonly DiffHunk[];
 }
-export type DiffParse = { readonly ok: true; readonly files: readonly FileDiff[] } | { readonly ok: false; readonly code: 'diff_empty' | 'diff_unparseable' | 'diff_unsupported' | 'diff_duplicate_file' };
+export type DiffParseCode = 'diff_empty' | 'diff_unparseable' | 'diff_unsupported' | 'diff_duplicate_file' | 'diff_header_mismatch' | 'path_invalid';
+export type DiffParse = { readonly ok: true; readonly files: readonly FileDiff[] } | { readonly ok: false; readonly code: DiffParseCode };
 
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 /** Extended git headers a plain text change may carry. Anything else (renames, copies, mode changes, binary patches) is not a change this flow applies. */
 const PLAIN_GIT_HEADER = /^(?:index [0-9a-f]{4,64}\.\.[0-9a-f]{4,64}(?: 100644)?|new file mode 100644|deleted file mode 100644)$/;
 
-const stripPrefix = (raw: string, prefix: 'a/' | 'b/'): string => {
-  const p = raw.split('\t')[0]!.trimEnd();
-  return p !== '/dev/null' && p.startsWith(prefix) ? p.slice(2) : p;
+/** A header path, canonical, or `/dev/null`. Null when it is not a plain path. A tab starts the optional timestamp; nothing else is trimmed. */
+const headerPath = (raw: string, prefix: 'a/' | 'b/'): string | null => {
+  const p = raw.split('\t')[0]!;
+  if (p === '/dev/null') return p;
+  return canonicalPath(p.startsWith(prefix) ? p.slice(2) : p);
 };
+const GIT_HEADER = /^diff --git a\/(.+) b\/(.+)$/;
 
 /**
  * A unified diff of text files: `--- a/<path>` and `+++ b/<path>` headers, `/dev/null` for a created or deleted file, and hunks whose line counts match their headers.
@@ -252,13 +288,21 @@ export function parseUnifiedDiff(diffText: string): DiffParse {
   if (L.at(-1) === '') L.pop();
   if (L.every((l) => l.trim() === '')) return { ok: false, code: 'diff_empty' };
   const files: FileDiff[] = [];
+  /** Lower-cased: on a case-insensitive file system `src/A.ts` and `src/a.ts` are one file. */
   const seen = new Set<string>();
   let i = 0;
-  const bad = (code: 'diff_unparseable' | 'diff_unsupported' | 'diff_duplicate_file'): DiffParse => ({ ok: false, code });
+  /** The names from the last `diff --git` line, which the `---` and `+++` paths must repeat. */
+  let gitNames: [string, string] | null = null;
+  const bad = (code: DiffParseCode): DiffParse => ({ ok: false, code });
   while (i < L.length) {
     const line = L[i]!;
     if (line.trim() === '') { i++; continue; }
     if (line.startsWith('diff --git ')) {
+      const g = GIT_HEADER.exec(line);
+      if (!g) return bad('diff_unparseable');
+      const a = canonicalPath(g[1]!), b = canonicalPath(g[2]!);
+      if (a === null || b === null) return bad('path_invalid');
+      gitNames = [a, b];
       i++;
       while (i < L.length && !L[i]!.startsWith('--- ') && !L[i]!.startsWith('diff --git ')) {
         if (!PLAIN_GIT_HEADER.test(L[i]!)) return bad('diff_unsupported');
@@ -268,14 +312,16 @@ export function parseUnifiedDiff(diffText: string): DiffParse {
       continue;
     }
     if (!line.startsWith('--- ') || !(L[i + 1] ?? '').startsWith('+++ ')) return bad('diff_unparseable');
-    const oldPath = stripPrefix(line.slice(4), 'a/');
-    const newPath = stripPrefix(L[i + 1]!.slice(4), 'b/');
+    const oldPath = headerPath(line.slice(4), 'a/');
+    const newPath = headerPath(L[i + 1]!.slice(4), 'b/');
     i += 2;
+    if (oldPath === null || newPath === null) return bad('path_invalid');
     if (oldPath === '/dev/null' && newPath === '/dev/null') return bad('diff_unparseable');
     if (oldPath !== '/dev/null' && newPath !== '/dev/null' && oldPath !== newPath) return bad('diff_unsupported');
     const change = oldPath === '/dev/null' ? 'create' : newPath === '/dev/null' ? 'delete' : 'modify';
     const filePath = change === 'create' ? newPath : oldPath;
-    if (filePath === '') return bad('diff_unparseable');
+    if (gitNames !== null && (gitNames[0] !== filePath || gitNames[1] !== filePath)) return bad('diff_header_mismatch');
+    gitNames = null;
     const hunks: DiffHunk[] = [];
     while (i < L.length && L[i]!.startsWith('@@')) {
       const m = HUNK.exec(L[i]!);
@@ -311,8 +357,9 @@ export function parseUnifiedDiff(diffText: string): DiffParse {
     if (hunks.length === 0) return bad('diff_unparseable');
     if (change === 'create' && (hunks.length !== 1 || hunks[0]!.oldCount !== 0)) return bad('diff_unparseable');
     if (change === 'delete' && hunks.some((h) => h.newCount !== 0)) return bad('diff_unparseable');
-    if (seen.has(filePath)) return bad('diff_duplicate_file');
-    seen.add(filePath);
+    if (!hunks.some((h) => h.lines.some((l) => l.op !== ' '))) return bad('diff_empty');
+    if (seen.has(filePath.toLowerCase())) return bad('diff_duplicate_file');
+    seen.add(filePath.toLowerCase());
     files.push({ path: filePath, change, hunks });
   }
   return files.length === 0 ? { ok: false, code: 'diff_empty' } : { ok: true, files };
@@ -395,12 +442,24 @@ export function checkPatch(diff: string, ctx: Pick<AgentCheckContext, 'allowedPa
   if (parsed.files.length > AGENT_LIMITS.patchFiles || summary.reduce((a, f) => a + f.added + f.removed, 0) > AGENT_LIMITS.patchChangedLines) return issue('diff_too_large');
   const issues: AgentIssue[] = [];
   const results = new Map<string, string | null>();
-  const files = ctx.files ?? new Map<string, string>();
+  // The given files under their canonical spelling; lookups for "does it exist" ignore case, as a case-insensitive file system would.
+  const files = new Map<string, string>();
+  for (const [k, v] of ctx.files ?? []) { const c = canonicalPath(k); if (c !== null) files.set(c, v); }
+  const known = new Set([...files.keys(), ...parsed.files.filter((f) => f.change !== 'create').map((f) => f.path)].map((k) => k.toLowerCase()));
+  const created = parsed.files.filter((f) => f.change === 'create').map((f) => f.path.toLowerCase());
+  /** A create collides when the file exists under any spelling, when a directory on its path is a file, or when it would be a directory over a file. */
+  const collides = (path: string): boolean => {
+    const l = path.toLowerCase();
+    const segs = l.split('/');
+    const parents = segs.slice(0, -1).map((_, j) => segs.slice(0, j + 1).join('/'));
+    const others = [...known, ...created.filter((x) => x !== l)];
+    return known.has(l) || parents.some((d) => others.includes(d)) || others.some((x) => x.startsWith(`${l}/`));
+  };
   parsed.files.forEach((fd, i) => {
     const at = `/files/${i}`;
     const p = pathIssue(fd.path, ctx.allowedPaths);
     if (p) { issues.push({ code: p, path: at }); return; }
-    if (fd.change === 'create' && files.has(fd.path)) { issues.push({ code: 'diff_file_exists', path: at }); return; }
+    if (fd.change === 'create' && collides(fd.path)) { issues.push({ code: 'diff_file_exists', path: at }); return; }
     if (fd.change !== 'create' && !files.has(fd.path)) { issues.push({ code: 'diff_file_not_provided', path: at }); return; }
     const applied = applyFileDiff(fd.change === 'create' ? null : files.get(fd.path)!, fd);
     if (!applied.ok) { issues.push({ code: applied.code, path: at }); return; }

@@ -3,7 +3,7 @@ import {
   DEFAULT_NANO_INPUT_BUDGET_CHARS, RoutePolicyModeSchema, effectiveRoutePolicy, redactSecrets, routeLockFor, routeOutcome, strongerLabel,
   type EffectiveRoutePolicy, type RouteConformance, type RouteLock, type RoutePolicySource, type RouteRecordReport, type RouteStepKind,
 } from '@selarikru/domain';
-import { resolveInferenceMode, type InferenceMode, type Policy, type Source } from '@selarikru/policy';
+import { FIREBASE_CLOUD_ROUTE, isDestinationGranted, resolveInferenceMode, type InferenceMode, type Policy, type Source } from '@selarikru/policy';
 import {
   MODEL_METADATA,
   composePrompt,
@@ -350,22 +350,32 @@ export class FirebaseHybridAssistantAdapter {
       return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: 'no_allowed_requirement_ids' });
     }
 
+    // Every label of what the prompt reads (the task, files, bundle claims, diff paths) must be covered by the policy's cloud grant, as the sources are. If any is not,
+    // the cloud is not allowed: a cloud-only route is refused, and a device-capable one runs on the device with no fallback. Unknown never counts as granted.
+    let mode: InferenceMode = routed.mode;
+    let allowFallback = routed.allowFallback;
+    if (mode !== 'ONLY_ON_DEVICE' && !(req.labels ?? []).every((l) => isDestinationGranted('inference', FIREBASE_CLOUD_ROUTE, l, req.policy))) {
+      if (mode === 'ONLY_IN_CLOUD') return make({ status: 'blocked', blockedReason: 'cloud_not_granted_for_label' });
+      if (mode === 'PREFER_IN_CLOUD') mode = 'ONLY_ON_DEVICE';
+      allowFallback = false;
+    }
+
     // Never let the SDK choose the cloud when policy has no approved fallback.
-    const deviceMustServe = routed.mode === 'ONLY_ON_DEVICE' || (routed.mode === 'PREFER_ON_DEVICE' && !routed.allowFallback);
-    const built = spec.prompt({ mode: routed.mode, cloudCapable: !deviceMustServe });
-    if ('refused' in built) return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: built.refused });
+    const deviceMustServe = mode === 'ONLY_ON_DEVICE' || (mode === 'PREFER_ON_DEVICE' && !allowFallback);
+    const built = spec.prompt({ mode, cloudCapable: !deviceMustServe });
+    if ('refused' in built) return make({ status: 'blocked', requestedMode: mode, blockedReason: built.refused });
     const systemInstruction = spec.systemInstruction;
     const prompt = built.prompt;
     if (redactSecrets(prompt) !== prompt || redactSecrets(systemInstruction) !== systemInstruction) {
-      return make({ status: 'blocked', requestedMode: routed.mode, blockedReason: 'secret_in_input' });
+      return make({ status: 'blocked', requestedMode: mode, blockedReason: 'secret_in_input' });
     }
 
     // The device model's input budget. Over it, a call that must run on the device is refused, never cut. Local first with an approved fallback goes to the cloud,
     // as the SDK would when the device cannot serve, and records it: the request says ONLY_IN_CLOUD and the route record shows the fallback.
     const chars = systemInstruction.length + prompt.length;
     const input: ProposalInput = { chars, budgetChars: this.budgetChars, overDeviceBudget: chars > this.budgetChars };
-    if (input.overDeviceBudget && deviceMustServe) return make({ status: 'blocked', requestedMode: routed.mode, input, blockedReason: 'input_too_large_for_device' });
-    const requestedMode: InferenceMode = input.overDeviceBudget && routed.mode === 'PREFER_ON_DEVICE' ? 'ONLY_IN_CLOUD' : routed.mode;
+    if (input.overDeviceBudget && deviceMustServe) return make({ status: 'blocked', requestedMode: mode, input, blockedReason: 'input_too_large_for_device' });
+    const requestedMode: InferenceMode = input.overDeviceBudget && mode === 'PREFER_ON_DEVICE' ? 'ONLY_IN_CLOUD' : mode;
 
     if (deviceMustServe) {
       const device = this.readiness.observe(await this.sdk.availability());
