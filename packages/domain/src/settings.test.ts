@@ -18,7 +18,7 @@ describe('settings', () => {
   });
 
   it('the server enforces policy, the runner acknowledges what it holds', () => {
-    expect(SETTING_ENFORCER).toEqual({ paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner', route_policy: 'server', route_override: 'server' });
+    expect(SETTING_ENFORCER).toEqual({ paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner', route_policy: 'server', route_override: 'server', display_name: 'server', role: 'server', auto_delegate: 'server' });
   });
 
   it('accepts only closed values for each field', () => {

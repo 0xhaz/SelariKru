@@ -7,7 +7,8 @@ import { projects } from './projects.ts';
  * Columns shared by run and runner settings. `desired` is what the owner saved, at `desired_revision`; `effective` is what the enforcer has acknowledged,
  * at `effective_revision`. They differ until the enforcer says so: the server sets both in the save's transaction for policy it enforces itself, a runner
  * advances a runner-acknowledged field through its config acknowledgement. `config_revision` is the runner config revision that carries a runner-acknowledged change.
- * Values are closed shapes (a boolean, a number, plan paths), never free text.
+ * Values are closed shapes (a boolean, a number, plan paths, a role word), never free text, except a worker's display name (H11): owner text,
+ * checked for length, control characters and secret shapes before it is saved, and only ever quoted as data.
  */
 export const settingColumns = () => ({
   field: text('field').notNull(),
@@ -28,7 +29,7 @@ export const runSettings = pgTable(
   { ...scope(), runId: text('run_id').notNull(), ...settingColumns() },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.projectId, t.runId, t.field] }),
-    check('run_settings_field', sql`field IN ('paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy')`),
+    check('run_settings_field', sql`field IN ('paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate')`),
     check('run_settings_enforcer', sql`enforcer IN ('server', 'runner')`),
   ],
 );
@@ -42,7 +43,7 @@ export const runnerSettings = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.runnerId, t.field] }),
-    check('runner_settings_field', sql`field IN ('enabled', 'slots')`),
+    check('runner_settings_field', sql`field IN ('enabled', 'slots', 'display_name', 'role')`),
     check('runner_settings_enforcer', sql`enforcer IN ('server', 'runner')`),
   ],
 );

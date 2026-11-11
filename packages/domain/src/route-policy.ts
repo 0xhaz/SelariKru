@@ -79,7 +79,10 @@ export function effectiveRoutePolicy(input: RoutePolicyInput): EffectiveRoutePol
 
 // ---- the suggestion -----------------------------------------------------------------------------------------------------------
 
-export const ROUTE_STEP_KINDS = ['brief', 'criteria', 'plan', 'breakdown', 'patch', 'review', 'triage', 'prDescription'] as const;
+/** H11 adds the Project Manager's steps: an answer, web research (cloud only, with Google Search grounding), a plan draft, and a delegation proposal. */
+export const ROUTE_STEP_KINDS = ['brief', 'criteria', 'plan', 'breakdown', 'patch', 'review', 'triage', 'prDescription', 'pmAnswer', 'pmResearch', 'pmPlan', 'pmDelegate'] as const;
+/** The Project Manager's steps. */
+export const PM_STEP_KINDS = ['pmAnswer', 'pmResearch', 'pmPlan', 'pmDelegate'] as const;
 export const RouteStepKindSchema = z.enum(ROUTE_STEP_KINDS);
 export type RouteStepKind = z.infer<typeof RouteStepKindSchema>;
 
@@ -89,6 +92,7 @@ export type RouteStepKind = z.infer<typeof RouteStepKindSchema>;
  */
 export const ROUTE_STEP_SCOPE: Readonly<Record<RouteStepKind, 'bounded' | 'broad'>> = {
   brief: 'bounded', criteria: 'bounded', patch: 'bounded', triage: 'bounded', prDescription: 'bounded', plan: 'broad', breakdown: 'broad', review: 'broad',
+  pmAnswer: 'bounded', pmDelegate: 'bounded', pmPlan: 'broad', pmResearch: 'broad',
 };
 
 /** The default input budget for the device model, in characters, when the deployment configures none. About 1,500 tokens: well inside Gemini Nano's context. */

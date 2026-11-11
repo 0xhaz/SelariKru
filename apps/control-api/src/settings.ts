@@ -1,5 +1,5 @@
 import {
-  RUNNER_RECENT_SECONDS, RoutePolicyModeSchema, SETTING_ENFORCER, TaskSpecSchema, isCloudCapable, isReduction, policyRevokedReason, transition,
+  RUNNER_RECENT_SECONDS, RoutePolicyModeSchema, SETTING_ENFORCER, TaskSpecSchema, isCloudCapable, isReduction, policyRevokedReason, transition, workerNameProblem,
   type TaskSpec, type TaskStatus,
   type RunnerConfig, type RunnerConfigAck, type SettingChange, type SettingField, type SettingValue,
 } from '@selarikru/domain';
@@ -102,6 +102,10 @@ async function configuredValue(tx: Executor, tenantId: string, projectId: string
     // The choice recorded at onboarding seeds the run default; a task has no override until one is saved.
     case 'route_policy': { const seeded = RoutePolicyModeSchema.safeParse(run?.setupSnapshot?.['inference']); return seeded.success ? seeded.data : null; }
     case 'route_override': return null;
+    // H11: no name means the role label shows; no role means the worker claims as before; the Project Manager's auto-delegation is on by default (owner).
+    case 'display_name': return null;
+    case 'role': return null;
+    case 'auto_delegate': return true;
   }
 }
 
@@ -171,7 +175,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
         const current = row?.desiredRevision ?? 0;
         if (body.expectedRevision !== current) throw staleRevision(current, 'this setting');
         const before = (row ? row.desired : await configuredValue(tx, config.tenantId, projectId, run, change.field)) as SettingValue | null;
-        await validate(tx, change, run, before, at);
+        await validate(tx, change, run, before, at, body.key);
 
         const enforcer = SETTING_ENFORCER[change.field];
         const revision = current + 1;
@@ -231,7 +235,7 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
   });
 
   /** Checks a change against what the owner authorised and, for a resume, revalidates budget, policy and leases. Throws; writes nothing. */
-  async function validate(tx: Tx, change: SettingChange, run: typeof schema.runs.$inferSelect | null, before: SettingValue | null, at: Date): Promise<void> {
+  async function validate(tx: Tx, change: SettingChange, run: typeof schema.runs.$inferSelect | null, before: SettingValue | null, at: Date, key: string): Promise<void> {
     switch (change.field) {
       case 'allowed_paths': {
         const plan = await planPaths(tx, config.tenantId, run!.projectId, run!.runId);
@@ -271,6 +275,20 @@ export function registerSettingsRoutes(app: FastifyInstance, ctx: AppContext): v
       // Any mode is a valid run default: a locked task stays on the device whatever it says. The lock on a task override is checked with the task, above.
       case 'route_policy':
       case 'route_override':
+        return;
+      // H11: a worker's name is owner text: 1-24 characters in any script, no secret shapes, unique among this tenant's workers (ignoring case).
+      case 'display_name': {
+        if (change.value === null) return;
+        const others = await tx.select({ runnerId: schema.runnerSettings.runnerId, desired: schema.runnerSettings.desired }).from(schema.runnerSettings)
+          .where(and(eq(schema.runnerSettings.tenantId, config.tenantId), eq(schema.runnerSettings.field, 'display_name')));
+        const taken = others.filter((r) => r.runnerId !== key && typeof r.desired === 'string').map((r) => r.desired as string);
+        const problem = workerNameProblem(change.value, taken);
+        if (problem) throw new AppError(422, problem, problem === 'name_taken' ? 'Another worker already has this name.' : 'This name cannot be used.');
+        return;
+      }
+      // A role takes effect from the worker's next claim; a running attempt keeps the role it was claimed under.
+      case 'role':
+      case 'auto_delegate':
         return;
     }
   }

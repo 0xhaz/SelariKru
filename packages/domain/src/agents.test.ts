@@ -4,7 +4,9 @@ import { AGENT_KINDS, AGENT_LIMITS, ROUTE_STEP_KINDS, agentOutputSchema, applyFi
 const IDS = ['AC-1', 'AC-2'];
 const BASE = 'line one\nline two\nline three\n';
 const files = new Map([['src/app.ts', BASE], ['src/util.ts', 'export const a = 1;\n']]);
-const ctx = (over: Partial<AgentCheckContext> = {}): AgentCheckContext => ({ criteriaIds: IDS, allowedPaths: ['src'], files, ...over });
+/** H11: what a Project Manager call may name. */
+const PM = { sourceIds: ['brain:c1'], taskIds: ['t1', 't2'], workerIds: ['w1'] };
+const ctx = (over: Partial<AgentCheckContext> = {}): AgentCheckContext => ({ criteriaIds: IDS, allowedPaths: ['src'], files, pm: PM, ...over });
 
 const GOOD_DIFF = ['--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1,3 +1,3 @@', ' line one', '-line two', '+line 2', ' line three', ''].join('\n');
 
@@ -22,6 +24,10 @@ const GOOD: Record<AgentKind, unknown> = {
   review: { outcome: 'changes_suggested', summary: 'One naming nit.', findings: [{ file: 'src/app.ts', line: 2, severity: 'nit', criterionId: 'AC-1', message: 'Spell the number out.' }] },
   triage: { summary: 'The post test failed.', category: 'test_failure', likelyCause: 'The route returns 200 instead of 201.', nextStep: 'Return 201 from the post route.', location: { file: 'src/app.ts', line: 2 } },
   prDescription: { title: 'Add posting', body: 'Adds the post route and screen.', criteriaCovered: ['AC-1'] },
+  pmAnswer: { answer: 'The list screen waits on the API task.', citations: [{ sourceId: 'brain:c1', note: 'The plan orders the API first.' }] },
+  pmResearch: { answer: 'Most feedback boards sort by votes.', findings: [{ point: 'Sorting by recency is the simplest start.' }] },
+  pmPlan: { tasks: [{ key: 'T1', title: 'API', description: 'Add the post route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [] }] },
+  pmDelegate: { assignments: [{ taskId: 't1', workerId: 'w1', why: 'Backend work, and Aisyah is free.' }] },
 };
 
 const BAD: Record<AgentKind, unknown[]> = {
@@ -33,6 +39,17 @@ const BAD: Record<AgentKind, unknown[]> = {
   review: [{ outcome: 'approve', summary: 'x', findings: [] }, { outcome: 'no_issues', summary: 'x', findings: [{ file: 'src/app.ts', line: 0, severity: 'nit', message: 'm' }] }],
   triage: [{ summary: 'x', category: 'magic', likelyCause: 'y', nextStep: 'z' }, { summary: 'x', category: 'unknown', likelyCause: 'y' }],
   prDescription: [{ title: 't'.repeat(73), body: 'b', criteriaCovered: [] }, { title: 't', body: 'b', criteriaCovered: ['AC-7'] }],
+  // A citation to a source the call was not given; an extra field.
+  pmAnswer: [{ answer: 'x', citations: [{ sourceId: 'brain:zz', note: 'n' }] }, { answer: 'x', citations: [], urls: ['https://example.com'] }],
+  // Web sources never come from the model's text: a findings URL field is refused.
+  pmResearch: [{ answer: 'x', findings: [{ point: 'p', url: 'https://example.com' }] }, { answer: '', findings: [] }],
+  pmPlan: [{ tasks: [] }],
+  // A task outside the plan, a worker that does not exist, and any widening field (paths, budget, a new role) are refused.
+  pmDelegate: [
+    { assignments: [{ taskId: 'zz', workerId: 'w1', why: 'w' }] }, { assignments: [{ taskId: 't1', workerId: 'w9', why: 'w' }] },
+    { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', allowedPaths: ['/'] }] }, { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', budgetUsd: 100 }] },
+    { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', role: 'admin' }] }, { assignments: [] },
+  ],
 };
 
 describe('agent output schemas', () => {
@@ -42,10 +59,10 @@ describe('agent output schemas', () => {
 
   for (const kind of AGENT_KINDS) {
     it(`${kind}: accepts a good fixture and rejects bad ones`, () => {
-      expect(agentOutputSchema(kind, IDS).safeParse(GOOD[kind]).success).toBe(true);
+      expect(agentOutputSchema(kind, IDS, PM).safeParse(GOOD[kind]).success).toBe(true);
       expect(checkAgentOutput(kind, GOOD[kind], ctx({ reviewedDiff: GOOD_DIFF }))).toMatchObject({ ok: true });
       for (const bad of BAD[kind]) {
-        expect(agentOutputSchema(kind, IDS).safeParse(bad).success).toBe(false);
+        expect(agentOutputSchema(kind, IDS, PM).safeParse(bad).success).toBe(false);
         const r = checkAgentOutput(kind, bad, ctx({ reviewedDiff: GOOD_DIFF }));
         expect(r.ok).toBe(false);
       }

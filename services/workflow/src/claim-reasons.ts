@@ -28,6 +28,10 @@ const exact = {
   // Coding workers are off: a task waits for the owner to accept a patch proposal. And an accepted proposal waits for a runner that can apply it.
   awaiting_accepted_proposal: false,
   apply_runner_update_required: false,
+  // H11: a delegated task waits for its own worker; a worker with a role claims only its role's tasks; the Project Manager claims none.
+  delegated_to_other_worker: true,
+  role_not_this_worker: true,
+  project_manager_claims_no_task: false,
   last_apply_failed: false,
   last_apply_unverified: false,
   infra_retry_backoff: true,

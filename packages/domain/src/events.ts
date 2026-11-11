@@ -14,7 +14,7 @@ export const EVENT_TYPES = [
   'settings.changed', 'settings.applied', 'run.cancel_requested', 'run.cancelled', 'placement.cleared',
   'product.recorded', 'product.proposed',
   'handover.requested', 'checkpoint.recorded', 'checkpoint.refused', 'attempt.fenced', 'attempt.route_changed', 'attempt.publish_refused', 'handover.decided',
-  'inference.reported', 'proposal.accepted',
+  'inference.reported', 'proposal.accepted', 'task.delegated',
 ] as const;
 export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
@@ -117,6 +117,11 @@ export const EVENT_ACTOR_ALLOWLIST: Readonly<Partial<Record<EventType, readonly 
   'inference.reported': [H],
   /** The owner accepted a patch proposal for a task: ids and hashes only (proposal, route record, base, results digest, file count), never content. Human only. */
   'proposal.accepted': [H],
+  /**
+   * H11: a task revision was assigned to a worker under the accepted plan revision that authorised it. The Project Manager agent (`agent:pm`) within the plan, or
+   * the owner. Ids and the plan revision only, never agent text.
+   */
+  'task.delegated': ['agent', H],
 };
 
 export interface ActorNotPermitted {

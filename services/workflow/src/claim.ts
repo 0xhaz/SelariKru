@@ -1,4 +1,5 @@
 import { asClaimReason, type ClaimReason } from './claim-reasons.ts';
+import { PROJECT_MANAGER_ROLE } from '@selarikru/domain';
 import { randomUUID } from 'node:crypto';
 import { APPLY_MODEL, APPLY_PROVIDER, harnessForProvider, NO_HARNESS_CATALOG, TaskSpecSchema, budgetUsed, isTerminalStreamable, readyTasks, transition, type RecordedAssignment, type StatusMap, type TaskSpec, type TaskState, type TaskStatus } from '@selarikru/domain';
 import { applyApproval, evaluate, strongest, type Classification, type Operation, type Source } from '@selarikru/policy';
@@ -145,7 +146,17 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     // takes the project's event sequence, which the owner's immediate task cancel, an approval resolve and the handover sweep take after a claimable task's status row, with
     // no scheduler lock. (A publish or lease expiry never meets this: the claim locks only claimable candidates.) See verification.ts.
     deferEvents(tx);
+    // H11: who may claim what. A task revision delegated to a worker is claimed only by that worker; a worker the owner gave a role claims only its role's tasks
+    // (from its next claim: a running attempt keeps the role it was claimed under); the Project Manager plans and delegates and claims none.
+    const myRole = await loadRunnerRole(tx, runner.tenantId, runner.runnerId);
+    const delegated = await loadDelegations(tx, runner.tenantId, candidates);
     for (const c of candidates) {
+      const to = delegated.get(`${c.projectId}:${c.taskId}:${c.currentRevision}`);
+      const taskRole = typeof (c.spec as { role?: unknown } | null)?.role === 'string' ? (c.spec as { role: string }).role : null;
+      const gate: ClaimReason | null = myRole === PROJECT_MANAGER_ROLE ? 'project_manager_claims_no_task'
+        : to !== undefined && to !== runner.runnerId ? 'delegated_to_other_worker'
+          : to === undefined && myRole !== null && taskRole !== myRole ? 'role_not_this_worker' : null;
+      if (gate) { skipped.push({ taskId: c.taskId, reason: gate }); continue; }
       const r = await claimCandidate(ctx, tx, runner, c, limits, counts, now, gateFor(gates, c.projectId, c.runId));
       if ('lease' in r) {
         await flushEvents(tx);
@@ -156,6 +167,23 @@ export async function tryClaim(ctx: SchedulerContext, runner: Runner, caps: Caps
     await flushEvents(tx);
     return { ok: false, reason: 'no_claimable_task', skipped };
   });
+}
+
+/** The role the owner gave this worker, as saved. Null: none, so it claims as before. Unreadable: a role no task has, so it claims nothing rather than everything. */
+async function loadRunnerRole(tx: Tx, tenantId: string, runnerId: string): Promise<string | null> {
+  const [row] = await tx.select({ desired: schema.runnerSettings.desired }).from(schema.runnerSettings)
+    .where(and(eq(schema.runnerSettings.tenantId, tenantId), eq(schema.runnerSettings.runnerId, runnerId), eq(schema.runnerSettings.field, 'role')));
+  if (!row) return null;
+  return typeof row.desired === 'string' ? row.desired : '\u0000unreadable';
+}
+
+/** The candidates' delegations at their current revision, keyed `project:task:revision`. Read after the scheduler lock, without a row lock. */
+async function loadDelegations(tx: Tx, tenantId: string, candidates: readonly Candidate[]): Promise<ReadonlyMap<string, string>> {
+  const taskIds = [...new Set(candidates.map((c) => c.taskId))];
+  if (taskIds.length === 0) return new Map();
+  const rows = await tx.select({ projectId: schema.taskDelegations.projectId, taskId: schema.taskDelegations.taskId, revision: schema.taskDelegations.revision, workerId: schema.taskDelegations.workerId })
+    .from(schema.taskDelegations).where(and(eq(schema.taskDelegations.tenantId, tenantId), inArray(schema.taskDelegations.taskId, taskIds)));
+  return new Map(rows.map((r) => [`${r.projectId}:${r.taskId}:${r.revision}`, r.workerId]));
 }
 
 /** `Lease | null` form of `tryClaim`. */

@@ -6,8 +6,9 @@ import { RoutePolicyModeSchema } from './route-policy.ts';
  * enforces it says so: the server, in the same transaction as the save, for policy it enforces itself; the runner, on its next claim poll or heartbeat,
  * for what it holds in its own loop. A save is never the same thing as applied.
  */
-export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy'] as const;
-export const RUNNER_SETTING_FIELDS = ['enabled', 'slots'] as const;
+export const RUN_SETTING_FIELDS = ['paused', 'budget_limit_usd', 'allowed_paths', 'cloud_eligible', 'route_policy', 'auto_delegate'] as const;
+/** H11: a worker's owner-given name and its role (the role decides which tasks it may claim, from its next attempt). */
+export const RUNNER_SETTING_FIELDS = ['enabled', 'slots', 'display_name', 'role'] as const;
 /** A task's own settings. `route_override` replaces the run's `route_policy` for this task; null clears it. */
 export const TASK_SETTING_FIELDS = ['route_override'] as const;
 export type RunSettingField = (typeof RUN_SETTING_FIELDS)[number];
@@ -23,6 +24,9 @@ export const SETTING_ENFORCER: Readonly<Record<SettingField, SettingEnforcer>> =
   paused: 'runner', budget_limit_usd: 'server', allowed_paths: 'server', cloud_eligible: 'server', enabled: 'runner', slots: 'runner',
   // Route policy is metadata the server serves to the browser adapter: in force when the save commits.
   route_policy: 'server', route_override: 'server',
+  // H11: names are labels the server serves; a role is enforced by the server at the next claim (a running attempt keeps the role it was claimed under);
+  // auto-delegation is the server's own switch.
+  display_name: 'server', role: 'server', auto_delegate: 'server',
 };
 
 /** Upper bound on a runner's slots. The server's total concurrency cap still applies on top. */
@@ -42,6 +46,12 @@ export const SettingChangeSchema = z.discriminatedUnion('field', [
   z.object({ scope: z.literal('run'), field: z.literal('route_policy'), value: RoutePolicyModeSchema }).strict(),
   /** One task's route policy override; null clears it. A cloud-capable value on a task locked by restricted data is refused (`route_locked_restricted`). */
   z.object({ scope: z.literal('task'), field: z.literal('route_override'), value: RoutePolicyModeSchema.nullable() }).strict(),
+  /** H11: the worker's name (1-24 characters, any script, unique per project: checked by `workerNameProblem`); null clears it and the role label shows. */
+  z.object({ scope: z.literal('runner'), field: z.literal('display_name'), value: z.string().min(1).max(96).nullable() }).strict(),
+  /** H11: the worker's role, one of the project's roles; it takes effect from the worker's next claim. */
+  z.object({ scope: z.literal('runner'), field: z.literal('role'), value: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/) }).strict(),
+  /** H11: whether the Project Manager's assignments inside the accepted plan apply on their own (on by default, per the owner). */
+  z.object({ scope: z.literal('run'), field: z.literal('auto_delegate'), value: z.boolean() }).strict(),
 ]);
 export type SettingChange = z.infer<typeof SettingChangeSchema>;
 export type SettingValue = SettingChange['value'];
@@ -62,6 +72,10 @@ export function isReduction(field: SettingField, before: SettingValue | null, af
     // Where a model runs is not a grant the scheduler holds: restricted data is kept on the device by the lock, whatever this says.
     case 'route_policy':
     case 'route_override': return false;
+    // A name is a label; a role change is judged at the next claim; switching auto-delegation off takes nothing away from the owner.
+    case 'display_name':
+    case 'role':
+    case 'auto_delegate': return false;
   }
 }
 

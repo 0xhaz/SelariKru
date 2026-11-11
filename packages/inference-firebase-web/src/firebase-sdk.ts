@@ -42,11 +42,18 @@ export function createFirebaseSdk(cfg: FirebaseSdkConfig): AssistantSdk {
       // Omitted when cloud is disallowed so the SDK has nothing to fall back to.
       ...(spec.allowCloud
         ? {
-            inCloudParams: {
-              model: CLOUD_MODEL,
-              systemInstruction: spec.systemInstruction,
-              generationConfig: { responseMimeType: 'application/json' as const, responseJsonSchema: spec.schema },
-            },
+            inCloudParams: spec.grounding === 'googleSearch'
+              ? {
+                  // H11: Grounding with Google Search. The schema is not sent with a search tool; the adapter validates the answer against it.
+                  model: CLOUD_MODEL,
+                  systemInstruction: spec.systemInstruction,
+                  tools: [{ googleSearch: {} }],
+                }
+              : {
+                  model: CLOUD_MODEL,
+                  systemInstruction: spec.systemInstruction,
+                  generationConfig: { responseMimeType: 'application/json' as const, responseJsonSchema: spec.schema },
+                },
           }
         : {}),
       onDeviceParams: {
@@ -76,7 +83,15 @@ export function createFirebaseSdk(cfg: FirebaseSdkConfig): AssistantSdk {
         async generate(prompt) {
           const res = await model.generateContent(prompt);
           const u = res.response.usageMetadata;
+          const g = res.response.candidates?.[0]?.groundingMetadata;
+          const grounding = g
+            ? {
+                sources: (g.groundingChunks ?? []).flatMap((c) => (c.web?.uri ? [{ uri: c.web.uri, title: c.web.title ?? null }] : [])),
+                entryPointHtml: g.searchEntryPoint?.renderedContent ?? null,
+              }
+            : undefined;
           return {
+            grounding,
             text: res.response.text(),
             inferenceSource: res.response.inferenceSource,
             usage: u

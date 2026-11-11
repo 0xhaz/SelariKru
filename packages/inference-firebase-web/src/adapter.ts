@@ -17,6 +17,7 @@ import {
 } from './models.ts';
 import { ReadinessTracker, type Readiness } from './readiness.ts';
 import type { AssistantSdk, SdkModel } from './sdk.ts';
+import type { SdkGrounding } from './sdk.ts';
 
 export type { ObservedSource, OnboardingOperation, Operation };
 
@@ -60,6 +61,8 @@ export interface CallSpec {
   prompt(at: { readonly mode: InferenceMode; readonly cloudCapable: boolean }): { readonly prompt: string } | { readonly refused: string };
   /** Checks a schema-valid response against the call's context. Codes and JSON paths only, never the response's text. Any entry makes the response invalid. */
   check?(data: unknown): readonly string[];
+  /** H11: Grounding with Google Search. Only on a cloud-only route that is not locked; anywhere else the call is refused before any model call. */
+  readonly grounding?: 'googleSearch';
 }
 
 /** A catalog agent's request. It always names its task: there is no agent call without a route. */
@@ -149,6 +152,8 @@ export interface AssistantProposal {
   readonly route?: ProposalRoute | null;
   /** Set once a prompt was built. Local only: never part of the route report. */
   readonly input?: ProposalInput | null;
+  /** H11: a grounded call's web sources and Search Suggestions, to show with the answer. Local only: never part of the route report. */
+  readonly grounding?: SdkGrounding | null;
 }
 
 /**
@@ -367,6 +372,11 @@ export class FirebaseHybridAssistantAdapter {
 
     // Never let the SDK choose the cloud when policy has no approved fallback.
     const deviceMustServe = mode === 'ONLY_ON_DEVICE' || (mode === 'PREFER_ON_DEVICE' && !allowFallback);
+    // H11: web search runs only on a cloud-only route, and never for a locked (restricted) task. Refused before any prompt is built or model called.
+    if (spec.grounding) {
+      if (current?.lock) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_locked' });
+      if (mode !== 'ONLY_IN_CLOUD' || deviceMustServe) return make({ status: 'blocked', requestedMode: mode, blockedReason: 'research_cloud_only' });
+    }
     const built = spec.prompt({ mode, cloudCapable: !deviceMustServe });
     if ('refused' in built) return make({ status: 'blocked', requestedMode: mode, blockedReason: built.refused });
     const systemInstruction = spec.systemInstruction;
@@ -391,10 +401,10 @@ export class FirebaseHybridAssistantAdapter {
 
     const hash = await payloadSha256(systemInstruction, prompt);
     const sdkMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : requestedMode;
-    const key = `${sdkMode}|${deviceMustServe ? 'nocloud' : 'cloud'}|${spec.schemaKey}`;
+    const key = `${sdkMode}|${deviceMustServe ? 'nocloud' : 'cloud'}|${spec.schemaKey}${spec.grounding ? '|grounded' : ''}`;
     let model = this.models.get(key);
     if (!model) {
-      model = this.sdk.createModel({ mode: sdkMode, allowCloud: !deviceMustServe, systemInstruction, schema: spec.schema });
+      model = this.sdk.createModel({ mode: sdkMode, allowCloud: !deviceMustServe, systemInstruction, schema: spec.schema, ...(spec.grounding ? { grounding: spec.grounding } : {}) });
       this.models.set(key, model);
     }
     const m = model;
@@ -431,7 +441,7 @@ export class FirebaseHybridAssistantAdapter {
       u && (u.inputTokens !== undefined || u.outputTokens !== undefined || u.totalTokens !== undefined)
         ? { status: 'observed', inputTokens: u.inputTokens ?? null, outputTokens: u.outputTokens ?? null, totalTokens: u.totalTokens ?? null }
         : UNAVAILABLE_USAGE;
-    const common = { requestedMode, observedSource, rawInferenceSource, usage, payloadSha256: hash, input };
+    const common = { requestedMode, observedSource, rawInferenceSource, usage, payloadSha256: hash, input, ...(spec.grounding ? { grounding: result.grounding ?? null } : {}) };
 
     // A response is on-device only if it says so. Withhold data otherwise.
     if (deviceMustServe && observedSource !== 'ON_DEVICE') {
@@ -442,7 +452,8 @@ export class FirebaseHybridAssistantAdapter {
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(result.text);
+      // A grounded answer is not schema-constrained by the SDK, so it may come in a fenced block; it is still checked against the schema below.
+      parsed = JSON.parse(spec.grounding ? result.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '') : result.text);
     } catch {
       return make({ ...common, status: 'invalid', validation: { status: 'failed', errors: ['output is not valid JSON'] } });
     }

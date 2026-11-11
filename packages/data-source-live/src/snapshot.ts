@@ -13,6 +13,8 @@ interface RawTask {
   cancel: { operationId: string; requestedAt: string; reason?: string } | null;
   /** Where the task's AI steps run, as the server works it out. Absent from servers before route policy. */
   route?: unknown;
+  /** H11: who the task revision is delegated to. Absent from servers before H11. */
+  delegation?: unknown;
 }
 interface RawApproval {
   outcome: string; approvalId: string; runId: string; taskId: string | null; revision: number | null; requester: string | null; scopeHash: string | null;
@@ -105,6 +107,7 @@ export function toViewSnapshot(raw: RawSnapshot): ProjectViewSnapshot {
       cancelRequested: t.cancel ? { at: t.cancel.requestedAt, operationId: t.cancel.operationId, reason: t.cancel.reason ?? null } : null, cancelReason: null, supersededByRevision: null,
       attemptIds: started.map((a) => a.attemptId), activeAttemptId: started.find((a) => a.endedAt === null)?.attemptId ?? null, enteredStatusAt: t.enteredStatusAt, latestEvidence: t.latestEvidence,
       ...(t.route !== undefined ? { route: t.route } : {}),
+      ...(t.delegation !== undefined && t.delegation !== null ? { delegation: t.delegation } : {}),
     };
   }
   const approvals: Record<string, unknown> = {};

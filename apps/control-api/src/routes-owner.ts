@@ -797,6 +797,8 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
           modelRoute: schema.attempts.modelRoute, modelProvider: schema.attempts.modelProvider, modelId: schema.attempts.modelId, assignmentSource: schema.attempts.assignmentSource,
         }).from(schema.attempts).where(scope(schema.attempts)).orderBy(asc(schema.attempts.attemptNumber));
         const commands = await tx.select().from(schema.taskCommands).where(scope(schema.taskCommands)).orderBy(desc(schema.taskCommands.requestedAt));
+        // H11: who each task revision is delegated to, and under which accepted plan revision.
+        const delegations = await tx.select().from(schema.taskDelegations).where(scope(schema.taskDelegations));
         const approvals = await tx.select().from(schema.approvals).where(and(scope(schema.approvals), inArray(schema.approvals.outcome, ['pending', 'expired'])));
         // Bounded and project-scoped. Resolved rows are for the record: only the open ones above can still be acted on.
         const resolved = await tx.select().from(schema.approvals)
@@ -967,6 +969,10 @@ export function registerOwnerRoutes(app: FastifyInstance, ctx: AppContext): void
               enteredStatusAt: statusEvents.find((e) => e['task_id'] === s.taskId) ? eventTime(statusEvents.find((e) => e['task_id'] === s.taskId)!) : s.updatedAt.toISOString(),
               latestEvidence: refOf(evidenceEvents.find((e) => e['task_id'] === s.taskId)),
               ...(skillWaits.has(s.taskId) ? { skillRunnerWait: skillWaits.get(s.taskId) } : {}),
+              delegation: (() => {
+                const d = delegations.find((x) => x.taskId === s.taskId && x.revision === s.currentRevision);
+                return d ? { workerId: d.workerId, planRevision: d.planRevision, actor: d.actorKind === 'agent' ? 'agent' : 'human', at: d.assignedAt.toISOString() } : null;
+              })(),
               /** Where the task's AI steps run: the effective policy and its source, the data lock, the suggestion, and the last source the browser reported. */
               route: (() => {
                 const parsed = TaskSpecSchema.safeParse(spec?.spec);

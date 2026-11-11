@@ -40,6 +40,7 @@ export const AGENT_LIMITS = {
 /** Whether the agent's output cites the task's criterion IDs, so a call without any is refused before it reaches a model. */
 export const AGENT_CITES_CRITERIA: Readonly<Record<AgentKind, boolean>> = {
   brief: true, criteria: true, plan: true, breakdown: true, patch: false, review: true, triage: false, prDescription: true,
+  pmAnswer: false, pmResearch: false, pmPlan: true, pmDelegate: false,
 };
 
 export const REVIEW_OUTCOMES = ['no_issues', 'changes_suggested', 'blocking_issues'] as const;
@@ -51,7 +52,16 @@ const path = z.string().min(1).max(200);
 const planKey = z.string().regex(/^T[0-9]{1,2}$/);
 
 /** The output schema for one agent, with criterion IDs narrowed to the ones this call allows. No IDs: no criterion can be cited. */
-export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[]): z.ZodType {
+/** What a Project Manager call may name (H11): the Brain sources it was given, and the accepted plan's tasks and the workers it may delegate to. */
+export interface PmIds {
+  readonly sourceIds?: readonly string[];
+  readonly taskIds?: readonly string[];
+  readonly workerIds?: readonly string[];
+}
+
+const oneOf = (ids: readonly string[] | undefined): z.ZodType => (ids && ids.length > 0 ? z.enum(ids as [string, ...string[]]) : z.never());
+
+export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[], pm: PmIds = {}): z.ZodType {
   const id: z.ZodType = criteriaIds.length > 0 ? z.enum(criteriaIds as [string, ...string[]]) : z.never();
   const criteria = z.array(z.strictObject({ requirementId: id, text: text(400) })).min(1).max(AGENT_LIMITS.criteria);
   switch (kind) {
@@ -87,12 +97,22 @@ export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[
       });
     case 'prDescription':
       return z.strictObject({ title: text(AGENT_LIMITS.prTitleChars), body: text(AGENT_LIMITS.prBodyChars), criteriaCovered: z.array(id).max(AGENT_LIMITS.criteria) });
+    // H11: the Project Manager. Its answer may cite only the Brain sources it was given; research findings carry no URLs (the web sources come from the
+    // SDK's grounding metadata, never from the model's text); a delegation names only the accepted plan's tasks and the project's workers, and nothing else.
+    case 'pmAnswer':
+      return z.strictObject({ answer: text(2000), citations: z.array(z.strictObject({ sourceId: oneOf(pm.sourceIds), note: text(300) })).max(8) });
+    case 'pmResearch':
+      return z.strictObject({ answer: text(2000), findings: z.array(z.strictObject({ point: text(400) })).max(8) });
+    case 'pmPlan':
+      return agentOutputSchema('plan', criteriaIds, pm);
+    case 'pmDelegate':
+      return z.strictObject({ assignments: z.array(z.strictObject({ taskId: oneOf(pm.taskIds), workerId: oneOf(pm.workerIds), why: text(200) })).min(1).max(AGENT_LIMITS.planTasks) });
   }
 }
 
 /** The same schema as JSON Schema, for the model's structured output. No `$schema` key: the SDK and Ajv take the object as is. */
-export function agentOutputJsonSchema(kind: AgentKind, criteriaIds: readonly string[]): Record<string, unknown> {
-  const { $schema: _drop, ...schema } = z.toJSONSchema(agentOutputSchema(kind, criteriaIds)) as Record<string, unknown>;
+export function agentOutputJsonSchema(kind: AgentKind, criteriaIds: readonly string[], pm: PmIds = {}): Record<string, unknown> {
+  const { $schema: _drop, ...schema } = z.toJSONSchema(agentOutputSchema(kind, criteriaIds, pm)) as Record<string, unknown>;
   return schema;
 }
 
@@ -119,6 +139,8 @@ export interface AgentCheckContext {
   readonly files?: ReadonlyMap<string, string>;
   /** The diff a review was asked about. */
   readonly reviewedDiff?: string;
+  /** H11: what a Project Manager call may name. */
+  readonly pm?: PmIds;
 }
 
 export type AgentCheck = { readonly ok: true; readonly data: unknown } | { readonly ok: false; readonly issues: readonly AgentIssue[] };
@@ -167,13 +189,14 @@ function pathIssue(raw: string, allowed: readonly string[] | null): AgentIssueCo
 
 /** Schema first, then the checks that need the call's context. */
 export function checkAgentOutput(kind: AgentKind, data: unknown, ctx: AgentCheckContext): AgentCheck {
-  const parsed = agentOutputSchema(kind, ctx.criteriaIds).safeParse(data);
+  const parsed = agentOutputSchema(kind, ctx.criteriaIds, ctx.pm).safeParse(data);
   if (!parsed.success) return { ok: false, issues: parsed.error.issues.map((i) => ({ code: 'schema_invalid', path: jsonPath(i.path) })) };
   const issues: AgentIssue[] = [];
   const add = (code: AgentIssueCode, ...p: PropertyKey[]): void => void issues.push({ code, path: jsonPath(p) });
   const out = parsed.data as Record<string, unknown>;
   switch (kind) {
     case 'plan':
+    case 'pmPlan':
       checkPlan(out as unknown as PlanOutput, ctx, add);
       break;
     case 'breakdown':

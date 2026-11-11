@@ -419,6 +419,14 @@ function projectTask(snap: ProjectViewSnapshot, e: ProjectViewEvent): Projected 
     case 'proposal.accepted':
       return commit(task);
 
+    // H11: a delegation names the worker and the accepted plan revision; it holds for this task revision only.
+    case 'task.delegated': {
+      const workerId = str(p, 'workerId');
+      const planRevision = int(p, 'planRevision', 1);
+      if (!workerId || planRevision === null) return commit(task);
+      return commit({ ...task, delegation: { workerId, planRevision, actor: e.actor.kind === 'agent' ? 'agent' : 'human', at } });
+    }
+
 
     default: {
       // Run-level types are handled by `projectRun`; a new domain event type fails to compile here until it is projected on purpose.

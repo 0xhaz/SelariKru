@@ -330,6 +330,11 @@ export const TaskViewSchema = z
     skillRunnerWait: z.array(Id).optional(),
     /** Where this task's AI steps run. Absent: the source does not report it. */
     route: TaskRouteViewSchema.optional(),
+    /**
+     * H11: who this task revision is assigned to, and under which accepted plan revision. `actor` `agent` is the Project Manager inside the plan, `human` the owner.
+     * Null: not delegated, so any worker that may claim it can.
+     */
+    delegation: z.object({ workerId: Id, planRevision: z.number().int().min(1), actor: z.enum(['agent', 'human']), at: Iso }).strict().nullable().optional(),
   })
   .strict();
 export type TaskView = z.infer<typeof TaskViewSchema>;

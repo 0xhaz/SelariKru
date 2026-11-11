@@ -44,6 +44,8 @@ type ClaimScope = { readonly tenantId: string; readonly projectId: string };
  * - a run cancel, and finishing one (`finishCancelledRuns`): scheduler lock, run row, the run's open tasks' status rows in task order, this lock, the event
  *   sequence, then the run's approval and reservation rows.
  * - a model assignment: its own advisory lock, the runner config row, the event sequence.
+ * - a Project Manager delegation (H11, `applyDelegation` in delegation.ts): scheduler lock, the run row read without a lock, each named task's status row in task id order,
+ *   its `task_delegations` row, then the event sequence (`task.delegated`). The claim reads `task_delegations` after the scheduler lock without locking it.
  * - a runner's config acknowledgement (`acknowledgeRunnerConfig`) and the periodic settle (`settlePendingSettings`): the runner row (acknowledgement only),
  *   then this runner's waiting `runner_settings` rows ordered by field, the waiting `run_settings` rows ordered by project, run and field, the waiting
  *   `model_assignments` rows ordered by project, scope kind, scope key and revision, every one locked before the first event, then the event sequence. Two

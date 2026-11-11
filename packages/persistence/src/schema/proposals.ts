@@ -74,3 +74,30 @@ export const agentContexts = pgTable(
     check('agent_contexts_destination', sql`${t.destination} IN ('local', 'cloud')`),
   ],
 );
+
+/**
+ * Task delegations (H11): which worker the Project Manager assigned a task revision to, under which accepted plan revision. One row per task revision; a later
+ * delegation of the same revision replaces it (a reassignment of a failed task is a new revision's row, after its repair). Ids and numbers only. The claim reads it:
+ * a delegated task is claimed only by its worker. Written under the scheduler lock, then the task's status row, then this row, then the event sequence.
+ */
+export const taskDelegations = pgTable(
+  'task_delegations',
+  {
+    ...scope(),
+    taskId: text('task_id').notNull(),
+    revision: integer('revision').notNull(),
+    runId: text('run_id').notNull(),
+    workerId: text('worker_id').notNull(),
+    /** The accepted plan revision that authorised it. */
+    planRevision: integer('plan_revision').notNull(),
+    /** `agent:pm` for the Project Manager's own delegation inside the plan; `human` when the owner made it. */
+    actorKind: text('actor_kind').notNull(),
+    actorId: text('actor_id').notNull(),
+    assignedAt: tstz('assigned_at').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.projectId, t.taskId, t.revision] }),
+    foreignKey({ columns: [t.tenantId, t.projectId], foreignColumns: [projects.tenantId, projects.projectId] }),
+    check('task_delegations_actor', sql`${t.actorKind} IN ('agent', 'human')`),
+  ],
+);
