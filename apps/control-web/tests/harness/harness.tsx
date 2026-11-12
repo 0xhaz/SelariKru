@@ -11,6 +11,7 @@ import { createProjectionStore, type ProjectionStore } from '../../src/shell/pro
 import { NO_PROJECT, projectFromUrl, useActiveProject } from '../../src/shell/active-project.ts';
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createDemoSdk } from '../../src/features/hybrid/demo-sdk.ts';
+import { createCloudQuota } from '../../src/features/hosted/cloud-quota.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
 import type { EngineeringDataSource, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlState, TerminalState } from '@selarikru/view-protocol';
 import '../../src/index.css';
@@ -72,6 +73,10 @@ interface Scenario {
   extraApprovals?: Record<string, Record<string, unknown>>;
   /** Each demo agent answer waits until the test calls `window.__releaseAgents`, so a call stays in flight. */
   holdAgents?: boolean;
+  /** H9: what the shell's Gemini Nano check answers (the hosted and real builds check it on first load). Absent: not checked, as under ?demo. */
+  nano?: 'available' | 'unavailable' | 'downloadable' | 'downloading' | 'unknown';
+  /** H9: mounts the shell as the hosted demo, with its cloud call cap already this far spent. */
+  hostedQuota?: { limit: number; used: number };
   /** H9: the snapshot's coding-workers setting. The demo fixtures are the hackathon build's: off. */
   codingWorkers?: 'off' | 'claude_code';
 }
@@ -314,10 +319,11 @@ if (sc.onboardingApi) {
   window.__releaseAgents = () => { agentGate?.release(); agentGate = null; };
   (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain = () => { agentGate = gate(); };
   const agentRuntime = { sdk: createDemoSdk({ beforeGenerate: () => agentGate?.p ?? Promise.resolve() }), simulated: true };
+  const hosted = sc.hostedQuota ? (() => { const q = createCloudQuota({ limit: sc.hostedQuota!.limit, storage: null }); for (let i = 0; i < sc.hostedQuota!.used; i++) q.spend(); return { quota: q }; })() : null;
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>
-        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} agentRuntime={agentRuntime} />
+        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} agentRuntime={agentRuntime} deviceAvailability={sc.nano ? async () => sc.nano! : null} hosted={hosted} />
       </StrictMode>,
     );
   });

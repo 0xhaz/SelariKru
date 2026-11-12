@@ -75,7 +75,9 @@ function App({ account }: { account: AccountInfo }) {
   useEffect(() => {
     if (!defaults.projectId && !window.location.hash) window.location.hash = '#/onboarding';
   }, [defaults.projectId]);
-  return <AppShell store={store} mode="live" ownerKey={auth.currentUser?.uid ?? 'owner'} agentRuntime={agentRuntime} projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
+  // H9: whether Gemini Nano is available here, checked once on first load; the shell says what each route does without it.
+  const deviceAvailability = useMemo(() => async () => (await adapter.getReadiness()).device, [adapter]);
+  return <AppShell store={store} mode="live" deviceAvailability={deviceAvailability} ownerKey={auth.currentUser?.uid ?? 'owner'} agentRuntime={agentRuntime} projectLabel={defaults.projectId || NO_PROJECT} account={account} assistant={<AssistantPanel adapter={adapter} api={api} hold={hold} defaults={defaults} recordedMode={recordedMode} />} onboarding={<OnboardingView api={onboardingApi} adapter={adapter} hold={hold} mode="live" onActivated={activate} signInAgain={signInAgain} />} />;
 }
 
 export default function LiveRoot() {

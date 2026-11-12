@@ -1,0 +1,51 @@
+/** H9 items 1 and 3, as the shell shows them: the hosted demo's cloud call cap and its one debug control, and the calm Gemini Nano banner. */
+import AxeBuilder from '@axe-core/playwright';
+import { expect, test, type Page } from '@playwright/test';
+
+async function open(page: Page, scenario: Record<string, unknown>, hash = '#/office'): Promise<void> {
+  await page.addInitScript((s) => { (window as unknown as { __scenario: unknown }).__scenario = s; }, { spiedFixture: 'feature-delivery', ...scenario });
+  await page.goto(`/tests/harness/index.html${hash}`);
+}
+
+test('Nano unavailable: one calm banner says what each route does, naming the tasks, with the Chrome instructions; no error styling', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, { nano: 'unavailable' });
+  const banner = page.getByTestId('nano-banner');
+  await expect(banner.getByRole('heading', { name: 'Gemini Nano is not available in this browser' })).toBeVisible();
+  const lines = banner.getByTestId('nano-banner-line');
+  await expect(lines).toHaveCount(3);
+  await expect(lines.nth(0)).toHaveText(/^Runs in the cloud instead, labelled as a fallback: .*Search index/);
+  await expect(lines.nth(1)).toHaveText(/^Run in the cloud as usual: .*API contract/);
+  await expect(lines.nth(2)).toHaveText(/^Blocked until Gemini Nano is available, never sent to the cloud: .*\(restricted\)/);
+  await expect(banner.getByRole('link', { name: /How to get Gemini Nano in Chrome/ })).toHaveAttribute('href', /developer\.chrome\.com/);
+  // An expected state: no alert role, no danger colour.
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(await banner.evaluate((el) => el.className)).not.toMatch(/danger|warning/);
+  const { violations } = await new AxeBuilder({ page }).include('[data-testid="nano-banner"]').analyze();
+  expect(violations.map((v) => v.id)).toEqual([]);
+  await banner.getByRole('button', { name: 'Got it' }).click();
+  await expect(banner).toHaveCount(0);
+});
+
+test('Nano available, or not checked (?demo): no banner', async ({ page }) => {
+  await open(page, { nano: 'available' });
+  await expect(page.getByTestId('team-panel-row').first()).toBeVisible();
+  await expect(page.getByTestId('nano-banner')).toHaveCount(0);
+  await page.goto('/?demo#/office');
+  await expect(page.getByTestId('team-panel-row').first()).toBeVisible();
+  await expect(page.getByTestId('nano-banner')).toHaveCount(0);
+});
+
+test('hosted demo: the top bar shows the cloud calls left, and Debug offers only Go offline', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, { hostedQuota: { limit: 40, used: 3 } });
+  await expect(page.getByTestId('cloud-quota')).toHaveText('Cloud calls left in this demo: 37');
+  await expect(page.getByTestId('demo-badge')).toHaveText('Demo data');
+  await page.getByRole('button', { name: 'Debug' }).click();
+  const panel = page.getByTestId('debug-panel');
+  await expect(panel.getByRole('heading', { name: 'Demo controls' })).toBeVisible();
+  await expect(panel.getByRole('button')).toHaveText(['✕', 'Go offline']);
+  await panel.getByRole('button', { name: 'Go offline' }).click();
+  await expect(panel.getByRole('button', { name: 'Go online' })).toBeVisible();
+  await panel.getByRole('button', { name: 'Go online' }).click();
+});

@@ -53,10 +53,11 @@ import { shortcutFor } from './shortcuts.ts';
 import { ui } from './ui-store.ts';
 import { TITLES, frameOf } from './views.ts';
 import { useUi } from './ui-store.ts';
-import type { AssistantSdk, DeviceAvailability, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
+import type { AssistantSdk, DeviceReadiness, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
 import type { CloudQuota } from '../features/hosted/cloud-quota.ts';
 import { quotaText } from '../features/hosted/quota-store.ts';
 import { EMPTY_QUOTA_STORE } from '../features/hosted/quota-store.ts';
+import { NanoBanner } from '../features/hosted/NanoBanner.tsx';
 import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
 import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
 import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
@@ -100,7 +101,7 @@ export interface AppShellProps {
   /** H9: the hosted demo. Its per-tab cloud call cap is shown in the top bar, and of the debug controls only Go offline is offered. */
   readonly hosted?: { readonly quota: CloudQuota } | null;
   /** H9: whether Gemini Nano is available in this browser, checked once on first load (the hosted and real builds). Absent: not checked. */
-  readonly deviceAvailability?: (() => Promise<DeviceAvailability>) | null;
+  readonly deviceAvailability?: (() => Promise<DeviceReadiness>) | null;
 }
 
 /** H12: one device store per tab (IndexedDB, or memory without it). */
@@ -587,6 +588,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
         <ConnectionBanner connection={connection} />
+        {deviceAvailability ? <NanoBanner check={deviceAvailability} snapshot={snapshot} /> : null}
         {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
         {panelWide ? <ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} /> : null}
       </div>
