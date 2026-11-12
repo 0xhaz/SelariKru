@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { matchesGlob } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONTENT_SECURITY_POLICY } from './csp.ts';
 import { FIREBASE_ENV_NAMES, firebaseConfigFromEnv, hostedEnvGuard, missingBuildEnv } from './hosted.ts';
@@ -62,7 +63,8 @@ describe('H9: the hosted build fails loudly without its env', () => {
 describe('H9: Firebase Hosting config (hosting only, never deployed from here)', () => {
   const json = JSON.parse(readFileSync(new URL('../../../../firebase.json', import.meta.url), 'utf8')) as { hosting: { public: string; rewrites: unknown[]; headers: { source?: string; regex?: string; headers: { key: string; value: string }[] }[] } } & Record<string, unknown>;
   const rc = JSON.parse(readFileSync(new URL('../../../../.firebaserc', import.meta.url), 'utf8')) as { projects: { default: string } };
-  const headersFor = (path: string): Record<string, string> => Object.fromEntries(json.hosting.headers.filter((h) => h.source === path || (h.source === undefined && h.regex !== undefined && new RegExp(h.regex).test(path))).flatMap((h) => h.headers).map((h) => [h.key, h.value]));
+  // As Hosting matches a header rule: a glob `source` (extglob, as node:path matchesGlob reads it) or an RE2 `regex`.
+  const headersFor = (path: string): Record<string, string> => Object.fromEntries(json.hosting.headers.filter((h) => (h.source !== undefined && matchesGlob(path, h.source)) || (h.regex !== undefined && new RegExp(h.regex).test(path))).flatMap((h) => h.headers).map((h) => [h.key, h.value]));
 
   it('is hosting only, serving the hosted build as a single-page app, for project selarikru', () => {
     expect(Object.keys(json)).toEqual(['hosting']);
@@ -84,8 +86,14 @@ describe('H9: Firebase Hosting config (hosting only, never deployed from here)',
   });
 
   it('caches hashed assets for a long time and never caches index.html, whichever path served it (the SPA rewrite)', () => {
-    expect(headersFor('/assets/**')['Cache-Control']).toBe('public, max-age=31536000, immutable');
-    expect(headersFor('/assets/index-abc123.js')['Cache-Control']).toBeUndefined();
-    for (const path of ['/', '/index.html', '/anything']) expect(headersFor(path)['Cache-Control']).toBe('no-cache');
+    expect(headersFor('/assets/index-abc123.js')['Cache-Control']).toBe('public, max-age=31536000, immutable');
+    for (const path of ['/', '/index.html', '/anything', '/a/b']) expect(headersFor(path)['Cache-Control']).toBe('no-cache');
+    // The Hosting emulator showed its matcher does not match `/` with `**/!(*.*)`: the root has its own rule.
+    expect(json.hosting.headers.find((h) => h.source === '/')?.headers).toEqual([{ key: 'Cache-Control', value: 'no-cache' }]);
+  });
+
+  it('H9 fix round 1 (H2): Hosting reads regex rules as RE2, which has no lookaround: none is used', () => {
+    for (const h of json.hosting.headers) if (h.regex !== undefined) expect(h.regex).not.toMatch(/\(\?[=!<]/);
+    expect(JSON.stringify(json)).not.toMatch(/\(\?[=!]/);
   });
 });
