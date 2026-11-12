@@ -273,7 +273,15 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     try {
       // Fix round 1 (M1): one tab sends it. A stored checkpoint is claimed on the server first (waiting → sending); an escalation was claimed already.
       if (how !== 'escalated' && deps.server?.claimAiCheckpointSend && !store.getState().deviceOnly[cp.checkpointId] && checkpointStorage(cp) === 'server') {
-        try { await deps.server.claimAiCheckpointSend(deps.projectId, cp.checkpointId); } catch (e) {
+        const claim = () => deps.server!.claimAiCheckpointSend!(deps.projectId, cp.checkpointId);
+        try {
+          try { await claim(); } catch (e) {
+            // The server does not have it (it was kept only here, say while the server was unreachable): store it, then claim it.
+            if (codeOf(e) !== 'checkpoint_not_found') throw e;
+            await write(cp);
+            await claim();
+          }
+        } catch (e) {
           setFor('problems', cp.checkpointId, [codeOf(e) === 'checkpoint_claimed' ? 'claimed' : 'claim_failed']);
           return;
         }

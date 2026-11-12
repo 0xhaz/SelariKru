@@ -44,7 +44,8 @@ function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRou
       saveAiCheckpoint: async (_p, cp) => { server.saved.push(structuredClone(cp)); server.rows.set(cp.checkpointId, { ...cp, escalatedAt: server.rows.get(cp.checkpointId)?.escalatedAt ?? null }); },
       listAiCheckpoints: async () => [...server.rows.values()],
       claimAiCheckpointSend: async (_p, id) => {
-        const cp = server.rows.get(id)!;
+        const cp = server.rows.get(id);
+        if (!cp) throw new Error('checkpoint_not_found: no such checkpoint');
         if (cp.status !== 'waiting') throw new Error(`checkpoint_claimed: ${cp.status}`);
         server.sends += 1;
         const next = { ...cp, status: 'sending' as const };
@@ -180,6 +181,17 @@ describe('fix 1 (M1, M4, M6)', () => {
     await other.engine.resume(oid);
     expect(other.runs).toEqual([]);
     expect(other.engine.store.getState().problems[oid]).toEqual(['claimed']);
+  });
+
+  it('M1: a waiting checkpoint the server does not have (kept only in IndexedDB, as after a reload against a server that lost it) is stored, then claimed and sent', async () => {
+    const h = setup();
+    h.setOnline(false);
+    const id = await pauseOffline(h);
+    h.server.rows.delete(id);
+    h.setOnline(true);
+    await h.engine.resume(id);
+    expect(h.runs).toHaveLength(1);
+    expect(h.server.sends).toBe(1);
   });
 
   it('M4: web research has no task context to check: its context check is not_applicable, and it is sent', async () => {
