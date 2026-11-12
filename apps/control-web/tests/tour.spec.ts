@@ -33,6 +33,8 @@ test('the tour runs end to end on demo data, by keyboard, each step on the real 
     await tour.getByRole('button', { name: 'Next' }).focus();
     await page.keyboard.press('Enter');
     await expect(tour).toHaveAttribute('data-step', String(n));
+    // The step's heading takes focus once the screen it moved to has settled (H9 fix round 2: wait for that, not a moment).
+    await expect(tour.getByRole('heading', { level: 2 })).toBeFocused();
   };
   await expect(tour).toHaveAttribute('data-step', '1');
   await expect(tour.getByRole('heading', { name: 'Drafted on this device' })).toBeFocused();
@@ -102,4 +104,15 @@ test('H9 fix round 1 (M3): when the offline step cannot run, the connection is r
   await tour.getByRole('button', { name: 'Go offline and run a Cloud only step' }).click();
   await expect(page.getByTestId('tour-offline-status')).toHaveText(/could not run.*connection is back/i);
   await expect(page.getByTestId('demo-network').getByRole('button', { name: 'Go offline' })).toBeVisible();
+});
+
+test('H9 fix round 2: when the PM cannot be asked (no run yet), step 5 says it failed and offers Try again; it never stays on Asking', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/?demo&fixture=no-data&tour=1#/office');
+  const tour = page.getByTestId('tour');
+  for (let n = 2; n <= 5; n++) { await tour.getByRole('button', { name: 'Next' }).click(); await expect(tour).toHaveAttribute('data-step', String(n)); }
+  await tour.getByRole('button', { name: 'Ask the PM for a plan' }).click();
+  await expect(page.getByTestId('tour-pm-status')).toHaveText(/could not be asked/i, { timeout: 30_000 });
+  await expect(tour.getByRole('button', { name: 'Try again' })).toBeVisible();
 });

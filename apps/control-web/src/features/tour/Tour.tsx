@@ -6,6 +6,7 @@ import { officeOnScreen } from '../../office/OfficeCanvas.tsx';
 import { connectivity } from '../checkpoints/connectivity.ts';
 import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
 import { useHybrid } from '../hybrid/context.tsx';
+import { pmPanelAction } from '../pm/PmPanel.tsx';
 import { TOUR_FIXTURE, TOUR_OFFLINE_TASK, TOUR_STEPS, markTourOffered, tourOffered, tourStartHref } from './tour.ts';
 
 /** Who opens the tour: the top bar's "Start the tour", the first-visit offer, or `?tour=1` after the switch to the tour's demo project. */
@@ -35,24 +36,6 @@ function targetRect(target: string): Rect | null {
   return null;
 }
 
-/** H9 fix round 1 (M2): asks through the PM panel itself, as a person would: the question in its box, then its Draft a plan button. */
-function askPmForPlan(question: string): boolean {
-  const box = document.querySelector<HTMLTextAreaElement>('[data-testid="pm-question"]');
-  const plan = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="pm-panel"] button')].find((b) => b.textContent?.trim() === 'Draft a plan');
-  if (!box || !plan) return false;
-  // React reads the value through its own setter, so the native one is used and the change announced.
-  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, question);
-  box.dispatchEvent(new Event('input', { bubbles: true }));
-  // The button enables once React has the question: pressed then, not before.
-  let tries = 0;
-  const press = (): void => {
-    if (!plan.disabled) { plan.click(); return; }
-    if ((tries += 1) < 50) window.setTimeout(press, 100);
-  };
-  press();
-  return true;
-}
-
 /**
  * H9 item 4: the guide. A non-modal card with Back, Next and Close (Escape closes too), focus on its heading at every step, and a ring round the real element
  * each step is about. No animation: it honours reduced motion by having none. Step 4 runs a real (demo-data) step offline, then reconnects.
@@ -74,7 +57,10 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
     if (!open) return;
     // Focus lands on the step's heading once the screen it moved to has taken focus for itself (a route change focuses its main region).
     let frame = 0;
-    const focus = (): void => { frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => heading.current?.focus()); }); };
+    // H9 fix round 2: a control in the card the person moved to since (say Ask the PM) keeps the focus; it is never taken back.
+    const from = document.activeElement;
+    const moved = (): boolean => { const a = document.activeElement; return a !== from && a !== heading.current && a instanceof Element && a.closest('[data-testid="tour"]') !== null; };
+    const focus = (): void => { frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => { if (!moved()) heading.current?.focus(); }); }); };
     const moving = window.location.hash !== s.hash;
     if (moving) { window.addEventListener('hashchange', focus, { once: true }); window.location.hash = s.hash; } else focus();
     return () => { window.removeEventListener('hashchange', focus); cancelAnimationFrame(frame); };
@@ -102,12 +88,23 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
     const timer = window.setInterval(follow, 250);
     return () => window.clearInterval(timer);
   }, [open, s.target]);
-  // H9 fix round 1 (M2): the plan is ready once its Accept plan button is there.
-  useEffect(() => {
-    if (pm !== 'asking') return;
-    const timer = window.setInterval(() => { if (document.querySelector('[data-testid="pm-accept-plan"]')) setPm('ready'); else if (document.querySelector('[data-testid="pm-refused"]')) setPm('failed'); }, 200);
-    return () => window.clearInterval(timer);
-  }, [pm]);
+  /**
+   * H9 fix round 2: step 5 asks the PM through the panel's own Draft a plan action (pmPanelAction), so it takes the button's exact path: route, lock, history and
+   * checkpoint. It waits for the panel's ready signal, never for the page; any failure or timeout ends in a visible failed state with Try again.
+   */
+  const askPm = async (): Promise<void> => {
+    setPm('asking');
+    const within = <T,>(p: Promise<T>, ms: number): Promise<T | 'timeout'> => new Promise((resolve) => { const t = window.setTimeout(() => resolve('timeout'), ms); void p.then((v) => { window.clearTimeout(t); resolve(v); }, () => { window.clearTimeout(t); resolve('timeout'); }); });
+    const ready = new Promise<NonNullable<ReturnType<typeof pmPanelAction.getState>['askPlan']>>((resolve) => {
+      const now = pmPanelAction.getState().askPlan;
+      if (now) { resolve(now); return; }
+      const off = pmPanelAction.subscribe((st) => { if (st.askPlan) { off(); resolve(st.askPlan); } });
+    });
+    const askPlan = await within(ready, 10_000);
+    if (askPlan === 'timeout') { setPm('failed'); return; }
+    const ok = await within(askPlan('Draft a plan for the open work.'), 60_000);
+    setPm(ok === true ? 'ready' : 'failed');
+  };
   // Sent after reconnecting, as the checkpoint records it.
   useEffect(() => {
     if (offline === 'waiting' && Object.values(checkpoints).some((c) => c.taskId === TOUR_OFFLINE_TASK && c.status === 'sent')) setOffline('sent');
@@ -176,9 +173,11 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
         ) : null}
         {s.pm ? (
           <div className="mt-2 space-y-2" data-testid="tour-pm">
-            <button type="button" className={buttonQuiet} disabled={pm === 'asking'} onClick={() => setPm(askPmForPlan('Draft a plan for the open work.') ? 'asking' : 'failed')}>Ask the PM for a plan</button>
+            {pm === 'failed'
+              ? <button type="button" className={buttonQuiet} onClick={() => void askPm()}>Try again</button>
+              : <button type="button" className={buttonQuiet} disabled={pm === 'asking'} onClick={() => void askPm()}>Ask the PM for a plan</button>}
             <p role="status" className="text-sm text-fg" data-testid="tour-pm-status">
-              {pm === 'asking' ? 'Asking the PM…' : pm === 'ready' ? 'The plan is ready. Accept plan is below its tasks: nothing changes until you press it.' : pm === 'failed' ? 'The PM could not be asked from here. Use its panel directly.' : ''}
+              {pm === 'asking' ? 'Asking the PM…' : pm === 'ready' ? 'The plan is ready. Accept plan is below its tasks: nothing changes until you press it.' : pm === 'failed' ? 'The PM could not be asked, or did not return a plan. Try again, or use its panel directly.' : ''}
             </p>
           </div>
         ) : null}

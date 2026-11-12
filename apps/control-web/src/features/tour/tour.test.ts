@@ -31,3 +31,12 @@ describe('H9 item 4: the first-visit guided demo story', () => {
     expect(tourStartHref('https://selarikru.web.app/')).toBe('https://selarikru.web.app/?fixture=feature-delivery&tour=1#/office');
   });
 });
+
+describe('H9 fix round 2: the tour asks the PM through the panel\'s own action, never through the DOM', () => {
+  it('Tour.tsx neither sets an input value nor clicks a button', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('./Tour.tsx', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/dispatchEvent|HTMLTextAreaElement|\.click\(\)|querySelectorAll<HTMLButtonElement>/);
+    expect(src).toContain('pmPanelAction');
+  });
+});
