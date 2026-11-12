@@ -166,6 +166,11 @@ for (const size of SIZES) {
       await shot(page, '17-nano-banner', size, page.getByTestId('nano-banner'));
     });
 
+    test('Team fleet, coding workers off', async ({ page }) => {
+      await open(page, '#/team');
+      await shot(page, '19-team', size, page.getByRole('heading', { name: 'Team', level: 1 }));
+    });
+
     test('the tour, step 1', async ({ page }) => {
       await page.clock.setFixedTime(FIXED);
       await page.goto('/?demo&fixture=feature-delivery&tour=1#/office');
