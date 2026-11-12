@@ -8,7 +8,9 @@ import type { RawRecord } from '../src/report.ts';
 /** Test data only. Every value here is synthetic; none is a measurement. */
 
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..');
-export const FIXTURE_MANIFEST_PATH = join(REPO_ROOT, 'fixtures/benchmarks/manifest.json');
+// A frozen copy of the tracked manifest as it was before the first real cohort (Track A, 2026-11-12). The tracked file now carries that
+// cohort's values, authorisation and start stamp; the tests need the unresolved, unauthorised, unstarted state.
+export const FIXTURE_MANIFEST_PATH = join(REPO_ROOT, 'tools/benchmarks/test/data/manifest-pre-cohort.json');
 export const fixtureManifestText = (): string => readFileSync(FIXTURE_MANIFEST_PATH, 'utf8');
 
 export const STARTER = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
@@ -18,6 +20,8 @@ export const SECRET = 'sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
 /** The fixture manifest with every required field resolved, both cloud modes available, and its seed and order frozen. */
 export function resolvedManifest(over: (m: Manifest) => void = () => {}): Manifest {
   const m = parseManifest(fixtureManifestText()).manifest;
+  // The tracked manifest may carry a real cohort's start stamps (Track A, 2026-11-12); the tests start from an unstarted copy.
+  m.starts = { ...m.starts, workers: null, assistant: null };
   m.cohortId = 'cohort-2026-11';
   // The T8.1 tests exercise the API-key path; the tracked manifest's mode (D6) is cli_login, tested on its own.
   m.credentials = { ...m.credentials, mode: 'api_key' };

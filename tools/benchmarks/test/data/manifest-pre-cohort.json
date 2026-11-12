@@ -1,0 +1,253 @@
+{
+  "protocolVersion": "0.1",
+  "status": "configuration_required",
+  "project": "Feedback Board",
+  "purpose": "Benchmark manifest. Reading or validating it dispatches nothing, calls no model, spends nothing and touches no network. Every null below is an unresolved field that blocks live dispatch.",
+  "cohortId": null,
+  "randomization": {
+    "seed": null,
+    "order": [],
+    "orderSha256": null,
+    "frozenAtUtc": null,
+    "freezeBeforeStart": true
+  },
+  "repository": {
+    "url": null,
+    "starterSha": null,
+    "lockfileSha256": null,
+    "contractSha256": null,
+    "verifierSha": null,
+    "verifierSha256": null
+  },
+  "environment": {
+    "harness": null,
+    "harnessVersion": null,
+    "codingModel": null,
+    "inferenceProvider": null,
+    "modelSettings": null,
+    "accountTier": null,
+    "priceReference": null,
+    "localHost": null,
+    "cloudBackend": null,
+    "imageDigest": null,
+    "verificationEnvironment": null,
+    "cpuRamLimitsVerified": false,
+    "verifierHostFrozen": false
+  },
+  "credentials": {
+    "mode": "cli_login",
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "checkedBy": "presence_only_never_printed"
+  },
+  "assistant": {
+    "fixtureFile": "apps/control-web/src/features/assistant/data/brief-fixtures.json",
+    "requestedModes": [
+      "ONLY_ON_DEVICE",
+      "ONLY_IN_CLOUD"
+    ],
+    "expectedObservedSources": [
+      "ON_DEVICE",
+      "IN_CLOUD"
+    ],
+    "repetitionsPerFixture": 3,
+    "excludedWarmupsPerRoute": 2,
+    "setupTimeoutSeconds": 1800,
+    "coldStartCohort": "not_planned",
+    "sdkVersion": null,
+    "browserVersion": null,
+    "origin": null,
+    "cloudModel": null,
+    "appCheckReadiness": "unverified",
+    "fixtureIds": [
+      "brief-01",
+      "brief-02",
+      "brief-03",
+      "brief-04",
+      "brief-05",
+      "brief-06",
+      "brief-07",
+      "brief-08",
+      "brief-09",
+      "brief-10"
+    ],
+    "deviceModel": null
+  },
+  "workers": {
+    "attemptsPerRequiredMode": 5,
+    "minimumExploratoryAttemptsPerMode": 3,
+    "requiredModes": [
+      {
+        "id": "L1",
+        "localCodingSlots": 1,
+        "cloudCodingSlots": 0,
+        "implementationOrder": [
+          "backend",
+          "frontend"
+        ],
+        "availability": "supported",
+        "unavailableReason": null
+      },
+      {
+        "id": "C1",
+        "localCodingSlots": 0,
+        "cloudCodingSlots": 1,
+        "implementationOrder": [
+          "backend",
+          "frontend"
+        ],
+        "availability": "unsupported",
+        "unavailableReason": "Needs the cloud sandbox, which waits for the coupon (D3, D4)"
+      },
+      {
+        "id": "H2",
+        "localCodingSlots": 1,
+        "cloudCodingSlots": 1,
+        "backendPlacement": "local",
+        "frontendPlacement": "cloud",
+        "availability": "unsupported",
+        "unavailableReason": "Needs the cloud sandbox, which waits for the coupon (D3, D4)"
+      }
+    ],
+    "optionalModes": [
+      "L2",
+      "C2"
+    ],
+    "attemptTimeoutSeconds": 1800,
+    "repairPolicy": null,
+    "resetWorktreeDatabaseAndAgentSession": true,
+    "installationPolicy": "warm_dependency_and_image_cache_report_setup_separately",
+    "verificationPolicy": "same_trusted_checks_exact_candidate_each_attempt"
+  },
+  "proposedVariableBudgetUsd": {
+    "total": 60,
+    "codingPlanningVerificationModelsAndTools": 50,
+    "cloudRuntime": 5,
+    "assistantInference": 5,
+    "status": "proposal_not_authorized",
+    "excludes": [
+      "fixed subscriptions",
+      "shared hosting",
+      "local hardware and energy",
+      "human labor",
+      "initial setup investment"
+    ],
+    "payer": null,
+    "authorizedBy": null,
+    "authorizedAtUtc": null
+  },
+  "privacy": {
+    "fixtures": "synthetic_cloud_permitted",
+    "credentialsInResults": false,
+    "rawPrivatePromptsInHostedTelemetry": false
+  },
+  "preflight": {
+    "blockOnMissingRepositoryIdentity": true,
+    "blockOnUnresolvedRuntimeModelPolicyAndBudgets": true,
+    "blockOnUnavailableTrustedVerifier": true,
+    "unsupportedModesMustRemainVisible": true,
+    "noLiveDispatchByReadingThisManifest": true,
+    "blockOnUnfrozenLockfile": true,
+    "blockOnUnfrozenSeedAndOrder": true
+  },
+  "starts": {
+    "workers": null,
+    "assistant": null
+  },
+  "protocolNotes": [
+    {
+      "id": "payload-sha256",
+      "text": "assistant.payloadSha256 is the sha-256 of the logical payload: the UTF-8 system instruction followed by the prompt, which is the fixture prompt plus its allowed requirement IDs in fixed order. It is not a hash of the wire request."
+    },
+    {
+      "id": "requirement-id-narrowing",
+      "text": "Each request narrows the requirementId enum to that fixture's allowed IDs; validation keeps the unmodified shared schema and checks returned IDs against the fixture. Adopted before any cohort started."
+    },
+    {
+      "id": "record-granularity",
+      "text": "One record per trial. Every trial fills one slot of the frozen randomization.order and records slotId and slotAttempt. The highest attempt represents the slot and drives times and pairs. Earlier attempts are superseded: kept, shown and counted towards completion and spend, never timed or paired. A slot with no record is missing."
+    },
+    {
+      "id": "permitted-human-action",
+      "text": "A human action the protocol permits outside control mode (resolving an approval gate the run raised, answering a blocked worker, the owner's handover review) is counted in operations.permittedHumanActions with its minutes in humanMinutes.permittedAction. It does not set humanIntervened and does not remove the trial from comparisons; the report shows the count beside the mode. Control-mode use sets humanIntervened and keeps the trial out of comparisons."
+    },
+    {
+      "id": "configuration-from-manifest",
+      "text": "The exporter fills each record's configuration from this manifest, including denied starts, and only from the manifest a track started under: its hash must equal the start's. Starter and candidate SHAs are full lowercase commit SHAs. Delivery times are on the server monotonic clock only."
+    },
+    {
+      "id": "lockfile-freeze",
+      "text": "repository.verifierSha256 and repository.lockfileSha256 freeze the verifier and lockfile before the cohorts run. Preflight recomputes both from the verifier's files and pnpm-lock.yaml with the verifier's own hashing, and refuses live dispatch when either differs from the frozen value, or when services/verifier/suites/feedback-board/HASHES.json is stale."
+    },
+    {
+      "id": "manifest-hash",
+      "text": "manifestSha256 is the sha-256 of this manifest's canonical JSON (sorted keys) with starts left out, so stamping a start does not change it. Records, starts and preflight all refer to the manifest by this hash."
+    },
+    {
+      "id": "starts",
+      "text": "record-start runs only on a passing preflight for its track. It stamps the start time and manifest hash under starts first, then writes the cohort-start file for the track (the preregistration record, kept in the repository). If the file write fails, the stamp still refuses freeze and preflight reports start_record_mismatch until record-start --repair writes the file from the stamp; --repair also restores a lost stamp from the file, only for the same cohortId, and never re-hashes. After either exists, freeze is refused, and preflight and export refuse a manifest whose hash differs from the start's (manifest_changed_after_start)."
+    },
+    {
+      "id": "published-hash",
+      "text": "The local export carries resultSha256, the hash of the unredacted record. The published copy drops it and carries publishedSha256, the hash of the redacted record with both hash fields left out, so a guessed host or account cannot be confirmed from the published file."
+    },
+    {
+      "id": "unknown-stays-unknown",
+      "text": "Human minutes are unavailable unless every category is recorded. A trial whose control-mode use or permitted human actions are not recorded is left out of pairs. Permitted human actions are shown per pair, and a difference within a pair is listed as a confounder."
+    },
+    {
+      "id": "slot-grammar",
+      "text": "Slots are the entries of randomization.order: workers/block-<n>/<mode> for a worker trial (its blockId is block-<n>), assistant/<route>/<fixtureId>/rep-<n> for a measured assistant request, and assistant/warmup/<route>/<n> for an excluded warm-up (assistant.warmup is true). slotAttempt runs 1..n within a slot with no gaps."
+    },
+    {
+      "id": "replacement-rule",
+      "text": "A slot may be retried only after an infrastructure outcome: denied_start, abandoned or not_run. A completed, failed, timed-out or cancelled attempt is final; a replacement after one is refused, so a cohort can never become best-of-N. Completion counts every attempt that ran, superseded ones included; a slot-level figure may sit beside it, labelled as slots."
+    },
+    {
+      "id": "start-reset",
+      "text": "Erasing both a track's stamp under starts and its cohort-start file makes the track look unstarted, so the seed could be re-frozen and the cohort restarted. Only git history would show it. Commit each cohort-start file and the stamped manifest as soon as record-start writes them."
+    },
+    {
+      "id": "worker-trial-isolation",
+      "text": "Each worker trial gets a fresh clone of the starter holding only the starter commit, a fresh bench_<time>_<random> PostgreSQL schema (dropped after the trial), a fresh project, run (a benchmark trial with the manifest's coding model pinned), runner enrolment, owner credential and trial-unique task ids, and a fresh sandbox runtime whose sandboxes are named under the trial's own owner scope, so its sweeps never touch the owner's or another runner's sandboxes. Each attempt's sandbox is a new container from the agent image, created with --skills off and only the workspace mounted, and removed after the attempt: Claude config, memory, history and CLAUDE.md inside it do not outlive the attempt, and the host home (~/.claude) never reaches it. What every sandbox on the machine does share: the owner's login, which reaches each sandbox as the sbx global anthropic service secret (OAuth) injected by the sbx proxy, and any sbx kit.shortcuts.claude image override; a set override, or a sandbox already in the trial's scope, is recorded as the confounder shared_agent_state. Every live trial records configuration.credentialPath and configuration.agentState (sandboxes in scope and the image override, before and after); the T8.5 first live trial checks both. Setup is timed apart in timings.initialSetupMs. The deadline is workers.attemptTimeoutSeconds from coordinator acceptance (the plan.accepted event); delivery intervals are differences of the trial's server event times on its monotonic clock. Claims refused 5 times in a row, or no start within 3 minutes, end the trial as a replaceable denied_start naming the refusal."
+    },
+    {
+      "id": "worker-budget",
+      "text": "The workers ceiling is codingPlanningVerificationModelsAndTools plus cloudRuntime. Each runnable trial may hold at most its share of it (ceiling / runnable trials), spread over every attempt the repair policy allows. A trial is charged its reported cost, or for an attempt that reported none, its worst-case hold. When the ceiling is spent, or a spend cannot be bounded at all, every remaining trial is recorded not_run (budget_exhausted or budget_unmetered); not_run is replaceable, so a later run continues in the same slot."
+    },
+    {
+      "id": "cloud-unavailable",
+      "text": "C1 and H2 need cloud capacity. Until it exists they are recorded not_run with failure category cloud_unavailable, once per slot, and never faked. The T6.7 cloud-location runner is a local process, so it does not count as cloud for this benchmark."
+    },
+    {
+      "id": "assistant-requests",
+      "text": "Each assistant request is single-turn on a new model instance, sent through the bench page in the owner's Chrome in the frozen order. Warm-up k sends fixture k in fixture order. A response whose inferenceSource is not the route's, or is missing or unknown, is a routing failure (status failed). firstOutputMs is null when the call does not stream. Model download and setup go to a separate setup ledger, never onto a record. Bytes are recorded as bytes; provider tokens only where the SDK reports them."
+    },
+    {
+      "id": "credentials-d6",
+      "text": "D6: local benchmarks use the owner's existing Claude Code CLI login (credentials.mode cli_login), not an API key. Preflight then checks, read-only with `claude auth status`, that the claude CLI is present and logged in, keeping only that flag: no account details are kept or printed and no token is read. In api_key mode it checks credentials.apiKeyEnv by presence only. Every worker record carries configuration.credentialMode and configuration.accountTier, and the report names an account confounder whenever two compared modes ran under different credential modes or account tiers."
+    },
+    {
+      "id": "budget-d4",
+      "text": "D4 is approved at $60 variable spend: $50 coding, planning and verification models and tools, $5 cloud runtime, $5 assistant inference. The manifest stays proposal_not_authorized until the owner marks it authorized, with payer, approver and time, at cohort start."
+    },
+    {
+      "id": "cdp-profile",
+      "text": "Track A drives the owner's Chrome over CDP. Start a separate Chrome profile for it, never the owner's everyday one: chrome --remote-debugging-port=9222 --user-data-dir=<a dedicated benchmark profile directory>. In that profile, sign in to the control web as the owner, open the bench page (built with VITE_BENCH_PAGE=1), and download the on-device model in that profile before the cohort (its download is per profile). The runner accepts only a loopback CDP endpoint, finds the already-open bench tab, never opens or navigates one, and disconnects when done. A VITE_BENCH_PAGE=1 build deployed to the origin is reachable by any signed-in user of that origin, so deploy it only for the cohort and redeploy the default build straight after."
+    },
+    {
+      "id": "coding-workers",
+      "text": "Worker trials run with codingWorkers set to claude_code: the benchmark measures Claude Code coding workers, which call a model API outside Firebase AI Logic. That is outside the hackathon build's AI path, where coding workers are off and accepted changes are applied with no model. Each worker record says so in configuration.codingWorkers."
+    }
+  ],
+  "resultTemplate": "fixtures/benchmarks/result.template.json",
+  "requirementIds": [
+    "FB-01",
+    "FB-02",
+    "FB-03",
+    "FB-04",
+    "FB-05",
+    "FB-06",
+    "FB-07",
+    "FB-08"
+  ]
+}
