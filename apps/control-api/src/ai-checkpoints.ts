@@ -70,7 +70,8 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     // Fix round 1 (I4): judged again by each task's lock now (computed as every route read computes it): a checkpoint stored while its task was internal is
     // withheld once the task reads restricted data, so it never reaches a browser that would send it to the cloud.
     const locks = await taskRouteLocks(db, tenantId, projectId, rows.map((r) => r.taskId));
-    return { checkpoints: rows.filter((r) => (locks.get(r.taskId) ?? null) === null).map(bodyOf) };
+    // Fix round 2 (N5): only a task the lock read knows, with no lock. An unknown task is withheld, never read as unlocked.
+    return { checkpoints: rows.filter((r) => locks.has(r.taskId) && locks.get(r.taskId) === null).map(bodyOf) };
   });
 
   app.post('/v1/projects/:id/ai-checkpoints', guard, async (req, reply) => {

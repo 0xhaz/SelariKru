@@ -102,6 +102,12 @@ describe('AI step checkpoints on the server (H12)', () => {
     expect((await list()).body.checkpoints).toEqual([]);
   });
 
+  it('fix 2 (N5): a row whose task is not known (no current status or spec) is withheld', async () => {
+    await t.db.insert(schema.aiCheckpoints).values({ tenantId: TENANT, projectId: PROJECT, checkpointId: 'ckp_unknown_task1', ownerUid: 'owner_uid_1', taskId: 't_gone', status: 'waiting', stopReason: 'offline', body: cp({ checkpointId: 'ckp_unknown_task1', taskId: 't_gone' }) as never, createdAt: new Date(), updatedAt: new Date() });
+    await save(cp());
+    expect((await list()).body.checkpoints.map((c: { checkpointId: string }) => c.checkpointId)).toEqual(['ckp_0123456789abcdef']);
+  });
+
   it('refuses secret-shaped text', async () => {
     const r = await save(cp({ partial: { issues: [], texts: [{ who: 'owner', text: 'use AKIAABCDEFGHIJKLMNOP', classification: 'internal' }] } }));
     expect(r.body.error.code).toBe('checkpoint_secret');
