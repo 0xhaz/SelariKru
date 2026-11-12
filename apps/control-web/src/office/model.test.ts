@@ -145,7 +145,7 @@ describe('the office world', () => {
     expect(at()).toEqual([]);
   });
 
-  it('has one sandbox rack per worker, lit only while it holds an attempt with no end, a plan desk with no robot, and a phase banner for the run', () => {
+  it('has one sandbox per worker (H9: shown on its desk monitor), running only while it holds an attempt with no end, a plan desk with no robot, and a phase banner for the run', () => {
     const s = snapshot();
     const attempt = (id: string, endedAt: string | null) => ({ attemptId: id, taskId: 'a', number: 1, fence: 1, outcome: endedAt ? 'succeeded' as const : 'running' as const, exitReason: null, runnerId: 'r', startedAt: iso(50), endedAt, lastHeartbeatAt: iso(1), assignment: null });
     s.attempts = { x1: attempt('x1', null), x2: attempt('x2', iso(5)) };
@@ -162,7 +162,7 @@ describe('the office world', () => {
 
   it('says what it shows in words, for the canvas label', () => {
     const world = buildOfficeWorld(snapshot(), buildTeam(snapshot(), NOW, NOW), 'Clinic queue');
-    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Team: Backend 1, Backend 2, Worker. 1 role not started (Frontend): an empty desk until a worker holds it. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
+    expect(world.summary).toBe('Office for Clinic queue: 3 workers. 1 working, 1 in review, 1 idle. 1 pull request. The team panel lists each worker. Team: Backend 1, Backend 2, Worker. In the kopitiam, with no claimed task: Worker. At the shared table with Project Manager, for a review: Backend 2. No sandbox is running. +1 role without a worker (Frontend): Team settings gives it one. Roof: 0 tasks on this device, 0 in the cloud, 0 fell back.');
   });
 
   it('says so when there are no workers', () => {
@@ -293,7 +293,19 @@ describe('the team in the office (H11)', () => {
     expect(placeholder).toMatchObject({ name: 'Frontend', roleLabel: 'Frontend', active: false, notStarted: true });
     expect(w.agents.find((a) => a.id === 'w1')!.notStarted).toBeUndefined();
     expect(w.pm.name).toBe('Puan Zara');
-    expect(w.summary).toContain('1 role not started');
+    expect(w.summary).toContain('+1 role without a worker (Frontend)');
+  });
+
+  it('H9: the PM meets the team at the shared table while a review is in progress, or while a plan is drafted; otherwise it is at its desk', () => {
+    const review = snapshotOf({ tasks: [task('a', { status: 'verifying' }), task('b')], workers: [worker('w1', { taskId: 'a', activity: 'testing' }), worker('w2', { taskId: 'b' })] });
+    expect(buildOfficeWorld(review, buildTeam(review, NOW, NOW, {}), 'P').meeting).toEqual({ pm: true, why: 'review', agentIds: ['w1'] });
+    const quiet = snapshotOf({ tasks: [task('b')], workers: [worker('w2', { taskId: 'b' })] });
+    expect(buildOfficeWorld(quiet, buildTeam(quiet, NOW, NOW, {}), 'P').meeting).toEqual({ pm: false, why: null, agentIds: [] });
+    const plan = buildOfficeWorld(quiet, buildTeam(quiet, NOW, NOW, {}), 'P', null, [{ taskId: 'b', place: 'cloud', stepKind: 'pmPlan' }]);
+    expect(plan.meeting).toEqual({ pm: true, why: 'plan', agentIds: [] });
+    expect(plan.summary).toContain('At the shared table: Project Manager, drafting a plan.');
+    // A plan step that only waits as a checkpoint is not in progress.
+    expect(buildOfficeWorld(quiet, buildTeam(quiet, NOW, NOW, {}), 'P', null, [{ taskId: 'b', place: 'cloud', stepKind: 'pmPlan', waiting: true }]).meeting?.pm).toBe(false);
   });
 
   it('a delegation is on the worker\'s cue, from the record', () => {

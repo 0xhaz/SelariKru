@@ -549,3 +549,105 @@ test('H7 fix round 4: the roof\'s device box lights on a device record and its c
   await expect.poll(() => look('cloud')).toBe('observed');
   await expect(page.getByTestId('office-canvas')).toHaveAttribute('aria-label', /Roof: \d+ tasks? on this device, \d+ in the cloud, \d+ fell back\./);
 });
+
+test.describe('H9: the office floor, a grid of desks, a shared table and a kopitiam', () => {
+  type Tile = [number, number];
+  type Live = {
+    world: { epoch: string; agents: { id: string; state: string; active?: boolean; notStarted?: true }[]; cues: { agentId: string; attemptId: string | null; attemptRunning: boolean }[]; summary: string };
+    layout: { ox: number; oy: number; mainW: number; desks: { agentId: string; x0: number; y0: number; seat: Tile }[]; lead: { seat: Tile }; table: { rect: { x: number; y: number; w: number; h: number }; spots: Tile[]; pmSpot: Tile }; kopitiam: { rect: { x: number; y: number; w: number; h: number }; spots: { tile: Tile }[] }; rolesSign: { count: number } | null; racks: unknown[] };
+    bots: Map<string, { x: number; y: number; path: unknown[]; seated: boolean }>;
+    pmPlace(): 'desk' | 'table';
+    setWorld(w: unknown): void;
+  };
+  const scene = (page: Page) => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world));
+  /** Changes the spied fixture's snapshot (the harness reads its patches on every load) and reloads it, so the office gets a real world built from it. */
+  const patch = (page: Page, scenario: Record<string, unknown>) => page.evaluate((sc) => {
+    Object.assign((window as unknown as { __scenario: Record<string, unknown> }).__scenario, sc);
+    (window as unknown as { __projection: { getState(): { resync(): void } } }).__projection.getState().resync();
+  }, scenario);
+  const taskOf = (page: Page, id: string) => page.evaluate((who) => (window as unknown as { __selarikruOffice: { world: { cues: { agentId: string; taskId: string | null }[] } } }).__selarikruOffice.world.cues.find((c) => c.agentId === who)!.taskId!, id);
+  const advance = (page: Page, ms: number) => page.evaluate((n) => (window as unknown as { __advance: (ms: number) => void }).__advance(n), ms);
+  const stateOf = (page: Page, id: string) => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.world.agents.find((a) => a.id === who)!.state, id);
+  const where = (page: Page, id: string) => page.evaluate((who) => {
+    const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+    const b = s.bots.get(who)!;
+    const inRect = (r: { x: number; y: number; w: number; h: number }) => b.x >= r.x && b.x <= r.x + r.w && b.y >= r.y && b.y <= r.y + r.h;
+    const tileOf = (t: Tile) => ({ x: s.layout.ox + t[0] * 16 + 8, y: s.layout.oy + t[1] * 16 + 8 });
+    const seat = tileOf(s.layout.desks.find((d) => d.agentId === who)!.seat);
+    const near = (t: Tile) => Math.hypot(tileOf(t).x - b.x, tileOf(t).y - b.y) < 2;
+    return { kopitiam: inRect(s.layout.kopitiam.rect), atDesk: Math.hypot(seat.x - b.x, seat.y - b.y) < 2, atTable: s.layout.table.spots.some(near), walking: b.path.length > 0 };
+  }, id);
+
+  test('desks are a grid of up to four across, only for workers; the PM sits at the top centre; roles with no worker get one small sign; no sandbox racks', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'feature-delivery');
+    await expect.poll(() => scene(page)).toBe(true);
+    const facts = await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
+      const workers = s.world.agents.filter((a) => !a.notStarted).map((a) => a.id);
+      return { workers, desks: s.layout.desks.map((d) => d.agentId), columns: new Set(s.layout.desks.map((d) => d.x0)).size, rows: new Set(s.layout.desks.map((d) => d.y0)).size, pm: s.layout.lead.seat, centre: (1 + s.layout.mainW) / 2, roles: s.layout.rolesSign, unheld: s.world.agents.filter((a) => a.notStarted).length, racks: s.layout.racks.length };
+    });
+    expect(facts.desks).toEqual(facts.workers);
+    expect(facts.columns).toBeLessThanOrEqual(4);
+    expect(facts.rows).toBe(Math.ceil(facts.workers.length / 4));
+    expect(Math.abs(facts.pm[0] + 0.5 - facts.centre)).toBeLessThanOrEqual(1.5);
+    expect(facts.racks).toBe(0);
+    expect(facts.roles?.count ?? 0).toBe(facts.unheld);
+    await expect(page.getByTestId('office-summary')).not.toContainText('rack');
+  });
+
+  test.describe('with motion allowed', () => {
+    test.use({ reducedMotion: 'no-preference' });
+    // A walk across the floor to the kopitiam takes about 15 s at 1x.
+    test.setTimeout(120_000);
+
+    test('in the demo script, a worker that finishes its task walks to the kopitiam; when it claims the next one it walks back to its desk', async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await spied(page, 'human-wait');
+      await expect.poll(() => scene(page)).toBe(true);
+      const id = 'runner_local_1';
+      await expect.poll(async () => (await where(page, id)).atDesk, { timeout: 10_000 }).toBe(true);
+      // The script ends its task (no claimed task: idle), then it claims the next one.
+      for (let i = 0; i < 12 && (await stateOf(page, id)) !== 'idle'; i++) await advance(page, 15_000);
+      expect(await stateOf(page, id)).toBe('idle');
+      await expect(page.getByTestId('office-summary')).toContainText('In the kopitiam, with no claimed task');
+      await expect.poll(async () => { const w = await where(page, id); return w.kopitiam && !w.walking; }, { timeout: 45_000 }).toBe(true);
+      await advance(page, 15_000);
+      expect(await stateOf(page, id)).toBe('working');
+      await expect.poll(async () => { const w = await where(page, id); return w.atDesk && !w.walking; }, { timeout: 45_000 }).toBe(true);
+    });
+
+    test('a review in progress: the reviewing worker and the PM meet at the shared table, and part when it ends', async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await spied(page, 'healthy-parallel-work');
+      await expect.poll(() => scene(page)).toBe(true);
+      const id = await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.layout.desks[0]!.agentId);
+      const task = await taskOf(page, id);
+      await expect.poll(async () => (await where(page, id)).atDesk, { timeout: 10_000 }).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.pmPlace())).toBe('desk');
+      await patch(page, { taskPatch: { [task]: { status: 'verifying' } } });
+      await expect.poll(() => stateOf(page, id)).toBe('in_review');
+      await expect.poll(async () => { const w = await where(page, id); return w.atTable && !w.walking; }, { timeout: 25_000 }).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.pmPlace())).toBe('table');
+      await expect(page.getByTestId('office-summary')).toContainText('At the shared table with');
+      await patch(page, { taskPatch: {} });
+      await expect.poll(() => stateOf(page, id)).toBe('working');
+      await expect.poll(async () => { const w = await where(page, id); return w.atDesk && !w.walking; }, { timeout: 25_000 }).toBe(true);
+      expect(await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.pmPlace())).toBe('desk');
+    });
+  });
+
+  test('reduced motion: workers move without walking, straight to the kopitiam or the table', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await expect.poll(() => scene(page)).toBe(true);
+    const id = await page.evaluate(() => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.layout.desks[0]!.agentId);
+    const task = await taskOf(page, id);
+    await patch(page, { taskPatch: { [task]: { status: 'verifying' } } });
+    await expect.poll(() => stateOf(page, id)).toBe('in_review');
+    await expect.poll(async () => where(page, id)).toEqual({ kopitiam: false, atDesk: false, atTable: true, walking: false });
+    await patch(page, { taskPatch: {}, workerPatch: { [id]: { taskId: null, attemptId: null, availability: 'idle', activity: null, leaseHeld: false } } });
+    await expect.poll(() => stateOf(page, id)).toBe('idle');
+    await expect.poll(async () => where(page, id)).toEqual({ kopitiam: true, atDesk: false, atTable: false, walking: false });
+  });
+});

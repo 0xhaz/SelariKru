@@ -102,7 +102,7 @@ export interface OfficeParcel {
   readonly stage: 'to_gate' | 'verified' | 'merged';
 }
 
-/** A worker's sandbox in the server room. Lit while the worker holds an attempt with no end recorded. */
+/** A worker's sandbox, shown on its desk monitor (H9; it was a rack before). Running while the worker holds an attempt with no end recorded. */
 export interface OfficeRack {
   readonly agentId: string;
   readonly name: string;
@@ -152,6 +152,11 @@ export interface OfficeWorld {
   readonly delegations?: readonly { readonly taskId: string; readonly workerId: string; readonly planRevision: number; readonly at: string }[];
   /** H11: the Project Manager at the PLAN desk, always there: the worker with role project_manager if there is one. Busy while a PM call runs. */
   readonly pm: { readonly id: string | null; readonly name: string; readonly busy: boolean };
+  /**
+   * H9: the shared table. The PM meets the team there while a review is in progress (a worker whose task is verifying) or while a plan is drafted (a PM plan
+   * or delegation call in flight). `agentIds`: the reviewing workers who join it. From the snapshot and the calls in flight only.
+   */
+  readonly meeting?: { readonly pm: boolean; readonly why: 'review' | 'plan' | null; readonly agentIds: readonly string[] };
   /** Which projection this world belongs to (the project and the data source session). A world from another epoch is never compared with this one. */
   readonly epoch: string;
 }
@@ -286,7 +291,18 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
     const inactive = agents.filter((a) => a.active === false).length;
     if (inactive > 0) summary += ` ${inactive} inactive (empty desk).`;
   }
-  if (notStarted.length > 0) summary += ` ${notStarted.length} role${notStarted.length === 1 ? '' : 's'} not started (${notStarted.map((a) => a.name).join(', ')}): an empty desk until a worker holds ${notStarted.length === 1 ? 'it' : 'them'}.`;
+  // H9: where each worker is, in words: the kopitiam (no claimed task), the shared table (a review, or a plan with the PM), and the sandboxes on the desks.
+  const reviewers = agents.filter((a) => a.active !== false && a.state === 'in_review');
+  const planning = calls.some((c) => c.waiting !== true && (c.stepKind === 'pmPlan' || c.stepKind === 'pmDelegate'));
+  const meeting: OfficeWorld['meeting'] = { pm: reviewers.length > 0 || planning, why: planning ? 'plan' : reviewers.length > 0 ? 'review' : null, agentIds: reviewers.map((a) => a.id) };
+  if (agents.length > 0) {
+    const resting = agents.filter((a) => a.active !== false && a.state === 'idle');
+    if (resting.length > 0) summary += ` In the kopitiam, with no claimed task: ${resting.map(labelOf).join(', ')}.`;
+    if (meeting.pm) summary += reviewers.length > 0 ? ` At the shared table with ${pm.name}, for a review: ${reviewers.map(labelOf).join(', ')}.` : ` At the shared table: ${pm.name}, drafting a plan.`;
+    const sandboxes = racks.filter((r) => r.running).map((r) => r.name);
+    summary += sandboxes.length > 0 ? ` Sandbox running at the desk of: ${sandboxes.join(', ')}.` : ' No sandbox is running.';
+  } else if (planning) summary += ` At the shared table: ${pm.name}, drafting a plan.`;
+  if (notStarted.length > 0) summary += ` +${notStarted.length} role${notStarted.length === 1 ? '' : 's'} without a worker (${notStarted.map((a) => a.name).join(', ')}): Team settings gives ${notStarted.length === 1 ? 'it one' : 'each one'}.`;
   const cloudCall = calls.some((c) => c.place === 'cloud');
   // The desk marks in words: a call in flight is where its route sends it, expected until its record says where it ran.
   const marks = agents.flatMap((a) => (a.ai === null ? [] : [a.ai.state === 'waiting' ? `${labelOf(a)} waiting at the cloud deck for the connection` : a.ai.state === 'expected'
@@ -323,5 +339,5 @@ export function buildOfficeWorld(snapshot: ProjectViewSnapshot, team: TeamModel,
       : failed ? 'failed' : verifiedState(r, r.evidence).established ? 'passed' : 'pending';
     return [{ id: `${r.runId}:${candidate.sha}`, label: candidate.sha.slice(0, 4).toUpperCase(), outcome }];
   });
-  return { projectName, agents: [...agents, ...notStarted], planRunId: run?.runId ?? null, planRevision: run?.planRevision ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, pm, delegations: Object.values(snapshot.tasks).flatMap((t) => (t.delegation ? [{ taskId: t.taskId, workerId: t.delegation.workerId, planRevision: t.delegation.planRevision, at: t.delegation.at }] : [])), epoch: epoch || snapshot.meta.projectId };
+  return { projectName, agents: [...agents, ...notStarted], planRunId: run?.runId ?? null, planRevision: run?.planRevision ?? null, banner, runs, notes, leadLabel: 'PLAN', racks, meeting, running: racks.filter((r) => r.running).length, prs, parcels, verifying, cloudCall, summary, cues, resolvedApprovals, verdicts, roof, pm, delegations: Object.values(snapshot.tasks).flatMap((t) => (t.delegation ? [{ taskId: t.taskId, workerId: t.delegation.workerId, planRevision: t.delegation.planRevision, at: t.delegation.at }] : [])), epoch: epoch || snapshot.meta.projectId };
 }

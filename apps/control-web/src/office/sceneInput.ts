@@ -39,8 +39,12 @@ function activate(s: OfficeScene, hit: Hit): void {
     if (id) s.hooks.onOpenWorker(id);
   }
   else if (hit.kind === 'plan') s.hooks.onOpenPlace('plan');
-  // H11: the PLAN table is where the Project Manager sits: it opens Talk to the PM.
-  else if (hit.kind === 'lead') s.hooks.onOpenPlace('pm');
+  // H11: the PLAN table is where the Project Manager sits: it opens Talk to the PM. H9: so does the shared table, where it meets the team.
+  else if (hit.kind === 'lead' || hit.kind === 'table') s.hooks.onOpenPlace('pm');
+  // H9: the roles sign opens Team settings (the shell reads `role:` as that).
+  else if (hit.kind === 'roles') s.hooks.onOpenWorker('role:');
+  // The kopitiam only describes who is on a break.
+  else if (hit.kind === 'kopitiam') return;
   else s.hooks.onOpenPlace('prs');
 }
 

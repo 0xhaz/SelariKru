@@ -12,7 +12,7 @@ import { ErrandQueue, type ErrandPlace } from './errands.ts';
 export type Face = 'up' | 'down' | 'left' | 'right';
 export type EmoteType = 'talk' | 'coffee' | 'mail' | 'ok' | 'heart';
 
-type Errand = { kind: 'plan' } | { kind: 'drop'; onArrive: () => void; deadline: number } | { kind: 'coffee' } | { kind: 'wander' };
+type Errand = { kind: 'plan' } | { kind: 'drop'; onArrive: () => void; deadline: number };
 
 const SPEED = 52; // px per second
 
@@ -102,13 +102,37 @@ export class Bot {
   }
 }
 
-/** Robots that sit at their desk: everything but idle. An unknown robot stays where it was last seen. */
-const AT_DESK: ReadonlySet<RobotState> = new Set(['working', 'needs_input', 'in_review', 'verified', 'blocked', 'offline']);
+/** Robots that sit at their desk: a worker that holds a task. An unknown robot stays where it was last seen. */
+const AT_DESK: ReadonlySet<RobotState> = new Set(['working', 'needs_input', 'verified', 'blocked', 'offline']);
+
+/**
+ * H9: where a robot rests for its worker's state, with no errand. A worker with no claimed task (idle) takes a break in the kopitiam, sitting or standing at
+ * its own place there; a worker whose task is in review meets the PM at the shared table; any other worker with a task sits at its desk. Unknown: null, it
+ * stays where it was last seen. Never random: the place follows the state, and the state follows the snapshot.
+ */
+export function restingSpot(bot: Bot, l: OfficeLayout, state: RobotState): { tile: Tile; seated: boolean; face: Face } | null {
+  if (state === 'unknown') return null;
+  if (state === 'idle' && l.kopitiam.spots.length > 0) {
+    const spot = l.kopitiam.spots[bot.index % l.kopitiam.spots.length]!;
+    return { tile: spot.tile, seated: spot.sit, face: spot.face };
+  }
+  if (state === 'in_review' && l.table.spots.length > 0) {
+    const tile = l.table.spots[bot.index % l.table.spots.length]!;
+    return { tile, seated: false, face: tile[1] > Math.floor((l.table.rect.y - l.oy) / 16) + 1 ? 'up' : 'left' };
+  }
+  if (AT_DESK.has(state) || state === 'idle' || state === 'in_review') {
+    const seat = seatOf(bot, l);
+    return seat ? { tile: seat, seated: true, face: 'up' } : null;
+  }
+  return null;
+}
 
 /** Where an errand step goes, in tiles (a negative row is on the rooftop). */
 export function placeTile(bot: Bot, l: OfficeLayout, place: ErrandPlace): Tile {
   switch (place) {
-    case 'plan': return l.lead.seat;
+    // A claim or a replan: the worker fetches the plan at the shared table (H9), where the PM meets the team.
+    case 'plan':
+    case 'table': return l.table.spots[bot.index % Math.max(1, l.table.spots.length)] ?? l.lead.seat;
     case 'drop': return l.desks.find((d) => d.agentId === bot.config.id)?.drop ?? l.door;
     case 'prs': return l.prBoard ? l.grid.nearest(Math.floor((l.prBoard.x - l.ox) / 16) + 1, Math.floor((l.prBoard.y - l.oy + l.prBoard.h) / 16) + 2) : l.door;
     case 'roofDevice': return l.roofWalk.deviceSpots[bot.index % Math.max(1, l.roofWalk.deviceSpots.length)] ?? l.roofWalk.top;
@@ -160,9 +184,6 @@ function runErrand(bot: Bot, l: OfficeLayout, simT: number): boolean {
 export function think(bot: Bot, l: OfficeLayout, state: RobotState, simT: number, rand: () => number): void {
   if (bot.path.length) return;
   if (runErrand(bot, l, simT)) return;
-  const seat = seatOf(bot, l);
-  const atSeat = seat && Math.abs(bot.x - tileCentre(l, seat).x) < 1 && Math.abs(bot.y - tileCentre(l, seat).y) < 1;
-
   const e = bot.errand;
   if (e) {
     if (e.kind === 'drop') {
@@ -171,31 +192,22 @@ export function think(bot: Bot, l: OfficeLayout, state: RobotState, simT: number
       return;
     }
     if (e.kind === 'plan') bot.emote = { type: 'talk', until: simT + 1.6 };
-    if (e.kind === 'coffee') bot.emote = { type: 'coffee', until: simT + 2.4 };
     bot.errand = null;
-    bot.pause = e.kind === 'wander' ? 2 + rand() * 3 : 1.8;
+    bot.pause = 1.8;
+    void rand;
     return;
   }
   if (bot.pause > 0) return;
-  if (state === 'unknown') return;
-
-  if (AT_DESK.has(state)) {
-    if (seat && !atSeat) bot.goTo(l, seat);
-    else {
-      bot.seated = true;
-      bot.face = 'up';
-    }
+  // H9: no random walks. The robot goes to where its state says it rests (kopitiam, shared table or desk) and stays there.
+  const rest = restingSpot(bot, l, state);
+  if (!rest) return;
+  const here = tileCentre(l, rest.tile);
+  if (Math.abs(bot.x - here.x) < 1 && Math.abs(bot.y - here.y) < 1) {
+    bot.seated = rest.seated;
+    bot.face = rest.face;
     return;
   }
-  // Idle: coffee, then wander.
-  if (rand() < 0.5 && l.lounge.coffee.length) {
-    bot.errand = { kind: 'coffee' };
-    bot.goTo(l, l.lounge.coffee[bot.index % l.lounge.coffee.length]!);
-  } else if (l.wander.length) {
-    bot.errand = { kind: 'wander' };
-    bot.goTo(l, l.wander[Math.floor(rand() * l.wander.length)]!);
-  }
-  if (!bot.path.length) bot.errand = null;
+  bot.goTo(l, rest.tile);
 }
 
 export function seatOf(bot: Bot, l: OfficeLayout): Tile | null {

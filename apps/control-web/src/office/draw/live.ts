@@ -1,13 +1,15 @@
 // The live layer of the kedai studio (H7), redrawn every frame. SelariKru's own drawing: desk screens and lanterns, the paved delivery lane with its
-// tiffin carriers, the verifier's gate, the almari rack lamps, the pull request tins, the sky between the louvres and the wall clock, the desk AI
-// plates, the rooftop CLOUD sign and dish, and the fallback route up the stair. What each part shows is read from the office world (model.ts).
+// tiffin carriers, the verifier's gate, the pull request tins, the sky between the louvres and the wall clock, the desk AI plates, the desk monitors'
+// sandbox tags and dimmed desks (H9), the rooftop CLOUD sign and dish, and the fallback route up the stair. What each part shows is read from the office
+// world (model.ts).
 
 import { stateStyle, type RobotState } from '../../theme/tokens.ts';
-import type { OfficeAgent, OfficePr, OfficeRack } from '../model.ts';
+import type { OfficeAgent, OfficePr } from '../model.ts';
 import { fit, tag, text, textW } from '../engine/font.ts';
 import { C } from '../engine/palette.ts';
 import { disc, drawRows, line, type Pen } from '../engine/pen.ts';
-import { STAIR_X, type DeskSpot, type OfficeLayout, type PxRect, type Rack } from '../layout/layout.ts';
+import { NOOK_X0, STAIR_X, type DeskSpot, type OfficeLayout, type PxRect } from '../layout/layout.ts';
+export { deskDim, sandboxTag } from './kopitiam.ts';
 import { framed, uplinkDish } from './furniture.ts';
 import { VERIFIER, VERIFIER_BLINK, VERIFIER_PAL } from './robots.ts';
 import { dishSpot } from './static.ts';
@@ -89,7 +91,7 @@ export function planLamp(p: Pen, ox: number, oy: number, state: RobotState, time
 
 /**
  * The delivery lane: terracotta pavers between gold kerbs, with a running line of chevrons showing which way the tiffins go, up the chute into the
- * rack room at the far end.
+ * post box at the far end.
  */
 export function deliveryLane(p: Pen, l: OfficeLayout, time: number) {
   const lane = l.belt;
@@ -141,33 +143,6 @@ export function verifierGate(p: Pen, g: PxRect, look: GateLook, since: number, t
 }
 
 /**
- * The lamps on each worker's almari rack: they chase down the panel while its worker holds an attempt, faster for busier states, and stay dark
- * otherwise. A running rack also wears a gold lamp on top, so "running" never rests on the moving lights alone.
- */
-export function rackLamps(
-  p: Pen, racks: Rack[], envs: readonly OfficeRack[], stateOf: (agentId: string | null) => RobotState | null, pulse: (name: string) => number, time: number,
-) {
-  const PACE: Record<RobotState, number> = { working: 9, in_review: 5, verified: 6, needs_input: 2, blocked: 2, idle: 1, offline: 0, unknown: 1 };
-  for (const r of racks) {
-    const env = envs.find((e) => e.agentId === r.agentId);
-    const pace = env?.running ? PACE[stateOf(r.agentId) ?? 'idle'] : 0;
-    const head = (time * pace) | 0;
-    const flash = pulse(r.name);
-    for (let row = 0; row < 8; row++) {
-      for (let col = 0; col < 3; col++) {
-        const step = row * 3 + col;
-        let lamp: string = C.deep2;
-        if (flash > 0.05) lamp = pulseOn(time, 12) ? C.leafL : C.leafD;
-        else if (pace > 0 && (step + head) % 6 < 2) lamp = col === 2 ? C.gold : row % 2 ? C.teal : C.leafL;
-        p.rect(r.x + 17 + col * 3, r.y + 14 + row * 10, 2, 2, lamp);
-      }
-    }
-    if (env?.running) framed(p, r.x + 13, r.y - 4, 6, 4, C.ink, C.gold, 1);
-    if (flash > 0.05) for (const [x, y, w, h] of [[r.x, r.y - 1, 32, 2], [r.x, r.y + r.h - 1, 32, 2], [r.x, r.y - 1, 2, r.h], [r.x + 30, r.y - 1, 2, r.h]] as const) p.rect(x, y, w, h, C.leafL, flash);
-  }
-}
-
-/**
  * Pull requests as round biscuit tins on the shelves, newest last, three to a shelf. Colour only from the run's verification record: green verified,
  * grey not verified, amber out of date (with OLD above it).
  */
@@ -186,31 +161,14 @@ export function prTins(p: Pen, b: PxRect, prs: readonly OfficePr[]) {
   }
 }
 
-/** One bright pulse travels each cable tray from desk to rack while its worker is active; idle and offline trays stay still. */
-export function cablePulses(p: Pen, l: OfficeLayout, stateOf: (agentId: string) => RobotState | null, time: number) {
-  const PACE: Record<RobotState, number> = { working: 70, in_review: 30, verified: 45, needs_input: 0, blocked: 0, idle: 0, offline: 0, unknown: 0 };
-  for (const cable of l.cables) {
-    const st = stateOf(cable.agentId) ?? 'idle';
-    if (PACE[st] === 0) continue;
-    const legs = cable.pts.slice(1).map(([x, y], k) => ({ from: cable.pts[k]!, to: [x, y] as const, len: Math.abs(x - cable.pts[k]![0]) + Math.abs(y - cable.pts[k]![1]) }));
-    const total = legs.reduce((sum, leg) => sum + leg.len, 0);
-    let left = (time * PACE[st]) % Math.max(1, total);
-    for (const leg of legs) {
-      if (left > leg.len) { left -= leg.len; continue; }
-      const f = leg.len === 0 ? 0 : left / leg.len;
-      p.rect(Math.round(leg.from[0] + (leg.to[0] - leg.from[0]) * f) - 1, Math.round(leg.from[1] + (leg.to[1] - leg.from[1]) * f) - 1, 3, 3, C.cream);
-      break;
-    }
-  }
-}
-
 /** The hour hand's tip for each hour on the 7 px clock face, and the minute hand's for each five minutes. */
 const HOUR_TIP: readonly (readonly [number, number])[] = [[0, -3], [1, -3], [2, -2], [3, 0], [2, 2], [1, 3], [0, 3], [-1, 3], [-2, 2], [-3, 0], [-2, -2], [-1, -3]];
 const MINUTE_TIP: readonly (readonly [number, number])[] = [[0, -5], [2, -4], [4, -3], [5, 0], [4, 3], [2, 4], [0, 5], [-2, 4], [-4, 3], [-5, 0], [-4, -3], [-2, -4]];
 
 /** The sky between the louvres, by the local hour (day, dusk or night), and the wall clock's hands. */
 export function skyAndClock(p: Pen, l: OfficeLayout, time: number) {
-  const pane = { x: l.ox + l.lounge.x0 * 16 + 81, y: l.oy + 22, w: 30, h: 28 };
+  // H9: the louvre window and the clock are in the reading nook, right of the plan desk group.
+  const pane = { x: l.ox + NOOK_X0 * 16 + 55, y: l.oy + 22, w: 30, h: 28 };
   const now = new Date();
   const hour = now.getHours();
   const night = hour >= 20 || hour < 6;
@@ -226,7 +184,7 @@ export function skyAndClock(p: Pen, l: OfficeLayout, time: number) {
   }
   // A row of shophouse roofs across the street, under the sky.
   for (let rx = 0; rx < pane.w; rx += 10) { p.rect(pane.x + rx, pane.y + pane.h - 7, 9, 7, C.wallD); p.rect(pane.x + rx, pane.y + pane.h - 9, 9, 2, C.roof); }
-  const cx = l.ox + l.lounge.x0 * 16 - 8;
+  const cx = l.ox + NOOK_X0 * 16 - 8;
   const cy = l.oy + 36;
   const [hx, hy] = HOUR_TIP[hour % 12]!;
   const [mx, my] = MINUTE_TIP[Math.floor(now.getMinutes() / 5) % 12]!;

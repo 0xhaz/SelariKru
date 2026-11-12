@@ -4,7 +4,7 @@
 // hooks. The reference ran on PixiJS; this draws the same pixel art with a plain 2D canvas.
 
 import { stateStyle, type RobotState } from '../theme/tokens.ts';
-import { Bot, seatOf, think } from './actors/bots.ts';
+import { Bot, restingSpot, seatOf, think } from './actors/bots.ts';
 import { Effects } from './actors/effects.ts';
 import { BeltPath, restingPlace, updateParcels, type Parcel } from './actors/parcels.ts';
 import { PlanNotes } from './actors/planNotes.ts';
@@ -16,7 +16,7 @@ import { Camera, type Insets, type WorldTransform } from './engine/camera.ts';
 import { C } from './engine/palette.ts';
 import { CanvasPen } from './engine/pen.ts';
 import { mulberry32 } from './engine/random.ts';
-import { generateLayout, layoutKey, tileCentre, type LayoutInput, type OfficeLayout, type PxRect } from './layout/layout.ts';
+import { LEAD_DX, generateLayout, layoutKey, tileCentre, type LayoutInput, type OfficeLayout, type PxRect } from './layout/layout.ts';
 import type { OfficeParcel, OfficeWorld } from './model.ts';
 import { attachInput, type SceneHooks } from './sceneInput.ts';
 import { effectsFor, errandFor, officeEvents, type EffectPoint, type OfficeEvent } from './events.ts';
@@ -202,6 +202,7 @@ export class OfficeScene {
       this.staticCanvas = buildStatic(l, input);
       this.camera.setWorldSize(l.worldW, l.worldH);
       if (first) { this.camera.home(false); this.homed = this.host.clientWidth > 0; }
+      this.pmPos = tileCentre(l, l.lead.seat);
       for (const b of this.bots.values()) {
         b.errand = null;
         b.path = [];
@@ -221,9 +222,9 @@ export class OfficeScene {
         return;
       }
       const bot = new Bot(a, i);
-      // On first sight a robot starts at its desk; one that joins later walks in from the door.
-      const seat = seatOf(bot, l);
-      Object.assign(bot, tileCentre(l, first || !seat || this.reducedMotion ? (seat ?? l.door) : l.door));
+      // On first sight a robot starts where its state rests it (H9: the kopitiam when it has no task); one that joins later walks in from the door.
+      const rest = restingSpot(bot, l, world.agents.find((x) => x.id === a.id)?.state ?? 'unknown')?.tile ?? seatOf(bot, l);
+      Object.assign(bot, tileCentre(l, first || !rest || this.reducedMotion ? (rest ?? l.door) : l.door));
       this.bots.set(a.id, bot);
     });
 
@@ -254,7 +255,7 @@ export class OfficeScene {
         b.carry = null;
         b.emote = null;
         b.pause = 0;
-        Object.assign(b, tileCentre(l, seatOf(b, l) ?? l.door));
+        Object.assign(b, tileCentre(l, restingSpot(b, l, this.stateOf(b.config.id))?.tile ?? seatOf(b, l) ?? l.door));
       }
     } else if (!first) this.dispatch(officeEvents(before, world), l);
     // A held roof visit ends when the world has no cloud call for that worker, whatever the events said.
@@ -290,11 +291,6 @@ export class OfficeScene {
     for (const bot of this.bots.values()) {
       const state = this.stateOf(bot.config.id);
       bot.pause = Math.max(0, bot.pause - dt);
-      if (state !== 'idle' && bot.errand && (bot.errand.kind === 'coffee' || bot.errand.kind === 'wander')) {
-        bot.errand = null;
-        bot.path = [];
-        bot.pause = 0;
-      }
       think(bot, l, state, t, this.rand);
       bot.move(dt * this.speed, l);
     }
@@ -302,6 +298,16 @@ export class OfficeScene {
       const pos = this.belt!.pos(this.belt!.len);
       this.effects.text(`${p.label} MERGED`, pos.x, pos.y - 26, C.green);
     });
+    // H9: the PM walks between its desk and the shared table, straight across the open floor.
+    {
+      const to = this.pmTarget(l);
+      const dx = to.x - this.pmPos.x;
+      const dy = to.y - this.pmPos.y;
+      const dist = Math.hypot(dx, dy);
+      const stepPx = 40 * dt * this.speed;
+      if (dist <= stepPx) this.pmPos = to;
+      else this.pmPos = { x: this.pmPos.x + (dx / dist) * stepPx, y: this.pmPos.y + (dy / dist) * stepPx };
+    }
     for (const [k, v] of this.pulses) this.pulses.set(k, Math.max(0, v - dt * 0.6));
     this.effects.update(dt);
     const verifying = this.world?.verifying ?? false;
@@ -352,7 +358,7 @@ export class OfficeScene {
     }
   }
 
-  /** Under reduced motion: robots sit where their state (or a held errand, the roof during a cloud call) puts them, without walking, and nothing blinks. */
+  /** Under reduced motion: robots are placed where their state (or a held errand, the roof during a cloud call) puts them, without walking, and nothing blinks. */
   private settle(): void {
     const l = this.layout;
     if (!l) return;
@@ -368,12 +374,27 @@ export class OfficeScene {
       }
       bot.errand = null;
       bot.pause = 0;
-      think(bot, l, state === 'idle' ? 'working' : state, 0, () => 0);
-      bot.jump(l);
-      think(bot, l, state === 'idle' ? 'working' : state, 0, () => 0);
-      if (state === 'idle') { bot.seated = false; bot.face = 'down'; }
+      bot.path = [];
+      // H9: straight to where the state puts it: the kopitiam for a worker with no claimed task, the shared table for a review, else its desk.
+      const rest = restingSpot(bot, l, state);
+      if (!rest) continue;
+      Object.assign(bot, tileCentre(l, rest.tile));
+      bot.seated = rest.seated;
+      bot.face = rest.face;
     }
+    this.pmPos = this.pmTarget(l);
     this.gateMode = { mode: this.world?.verifying ? 'reviewing' : 'idle', at: 0 };
+  }
+
+  /** H9: where the PM is: at the shared table while a plan or a review is in progress there, otherwise at its desk (top centre). */
+  private pmPos = { x: 0, y: 0 };
+  private pmTarget(l: OfficeLayout): { x: number; y: number } {
+    return tileCentre(l, this.world?.meeting?.pm ? l.table.pmSpot : l.lead.seat);
+  }
+
+  /** Where the PM is going (development test hook). */
+  pmPlace(): 'desk' | 'table' {
+    return this.world?.meeting?.pm ? 'table' : 'desk';
   }
 
   private draw(): void {
@@ -398,18 +419,23 @@ export class OfficeScene {
 
     live.skyAndClock(p, l, slow);
     for (const d of l.desks) live.screenFace(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 12, this.stateOf(d.agentId), this.colorOf(d.agentId), slow, d.index);
+    // H9: each worker's sandbox, on its desk monitor (it used to be a rack): running or idle. Execution, labelled apart from where AI runs.
+    for (const d of l.desks) {
+      const agent = world.agents.find((a) => a.id === d.agentId);
+      live.sandboxTag(p, l.ox + (d.x0 + 2) * 16 + 15, l.oy + d.y0 * 16 + 24, world.racks.find((r) => r.agentId === d.agentId)?.running === true);
+      // A desk whose worker is not active, or is on a break in the kopitiam, is dimmed and says so.
+      if (agent && (agent.active === false || agent.state === 'idle')) live.deskDim(p, d, l.ox, l.oy, agent.active === false ? 'NOT ACTIVE' : 'ON BREAK');
+    }
     // The plan desk's screens: busy while any task is in progress on the plan wall, resting otherwise.
     const planState = world.notes.some((n) => n.column === 1 || n.column === 2) ? 'working' : 'idle';
-    live.screenFace(p, l.ox + 224, l.oy + 72, planState, C.teal, slow, 0);
-    live.screenFace(p, l.ox + 250, l.oy + 72, planState, C.teal, slow, 1);
-    live.planLamp(p, l.ox, l.oy, planState, this.reducedMotion ? 0 : t);
+    live.screenFace(p, l.ox + 224 + LEAD_DX * 16, l.oy + 72, planState, C.teal, slow, 0);
+    live.screenFace(p, l.ox + 250 + LEAD_DX * 16, l.oy + 72, planState, C.teal, slow, 1);
+    live.planLamp(p, l.ox + LEAD_DX * 16, l.oy, planState, this.reducedMotion ? 0 : t);
     if (l.prBoard) live.prTins(p, l.prBoard, [...world.prs].filter((x) => !x.closed).sort((a, b) => a.num - b.num));
-    live.rackLamps(p, l.racks, world.racks, (id) => (id ? this.stateOf(id) : null), (n) => this.pulses.get(n) ?? 0, slow);
 
     if (world.banner) live.planBanner(p, l, world.banner);
     this.notes.update(world.notes, l.plan.board, this.dt, t, this.reducedMotion);
     this.notes.draw(p, world.notes, (id) => this.colorOf(id), t);
-    if (!this.reducedMotion) live.cablePulses(p, l, (id) => this.stateOf(id), t);
     for (const d of l.desks) live.deskLanterns(p, d, l.ox, l.oy, this.stateOf(d.agentId), t);
     for (const d of l.desks) {
       const ai = world.agents.find((a) => a.id === d.agentId)?.ai ?? null;
@@ -432,10 +458,12 @@ export class OfficeScene {
     for (const bot of [...bots].sort((a, b) => a.y - b.y)) g.drawImage(bot.sprite, bot.spriteX, bot.spriteY);
     // H11: the Project Manager at the PLAN table, always there; it talks while the owner's PM call runs, and when it delegates.
     {
-      const seat = tileCentre(l, l.lead.seat);
+      // H9: at its desk (top centre), or at the shared table while a plan or a review is in progress.
+      const seat = this.pmPos.x === 0 && this.pmPos.y === 0 ? tileCentre(l, l.lead.seat) : this.pmPos;
+      const atTable = world.meeting?.pm === true;
       const sprite = pmCanvas();
       const px = Math.round(seat.x) - 6;
-      const py = Math.round(seat.y) - 15 - 10;
+      const py = Math.round(seat.y) - 15 - (atTable ? 0 : 10);
       p.rect(px + 1, py + 15, 10, 2, C.shadow, 0.25);
       g.drawImage(sprite, px, py);
       const talking = world.pm.busy || this.t < this.pmTalkUntil;
@@ -465,13 +493,23 @@ export class OfficeScene {
   }
 
   /** The words for what the pointer is over, for the tooltip. */
-  describe(kind: 'agent' | 'plan' | 'prs' | 'gate' | 'env' | 'lead', id: string): { title: string; sub?: string } {
+  describe(kind: 'agent' | 'plan' | 'prs' | 'gate' | 'env' | 'lead' | 'roles' | 'kopitiam' | 'table', id: string): { title: string; sub?: string } {
     const w = this.world;
     if (!w) return { title: '' };
     if (kind === 'agent') {
       const a = w.agents.find((x) => x.id === id);
-      return a ? { title: `${a.name}${a.roleLabel && a.roleLabel !== a.name ? ` · ${a.roleLabel}` : ''} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.notStarted ? 'Not started: no worker holds this role yet. Enrol a runner and give it this role in Team settings.' : a.active === false ? 'Not active: no runner is running for this worker' : a.taskTitle ?? 'No task' } : { title: id };
+      const sandbox = w.racks.find((r) => r.agentId === id)?.running ? 'Sandbox: running an attempt' : 'Sandbox: idle';
+      return a ? { title: `${a.name}${a.roleLabel && a.roleLabel !== a.name ? ` · ${a.roleLabel}` : ''} · ${stateStyle[a.state].glyph} ${a.label}`, sub: a.active === false ? `Not active: no runner is running for this worker. ${sandbox}.` : `${a.taskTitle ?? 'No task: on a break in the kopitiam'}. ${sandbox}.` } : { title: id };
     }
+    if (kind === 'roles') {
+      const roles = w.agents.filter((a) => a.notStarted).map((a) => a.name);
+      return { title: `+${roles.length} role${roles.length === 1 ? '' : 's'} without a worker`, sub: `${roles.join(', ')}. Opens Team settings, where a worker is given a role.` };
+    }
+    if (kind === 'kopitiam') {
+      const resting = w.agents.filter((a) => !a.notStarted && a.active !== false && a.state === 'idle').map((a) => a.name);
+      return { title: 'Kopitiam', sub: resting.length > 0 ? `On a break, with no claimed task: ${resting.join(', ')}.` : 'Nobody is on a break: every active worker has a task.' };
+    }
+    if (kind === 'table') return { title: 'Shared table', sub: w.meeting?.pm ? `${w.pm.name} is here: ${w.meeting.why === 'plan' ? 'a plan is being drafted' : 'a review is in progress'}. Opens Talk to the PM.` : 'Where the PM meets a worker for a plan or a review. Opens Talk to the PM.' };
     if (kind === 'plan') return { title: 'Plan wall', sub: `${w.notes.length} task${w.notes.length === 1 ? '' : 's'} on the current run. Opens Pipeline.` };
     if (kind === 'env') {
       const r = w.racks.find((x) => x.agentId === id);

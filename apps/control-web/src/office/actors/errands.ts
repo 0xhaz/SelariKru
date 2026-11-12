@@ -4,7 +4,7 @@
 // or carrying a tiffin if the step says so), then takes the next step. A held step (a roof box while the worker's AI call is in flight) waits until it is released.
 
 /** Where a step goes. `here` stays put; the scene turns the rest into tiles. */
-export type ErrandPlace = 'plan' | 'seat' | 'roofDevice' | 'roofCloud' | 'drop' | 'prs' | 'here';
+export type ErrandPlace = 'plan' | 'table' | 'seat' | 'roofDevice' | 'roofCloud' | 'drop' | 'prs' | 'here';
 export type ErrandEmote = 'talk' | 'mail' | 'ok' | 'heart';
 
 export interface ErrandStep {
