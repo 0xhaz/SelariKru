@@ -35,13 +35,23 @@ function snap(over: { budget?: { value: number | null; basis: string } } = {}): 
 
 function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRouteView = () => route()) {
   const device = memoryDeviceStore();
-  const server = { saved: [] as AiCheckpoint[], rows: new Map<string, AiCheckpoint>(), claims: 0, sends: 0 };
+  const server = { saved: [] as AiCheckpoint[], rows: new Map<string, AiCheckpoint>(), claims: 0, sends: 0, tokens: new Map<string, string>() };
   let online = true;
   let snapshot = snap();
   const deps: CheckpointEngineDeps = {
     projectId: 'p', ownerKey: 'owner_1', device,
     server: {
-      saveAiCheckpoint: async (_p, cp) => { if (!online) throw new Error('unavailable: network error'); server.saved.push(structuredClone(cp)); server.rows.set(cp.checkpointId, { ...cp, escalatedAt: server.rows.get(cp.checkpointId)?.escalatedAt ?? null }); },
+      saveAiCheckpoint: async (_p, cp) => {
+        if (!online) throw new Error('unavailable: network error');
+        // As the server (fix round 2, N4): a sending row takes a save only with its claim token.
+        const prior = server.rows.get(cp.checkpointId);
+        if (prior?.status === 'sending' && (cp.claimToken === undefined || cp.claimToken !== server.tokens.get(cp.checkpointId))) throw new Error('checkpoint_claimed: another tab is sending it');
+        server.tokens.delete(cp.checkpointId);
+        server.saved.push(structuredClone(cp));
+        const { claimToken: _t, ...rest } = cp;
+        void _t;
+        server.rows.set(cp.checkpointId, { ...rest, escalatedAt: prior?.escalatedAt ?? null });
+      },
       listAiCheckpoints: async () => [...server.rows.values()],
       claimAiCheckpointSend: async (_p, id) => {
         if (!online) throw new Error('unavailable: network error');
@@ -51,7 +61,9 @@ function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRou
         server.sends += 1;
         const next = { ...cp, status: 'sending' as const };
         server.rows.set(id, next);
-        return next;
+        const token = `tok_${'x'.repeat(16)}${server.sends}`;
+        server.tokens.set(id, token);
+        return { ...next, claimToken: token };
       },
       claimAiCheckpointEscalation: async (_p, id) => {
         const cp = server.rows.get(id)!;

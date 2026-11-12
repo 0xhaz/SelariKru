@@ -132,10 +132,37 @@ describe('AI step checkpoints on the server (H12)', () => {
       expect([a.status, b.status].sort()).toEqual([200, 409]);
       expect([a, b].find((r) => r.status === 409)!.body.error.code).toBe('checkpoint_claimed');
       expect((await list()).body.checkpoints[0].status).toBe('sending');
-      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect' }))).status).toBe(200);
+      const token = [a, b].find((r) => r.status === 200)!.body.checkpoint.claimToken as string;
+      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect', claimToken: token }))).status).toBe(200);
       await save(cp({ checkpointId: 'ckp_again_00000001' }));
-      await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_again_00000001/send-claim`, {});
-      expect((await save(cp({ checkpointId: 'ckp_again_00000001', status: 'waiting' }))).status).toBe(200);
+      const again = await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_again_00000001/send-claim`, {});
+      expect((await save(cp({ checkpointId: 'ckp_again_00000001', status: 'waiting', claimToken: again.body.checkpoint.claimToken }))).status).toBe(200);
+    });
+
+    it('fix 2 (N4): a sending row takes a save only with its claim token, and only to sent, waiting, moved_to_device or abandoned', async () => {
+      await save(cp());
+      const claimed = await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_0123456789abcdef/send-claim`, {});
+      const token = claimed.body.checkpoint.claimToken as string;
+      expect(token).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+      // No token, or another token: refused, whatever the status.
+      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect' }))).body.error.code).toBe('checkpoint_claimed');
+      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect', claimToken: 'x'.repeat(32) }))).body.error.code).toBe('checkpoint_claimed');
+      // The token, to a status a sender may not write: refused.
+      expect((await save(cp({ status: 'running', stopReason: null, claimToken: token }))).body.error.code).toBe('checkpoint_claimed');
+      expect((await list()).body.checkpoints[0]).toMatchObject({ status: 'sending' });
+      expect((await list()).body.checkpoints[0].claimToken).toBeUndefined();
+      // The token, to sent: accepted, and the token is spent.
+      expect((await save(cp({ status: 'sent', resumedAs: 'after_reconnect', claimToken: token }))).status).toBe(200);
+      const [row] = await t.db.execute(sql`SELECT claim_token FROM ai_checkpoints WHERE checkpoint_id = 'ckp_0123456789abcdef'`);
+      expect(row!['claim_token']).toBeNull();
+    });
+
+    it('fix 2 (N4): a claim left for 30 minutes may be closed as abandoned without its token, and not before', async () => {
+      await save(cp());
+      await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_0123456789abcdef/send-claim`, {});
+      expect((await save(cp({ status: 'abandoned', stopReason: null }))).body.error.code).toBe('checkpoint_claimed');
+      h.clock.advance(31 * 60);
+      expect((await save(cp({ status: 'abandoned', stopReason: null }))).status).toBe(200);
     });
 
     it('M2: two concurrent first saves of one checkpoint both succeed, with no 500', async () => {

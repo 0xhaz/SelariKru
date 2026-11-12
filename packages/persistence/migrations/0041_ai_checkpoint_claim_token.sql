@@ -1,0 +1,1 @@
+ALTER TABLE "ai_checkpoints" ADD COLUMN "claim_token" text;

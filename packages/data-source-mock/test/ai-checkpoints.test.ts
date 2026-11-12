@@ -59,9 +59,14 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
   it('fix 1 (M1, M6): one claim sends a waiting checkpoint; abandoned is closed', async () => {
     const { ds, f, cp } = await setup();
     await ds.saveAiCheckpoint!(f.projectId, cp());
-    expect((await ds.claimAiCheckpointSend!(f.projectId, 'ckp_demo_000000001')).status).toBe('sending');
+    const claimed = await ds.claimAiCheckpointSend!(f.projectId, 'ckp_demo_000000001');
+    expect(claimed.status).toBe('sending');
     await expect(ds.claimAiCheckpointSend!(f.projectId, 'ckp_demo_000000001')).rejects.toThrow(/checkpoint_claimed/);
-    await ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sent', resumedAs: 'after_reconnect' }));
+    // Fix round 2 (N4): only the claiming tab's token saves it, and only to what a send ends in.
+    await expect(ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sent', resumedAs: 'after_reconnect' }))).rejects.toThrow(/checkpoint_claimed/);
+    await expect(ds.saveAiCheckpoint!(f.projectId, cp({ status: 'running', claimToken: claimed.claimToken! }))).rejects.toThrow(/checkpoint_claimed/);
+    await ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sent', resumedAs: 'after_reconnect', claimToken: claimed.claimToken! }));
+    expect((await ds.listAiCheckpoints!(f.projectId))[0]!.claimToken).toBeUndefined();
     await ds.saveAiCheckpoint!(f.projectId, cp({ checkpointId: 'ckp_demo_abandon01', status: 'abandoned', stopReason: null }));
     await expect(ds.saveAiCheckpoint!(f.projectId, cp({ checkpointId: 'ckp_demo_abandon01' }))).rejects.toThrow(/checkpoint_closed/);
   });

@@ -14,8 +14,11 @@ export interface DeviceCheckpointStore {
 
 /** What is written: secret-shaped text redacted, in every text a checkpoint can carry. */
 export function forDevice(cp: AiCheckpoint): AiCheckpoint {
+  // A claim token belongs to one send in one tab: never kept (fix round 2, N4).
+  const { claimToken: _token, ...rest } = cp;
+  void _token;
   return {
-    ...cp,
+    ...rest,
     partial: cp.partial ? { issues: cp.partial.issues.map(redactSecrets), texts: cp.partial.texts.map((t) => ({ ...t, text: redactSecrets(t.text) })) } : null,
     inputs: { ...cp.inputs, files: cp.inputs.files.map((f) => ({ ...f, path: redactSecrets(f.path) })) },
   };

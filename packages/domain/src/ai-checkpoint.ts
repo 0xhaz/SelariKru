@@ -97,6 +97,11 @@ export const AiCheckpointSchema = z.strictObject({
    * Fix round 2 (N3): why its last re-validation did not send it (codes such as `budget_missing`), kept with it. The stop reason still says why it first paused.
    */
   problems: z.array(z.string().regex(/^[a-z][a-z_]{0,39}$/)).max(10).optional(),
+  /**
+   * Fix round 2 (N4): the token the server gave the tab that claimed this checkpoint for sending. A save to a `sending` row must carry it. Never stored in the body,
+   * never shown, never kept on the device.
+   */
+  claimToken: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/).optional(),
   /** Fix round 1 (I3): kept on this device only, whatever its labels say now (its route was locked, or the server judged it restricted). Never sent. */
   deviceOnly: z.boolean().optional(),
   createdAt: Iso,

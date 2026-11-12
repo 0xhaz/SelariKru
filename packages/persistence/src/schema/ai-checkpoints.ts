@@ -21,6 +21,8 @@ export const aiCheckpoints = pgTable(
     status: text('status').notNull(),
     stopReason: text('stop_reason'),
     escalatedAt: tstz('escalated_at'),
+    /** Fix round 2 (N4): the claim token of the tab sending this row, while it is `sending`. */
+    claimToken: text('claim_token'),
     body: jsonb('body').$type<Record<string, unknown>>().notNull(),
     createdAt: tstz('created_at').notNull(),
     updatedAt: tstz('updated_at').notNull(),

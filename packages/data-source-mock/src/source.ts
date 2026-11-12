@@ -63,6 +63,8 @@ interface Project {
   readonly usedDelegations: Map<string, { print: string; result: DelegationReceipt }>;
   /** H12: AI step checkpoints the demo keeps as the server would: public and internal only, by checkpoint id. Simulated. */
   readonly aiCheckpoints: Map<string, AiCheckpoint>;
+  /** Fix round 2 (N4): the claim token of each checkpoint being sent. */
+  readonly claimTokens: Map<string, string>;
 }
 
 const NO_ROUTES: FixtureRoutes = { runDefault: null, tasks: {} };
@@ -146,6 +148,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       reportContexts: new Map(),
       usedDelegations: new Map(),
       aiCheckpoints: new Map(),
+      claimTokens: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
     });
@@ -449,6 +452,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   }
 
   const prng = mulberry32(0x5e1a);
+  /** Claim tokens draw from their own sequence, so they never shift the demo's event ids. */
+  const claimPrng = mulberry32(0xc1a1);
   type CommandEvent = 'task.delegated' | 'plan.accepted' | 'proposal.accepted' | 'task.cancel_requested' | 'task.ready' | 'approval.granted' | 'approval.denied' | 'task.cancelled' | 'task.reopened' | 'run.reduced_scope_accepted' | 'change.proposed' | 'run.created' | 'settings.changed' | 'settings.applied' | 'run.cancel_requested' | 'run.cancelled'
     | 'handover.requested' | 'attempt.failed' | 'attempt.fenced' | 'attempt.started' | 'attempt.route_changed' | 'checkpoint.recorded' | 'checkpoint.refused' | 'handover.decided' | 'inference.reported';
   /** Who the services record as the actor of each simulated type that is not a person's. */
@@ -809,7 +814,14 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const prior = p.aiCheckpoints.get(cp.checkpointId);
       if (prior && prior.taskId !== cp.taskId) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
       if (prior && !['running', 'waiting', 'sending'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
-      p.aiCheckpoints.set(cp.checkpointId, { ...cp, escalatedAt: prior?.escalatedAt ?? null });
+      // Fix round 2 (N4): as the server, a row being sent takes a save only from the claiming tab's token, and only to what a send ends in.
+      if (prior?.status === 'sending' && !(cp.claimToken !== undefined && cp.claimToken === p.claimTokens.get(cp.checkpointId) && ['sent', 'waiting', 'moved_to_device', 'abandoned'].includes(cp.status))) {
+        throw fail('unavailable', 'checkpoint_claimed: another tab is sending this step');
+      }
+      p.claimTokens.delete(cp.checkpointId);
+      const { claimToken: _token, ...stored } = cp;
+      void _token;
+      p.aiCheckpoints.set(cp.checkpointId, { ...stored, escalatedAt: prior?.escalatedAt ?? null });
     },
     async listAiCheckpoints(projectId) {
       offlineCheck();
@@ -824,7 +836,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (cp.status !== 'waiting') throw fail('unavailable', `checkpoint_claimed: this step is ${cp.status.replace(/_/g, ' ')}, not waiting`);
       const next = { ...cp, status: 'sending' as const, updatedAt: isoOf(timeOf(p)) };
       p.aiCheckpoints.set(checkpointId, next);
-      return { ...next };
+      const claimToken = seededId(claimPrng, 'claim').replace(/[^A-Za-z0-9_-]/g, '_').padEnd(24, '0').slice(0, 48);
+      p.claimTokens.set(checkpointId, claimToken);
+      return { ...next, claimToken };
     },
     async claimAiCheckpointEscalation(projectId, checkpointId) {
       offlineCheck();

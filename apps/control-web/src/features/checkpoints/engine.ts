@@ -116,6 +116,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   const writes = new Map<string, Promise<void>>();
   /** Fix round 2 (N1): checkpoints whose last server write did not arrive. */
   const unsynced = new Set<string>();
+  /** Fix round 2 (N4): the claim token this tab holds for a checkpoint it is sending. Sent with its writes; never stored on the device. */
+  const claimTokens = new Map<string, string>();
 
   const patch = (fn: (s: CheckpointState) => Partial<CheckpointState>): void => store.setState((s) => ({ ...s, ...fn(s) }));
   const setFor = <K extends 'problems' | 'asks' | 'busy' | 'deviceOnly'>(key: K, id: string, v: CheckpointState[K][string] | undefined): void =>
@@ -132,7 +134,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       try { await deps.device.put(deps.ownerKey, kept); } catch { /* No device storage: the screen still holds it for this tab. */ }
       if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); return; }
       try {
-        await deps.server!.saveAiCheckpoint!(deps.projectId, cp);
+        const token = claimTokens.get(cp.checkpointId);
+        await deps.server!.saveAiCheckpoint!(deps.projectId, token !== undefined ? { ...cp, claimToken: token } : cp);
+        // The save that ends the send spends the token.
+        if (token !== undefined) claimTokens.delete(cp.checkpointId);
         unsynced.delete(cp.checkpointId);
       } catch (e) {
         // Fix round 2 (N1): not reached (offline, a network failure): this browser holds the newest copy, and it is written again on reconnect.
@@ -282,7 +287,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       // Fix round 1 (M1): one tab sends it. A stored checkpoint is claimed on the server first (waiting → sending); an escalation was claimed already.
       // Fix round 2 (N1): a device run sends nothing, so it needs no claim and works offline; its closing save syncs through the write-through.
       if (how !== 'escalated' && how !== 'device_only' && deps.server?.claimAiCheckpointSend && !store.getState().deviceOnly[cp.checkpointId] && checkpointStorage(cp) === 'server') {
-        const claim = () => deps.server!.claimAiCheckpointSend!(deps.projectId, cp.checkpointId);
+        const claim = async () => {
+          const c = await deps.server!.claimAiCheckpointSend!(deps.projectId, cp.checkpointId);
+          if (c.claimToken) claimTokens.set(cp.checkpointId, c.claimToken);
+        };
         try {
           try { await claim(); } catch (e) {
             // The server does not have it (it was kept only here, say while the server was unreachable): store it, then claim it.

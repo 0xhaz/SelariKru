@@ -288,6 +288,13 @@
       "when": 1794441297165,
       "tag": "0040_ai_checkpoint_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794442783326,
+      "tag": "0041_ai_checkpoint_claim_token",
+      "breakpoints": true
     }
   ]
 }
