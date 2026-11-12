@@ -500,22 +500,38 @@ test.describe('H7 fix round 3: a loop never strands a robot', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work');
     await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
-    // In one turn, so no projection refresh lands in between (H9: the shell may still be settling, for example the checkpoint engine's first load).
-    const { holding, after } = await page.evaluate(() => {
+    // The call stays in flight in every world the shell sends meanwhile (H9 fix round 1, M1): a projection refresh must not end the walk early.
+    const id = await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Live & { __keep?: string | null } }).__selarikruOffice;
+      const who = s.world.cues[0]!.agentId;
+      const set = s.setWorld.bind(s);
+      s.__keep = who;
+      s.setWorld = (w: unknown) => {
+        const world = w as Live['world'];
+        set(s.__keep ? { ...world, cues: world.cues.map((c) => (c.agentId === s.__keep ? { ...c, cloudCall: true } : c)) } : world);
+      };
+      s.setWorld(s.world);
+      return who;
+    });
+    // It heads up the stair and holds there while the call is in flight.
+    await expect.poll(() => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(who)!.queue.current(), id), { timeout: 5000 }).toEqual({ to: 'roofCloud', hold: 'call' });
+    // Partway there: walking, away from its desk.
+    await expect.poll(() => page.evaluate((who) => {
       const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
-      const w = s.world;
-      const who = w.cues[0]!.agentId;
-      s.setWorld({ ...w, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: true } : c)) });
-      // It heads up the stair and holds there while the call is in flight.
-      const holding = s.bots.get(who)!.queue.current();
-      const w2 = s.world;
-      // The loop wraps: a fresh session still reports the call in flight for a moment; the new epoch must still clear the roof visit.
-      s.setWorld({ ...w2, epoch: `${w2.epoch}-loop`, cues: w2.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: false } : c)) });
       const b = s.bots.get(who)!;
       const seat = s.layout.desks.find((d) => d.agentId === who)!.seat;
-      return { holding, after: { errand: b.queue.current(), walking: b.path.length, x: Math.round(b.x), y: Math.round(b.y), seatX: s.layout.ox + seat[0] * 16 + 8, seatY: s.layout.oy + seat[1] * 16 + 8 } };
-    });
-    expect(holding).toEqual({ to: 'roofCloud', hold: 'call' });
+      return b.path.length > 0 && Math.hypot(b.x - (s.layout.ox + seat[0] * 16 + 8), b.y - (s.layout.oy + seat[1] * 16 + 8)) > 24;
+    }, id), { timeout: 10_000 }).toBe(true);
+    const after = await page.evaluate((who) => {
+      const s = (window as unknown as { __selarikruOffice: Live & { __keep?: string | null } }).__selarikruOffice;
+      s.__keep = null;
+      const w = s.world;
+      // The loop wraps mid-walk: a fresh session still reports the call in flight for a moment; the new epoch must still clear the roof visit.
+      s.setWorld({ ...w, epoch: `${w.epoch}-loop`, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: false } : c)) });
+      const b = s.bots.get(who)!;
+      const seat = s.layout.desks.find((d) => d.agentId === who)!.seat;
+      return { errand: b.queue.current(), walking: b.path.length, x: Math.round(b.x), y: Math.round(b.y), seatX: s.layout.ox + seat[0] * 16 + 8, seatY: s.layout.oy + seat[1] * 16 + 8 };
+    }, id);
     expect(after.errand).toBeNull();
     expect(after.walking).toBe(0);
     expect([after.x, after.y]).toEqual([after.seatX, after.seatY]);
