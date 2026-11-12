@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export const ROUTES = ['office', 'actions', 'summary', 'team', 'pipeline', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding', 'pm'] as const;
+export const ROUTES = ['office', 'actions', 'summary', 'team', 'pipeline', 'evidence', 'product', 'brain', 'benchmark', 'assistant', 'settings', 'onboarding', 'pm', 'calls'] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** The office is the centre and the default; every other route opens over it. A route may carry its own query, such as `#/pipeline?view=graph&task=x`, for deep links. */

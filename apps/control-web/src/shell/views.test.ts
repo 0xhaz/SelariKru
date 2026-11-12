@@ -16,7 +16,7 @@ describe('where each screen lives', () => {
   });
 
   it('places each screen under its most relevant entry', () => {
-    expect(BOARDS_MENU.map((e) => [e.label, e.route])).toEqual([['Talk to the PM', 'pm'], ['Pipeline', 'pipeline'], ['Run summary', 'summary'], ['Product', 'product'], ['Brain', 'brain'], ['Benchmark', 'benchmark']]);
+    expect(BOARDS_MENU.map((e) => [e.label, e.route])).toEqual([['Talk to the PM', 'pm'], ['AI calls', 'calls'], ['Pipeline', 'pipeline'], ['Run summary', 'summary'], ['Product', 'product'], ['Brain', 'brain'], ['Benchmark', 'benchmark']]);
     expect(SETTINGS_MENU_EXTRA.map((e) => e.route)).toEqual(['team', 'assistant', 'onboarding']);
     expect(topBarHomeOf('actions')).toBe('Action items');
     expect(topBarHomeOf('evidence')).toBe('PRs');

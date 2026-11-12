@@ -15,7 +15,7 @@ export function frameOf(route: Route): ViewFrame {
 
 export const TITLES: Readonly<Record<Route, string>> = {
   office: 'Office', actions: 'Action items', summary: 'Run summary', team: 'Team', pipeline: 'Pipeline', evidence: 'Evidence and pull requests', product: 'Product',
-  brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project', pm: 'Talk to the PM',
+  brain: 'Project Brain', benchmark: 'Benchmark', assistant: 'Assistant', settings: 'Settings', onboarding: 'New project', pm: 'Talk to the PM', calls: 'AI calls',
 };
 
 export interface MenuEntry {
@@ -26,11 +26,11 @@ export interface MenuEntry {
 
 /**
  * The template menus (owner, T5.12): each screen appears exactly once, under the top-bar entry it is most relevant to.
- * Action items: one button and one drawer (what workers ask, and everything else waiting on you). Boards: Pipeline, Run summary, Product, Brain,
- * Benchmark. PRs: Evidence and pull requests. Terminal: the selected worker's terminal. Settings: the Settings tabs, plus Team, Assistant and New project.
+ * Action items: one button and one drawer (what workers ask, and everything else waiting on you). Boards: Talk to the PM, AI calls (H9), Pipeline, Run summary,
+ * Product, Brain, Benchmark. PRs: Evidence and pull requests. Terminal: the selected worker's terminal. Settings: the Settings tabs, plus Team, Assistant and New project.
  */
 export const BOARDS_MENU: readonly MenuEntry[] = [
-  { label: 'Talk to the PM', route: 'pm' }, { label: 'Pipeline', route: 'pipeline' }, { label: 'Run summary', route: 'summary' }, { label: 'Product', route: 'product' }, { label: 'Brain', route: 'brain' }, { label: 'Benchmark', route: 'benchmark' },
+  { label: 'Talk to the PM', route: 'pm' }, { label: 'AI calls', route: 'calls' }, { label: 'Pipeline', route: 'pipeline' }, { label: 'Run summary', route: 'summary' }, { label: 'Product', route: 'product' }, { label: 'Brain', route: 'brain' }, { label: 'Benchmark', route: 'benchmark' },
 ];
 
 /** In the Settings modal's menu, after the settings tabs. */

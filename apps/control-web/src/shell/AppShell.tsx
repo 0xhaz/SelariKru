@@ -28,6 +28,7 @@ import { EvidenceView } from '../features/evidence/EvidenceView.tsx';
 import { buildEvidence, type EvidenceModel } from '../features/evidence/model.ts';
 import { BenchmarkView } from '../features/benchmark/BenchmarkView.tsx';
 import { PmPanel } from '../features/pm/PmPanel.tsx';
+import { AiCallsView } from '../features/calls/AiCallsView.tsx';
 import { BrainConflicts, BrainView } from '../features/brain/BrainView.tsx';
 import { ProductFollowUps, ProductView } from '../features/product/ProductView.tsx';
 import { HandoverDecisions } from '../features/handover/ContinueInCloud.tsx';
@@ -534,6 +535,11 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         {route === 'pm' ? (
           <RouteBoundary resetKey="pm">
             <PmPanel />
+          </RouteBoundary>
+        ) : null}
+        {route === 'calls' ? (
+          <RouteBoundary resetKey="calls">
+            <AiCallsView source={state.agentSource} snapshot={snapshot} projectId={state.projectId} simulated={mode === 'mock'} />
           </RouteBoundary>
         ) : null}
         {route === 'benchmark' ? (
