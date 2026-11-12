@@ -29,6 +29,7 @@ function sharedServer(nowMs: () => number) {
     saveAiCheckpoint: async (_p: string, c: AiCheckpoint) => {
       if (!online) throw new Error('unavailable: network error');
       const prior = rows.get(c.checkpointId);
+      if (prior && ['done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned'].includes(prior.status) && prior.status !== c.status) throw new Error(`checkpoint_closed: already ${prior.status}`);
       if (prior?.status === 'sending') {
         const holder = c.claimToken !== undefined && c.claimToken === tokens.get(c.checkpointId);
         const stale = c.status === 'abandoned' && nowMs() - (claimedAt.get(c.checkpointId) ?? 0) > 30 * MIN;
@@ -122,5 +123,40 @@ describe('two tabs (H12 fix round 3, R1)', () => {
     await b.load();
     expect(server.rows.get('ckp_two_tabs_000001')!.status).toBe('abandoned');
     expect(b.store.getState().checkpoints['ckp_two_tabs_000001']!.status).toBe('abandoned');
+  });
+
+  it('R2: offline, this tab moves a step to device only while another tab sends it; on reconnect the server refuses the late write, and this tab adopts the server\'s copy (sent) instead of keeping its own', async () => {
+    let online = true;
+    const now = () => T0;
+    const server = sharedServer(now);
+    const device = memoryDeviceStore();
+    await server.saveAiCheckpoint('p', cp({ updatedAt: new Date(T0).toISOString() }));
+    const b = engineFor(server, device, now, () => online);
+    await b.load();
+    b.attach({
+      run: async (req: { taskId: string; kind: string; callOverride: null; resume?: { checkpointId: string; kind: 'device_only' } }) => {
+        const rec = b.begin({ taskId: req.taskId, stepKind: req.kind as never, callOverride: req.callOverride, ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}) });
+        const proposal = { status: 'ok', blockedReason: null, observedSource: 'ON_DEVICE', requestId: 'req_d', validation: { status: 'passed', errors: [] }, route: { effectiveMode: 'ONLY_ON_DEVICE' }, input: null } as never;
+        const result = { kind: 'criteria', proposal, report: { requestId: 'req_d' }, reported: 'sent', omissions: [], locked: false } as never;
+        await rec.finish({ kind: 'result', result, context });
+        return { kind: 'result', result, context };
+      },
+      pm: async () => undefined,
+    } as unknown as CheckpointRunner);
+    online = false;
+    server.setOnline(false);
+    await b.moveToDevice('ckp_two_tabs_000001');
+    expect(b.store.getState().checkpoints['ckp_two_tabs_000001']!.status).toBe('moved_to_device');
+    // Meanwhile another tab sent it.
+    server.rows.set('ckp_two_tabs_000001', { ...server.rows.get('ckp_two_tabs_000001')!, status: 'sent', resumedAs: 'after_reconnect' });
+    online = true;
+    server.setOnline(true);
+    await b.reconnect();
+    expect(server.rows.get('ckp_two_tabs_000001')!.status).toBe('sent');
+    expect(b.store.getState().checkpoints['ckp_two_tabs_000001']!.status).toBe('sent');
+    expect((await device.list('owner_1', 'p'))[0]!.status).toBe('sent');
+    // Not retried again: a refusal is not a network failure.
+    await b.reconnect();
+    expect(b.store.getState().checkpoints['ckp_two_tabs_000001']!.status).toBe('sent');
   });
 });

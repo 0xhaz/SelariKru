@@ -146,8 +146,13 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
         if (token !== undefined) claimTokens.delete(cp.checkpointId);
         unsynced.delete(cp.checkpointId);
       } catch (e) {
-        // Fix round 2 (N1): not reached (offline, a network failure): this browser holds the newest copy, and it is written again on reconnect.
-        if (codeOf(e) !== 'checkpoint_restricted') unsynced.add(cp.checkpointId);
+        // Fix round 2 (N1), round 3 (R2): only a write that never reached the server is kept to write again on reconnect. A refusal (closed, claimed by another
+        // tab) means the server's copy won: it is adopted here, and this write is dropped.
+        if (isNetworkError(e)) unsynced.add(cp.checkpointId);
+        else {
+          unsynced.delete(cp.checkpointId);
+          if (codeOf(e) !== 'checkpoint_restricted') await adoptServerCopy(cp.checkpointId);
+        }
         // The server judged it restricted (its own backstop): it stays on this device from now on. Any other failure keeps it here until the next write.
         if (codeOf(e) === 'checkpoint_restricted') {
           setFor('deviceOnly', cp.checkpointId, true);
