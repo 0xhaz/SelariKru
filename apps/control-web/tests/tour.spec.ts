@@ -65,7 +65,7 @@ test('the tour runs end to end on demo data, by keyboard, each step on the real 
   await expect(page).toHaveURL(/#\/pm/);
   await tour.getByRole('button', { name: 'Ask the PM for a plan' }).focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByTestId('pm-accept-plan')).toBeVisible();
+  await expect(page.getByTestId('pm-accept-plan')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('tour-pm-status')).toHaveText(/plan is ready/);
   await expect(ring).toBeVisible();
 

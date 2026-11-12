@@ -106,7 +106,8 @@ test('execution and inference are separately labeled for each worker', async ({ 
   await expect(local).toContainText('Execution');
   await expect(local).toContainText('Local sandbox');
   await expect(local).toContainText('Inference');
-  await expect(local).toContainText('Model in cloud');
+  // H9 fix round 1 (H1): coding workers off: the worker applies changes with no model; its AI steps run in the browser.
+  await expect(local).toContainText('No model');
 });
 
 test('a runner loss shows the last confirmed time and offers inspection', async ({ page }) => {

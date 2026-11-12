@@ -393,6 +393,14 @@ describe('model assignment', () => {
     expect(model.providers).toEqual([{ value: 'unknown', label: 'Not recorded' }]);
   });
 
+  it('H9 fix round 1 (H1): the apply worker says what it does, not a model name', () => {
+    const apply = { provider: 'selarikru', model: 'apply-proposal', source: 'role' as const };
+    const busy = worker('w', { taskId: 'a', attemptId: 'att', assignment: apply });
+    expect(row(buildTeam(snapshotOf({ tasks: [task('a')], workers: [busy] }), NOW, NOW), 'w').modelDetail).toBe('Applies accepted changes (no model)');
+    const idle = worker('w', { availability: 'idle', taskId: null, attemptId: null, assignment: apply });
+    expect(row(buildTeam(snapshotOf({ workers: [idle] }), NOW, NOW), 'w').modelDetail).toBe('Applies accepted changes (no model) (previous attempt)');
+  });
+
   it('an idle worker\'s model is labelled as the previous attempt\'s', () => {
     const recorded = { provider: 'anthropic', model: 'claude-opus-5-5', source: 'role' as const };
     const idle = worker('w', { availability: 'idle', taskId: null, attemptId: null, assignment: recorded });

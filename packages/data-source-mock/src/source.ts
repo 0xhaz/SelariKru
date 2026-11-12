@@ -166,7 +166,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
   for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
       fixture, pending: forCodingWorkers(fixture.events, options.codingWorkers ?? null), released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
-      modelCatalog: fixture.modelCatalog ?? options.codingWorkers?.catalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
+      // A fixture's own catalog (no-data: nothing detected) keeps its providers, and follows the build's coding-workers setting.
+      modelCatalog: fixture.modelCatalog ? (options.codingWorkers ? { ...fixture.modelCatalog, codingWorkers: options.codingWorkers.catalog.codingWorkers } : fixture.modelCatalog) : options.codingWorkers?.catalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
       criteria: new Map(),
       acceptedProposals: new Map(),

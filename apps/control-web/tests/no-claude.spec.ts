@@ -23,6 +23,10 @@ for (const fixture of ['feature-delivery', 'healthy-parallel-work', 'benchmark-t
       await expect.poll(() => page.evaluate(() => document.body.innerText.length)).toBeGreaterThan(200);
       expect((await words(page)).match(BANNED), `${fixture} ${hash}`).toBeNull();
     }
+    // The worker cards say what the worker does, not a raw model id.
+    await page.goto(`/?demo&fixture=${fixture}#/office`);
+    await expect(page.getByTestId('team-panel-model').first()).toContainText('Applies accepted changes (no model)');
+    expect(await words(page)).not.toContain('apply-proposal');
     await page.goto(`/?demo&fixture=${fixture}#/team`);
     await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
     await expect(page.getByLabel('Provider', { exact: true })).toHaveCount(0);

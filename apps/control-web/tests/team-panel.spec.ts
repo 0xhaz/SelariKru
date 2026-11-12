@@ -45,7 +45,8 @@ test('team panel shows each worker\'s live state on every view', async ({ page }
     // The card's chip uses the reference's word (T5.12).
     await expect(waiting.getByTestId('team-panel-state')).toContainText('Needs input');
     await expect(waiting.getByTestId('team-panel-task')).toContainText('Add feedback table');
-    await expect(waiting.getByTestId('team-panel-model')).toContainText('claude-sonnet-5-5');
+    // H9 fix round 1 (H1): coding workers off: the worker applies accepted changes with no model.
+    await expect(waiting.getByTestId('team-panel-model')).toContainText('Applies accepted changes (no model)');
     await expect(waiting.getByTestId('team-panel-since')).toHaveText(/^for \d+/);
     await expect(waiting).toContainText('Backend');
     await expect(panelRow(page, 'runner_cloud_1')).toHaveAttribute('data-state', 'working');

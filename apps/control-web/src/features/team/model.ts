@@ -1,3 +1,4 @@
+import { APPLY_WORKER_LABEL, isApplyAssignment } from '@selarikru/domain';
 import { workerIdentity } from './identity.ts';
 import { formatAge, formatCount, formatDuration, formatExact, formatUsd, type Tone } from '@selarikru/ui';
 import {
@@ -512,7 +513,7 @@ function rowOf(w: WorkerView, snapshot: ProjectViewSnapshot, nowMs: number, live
   return {
     workerId: w.workerId, presence: presenceOf(w, health, stale, activity, blockers, lastConfirmedAt, nowMs, snapshot), role: identity.role, name: identity.name, label: identity.label, runId: focus?.runId ?? null, task, lastTask, activity, health, healthNote,
     results: resultOf(w, focus, attempt, snapshot, task === null),
-    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? w.assignment.model : `${w.assignment.model} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, humanIntervenedAt: attempt?.humanIntervenedAt ?? null, stale, lastConfirmedAt,
+    execution: w.execution, modelRoute: w.modelRoute, assignment: w.assignment, modelDetail: w.assignment ? (w.attemptId !== null ? modelWords(w.assignment) : `${modelWords(w.assignment)} (previous attempt)`) : null, overrideTarget: focus ? taskTarget(focus, snapshot) : null, terminalTarget: attempt && focus ? { taskId: attempt.taskId, attemptId: attempt.attemptId, expectedRevision: focus.revision } : null, humanIntervenedAt: attempt?.humanIntervenedAt ?? null, stale, lastConfirmedAt,
     lastProgressAt: progressTimes.sort().at(-1)!,
     blockers: blockers.length, spend: spendOf(snapshot.usage, taskId), attentionRank: rank, rail: RAIL[rank] ?? null,
     detail: !withDetail ? NO_DETAIL : {
@@ -565,6 +566,9 @@ export interface TeamOptions {
 const NO_DETAIL: WorkerDetail = { summary: '', task: null, blockers: [], timeline: [], checks: [], artifacts: [], permissions: [], sandbox: [], usage: [] };
 
 /** Everything the Team view shows, derived from one snapshot. Pure; time and liveness are parameters. */
+/** H9 fix round 1 (H1): the apply worker has no model, and says what it does; a coding worker shows its model. */
+const modelWords = (a: { readonly provider: string; readonly model: string }): string => (isApplyAssignment(a) ? APPLY_WORKER_LABEL : a.model);
+
 export function buildTeam(snapshot: ProjectViewSnapshot, nowMs: number, livenessAsOfMs: number | null, options: TeamOptions = {}): TeamModel {
   const workers = Object.values(snapshot.workers);
   const sessionStale = options.stale === true;

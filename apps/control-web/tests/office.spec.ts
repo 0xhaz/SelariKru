@@ -400,7 +400,8 @@ test('the worker drawer follows the reference: identity line with the reported c
   const d = page.getByTestId('worker-drawer');
   await expect(d.getByRole('tab')).toHaveText(['Terminal', 'Shell', 'Task', 'Sandbox', 'Messages', 'Settings']);
   // Read-only: the coding agent and model as the runner reports them, then the runtime. Nothing here is a picker.
-  await expect(d.getByTestId('drawer-identity')).toHaveText(/^Backend · .+ claude-sonnet-5-5 · (Local|Cloud) sandbox$/);
+  // H9 fix round 1 (H1): with coding workers off the worker is the apply worker, which has no model.
+  await expect(d.getByTestId('drawer-identity')).toHaveText(/^Backend · Applies accepted changes \(no model\) · (Local|Cloud) sandbox$/);
   await expect(d.getByTestId('drawer-state-chip')).toHaveText('Needs input');
   await expect(d.getByTestId('drawer-session')).toContainText(/Session running|Stopped|Idle/);
   await expect(d.getByTestId('drawer-activity')).not.toBeEmpty();

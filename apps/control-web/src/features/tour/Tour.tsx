@@ -43,8 +43,13 @@ function askPmForPlan(question: string): boolean {
   // React reads the value through its own setter, so the native one is used and the change announced.
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, question);
   box.dispatchEvent(new Event('input', { bubbles: true }));
-  // The button enables once React has the question.
-  requestAnimationFrame(() => requestAnimationFrame(() => plan.click()));
+  // The button enables once React has the question: pressed then, not before.
+  let tries = 0;
+  const press = (): void => {
+    if (!plan.disabled) { plan.click(); return; }
+    if ((tries += 1) < 50) window.setTimeout(press, 100);
+  };
+  press();
   return true;
 }
 

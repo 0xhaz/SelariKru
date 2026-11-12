@@ -54,7 +54,8 @@ test('null activity renders exactly once, muted, and is never guessed', async ({
 });
 
 test('runtime and inference badges independent, including local worker with cloud model', async ({ page }) => {
-  await openTeam(page, fixture('healthy-parallel-work'));
+  // A coding worker's cloud model needs coding workers on (H9 fix round 1); off, every worker applies changes with no model (no-claude.spec.ts).
+  await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
   const local = rowOf(page, 'runner_local_1');
   await expect(local).toContainText('Local sandbox');
   await expect(local).toContainText('Model in cloud');
@@ -643,7 +644,7 @@ test.describe('model assignment', () => {
   });
 
   test('the provider filter narrows the fleet and keeps unrecorded workers apart', async ({ page }) => {
-    await openTeam(page, fixture('unknown-costs'));
+    await openTeam(page, withCodingWorkers(fixture('unknown-costs')));
     await expect(rows(page)).toHaveCount(3);
     await page.getByLabel('Provider', { exact: true }).selectOption('unknown');
     await expect(rows(page)).toHaveCount(1);
