@@ -147,5 +147,29 @@ for (const size of SIZES) {
       await page.goto('/?demo#/onboarding');
       await shot(page, '14-onboarding', size, page.getByRole('heading', { name: 'Set up a project' }));
     });
+
+    // H9: the new office floor with a review at the shared table and a worker on a break in the kopitiam, the AI calls view, the Nano banner and the tour.
+    test('office: a review at the shared table, a break in the kopitiam', async ({ page }) => {
+      // Kavitha's task is in review (she meets the PM at the table); Daniel has no claimed task (he rests in the kopitiam).
+      await open(page, '#/office', { taskPatch: { [T('web')]: { status: 'verifying' } } });
+      await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: { world: unknown } }).__selarikruOffice?.world))).toBe(true);
+      await shot(page, '15-office-table-and-kopitiam', size, page.getByTestId('top-bar'));
+    });
+
+    test('AI calls', async ({ page }) => {
+      await open(page, '#/calls');
+      await shot(page, '16-ai-calls', size, page.getByTestId('ai-call-row'));
+    });
+
+    test('Gemini Nano unavailable', async ({ page }) => {
+      await open(page, '#/office', { nano: 'unavailable' });
+      await shot(page, '17-nano-banner', size, page.getByTestId('nano-banner'));
+    });
+
+    test('the tour, step 1', async ({ page }) => {
+      await page.clock.setFixedTime(FIXED);
+      await page.goto('/?demo&fixture=feature-delivery&tour=1#/office');
+      await shot(page, '18-tour', size, page.getByTestId('tour'));
+    });
   });
 }

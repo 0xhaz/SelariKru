@@ -168,7 +168,8 @@ test('the top bar matches the reference: mark and name, Demo data, project, plan
   // Counted from attempts with no end that a worker holds: in this fixture one is still open.
   await expect(bar.getByTestId('sandbox-chip')).toHaveText(/^Sandbox · 1 running$/);
   const nav = bar.getByRole('navigation', { name: 'Primary' });
-  await expect(nav.locator(':scope > *')).toHaveText([/^Action items/, /^Boards/, 'PRs', /^Terminal/, 'Settings', 'Debug']);
+  // H9: Start the tour, on demo data.
+  await expect(nav.locator(':scope > *')).toHaveText([/^Action items/, /^Boards/, 'PRs', /^Terminal/, 'Settings', 'Start the tour', 'Debug']);
   // Terminal with no worker chosen lets you pick one; picking opens that worker's Terminal tab.
   await nav.getByRole('button', { name: 'Terminal' }).click();
   await nav.getByRole('link', { name: /terminal$/ }).first().click();
@@ -499,24 +500,22 @@ test.describe('H7 fix round 3: a loop never strands a robot', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work');
     await expect.poll(() => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Live }).__selarikruOffice?.world))).toBe(true);
-    const id = await page.evaluate(() => {
+    // In one turn, so no projection refresh lands in between (H9: the shell may still be settling, for example the checkpoint engine's first load).
+    const { holding, after } = await page.evaluate(() => {
       const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
       const w = s.world;
       const who = w.cues[0]!.agentId;
       s.setWorld({ ...w, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: true } : c)) });
-      return who;
-    });
-    // It heads up the stair and holds there while the call is in flight.
-    await expect.poll(() => page.evaluate((who) => (window as unknown as { __selarikruOffice: Live }).__selarikruOffice.bots.get(who)!.queue.current(), id), { timeout: 5000 }).toEqual({ to: 'roofCloud', hold: 'call' });
-    const after = await page.evaluate((who) => {
-      const s = (window as unknown as { __selarikruOffice: Live }).__selarikruOffice;
-      const w = s.world;
+      // It heads up the stair and holds there while the call is in flight.
+      const holding = s.bots.get(who)!.queue.current();
+      const w2 = s.world;
       // The loop wraps: a fresh session still reports the call in flight for a moment; the new epoch must still clear the roof visit.
-      s.setWorld({ ...w, epoch: `${w.epoch}-loop`, cues: w.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: false } : c)) });
+      s.setWorld({ ...w2, epoch: `${w2.epoch}-loop`, cues: w2.cues.map((c) => (c.agentId === who ? { ...c, cloudCall: false } : c)) });
       const b = s.bots.get(who)!;
       const seat = s.layout.desks.find((d) => d.agentId === who)!.seat;
-      return { errand: b.queue.current(), walking: b.path.length, x: Math.round(b.x), y: Math.round(b.y), seatX: s.layout.ox + seat[0] * 16 + 8, seatY: s.layout.oy + seat[1] * 16 + 8 };
-    }, id);
+      return { holding, after: { errand: b.queue.current(), walking: b.path.length, x: Math.round(b.x), y: Math.round(b.y), seatX: s.layout.ox + seat[0] * 16 + 8, seatY: s.layout.oy + seat[1] * 16 + 8 } };
+    });
+    expect(holding).toEqual({ to: 'roofCloud', hold: 'call' });
     expect(after.errand).toBeNull();
     expect(after.walking).toBe(0);
     expect([after.x, after.y]).toEqual([after.seatX, after.seatY]);
