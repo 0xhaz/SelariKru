@@ -163,6 +163,15 @@ describe('AI step checkpoints on the server (H12)', () => {
       expect(row!['claim_token']).toBeNull();
     });
 
+    it('fix 3 (R3): a save cannot set status sending; only the send claim can', async () => {
+      const r = await save(cp({ status: 'sending' }));
+      expect(r.status).toBe(400);
+      expect(r.body.error.code).toBe('invalid_request');
+      await save(cp());
+      expect((await save(cp({ status: 'sending' }))).status).toBe(400);
+      expect((await list()).body.checkpoints[0].status).toBe('waiting');
+    });
+
     it('fix 3 (R1): a claim stamps the checkpoint with the claim time, so no other tab reads a live claim as stale', async () => {
       await save(cp({ updatedAt: '2026-11-01T00:00:00.000Z' }));
       h.clock.advance(60);

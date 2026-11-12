@@ -797,6 +797,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (!parsed.success) throw fail('unavailable', 'invalid_request: not a checkpoint');
       const cp = parsed.data;
       if (cp.projectId !== projectId) throw fail('unavailable', 'checkpoint_project_mismatch: this checkpoint names another project');
+      // Fix round 3 (R3): as the server, only the send claim moves a checkpoint to sending.
+      if (cp.status === 'sending') throw fail('unavailable', 'invalid_request: a save cannot set a checkpoint sending; claim it first');
       const own = serverCheckpointRefusal(cp);
       if (own === 'checkpoint_secret') throw fail('unavailable', 'checkpoint_secret: this checkpoint carries something shaped like a credential');
       const restricted = (): DataSourceException => fail('unavailable', 'checkpoint_restricted: this checkpoint holds restricted data, so it stays in this browser');

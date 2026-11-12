@@ -87,6 +87,11 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     expect((await ds.listAiCheckpoints!(f.projectId))[0]!.status).toBe('moved_to_device');
   });
 
+  it('fix 3 (R3): a save cannot set status sending; only the send claim can', async () => {
+    const { ds, f, cp } = await setup();
+    await expect(ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sending' }))).rejects.toThrow(/invalid_request/);
+  });
+
   it('a resumed call\'s route record says so', async () => {
     const { ds, f } = await setup();
     const report = { kind: 'route' as const, requestId: 'req-resumed', stepKind: 'criteria' as const, callOverride: 'ONLY_IN_CLOUD' as const, requestedMode: 'ONLY_IN_CLOUD' as const, observedSource: 'IN_CLOUD' as const, status: 'ok' as const,

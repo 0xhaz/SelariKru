@@ -81,6 +81,8 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     await requireProject(db, tenantId, projectId);
     const cp = parseBody(AiCheckpointSchema, req.body);
     if (cp.projectId !== projectId) throw new AppError(422, 'checkpoint_project_mismatch', 'this checkpoint names another project');
+    // Fix round 3 (R3): only the send claim moves a checkpoint to sending.
+    if (cp.status === 'sending') throw new AppError(400, 'invalid_request', 'a save cannot set a checkpoint sending; claim it with send-claim', { field: 'status' });
     await judge(projectId, cp);
     const at = now();
     const created = await withTx(db, async (tx) => {
