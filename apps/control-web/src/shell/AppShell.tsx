@@ -103,6 +103,8 @@ export interface AppShellProps {
   readonly hosted?: { readonly quota: CloudQuota } | null;
   /** H9: whether Gemini Nano is available in this browser, checked once on first load (the hosted and real builds). Absent: not checked. */
   readonly deviceAvailability?: (() => Promise<DeviceReadiness>) | null;
+  /** H9 fix round 1 (I3): a development notice shown over the shell, such as the missing Firebase config. Null: none. */
+  readonly devNotice?: string | null;
 }
 
 /** H12: one device store per tab (IndexedDB, or memory without it). */
@@ -150,7 +152,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
 let epochSeq = 0;
 const nextEpoch = (): number => (epochSeq += 1);
 
-export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null, ownerKey, hosted = null, deviceAvailability = null }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null, ownerKey, hosted = null, deviceAvailability = null, devNotice = null }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
@@ -589,6 +591,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
         <ConnectionBanner connection={connection} />
+        {devNotice ? <p role="status" data-testid="dev-config-missing" className="z-50 mx-3 mt-3 border-2 border-ink bg-warning-tint px-3 py-1 text-[14px] font-semibold text-fg rounded-[4px] xl:fixed xl:left-1/2 xl:top-[100px] xl:mx-0 xl:mt-0 xl:-translate-x-1/2">{devNotice}</p> : null}
         {deviceAvailability ? <NanoBanner check={deviceAvailability} snapshot={snapshot} /> : null}
         {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
         {panelWide ? <ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} /> : null}

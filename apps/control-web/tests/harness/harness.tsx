@@ -12,6 +12,7 @@ import { NO_PROJECT, projectFromUrl, useActiveProject } from '../../src/shell/ac
 import { loadDemoSession } from '../../src/data-source/demo.ts';
 import { createDemoSdk } from '../../src/features/hybrid/demo-sdk.ts';
 import { createCloudQuota } from '../../src/features/hosted/cloud-quota.ts';
+import { devConfigNotice } from '../../src/build/dev-config.ts';
 import { createLiveDataSource } from '@selarikru/data-source-live';
 import type { EngineeringDataSource, TerminalControlChannel, TerminalControlInputOutcome, TerminalControlState, TerminalState } from '@selarikru/view-protocol';
 import '../../src/index.css';
@@ -75,6 +76,8 @@ interface Scenario {
   holdAgents?: boolean;
   /** H9: what the shell's Gemini Nano check answers (the hosted and real builds check it on first load). Absent: not checked, as under ?demo. */
   nano?: 'available' | 'unavailable' | 'downloadable' | 'downloading' | 'unknown';
+  /** H9 fix round 1 (I3): the dev notice for a missing Firebase config. */
+  devConfigMissing?: boolean;
   /** H9: mounts the shell as the hosted demo, with its cloud call cap already this far spent. */
   hostedQuota?: { limit: number; used: number };
   /** H9: the snapshot's coding-workers setting. The demo fixtures are the hackathon build's: off. */
@@ -323,7 +326,7 @@ if (sc.onboardingApi) {
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>
-        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} agentRuntime={agentRuntime} deviceAvailability={sc.nano ? async () => sc.nano! : null} hosted={hosted} />
+        <AppShell store={spied} mode={sc.observed ? 'live' : 'mock'} projectLabel={label} assistant={null} agentRuntime={agentRuntime} deviceAvailability={sc.nano ? async () => sc.nano! : null} hosted={hosted} devNotice={sc.devConfigMissing ? devConfigNotice({ dev: true, configured: false }) : null} />
       </StrictMode>,
     );
   });

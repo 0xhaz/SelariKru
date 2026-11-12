@@ -49,3 +49,9 @@ test('hosted demo: the top bar shows the cloud calls left, and Debug offers only
   await expect(panel.getByRole('button', { name: 'Go online' })).toBeVisible();
   await panel.getByRole('button', { name: 'Go online' }).click();
 });
+
+test('H9 fix round 1 (I3): in dev with no Firebase config, a visible notice says AI calls will fail and what to add', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, { devConfigMissing: true });
+  await expect(page.getByTestId('dev-config-missing')).toHaveText('Firebase config missing: AI calls will fail. Add VITE_FIREBASE_* to apps/control-web/.env.local');
+});
