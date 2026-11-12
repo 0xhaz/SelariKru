@@ -484,6 +484,16 @@ export class OfficeScene {
     if (this.hover) cornerMarks(p, this.hover.rect, this.reducedMotion ? 0.5 : t);
   }
 
+  /** H9: where a rooftop box is on screen, in CSS pixels (the canvas fills the viewport), for the tour's highlight. Null before the first world. */
+  roofBoxOnScreen(place: 'device' | 'cloud'): { x: number; y: number; w: number; h: number } | null {
+    const l = this.layout;
+    if (!l) return null;
+    const b = l.roofBoxes[place];
+    const a = this.camera.worldToScreen(l.ox + b.x, l.oy + b.y);
+    const z = this.camera.worldToScreen(l.ox + b.x + b.w, l.oy + b.y + b.h);
+    return { x: a.x, y: a.y, w: z.x - a.x, h: z.y - a.y };
+  }
+
   /** Where a robot is on screen, in CSS pixels relative to the canvas. For tests and the camera; null when it is not in the office. */
   robotOnScreen(id: string): { x: number; y: number } | null {
     const b = this.bots.get(id);

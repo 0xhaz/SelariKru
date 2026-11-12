@@ -185,6 +185,8 @@ export interface TopBarProps {
   readonly panelWide: boolean;
   /** H9, hosted demo: "Cloud calls left in this demo: N". */
   readonly quota?: string | null;
+  /** H9: starts the guided demo story (demo data only). */
+  readonly onTour?: (() => void) | null;
 }
 
 const SPEEDS = [1, 2, 4] as const;
@@ -217,7 +219,7 @@ function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | nul
  * the page and wraps.
  */
 export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props, ref) {
-  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, aiCounts, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide, quota = null } = props;
+  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, aiCounts, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide, quota = null, onTour = null } = props;
   // The narrow nav scrolls sideways: the current page must be in view, or the operator cannot tell where they are.
   const navRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -280,6 +282,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
         <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
+        {onTour ? <button type="button" className="btn text-[14px]" data-testid="start-tour" onClick={onTour}>Start the tour</button> : null}
         {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title={quota !== null ? 'Demo controls: go offline' : 'Development only'}>Debug</button> : null}
       </nav>
       <div className="ml-auto flex shrink-0 items-center gap-2 xl:ml-0">

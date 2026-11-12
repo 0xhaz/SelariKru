@@ -58,6 +58,7 @@ import type { CloudQuota } from '../features/hosted/cloud-quota.ts';
 import { quotaText } from '../features/hosted/quota-store.ts';
 import { EMPTY_QUOTA_STORE } from '../features/hosted/quota-store.ts';
 import { NanoBanner } from '../features/hosted/NanoBanner.tsx';
+import { Tour, startTour } from '../features/tour/Tour.tsx';
 import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
 import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
 import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
@@ -583,7 +584,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           attentionCount={attentionCount} attentionNumber={builtDecisions.decisions ? waitingCount : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
           runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null} aiCounts={aiCounts}
           workers={world?.agents.filter((a) => !a.notStarted).map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
-          debugOpen={debugOpen} onDebug={debugAllowed ? () => setDebugOpen((o) => !o) : null} quota={hosted ? quotaText(quotaState) : null}
+          debugOpen={debugOpen} onDebug={debugAllowed ? () => setDebugOpen((o) => !o) : null} quota={hosted ? quotaText(quotaState) : null} onTour={mode === 'mock' ? () => startTour(state.projectId) : null}
           teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
@@ -621,6 +622,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         assistantHost,
       ) : null}
       <Tooltip />
+      {/* H9: the guided demo story, on demo data (?demo and the hosted demo). */}
+      {mode === 'mock' ? <Tour projectId={state.projectId} simulated onOffice={route === 'office'} /> : null}
       {workerId !== null && team !== null && snapshot !== null ? (
         <WorkerDrawerHost
           look={agentById.get(workerId) ?? null} workerId={workerId} tab={tabOf(workerTab) ?? undefined} team={team} snapshot={snapshot} decisions={builtDecisions.decisions} connection={connection} mode={mode} nowMs={state.nowMs}

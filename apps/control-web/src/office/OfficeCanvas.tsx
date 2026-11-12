@@ -24,6 +24,9 @@ export interface OfficeCanvasProps {
  * The pixel office behind every screen. A picture of what the team panel lists: it has role="img" and a summary label, and the team panel is
  * its keyboard path. Mounted once; it follows the world it is given.
  */
+/** H9: the office scene on screen now, for the guided tour's highlight of the rooftop. Null while none is mounted. */
+export const officeOnScreen: { scene: OfficeScene | null } = { scene: null };
+
 export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject, paused, speed }: OfficeCanvasProps) {
   const host = useRef<HTMLDivElement>(null);
   const scene = useRef<OfficeScene | null>(null);
@@ -39,6 +42,7 @@ export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject
       onHover: (h) => ui.setHover(h),
     }, () => latest.current.insets);
     scene.current = s;
+    officeOnScreen.scene = s;
     // Dev builds only: lets the Playwright specs find a robot on screen. Never in a production bundle.
     if (import.meta.env.DEV) (window as unknown as { __selarikruOffice?: OfficeScene }).__selarikruOffice = s;
     const off = useUi.subscribe((st, prev) => {
@@ -53,6 +57,7 @@ export function OfficeCanvas({ world, insets, onOpenWorker, onOpenPlace, subject
       ui.setHover(null);
       s.destroy();
       scene.current = null;
+      if (officeOnScreen.scene === s) officeOnScreen.scene = null;
       if (import.meta.env.DEV) delete (window as unknown as { __selarikruOffice?: OfficeScene }).__selarikruOffice;
     };
   }, []);

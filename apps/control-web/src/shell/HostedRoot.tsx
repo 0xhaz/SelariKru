@@ -18,7 +18,8 @@ const AssistantPanel = lazy(() => import('../features/assistant/AssistantPanel.t
  * the project; the build fails without its site key, and no debug token is ever in it. A per-tab cap on cloud calls protects the free-tier quota.
  */
 export default function HostedRoot() {
-  const fixtureId = new URLSearchParams(window.location.search).get('fixture') ?? 'healthy-parallel-work';
+  const fixtureId = new URLSearchParams(window.location.search).get('fixture') ?? 'feature-delivery';
+  // The hosted demo opens on the project that uses every route (Local only, Local first, Cloud first, Cloud only, a restricted lock), as the tour does.
   const { session, project, store, playback } = useDemoSession(fixtureId);
   const quota = useMemo(() => createCloudQuota(), []);
   const sdk = useMemo(() => createFirebaseSdk({ app, recaptchaSiteKey: (import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined) || undefined }), []);
