@@ -251,6 +251,26 @@ describe('fix 2: an abandoned step can be run again from scratch', () => {
   });
 });
 
+describe('fix 3: a dismissed abandoned step stays dismissed for this viewer, in localStorage, and the page works without it', () => {
+  it('dismissed ids are kept per owner and project and read back by the next engine', async () => {
+    const kept = new Map<string, string>();
+    const storage = { getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => { kept.set(k, v); } };
+    const h = setup({ storage });
+    h.engine.dismiss('ckp_gone_000000001');
+    const again = createCheckpointEngine({ ...h.deps, storage });
+    expect(again.store.getState().dismissed['ckp_gone_000000001']).toBe(true);
+    // Another project of the same owner does not share them.
+    expect(createCheckpointEngine({ ...h.deps, projectId: 'other', storage }).store.getState().dismissed).toEqual({});
+  });
+
+  it('a storage that throws (private mode, blocked) changes nothing else', () => {
+    const storage = { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } };
+    const h = setup({ storage });
+    expect(() => h.engine.dismiss('ckp_gone_000000001')).not.toThrow();
+    expect(h.engine.store.getState().dismissed['ckp_gone_000000001']).toBe(true);
+  });
+});
+
 describe('fix 1 (M1, M4, M6)', () => {
   it('M1: two resumes at once send it once: busy is set before the re-check, and the server claim refuses a second tab', async () => {
     const h = setup();

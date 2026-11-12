@@ -56,6 +56,11 @@ export interface CheckpointEngineDeps {
   readonly isOnline: () => boolean;
   readonly now?: () => Date;
   readonly newId?: () => string;
+  /**
+   * Fix round 3: where this viewer's dismissed abandoned steps are remembered (a per-viewer convenience). Default: the browser's localStorage. Any failure is
+   * ignored: the page works the same without it.
+   */
+  readonly storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
 }
 
 export interface ChainStart {
@@ -114,7 +119,19 @@ export interface CheckpointEngine {
 }
 
 export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEngine {
-  const store = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {}, dismissed: {} }));
+  const storage = deps.storage !== undefined ? deps.storage : (typeof localStorage === 'undefined' ? null : localStorage);
+  const dismissedKey = `selarikru.dismissed-abandoned.${deps.ownerKey}.${deps.projectId}`;
+  const readDismissed = (): Record<string, boolean> => {
+    try {
+      const raw = storage?.getItem(dismissedKey);
+      const ids: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(ids) ? Object.fromEntries(ids.filter((x): x is string => typeof x === 'string').slice(0, 500).map((x) => [x, true])) : {};
+    } catch { return {}; }
+  };
+  const store = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {}, dismissed: readDismissed() }));
+  const keepDismissed = (): void => {
+    try { storage?.setItem(dismissedKey, JSON.stringify(Object.keys(store.getState().dismissed).slice(-500))); } catch { /* a convenience only */ }
+  };
   const now = (): string => (deps.now ?? (() => new Date()))().toISOString();
   const newId = deps.newId ?? (() => `ckp_${crypto.randomUUID().replace(/-/g, '')}`);
   const newCtx = (): string => `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -347,6 +364,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   }
 
   /**
+   * Accepted behaviour (fix round 3, R5): a step whose closing save failed (it finished, but the server never took `sent`) and whose tab was then reloaded is read
+   * back as `running` or `sending`; after 30 minutes it shows as Abandoned, and Run again starts it from scratch. Nothing is sent twice by that: the server still
+   * holds its own copy, and a refused write adopts it.
+   *
    * Fix round 3 (R1): a step left running or sending is closed as abandoned server first. Offline nothing is marked: it waits for the connection. A stored
    * checkpoint is written to the server first and changed here only after it took it; a refusal (another tab still holds its claim) adopts the server's copy.
    * A device-only one has no server to ask and is closed here.
@@ -484,6 +505,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       const cp = store.getState().checkpoints[id];
       if (!cp || cp.status !== 'abandoned' || !runner) return;
       setFor('dismissed', id, true);
+      keepDismissed();
       if (PM_STEPS.has(cp.stepKind)) {
         const q = cp.partial?.texts.find((t) => t.who === 'owner');
         if (q) await runner.pm({ kind: cp.stepKind as never, subjectTaskId: cp.taskId, question: q.text, questionClassification: q.classification === 'restricted' || q.classification === 'secret' ? 'restricted' : 'internal', history: [], callOverride: cp.callOverride });
@@ -491,7 +513,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       }
       await runner.run({ taskId: cp.taskId, kind: cp.stepKind as AgentActionKind, callOverride: cp.callOverride });
     },
-    dismiss(id) { setFor('dismissed', id, true); },
+    dismiss(id) { setFor('dismissed', id, true); keepDismissed(); },
     async drop(id) {
       const cp = store.getState().checkpoints[id];
       if (!cp || cp.status !== 'waiting') return;
