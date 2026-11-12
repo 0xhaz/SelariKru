@@ -237,6 +237,20 @@ describe('fix 2 (N2): a claim is released on every exit that is not a closing wr
   });
 });
 
+describe('fix 2: an abandoned step can be run again from scratch', () => {
+  it('Run again runs the step fresh (no resume, no claim) and takes it off the list', async () => {
+    const h = setup();
+    h.setOnline(false);
+    const id = await pauseOffline(h);
+    const cp = h.engine.store.getState().checkpoints[id]!;
+    h.engine.store.setState((s) => ({ ...s, checkpoints: { ...s.checkpoints, [id]: { ...cp, status: 'abandoned' } } }));
+    h.setOnline(true);
+    await h.engine.runAgain(id);
+    expect(h.runs).toEqual([{ taskId: 't1', kind: 'criteria', callOverride: null }]);
+    expect(h.engine.store.getState().dismissed[id]).toBe(true);
+  });
+});
+
 describe('fix 1 (M1, M4, M6)', () => {
   it('M1: two resumes at once send it once: busy is set before the re-check, and the server claim refuses a second tab', async () => {
     const h = setup();

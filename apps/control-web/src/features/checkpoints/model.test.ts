@@ -47,4 +47,13 @@ describe('Paused AI work (H12)', () => {
   it('the office: only a waiting cloud step stands at the cloud deck', () => {
     expect(waitingCloudCalls([cp(), cp({ checkpointId: 'ckp_d', continuation: 'device_only', stopReason: 'input_too_large_for_device' }), cp({ checkpointId: 'ckp_e', status: 'sent' })])).toEqual([{ taskId: 't1', place: 'cloud', stepKind: 'patch', waiting: true }]);
   });
+
+  it('fix 2: an abandoned step is visible, "Abandoned: <task> · <step>", in the feed and in the list, where it can be run again from scratch', () => {
+    const gone = cp({ checkpointId: 'ckp_abandoned_001', status: 'abandoned', stopReason: null });
+    expect(checkpointActivity([gone], titles).map((i) => i.text)).toEqual(['Abandoned: Search index · Propose change']);
+    const rows = pausedRows(state([gone]), titles, true);
+    expect(rows).toEqual([expect.objectContaining({ id: 'ckp_abandoned_001', headline: 'Abandoned: Search index · Propose change', abandoned: true })]);
+    // Dismissed: no longer listed.
+    expect(pausedRows(state([gone], { dismissed: { ckp_abandoned_001: true } }), titles, true)).toEqual([]);
+  });
 });

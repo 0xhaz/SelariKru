@@ -54,6 +54,8 @@ export interface PausedRow {
   readonly resume: string | null;
   readonly escalate: string | null;
   readonly moveToDevice: string | null;
+  /** Fix round 2: an abandoned step (its tab closed mid-step), offered Run again (from scratch) and Dismiss. */
+  readonly abandoned?: boolean;
 }
 
 const plural = (n: number, w: string): string => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -69,8 +71,18 @@ export function sendsText(cp: AiCheckpoint): string {
   return `${size}${files}${q ? ` · question: "${q.text.slice(0, 80)}${q.text.length > 80 ? '…' : ''}"` : ''} · labels: ${labels}`;
 }
 
-export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problems' | 'asks' | 'busy'>, titleOf: (taskId: string) => string, online: boolean): PausedRow[] {
-  return Object.values(state.checkpoints).filter((cp) => cp.status === 'waiting').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((cp) => {
+export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problems' | 'asks' | 'busy'> & { readonly dismissed?: Readonly<Record<string, boolean>> }, titleOf: (taskId: string) => string, online: boolean): PausedRow[] {
+  const dismissed = state.dismissed ?? {};
+  const abandoned = Object.values(state.checkpoints).filter((cp) => cp.status === 'abandoned' && !dismissed[cp.checkpointId]).map((cp): PausedRow => {
+    const title = titleOf(cp.taskId);
+    const step = STEP_LABEL[cp.stepKind] ?? cp.stepKind;
+    return {
+      id: cp.checkpointId, taskId: cp.taskId, title, step, headline: `Abandoned: ${title} · ${step}`, stop: 'Abandoned', tone: 'warning',
+      sends: 'Its tab closed while it ran, so it never finished. Run it again from scratch, or dismiss it.', problems: [], restricted: !['public', 'internal'].includes(checkpointLabel(cp)),
+      busy: state.busy[cp.checkpointId] === true, resume: 'An abandoned step is run again from scratch, not resumed.', escalate: 'An abandoned step is run again from scratch.', moveToDevice: 'An abandoned step is run again from scratch.', abandoned: true,
+    };
+  });
+  return [...abandoned, ...Object.values(state.checkpoints).filter((cp) => cp.status === 'waiting').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((cp): PausedRow => {
     const title = titleOf(cp.taskId);
     const step = STEP_LABEL[cp.stepKind] ?? cp.stepKind;
     const problems = (state.problems[cp.checkpointId] ?? []).map((p) => PROBLEM_TEXT[p] ?? p);
@@ -88,7 +100,7 @@ export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problem
       sends: sendsText(cp), problems, restricted, busy: state.busy[cp.checkpointId] === true, resume, escalate,
       moveToDevice: cp.routeMode === 'ONLY_ON_DEVICE' && cp.stopReason === 'input_too_large_for_device' ? 'It is already device only, and too large for this device.' : null,
     };
-  });
+  })];
 }
 
 export interface CheckpointActivity { readonly id: string; readonly at: string; readonly glyph: string; readonly tone: Tone; readonly text: string }
@@ -101,6 +113,7 @@ export function checkpointActivity(checkpoints: readonly AiCheckpoint[], titleOf
     if (cp.status === 'waiting' && cp.stopReason) return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '‖', tone: 'warning', text: `${what}: Paused: ${STOP_TEXT[cp.stopReason].toLowerCase()}` }];
     if (cp.status === 'sent') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '☁', tone: 'active', text: `${what}: Sent after reconnecting` }];
     if (cp.status === 'escalated') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '⇡', tone: 'active', text: `${what}: Escalated to cloud: local result failed checks` }];
+    if (cp.status === 'abandoned') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '!', tone: 'warning', text: `Abandoned: ${what}` }];
     if (cp.status === 'moved_to_device') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '▣', tone: 'success', text: `${what}: Moved to device only` }];
     return [];
   });

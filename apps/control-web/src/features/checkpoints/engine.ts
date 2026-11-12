@@ -32,6 +32,8 @@ export interface CheckpointState {
   readonly busy: Readonly<Record<string, boolean>>;
   /** Kept on this device only (restricted, locked, or the server did not take it). */
   readonly deviceOnly: Readonly<Record<string, boolean>>;
+  /** Fix round 2: abandoned steps the owner ran again or dismissed, so they leave the list. This tab only. */
+  readonly dismissed: Readonly<Record<string, boolean>>;
 }
 
 /** What a resumed step runs through: the agents port (which starts its own recorder, continuing this checkpoint). */
@@ -105,10 +107,14 @@ export interface CheckpointEngine {
   escalate(id: string): Promise<void>;
   moveToDevice(id: string): Promise<void>;
   drop(id: string): Promise<void>;
+  /** Fix round 2: an abandoned step, run again from scratch (a fresh step with its own checkpoint, not a resume). */
+  runAgain(id: string): Promise<void>;
+  /** Fix round 2: takes an abandoned step off the list without running it. */
+  dismiss(id: string): void;
 }
 
 export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEngine {
-  const store = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {} }));
+  const store = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {}, dismissed: {} }));
   const now = (): string => (deps.now ?? (() => new Date()))().toISOString();
   const newId = deps.newId ?? (() => `ckp_${crypto.randomUUID().replace(/-/g, '')}`);
   const newCtx = (): string => `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
@@ -120,7 +126,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   const claimTokens = new Map<string, string>();
 
   const patch = (fn: (s: CheckpointState) => Partial<CheckpointState>): void => store.setState((s) => ({ ...s, ...fn(s) }));
-  const setFor = <K extends 'problems' | 'asks' | 'busy' | 'deviceOnly'>(key: K, id: string, v: CheckpointState[K][string] | undefined): void =>
+  const setFor = <K extends 'problems' | 'asks' | 'busy' | 'deviceOnly' | 'dismissed'>(key: K, id: string, v: CheckpointState[K][string] | undefined): void =>
     patch((s) => { const next = { ...s[key] } as Record<string, unknown>; if (v === undefined) delete next[id]; else next[id] = v; return { [key]: next } as Partial<CheckpointState>; });
 
   /** Every checkpoint is kept on this device; a public or internal one also goes to the server. One write at a time per checkpoint, in order. */
@@ -435,6 +441,18 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       if (!cp || cp.status !== 'waiting') return;
       await send(cp, 'device_only', 'ONLY_ON_DEVICE');
     },
+    async runAgain(id) {
+      const cp = store.getState().checkpoints[id];
+      if (!cp || cp.status !== 'abandoned' || !runner) return;
+      setFor('dismissed', id, true);
+      if (PM_STEPS.has(cp.stepKind)) {
+        const q = cp.partial?.texts.find((t) => t.who === 'owner');
+        if (q) await runner.pm({ kind: cp.stepKind as never, subjectTaskId: cp.taskId, question: q.text, questionClassification: q.classification === 'restricted' || q.classification === 'secret' ? 'restricted' : 'internal', history: [], callOverride: cp.callOverride });
+        return;
+      }
+      await runner.run({ taskId: cp.taskId, kind: cp.stepKind as AgentActionKind, callOverride: cp.callOverride });
+    },
+    dismiss(id) { setFor('dismissed', id, true); },
     async drop(id) {
       const cp = store.getState().checkpoints[id];
       if (!cp || cp.status !== 'waiting') return;
@@ -448,4 +466,4 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
 export type { CheckpointProblem };
 
 /** A store with nothing in it, for screens with no engine (hooks need a store either way). */
-export const EMPTY_CHECKPOINT_STORE: StoreApi<CheckpointState> = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {} }));
+export const EMPTY_CHECKPOINT_STORE: StoreApi<CheckpointState> = createStore<CheckpointState>()(() => ({ checkpoints: {}, problems: {}, asks: {}, busy: {}, deviceOnly: {}, dismissed: {} }));

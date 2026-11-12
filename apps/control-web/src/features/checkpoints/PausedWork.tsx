@@ -33,6 +33,12 @@ export function PausedWork({ engine, titleOf, simulated }: { engine: CheckpointE
             </div>
             <p className="mt-1 text-sm text-muted" data-testid="paused-sends">Would send: {r.sends}</p>
             {r.problems.map((p) => <p key={p} className="mt-1 text-sm text-warning" data-testid="paused-problem">{p}</p>)}
+            {r.abandoned ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button type="button" className={buttonPrimary} disabled={r.busy} onClick={() => void engine.runAgain(r.id)}>Run again</button>
+                <button type="button" className={buttonQuiet} onClick={() => engine.dismiss(r.id)}>Dismiss</button>
+              </div>
+            ) : (
             <div className="mt-2 flex flex-wrap gap-2">
               {r.escalate === null
                 ? <button type="button" className={buttonPrimary} disabled={r.busy} onClick={() => void engine.escalate(r.id)}>Escalate to cloud</button>
@@ -40,7 +46,8 @@ export function PausedWork({ engine, titleOf, simulated }: { engine: CheckpointE
               <button type="button" className={buttonQuiet} disabled={r.busy || r.moveToDevice !== null} title={r.moveToDevice ?? undefined} onClick={() => void engine.moveToDevice(r.id)}>Move to device only</button>
               <button type="button" className={buttonQuiet} disabled={r.busy} onClick={() => void engine.drop(r.id)}>Drop</button>
             </div>
-            {r.resume !== null && r.escalate !== null ? <p className="mt-1 text-sm text-muted">{r.resume}</p> : null}
+            )}
+            {!r.abandoned && r.resume !== null && r.escalate !== null ? <p className="mt-1 text-sm text-muted">{r.resume}</p> : null}
             {r.busy ? <p role="status" className="mt-1 text-sm text-fg">Sending…</p> : null}
           </li>
         ))}
