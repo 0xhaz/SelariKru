@@ -898,6 +898,17 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
     }
   });
 
+  it('M1: under Cloud first the SDK tries the cloud before the device (a 429 falls back), so an answer on the device still costs its unit', async () => {
+    const sdk = new FakeSdk();
+    sdk.result = { text: GOOD, inferenceSource: 'on_device' };
+    const quota = cap(5);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server({ runDefault: 'PREFER_IN_CLOUD' });
+    expect((await adapter.draftBrief(req({ policy: cloud('PREFER_IN_CLOUD'), route }))).status).toBe('ok');
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'PREFER_IN_CLOUD' });
+    expect(quota.used()).toBe(1);
+  });
+
   it('H9 fix round 1 (I2): two calls at once with one unit left: exactly one is sent, the other pauses as cloud_quota', async () => {
     const sdk = new FakeSdk();
     sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };

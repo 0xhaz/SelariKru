@@ -518,8 +518,9 @@ export class FirebaseHybridAssistantAdapter {
 
     const observedSource = mapInferenceSource(result.inferenceSource);
     if (observedSource === 'IN_CLOUD') this.onNetworkSuccess?.();
-    // Answered on this device: the reserved unit is given back. In the cloud, or not shown, it is spent.
-    if (reserved && observedSource === 'ON_DEVICE') this.cloudCalls?.refund();
+    // Answered on this device: the reserved unit is given back only when the SDK tried the device first (M1). Under PREFER_IN_CLOUD (and ONLY_IN_CLOUD) it tries the
+    // cloud first and falls back to the device on a fetch-error or an error, so the cloud was already hit and the unit is spent. In the cloud, or not shown, it is spent.
+    if (reserved && observedSource === 'ON_DEVICE' && (sdkMode === 'PREFER_ON_DEVICE' || sdkMode === 'ONLY_ON_DEVICE')) this.cloudCalls?.refund();
     const rawInferenceSource = result.inferenceSource ?? null;
     const u = result.usage;
     const usage: ProposalUsage =
