@@ -45,7 +45,8 @@ export function AssistPanel({ adapter, hold, api, mode, goal, restricted, record
     if (heldId.current) { hold?.discard(heldId.current); heldId.current = null; }
   }, [restricted, hold]);
 
-  if (mode === 'mock' || !adapter) return <p className="text-sm text-muted">The assistant is off in demo mode.</p>;
+  // H9: the hosted demo passes the real adapter over demo data; under ?demo there is none, and the assistant is off.
+  if (!adapter) return <p className="text-sm text-muted">The assistant is off in demo mode.</p>;
 
   const ask = async (): Promise<void> => {
     setBusy(true); setFailure(null); setProposal(null); setReview(null);

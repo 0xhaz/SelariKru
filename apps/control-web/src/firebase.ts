@@ -1,19 +1,10 @@
-import { initializeApp } from 'firebase/app';
-import { connectAuthEmulator, getAuth } from 'firebase/auth';
+import { getAuth, connectAuthEmulator } from 'firebase/auth';
 import { connectivity, isOnline } from './features/checkpoints/connectivity.ts';
 import { FirebaseHybridAssistantAdapter, createFirebaseSdk, type FetchRoute } from '@selarikru/inference-firebase-web';
+import { app } from './firebase-app.ts';
 
-// Public web client config (not a secret), as in spikes/firebase-hybrid.
-const firebaseConfig = {
-  projectId: 'selarikru',
-  appId: '1:808736999784:web:991baa74a0aa41bae6eedd',
-  storageBucket: 'selarikru.firebasestorage.app',
-  apiKey: 'AIzaSyBEMbdymrhgD-OT2TBYlw8huB5D-BLTSyQ',
-  authDomain: 'selarikru.firebaseapp.com',
-  messagingSenderId: '808736999784',
-};
-
-export const app = initializeApp(firebaseConfig);
+// H9: the web config comes from the VITE_FIREBASE_* env variables (firebase-app.ts), never from the source.
+export { app };
 
 export const auth = getAuth(app);
 // Auth Emulator in dev (pnpm dev:stack). Hosted builds go to Firebase Auth by the same code path.

@@ -57,7 +57,7 @@ const fetchRoute: FetchRoute = async () => {
   return fresh.route;
 };
 
-function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void; onNetworkSuccess?: () => void } = {}) {
+function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void; onNetworkSuccess?: () => void; cloudCalls?: { allowed(): boolean; spend(): void } } = {}) {
   let t = 0;
   fresh.route = null;
   fresh.fail = false;
@@ -788,5 +788,43 @@ describe('H12: offline', () => {
     fresh.route = server();
     expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorCode: 'AI/fetch-error' });
     expect(failures).toBe(1);
+  });
+});
+
+describe('H9: the hosted demo\'s cloud call cap', () => {
+  const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'ONLY_IN_CLOUD', override: null, lock: null, ...over });
+  const route = { taskId: 't1', stepKind: 'review' as const };
+  const cap = (limit: number) => {
+    let used = 0;
+    return { allowed: () => used < limit, spend: () => { used += 1; }, used: () => used };
+  };
+
+  it('each call answered in the cloud spends one; a device answer spends none', async () => {
+    const sdk = new FakeSdk();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const quota = cap(5);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server();
+    expect((await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).status).toBe('ok');
+    expect(quota.used()).toBe(1);
+    sdk.result = { text: GOOD, inferenceSource: 'on_device' };
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ route }))).status).toBe('ok');
+    expect(quota.used()).toBe(1);
+  });
+
+  it('once the cap is reached, a call that needs the cloud is not sent: blocked as cloud_quota, so it pauses as a checkpoint; a device call still runs', async () => {
+    const sdk = new FakeSdk();
+    const quota = cap(0);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server();
+    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'cloud_quota', requestedMode: 'ONLY_IN_CLOUD' });
+    fresh.route = server({ runDefault: 'PREFER_IN_CLOUD' });
+    expect(await adapter.draftBrief(req({ policy: cloud('PREFER_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'cloud_quota' });
+    expect(sdk.specs).toHaveLength(0);
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).status).toBe('ok');
+    fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ route }))).status).toBe('ok');
   });
 });

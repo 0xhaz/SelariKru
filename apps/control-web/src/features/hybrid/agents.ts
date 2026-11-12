@@ -23,6 +23,8 @@ export type AgentsOutcome = AgentRunOutcome & { readonly simulated: boolean; rea
 export interface AgentsPort {
   /** Demo data: results are labelled so and are never evidence. */
   readonly simulated: boolean;
+  /** H9, hosted demo: the answers come from a real model (Firebase AI Logic) over demo data. Still demo data and never evidence. */
+  readonly liveModel?: boolean;
   run(req: AgentRunRequest): Promise<AgentsOutcome>;
   inFlight(): readonly InFlightCall[];
   onInFlight(fn: (calls: readonly InFlightCall[]) => void): () => void;
@@ -66,6 +68,8 @@ export interface CreateAgentsOptions {
   /** The demo's stand-in SDK. */
   readonly sdk?: AssistantSdk;
   readonly simulated: boolean;
+  /** H9: a real model answers over demo data (the hosted demo). */
+  readonly liveModel?: boolean;
   /** Sends `route.report`. A refusal is a failed report and changes nothing else. */
   readonly execute: (command: AuthorizedViewCommand) => Promise<CommandReceipt>;
   readonly snapshot: () => ProjectViewSnapshot | null;
@@ -114,6 +118,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
 
   return {
     simulated: opts.simulated,
+    liveModel: opts.liveModel === true,
     inFlight: () => calls,
     onInFlight(fn) {
       listeners.add(fn);

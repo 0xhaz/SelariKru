@@ -429,7 +429,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       else { setFor('problems', id, undefined); setFor('asks', id, 'escalate'); }
       return;
     }
-    if (cp.continuation !== 'cloud_capable' || !deps.isOnline()) return;
+    // H9: a step paused by the hosted demo's cloud call cap is never sent from this tab: it may be moved to this device or dropped.
+    if (cp.continuation !== 'cloud_capable' || !deps.isOnline() || cp.stopReason === 'cloud_quota') return;
     // Fix round 1 (M1): busy before the re-check, so a second trigger (reconnect, the owner's button) does not send it again.
     setFor('busy', id, true);
     let ok: boolean;

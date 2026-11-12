@@ -50,6 +50,8 @@ describe('AI step checkpoints (H12)', () => {
     expect(stopReasonFor('offline')).toBe('offline');
     expect(stopReasonFor('input_too_large_for_device')).toBe('input_too_large_for_device');
     expect(stopReasonFor('route_changed_in_queue')).toBe('route_changed');
+    // H9: the hosted demo's cloud call cap pauses a cloud step as a checkpoint.
+    expect(stopReasonFor('cloud_quota')).toBe('cloud_quota');
     expect(stopReasonFor('secret_in_input')).toBeNull();
   });
 

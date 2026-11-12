@@ -20,21 +20,22 @@ function JsonNode({ name, value, depth }: { name: string; value: unknown; depth:
 }
 
 /** Development only: the demo controls and what the shell is reading. Not part of the product, and never in a production build. */
-export function DebugPanel({ connection, snapshot, world, onClose, children }: { connection: ConnectionState; snapshot: ProjectViewSnapshot | null; world: OfficeWorld | null; onClose: () => void; children?: ReactNode }) {
+/** H9: in the hosted demo it holds the one control kept there, Go offline, and nothing else (no state dump). */
+export function DebugPanel({ connection, snapshot, world, onClose, children, hosted = false }: { connection: ConnectionState; snapshot: ProjectViewSnapshot | null; world: OfficeWorld | null; onClose: () => void; children?: ReactNode; hosted?: boolean }) {
   return (
     <section aria-label="Debug" data-testid="debug-panel" className="panel-dark pointer-events-auto relative z-[15] mx-3 my-3 flex flex-col overflow-hidden xl:fixed xl:bottom-4 xl:left-4 xl:m-0 xl:max-h-[60vh] xl:w-[280px]">
       <div className="flex items-center justify-between border-b-2 border-ink px-3 py-1.5">
-        <h2 className="text-[13px] uppercase tracking-[0.14em] text-feed-soft">Debug · development only</h2>
+        <h2 className="text-[13px] uppercase tracking-[0.14em] text-feed-soft">{hosted ? 'Demo controls' : 'Debug · development only'}</h2>
         <button type="button" className="btn px-2 text-[13px]" onClick={onClose} aria-label="Close debug panel">✕</button>
       </div>
       <div className="scroll-thin min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {children ? <div className="bg-paper p-1 text-ink">{children}</div> : null}
-        <details className="font-mono text-[15px] leading-tight text-paper">
+        {hosted ? null : <details className="font-mono text-[15px] leading-tight text-paper">
           <summary className="cursor-pointer text-paper">State</summary>
           <JsonNode name="connection" value={connection} depth={1} />
           <JsonNode name="office" value={world ? { banner: world.banner, running: world.running, agents: world.agents.map((a) => `${a.name}: ${a.label}`), parcels: world.parcels, prs: world.prs } : null} depth={1} />
           <JsonNode name="snapshot.meta" value={snapshot?.meta ?? null} depth={1} />
-        </details>
+        </details>}
       </div>
     </section>
   );

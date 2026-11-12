@@ -596,3 +596,17 @@ describe('H9 step 0 (F2): a server copy in waiting never replaces a closed local
     expect(h.server.rows.get(id)).toMatchObject({ status: 'moved_to_device' });
   });
 });
+
+describe('H9: a step paused by the hosted demo\'s cloud call cap', () => {
+  it('waits as a checkpoint with stop reason cloud_quota, and reconnecting never sends it', async () => {
+    const h = setup();
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'criteria', callOverride: null });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    const r = result(proposal({ status: 'blocked', blockedReason: 'cloud_quota', observedSource: 'UNKNOWN', requestId: 'req_q' }));
+    await rec.finish({ kind: 'result', result: r, context: context(), simulated: true });
+    expect(h.engine.store.getState().checkpoints[rec.id]).toMatchObject({ status: 'waiting', stopReason: 'cloud_quota', continuation: 'cloud_capable' });
+    await h.engine.reconnect();
+    expect(h.runs).toEqual([]);
+    expect(h.engine.store.getState().asks[rec.id]).toBeUndefined();
+  });
+});

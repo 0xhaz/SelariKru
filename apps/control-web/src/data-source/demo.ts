@@ -2,8 +2,8 @@ import type { Clock, DataSourceError, EngineeringDataSource } from '@selarikru/v
 import type { Scheduler } from '../shell/projection-store.ts';
 
 /**
- * The only way the mock data source reaches the app. It is a dynamic import behind `import.meta.env.DEV`: in a production build Vite
- * replaces the flag with `false`, the branch is dead and the import is never emitted, so the mock and its fixtures are not in the bundle.
+ * The only way the mock data source reaches the app. It is a dynamic import behind `import.meta.env.DEV` (and, H9, the hosted demo's build-time flag): in the
+ * real production build Vite replaces both with constants, the branch is dead and the import is never emitted, so the mock and its fixtures are not in that bundle.
  * `data-source-mock` is a devDependency for the same reason. Do not import it from any module a production build can reach.
  */
 
@@ -70,7 +70,8 @@ function withFault(source: EngineeringDataSource, fault: DemoFault): Engineering
 }
 
 export async function loadDemoSession(fault: DemoFault | null): Promise<DemoSession | null> {
-  if (!import.meta.env.DEV) return null;
+  // Dev (`?demo`) and the hosted demo (H9, a build-time constant) only: the real build never bundles the mock.
+  if (!import.meta.env.DEV && import.meta.env.VITE_HOSTED_DEMO !== '1') return null;
   const { createDemoDataSource } = await import('@selarikru/data-source-mock');
   // H12 fix round 2 (N1): the demo's simulated offline reaches the demo server too, so its checkpoint calls fail as live ones would.
   const { connectivity } = await import('../features/checkpoints/connectivity.ts');

@@ -183,6 +183,8 @@ export interface TopBarProps {
   readonly teamToggle: ReactNode;
   readonly teamFold: ReactNode;
   readonly panelWide: boolean;
+  /** H9, hosted demo: "Cloud calls left in this demo: N". */
+  readonly quota?: string | null;
 }
 
 const SPEEDS = [1, 2, 4] as const;
@@ -215,7 +217,7 @@ function AiCounter({ counts, runId }: { counts: AiRunCounts; runId: string | nul
  * the page and wraps.
  */
 export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props, ref) {
-  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, aiCounts, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide } = props;
+  const { route, projectLabel, mode, connection, confirmedAt, nowMs, account, attentionCount, attentionNumber, attentionUrgent, attentionBadge, decisionCount, runs, planRunId, onPlanRun, speed, onSpeed, running, aiCounts, workers, selectedWorker, debugOpen, onDebug, teamToggle, teamFold, panelWide, quota = null } = props;
   // The narrow nav scrolls sideways: the current page must be in view, or the operator cannot tell where they are.
   const navRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -228,6 +230,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
         <span className="contents" data-testid="top-bar-demo-chip">{mode === 'mock' ? <span role="status" data-testid="demo-badge" className="chip shrink-0 text-[12px]" style={{ background: 'var(--color-gold)' }}>Demo data</span> : null}</span>
+        {quota !== null ? <span role="status" data-testid="cloud-quota" className="chip shrink-0 text-[12px]" title="The hosted demo's cap on cloud calls in this tab, which protects the free-tier quota. Calls on this device do not count.">{quota}</span> : null}
         <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
       {runs.length > 0 ? (
@@ -277,7 +280,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
         <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
-        {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title="Development only">Debug</button> : null}
+        {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title={quota !== null ? 'Demo controls: go offline' : 'Development only'}>Debug</button> : null}
       </nav>
       <div className="ml-auto flex shrink-0 items-center gap-2 xl:ml-0">
         {panelWide ? null : teamToggle}

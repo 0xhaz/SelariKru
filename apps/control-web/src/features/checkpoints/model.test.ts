@@ -57,3 +57,11 @@ describe('Paused AI work (H12)', () => {
     expect(pausedRows(state([gone], { dismissed: { ckp_abandoned_001: true } }), titles, true)).toEqual([]);
   });
 });
+
+describe('H9: the hosted demo\'s cloud call cap', () => {
+  it('a step paused by the cap says so plainly, offers no Resume (nothing more can be sent from this tab), and keeps Move to device only and Drop', () => {
+    const [row] = pausedRows(state([cp({ stopReason: 'cloud_quota' })]), titles, true);
+    expect(row).toMatchObject({ stop: 'Cloud call limit reached for this demo', headline: 'Cloud call limit reached for this demo: Search index · Propose change', moveToDevice: null });
+    expect(row!.resume).toBe('This demo tab has used all its cloud calls. Move it to this device, or drop it.');
+  });
+});

@@ -52,7 +52,10 @@ import { shortcutFor } from './shortcuts.ts';
 import { ui } from './ui-store.ts';
 import { TITLES, frameOf } from './views.ts';
 import { useUi } from './ui-store.ts';
-import type { AssistantSdk, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
+import type { AssistantSdk, DeviceAvailability, FirebaseHybridAssistantAdapter } from '@selarikru/inference-firebase-web';
+import type { CloudQuota } from '../features/hosted/cloud-quota.ts';
+import { quotaText } from '../features/hosted/quota-store.ts';
+import { EMPTY_QUOTA_STORE } from '../features/hosted/quota-store.ts';
 import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
 import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
 import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
@@ -90,9 +93,13 @@ export interface AppShellProps {
    * What runs the task agents (H4): the live Firebase AI Logic adapter, wired to the source's fresh route reads, or under demo data a stand-in SDK whose answers are
    * labelled demo data. Absent: no AI actions are offered.
    */
-  readonly agentRuntime?: { readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>; readonly sdk?: AssistantSdk; readonly simulated: boolean } | null;
+  readonly agentRuntime?: { readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>; readonly sdk?: AssistantSdk; readonly simulated: boolean; readonly liveModel?: boolean } | null;
   /** H12: who this browser's checkpoints belong to (the signed-in owner's uid). The device store is scoped to it. Default: the demo operator, or the owner. */
   readonly ownerKey?: string;
+  /** H9: the hosted demo. Its per-tab cloud call cap is shown in the top bar, and of the debug controls only Go offline is offered. */
+  readonly hosted?: { readonly quota: CloudQuota } | null;
+  /** H9: whether Gemini Nano is available in this browser, checked once on first load (the hosted and real builds). Absent: not checked. */
+  readonly deviceAvailability?: (() => Promise<DeviceAvailability>) | null;
 }
 
 /** H12: one device store per tab (IndexedDB, or memory without it). */
@@ -140,7 +147,7 @@ function AssistantNotice({ leaveDemoHref }: { leaveDemoHref?: string | undefined
 let epochSeq = 0;
 const nextEpoch = (): number => (epochSeq += 1);
 
-export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null, ownerKey }: AppShellProps) {
+export function AppShell({ store, mode, projectLabel, account, assistant, onboarding, devPanel, leaveDemoHref, agentRuntime = null, playback = null, ownerKey, hosted = null, deviceAvailability = null }: AppShellProps) {
   const route = useRoute();
   useEffect(applyTheme, []);
   // The font style is a per-browser choice (Settings, Project). theme-init.js applies it before first paint; this covers pages without it.
@@ -316,6 +323,9 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // Development only: the reference's debug panel.
   // Under ?demo it opens with the demo controls in it (fixture, advance, restart); close it to see the office alone.
   const [debugOpen, setDebugOpen] = useState(() => import.meta.env.DEV && mode === 'mock' && devPanel != null);
+  // H9: the hosted demo keeps one debug control, Go offline. Every other debug control is development only.
+  const debugAllowed = import.meta.env.DEV || (import.meta.env.VITE_HOSTED_DEMO === '1' && hosted !== null);
+  const quotaState = useStore(hosted?.quota.store ?? EMPTY_QUOTA_STORE);
   // The task agents, and their calls in flight for the office's desk marks and rooftop cloud deck.
   // H12: the AI step checkpoints (the offline queue), kept on this device and, when not restricted, by the server. One engine per project and source.
   const owner = ownerKey ?? (mode === 'mock' ? 'demo-operator' : 'owner');
@@ -566,7 +576,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           attentionCount={attentionCount} attentionNumber={builtDecisions.decisions ? waitingCount : null} attentionUrgent={overview !== null && overview.needsYou > 0} attentionBadge={attentionBadge} decisionCount={decisionCount} panelWide={panelWide}
           runs={world?.runs ?? []} planRunId={world?.planRunId ?? planRunId} onPlanRun={setPlanRunId} speed={speed} onSpeed={setSpeed} running={world ? world.running : null} aiCounts={aiCounts}
           workers={world?.agents.filter((a) => !a.notStarted).map((a) => ({ id: a.id, name: a.name })) ?? []} selectedWorker={workerId}
-          debugOpen={debugOpen} onDebug={import.meta.env.DEV ? () => setDebugOpen((o) => !o) : null}
+          debugOpen={debugOpen} onDebug={debugAllowed ? () => setDebugOpen((o) => !o) : null} quota={hosted ? quotaText(quotaState) : null}
           teamToggle={<TeamFoldToggle status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} />}
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
@@ -591,7 +601,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           </ViewDrawer>
         )}
         {/* Inside the page region, so it is inert like the rest of the page while a worker is open beside the team cards. */}
-        {import.meta.env.DEV && debugOpen ? <DebugPanel connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}>{devPanel}{mode === 'mock' ? <DemoNetwork offline={simulatedOffline} /> : null}</DebugPanel> : null}
+        {import.meta.env.DEV && hosted === null && debugOpen ? <DebugPanel connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}>{devPanel}{mode === 'mock' ? <DemoNetwork offline={simulatedOffline} /> : null}</DebugPanel> : null}
+        {(import.meta.env.DEV || import.meta.env.VITE_HOSTED_DEMO === '1') && hosted !== null && debugOpen ? <DebugPanel hosted connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}><DemoNetwork offline={simulatedOffline} /></DebugPanel> : null}
       </div>
       {/* The page under a worker open beside the team cards is inert, and an inert region is not hit-tested: this catcher gives the paused area its arrow pointer. */}
       {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}

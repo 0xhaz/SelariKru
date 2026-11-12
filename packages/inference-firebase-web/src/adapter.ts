@@ -193,6 +193,11 @@ export interface AdapterOptions {
   readonly onNetworkFailure?: () => void;
   /** H12 fix round 1 (I2): told when an answer came back from the cloud, so a network failure is cleared. */
   readonly onNetworkSuccess?: () => void;
+  /**
+   * H9: a cap on cloud calls (the hosted demo's per-tab cap, which protects the free-tier quota). Once `allowed` is false, a call that needs the cloud is not sent:
+   * it is blocked as `cloud_quota`, so the caller keeps it as a checkpoint. `spend` is told of each call answered in the cloud. Absent: no cap.
+   */
+  readonly cloudCalls?: { allowed(): boolean; spend(): void };
 }
 
 /**
@@ -227,6 +232,7 @@ export class FirebaseHybridAssistantAdapter {
   private readonly isOnline: () => boolean;
   private readonly onNetworkFailure: (() => void) | undefined;
   private readonly onNetworkSuccess: (() => void) | undefined;
+  private readonly cloudCalls: AdapterOptions['cloudCalls'];
   private readonly ajv = new Ajv({ strict: false, allErrors: true });
   private readonly readiness = new ReadinessTracker();
   private models = new Map<string, SdkModel>();
@@ -245,6 +251,7 @@ export class FirebaseHybridAssistantAdapter {
     this.isOnline = opts.isOnline ?? (() => true);
     this.onNetworkFailure = opts.onNetworkFailure;
     this.onNetworkSuccess = opts.onNetworkSuccess;
+    this.cloudCalls = opts.cloudCalls;
   }
 
   draftBrief(req: AssistRequest): Promise<AssistantProposal> {
@@ -433,6 +440,13 @@ export class FirebaseHybridAssistantAdapter {
         || (requestedMode === 'PREFER_ON_DEVICE' && this.readiness.observe(await this.sdk.availability()) !== 'available');
       if (needsCloud) return make({ status: 'blocked', requestedMode, input, blockedReason: 'offline' });
     }
+    // H9: past the cloud call cap, a call that would go to the cloud is not sent and waits as a checkpoint. Cloud first counts as needing the cloud: it is never
+    // quietly answered on the device instead. Local first still runs on a ready device model.
+    if (!deviceMustServe && this.cloudCalls && !this.cloudCalls.allowed()) {
+      const needsCloud = requestedMode === 'ONLY_IN_CLOUD' || requestedMode === 'PREFER_IN_CLOUD'
+        || (requestedMode === 'PREFER_ON_DEVICE' && this.readiness.observe(await this.sdk.availability()) !== 'available');
+      if (needsCloud) return make({ status: 'blocked', requestedMode, input, blockedReason: 'cloud_quota' });
+    }
 
     const hash = await payloadSha256(systemInstruction, prompt);
     const sdkMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : requestedMode;
@@ -476,6 +490,7 @@ export class FirebaseHybridAssistantAdapter {
 
     const observedSource = mapInferenceSource(result.inferenceSource);
     if (observedSource === 'IN_CLOUD') this.onNetworkSuccess?.();
+    if (observedSource === 'IN_CLOUD') this.cloudCalls?.spend();
     const rawInferenceSource = result.inferenceSource ?? null;
     const u = result.usage;
     const usage: ProposalUsage =

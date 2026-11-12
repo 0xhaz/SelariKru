@@ -16,6 +16,7 @@ export const STOP_TEXT: Readonly<Record<AiCheckpointStopReason, string>> = {
   awaiting_owner: 'Waiting for you',
   route_changed: 'The route changed while it waited',
   budget: 'No cloud budget',
+  cloud_quota: 'Cloud call limit reached for this demo',
 };
 
 export const PROBLEM_TEXT: Readonly<Record<string, string>> = {
@@ -93,6 +94,7 @@ export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problem
     const cloudOk = cp.continuation === 'cloud_capable';
     // Fix round 1 (M4): Resume runs the whole check again, so it is offered whenever this browser is online, even after a refusal.
     const resume = cp.stopReason === 'local_failed_checks' ? 'This step continues in the cloud only by escalation.'
+      : cp.stopReason === 'cloud_quota' ? 'This demo tab has used all its cloud calls. Move it to this device, or drop it.'
       : !cloudOk ? 'This step may only run on this device.' : !online ? 'Waiting for connection.' : null;
     const escalate = cp.stopReason !== 'local_failed_checks' ? 'Only a step whose local result failed its checks is escalated.' : !online ? 'Waiting for connection.' : null;
     return {

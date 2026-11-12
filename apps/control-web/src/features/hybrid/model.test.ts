@@ -145,6 +145,8 @@ describe('refusals in plain words', () => {
     expect(refusalText('route_fetch_failed')).toMatch(/could not be read/i);
     expect(refusalText('context_destination_refused')).toMatch(/keeps its AI steps on this device/i);
     expect(refusalText('task_spec_unreadable')).toMatch(/spec/i);
+    // H9: the hosted demo's cloud call cap pauses the step, it is not an error.
+    expect(refusalText('cloud_quota')).toMatch(/Cloud calls left in this demo: 0.*Paused AI work/);
     expect(refusalText('something_new')).toMatch(/stopped/i);
     for (const code of ['input_too_large_for_device', 'route_changed_in_queue', 'secret_in_input', 'cloud_source_without_approval', 'something_new']) expect(refusalText(code)).not.toMatch(/_/);
   });

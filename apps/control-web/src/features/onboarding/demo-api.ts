@@ -1,4 +1,4 @@
-import { advanceOnboarding, blueprintFromAnswers, costPlanFor, templateSupport, type BlueprintContent, type CostAssumptions, type LedgerKey, type OnboardingView } from '@selarikru/domain';
+import { redactSecrets, validateProposal, advanceOnboarding, blueprintFromAnswers, costPlanFor, templateSupport, type BlueprintContent, type CostAssumptions, type LedgerKey, type OnboardingView } from '@selarikru/domain';
 import type { ApiResult, OnboardingApi } from './api.ts';
 
 const REASON = 'Demo mode never runs a real check, so this could not be confirmed.';
@@ -8,7 +8,22 @@ const fail = (message: string): ApiResult<never> => ({ ok: false, status: 409, c
  * The onboarding screens over in-memory data, for `?demo` only. It never touches a network and it cannot reach `ready`: every check is unknown, whatever was entered.
  * Its only job is to let someone see the flow without connecting a real app, clearly labelled as demo data.
  */
-export function createDemoOnboardingApi(): OnboardingApi {
+const ASSIST_CRITERIA_IDS = ['AC-1', 'AC-2', 'AC-3', 'AC-4', 'AC-5', 'AC-6', 'AC-7', 'AC-8'];
+const hasSecret = (v: unknown): boolean => typeof v === 'string' ? redactSecrets(v) !== v : Array.isArray(v) ? v.some(hasSecret) : v !== null && typeof v === 'object' ? Object.values(v).some(hasSecret) : false;
+
+/**
+ * H9, hosted demo: the guide's answer comes from a real model, and there is no control API to review it. It is checked here with the server's own rule
+ * (control-api `/v1/onboarding/assist-review`): a draftBrief that passed, citing only the known criteria, with no credential in it. Nothing is saved.
+ */
+async function reviewLocally(input: Parameters<OnboardingApi['reviewAssist']>[0]): ReturnType<OnboardingApi['reviewAssist']> {
+  if (input.restricted === true) return { ok: false, status: 422, code: 'restricted_stays_on_device', message: 'A draft made from restricted text stays on your device, so it cannot be applied here.' };
+  if (input.envelope.status !== 'ok' || input.envelope.operation !== 'draftBrief') return { ok: false, status: 422, code: 'proposal_not_acceptable', message: 'This proposal cannot be used.' };
+  const v = validateProposal(input.envelope.data, { operation: 'draftBrief', allowedRequirementIds: ASSIST_CRITERIA_IDS, forbiddenMandatoryScope: [] });
+  if (v.status === 'rejected' || v.data === null || !('summary' in v.data) || hasSecret(v.data)) return { ok: false, status: 422, code: 'proposal_rejected', message: 'The proposal failed validation.' };
+  return { ok: true, value: { status: v.status === 'needs_review' ? 'needs_review' : 'valid', summary: v.data.summary, acceptanceCriteria: v.data.acceptanceCriteria.map((c) => ({ id: c.requirementId, text: c.text })), issues: v.issues.map((i) => ({ kind: i.kind, path: i.path, message: i.message })) } };
+}
+
+export function createDemoOnboardingApi(opts: { readonly reviewLocally?: boolean } = {}): OnboardingApi {
   const views = new Map<string, OnboardingView>();
   let content: BlueprintContent | null = null;
   const save = (v: OnboardingView): ApiResult<OnboardingView> => {
@@ -50,6 +65,6 @@ export function createDemoOnboardingApi(): OnboardingApi {
     },
     activate: async () => fail('Demo data cannot start a run.'),
     cancel: async (id) => { views.delete(id); return { ok: true, value: {} as OnboardingView }; },
-    reviewAssist: async () => fail('The assistant is off in demo mode.'),
+    reviewAssist: opts.reviewLocally ? reviewLocally : async () => fail('The assistant is off in demo mode.'),
   };
 }

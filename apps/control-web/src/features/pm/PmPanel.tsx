@@ -271,7 +271,7 @@ export function PmPanel() {
       <div>
         <h1 id={`${id}-h`} className="text-2xl font-semibold tracking-tight">Talk to the Project Manager</h1>
         <p className="mt-1 max-w-prose text-muted">The Project Manager is an AI agent on Firebase AI Logic. It answers from the project, researches the web on the cloud route, drafts plans and proposes who takes each task. Every reply is a proposal until you accept it.</p>
-        {h?.agents?.simulated ? <p className="mt-1 text-sm font-medium text-warning">Demo data: replies are simulated, with no live model. They are never evidence.</p> : null}
+        {h?.agents?.simulated ? <p className="mt-1 text-sm font-medium text-warning">{h.agents.liveModel ? 'Demo data: replies come from a real model (Firebase AI Logic) reading demo data. They are never evidence.' : 'Demo data: replies are simulated, with no live model. They are never evidence.'}</p> : null}
       </div>
       {!h?.agents ? <p className="text-muted">This source cannot run the Project Manager.</p> : runTasks.length === 0 ? <p className="text-muted">There is no run yet. The Project Manager needs a run to talk about.</p> : (
         <div className="space-y-3 rounded-card border border-line bg-panel p-3">
