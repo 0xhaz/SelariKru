@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { schema } from '@selarikru/persistence';
+import { schema, withTx, type Tx } from '@selarikru/persistence';
 import { sql } from 'drizzle-orm';
 import type { AiCheckpoint } from '@selarikru/domain';
 import { INTRUDER_TOKEN, PROJECT, RUN, TENANT, bearer, get, makeHarness, post, resetDb, seedTask, setupTestDb, specFor, type Harness, type TestDb } from './helpers.ts';
@@ -171,10 +171,27 @@ describe('AI step checkpoints on the server (H12)', () => {
       expect((await save(cp({ status: 'abandoned', stopReason: null }))).status).toBe(200);
     });
 
-    it('M2: two concurrent first saves of one checkpoint both succeed, with no 500', async () => {
-      const [a, b] = await Promise.all([save(cp()), save(cp({ updatedAt: '2026-11-12T00:00:01.000Z' }))]);
-      expect([a.status, b.status].every((x) => x === 200 || x === 201)).toBe(true);
-      expect((await list()).body.checkpoints).toHaveLength(1);
+    it('fix 2 (M2, real race): a first save that meets a row another connection is inserting (not yet committed) waits for it, then updates it: 200, not 500', async () => {
+      /** Resolves once some other backend is waiting on a lock this transaction holds. */
+      async function queuedBehind(tx: Tx): Promise<void> {
+        const [me] = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+        const pid = Number(me!['pid']);
+        for (let i = 0; i < 2000; i++) {
+          const [row] = await t.db.execute(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))`);
+          if (Number(row!['n']) > 0) return;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        throw new Error('the save never queued behind the open insert');
+      }
+      let pending: ReturnType<typeof save> | undefined;
+      await withTx(t.db, async (tx) => {
+        await tx.insert(schema.aiCheckpoints).values({ tenantId: TENANT, projectId: PROJECT, checkpointId: 'ckp_0123456789abcdef', ownerUid: 'owner_uid_1', taskId: 't_open', status: 'waiting', stopReason: 'offline', body: cp() as never, createdAt: new Date(), updatedAt: new Date() });
+        pending = save(cp({ updatedAt: '2026-11-12T00:00:05.000Z' }));
+        await queuedBehind(tx);
+      });
+      const r = await pending!;
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect((await list()).body.checkpoints).toEqual([expect.objectContaining({ updatedAt: '2026-11-12T00:00:05.000Z' })]);
     });
 
     it('M3: escalation names the owner: another owner\'s row is not found', async () => {
