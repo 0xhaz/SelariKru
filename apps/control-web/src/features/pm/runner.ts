@@ -20,7 +20,7 @@ export interface PmRequest {
   readonly history: readonly PmTurn[];
   readonly callOverride: RoutePolicyMode | null;
   /** H12: this turn continues a paused checkpoint (sent after reconnecting, or moved to device only). */
-  readonly resume?: { readonly checkpointId: string; readonly kind: 'after_reconnect' | 'escalated' | 'device_only' };
+  readonly resume?: { readonly checkpointId: string; readonly kind: 'after_reconnect' | 'escalated' | 'device_only' | 'owner_resume' };
 }
 
 export type PmOutcome =

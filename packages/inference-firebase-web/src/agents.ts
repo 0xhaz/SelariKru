@@ -50,7 +50,7 @@ export interface AgentBaseInput {
   /** The id the server recorded the served context under (H5 fix round 4). Reported with the route record, so the server judges the output by what it was given. */
   readonly contextId?: string;
   /** H12: this call continues a paused step (a checkpoint): sent after reconnecting, escalated, or moved to device only. Reported with the route record. */
-  readonly resume?: { readonly kind: 'after_reconnect' | 'escalated' | 'device_only'; readonly checkpointId: string };
+  readonly resume?: { readonly kind: 'after_reconnect' | 'escalated' | 'device_only' | 'owner_resume'; readonly checkpointId: string };
 }
 
 export interface AgentInputs {

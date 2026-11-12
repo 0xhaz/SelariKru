@@ -44,6 +44,12 @@ describe('Paused AI work (H12)', () => {
     expect(resumedText('after_reconnect')).toBe('Sent after reconnecting');
   });
 
+  it('M1: a step the owner resumed reads "Resumed by owner", never "Sent after reconnecting"', () => {
+    const items = checkpointActivity([cp({ status: 'sent', resumedAs: 'owner_resume' }), cp({ checkpointId: 'ckp_b', status: 'sent', resumedAs: 'after_reconnect' }), cp({ checkpointId: 'ckp_c', status: 'sent' })], titles).map((i) => i.text);
+    expect(items).toEqual(['Search index · Propose change: Resumed by owner', 'Search index · Propose change: Sent after reconnecting', 'Search index · Propose change: Sent after reconnecting']);
+    expect(resumedText('owner_resume')).toBe('Resumed by owner');
+  });
+
   it('the office: only a waiting cloud step stands at the cloud deck', () => {
     expect(waitingCloudCalls([cp(), cp({ checkpointId: 'ckp_d', continuation: 'device_only', stopReason: 'input_too_large_for_device' }), cp({ checkpointId: 'ckp_e', status: 'sent' })])).toEqual([{ taskId: 't1', place: 'cloud', stepKind: 'patch', waiting: true }]);
   });

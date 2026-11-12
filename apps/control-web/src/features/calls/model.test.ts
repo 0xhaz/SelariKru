@@ -36,6 +36,11 @@ describe('H9 item 2: one view of every AI call, from route records only', () => 
     expect(unknown).toMatchObject({ ran: 'Unknown', ranTone: 'warning', how: 'Unknown', check: 'Not run' });
   });
 
+  it('M1: a call the owner resumed says "Resumed by owner"', () => {
+    const [row] = aiCallRows([rec({ recordId: 'a', reportedAt: '2026-11-12T10:03:00.000Z', observedSource: 'IN_CLOUD', resumed: 'owner_resume' as never })], titles);
+    expect(row).toMatchObject({ how: 'Resumed by owner' });
+  });
+
   it('a stopped call says why; a route violation says so', () => {
     const [stopped, violation] = aiCallRows([
       rec({ recordId: 'a', reportedAt: '2026-11-12T10:05:00.000Z', status: 'blocked', blockedReason: 'offline', observedSource: 'UNKNOWN', fellBack: null, validation: 'not_run' }),

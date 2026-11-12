@@ -115,7 +115,7 @@ export function checkpointActivity(checkpoints: readonly AiCheckpoint[], titleOf
     const what = `${titleOf(cp.taskId)} · ${STEP_LABEL[cp.stepKind] ?? cp.stepKind}`;
     if (cp.status === 'waiting' && cp.stopReason === 'offline') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '‖', tone: 'warning', text: `${what}: Paused: offline` }];
     if (cp.status === 'waiting' && cp.stopReason) return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '‖', tone: 'warning', text: `${what}: Paused: ${STOP_TEXT[cp.stopReason].toLowerCase()}` }];
-    if (cp.status === 'sent') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '☁', tone: 'active', text: `${what}: Sent after reconnecting` }];
+    if (cp.status === 'sent') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '☁', tone: 'active', text: `${what}: ${cp.resumedAs === 'owner_resume' ? 'Resumed by owner' : 'Sent after reconnecting'}` }];
     if (cp.status === 'escalated') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '⇡', tone: 'active', text: `${what}: Escalated to cloud: local result failed checks` }];
     if (cp.status === 'abandoned') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '!', tone: 'warning', text: `Abandoned: ${what}` }];
     if (cp.status === 'moved_to_device') return [{ id: `ckp:${cp.checkpointId}`, at: cp.updatedAt, glyph: '▣', tone: 'success', text: `${what}: Moved to device only` }];
@@ -134,5 +134,6 @@ export function resumedText(resumed: string | undefined): string | null {
   if (resumed === 'after_reconnect') return 'Sent after reconnecting';
   if (resumed === 'escalated') return 'Escalated to cloud: local result failed checks';
   if (resumed === 'device_only') return 'Moved to device only';
+  if (resumed === 'owner_resume') return 'Resumed by owner';
   return null;
 }

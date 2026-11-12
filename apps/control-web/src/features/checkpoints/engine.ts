@@ -263,7 +263,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
           const issues = localFailed ? r.proposal.validation.errors.slice(0, 20).map((x) => x.slice(0, 160).replace(/\n/g, ' ')) : (draft.partial?.issues ?? []);
           cp = { ...draft, status: 'waiting', stopReason: stop, partial: { issues, texts: draft.partial?.texts ?? [] } };
         } else {
-          const status = !start.resumedAs ? 'done' : start.resumedAs === 'after_reconnect' ? 'sent' : start.resumedAs === 'escalated' ? 'escalated' : 'moved_to_device';
+          const status = !start.resumedAs ? 'done' : start.resumedAs === 'after_reconnect' || start.resumedAs === 'owner_resume' ? 'sent' : start.resumedAs === 'escalated' ? 'escalated' : 'moved_to_device';
           const { problems: _cleared, ...rest } = draft;
           void _cleared;
           cp = { ...rest, status, stopReason: null, resumedAs: start.resumedAs ?? null };
@@ -515,7 +515,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       let ok: boolean;
       try { ok = await revalidated(cp, false); } finally { setFor('busy', id, undefined); }
       if (!ok) return;
-      await send(cp, 'after_reconnect', cp.callOverride);
+      // M1: a step the cloud quota, the rate limit or the budget stopped was not waiting for a connection; the owner's Resume is recorded as theirs.
+      await send(cp, cp.stopReason === 'cloud_rate_limited' || cp.stopReason === 'budget' ? 'owner_resume' : 'after_reconnect', cp.callOverride);
     },
     escalate,
     async moveToDevice(id) {

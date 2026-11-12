@@ -143,6 +143,17 @@ describe('fix 1 (H2): a paused patch step can be resumed; its files are read aga
     expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', resume: expect.objectContaining({ checkpointId: id }) })]);
   });
 
+  it('M1: the owner resumes a step the cloud rate-limited or the budget stopped: recorded as owner_resume, not after_reconnect', async () => {
+    for (const reason of ['cloud_rate_limited', 'budget'] as const) {
+      const h = setup(filesNow(A));
+      const id = await pausedPatch(h, reason);
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'waiting', stopReason: reason });
+      await h.engine.resume(id);
+      expect(h.runs).toEqual([expect.objectContaining({ kind: 'patch', resume: expect.objectContaining({ checkpointId: id, kind: 'owner_resume' }) })]);
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sent', resumedAs: 'owner_resume' });
+    }
+  });
+
   it('a file that changed since the pause refuses it as inputs_changed; nothing is sent', async () => {
     const h = setup(filesNow('export const A = 2;\n'));
     h.setOnline(false);

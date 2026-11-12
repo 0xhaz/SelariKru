@@ -178,8 +178,8 @@ export function routeOutcome(mode: RoutePolicyMode | null, observed: RouteObserv
   return { fellBack, conformance: wideRequest || sourceViolation ? 'violation' : 'conforms', requestModeMismatch };
 }
 
-/** H12: how a resumed call continued a paused step (see ai-checkpoint.ts). */
-export const ROUTE_RESUMES = ['after_reconnect', 'escalated', 'device_only'] as const;
+/** H12: how a resumed call continued a paused step (see ai-checkpoint.ts). M1: `owner_resume` is the owner's own Resume of a step the cloud quota, rate limit or budget stopped. */
+export const ROUTE_RESUMES = ['after_reconnect', 'escalated', 'device_only', 'owner_resume'] as const;
 const CheckpointId = z.string().regex(/^ckp_[A-Za-z0-9_-]{8,80}$/);
 
 export const ROUTE_CALL_STATUSES = ['ok', 'invalid', 'blocked', 'route_violation', 'unverified_source', 'error'] as const;

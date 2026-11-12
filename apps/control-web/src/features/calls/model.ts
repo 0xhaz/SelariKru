@@ -36,6 +36,7 @@ const RESUMED: Readonly<Record<string, string>> = {
   after_reconnect: 'Sent after reconnecting',
   escalated: 'Escalated to the cloud: the local result failed its checks',
   device_only: 'Moved to this device only',
+  owner_resume: 'Resumed by owner',
 };
 const CHECK: Readonly<Record<RouteRecord['validation'], string>> = { passed: 'Passed', failed: 'Failed', not_run: 'Not run' };
 
