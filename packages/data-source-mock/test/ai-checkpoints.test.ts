@@ -92,6 +92,34 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     await expect(ds.saveAiCheckpoint!(f.projectId, cp({ status: 'sending' }))).rejects.toThrow(/invalid_request/);
   });
 
+  it('fix 3 (R4): as the server, an abandoned save without the claim token is taken once the claim is more than 30 minutes old, not before', async () => {
+    const clock = createSeededClock(fixtureTime(0));
+    const ds = createMockDataSource({ clock });
+    const f = buildFixture('feature-delivery');
+    const snap = await ds.getSnapshot(f.projectId);
+    const runId = Object.keys(snap.runs)[0]!;
+    const one = { ...(await setup()).cp(), runId, taskRevision: snap.tasks[id('search')]!.revision, planRevision: snap.runs[runId]!.planRevision };
+    await ds.saveAiCheckpoint!(f.projectId, one);
+    await ds.claimAiCheckpointSend!(f.projectId, one.checkpointId);
+    await expect(ds.saveAiCheckpoint!(f.projectId, { ...one, status: 'abandoned', stopReason: null })).rejects.toThrow(/checkpoint_claimed/);
+    clock.advance(31 * 60_000);
+    await ds.saveAiCheckpoint!(f.projectId, { ...one, status: 'abandoned', stopReason: null });
+    expect((await ds.listAiCheckpoints!(f.projectId))[0]!.status).toBe('abandoned');
+  });
+
+  it('fix 3 (R4): as the server, the list re-judges locks: a checkpoint saved while its task was internal is withheld once the task is locked', async () => {
+    const f = buildFixture('feature-delivery');
+    const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)), fixtures: [f] });
+    const snap = await ds.getSnapshot(f.projectId);
+    const runId = Object.keys(snap.runs)[0]!;
+    const one = { ...(await setup()).cp(), runId, taskRevision: snap.tasks[id('search')]!.revision, planRevision: snap.runs[runId]!.planRevision };
+    await ds.saveAiCheckpoint!(f.projectId, one);
+    expect(await ds.listAiCheckpoints!(f.projectId)).toHaveLength(1);
+    // The task is locked since (a restricted label recorded for it).
+    (f.routes!.tasks as Record<string, Record<string, unknown>>)[id('search')] = { ...f.routes!.tasks[id('search')], label: 'restricted' };
+    expect(await ds.listAiCheckpoints!(f.projectId)).toEqual([]);
+  });
+
   it('a resumed call\'s route record says so', async () => {
     const { ds, f } = await setup();
     const report = { kind: 'route' as const, requestId: 'req-resumed', stepKind: 'criteria' as const, callOverride: 'ONLY_IN_CLOUD' as const, requestedMode: 'ONLY_IN_CLOUD' as const, observedSource: 'IN_CLOUD' as const, status: 'ok' as const,

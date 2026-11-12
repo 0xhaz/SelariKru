@@ -817,7 +817,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       if (prior && prior.taskId !== cp.taskId) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
       if (prior && !['running', 'waiting', 'sending'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
       // Fix round 2 (N4): as the server, a row being sent takes a save only from the claiming tab's token, and only to what a send ends in.
-      if (prior?.status === 'sending' && !(cp.claimToken !== undefined && cp.claimToken === p.claimTokens.get(cp.checkpointId) && ['sent', 'waiting', 'moved_to_device', 'abandoned'].includes(cp.status))) {
+      // Fix round 3 (R4): and, as the server, another tab may close a claim left for more than 30 minutes as abandoned without the token.
+      const staleClaim = prior?.status === 'sending' && cp.status === 'abandoned' && timeOf(p) - Date.parse(prior.updatedAt) > 30 * 60_000;
+      if (prior?.status === 'sending' && !staleClaim && !(cp.claimToken !== undefined && cp.claimToken === p.claimTokens.get(cp.checkpointId) && ['sent', 'waiting', 'moved_to_device', 'abandoned'].includes(cp.status))) {
         throw fail('unavailable', 'checkpoint_claimed: another tab is sending this step');
       }
       p.claimTokens.delete(cp.checkpointId);
@@ -828,7 +830,9 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     async listAiCheckpoints(projectId) {
       offlineCheck();
       const p = project(projectId);
-      return [...p.aiCheckpoints.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ ...c }));
+      // Fix round 3 (R4): as the server, each row is judged again by its task's lock now; an unknown task is withheld.
+      return [...p.aiCheckpoints.values()].filter((c) => p.state.snapshot.tasks[c.taskId] !== undefined && routeLockOf(p.fixture.routes ?? NO_ROUTES, c.taskId) === null)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ ...c }));
     },
     async claimAiCheckpointSend(projectId, checkpointId) {
       offlineCheck();
