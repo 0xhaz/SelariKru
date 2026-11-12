@@ -53,6 +53,9 @@ describe('H9: the hosted demo bundle', () => {
     // No live root, no Auth Emulator, and no env value the build does not read.
     expect(all).not.toContain('connectAuthEmulator');
     expect(all).not.toContain('canary-unused.example.invalid');
+    // H9 fix round 1 (H1): coding workers are off in the hosted demo: no Claude catalog or assignment is in its data.
+    expect(all).not.toContain('claude-sonnet-5-5');
+    expect(all).not.toMatch(/['"`]anthropic['"`]/);
   }, 240_000);
 
   it('carries the Content-Security-Policy in its page', async () => {

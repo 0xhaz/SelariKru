@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { ProjectViewSnapshotSchema, type ProjectViewEvent, type ProjectViewSnapshot } from '@selarikru/view-protocol';
-import { buildFixture, createMockDataSource, createSeededClock, fixtureTime } from '../src/index.ts';
+import { CLAUDE_DEMO, buildFixture, createMockDataSource, createSeededClock, fixtureTime } from '../src/index.ts';
 
 const setup = async () => {
-  const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)) });
+  const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)), codingWorkers: CLAUDE_DEMO });
   const f = buildFixture('healthy-parallel-work');
   const first = await ds.getSnapshot(f.projectId);
   const runId = Object.keys(first.runs)[0]!;

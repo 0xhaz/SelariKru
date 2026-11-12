@@ -6,7 +6,7 @@ import {
   ProjectViewEventSchema, ProjectViewSnapshotSchema, approvalStateAt, effectiveWorkerHealth, isEmptyProject, startProjection, usageFor,
   type ProjectViewSnapshot,
 } from '@selarikru/view-protocol';
-import { EXTRA_FIXTURE_IDS, FIXTURE_IDS, FIXTURE_T0_MS, buildAllFixtures, buildDemoFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
+import { CLAUDE_DEMO, EXTRA_FIXTURE_IDS, FIXTURE_IDS, FIXTURE_T0_MS, buildAllFixtures, buildDemoFixtures, buildFixture, createMockDataSource, createSeededClock, fixtureTime, scoped, type Fixture, type FixtureId } from '../src/index.ts';
 
 const make = (fixtures?: Fixture[]) => createMockDataSource({ clock: createSeededClock(fixtureTime(0)), ...(fixtures ? { fixtures } : {}) });
 const snap = async (id: FixtureId, advanceSec = 0): Promise<{ s: ProjectViewSnapshot; nowMs: number }> => {
@@ -130,10 +130,10 @@ describe('fixtures', () => {
     for (const [taskId, st] of machines) expect(final.tasks[taskId]?.status, taskId).toBe(st.status);
   });
 
-  it('healthy parallel work: two workers on two execution axes, both calling cloud models', async () => {
+  it('healthy parallel work: two workers on two execution axes, each applying accepted changes with no model (H9: coding workers off)', async () => {
     const { s, nowMs } = await snap('healthy-parallel-work');
-    expect(worker(s, 'runner_local_1')).toMatchObject({ execution: 'local', modelRoute: 'cloud', availability: 'assigned', activity: null });
-    expect(worker(s, 'runner_cloud_1')).toMatchObject({ execution: 'cloud', modelRoute: 'cloud', activity: null });
+    expect(worker(s, 'runner_local_1')).toMatchObject({ execution: 'local', modelRoute: 'none', availability: 'assigned', activity: null, assignment: { provider: 'selarikru', model: 'apply-proposal' } });
+    expect(worker(s, 'runner_cloud_1')).toMatchObject({ execution: 'cloud', modelRoute: 'none', activity: null });
     expect(s.assistant).toEqual({ mode: 'PREFER_ON_DEVICE', observedSource: 'on_device' });
     for (const w of Object.values(s.workers)) expect(effectiveWorkerHealth(w, nowMs, nowMs).health).toBe('healthy');
     expect(Object.values(s.tasks).filter((t) => t.status === 'running')).toHaveLength(2);
@@ -508,7 +508,8 @@ describe('purity of reducers and fixtures', () => {
 describe('model assignment commands', () => {
   const setup = async (id: Parameters<typeof buildFixture>[0] = 'healthy-parallel-work') => {
     const fixture = buildFixture(id);
-    const source = createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()), fixtures: [fixture] });
+    // These commands are for coding workers: on here, as under dev ?demo&codingWorkers=claude_code (H9).
+    const source = createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()), fixtures: [fixture], codingWorkers: CLAUDE_DEMO });
     const snap = await source.getSnapshot(fixture.projectId);
     return { source, snap, projectId: fixture.projectId };
   };
@@ -575,5 +576,18 @@ describe('per-criterion evidence and activity', () => {
   it('the merge-flow candidate is assembled before any verdict', () => {
     const types = buildFixture('merge-flow').events.map((e) => e.type);
     expect(types.indexOf('candidate.assembled')).toBeLessThan(types.indexOf('verification.passed'));
+  });
+});
+
+describe('H9 fix round 1 (H1): the hackathon build, coding workers off', () => {
+  it('lists only the apply harness, records the apply worker on every attempt, and pins no model on a benchmark trial; nothing names Claude', async () => {
+    const ds = createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()), fixtures: [buildFixture('benchmark-trial'), buildFixture('healthy-parallel-work')] });
+    for (const id of ['demo-benchmark-trial', 'demo-healthy-parallel-work']) {
+      const s = await ds.getSnapshot(id);
+      expect(s.modelCatalog.codingWorkers).toBe('off');
+      expect(s.modelCatalog.providers.map((p) => p.provider)).toEqual(['selarikru']);
+      for (const w of Object.values(s.workers)) if (w.assignment) expect(w.assignment).toMatchObject({ provider: 'selarikru', model: 'apply-proposal' });
+      expect(JSON.stringify(s)).not.toMatch(/claude|anthropic|codex/i);
+    }
   });
 });

@@ -17,6 +17,11 @@ const execFileAsync = promisify(execFile);
 // Vitest sets NODE_ENV=test, which would make Vite treat the build as non-production. The build runs in a child with that unset, as `pnpm build` does.
 const { NODE_ENV: _ignored, VITEST: _v, VITEST_WORKER_ID: _w, ...cleanEnv } = process.env;
 void _ignored; void _v; void _w;
+// H9: every production build needs the Firebase web config (build/hosted.ts). Placeholders only: no real key is ever used in a test.
+Object.assign(cleanEnv, {
+  VITE_FIREBASE_API_KEY: 'placeholder-api-key', VITE_FIREBASE_AUTH_DOMAIN: 'placeholder.example.invalid', VITE_FIREBASE_PROJECT_ID: 'placeholder-project',
+  VITE_FIREBASE_STORAGE_BUCKET: 'placeholder.example.invalid', VITE_FIREBASE_MESSAGING_SENDER_ID: '000000000000', VITE_FIREBASE_APP_ID: '1:000000000000:web:placeholder',
+});
 
 async function buildWeb(options: { forceDev: boolean }): Promise<{ dir: string; files: string[]; text: string }> {
   const viteBin = join(webRoot, 'node_modules/vite/bin/vite.js');

@@ -1,5 +1,5 @@
 import type { ChangeRequestView } from '@selarikru/view-protocol';
-import { FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, fixtureTime, scoped, type Fixture, type FixtureId } from './builder.ts';
+import { DEMO_ASSIGNMENT, FixtureBuilder, HUMAN, INTEGRATION, REAPER, figure, fixtureTime, scoped, type Fixture, type FixtureId } from './builder.ts';
 
 /**
  * Ten named scenarios. Each is a stream of real domain events (the payload fields the services emit today), a fixed start time, usage
@@ -347,7 +347,8 @@ export const FIXTURE_IDS = [
 
 function benchmarkTrial(): Fixture {
   const b = new FixtureBuilder('benchmark-trial', 1313);
-  b.pinnedModel = { provider: 'anthropic', model: 'claude-sonnet-5-5' };
+  // The trial's one model: the coding worker's when coding workers are on (the mock swaps it in); none with them off.
+  b.pinnedModel = { ...DEMO_ASSIGNMENT };
   b.task('api', { title: 'Benchmark API task', role: 'backend', criteria: 1 });
   b.plan(1, ['api']).ready('api', 5).start('api', 'att_api_1', 6, LOCAL, 'local', 'cloud');
   return done(b, { id: 'benchmark-trial', name: 'Benchmark trial', startSec: 60, assistant: ASSISTANT_DEVICE, description: 'A benchmark trial: every attempt uses its one pinned model, and overrides are refused.', usage: [] });

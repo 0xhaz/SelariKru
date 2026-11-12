@@ -102,7 +102,7 @@ function FleetCards({ rows, nowMs, onOpen }: { rows: readonly TeamRow[]; nowMs: 
 
 const selectClass = 'rounded-chip border border-line-strong bg-bg px-2 py-1.5 text-sm text-fg';
 
-function Toolbar({ sort, onSort, filter, onFilter, roles, runs, providers, shown, total }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; runs: readonly string[]; providers: TeamModel['providers']; shown: number; total: number }) {
+function Toolbar({ sort, onSort, filter, onFilter, roles, runs, providers, shown, total, showProvider = true }: { sort: SortKey; onSort: (s: SortKey) => void; filter: FleetFilter; onFilter: (f: FleetFilter) => void; roles: readonly string[]; runs: readonly string[]; providers: TeamModel['providers']; shown: number; total: number; showProvider?: boolean }) {
   return (
     <div className="mb-3 flex flex-wrap items-end gap-3 border-b border-line pb-3">
       <div>
@@ -120,13 +120,14 @@ function Toolbar({ sort, onSort, filter, onFilter, roles, runs, providers, shown
           <option value="unknown">Unknown</option>
         </select>
       </div>
-      <div>
+      {/* H9 fix round 1 (H1): with coding workers off every worker is the apply worker, so there is no provider to filter by. */}
+      {showProvider ? <div>
         <label htmlFor="team-provider" className="mb-1 block text-sm text-muted">Provider</label>
         <select id="team-provider" className={selectClass} value={filter.provider} onChange={(e) => onFilter({ ...filter, provider: e.target.value })}>
           <option value="all">All providers</option>
           {providers.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
         </select>
-      </div>
+      </div> : null}
       <div>
         <label htmlFor="team-role" className="mb-1 block text-sm text-muted">Role</label>
         <select id="team-role" className={selectClass} value={filter.role} onChange={(e) => onFilter({ ...filter, role: e.target.value })}>
@@ -242,7 +243,7 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
         </section>
       ) : (
         <Panel title="Fleet" labelId="team-fleet-title" aside={team.simulated ? 'Simulated, not evidence' : null}>
-          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} runs={team.runs} providers={team.providers} shown={rows.length} total={team.rows.length} />
+          <Toolbar sort={sort} onSort={setSort} filter={filter} onFilter={setFilter} roles={team.roles} runs={team.runs} providers={team.providers} shown={rows.length} total={team.rows.length} showProvider={!codingWorkersOff(team.assignments)} />
           {rows.length === 0 ? (
             <div className="py-6 text-center">
               <p className="text-muted">No workers match these filters.</p>

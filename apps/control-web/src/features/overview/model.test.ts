@@ -121,7 +121,8 @@ describe('fleet', () => {
   it('keeps execution and inference as separate fields', async () => {
     const { snapshot, nowMs } = await fixtureSnapshot('healthy-parallel-work');
     const rows = buildOverview(snapshot, nowMs, nowMs).fleet.rows;
-    expect(rows.map((r) => [r.execution, r.modelRoute])).toEqual([['local', 'cloud'], ['cloud', 'cloud']]);
+    // H9 fix round 1 (H1): with coding workers off, a worker applies accepted changes with no model: its model route is none, its execution unchanged.
+    expect(rows.map((r) => [r.execution, r.modelRoute])).toEqual([['local', 'none'], ['cloud', 'none']]);
   });
 });
 

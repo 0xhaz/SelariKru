@@ -212,7 +212,7 @@ const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: 
 
 /** The demo source with `execute` and `openTerminal` spied. Everything else passes through. */
 async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; label: string }> {
-  const session = (await loadDemoSession(sc.fault ?? null))!;
+  const session = (await loadDemoSession(sc.fault ?? null, { codingWorkers: sc.codingWorkers === 'claude_code' ? 'claude_code' : null }))!;
   let refuseFailureLoads = sc.refuseFailureLoads === true;
   window.__allowFailureLoads = () => { refuseFailureLoads = false; };
   let release: () => void = () => undefined;
@@ -225,7 +225,7 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       await held;
       const loaded = await session.source.getSnapshot(projectId);
       const base = sc.observed ? { ...loaded, meta: { ...loaded.meta, provenance: 'observed' as const } } : loaded;
-      const withWorkers = sc.codingWorkers ? { ...base, modelCatalog: { ...base.modelCatalog, codingWorkers: sc.codingWorkers } } : base;
+      const withWorkers = base;
       if (!sc.dependsOn && !sc.taskPatch && !sc.attemptPatch && !sc.runPatch && !sc.workerPatch && !sc.extraApprovals) return withWorkers;
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
       return { ...withWorkers, approvals: { ...base.approvals, ...(sc.extraApprovals ?? {}) } as typeof base.approvals, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };

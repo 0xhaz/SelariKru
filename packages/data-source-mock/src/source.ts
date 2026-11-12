@@ -5,7 +5,7 @@ import {
   type AuthorizedTerminalRequest, type AuthorizedViewCommand, type ChangeRequestView, type Clock, type ModelAssignmentView, type ModelCatalogView, type CommandReceipt, type DataSourceError, type EngineeringDataSource, type NotDelivered, type ProjectViewEvent,
   type ProjectViewSnapshot, type ProposalAcceptReceipt, type ProjectionState, type RunView, type ScopeAssessment, type SettingView, type TaskView, type BoundedAutonomy, type DelegationReceipt, type TerminalChannel, type TerminalControlChannel, type TerminalControlState, type TerminalState,
 } from '@selarikru/view-protocol';
-import { AiCheckpointSchema, effectiveRoutePolicy, escalationDecision, serverCheckpointRefusal, type AiCheckpoint, MAX_ATTEMPTS_CAP, canonicalJson, mapPmPlan, sha256Hex, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
+import { APPLY_MODEL, APPLY_PROVIDER, AiCheckpointSchema, effectiveRoutePolicy, escalationDecision, serverCheckpointRefusal, type AiCheckpoint, MAX_ATTEMPTS_CAP, canonicalJson, mapPmPlan, sha256Hex, checkDelegation, delegationOutputSha256, workerNameProblem, workerRoleOf, PROJECT_MANAGER_ROLE, RoutePolicyModeSchema, approvalUnavailableReason, strongerLabel, criterionDescription, isCloudCapable, SETTING_ENFORCER, type RouteRecord, type SettingChange } from '@selarikru/domain';
 import type { VirtualClock } from './clock.ts';
 import { DEMO_CATALOG, FIXTURE_T0_MS, HUMAN, INTEGRATION, REAPER, SCHEDULER, scoped, type Fixture, type TaskSeed } from './builder.ts';
 import { buildDemoFixtures } from './fixtures.ts';
@@ -78,6 +78,32 @@ export interface MockOptions {
    * live server, so the demo behaves as live does. Absent: never offline.
    */
   readonly isOffline?: () => boolean;
+  /**
+   * H9 fix round 1 (H1): coding workers on, with their catalog and the model each attempt records (`CLAUDE_DEMO` for dev `?demo&codingWorkers=claude_code`).
+   * Absent: the hackathon build, coding workers off: the apply harness only, and every attempt records the apply worker (no model).
+   */
+  readonly codingWorkers?: { readonly catalog: ModelCatalogView; readonly assignment: { readonly provider: string; readonly model: string } } | null;
+}
+
+/**
+ * H9 fix round 1 (H1): a fixture's events for the build's coding-workers setting. Off: an attempt records the apply worker, whose model route is none, and a
+ * benchmark trial pins nothing. On: the coding worker's model, as before.
+ */
+function forCodingWorkers(events: readonly ProjectViewEvent[], on: MockOptions['codingWorkers']): ProjectViewEvent[] {
+  return events.map((e) => {
+    const p = e.payload as Record<string, unknown> | null | undefined;
+    if (!p || (e.type !== 'attempt.started' && e.type !== 'run.created')) return e;
+    if (e.type === 'run.created' && p['pinnedModel']) {
+      if (on) return { ...e, payload: { ...p, pinnedModel: { ...on.assignment } } };
+      const { pinnedModel: _pin, ...rest } = p;
+      void _pin;
+      return { ...e, payload: rest } as ProjectViewEvent;
+    }
+    const a = p['assignment'] as { source?: string } | undefined;
+    if (e.type !== 'attempt.started' || !a) return e;
+    if (on) return { ...e, payload: { ...p, assignment: { ...on.assignment, source: a.source } } };
+    return { ...e, payload: { ...p, modelRoute: 'none', assignment: { provider: APPLY_PROVIDER, model: APPLY_MODEL, source: 'role' } } };
+  });
 }
 
 export interface MockDataSource extends EngineeringDataSource {
@@ -139,8 +165,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
   for (const fixture of options.fixtures ?? buildDemoFixtures()) {
     projects.set(fixture.projectId, {
-      fixture, pending: [...fixture.events], released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
-      modelCatalog: fixture.modelCatalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
+      fixture, pending: forCodingWorkers(fixture.events, options.codingWorkers ?? null), released: [], subscribers: new Set(), receipts: new Map(), changeRequests: [...(fixture.changeRequests ?? [])], reverifyCounts: new Map(),
+      modelCatalog: fixture.modelCatalog ?? options.codingWorkers?.catalog ?? DEMO_CATALOG, modelAssignments: (fixture.modelAssignments ?? []).map((a) => ({ ...a, state: a.state ?? 'applied' as const })), assignmentRevisions: new Map((fixture.modelAssignments ?? []).map((a) => [`${a.scope}:${a.key}`, a.revision])),
       settings: fixture.routes ? seededRouteSettings(fixture.routes, isoOf(clock.nowMs() + fixture.startSec * 1000)) : [], cancels: new Map(), held: [], heldTasks: new Set(),
       criteria: new Map(),
       acceptedProposals: new Map(),

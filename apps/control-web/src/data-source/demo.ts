@@ -69,21 +69,16 @@ function withFault(source: EngineeringDataSource, fault: DemoFault): Engineering
   };
 }
 
-/**
- * H9, dev only: the demo fixtures are the hackathon build's, with coding workers off. `?demo&codingWorkers=claude_code` turns them on in the snapshot, so the
- * screens for that setting (the MCP section, the Claude Code model controls) can be seen and tested.
- */
-function withCodingWorkers(source: EngineeringDataSource, codingWorkers: 'claude_code'): EngineeringDataSource {
-  return { ...source, getSnapshot: async (projectId) => { const s = await source.getSnapshot(projectId); return { ...s, modelCatalog: { ...s.modelCatalog, codingWorkers } }; } };
-}
-
 export async function loadDemoSession(fault: DemoFault | null, opts: { readonly codingWorkers?: 'claude_code' | null } = {}): Promise<DemoSession | null> {
   // Dev (`?demo`) and the hosted demo (H9, a build-time constant) only: the real build never bundles the mock.
   if (!import.meta.env.DEV && import.meta.env.VITE_HOSTED_DEMO !== '1') return null;
   const { createDemoDataSource } = await import('@selarikru/data-source-mock');
   // H12 fix round 2 (N1): the demo's simulated offline reaches the demo server too, so its checkpoint calls fail as live ones would.
   const { connectivity } = await import('../features/checkpoints/connectivity.ts');
-  const mock = createDemoDataSource({ isOffline: () => connectivity.getState().simulatedOffline });
+  // H9 fix round 1 (H1): the demo is the hackathon build, coding workers off. Dev `?demo&codingWorkers=claude_code` alone turns them on, with the Claude catalog
+  // and assignments; the hosted demo never does (a build-time constant, so the Claude data is not in its bundle).
+  const claude = import.meta.env.DEV && import.meta.env.VITE_HOSTED_DEMO !== '1' && opts.codingWorkers === 'claude_code' ? (await import('@selarikru/data-source-mock')).CLAUDE_DEMO : null;
+  const mock = createDemoDataSource({ isOffline: () => connectivity.getState().simulatedOffline, ...(claude ? { codingWorkers: claude } : {}) });
   const every: Scheduler = (fn, ms) => {
     let last = mock.clock.nowMs();
     const off = mock.clock.onTick(() => {
@@ -96,7 +91,7 @@ export async function loadDemoSession(fault: DemoFault | null, opts: { readonly 
     };
   };
   return {
-    source: (() => { const base = fault ? withFault(mock, fault) : mock; return import.meta.env.DEV && opts.codingWorkers === 'claude_code' ? withCodingWorkers(base, 'claude_code') : base; })(),
+    source: fault ? withFault(mock, fault) : mock,
     projects: mock.listProjects(),
     clockFor: (projectId) => mock.clockFor(projectId),
     every,

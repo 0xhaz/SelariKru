@@ -1,4 +1,4 @@
-import type { Actor, EventType } from '@selarikru/domain';
+import { APPLY_HARNESS_VERSION, APPLY_MODEL, APPLY_PROVIDER, type Actor, type EventType } from '@selarikru/domain';
 import type { AssistantView, ChangeRequestView, ModelAssignmentView, ModelCatalogView, ProjectViewEvent, UsageEntry, UsageFigure } from '@selarikru/view-protocol';
 import { mulberry32, seededId } from './prng.ts';
 import type { FixtureRoutes } from './routes.ts';
@@ -88,20 +88,20 @@ export interface Fixture {
   readonly budgetLimitUsd?: number;
 }
 
-/** Claude only: no provider is listed that is not installed. Opus is marked not allowed so the demo can show a refused choice. */
+/**
+ * H9 fix round 1 (H1): the hackathon build's catalog, coding workers off. The runners report only SelariKru's apply harness, which applies an accepted change
+ * with no model; every AI step runs in the browser through Firebase AI Logic. The Claude catalog is in claude.ts, for dev `?demo&codingWorkers=claude_code` only.
+ */
 export const DEMO_CATALOG: ModelCatalogView = {
-  status: 'detected', detail: null, projectDefault: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
-  // The hackathon build: Claude Code is listed as installed but not used; accepted changes are applied with no model.
-  codingWorkers: 'off',
+  status: 'detected', detail: null, projectDefault: { provider: APPLY_PROVIDER, model: APPLY_MODEL }, codingWorkers: 'off',
   providers: [{
-    provider: 'anthropic', label: 'Claude', harnessVersion: '2.1.316',
-    models: [
-      { modelId: 'claude-sonnet-5-5', label: 'Sonnet 5.5', route: 'cloud', allowedByPolicy: true, policyReason: null },
-      { modelId: 'claude-haiku-5-5', label: 'Haiku 5.5', route: 'cloud', allowedByPolicy: true, policyReason: null },
-      { modelId: 'claude-opus-5-5', label: 'Opus 5.5', route: 'cloud', allowedByPolicy: false, policyReason: 'model_not_allowed' },
-    ],
+    provider: APPLY_PROVIDER, label: 'SelariKru apply worker', harnessVersion: APPLY_HARNESS_VERSION,
+    models: [{ modelId: APPLY_MODEL, label: 'Applies accepted changes (no model)', route: 'none', allowedByPolicy: true, policyReason: null }],
   }],
 };
+
+/** What every demo attempt records: the apply worker. With coding workers on, the mock records the coding worker's model instead (MockOptions.codingWorkers). */
+export const DEMO_ASSIGNMENT = { provider: APPLY_PROVIDER, model: APPLY_MODEL } as const;
 
 /** Ids are namespaced per fixture so a command or terminal request can only ever match one project. */
 export const scoped = (fixtureId: FixtureId, local: string): string => `${fixtureId}.${local}`;
@@ -191,7 +191,7 @@ export class FixtureBuilder {
   /** Claim: `attempt.started` then `placement.decided` in one revision. `modelRoute` is the one extra field (see the report). */
   start(task: string, attempt: string, sec: number, runnerId: string, location: 'local' | 'cloud', modelRoute: 'device' | 'cloud' | 'unknown', n = 1): this {
     return this.emit('attempt.started', sec, {
-      task, attempt, payload: { fence: n, attemptNumber: n, runnerId, location, reservationId: `rsv_${attempt}_${n}`, amountUsd: 1, modelRoute, ...(modelRoute === 'cloud' ? { assignment: this.pinnedModel ? { ...this.pinnedModel, source: 'trial_pin' } : { provider: 'anthropic', model: 'claude-sonnet-5-5', source: 'role' } } : {}) },
+      task, attempt, payload: { fence: n, attemptNumber: n, runnerId, location, reservationId: `rsv_${attempt}_${n}`, amountUsd: 1, modelRoute, ...(modelRoute === 'cloud' ? { assignment: this.pinnedModel ? { ...this.pinnedModel, source: 'trial_pin' } : { ...DEMO_ASSIGNMENT, source: 'role' } } : {}) },
     }).emit('placement.decided', sec, {
       task, attempt, bump: false,
       payload: { target: location, reason: location === 'local' ? 'local_slot_free' : 'execution_cloud', mode: 'local-first', runnerId, ...(location === 'cloud' ? { destination: 'sandbox-cloud' } : {}) },

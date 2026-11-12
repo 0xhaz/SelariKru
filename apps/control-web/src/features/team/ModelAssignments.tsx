@@ -141,7 +141,7 @@ export function ModelAssignmentsPanel(props: AssignProps) {
   );
 }
 
-/** H9: Claude Code workers are off in the hackathon build: their model controls are not shown. */
+/** H9: Claude Code workers are off in the hackathon build: their model controls are not shown. Set from the shared check (settings/integrations.ts). */
 export const codingWorkersOff = (model: { readonly codingWorkersNote: string | null }): boolean => model.codingWorkersNote !== null;
 
 /** One task's override, in the drawer. A benchmark trial shows its pin instead: there is nothing to change. */

@@ -129,3 +129,12 @@ test.describe('H9 item 6: integrations that are switched off are hidden', () => 
     await expect(page.getByTestId('settings-mcp-missing')).toBeVisible();
   });
 });
+
+test('H9 fix round 1 (I4): with no snapshot, Settings hides nothing and says nothing about integrations', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { shell: true }; });
+  await page.goto('/tests/harness/index.html#/settings');
+  const tabs = page.getByRole('navigation', { name: 'Settings sections' });
+  await expect(tabs.getByRole('link', { name: 'MCP', exact: true })).toBeVisible();
+  await expect(page.getByTestId('integrations-off')).toHaveCount(0);
+});

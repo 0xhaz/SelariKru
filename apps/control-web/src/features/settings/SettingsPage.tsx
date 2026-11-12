@@ -12,6 +12,7 @@ import { SkillsSettings } from '../skills/SkillsSettings.tsx';
 import { StackSettings } from '../stack/StackSettings.tsx';
 import { ASSIGNMENTS_OFF, ModelAssignmentsPanel, codingWorkersOff } from '../team/ModelAssignments.tsx';
 import type { TeamModel } from '../team/model.ts';
+import { integrationsOff } from './integrations.ts';
 import { autoDelegateModel, autonomyModel, pmNameModel, webResearchModel } from './model.ts';
 import { AutoDelegatePanel } from './SettingsPanel.tsx';
 
@@ -182,17 +183,17 @@ function ProjectTab({ projectLabel, snapshot }: { projectLabel: string; snapshot
 export function SettingsPage({ stack, skills = null, connection, mode, projectLabel = '', snapshot = null, team = null, autonomy = null, onOpenWorker, onExecute, onRefresh, onResync }: SettingsPageProps) {
   const query = useHashQuery();
   // H9: in the hackathon build (coding workers off) the integrations outside Firebase AI Logic are hidden: the MCP section, and the Claude Code model controls.
-  const integrationsOff = snapshot?.modelCatalog.codingWorkers !== 'claude_code';
-  const tabs = integrationsOff ? SETTINGS_TABS.filter((t) => t.id !== 'mcp') : SETTINGS_TABS;
+  const off = integrationsOff(snapshot);
+  const tabs = off ? SETTINGS_TABS.filter((t) => t.id !== 'mcp') : SETTINGS_TABS;
   const raw = settingsSection(query.get('section'));
-  const { tab, sub } = integrationsOff && raw.tab === 'mcp' ? { tab: 'team' as const, sub: null } : raw;
+  const { tab, sub } = off && raw.tab === 'mcp' ? { tab: 'team' as const, sub: null } : raw;
   const current = (id: SettingsTab, s: 'skills' | null = null): boolean => tab === id && sub === s;
   return (
     <div data-testid="settings-page" data-tab={tab} className="space-y-5">
       <header>
         <h1 className="text-2xl font-bold text-fg">Settings</h1>
-        <p className="mt-1 max-w-prose text-sm text-muted">Scope: this project. A worker's own {integrationsOff ? '' : 'model and '}switches are in its drawer, from the team panel.</p>
-        {integrationsOff ? <p className="mt-1 max-w-prose text-sm text-fg" data-testid="integrations-off">Worker integrations (Claude Code, MCP) are outside Firebase AI Logic and are off in this build.</p> : null}
+        <p className="mt-1 max-w-prose text-sm text-muted">Scope: this project. A worker's own {off ? '' : 'model and '}switches are in its drawer, from the team panel.</p>
+        {off ? <p className="mt-1 max-w-prose text-sm text-fg" data-testid="integrations-off">Worker integrations (Claude Code, MCP) are outside Firebase AI Logic and are off in this build.</p> : null}
       </header>
       <div className="flex flex-col gap-5 md:flex-row">
         <nav aria-label="Settings sections" className="flex shrink-0 gap-2 overflow-x-auto pb-1 md:w-[13rem] md:flex-col md:overflow-visible">
