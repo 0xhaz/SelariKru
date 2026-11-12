@@ -326,6 +326,40 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     }
   }
 
+  /** A failure that never reached the server (offline, a network error), as opposed to the server refusing. */
+  const isNetworkError = (e: unknown): boolean => { const c = codeOf(e); return c === '' || c === 'unavailable' || c === 'disconnected'; };
+
+  /** The server's copy of one checkpoint, adopted here (store and device) in place of ours. Null: the server has none, or could not be read. */
+  async function adoptServerCopy(id: string): Promise<AiCheckpoint | null> {
+    if (!deps.server?.listAiCheckpoints) return null;
+    let theirs: AiCheckpoint | undefined;
+    try { theirs = (await deps.server.listAiCheckpoints(deps.projectId)).find((c) => c.checkpointId === id); } catch { return null; }
+    if (!theirs) return null;
+    const adopted = theirs;
+    patch((s) => ({ checkpoints: { ...s.checkpoints, [id]: adopted } }));
+    try { await deps.device.put(deps.ownerKey, adopted); } catch { /* the screen still holds it */ }
+    return adopted;
+  }
+
+  /**
+   * Fix round 3 (R1): a step left running or sending is closed as abandoned server first. Offline nothing is marked: it waits for the connection. A stored
+   * checkpoint is written to the server first and changed here only after it took it; a refusal (another tab still holds its claim) adopts the server's copy.
+   * A device-only one has no server to ask and is closed here.
+   */
+  async function abandon(cp: AiCheckpoint): Promise<void> {
+    if (!deps.isOnline()) return;
+    const next: AiCheckpoint = { ...cp, status: 'abandoned', updatedAt: now() };
+    const stored = deps.server?.saveAiCheckpoint && checkpointStorage(cp) === 'server' && !store.getState().deviceOnly[cp.checkpointId];
+    if (stored) {
+      try { await deps.server!.saveAiCheckpoint!(deps.projectId, next); } catch (e) {
+        if (!isNetworkError(e)) await adoptServerCopy(cp.checkpointId);
+        return;
+      }
+    }
+    patch((s) => ({ checkpoints: { ...s.checkpoints, [cp.checkpointId]: next } }));
+    try { await deps.device.put(deps.ownerKey, { ...next, ...(stored ? {} : { deviceOnly: true }) }); } catch { /* the screen still holds it */ }
+  }
+
   /**
    * Re-validates before a cloud send (fix round 1, I1): an escalation skips only the route comparison. Says why when it fails; a budget that blocks it becomes the
    * checkpoint's stop reason (`budget`), so the queue shows it as waiting on the budget, not on the connection.
@@ -412,7 +446,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       const at = (deps.now ?? (() => new Date()))().getTime();
       for (const cp of Object.values(merged)) {
         const age = at - Date.parse(cp.updatedAt);
-        if ((cp.status === 'running' || cp.status === 'sending') && age > ABANDON_AFTER_MS) await write({ ...cp, status: 'abandoned', updatedAt: now() });
+        if ((cp.status === 'running' || cp.status === 'sending') && age > ABANDON_AFTER_MS) await abandon(cp);
         else if (CLOSED_STATUSES.has(cp.status) && age > PURGE_AFTER_MS) {
           try { await deps.device.remove(deps.ownerKey, deps.projectId, cp.checkpointId); } catch { /* left for the next load */ }
           patch((s) => { const next = { ...s.checkpoints }; delete next[cp.checkpointId]; return { checkpoints: next }; });

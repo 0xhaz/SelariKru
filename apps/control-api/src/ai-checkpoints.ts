@@ -57,7 +57,8 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     // The claim token is never in a listed body (fix round 2, N4).
     const { claimToken: _token, ...body } = row.body as unknown as AiCheckpoint;
     void _token;
-    return { ...body, escalatedAt: row.escalatedAt ? row.escalatedAt.toISOString() : null };
+    // Fix round 3 (R1): the row's own time, which the claim sets, is the checkpoint's updatedAt: a live claim never reads as stale to another tab.
+    return { ...body, updatedAt: row.updatedAt.toISOString(), escalatedAt: row.escalatedAt ? row.escalatedAt.toISOString() : null };
   };
 
   app.get('/v1/projects/:id/ai-checkpoints', guard, async (req) => {
@@ -123,7 +124,7 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const at = now();
     const claimToken = randomBytes(24).toString('base64url');
     const [claimed] = await db.update(schema.aiCheckpoints)
-      .set({ status: 'sending', updatedAt: at, claimToken, body: sql`jsonb_set(${schema.aiCheckpoints.body}, '{status}', '"sending"'::jsonb)` })
+      .set({ status: 'sending', updatedAt: at, claimToken, body: sql`jsonb_set(jsonb_set(${schema.aiCheckpoints.body}, '{status}', '"sending"'::jsonb), '{updatedAt}', to_jsonb(${at.toISOString()}::text))` })
       .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), eq(schema.aiCheckpoints.status, 'waiting')))
       .returning();
     if (!claimed) {

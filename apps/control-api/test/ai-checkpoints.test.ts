@@ -163,6 +163,15 @@ describe('AI step checkpoints on the server (H12)', () => {
       expect(row!['claim_token']).toBeNull();
     });
 
+    it('fix 3 (R1): a claim stamps the checkpoint with the claim time, so no other tab reads a live claim as stale', async () => {
+      await save(cp({ updatedAt: '2026-11-01T00:00:00.000Z' }));
+      h.clock.advance(60);
+      const claimed = await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_0123456789abcdef/send-claim`, {});
+      const at = h.clock.now().toISOString();
+      expect(claimed.body.checkpoint.updatedAt).toBe(at);
+      expect((await list()).body.checkpoints[0]).toMatchObject({ status: 'sending', updatedAt: at });
+    });
+
     it('fix 2 (N4): a claim left for 30 minutes may be closed as abandoned without its token, and not before', async () => {
       await save(cp());
       await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_0123456789abcdef/send-claim`, {});
@@ -186,12 +195,13 @@ describe('AI step checkpoints on the server (H12)', () => {
       let pending: ReturnType<typeof save> | undefined;
       await withTx(t.db, async (tx) => {
         await tx.insert(schema.aiCheckpoints).values({ tenantId: TENANT, projectId: PROJECT, checkpointId: 'ckp_0123456789abcdef', ownerUid: 'owner_uid_1', taskId: 't_open', status: 'waiting', stopReason: 'offline', body: cp() as never, createdAt: new Date(), updatedAt: new Date() });
-        pending = save(cp({ updatedAt: '2026-11-12T00:00:05.000Z' }));
+        pending = save(cp({ stopReason: 'route_changed' }));
         await queuedBehind(tx);
       });
       const r = await pending!;
       expect(r.status, JSON.stringify(r.body)).toBe(200);
-      expect((await list()).body.checkpoints).toEqual([expect.objectContaining({ updatedAt: '2026-11-12T00:00:05.000Z' })]);
+      // The save updated the row (fix round 3: updatedAt is now the row's own time, so the body's stop reason is what shows the save landed).
+      expect((await list()).body.checkpoints).toEqual([expect.objectContaining({ stopReason: 'route_changed' })]);
     });
 
     it('M3: escalation names the owner: another owner\'s row is not found', async () => {
