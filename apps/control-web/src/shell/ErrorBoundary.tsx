@@ -2,7 +2,11 @@ import { Component, type ReactNode } from 'react';
 import { buttonQuiet } from '@selarikru/ui';
 
 /** Contains a render failure or a failed lazy chunk to one route, so the frame around it and the Demo data badge survive. */
-export class RouteBoundary extends Component<{ resetKey: string; root?: boolean; children: ReactNode }, { failed: boolean }> {
+/**
+ * H9: `failure` is a failure the view's model already caught (a snapshot it cannot read). The boundary shows its fallback for it directly, without a throw in
+ * render: React's development build reports every render throw as an unhandled error, even one a boundary catches, which filled the console.
+ */
+export class RouteBoundary extends Component<{ resetKey: string; root?: boolean; failure?: unknown; children: ReactNode }, { failed: boolean }> {
   override state = { failed: false };
 
   static getDerivedStateFromError(): { failed: boolean } {
@@ -15,7 +19,7 @@ export class RouteBoundary extends Component<{ resetKey: string; root?: boolean;
   }
 
   override render(): ReactNode {
-    if (!this.state.failed) return this.props.children;
+    if (!this.state.failed && this.props.failure === undefined) return this.props.children;
     return (
       <section role="alert" className="mx-auto mt-10 max-w-xl rounded-card border border-danger bg-danger-tint p-6">
         <h1 className="text-xl font-semibold text-fg">{this.props.root ? 'SelariKru could not load' : 'This view could not load'}</h1>

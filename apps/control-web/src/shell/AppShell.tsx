@@ -487,22 +487,22 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const views = (
     <>
         {route === 'summary' ? (
-          <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`}>
+          <RouteBoundary resetKey={`${route}:${built.failure === undefined ? 'ok' : 'failed'}`} failure={built.failure}>
             <MissionControl connection={connection} error={state.error} overview={overview} failure={built.failure} snapshot={snapshot} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} fleetInPanel={panelWide} autonomy={autonomyPanel} />
           </RouteBoundary>
         ) : null}
         {route === 'team' ? (
-          <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`}>
+          <RouteBoundary resetKey={`team:${builtTeam.failure === undefined ? 'ok' : 'failed'}`} failure={builtTeam.failure}>
             <TeamView connection={connection} error={state.error} team={builtTeam.team} failure={builtTeam.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} onExecute={state.execute} onRefresh={state.refresh} onResync={state.resync} onOpenWorker={openWorker} autonomy={autonomyPanel} />
           </RouteBoundary>
         ) : null}
         {route === 'pipeline' ? (
-          <RouteBoundary resetKey={`pipeline:${builtPipeline.failure === undefined ? 'ok' : 'failed'}`}>
+          <RouteBoundary resetKey={`pipeline:${builtPipeline.failure === undefined ? 'ok' : 'failed'}`} failure={builtPipeline.failure}>
             <PipelineView connection={connection} error={state.error} pipeline={builtPipeline.pipeline} failure={builtPipeline.failure} confirmedAt={confirmedAt} mode={mode} onRestart={state.restart} leaveDemoHref={leaveDemoHref} handover={state.handover} refreshKey={snapshot?.meta.cursor ?? '0'} />
           </RouteBoundary>
         ) : null}
         {route === 'actions' ? (
-          <RouteBoundary resetKey={`actions:${builtDecisions.failure === undefined ? 'ok' : 'failed'}`}>
+          <RouteBoundary resetKey={`actions:${builtDecisions.failure === undefined ? 'ok' : 'failed'}`} failure={builtDecisions.failure}>
             <DecisionsView
               fromWorkers={actionsFromWorkers} noted={actionsNoted} workerOf={workerOfCard}
               connection={connection} error={state.error} model={builtDecisions.decisions} failure={builtDecisions.failure} confirmedAt={confirmedAt} nowMs={state.nowMs} mode={mode} leaveDemoHref={leaveDemoHref}
@@ -516,7 +516,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           </RouteBoundary>
         ) : null}
         {route === 'evidence' ? (
-          <RouteBoundary resetKey={`evidence:${builtEvidence.failure === undefined ? 'ok' : 'failed'}`}>
+          <RouteBoundary resetKey={`evidence:${builtEvidence.failure === undefined ? 'ok' : 'failed'}`} failure={builtEvidence.failure}>
             <EvidenceView
               connection={connection} error={state.error} model={builtEvidence.evidence} failure={builtEvidence.failure} hasSnapshot={snapshot !== null} confirmedAt={confirmedAt} mode={mode} leaveDemoHref={leaveDemoHref}
               checkTarget={query.get('check')} candidateTarget={query.get('candidate')} onLoadFailures={state.loadFailures} onRestart={state.restart} onChooseRun={(id) => { window.location.hash = `${hrefFor('evidence')}?run=${encodeURIComponent(id)}`; }}
