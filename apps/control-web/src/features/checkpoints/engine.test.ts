@@ -186,6 +186,45 @@ describe('fix 2 (N1): Move to device only works offline', () => {
   });
 });
 
+describe('fix 2 (N2): a claim is released on every exit that is not a closing write', () => {
+  it('a file changes between the re-check and the send: the row goes back to waiting with why, and a second Resume after the file is restored is sent', async () => {
+    const h = setup();
+    h.setOnline(false);
+    const id = await pauseOffline(h);
+    h.setOnline(true);
+    let refuse = true;
+    h.engine.attach({
+      ...h.runner,
+      run: async (req) => {
+        h.runs.push(req);
+        const rec = h.engine.begin({ taskId: req.taskId, stepKind: req.kind, callOverride: req.callOverride, ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}) });
+        if (refuse) { await rec.finish({ kind: 'refused', code: 'inputs_changed' }); return { kind: 'refused', code: 'inputs_changed' }; }
+        return h.runner.run(req);
+      },
+    } as never);
+    await h.engine.resume(id);
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'waiting' });
+    expect(h.engine.store.getState().problems[id]).toEqual(['inputs_changed']);
+    refuse = false;
+    await h.engine.resume(id);
+    expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sent' });
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'sent' });
+  });
+
+  it('a PM checkpoint with no question to send goes back to waiting, not left sending', async () => {
+    const h = setup();
+    h.setOnline(false);
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'pmAnswer', callOverride: null, texts: [] });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    const r = result(proposal({ status: 'blocked', blockedReason: 'offline', observedSource: 'UNKNOWN' }), 'pmAnswer');
+    await rec.finish({ kind: 'result', result: r, context: context() });
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.runner.pm).not.toHaveBeenCalled();
+    expect(h.server.rows.get(rec.id)).toMatchObject({ status: 'waiting' });
+  });
+});
+
 describe('fix 1 (M1, M4, M6)', () => {
   it('M1: two resumes at once send it once: busy is set before the re-check, and the server claim refuses a second tab', async () => {
     const h = setup();

@@ -275,6 +275,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     if (!runner) return;
     setFor('busy', cp.checkpointId, true);
     setFor('asks', cp.checkpointId, undefined);
+    let claimed = false;
     try {
       // Fix round 1 (M1): one tab sends it. A stored checkpoint is claimed on the server first (waiting → sending); an escalation was claimed already.
       // Fix round 2 (N1): a device run sends nothing, so it needs no claim and works offline; its closing save syncs through the write-through.
@@ -287,6 +288,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
             await write(cp);
             await claim();
           }
+          claimed = true;
         } catch (e) {
           setFor('problems', cp.checkpointId, [codeOf(e) === 'checkpoint_claimed' ? 'claimed' : 'claim_failed']);
           return;
@@ -300,6 +302,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
         await runner.run({ taskId: cp.taskId, kind: cp.stepKind as AgentActionKind, callOverride, resume: { checkpointId: cp.checkpointId, kind: how, ...(cp.inputs.files.length > 0 ? { files: cp.inputs.files } : {}), ...(cp.partial && cp.partial.issues.length > 0 ? { priorIssues: cp.partial.issues } : {}) } });
       }
     } finally {
+      // Fix round 2 (N2): a claim is released on every exit that is not a closing write (the runner refused it, its files changed, a PM checkpoint had no
+      // question): the row goes back to waiting, with why, so a later Resume can claim it again.
+      const after = store.getState().checkpoints[cp.checkpointId];
+      if (claimed && after && after.status === 'waiting') await write({ ...after, updatedAt: now() });
       setFor('busy', cp.checkpointId, undefined);
     }
   }
