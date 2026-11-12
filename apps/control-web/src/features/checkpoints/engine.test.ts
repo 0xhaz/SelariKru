@@ -522,3 +522,77 @@ describe('the checkpoint engine (H12)', () => {
     expect(h.engine.store.getState().checkpoints[other]).toMatchObject({ status: 'dropped' });
   });
 });
+
+describe('H9 step 0 (F1): only a known refusal takes the server\'s copy; every other error is retried', () => {
+  async function sendWithFailingSave(code: string) {
+    const h = setup();
+    h.setOnline(false);
+    const id = await pauseOffline(h);
+    h.setOnline(true);
+    // The closing save ("sent") fails once with this error; the claim and the earlier saves go through.
+    const save = h.deps.server!.saveAiCheckpoint!;
+    let failed = 0;
+    const engine = createCheckpointEngine({ ...h.deps, server: { ...h.deps.server!, saveAiCheckpoint: async (p, cp) => {
+      if (cp.status === 'sent' && failed === 0) { failed += 1; throw new Error(code); }
+      return save(p, cp);
+    } } });
+    engine.attach({ ...h.runner, run: vi.fn(async (req) => {
+      const rec = engine.begin({ taskId: req.taskId, stepKind: req.kind, callOverride: req.callOverride, ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}) });
+      rec.stage({ stage: 'context', context: context(), contextId: 'ctx_2' });
+      const r = result(proposal({ requestId: 'req_resumed' }));
+      await rec.finish({ kind: 'result', result: r, context: context(), simulated: true });
+      return r;
+    }) });
+    await engine.load();
+    await engine.reconnect();
+    return { h, engine, id, failed: () => failed };
+  }
+
+  it('a transient 500 on the final "sent" save is kept and retried on reconnect; it never becomes Abandoned', async () => {
+    const { h, engine, id, failed } = await sendWithFailingSave('internal_error: the server failed');
+    expect(failed()).toBe(1);
+    expect(engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sent' });
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'sending' });
+    await engine.reconnect();
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'sent' });
+    expect(engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sent' });
+  });
+
+  it('a 401 on the final save is retried too, not replaced by the server\'s copy', async () => {
+    const { h, engine, id } = await sendWithFailingSave('unauthorized: the token expired');
+    expect(engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sent' });
+    await engine.reconnect();
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'sent' });
+  });
+
+  it('a known refusal (checkpoint_closed) still takes the server\'s copy', async () => {
+    const { engine, id } = await sendWithFailingSave('checkpoint_closed: this checkpoint is closed');
+    expect(engine.store.getState().checkpoints[id]).toMatchObject({ status: 'sending' });
+  });
+});
+
+describe('H9 step 0 (F2): a server copy in waiting never replaces a closed local copy; unsynced writes survive a reload', () => {
+  it('offline, move to device only, reload with the browser clock behind the server\'s: the step does not go back to the queue, and its closing state reaches the server', async () => {
+    const h = setup();
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'criteria', callOverride: null });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    const r = result(proposal({ status: 'blocked', blockedReason: 'input_too_large_for_device', observedSource: 'UNKNOWN' }));
+    await rec.finish({ kind: 'result', result: r, context: context() });
+    const id = rec.id;
+    // The server's clock is ten minutes ahead of this browser's: its copy is stamped later.
+    h.server.rows.set(id, { ...h.server.rows.get(id)!, updatedAt: '2026-11-12T00:10:00.000Z' });
+    h.setOnline(false);
+    await h.engine.moveToDevice(id);
+    expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'moved_to_device' });
+    // Reload: a new engine over the same device store and server.
+    h.setOnline(true);
+    const again = createCheckpointEngine({ ...h.deps, now: () => new Date('2026-11-12T00:01:00.000Z') });
+    const runs: unknown[] = [];
+    again.attach({ ...h.runner, run: vi.fn(async (req) => { runs.push(req); return { kind: 'refused', code: 'x' }; }) } as never);
+    await again.load();
+    expect(again.store.getState().checkpoints[id]).toMatchObject({ status: 'moved_to_device' });
+    await again.reconnect();
+    expect(runs).toEqual([]);
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'moved_to_device' });
+  });
+});

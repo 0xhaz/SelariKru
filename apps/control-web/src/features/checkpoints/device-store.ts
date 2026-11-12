@@ -10,6 +10,13 @@ export interface DeviceCheckpointStore {
   list(ownerKey: string, projectId: string): Promise<AiCheckpoint[]>;
   /** Fix round 1 (M6): removes one checkpoint (a closed one past its retention). */
   remove(ownerKey: string, projectId: string, checkpointId: string): Promise<void>;
+  /**
+   * H9 step 0 (F2): marks a checkpoint whose last server write did not arrive (or clears the mark), so the list of unsynced writes survives a reload. Kept beside
+   * the checkpoint, never inside it.
+   */
+  setUnsynced(ownerKey: string, projectId: string, checkpointId: string, unsynced: boolean): Promise<void>;
+  /** H9 step 0 (F2): the checkpoints marked unsynced, for this owner and project. */
+  listUnsynced(ownerKey: string, projectId: string): Promise<string[]>;
 }
 
 /** What is written: secret-shaped text redacted, in every text a checkpoint can carry. */
@@ -29,19 +36,27 @@ const scopeKey = (ownerKey: string, projectId: string): string => `${ownerKey}|$
 /** In memory: tests, and a browser without IndexedDB (nothing then survives a reload, and the screen says so). */
 export function memoryDeviceStore(): DeviceCheckpointStore & { readonly rows: Map<string, AiCheckpoint> } {
   const rows = new Map<string, AiCheckpoint>();
+  const unsynced = new Set<string>();
   return {
     rows,
+    async setUnsynced(ownerKey, projectId, checkpointId, on) { const k = `${scopeKey(ownerKey, projectId)}|${checkpointId}`; if (on) unsynced.add(k); else unsynced.delete(k); },
+    async listUnsynced(ownerKey, projectId) {
+      const prefix = `${scopeKey(ownerKey, projectId)}|`;
+      return [...unsynced].filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+    },
     async put(ownerKey, cp) { rows.set(`${scopeKey(ownerKey, cp.projectId)}|${cp.checkpointId}`, structuredClone(forDevice(cp))); },
     async list(ownerKey, projectId) {
       const prefix = `${scopeKey(ownerKey, projectId)}|`;
       return [...rows.entries()].filter(([k]) => k.startsWith(prefix)).map(([, v]) => structuredClone(v));
     },
-    async remove(ownerKey, projectId, checkpointId) { rows.delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`); },
+    async remove(ownerKey, projectId, checkpointId) { rows.delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`); unsynced.delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`); },
   };
 }
 
 const DB = 'selarikru-checkpoints';
 const STORE = 'checkpoints';
+/** H9 step 0 (F2): the ids whose last server write did not arrive. Version 2 of the database adds it. */
+const UNSYNCED = 'unsynced';
 
 const promised = <T,>(r: IDBRequest<T>): Promise<T> => new Promise((resolve, reject) => { r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
 
@@ -50,10 +65,13 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): DeviceCheckpoin
   let opened: Promise<IDBDatabase> | null = null;
   const open = (): Promise<IDBDatabase> => {
     opened ??= new Promise((resolve, reject) => {
-      const req = factory.open(DB, 1);
-      req.onupgradeneeded = () => {
-        const store = req.result.createObjectStore(STORE, { keyPath: 'key' });
-        store.createIndex('scope', 'scope');
+      const req = factory.open(DB, 2);
+      req.onupgradeneeded = (e) => {
+        if (e.oldVersion < 1) {
+          const store = req.result.createObjectStore(STORE, { keyPath: 'key' });
+          store.createIndex('scope', 'scope');
+        }
+        if (e.oldVersion < 2) req.result.createObjectStore(UNSYNCED, { keyPath: 'key' }).createIndex('scope', 'scope');
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => { opened = null; reject(req.error); };
@@ -75,7 +93,21 @@ export function indexedDbStore(factory: IDBFactory = indexedDB): DeviceCheckpoin
     },
     async remove(ownerKey, projectId, checkpointId) {
       const db = await open();
-      await promised(db.transaction(STORE, 'readwrite').objectStore(STORE).delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`));
+      const tx = db.transaction([STORE, UNSYNCED], 'readwrite');
+      await promised(tx.objectStore(STORE).delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`));
+      await promised(tx.objectStore(UNSYNCED).delete(`${scopeKey(ownerKey, projectId)}|${checkpointId}`));
+    },
+    async setUnsynced(ownerKey, projectId, checkpointId, on) {
+      const db = await open();
+      const scope = scopeKey(ownerKey, projectId);
+      const os = db.transaction(UNSYNCED, 'readwrite').objectStore(UNSYNCED);
+      if (on) await promised(os.put({ key: `${scope}|${checkpointId}`, scope, checkpointId }));
+      else await promised(os.delete(`${scope}|${checkpointId}`));
+    },
+    async listUnsynced(ownerKey, projectId) {
+      const db = await open();
+      const rows = await promised(db.transaction(UNSYNCED, 'readonly').objectStore(UNSYNCED).index('scope').getAll(scopeKey(ownerKey, projectId))) as { checkpointId: unknown }[];
+      return rows.flatMap((r) => (typeof r.checkpointId === 'string' ? [r.checkpointId] : []));
     },
   };
 }

@@ -97,6 +97,12 @@ export const ABANDON_AFTER_MS = 30 * 60_000;
 export const PURGE_AFTER_MS = 7 * 86_400_000;
 const CLOSED_STATUSES: ReadonlySet<string> = new Set(['done', 'sent', 'escalated', 'moved_to_device', 'dropped', 'abandoned']);
 const codeOf = (e: unknown): string => /^([a-z_]+):/.exec(e instanceof Error ? e.message : '')?.[1] ?? '';
+/**
+ * H9 step 0 (F1): the server's refusals of a checkpoint write. Only these mean the server's copy won and is adopted here. Every other failure (offline, a network
+ * error, any 5xx, a 401 while the token is renewed) never settled anything: the write is kept and sent again on reconnect.
+ */
+export const CHECKPOINT_REFUSALS: ReadonlySet<string> = new Set(['checkpoint_closed', 'checkpoint_claimed', 'checkpoint_not_found', 'invalid_request', 'checkpoint_secret']);
+const isRefusal = (e: unknown): boolean => CHECKPOINT_REFUSALS.has(codeOf(e));
 
 export interface CheckpointEngine {
   readonly store: StoreApi<CheckpointState>;
@@ -137,8 +143,13 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   const newCtx = (): string => `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
   let runner: CheckpointRunner | null = null;
   const writes = new Map<string, Promise<void>>();
-  /** Fix round 2 (N1): checkpoints whose last server write did not arrive. */
+  /** Fix round 2 (N1): checkpoints whose last server write did not arrive. H9 step 0 (F2): mirrored on the device, so the list survives a reload. */
   const unsynced = new Set<string>();
+  const markUnsynced = async (id: string, on: boolean): Promise<void> => {
+    if (on === unsynced.has(id)) return;
+    if (on) unsynced.add(id); else unsynced.delete(id);
+    try { await deps.device.setUnsynced(deps.ownerKey, deps.projectId, id, on); } catch { /* No device storage: this tab still remembers it. */ }
+  };
   /** Fix round 2 (N4): the claim token this tab holds for a checkpoint it is sending. Sent with its writes; never stored on the device. */
   const claimTokens = new Map<string, string>();
 
@@ -161,15 +172,15 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
         await deps.server!.saveAiCheckpoint!(deps.projectId, token !== undefined ? { ...cp, claimToken: token } : cp);
         // The save that ends the send spends the token.
         if (token !== undefined) claimTokens.delete(cp.checkpointId);
-        unsynced.delete(cp.checkpointId);
+        await markUnsynced(cp.checkpointId, false);
       } catch (e) {
-        // Fix round 2 (N1), round 3 (R2): only a write that never reached the server is kept to write again on reconnect. A refusal (closed, claimed by another
-        // tab) means the server's copy won: it is adopted here, and this write is dropped.
-        if (isNetworkError(e)) unsynced.add(cp.checkpointId);
-        else {
-          unsynced.delete(cp.checkpointId);
-          if (codeOf(e) !== 'checkpoint_restricted') await adoptServerCopy(cp.checkpointId);
-        }
+        // Fix round 2 (N1), round 3 (R2), H9 step 0 (F1): a known refusal (closed, claimed by another tab) means the server's copy won: it is adopted here, and this
+        // write is dropped. Anything else (offline, a 5xx, a 401) settled nothing: the write is kept to send again on reconnect.
+        if (codeOf(e) === 'checkpoint_restricted') await markUnsynced(cp.checkpointId, false);
+        else if (isRefusal(e)) {
+          await markUnsynced(cp.checkpointId, false);
+          await adoptServerCopy(cp.checkpointId);
+        } else await markUnsynced(cp.checkpointId, true);
         // The server judged it restricted (its own backstop): it stays on this device from now on. Any other failure keeps it here until the next write.
         if (codeOf(e) === 'checkpoint_restricted') {
           setFor('deviceOnly', cp.checkpointId, true);
@@ -348,9 +359,6 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     }
   }
 
-  /** A failure that never reached the server (offline, a network error), as opposed to the server refusing. */
-  const isNetworkError = (e: unknown): boolean => { const c = codeOf(e); return c === '' || c === 'unavailable' || c === 'disconnected'; };
-
   /** The server's copy of one checkpoint, adopted here (store and device) in place of ours. Null: the server has none, or could not be read. */
   async function adoptServerCopy(id: string): Promise<AiCheckpoint | null> {
     if (!deps.server?.listAiCheckpoints) return null;
@@ -378,7 +386,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     const stored = deps.server?.saveAiCheckpoint && checkpointStorage(cp) === 'server' && !store.getState().deviceOnly[cp.checkpointId];
     if (stored) {
       try { await deps.server!.saveAiCheckpoint!(deps.projectId, next); } catch (e) {
-        if (!isNetworkError(e)) await adoptServerCopy(cp.checkpointId);
+        if (isRefusal(e)) await adoptServerCopy(cp.checkpointId);
         return;
       }
     }
@@ -456,12 +464,25 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     async load() {
       const mine = await deps.device.list(deps.ownerKey, deps.projectId).catch(() => [] as AiCheckpoint[]);
       const theirs = deps.server?.listAiCheckpoints ? await deps.server.listAiCheckpoints(deps.projectId).catch(() => [] as AiCheckpoint[]) : [];
+      // H9 step 0 (F2): what this device wrote and the server never took is read back, so it is sent on reconnect.
+      for (const id of await deps.device.listUnsynced(deps.ownerKey, deps.projectId).catch(() => [] as string[])) unsynced.add(id);
       const merged: Record<string, AiCheckpoint> = { ...store.getState().checkpoints };
-      for (const cp of [...theirs, ...mine]) {
-        const had = merged[cp.checkpointId];
-        // The newer copy wins; an escalation recorded anywhere is never forgotten.
-        const pick = !had || cp.updatedAt >= had.updatedAt ? cp : had;
-        merged[cp.checkpointId] = { ...pick, escalatedAt: had?.escalatedAt ?? cp.escalatedAt };
+      const serverById = new Map(theirs.map((c) => [c.checkpointId, c]));
+      const deviceById = new Map(mine.map((c) => [c.checkpointId, c]));
+      // H9 step 0 (F2): this browser's clock and the server's differ, so the time stamps alone cannot decide. A copy this device wrote that the server never took
+      // wins, and a server copy still waiting never replaces a copy this device has closed. Otherwise the newer copy wins.
+      const choose = (id: string, local: AiCheckpoint | undefined, server: AiCheckpoint | undefined): AiCheckpoint => {
+        if (!local) return server!;
+        if (!server) return local;
+        if (unsynced.has(id) || (CLOSED_STATUSES.has(local.status) && server.status === 'waiting')) return local;
+        return local.updatedAt >= server.updatedAt ? local : server;
+      };
+      for (const id of new Set([...serverById.keys(), ...deviceById.keys()])) {
+        const cp = choose(id, deviceById.get(id), serverById.get(id));
+        const had = merged[id];
+        // An escalation recorded anywhere is never forgotten.
+        const escalatedAt = had?.escalatedAt ?? serverById.get(id)?.escalatedAt ?? deviceById.get(id)?.escalatedAt ?? cp.escalatedAt;
+        merged[id] = { ...(!had || cp.updatedAt >= had.updatedAt ? cp : had), escalatedAt };
       }
       patch(() => ({ checkpoints: merged }));
       for (const cp of mine) if (cp.deviceOnly === true || checkpointStorage(cp) !== 'server') setFor('deviceOnly', cp.checkpointId, true);
