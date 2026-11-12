@@ -12,7 +12,8 @@ export interface AiCallRow {
   readonly id: string;
   readonly taskId: string;
   readonly task: string;
-  readonly taskHref: string;
+  /** Null: not a task step (an Assistant or onboarding call, H9 fix round 1). */
+  readonly taskHref: string | null;
   readonly step: string;
   readonly at: string;
   /** The route the server worked out for this call: its label and mode. */

@@ -7,6 +7,7 @@ import { createDemoOnboardingApi } from '../features/onboarding/demo-api.ts';
 import { fetchRouteFrom } from '../features/hybrid/agents.ts';
 import { connectivity, isOnline } from '../features/checkpoints/connectivity.ts';
 import { createCloudQuota } from '../features/hosted/cloud-quota.ts';
+import { sessionCalls } from '../features/calls/session.ts';
 import { useDemoSession } from './demo-session.ts';
 
 const AssistantPanel = lazy(() => import('../features/assistant/AssistantPanel.tsx').then((m) => ({ default: m.AssistantPanel })));
@@ -27,6 +28,8 @@ export default function HostedRoot() {
   // One adapter for every call in this tab, so the cap counts them all. Each call that names a task reads its route fresh from the demo source first.
   const adapter = useMemo(() => (source ? new FirebaseHybridAssistantAdapter({
     sdk, fetchRoute: fetchRouteFrom(source), isOnline, cloudCalls: quota,
+    // H9 fix round 1 (I1): the Assistant's and the onboarding guide's calls, for AI calls (this tab only).
+    onTelemetry: (e) => sessionCalls.getState().add(e),
     onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess(),
   }) : null), [sdk, source, quota]);
   // Demo data: results are labelled so and never evidence, though a real model wrote them.

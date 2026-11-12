@@ -425,8 +425,10 @@ describe('telemetry', () => {
     await adapter.draftBrief(req());
     expect(events).toHaveLength(2);
     const allowed = new Set([
-      'kind', 'requestId', 'operation', 'requestedMode', 'observedSource', 'status', 'totalMs', 'payloadSha256', 'blockedReason', 'validationStatus',
+      'kind', 'requestId', 'operation', 'requestedMode', 'observedSource', 'status', 'totalMs', 'payloadSha256', 'blockedReason', 'validationStatus', 'routed', 'restricted',
     ]);
+    // H9 fix round 1 (I1): whether the call named a task (its route record lists it) and whether it read restricted data, for the tab's AI calls view.
+    expect(events[0]).toMatchObject({ routed: false, restricted: false });
     for (const e of events) {
       for (const k of Object.keys(e)) expect(allowed.has(k)).toBe(true);
       const s = JSON.stringify(e);
@@ -439,6 +441,18 @@ describe('telemetry', () => {
     const _b: TelemetryEvent = { ...events[0]!, output: 'x' };
     void _a;
     void _b;
+  });
+});
+
+describe('H9 fix round 1 (I1): telemetry says whether a call was a task step and whether it read restricted data', () => {
+  it('a restricted source marks it restricted; a route marks it a task step', async () => {
+    const events: TelemetryEvent[] = [];
+    const { adapter } = make(new FakeSdk(), events);
+    await adapter.draftBrief(req({ sources: [{ id: 's1', classification: 'restricted' }] }));
+    expect(events.at(-1)).toMatchObject({ routed: false, restricted: true });
+    fresh.route = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null };
+    await adapter.draftBrief(req({ route: { taskId: 't1', stepKind: 'brief' } }));
+    expect(events.at(-1)).toMatchObject({ routed: true });
   });
 });
 

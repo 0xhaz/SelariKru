@@ -61,13 +61,19 @@ test('the tour runs end to end on demo data, by keyboard, each step on the real 
   await expect(page.getByTestId('tour-offline-status')).toHaveText('Sent after reconnecting.');
 
   await next(5);
-  await expect(page.getByTestId('ai-calls')).toBeVisible();
-  // The step just sent is there, recorded as sent after reconnecting.
-  await expect(page.getByTestId('ai-call-row').first()).toContainText('Sent after reconnecting');
+  // H9 fix round 1 (M2): the PM is asked for a plan on demo data, through its own panel, and its plan offers Accept plan.
+  await expect(page).toHaveURL(/#\/pm/);
+  await tour.getByRole('button', { name: 'Ask the PM for a plan' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByTestId('pm-accept-plan')).toBeVisible();
+  await expect(page.getByTestId('tour-pm-status')).toHaveText(/plan is ready/);
+  await expect(ring).toBeVisible();
 
   await next(6);
-  await expect(page.getByTestId('pm-question')).toBeVisible();
-  await expect(ring).toBeVisible();
+  await expect(page.getByTestId('ai-calls')).toBeVisible();
+  // H9 fix round 1 (I1): the PM's plan from step 5 is there, with where it ran; and the step sent after reconnecting.
+  await expect(page.getByTestId('ai-call-row').first()).toContainText('PM plan draft');
+  await expect(page.getByTestId('ai-call-row').filter({ hasText: 'Sent after reconnecting' })).toHaveCount(1);
   await tour.getByRole('button', { name: 'Finish' }).focus();
   await page.keyboard.press('Enter');
   await expect(tour).toHaveCount(0);
@@ -85,4 +91,15 @@ test('Escape closes the tour, and Back goes back a step', async ({ page }) => {
   await expect(tour).toHaveAttribute('data-step', '1');
   await page.keyboard.press('Escape');
   await expect(tour).toHaveCount(0);
+});
+
+test('H9 fix round 1 (M3): when the offline step cannot run, the connection is restored and the tour says it failed', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // A project without the tour's Cloud only task: the step cannot run.
+  await page.goto('/?demo&fixture=healthy-parallel-work&tour=1#/office');
+  const tour = page.getByTestId('tour');
+  for (let n = 2; n <= 4; n++) { await tour.getByRole('button', { name: 'Next' }).click(); await expect(tour).toHaveAttribute('data-step', String(n)); }
+  await tour.getByRole('button', { name: 'Go offline and run a Cloud only step' }).click();
+  await expect(page.getByTestId('tour-offline-status')).toHaveText(/could not run.*connection is back/i);
+  await expect(page.getByTestId('demo-network').getByRole('button', { name: 'Go offline' })).toBeVisible();
 });

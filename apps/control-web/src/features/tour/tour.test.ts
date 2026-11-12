@@ -6,7 +6,7 @@ const memory = () => { const m = new Map<string, string>(); return { getItem: (k
 describe('H9 item 4: the first-visit guided demo story', () => {
   it('has six short steps, in the order of the story, each pointing at a real element on a real screen', () => {
     expect(TOUR_STEPS.map((s) => s.title)).toEqual([
-      'Drafted on this device', 'Too big for Nano: planned in the cloud', 'Restricted: Local only, never the cloud', 'Offline, then reconnected', 'Where every call ran', 'Ask the Project Manager',
+      'Drafted on this device', 'Too big for Nano: planned in the cloud', 'Restricted: Local only, never the cloud', 'Offline, then reconnected', 'Ask the Project Manager', 'Where every call ran',
     ]);
     for (const s of TOUR_STEPS) {
       expect(s.hash).toMatch(/^#\//);

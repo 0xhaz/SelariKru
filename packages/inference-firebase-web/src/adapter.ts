@@ -172,6 +172,10 @@ export interface TelemetryEvent {
   readonly payloadSha256: string | null;
   readonly blockedReason: string | null;
   readonly validationStatus: ProposalValidation['status'];
+  /** H9 fix round 1 (I1): the call named a task: its route record lists it. False: an Assistant or onboarding call, listed in this tab only. */
+  readonly routed: boolean;
+  /** H9 fix round 1 (I1): it read restricted or secret data (or an unknown label): show its labels only. */
+  readonly restricted: boolean;
 }
 
 export interface AdapterOptions {
@@ -318,6 +322,8 @@ export class FirebaseHybridAssistantAdapter {
       payloadSha256: proposal.payloadSha256,
       blockedReason: proposal.blockedReason,
       validationStatus: proposal.validation.status,
+      routed: req.route !== undefined && req.route !== null,
+      restricted: proposal.route?.locked === true || [...req.sources.map((x) => x.classification), ...(req.labels ?? [])].some((l) => l !== 'public' && l !== 'internal'),
     });
     return proposal;
   }

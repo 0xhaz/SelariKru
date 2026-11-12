@@ -25,10 +25,27 @@ type Rect = { x: number; y: number; w: number; h: number };
 
 function targetRect(target: string): Rect | null {
   if (target === 'roof:device') return officeOnScreen.scene?.roofBoxOnScreen('device') ?? null;
-  const el = document.querySelector<HTMLElement>(target);
-  if (!el || el.getClientRects().length === 0) return null;
-  const r = el.getBoundingClientRect();
-  return { x: r.left, y: r.top, w: r.width, h: r.height };
+  // The first selector, in order of preference, that is on screen.
+  for (const sel of target.split(' || ')) {
+    const el = document.querySelector<HTMLElement>(sel);
+    if (!el || el.getClientRects().length === 0) continue;
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }
+  return null;
+}
+
+/** H9 fix round 1 (M2): asks through the PM panel itself, as a person would: the question in its box, then its Draft a plan button. */
+function askPmForPlan(question: string): boolean {
+  const box = document.querySelector<HTMLTextAreaElement>('[data-testid="pm-question"]');
+  const plan = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="pm-panel"] button')].find((b) => b.textContent?.trim() === 'Draft a plan');
+  if (!box || !plan) return false;
+  // React reads the value through its own setter, so the native one is used and the change announced.
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(box, question);
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  // The button enables once React has the question.
+  requestAnimationFrame(() => requestAnimationFrame(() => plan.click()));
+  return true;
 }
 
 /**
@@ -42,7 +59,8 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
   const heading = useRef<HTMLHeadingElement>(null);
   const [ring, setRing] = useState<Rect | null>(null);
   const [offer, setOffer] = useState(() => !tourStore.getState().open && !tourOffered());
-  const [offline, setOffline] = useState<'idle' | 'running' | 'waiting' | 'sent'>('idle');
+  const [offline, setOffline] = useState<'idle' | 'running' | 'waiting' | 'sent' | 'failed'>('idle');
+  const [pm, setPm] = useState<'idle' | 'asking' | 'ready' | 'failed'>('idle');
   const wentOffline = useRef(false);
   const checkpoints = useStore(hybrid?.checkpoints?.store ?? EMPTY_CHECKPOINT_STORE, (s) => s.checkpoints);
   const s = TOUR_STEPS[step]!;
@@ -79,6 +97,12 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
     const timer = window.setInterval(follow, 250);
     return () => window.clearInterval(timer);
   }, [open, s.target]);
+  // H9 fix round 1 (M2): the plan is ready once its Accept plan button is there.
+  useEffect(() => {
+    if (pm !== 'asking') return;
+    const timer = window.setInterval(() => { if (document.querySelector('[data-testid="pm-accept-plan"]')) setPm('ready'); else if (document.querySelector('[data-testid="pm-refused"]')) setPm('failed'); }, 200);
+    return () => window.clearInterval(timer);
+  }, [pm]);
   // Sent after reconnecting, as the checkpoint records it.
   useEffect(() => {
     if (offline === 'waiting' && Object.values(checkpoints).some((c) => c.taskId === TOUR_OFFLINE_TASK && c.status === 'sent')) setOffline('sent');
@@ -97,8 +121,15 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
     setOffline('running');
     wentOffline.current = true;
     connectivity.getState().simulateOffline(true);
-    await hybrid.agents.run({ taskId: TOUR_OFFLINE_TASK, kind: 'criteria', callOverride: null });
-    setOffline('waiting');
+    // H9 fix round 1 (M3): a step that could not run (or did not wait) leaves nothing paused: the connection is restored and the tour says so.
+    let waiting = false;
+    try {
+      const out = await hybrid.agents.run({ taskId: TOUR_OFFLINE_TASK, kind: 'criteria', callOverride: null });
+      waiting = out.kind === 'result' && out.result.proposal.blockedReason === 'offline';
+    } catch { waiting = false; } finally {
+      if (!waiting) { wentOffline.current = false; connectivity.getState().simulateOffline(false); }
+      setOffline(waiting ? 'waiting' : 'failed');
+    }
   };
   const reconnect = (): void => {
     wentOffline.current = false;
@@ -134,7 +165,15 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
               <button type="button" className={buttonQuiet} disabled={offline !== 'waiting'} onClick={reconnect}>Reconnect</button>
             </div>
             <p role="status" className="text-sm text-fg" data-testid="tour-offline-status">
-              {offline === 'running' ? 'Running the step offline…' : offline === 'waiting' ? 'Waiting in Paused AI work: not an error. Reconnect to send it.' : offline === 'sent' ? 'Sent after reconnecting.' : ''}
+              {offline === 'running' ? 'Running the step offline…' : offline === 'waiting' ? 'Waiting in Paused AI work: not an error. Reconnect to send it.' : offline === 'sent' ? 'Sent after reconnecting.' : offline === 'failed' ? 'The step could not run here, so nothing was paused. The connection is back.' : ''}
+            </p>
+          </div>
+        ) : null}
+        {s.pm ? (
+          <div className="mt-2 space-y-2" data-testid="tour-pm">
+            <button type="button" className={buttonQuiet} disabled={pm === 'asking'} onClick={() => setPm(askPmForPlan('Draft a plan for the open work.') ? 'asking' : 'failed')}>Ask the PM for a plan</button>
+            <p role="status" className="text-sm text-fg" data-testid="tour-pm-status">
+              {pm === 'asking' ? 'Asking the PM…' : pm === 'ready' ? 'The plan is ready. Accept plan is below its tasks: nothing changes until you press it.' : pm === 'failed' ? 'The PM could not be asked from here. Use its panel directly.' : ''}
             </p>
           </div>
         ) : null}

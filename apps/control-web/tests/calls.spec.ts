@@ -49,3 +49,19 @@ test('a call made now appears in AI calls with where it ran', async ({ page }) =
   await expect(rows.first()).toContainText('Search index');
   await expect(rows.first().getByTestId('ai-call-ran')).toHaveText(/On this device/);
 });
+
+test('H9 fix round 1 (I1): a Project Manager call appears in AI calls with where it actually ran', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => { try { localStorage.setItem('selarikru.tour.offered', '1'); } catch { /* none */ } });
+  await page.goto('/?demo&fixture=feature-delivery#/calls');
+  const rows = page.getByTestId('ai-call-row');
+  await expect(rows).toHaveCount(6);
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-question').fill('What blocks the list screen?');
+  await page.getByRole('button', { name: 'Ask', exact: true }).click();
+  await expect(page.getByTestId('pm-answer')).toBeVisible();
+  await page.evaluate(() => { window.location.hash = '#/calls'; });
+  await expect(rows).toHaveCount(7);
+  await expect(rows.first()).toContainText('Ask the PM');
+  await expect(rows.first().getByTestId('ai-call-ran')).toHaveText(/On this device|Cloud/);
+});

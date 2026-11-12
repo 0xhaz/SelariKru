@@ -3,7 +3,9 @@ import type { RouteRecord } from '@selarikru/domain';
 import { Chip, EmptyState, Panel, formatClock } from '@selarikru/ui';
 import type { ProjectViewSnapshot } from '@selarikru/view-protocol';
 import type { AgentSource } from '../../shell/projection-store.ts';
+import { useStore } from 'zustand';
 import { aiCallRows, aiCallsSummary } from './model.ts';
+import { sessionCallRows, sessionCalls } from './session.ts';
 
 /**
  * H9 item 2: "AI calls" (Boards). Every AI call in this project, read fresh from each task's route records: where it was meant to run, where it actually ran, and
@@ -24,14 +26,16 @@ export function AiCallsView({ source, snapshot, projectId, simulated }: { source
     return () => { live = false; };
   }, [source, projectId, taskIds, cursor]);
   const titleOf = (id: string): string | null => snapshot?.tasks[id]?.title ?? null;
-  const rows = useMemo(() => (state ? aiCallRows(state.records, titleOf) : []), [state, snapshot]);
+  // H9 fix round 1 (I1): plus this tab's calls that are not task steps, newest first with the rest.
+  const session = useStore(sessionCalls, (s) => s.calls);
+  const rows = useMemo(() => (state ? [...aiCallRows(state.records, titleOf), ...sessionCallRows(session)].sort((a, b) => b.at.localeCompare(a.at)) : []), [state, snapshot, session]);
 
   return (
     <section aria-labelledby="ai-calls-h" className="space-y-5" data-testid="ai-calls">
       <header>
         <h1 id="ai-calls-h" className="text-2xl font-bold text-fg">AI calls</h1>
         <p className="mt-1 max-w-prose text-sm text-muted">
-          Every AI call in this project, from the route records the browser reported: where each one was meant to run, and where it actually ran. Nothing here is a
+          Every AI call in this project, from the route records the browser reported, and this tab's Assistant and onboarding calls, which are not task steps: where each one was meant to run, and where it actually ran. Nothing here is a
           prediction. A call whose source was not shown stays Unknown, and a restricted call shows its labels only.{simulated ? ' Demo data: never evidence.' : ''}
         </p>
       </header>
@@ -47,7 +51,7 @@ export function AiCallsView({ source, snapshot, projectId, simulated }: { source
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-fg">{r.step}</span>
                     <span className="text-muted">·</span>
-                    <a className="min-w-0 wrap-anywhere text-active underline underline-offset-2" href={r.taskHref}>{r.task}</a>
+                    {r.taskHref ? <a className="min-w-0 wrap-anywhere text-active underline underline-offset-2" href={r.taskHref}>{r.task}</a> : <span className="text-muted" data-testid="ai-call-not-task">{r.task}</span>}
                     <span className="ml-auto text-sm text-muted"><time dateTime={r.at}>{formatClock(r.at)}</time></span>
                   </div>
                   <dl className="mt-2 grid grid-cols-1 gap-x-4 gap-y-1 text-sm sm:grid-cols-[minmax(9rem,auto)_minmax(0,1fr)]">

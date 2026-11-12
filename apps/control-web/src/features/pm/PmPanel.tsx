@@ -132,7 +132,7 @@ function ReplyView({ reply, snap, browser, onAcceptPlan }: { reply: Reply; snap:
               <p className="text-sm text-muted">Until you accept it, it changes nothing. Accepting records it as the next plan revision, and sets each task&apos;s route as proposed; the server checks the call it came from first.</p>
               {reply.accepted === undefined ? (
                 o.result.locked ? <p className="text-sm text-muted" data-testid="pm-plan-locked">This plan came from restricted data. It stays on this device, so it cannot become the run\'s plan.</p>
-                  : onAcceptPlan ? <button type="button" className={buttonPrimary} onClick={onAcceptPlan}>Accept plan</button>
+                  : onAcceptPlan ? <button type="button" className={buttonPrimary} data-testid="pm-accept-plan" onClick={onAcceptPlan}>Accept plan</button>
                     : <p className="text-sm text-muted">Accept it through the replan step in the Assistant.</p>
               ) : reply.accepted === 'sending' ? <p role="status" className="text-sm text-fg">Accepting…</p>
                 : 'error' in reply.accepted ? <p className="text-sm text-danger" data-testid="pm-plan-refused">{reply.accepted.error}</p>

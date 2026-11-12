@@ -2,6 +2,7 @@ import { getAuth, connectAuthEmulator } from 'firebase/auth';
 import { connectivity, isOnline } from './features/checkpoints/connectivity.ts';
 import { FirebaseHybridAssistantAdapter, createFirebaseSdk, type FetchRoute } from '@selarikru/inference-firebase-web';
 import { app } from './firebase-app.ts';
+import { sessionCalls } from './features/calls/session.ts';
 
 // H9: the web config comes from the VITE_FIREBASE_* env variables (firebase-app.ts), never from the source.
 export { app };
@@ -22,7 +23,7 @@ if (usingAuthEmulator) {
 export function createAdapter(fetchRoute: FetchRoute = async () => { throw new Error('no task route source is wired'); }): FirebaseHybridAssistantAdapter {
   const siteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;
   // H12: a call that needs the cloud while this browser is offline waits as a checkpoint instead of being sent.
-  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }), fetchRoute, isOnline, onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() });
+  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }), fetchRoute, isOnline, onTelemetry: (e) => sessionCalls.getState().add(e), onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() });
 }
 
 export const getOwnerToken = async (): Promise<string> => {

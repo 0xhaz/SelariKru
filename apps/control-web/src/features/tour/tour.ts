@@ -10,10 +10,12 @@ export interface TourStep {
   readonly body: string;
   /** Where the step is shown. */
   readonly hash: string;
-  /** What it points at: a CSS selector, or `roof:device` for the rooftop's ON THIS DEVICE box on the office canvas. */
+  /** What it points at: CSS selectors in order of preference (` || ` between them), or `roof:device` for the rooftop's ON THIS DEVICE box on the office canvas. */
   readonly target: string;
   /** Step 4 only: the real offline and reconnect actions. */
   readonly offline?: true;
+  /** H9 fix round 1 (M2): asks the PM for a plan on demo data, through the PM panel itself. */
+  readonly pm?: true;
 }
 
 export const TOUR_STEPS: readonly TourStep[] = [
@@ -38,14 +40,14 @@ export const TOUR_STEPS: readonly TourStep[] = [
     hash: '#/actions', target: '[data-testid="paused-work"]', offline: true,
   },
   {
-    title: 'Where every call ran',
-    body: 'AI calls lists every call from its route record: the route it asked for, and where it actually ran. Unknown stays unknown, and a restricted call shows its labels only.',
-    hash: '#/calls', target: '[data-testid="ai-calls"]',
+    title: 'Ask the Project Manager',
+    body: 'The Project Manager is an AI agent too. Ask it for a plan: it drafts one on demo data, and the plan is a proposal until you accept it.',
+    hash: '#/pm', target: '[data-testid="pm-accept-plan"] || [data-testid="pm-question"]', pm: true,
   },
   {
-    title: 'Ask the Project Manager',
-    body: 'The Project Manager is an AI agent too. Ask it about a task, or for a plan; its plan is a proposal until you accept it.',
-    hash: '#/pm', target: '[data-testid="pm-question"]',
+    title: 'Where every call ran',
+    body: 'AI calls lists every call from its route record, the PM\'s plan just now included: the route it asked for, and where it actually ran. Unknown stays unknown, and a restricted call shows its labels only.',
+    hash: '#/calls', target: '[data-testid="ai-calls"]',
   },
 ];
 
