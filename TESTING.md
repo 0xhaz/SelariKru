@@ -1,0 +1,74 @@
+# Testing SelariKru
+
+SelariKru plans and runs AI coding work. Every AI step goes through **Firebase AI Logic** in the browser, either to **Gemini Nano on your device** or to **Gemini in the cloud**. Each task has a route that decides which, and the app records where every call actually ran. A local runner applies and verifies changes with no model.
+
+There are two ways to try it. The hosted demo needs only a browser. The local stack needs Node, pnpm and Docker.
+
+## 1. The hosted demo
+
+The hosted demo is the app on **demo data**. It shows a fixed, simulated project, and every screen carries a **Demo data** label. Nothing in it counts as evidence. It has no server of its own: no control API and no sign-in.
+
+The **AI calls are real.** The Assistant, the Project Manager, the task agents and the onboarding guide all call Firebase AI Logic:
+
+- the device route uses **Gemini Nano** in Chrome, on your machine;
+- the cloud route uses **Gemini** through Firebase, protected by App Check (reCAPTCHA Enterprise).
+
+Routes, locks, fallback and the record of where each call ran work as they do with live data.
+
+Some things to know before you start:
+
+- **Cloud calls are capped per tab.** The top bar shows *Cloud calls left in this demo: N* (40 per tab). This protects the free-tier quota for everyone judging. When the count reaches 0, a step that needs the cloud pauses in **Action items › Paused AI work**. From there you can move it to your device or drop it. Calls on your device are not counted.
+- **Debug › Go offline** simulates losing the connection. Your browser's own network is not changed.
+- **Start the tour** (top bar) is a six-step walk through the story: a brief drafted on the device, a large task planned in the cloud, a restricted task locked to the device, a step that waits offline and is sent after reconnecting, the **AI calls** view (Boards › AI calls), and the Project Manager. The tour is offered once on your first visit.
+
+### Getting Gemini Nano in Chrome
+
+On-device calls need desktop Chrome with the built-in Prompt API (Gemini Nano). Google's guide covers the requirements: <https://developer.chrome.com/docs/ai/get-started>. In short:
+
+1. Use a recent desktop Chrome on a machine that meets the guide's disk, memory and GPU requirements.
+2. If the API is not on by default in your version, enable the Prompt API and the on-device model in `chrome://flags`, as the guide describes, then relaunch Chrome.
+3. Open `chrome://on-device-internals` to see the model's state. The first use may start a download. The app also offers to download the model where Chrome allows it.
+
+**Without Nano**, the app says so in one calm banner when it first loads, and lists what each route will do:
+
+- **Local first** steps run in the cloud instead. They are labelled as a **fallback**, in the step's result and in AI calls.
+- **Cloud first** and **Cloud only** steps run in the cloud as usual.
+- **Local only** steps, and every task locked by **restricted** data, are **blocked**. They wait for Nano and are never sent to the cloud.
+
+## 2. The full local stack
+
+You need Node 24, pnpm 9 and Docker. Copy `.env.example` to `.env` (repository root), and `apps/control-web/.env.example` to `apps/control-web/.env.local`. Each file lists the variable **names** only. Fill in your own values, and never commit them.
+
+```sh
+pnpm install
+
+# Demo data in the browser, with a stand-in model (no network, no Firebase):
+pnpm --filter @selarikru/control-web dev
+# then open http://127.0.0.1:5173/?demo
+
+# The local stack: Postgres, migrations, the Firebase Auth Emulator and the control API.
+pnpm db:up
+pnpm dev:demo      # stack + a seeded demo account, project and run + the web app
+pnpm dev:real      # stack + a real run against a local checkout (see .env.example)
+```
+
+AI calls in the local stack need your own Firebase project's web config. Set the `VITE_FIREBASE_*` values, plus `VITE_RECAPTCHA_SITE_KEY` for App Check, in `apps/control-web/.env.local`.
+
+To build and preview the hosted demo locally, set the same variables in the environment, then run:
+
+```sh
+pnpm --filter @selarikru/control-web build:hosted
+pnpm --filter @selarikru/control-web exec vite preview --outDir dist-hosted
+```
+
+The build fails if any `VITE_FIREBASE_*` variable or the reCAPTCHA site key is missing. It also refuses to build with an App Check debug token set.
+
+### Automated tests
+
+```sh
+pnpm typecheck
+pnpm --filter @selarikru/control-web exec vitest run
+pnpm --filter @selarikru/control-web exec playwright test   # starts its own dev server on port 5174
+```
+
+No test needs a key: the build tests use placeholder values.
