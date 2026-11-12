@@ -195,7 +195,7 @@ describe('fix 2 (N2): a claim is released on every exit that is not a closing wr
     let refuse = true;
     h.engine.attach({
       ...h.runner,
-      run: async (req) => {
+      run: async (req: Parameters<CheckpointRunner["run"]>[0]) => {
         h.runs.push(req);
         const rec = h.engine.begin({ taskId: req.taskId, stepKind: req.kind, callOverride: req.callOverride, ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}) });
         if (refuse) { await rec.finish({ kind: 'refused', code: 'inputs_changed' }); return { kind: 'refused', code: 'inputs_changed' }; }
@@ -420,15 +420,21 @@ describe('the checkpoint engine (H12)', () => {
       expect(locked.engine.store.getState().problems[lid]).toEqual(['locked']);
     });
 
-    it('fix 1 (I1): escalation runs the full re-validation first: a run with no budget does not escalate, and the checkpoint says budget', async () => {
+    it('fix 2 (N3): a budget block keeps why the step paused: no budget, it is not escalated (local_failed_checks, problem budget); with a budget it escalates, labelled escalated', async () => {
       const h = setup({}, localFirst);
       h.setSnap(snap({ budget: { value: 25, basis: 'recommended' } }));
       const id = await localFailed(h);
       expect(h.runs).toEqual([]);
       expect(h.server.claims).toBe(0);
       expect(h.engine.store.getState().problems[id]).toEqual(['budget_missing']);
-      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'waiting', stopReason: 'budget' });
-      expect(h.server.rows.get(id)).toMatchObject({ stopReason: 'budget' });
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'waiting', stopReason: 'local_failed_checks', problems: ['budget_missing'] });
+      expect(h.server.rows.get(id)).toMatchObject({ stopReason: 'local_failed_checks', problems: ['budget_missing'] });
+      // The owner sets a budget: the step escalates, as an escalation, not as "Sent after reconnecting".
+      h.setSnap(snap());
+      await h.engine.reconnect();
+      expect(h.runs).toEqual([expect.objectContaining({ callOverride: 'ONLY_IN_CLOUD', resume: expect.objectContaining({ kind: 'escalated' }) })]);
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'escalated', resumedAs: 'escalated' });
+      expect(h.engine.store.getState().checkpoints[id]!.problems ?? []).toEqual([]);
     });
 
     it('fix 1 (I1): escalation is refused when the inputs changed since the pause', async () => {
@@ -438,7 +444,7 @@ describe('the checkpoint engine (H12)', () => {
       expect(h.engine.store.getState().problems[id]).toContain('inputs_changed');
     });
 
-    it('fix 1 (I1): a cloud resume the budget blocks records the stop reason budget', async () => {
+    it('fix 2 (N3): a cloud resume the budget blocks keeps its stop reason, offline, and records the budget as a problem', async () => {
       const h = setup();
       h.setOnline(false);
       const id = await pauseOffline(h);
@@ -446,7 +452,7 @@ describe('the checkpoint engine (H12)', () => {
       h.setOnline(true);
       await h.engine.reconnect();
       expect(h.runs).toEqual([]);
-      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ stopReason: 'budget' });
+      expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ stopReason: 'offline', problems: ['budget_missing'] });
     });
 
     it('outside the plan it waits for the owner', async () => {

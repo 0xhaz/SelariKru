@@ -15,7 +15,8 @@ import { ROUTE_RESUMES, RoutePolicyModeSchema, RouteStepKindSchema, suggestRoute
  * A checkpoint holds ids, hashes, sizes, codes, and text only with its label (the PM's turns). Never a prompt, a bundle, file contents or a model's answer.
  */
 /**
- * Why a step stopped. `budget`: a cloud send was blocked by the run's budget (missing or spent). `awaiting_owner` is reserved: nothing sets it yet; a step that waits
+ * Why a step stopped. `budget`: the step's first pause was the run's budget (missing or spent); a step that paused for another reason keeps that reason, and a
+ * later budget block is recorded as a problem on it (fix round 2, N3). `awaiting_owner` is reserved: nothing sets it yet; a step that waits
  * for the owner is shown through its Action items ask, with the stop reason it already had.
  */
 export const AI_CHECKPOINT_STOP_REASONS = ['offline', 'input_too_large_for_device', 'local_failed_checks', 'awaiting_owner', 'route_changed', 'budget'] as const;
@@ -92,6 +93,10 @@ export const AiCheckpointSchema = z.strictObject({
   /** Set once, when the step was escalated to the cloud: a reload can never escalate it again. */
   escalatedAt: Iso.nullable(),
   resumedAs: z.enum(AI_CHECKPOINT_RESUMES).nullable(),
+  /**
+   * Fix round 2 (N3): why its last re-validation did not send it (codes such as `budget_missing`), kept with it. The stop reason still says why it first paused.
+   */
+  problems: z.array(z.string().regex(/^[a-z][a-z_]{0,39}$/)).max(10).optional(),
   /** Fix round 1 (I3): kept on this device only, whatever its labels say now (its route was locked, or the server judged it restricted). Never sent. */
   deviceOnly: z.boolean().optional(),
   createdAt: Iso,

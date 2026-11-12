@@ -220,7 +220,9 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
           cp = { ...draft, status: 'waiting', stopReason: stop, partial: { issues, texts: draft.partial?.texts ?? [] } };
         } else {
           const status = !start.resumedAs ? 'done' : start.resumedAs === 'after_reconnect' ? 'sent' : start.resumedAs === 'escalated' ? 'escalated' : 'moved_to_device';
-          cp = { ...draft, status, stopReason: null, resumedAs: start.resumedAs ?? null };
+          const { problems: _cleared, ...rest } = draft;
+          void _cleared;
+          cp = { ...rest, status, stopReason: null, resumedAs: start.resumedAs ?? null };
           setFor('problems', id, undefined);
           setFor('asks', id, undefined);
         }
@@ -319,7 +321,12 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     if (v.ok) return true;
     setFor('problems', cp.checkpointId, v.problems);
     setFor('asks', cp.checkpointId, undefined);
-    if (v.problems.some((p) => p === 'budget_missing' || p === 'budget_exhausted') && cp.stopReason !== 'budget') await write({ ...cp, stopReason: 'budget', updatedAt: now() });
+    // Fix round 2 (N3): a budget block never erases why the step paused (offline, a local result that failed its checks): it is kept as a problem on the
+    // checkpoint, so once a budget is set the step continues as what it was (an escalation stays an escalation).
+    if (v.problems.some((p) => p === 'budget_missing' || p === 'budget_exhausted')) {
+      const current = store.getState().checkpoints[cp.checkpointId] ?? cp;
+      await write({ ...current, problems: [...v.problems], updatedAt: now() });
+    }
     return false;
   }
 
@@ -384,6 +391,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       }
       patch(() => ({ checkpoints: merged }));
       for (const cp of mine) if (cp.deviceOnly === true || checkpointStorage(cp) !== 'server') setFor('deviceOnly', cp.checkpointId, true);
+      // The reasons a waiting checkpoint was last held back (fix round 2, N3) are shown again after a reload.
+      for (const cp of Object.values(merged)) if (cp.status === 'waiting' && cp.problems && cp.problems.length > 0) setFor('problems', cp.checkpointId, cp.problems);
       // Fix round 1 (M6): a step left running (its tab closed mid-step) for 30 minutes is closed as abandoned, here and on the server; a closed checkpoint older
       // than 7 days is purged from this device. Waiting ones are kept: they are the queue.
       const at = (deps.now ?? (() => new Date()))().getTime();
