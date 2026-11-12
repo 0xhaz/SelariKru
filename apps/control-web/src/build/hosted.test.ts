@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { matchesGlob } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -29,6 +30,13 @@ describe('H9: the Firebase web config comes from VITE_FIREBASE_* env variables',
   it('every name is listed in .env.example, with no value', () => {
     const example = readFileSync(new URL('../../../../.env.example', import.meta.url), 'utf8');
     for (const name of [...FIREBASE_ENV_NAMES, 'VITE_RECAPTCHA_SITE_KEY']) expect(example).toMatch(new RegExp(`^${name}=$`, 'm'));
+  });
+
+  it('H9 fix round 1 (H3): no tracked file in the repository holds a web API key literal (the spike reads its config from env too)', () => {
+    const root = new URL('../../../../', import.meta.url).pathname;
+    let hits = '';
+    try { hits = execFileSync('git', ['grep', '-lE', 'AIza[0-9A-Za-z_-]{35}'], { cwd: root, encoding: 'utf8' }); } catch { hits = ''; }
+    expect(hits.trim()).toBe('');
   });
 
   it('the source holds no web API key literal', () => {

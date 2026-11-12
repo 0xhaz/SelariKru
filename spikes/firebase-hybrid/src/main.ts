@@ -13,15 +13,19 @@ import fixtures from "../fixtures/brief-fixtures.json";
 // Pinned cloud model (GA per https://firebase.google.com/docs/ai-logic/models).
 const CLOUD_MODEL = "gemini-3.5-flash-lite";
 
-// Public web client config (not a secret).
+// The web client config, from the env (names in .env.example; values in a git-ignored .env.local). H9 fix round 1 (H3): never written in the source.
+const viteEnv = import.meta.env as Record<string, string | undefined>;
 const firebaseConfig = {
-  projectId: "selarikru",
-  appId: "1:808736999784:web:991baa74a0aa41bae6eedd",
-  storageBucket: "selarikru.firebasestorage.app",
-  apiKey: "AIzaSyBEMbdymrhgD-OT2TBYlw8huB5D-BLTSyQ",
-  authDomain: "selarikru.firebaseapp.com",
-  messagingSenderId: "808736999784",
+  projectId: viteEnv.VITE_FIREBASE_PROJECT_ID,
+  appId: viteEnv.VITE_FIREBASE_APP_ID,
+  storageBucket: viteEnv.VITE_FIREBASE_STORAGE_BUCKET,
+  apiKey: viteEnv.VITE_FIREBASE_API_KEY,
+  authDomain: viteEnv.VITE_FIREBASE_AUTH_DOMAIN,
+  messagingSenderId: viteEnv.VITE_FIREBASE_MESSAGING_SENDER_ID,
 };
+if (!firebaseConfig.apiKey || !firebaseConfig.projectId || !firebaseConfig.appId) {
+  throw new Error("The Firebase web config is missing: set the VITE_FIREBASE_* variables listed in .env.example in .env.local.");
+}
 
 const app = initializeApp(firebaseConfig);
 
