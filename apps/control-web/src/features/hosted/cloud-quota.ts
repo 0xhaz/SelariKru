@@ -11,7 +11,10 @@ export interface CloudQuotaState { readonly limit: number; readonly used: number
 export interface CloudQuota {
   readonly store: StoreApi<CloudQuotaState>;
   allowed(): boolean;
-  spend(): void;
+  /** H9 fix round 1 (I2): takes one unit, or refuses at the cap. Synchronous, so two calls cannot both take the last one. */
+  reserve(): boolean;
+  /** Gives one back: the call was answered on this device. */
+  refund(): void;
 }
 
 /** Kept in this tab's session storage, so a reload does not reset it. Any storage failure is ignored: the count then lives in memory for this page. */
@@ -24,14 +27,19 @@ export function createCloudQuota(opts: { readonly limit?: number; readonly stora
     start = Number.isInteger(n) && n >= 0 ? Math.min(n, limit) : 0;
   } catch { /* storage blocked: start at zero */ }
   const store = createStore<CloudQuotaState>()(() => ({ limit, used: start }));
+  const set = (used: number): void => {
+    store.setState({ used });
+    try { storage?.setItem(KEY, String(used)); } catch { /* a convenience only */ }
+  };
   return {
     store,
     allowed: () => store.getState().used < store.getState().limit,
-    spend() {
-      const used = Math.min(store.getState().used + 1, limit);
-      store.setState({ used });
-      try { storage?.setItem(KEY, String(used)); } catch { /* a convenience only */ }
+    reserve() {
+      if (store.getState().used >= limit) return false;
+      set(store.getState().used + 1);
+      return true;
     },
+    refund() { set(Math.max(0, store.getState().used - 1)); },
   };
 }
 

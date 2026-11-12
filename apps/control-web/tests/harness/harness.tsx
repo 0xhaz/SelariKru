@@ -319,7 +319,7 @@ if (sc.onboardingApi) {
   window.__releaseAgents = () => { agentGate?.release(); agentGate = null; };
   (window as unknown as { __holdAgentsAgain: () => void }).__holdAgentsAgain = () => { agentGate = gate(); };
   const agentRuntime = { sdk: createDemoSdk({ beforeGenerate: () => agentGate?.p ?? Promise.resolve() }), simulated: true };
-  const hosted = sc.hostedQuota ? (() => { const q = createCloudQuota({ limit: sc.hostedQuota!.limit, storage: null }); for (let i = 0; i < sc.hostedQuota!.used; i++) q.spend(); return { quota: q }; })() : null;
+  const hosted = sc.hostedQuota ? (() => { const q = createCloudQuota({ limit: sc.hostedQuota!.limit, storage: null }); for (let i = 0; i < sc.hostedQuota!.used; i++) q.reserve(); return { quota: q }; })() : null;
   void spiedShell(sc.spiedFixture).then(({ store: spied, label }) => {
     root.render(
       <StrictMode>

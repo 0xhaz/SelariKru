@@ -57,7 +57,7 @@ const fetchRoute: FetchRoute = async () => {
   return fresh.route;
 };
 
-function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void; onNetworkSuccess?: () => void; cloudCalls?: { allowed(): boolean; spend(): void } } = {}) {
+function make(sdk = new FakeSdk(), events: TelemetryEvent[] = [], extra: { nanoInputBudgetChars?: number; isOnline?: () => boolean; onNetworkFailure?: () => void; onNetworkSuccess?: () => void; cloudCalls?: { allowed(): boolean; reserve(): boolean; refund(): void } } = {}) {
   let t = 0;
   fresh.route = null;
   fresh.fail = false;
@@ -794,12 +794,12 @@ describe('H12: offline', () => {
 describe('H9: the hosted demo\'s cloud call cap', () => {
   const server = (over: Partial<FreshRoute> = {}): FreshRoute => ({ runDefault: 'ONLY_IN_CLOUD', override: null, lock: null, ...over });
   const route = { taskId: 't1', stepKind: 'review' as const };
-  const cap = (limit: number) => {
-    let used = 0;
-    return { allowed: () => used < limit, spend: () => { used += 1; }, used: () => used };
+  const cap = (limit: number, start = 0) => {
+    let used = start;
+    return { allowed: () => used < limit, reserve: () => { if (used >= limit) return false; used += 1; return true; }, refund: () => { used = Math.max(0, used - 1); }, used: () => used };
   };
 
-  it('each call answered in the cloud spends one; a device answer spends none', async () => {
+  it('each call that may go to the cloud reserves one before it is sent; an answer on this device gives it back', async () => {
     const sdk = new FakeSdk();
     sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
     const quota = cap(5);
@@ -807,13 +807,42 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
     fresh.route = server();
     expect((await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).status).toBe('ok');
     expect(quota.used()).toBe(1);
+    // Local first may fall back to the cloud: reserved, then given back when the device answered.
     sdk.result = { text: GOOD, inferenceSource: 'on_device' };
+    fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
+    expect((await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).status).toBe('ok');
+    expect(quota.used()).toBe(1);
+    // Local only never reserves.
     fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
     expect((await adapter.draftBrief(req({ route }))).status).toBe('ok');
     expect(quota.used()).toBe(1);
   });
 
-  it('once the cap is reached, a call that needs the cloud is not sent: blocked as cloud_quota, so it pauses as a checkpoint; a device call still runs', async () => {
+  it('H9 fix round 1 (I2): a cloud call that fails still costs its unit', async () => {
+    const sdk = new FakeSdk();
+    sdk.gate = Promise.reject(Object.assign(new Error('quota exceeded'), { name: 'FirebaseError', code: 'AI/api-error' }));
+    sdk.gate.catch(() => undefined);
+    const quota = cap(5);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server();
+    expect((await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).status).toBe('error');
+    expect(quota.used()).toBe(1);
+  });
+
+  it('H9 fix round 1 (I2): two calls at once with one unit left: exactly one is sent, the other pauses as cloud_quota', async () => {
+    const sdk = new FakeSdk();
+    sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };
+    const quota = cap(40, 39);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server();
+    const both = await Promise.all([adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route })), adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))]);
+    expect(both.map((p) => p.status).sort()).toEqual(['blocked', 'ok']);
+    expect(both.find((p) => p.status === 'blocked')).toMatchObject({ blockedReason: 'cloud_quota' });
+    expect(sdk.prompts).toHaveLength(1);
+    expect(quota.used()).toBe(40);
+  });
+
+  it('once the cap is reached, a call that needs the cloud is not sent; Local first runs on this device only, never falling back', async () => {
     const sdk = new FakeSdk();
     const quota = cap(0);
     const { adapter } = make(sdk, [], { cloudCalls: quota });
@@ -824,7 +853,9 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
     expect(sdk.specs).toHaveLength(0);
     fresh.route = server({ runDefault: 'PREFER_ON_DEVICE' });
     expect((await adapter.draftBrief(req({ policy: cloud('PREFER_ON_DEVICE'), route }))).status).toBe('ok');
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
     fresh.route = server({ runDefault: 'ONLY_ON_DEVICE' });
     expect((await adapter.draftBrief(req({ route }))).status).toBe('ok');
+    expect(quota.used()).toBe(0);
   });
 });

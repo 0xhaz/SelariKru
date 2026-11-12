@@ -194,10 +194,13 @@ export interface AdapterOptions {
   /** H12 fix round 1 (I2): told when an answer came back from the cloud, so a network failure is cleared. */
   readonly onNetworkSuccess?: () => void;
   /**
-   * H9: a cap on cloud calls (the hosted demo's per-tab cap, which protects the free-tier quota). Once `allowed` is false, a call that needs the cloud is not sent:
-   * it is blocked as `cloud_quota`, so the caller keeps it as a checkpoint. `spend` is told of each call answered in the cloud. Absent: no cap.
+   * H9: a cap on cloud calls (the hosted demo's per-tab cap, which protects the free-tier quota). H9 fix round 1 (I2): exact. Each call that may go to the cloud
+   * reserves one unit synchronously inside the generation queue, right before it is sent, so two calls at once can never both take the last one; the unit is
+   * given back only when the answer is observed on this device. A cloud call that fails still costs it. Once nothing is left (`allowed` false, or `reserve`
+   * refused), a call that needs the cloud is blocked as `cloud_quota`, so the caller keeps it as a checkpoint, and Local first runs on this device only, never
+   * falling back. Absent: no cap.
    */
-  readonly cloudCalls?: { allowed(): boolean; spend(): void };
+  readonly cloudCalls?: { allowed(): boolean; reserve(): boolean; refund(): void };
 }
 
 /**
@@ -401,6 +404,8 @@ export class FirebaseHybridAssistantAdapter {
       allowFallback = false;
     }
 
+    // H9 fix round 1 (I2): past the cloud call cap, Local first keeps to this device: no fallback is approved for it any more.
+    if (mode === 'PREFER_ON_DEVICE' && this.cloudCalls && !this.cloudCalls.allowed()) allowFallback = false;
     // Never let the SDK choose the cloud when policy has no approved fallback.
     const deviceMustServe = mode === 'ONLY_ON_DEVICE' || (mode === 'PREFER_ON_DEVICE' && !allowFallback);
     // H11: web search runs only on a cloud-only route, and never for a locked (restricted) task. Refused before any prompt is built or model called.
@@ -442,11 +447,7 @@ export class FirebaseHybridAssistantAdapter {
     }
     // H9: past the cloud call cap, a call that would go to the cloud is not sent and waits as a checkpoint. Cloud first counts as needing the cloud: it is never
     // quietly answered on the device instead. Local first still runs on a ready device model.
-    if (!deviceMustServe && this.cloudCalls && !this.cloudCalls.allowed()) {
-      const needsCloud = requestedMode === 'ONLY_IN_CLOUD' || requestedMode === 'PREFER_IN_CLOUD'
-        || (requestedMode === 'PREFER_ON_DEVICE' && this.readiness.observe(await this.sdk.availability()) !== 'available');
-      if (needsCloud) return make({ status: 'blocked', requestedMode, input, blockedReason: 'cloud_quota' });
-    }
+    if (!deviceMustServe && this.cloudCalls && !this.cloudCalls.allowed()) return make({ status: 'blocked', requestedMode, input, blockedReason: 'cloud_quota' });
 
     const hash = await payloadSha256(systemInstruction, prompt);
     const sdkMode: InferenceMode = deviceMustServe ? 'ONLY_ON_DEVICE' : requestedMode;
@@ -460,6 +461,7 @@ export class FirebaseHybridAssistantAdapter {
     const before = current;
 
     let result;
+    let reserved = false;
     try {
       // Single-turn, one generation at a time. The route is read again inside the queue, right before generate: a lock raised, or any other change made, while this
       // call waited blocks it rather than let it run on the route it was built for.
@@ -472,6 +474,11 @@ export class FirebaseHybridAssistantAdapter {
             current = now;
             return { recheck: 'route_changed_in_queue' };
           }
+        }
+        // H9 fix round 1 (I2): one unit reserved here, synchronously in the queue, before a call that may go to the cloud is sent.
+        if (!deviceMustServe && this.cloudCalls) {
+          if (!this.cloudCalls.reserve()) return { recheck: 'cloud_quota' };
+          reserved = true;
         }
         return { result: await m.generate(prompt) };
       });
@@ -490,7 +497,8 @@ export class FirebaseHybridAssistantAdapter {
 
     const observedSource = mapInferenceSource(result.inferenceSource);
     if (observedSource === 'IN_CLOUD') this.onNetworkSuccess?.();
-    if (observedSource === 'IN_CLOUD') this.cloudCalls?.spend();
+    // Answered on this device: the reserved unit is given back. In the cloud, or not shown, it is spent.
+    if (reserved && observedSource === 'ON_DEVICE') this.cloudCalls?.refund();
     const rawInferenceSource = result.inferenceSource ?? null;
     const u = result.usage;
     const usage: ProposalUsage =

@@ -4,27 +4,29 @@ import { HOSTED_CLOUD_CALL_LIMIT, createCloudQuota, quotaText } from './cloud-qu
 const memory = () => { const m = new Map<string, string>(); return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }; };
 
 describe('H9: the hosted demo\'s per-tab cloud call cap', () => {
-  it('defaults to 40 calls, counts each cloud answer, and stops allowing at the cap', () => {
+  it('defaults to 40 calls; reserving takes one, refusing at the cap; a refund gives one back', () => {
     expect(HOSTED_CLOUD_CALL_LIMIT).toBe(40);
     const q = createCloudQuota({ limit: 2, storage: memory() });
     expect(q.allowed()).toBe(true);
-    q.spend();
+    expect(q.reserve()).toBe(true);
     expect(q.store.getState()).toEqual({ limit: 2, used: 1 });
-    q.spend();
+    expect(q.reserve()).toBe(true);
     expect(q.allowed()).toBe(false);
-    q.spend();
+    expect(q.reserve()).toBe(false);
     expect(q.store.getState().used).toBe(2);
+    q.refund();
+    expect(q.store.getState().used).toBe(1);
   });
 
   it('is kept for this tab (session storage), so a reload does not reset it; a storage that throws changes nothing else', () => {
     const s = memory();
-    createCloudQuota({ limit: 40, storage: s }).spend();
+    createCloudQuota({ limit: 40, storage: s }).reserve();
     expect(createCloudQuota({ limit: 40, storage: s }).store.getState().used).toBe(1);
     s.m.set('selarikru.hosted-cloud-calls', 'garbage');
     expect(createCloudQuota({ limit: 40, storage: s }).store.getState().used).toBe(0);
     const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
     const q = createCloudQuota({ limit: 1, storage: broken });
-    q.spend();
+    q.reserve();
     expect(q.allowed()).toBe(false);
   });
 
