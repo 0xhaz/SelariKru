@@ -41,9 +41,10 @@ function setup(over: Partial<CheckpointEngineDeps> = {}, routeNow: () => TaskRou
   const deps: CheckpointEngineDeps = {
     projectId: 'p', ownerKey: 'owner_1', device,
     server: {
-      saveAiCheckpoint: async (_p, cp) => { server.saved.push(structuredClone(cp)); server.rows.set(cp.checkpointId, { ...cp, escalatedAt: server.rows.get(cp.checkpointId)?.escalatedAt ?? null }); },
+      saveAiCheckpoint: async (_p, cp) => { if (!online) throw new Error('unavailable: network error'); server.saved.push(structuredClone(cp)); server.rows.set(cp.checkpointId, { ...cp, escalatedAt: server.rows.get(cp.checkpointId)?.escalatedAt ?? null }); },
       listAiCheckpoints: async () => [...server.rows.values()],
       claimAiCheckpointSend: async (_p, id) => {
+        if (!online) throw new Error('unavailable: network error');
         const cp = server.rows.get(id);
         if (!cp) throw new Error('checkpoint_not_found: no such checkpoint');
         if (cp.status !== 'waiting') throw new Error(`checkpoint_claimed: ${cp.status}`);
@@ -163,6 +164,28 @@ describe('fix 1 (I3): nothing is sent before the lock is known', () => {
   }
 });
 
+describe('fix 2 (N1): Move to device only works offline', () => {
+  it('offline, a server-stored checkpoint moved to device only runs on this device; its closing state syncs once reconnected', async () => {
+    const h = setup();
+    // Stored on the server while online: too large for the device on a cloud-capable route.
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'criteria', callOverride: null });
+    rec.stage({ stage: 'context', context: context(), contextId: 'ctx_1' });
+    const r = result(proposal({ status: 'blocked', blockedReason: 'input_too_large_for_device', observedSource: 'UNKNOWN' }));
+    await rec.finish({ kind: 'result', result: r, context: context() });
+    const id = rec.id;
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'waiting' });
+    h.setOnline(false);
+    await h.engine.moveToDevice(id);
+    expect(h.runs).toEqual([expect.objectContaining({ callOverride: 'ONLY_ON_DEVICE', resume: expect.objectContaining({ kind: 'device_only' }) })]);
+    expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'moved_to_device' });
+    // The server could not be told while offline; it is told once the connection is back.
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'waiting' });
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'moved_to_device' });
+  });
+});
+
 describe('fix 1 (M1, M4, M6)', () => {
   it('M1: two resumes at once send it once: busy is set before the re-check, and the server claim refuses a second tab', async () => {
     const h = setup();
@@ -232,8 +255,12 @@ describe('the checkpoint engine (H12)', () => {
     const id = await pauseOffline(h);
     const cp = h.engine.store.getState().checkpoints[id]!;
     expect(cp).toMatchObject({ status: 'waiting', stopReason: 'offline', continuation: 'cloud_capable', stage: 'criteria', routeRecordId: 'req_off' });
-    expect(h.server.rows.get(id)).toMatchObject({ status: 'waiting' });
+    // Kept on this device while offline; the server cannot be reached, so it is told on reconnect (fix round 2, N1).
     expect((await h.device.list('owner_1', 'p')).map((c) => c.checkpointId)).toEqual([id]);
+    expect(h.server.rows.has(id)).toBe(false);
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.server.rows.has(id)).toBe(true);
   });
 
   it('storage split, canary: a restricted checkpoint (a locked call, a restricted question) never reaches the server; it stays on this device', async () => {

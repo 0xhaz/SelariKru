@@ -8,6 +8,6 @@ import { createSeededClock } from './clock.ts';
 import { FIXTURE_T0_MS } from './builder.ts';
 
 /** The demo entry point: a mock over all ten fixtures with a fresh virtual clock at the fixture epoch. */
-export function createDemoDataSource(): MockDataSource {
-  return createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()) });
+export function createDemoDataSource(opts: { readonly isOffline?: () => boolean } = {}): MockDataSource {
+  return createMockDataSource({ clock: createSeededClock(new Date(FIXTURE_T0_MS).toISOString()), ...(opts.isOffline ? { isOffline: opts.isOffline } : {}) });
 }

@@ -71,6 +71,11 @@ export interface MockOptions {
   readonly clock: VirtualClock;
   /** Defaults to the ten named fixtures. */
   readonly fixtures?: readonly Fixture[];
+  /**
+   * H12 fix round 2 (N1): the demo's simulated offline (Debug › Go offline). While it is true, the checkpoint calls fail as a network failure would against the
+   * live server, so the demo behaves as live does. Absent: never offline.
+   */
+  readonly isOffline?: () => boolean;
 }
 
 export interface MockDataSource extends EngineeringDataSource {
@@ -125,6 +130,7 @@ function seedTask(seed: TaskSeed, runId: string, at: string, prior?: TaskView): 
  */
 export function createMockDataSource(options: MockOptions): MockDataSource {
   const { clock } = options;
+  const offlineCheck = (): void => { if (options.isOffline?.()) throw fail('unavailable', 'unavailable: network error (demo offline)', true); };
   const timeOf = (p: Project): number => clock.nowMs() + p.fixture.startSec * 1000;
   const projects = new Map<string, Project>();
   let closed = false;
@@ -780,6 +786,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
 
     // H12: AI step checkpoints, with the server's refusals: the storage split, the task's lock, a locked call record, a restricted served context, secrets.
     async saveAiCheckpoint(projectId, checkpoint) {
+      offlineCheck();
       const p = project(projectId);
       const parsed = AiCheckpointSchema.safeParse(checkpoint);
       if (!parsed.success) throw fail('unavailable', 'invalid_request: not a checkpoint');
@@ -805,10 +812,12 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       p.aiCheckpoints.set(cp.checkpointId, { ...cp, escalatedAt: prior?.escalatedAt ?? null });
     },
     async listAiCheckpoints(projectId) {
+      offlineCheck();
       const p = project(projectId);
       return [...p.aiCheckpoints.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({ ...c }));
     },
     async claimAiCheckpointSend(projectId, checkpointId) {
+      offlineCheck();
       const p = project(projectId);
       const cp = p.aiCheckpoints.get(checkpointId);
       if (!cp) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
@@ -818,6 +827,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       return { ...next };
     },
     async claimAiCheckpointEscalation(projectId, checkpointId) {
+      offlineCheck();
       const p = project(projectId);
       const cp = p.aiCheckpoints.get(checkpointId);
       if (!cp) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');

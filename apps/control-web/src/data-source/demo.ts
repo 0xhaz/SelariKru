@@ -72,7 +72,9 @@ function withFault(source: EngineeringDataSource, fault: DemoFault): Engineering
 export async function loadDemoSession(fault: DemoFault | null): Promise<DemoSession | null> {
   if (!import.meta.env.DEV) return null;
   const { createDemoDataSource } = await import('@selarikru/data-source-mock');
-  const mock = createDemoDataSource();
+  // H12 fix round 2 (N1): the demo's simulated offline reaches the demo server too, so its checkpoint calls fail as live ones would.
+  const { connectivity } = await import('../features/checkpoints/connectivity.ts');
+  const mock = createDemoDataSource({ isOffline: () => connectivity.getState().simulatedOffline });
   const every: Scheduler = (fn, ms) => {
     let last = mock.clock.nowMs();
     const off = mock.clock.onTick(() => {

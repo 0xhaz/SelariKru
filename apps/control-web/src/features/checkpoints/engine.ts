@@ -114,6 +114,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   const newCtx = (): string => `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
   let runner: CheckpointRunner | null = null;
   const writes = new Map<string, Promise<void>>();
+  /** Fix round 2 (N1): checkpoints whose last server write did not arrive. */
+  const unsynced = new Set<string>();
 
   const patch = (fn: (s: CheckpointState) => Partial<CheckpointState>): void => store.setState((s) => ({ ...s, ...fn(s) }));
   const setFor = <K extends 'problems' | 'asks' | 'busy' | 'deviceOnly'>(key: K, id: string, v: CheckpointState[K][string] | undefined): void =>
@@ -131,7 +133,10 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); return; }
       try {
         await deps.server!.saveAiCheckpoint!(deps.projectId, cp);
+        unsynced.delete(cp.checkpointId);
       } catch (e) {
+        // Fix round 2 (N1): not reached (offline, a network failure): this browser holds the newest copy, and it is written again on reconnect.
+        if (codeOf(e) !== 'checkpoint_restricted') unsynced.add(cp.checkpointId);
         // The server judged it restricted (its own backstop): it stays on this device from now on. Any other failure keeps it here until the next write.
         if (codeOf(e) === 'checkpoint_restricted') {
           setFor('deviceOnly', cp.checkpointId, true);
@@ -272,7 +277,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     setFor('asks', cp.checkpointId, undefined);
     try {
       // Fix round 1 (M1): one tab sends it. A stored checkpoint is claimed on the server first (waiting → sending); an escalation was claimed already.
-      if (how !== 'escalated' && deps.server?.claimAiCheckpointSend && !store.getState().deviceOnly[cp.checkpointId] && checkpointStorage(cp) === 'server') {
+      // Fix round 2 (N1): a device run sends nothing, so it needs no claim and works offline; its closing save syncs through the write-through.
+      if (how !== 'escalated' && how !== 'device_only' && deps.server?.claimAiCheckpointSend && !store.getState().deviceOnly[cp.checkpointId] && checkpointStorage(cp) === 'server') {
         const claim = () => deps.server!.claimAiCheckpointSend!(deps.projectId, cp.checkpointId);
         try {
           try { await claim(); } catch (e) {
@@ -385,6 +391,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       }
     },
     async reconnect() {
+      // First the server is told what changed here while it could not be reached (fix round 2, N1), then the queue is re-validated and sent.
+      for (const id of [...unsynced]) { const cp = store.getState().checkpoints[id]; if (cp) await write(cp); }
       for (const cp of Object.values(store.getState().checkpoints)) if (cp.status === 'waiting') await process(cp.checkpointId);
     },
     process,

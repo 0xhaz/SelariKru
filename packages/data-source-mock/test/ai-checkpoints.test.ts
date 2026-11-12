@@ -66,6 +66,22 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     await expect(ds.saveAiCheckpoint!(f.projectId, cp({ checkpointId: 'ckp_demo_abandon01' }))).rejects.toThrow(/checkpoint_closed/);
   });
 
+  it('fix 2 (N1): while the demo is offline its checkpoint calls fail like a network failure, so the demo matches live', async () => {
+    let offline = false;
+    const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)), isOffline: () => offline });
+    const f = buildFixture('feature-delivery');
+    const snap = await ds.getSnapshot(f.projectId);
+    const runId = Object.keys(snap.runs)[0]!;
+    const one = { ...(await setup()).cp(), runId, taskRevision: snap.tasks[id('search')]!.revision, planRevision: snap.runs[runId]!.planRevision };
+    await ds.saveAiCheckpoint!(f.projectId, one);
+    offline = true;
+    await expect(ds.claimAiCheckpointSend!(f.projectId, one.checkpointId)).rejects.toThrow(/network/);
+    await expect(ds.saveAiCheckpoint!(f.projectId, { ...one, status: 'moved_to_device' })).rejects.toThrow(/network/);
+    offline = false;
+    await ds.saveAiCheckpoint!(f.projectId, { ...one, status: 'moved_to_device' });
+    expect((await ds.listAiCheckpoints!(f.projectId))[0]!.status).toBe('moved_to_device');
+  });
+
   it('a resumed call\'s route record says so', async () => {
     const { ds, f } = await setup();
     const report = { kind: 'route' as const, requestId: 'req-resumed', stepKind: 'criteria' as const, callOverride: 'ONLY_IN_CLOUD' as const, requestedMode: 'ONLY_IN_CLOUD' as const, observedSource: 'IN_CLOUD' as const, status: 'ok' as const,

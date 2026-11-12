@@ -84,3 +84,17 @@ test('the offline queue survives a reload: kept in IndexedDB, sent once the page
   await expect(action(page, 'criteria').getByTestId('result-resumed')).toContainText('Sent after reconnecting');
   await expect(action(page, 'criteria').getByTestId('agent-result')).not.toContainText('Fell back');
 });
+
+test('fix 2 (N1): offline, Move to device only runs the step on this device; nothing waits on the connection', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pipeline');
+  await network(page, 'Go offline');
+  await row(page, T('contract')).getByRole('button', { name: 'Approve API contract' }).click();
+  await action(page, 'criteria').getByRole('button', { name: 'Draft criteria' }).click();
+  await expect(action(page, 'criteria').getByTestId('agent-result')).toHaveAttribute('data-status', 'waiting');
+  await page.goto('/tests/harness/index.html#/actions');
+  const paused = page.getByTestId('paused-work');
+  await paused.getByRole('button', { name: 'Move to device only' }).click();
+  await expect(page.getByTestId('paused-work')).toHaveCount(0);
+  await expect(page.getByTestId('activity-feed')).toContainText('Approve API contract · Draft criteria: Moved to device only');
+});
