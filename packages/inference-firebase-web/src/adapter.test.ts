@@ -843,6 +843,17 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
     expect(quota.used()).toBe(1);
   });
 
+  it('H9 fix round 2: a cloud call that fails on the network was never sent: its unit is given back, and it waits as offline', async () => {
+    const sdk = new FakeSdk();
+    sdk.gate = Promise.reject(Object.assign(new Error('fetch failed'), { name: 'FirebaseError', code: 'AI/fetch-error' }));
+    sdk.gate.catch(() => undefined);
+    const quota = cap(5);
+    const { adapter } = make(sdk, [], { cloudCalls: quota });
+    fresh.route = server();
+    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline' });
+    expect(quota.used()).toBe(0);
+  });
+
   it('H9 fix round 1 (I2): two calls at once with one unit left: exactly one is sent, the other pauses as cloud_quota', async () => {
     const sdk = new FakeSdk();
     sdk.result = { text: GOOD, inferenceSource: 'in_cloud' };

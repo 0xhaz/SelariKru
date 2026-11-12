@@ -495,6 +495,8 @@ export class FirebaseHybridAssistantAdapter {
     } catch (e) {
       // H12: a cloud request that failed on the network never reached the cloud. It is offline, not an error: the step can wait for the connection.
       if (!deviceMustServe && isNetworkFailure(e)) {
+        // H9 fix round 2: the request never reached the cloud, so its reserved unit is given back.
+        if (reserved) this.cloudCalls?.refund();
         this.onNetworkFailure?.();
         return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: 'offline', errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
       }

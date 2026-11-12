@@ -4,6 +4,7 @@ import { matchesGlob } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONTENT_SECURITY_POLICY } from './csp.ts';
 import { FIREBASE_ENV_NAMES, firebaseConfigFromEnv, hostedEnvGuard, missingBuildEnv } from './hosted.ts';
+import { trackedKeyFiles } from './repo-keys.ts';
 
 /** Placeholders only: no real key, id or site key is ever used in a test. */
 const PLACEHOLDER: Record<string, string> = {
@@ -34,9 +35,15 @@ describe('H9: the Firebase web config comes from VITE_FIREBASE_* env variables',
 
   it('H9 fix round 1 (H3): no tracked file in the repository holds a web API key literal (the spike reads its config from env too)', () => {
     const root = new URL('../../../../', import.meta.url).pathname;
-    let hits = '';
-    try { hits = execFileSync('git', ['grep', '-lE', 'AIza[0-9A-Za-z_-]{35}'], { cwd: root, encoding: 'utf8' }); } catch { hits = ''; }
-    expect(hits.trim()).toBe('');
+    expect(trackedKeyFiles((args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }))).toEqual([]);
+  });
+
+  it('H9 fix round 2: only git grep\'s "no match" (exit status 1) counts as no hits; any other failure fails the check', () => {
+    const fail = (status: number) => () => { throw Object.assign(new Error(`git exited ${status}`), { status }); };
+    expect(trackedKeyFiles(fail(1))).toEqual([]);
+    expect(() => trackedKeyFiles(fail(2))).toThrow(/git exited 2/);
+    expect(() => trackedKeyFiles(() => { throw new Error('spawn git ENOENT'); })).toThrow(/ENOENT/);
+    expect(trackedKeyFiles(() => 'a.ts\nb.ts\n')).toEqual(['a.ts', 'b.ts']);
   });
 
   it('the source holds no web API key literal', () => {
