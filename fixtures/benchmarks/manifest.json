@@ -231,7 +231,10 @@
   },
   "starts": {
     "workers": null,
-    "assistant": null
+    "assistant": {
+      "startedAtUtc": "2026-11-12T13:51:21.683Z",
+      "manifestSha256": "ddf7806d48662795e3e341b7cd93067a95544780f170ca36b1b969f3e2762ea4"
+    }
   },
   "protocolNotes": [
     {
