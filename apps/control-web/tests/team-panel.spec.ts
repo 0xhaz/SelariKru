@@ -148,7 +148,8 @@ test('selecting a worker opens the drawer without navigation', async ({ page }) 
 
 test('changing a model in the drawer applies to the next attempt', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await spied(page, { spiedFixture: 'healthy-parallel-work' }, 'summary');
+  // The model controls are for Claude Code workers, shown only when they are on (H9).
+  await spied(page, { spiedFixture: 'healthy-parallel-work', codingWorkers: 'claude_code' }, 'summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const settings = drawer(page).getByTestId('worker-settings');
@@ -411,7 +412,7 @@ test('the page beside an open drawer is dimmed and says why it does not respond'
 
 test('crossing the panel width with the drawer open keeps what is in Settings', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/?demo&fixture=healthy-parallel-work#/summary');
+  await page.goto('/?demo&fixture=healthy-parallel-work&codingWorkers=claude_code#/summary');
   await panelRow(page, 'runner_local_1').click();
   await drawer(page).getByRole('tab', { name: 'Settings' }).click();
   const model = drawer(page).getByRole('region', { name: 'Model for this task' }).getByLabel('Model for Feedback API');

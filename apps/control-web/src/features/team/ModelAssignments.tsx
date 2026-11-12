@@ -124,6 +124,7 @@ function AssignmentRow({ target, model, disabledReason, onExecute, onRefresh, on
 export function ModelAssignmentsPanel(props: AssignProps) {
   const { model } = props;
   return (
+    <div data-testid="model-assignments">
     <Panel title="Model assignments" labelId="team-assignments-title" aside={model.available ? APPLIES : null} className="mb-6">
       {model.codingWorkersNote ? <p className="mb-3 rounded-chip border border-line bg-panel-2 p-2.5 text-sm text-fg" data-testid="coding-workers-off">{model.codingWorkersNote}</p> : null}
       {!model.available ? (
@@ -136,8 +137,12 @@ export function ModelAssignmentsPanel(props: AssignProps) {
         </ul>
       )}
     </Panel>
+    </div>
   );
 }
+
+/** H9: Claude Code workers are off in the hackathon build: their model controls are not shown. */
+export const codingWorkersOff = (model: { readonly codingWorkersNote: string | null }): boolean => model.codingWorkersNote !== null;
 
 /** One task's override, in the drawer. A benchmark trial shows its pin instead: there is nothing to change. */
 export function TaskModelOverride({ target, ...props }: AssignProps & { target: AssignmentTarget }) {

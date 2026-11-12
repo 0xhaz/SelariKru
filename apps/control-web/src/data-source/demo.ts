@@ -69,7 +69,15 @@ function withFault(source: EngineeringDataSource, fault: DemoFault): Engineering
   };
 }
 
-export async function loadDemoSession(fault: DemoFault | null): Promise<DemoSession | null> {
+/**
+ * H9, dev only: the demo fixtures are the hackathon build's, with coding workers off. `?demo&codingWorkers=claude_code` turns them on in the snapshot, so the
+ * screens for that setting (the MCP section, the Claude Code model controls) can be seen and tested.
+ */
+function withCodingWorkers(source: EngineeringDataSource, codingWorkers: 'claude_code'): EngineeringDataSource {
+  return { ...source, getSnapshot: async (projectId) => { const s = await source.getSnapshot(projectId); return { ...s, modelCatalog: { ...s.modelCatalog, codingWorkers } }; } };
+}
+
+export async function loadDemoSession(fault: DemoFault | null, opts: { readonly codingWorkers?: 'claude_code' | null } = {}): Promise<DemoSession | null> {
   // Dev (`?demo`) and the hosted demo (H9, a build-time constant) only: the real build never bundles the mock.
   if (!import.meta.env.DEV && import.meta.env.VITE_HOSTED_DEMO !== '1') return null;
   const { createDemoDataSource } = await import('@selarikru/data-source-mock');
@@ -88,7 +96,7 @@ export async function loadDemoSession(fault: DemoFault | null): Promise<DemoSess
     };
   };
   return {
-    source: fault ? withFault(mock, fault) : mock,
+    source: (() => { const base = fault ? withFault(mock, fault) : mock; return import.meta.env.DEV && opts.codingWorkers === 'claude_code' ? withCodingWorkers(base, 'claude_code') : base; })(),
     projects: mock.listProjects(),
     clockFor: (projectId) => mock.clockFor(projectId),
     every,

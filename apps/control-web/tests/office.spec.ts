@@ -256,7 +256,8 @@ test.describe('settings tabs', () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'healthy-parallel-work', '#/settings');
     const tabs = page.getByRole('navigation', { name: 'Settings sections' });
-    await expect(tabs.getByRole('link')).toHaveText([/^Team/, /Knowledge and skills/, /^Workflow/, /^Stack/, /^MCP/, /^Sandbox/, /^Boards/, /^Project/, 'Team fleet', 'Assistant', 'New project']);
+    // H9: the hackathon build (coding workers off) has no MCP section; settings.spec.ts shows it with coding workers on.
+    await expect(tabs.getByRole('link')).toHaveText([/^Team/, /Knowledge and skills/, /^Workflow/, /^Stack/, /^Sandbox/, /^Boards/, /^Project/, 'Team fleet', 'Assistant', 'New project']);
     // Team: workers, models and Bounded autonomy, with the same controls Overview has.
     await expect(tabs.getByRole('link', { name: 'Team', exact: true })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByTestId('settings-workers').getByRole('listitem')).toHaveCount(2);
@@ -272,8 +273,6 @@ test.describe('settings tabs', () => {
     await expect(page.locator('#main')).toContainText('Human merge on GitHub. Agents never merge.');
     await tabs.getByRole('link', { name: 'Stack', exact: true }).click();
     await expect(page.getByRole('heading', { level: 2, name: 'Stack' })).toBeVisible();
-    await tabs.getByRole('link', { name: 'MCP', exact: true }).click();
-    await expect(page.getByTestId('settings-mcp-missing')).toContainText('No MCP connections yet. Connectors are not built.');
     await tabs.getByRole('link', { name: 'Sandbox', exact: true }).click();
     await expect(page.getByTestId('settings-sandbox-missing')).toContainText('not reported');
     await tabs.getByRole('link', { name: 'Boards', exact: true }).click();
@@ -358,7 +357,7 @@ test.describe('closing Settings', () => {
     await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
     await expect(search).toBeFocused();
     // A button inside is a control too: Escape there does nothing.
-    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'MCP' }).focus();
+    await page.getByRole('navigation', { name: 'Settings sections' }).getByRole('link', { name: 'Boards' }).focus();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
   });

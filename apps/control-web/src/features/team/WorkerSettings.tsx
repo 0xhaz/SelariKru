@@ -7,7 +7,7 @@ import { ConfirmDialog } from '../decisions/ConfirmDialog.tsx';
 import { ActionControl } from '../decisions/DecisionCard.tsx';
 import { CHANGED_NOT_SENT_MESSAGE, NETWORK_MESSAGE, NOT_SENT_MESSAGE, outcomeMessage, rejectionView } from '../decisions/copy.ts';
 import type { DecisionCardModel } from '../decisions/model.ts';
-import { RoleModelAssignment, TaskModelOverride } from './ModelAssignments.tsx';
+import { RoleModelAssignment, TaskModelOverride, codingWorkersOff } from './ModelAssignments.tsx';
 import type { TeamRow } from './model.ts';
 import { STOP_CARD, confirmationStale, currentAction, type CommandAction, type PendingConfirm, type WorkerSettingsModel } from './settings.ts';
 import { CHANGED_ON_SCREEN, holdActions, useChangedCards } from '../decisions/useChangedCards.ts';
@@ -144,11 +144,11 @@ export function WorkerSettings({ row, settings, assign, live, onExecute, onRefre
         </Section>
       ) : null}
 
-      <Section title="Model" testId="settings-model">
+      {codingWorkersOff(assign.model) ? null : <Section title="Model" testId="settings-model">
         <p className="text-sm text-muted">A change applies from the next attempt. The attempt running now keeps the model it was started with{row.assignment ? <>: <span className="font-mono text-mono text-fg">{row.assignment.provider} / {row.assignment.model}</span></> : ', which is not recorded'}.</p>
         {row.overrideTarget ? <TaskModelOverride {...assign} target={row.overrideTarget} /> : <p className="text-sm text-muted">{row.task || row.lastTask ? 'This task can take no further attempt, so its model cannot change.' : 'No task, so there is no task model to change.'}</p>}
         {roleTarget && !row.overrideTarget?.pinned ? <RoleModelAssignment {...assign} target={roleTarget} /> : null}
-      </Section>
+      </Section>}
 
       {controls ? (
         <Section title="Worker" testId="settings-worker">
@@ -159,7 +159,7 @@ export function WorkerSettings({ row, settings, assign, live, onExecute, onRefre
       <Section title="Cancel this task" testId="settings-stop">
         {stop ? (
           <div className="space-y-2 rounded-chip border border-line p-3">
-            <p id={`${reasonId}-stop-explain`} className="text-sm text-fg">Cancelling stops the running attempt and ends <span className="font-medium">{row.task?.title}</span> for good. To keep the task and try another model, change the model above instead.</p>
+            <p id={`${reasonId}-stop-explain`} className="text-sm text-fg">Cancelling stops the running attempt and ends <span className="font-medium">{row.task?.title}</span> for good.{codingWorkersOff(assign.model) ? '' : ' To keep the task and try another model, change the model above instead.'}</p>
             <div className="max-w-xs"><ActionControl action={stop} busyId={busy} cardId={STOP_CARD} describedBy={[`${reasonId}-stop-explain`, ...(stop.disabledReason !== null ? [`${reasonId}-stop`] : [])].join(' ')} onCommand={(a) => request(STOP_CARD, null, a)} /></div>
             {stop.disabledReason !== null ? <p id={`${reasonId}-stop`} data-testid="stop-disabled-reason" className="text-sm text-muted">{stop.disabledReason}</p> : null}
           </div>

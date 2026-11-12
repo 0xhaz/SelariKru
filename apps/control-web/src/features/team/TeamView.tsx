@@ -3,7 +3,7 @@ import { AxisBadges, Chip, EmptyState, Panel, RAIL_BORDER, RAIL_SHADOW, Timestam
 import type { AuthorizedViewCommand, CommandReceipt, DataSourceError } from '@selarikru/view-protocol';
 import { ConnectionBanner, NextStep, STATE_COPY } from '../../shell/ConnectionStates.tsx';
 import type { ConnectionState } from '../../shell/projection-store.ts';
-import { ASSIGNMENTS_OFF, ModelAssignmentsPanel } from './ModelAssignments.tsx';
+import { ASSIGNMENTS_OFF, ModelAssignmentsPanel, codingWorkersOff } from './ModelAssignments.tsx';
 import { ActivitySignalView, HealthSignalView, PROVENANCE_CHIP, ResultSignalView, roleName } from './TeamSignals.tsx';
 import { NO_FILTER, SORT_KEYS, filterRows, sortRows, type FleetFilter, type RunnerRow, type SortKey, type TeamModel, type TeamRow } from './model.ts';
 
@@ -232,7 +232,8 @@ export function TeamView({ connection, error, team, confirmedAt, nowMs, mode, on
     <>
       <Heading summary={team.summary} />
       <ConnectionBanner connection={connection} error={error} onRestart={onRestart} observedAt={confirmedAt} />
-      <ModelAssignmentsPanel {...assignProps} />
+      {/* H9: the model controls apply only to Claude Code workers, which are off in the hackathon build. */}
+      {codingWorkersOff(team.assignments) ? null : <ModelAssignmentsPanel {...assignProps} />}
       {team.empty ? (
         <section aria-label="Workers" className="rounded-card border border-line bg-panel">
           <EmptyState title="No workers have started" action={<NextStep mode={mode} leaveDemoHref={leaveDemoHref} />}>

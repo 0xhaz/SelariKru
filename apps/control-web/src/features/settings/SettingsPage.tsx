@@ -10,7 +10,7 @@ import { SETTINGS_MENU_EXTRA, SETTINGS_TABS, settingsHref, settingsSection, type
 import { FONT_STYLES, setFont, useFont } from '../../theme/fonts.ts';
 import { SkillsSettings } from '../skills/SkillsSettings.tsx';
 import { StackSettings } from '../stack/StackSettings.tsx';
-import { ASSIGNMENTS_OFF, ModelAssignmentsPanel } from '../team/ModelAssignments.tsx';
+import { ASSIGNMENTS_OFF, ModelAssignmentsPanel, codingWorkersOff } from '../team/ModelAssignments.tsx';
 import type { TeamModel } from '../team/model.ts';
 import { autoDelegateModel, autonomyModel, pmNameModel, webResearchModel } from './model.ts';
 import { AutoDelegatePanel } from './SettingsPanel.tsx';
@@ -77,7 +77,7 @@ function TeamTab({ team, connection, autonomy, onOpenWorker, onExecute, onRefres
         )}
       </Panel>
       <p className="text-sm text-muted" data-testid="settings-add-worker">To add a worker, enrol another runner (<a className={link} href={settingsHref('sandbox')}>Sandbox › Runners</a>). It joins the team here, and you give it a name and a role in its drawer.</p>
-      {team && onExecute && onRefresh && onResync ? <ModelAssignmentsPanel model={team.assignments} disabledReason={connection === 'live' ? null : ASSIGNMENTS_OFF} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} idScope="settings" /> : null}
+      {team && !codingWorkersOff(team.assignments) && onExecute && onRefresh && onResync ? <ModelAssignmentsPanel model={team.assignments} disabledReason={connection === 'live' ? null : ASSIGNMENTS_OFF} onExecute={onExecute} onRefresh={onRefresh} onResync={onResync} idScope="settings" /> : null}
       {autonomy ?? (
         <Panel title="Bounded autonomy" labelId="settings-autonomy-title">
           <p className="text-muted" data-testid="settings-autonomy-missing">The server reports no policy for this run, so no limit is shown here. Nothing is invented in its place.</p>
@@ -181,17 +181,22 @@ function ProjectTab({ projectLabel, snapshot }: { projectLabel: string; snapshot
  */
 export function SettingsPage({ stack, skills = null, connection, mode, projectLabel = '', snapshot = null, team = null, autonomy = null, onOpenWorker, onExecute, onRefresh, onResync }: SettingsPageProps) {
   const query = useHashQuery();
-  const { tab, sub } = settingsSection(query.get('section'));
+  // H9: in the hackathon build (coding workers off) the integrations outside Firebase AI Logic are hidden: the MCP section, and the Claude Code model controls.
+  const integrationsOff = snapshot?.modelCatalog.codingWorkers !== 'claude_code';
+  const tabs = integrationsOff ? SETTINGS_TABS.filter((t) => t.id !== 'mcp') : SETTINGS_TABS;
+  const raw = settingsSection(query.get('section'));
+  const { tab, sub } = integrationsOff && raw.tab === 'mcp' ? { tab: 'team' as const, sub: null } : raw;
   const current = (id: SettingsTab, s: 'skills' | null = null): boolean => tab === id && sub === s;
   return (
     <div data-testid="settings-page" data-tab={tab} className="space-y-5">
       <header>
         <h1 className="text-2xl font-bold text-fg">Settings</h1>
-        <p className="mt-1 max-w-prose text-sm text-muted">Scope: this project. A worker's own model and switches are in its drawer, from the team panel.</p>
+        <p className="mt-1 max-w-prose text-sm text-muted">Scope: this project. A worker's own {integrationsOff ? '' : 'model and '}switches are in its drawer, from the team panel.</p>
+        {integrationsOff ? <p className="mt-1 max-w-prose text-sm text-fg" data-testid="integrations-off">Worker integrations (Claude Code, MCP) are outside Firebase AI Logic and are off in this build.</p> : null}
       </header>
       <div className="flex flex-col gap-5 md:flex-row">
         <nav aria-label="Settings sections" className="flex shrink-0 gap-2 overflow-x-auto pb-1 md:w-[13rem] md:flex-col md:overflow-visible">
-          {SETTINGS_TABS.map((t) => (
+          {tabs.map((t) => (
             <span key={t.id} className="contents">
               <a href={settingsHref(t.id)} aria-current={current(t.id) ? 'page' : undefined} className="btn shrink-0 flex-col items-start! px-2.5 py-1 text-left whitespace-normal md:w-full">
                 <span className="text-base">{t.label}</span>

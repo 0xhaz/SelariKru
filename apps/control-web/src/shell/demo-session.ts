@@ -44,7 +44,9 @@ export function useDemoSession(fixtureId: string): DemoState {
     const raw = params().get('fault');
     const fault = (DEMO_FAULTS as readonly string[]).includes(raw ?? '') ? (raw as DemoFault) : null;
     let cancelled = false;
-    void loadDemoSession(fault).then((s) => {
+    // Dev only (?demo): `codingWorkers=claude_code` shows the screens for coding workers turned on (H9). The hosted demo is the hackathon build: off.
+    const codingWorkers = import.meta.env.DEV && import.meta.env.VITE_HOSTED_DEMO !== '1' && params().get('codingWorkers') === 'claude_code' ? 'claude_code' as const : null;
+    void loadDemoSession(fault, { codingWorkers }).then((s) => {
       if (cancelled) return s?.close();
       // The previous round's session closes only once the new one is on screen.
       setSession((prev) => { prev?.close(); return s; });

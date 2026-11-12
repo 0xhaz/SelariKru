@@ -6,6 +6,8 @@ async function openTeam(page: Page, query = ''): Promise<void> {
   await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
 }
 const fixture = (id: string): string => `&fixture=${id}`;
+/** H9: the model controls are for Claude Code workers, shown only when they are on; the demo fixtures are the hackathon build's (off). */
+const withCodingWorkers = (query: string): string => `${query}&codingWorkers=claude_code`;
 const rows = (page: Page) => page.getByTestId('fleet-row');
 const rowOf = (page: Page, id: string) => page.locator(`[data-testid="fleet-row"][data-worker-id="${id}"]`);
 const drawer = (page: Page) => page.getByTestId('worker-drawer');
@@ -560,7 +562,7 @@ const assignmentRow = (page: Page, role: string) => page.locator(`[data-testid="
 
 test.describe('model assignment', () => {
   test('assignment is recorded on the attempt and shown on the inference badge', async ({ page }) => {
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     const local = rowOf(page, 'runner_local_1');
     await expect(local).toContainText('Local sandbox');
     await expect(local).toContainText('Model in cloud');
@@ -570,7 +572,7 @@ test.describe('model assignment', () => {
   });
 
   test('a role assignment saves through the command and says it applies to the next attempt', async ({ page }) => {
-    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work' }; });
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work', codingWorkers: 'claude_code' }; });
     await page.goto('/tests/harness/index.html#/team');
     await expect(page.getByRole('heading', { name: 'Team', level: 1 })).toBeVisible();
     const row = assignmentRow(page, 'backend');
@@ -589,7 +591,7 @@ test.describe('model assignment', () => {
   });
 
   test('an unsupported choice is explained and cannot be saved', async ({ page }) => {
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     const row = assignmentRow(page, 'backend');
     await page.getByLabel('Model for Backend').selectOption('claude-opus-5-5');
     await expect(row.getByTestId('assignment-refusal')).toContainText('Policy does not allow');
@@ -599,7 +601,7 @@ test.describe('model assignment', () => {
   });
 
   test('a server refusal is visible and typed', async ({ page }) => {
-    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work', rejectWith: 'model_not_allowed' }; });
+    await page.addInitScript(() => { (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'healthy-parallel-work', rejectWith: 'model_not_allowed', codingWorkers: 'claude_code' }; });
     await page.goto('/tests/harness/index.html#/team');
     await page.getByLabel('Model for Backend').selectOption('claude-haiku-5-5');
     await assignmentRow(page, 'backend').getByRole('button', { name: 'Save for Backend' }).click();
@@ -616,24 +618,24 @@ test.describe('model assignment', () => {
   });
 
   test('offers no provider that is not installed', async ({ page }) => {
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     await expect(page.getByLabel('Provider for Backend').locator('option')).toHaveText(['Claude']);
     await expect(page.locator('body')).not.toContainText(/codex/i);
   });
 
   test('says so when no provider is detected', async ({ page }) => {
-    await openTeam(page, fixture('no-data'));
+    await openTeam(page, withCodingWorkers(fixture('no-data')));
     await expect(page.getByTestId('assignment-unavailable')).toContainText('No runner has reported');
     await expect(page.getByLabel(/Model for/)).toHaveCount(0);
   });
 
   test('the drawer offers a per-task override, and a trial shows its pin', async ({ page }) => {
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     await openWorker(page, 'runner_local_1');
     await drawer(page).getByRole('tab', { name: 'Settings' }).click();
     await expect(drawer(page).getByRole('heading', { name: 'Model override for this task' })).toBeVisible();
     await page.keyboard.press('Escape');
-    await openTeam(page, fixture('benchmark-trial'));
+    await openTeam(page, withCodingWorkers(fixture('benchmark-trial')));
     await rows(page).first().locator('[data-open-worker]').click();
     await drawer(page).getByRole('tab', { name: 'Settings' }).click();
     await expect(drawer(page).getByTestId('trial-pin')).toContainText('claude-sonnet-5-5');
@@ -655,7 +657,7 @@ test.describe('model assignment', () => {
   for (const [width, height] of [[1440, 900], [375, 800]] as const) {
     test(`axe pass and screenshots at ${width}: control, refusal, filter`, async ({ page }) => {
       await page.setViewportSize({ width, height });
-      await openTeam(page, fixture('healthy-parallel-work'));
+      await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
       await expect(assignmentRow(page, 'backend')).toBeVisible();
       await shot(page, `assignment-control-${width}`);
       await expectNoAxeViolations(page);
@@ -673,7 +675,7 @@ test.describe('model assignment', () => {
   test('axe pass and screenshots in light theme at 1440', async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('selarikru.theme', 'light'));
     await page.setViewportSize({ width: 1440, height: 900 });
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     await expect(assignmentRow(page, 'backend')).toBeVisible();
     await shot(page, 'assignment-control-1440-light');
     await expectNoAxeViolations(page);
@@ -685,7 +687,7 @@ test.describe('model assignment', () => {
   });
 
   test('axe pass: drawer with the override control', async ({ page }) => {
-    await openTeam(page, fixture('healthy-parallel-work'));
+    await openTeam(page, withCodingWorkers(fixture('healthy-parallel-work')));
     await openWorker(page, 'runner_local_1');
     await expectNoAxeViolations(page);
   });
