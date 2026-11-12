@@ -6,3 +6,20 @@ import { createStore } from 'zustand/vanilla';
  */
 export const pmPanelAction = createStore<{ askPlan: ((question: string) => Promise<boolean>) | null }>()(() => ({ askPlan: null }));
 
+
+/**
+ * M1: one call at a time, decided synchronously. A React state flag only changes on the next render, so two calls in the same tick both saw it clear; this one is a
+ * plain object (the panel keeps it in a ref) set before anything is awaited.
+ */
+export interface BusyGuard { current: boolean }
+
+/** Runs `run` unless one is already running on this guard, in which case it answers `whenBusy` at once and starts nothing. */
+export async function exclusive<T>(guard: BusyGuard, whenBusy: T, run: () => Promise<T>): Promise<T> {
+  if (guard.current) return whenBusy;
+  guard.current = true;
+  try {
+    return await run();
+  } finally {
+    guard.current = false;
+  }
+}

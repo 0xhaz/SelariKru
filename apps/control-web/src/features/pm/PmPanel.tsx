@@ -166,7 +166,7 @@ function DelegationView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapsh
 }
 
 export { pmPanelAction } from './panel-action.ts';
-import { pmPanelAction } from './panel-action.ts';
+import { exclusive, pmPanelAction, type BusyGuard } from './panel-action.ts';
 
 /** When this tab started: PM checkpoints from before it are remembered turns (H12 PM memory); later ones are already in this tab's conversation. */
 const TAB_STARTED = new Date().toISOString();
@@ -195,7 +195,12 @@ export function PmPanel() {
   const researchGranted = webResearchGranted(snap, task?.runId ?? null);
   const autoDelegate = !(snap && run && snap.settings.some((x) => x.scope === 'run' && x.key === run.runId && x.field === 'auto_delegate' && x.desired === false));
 
-  async function ask(kind: PmKind, asked: string = question): Promise<boolean> {
+  // M1: set synchronously, before anything is awaited: two calls in the same tick start one request (a state flag only changes on the next render).
+  const asking = useRef<BusyGuard>({ current: false });
+  function ask(kind: PmKind, asked: string = question): Promise<boolean> {
+    return exclusive(asking.current, false, () => askNow(kind, asked));
+  }
+  async function askNow(kind: PmKind, asked: string): Promise<boolean> {
     if (!h?.agents || !subjectId) return false;
     const add = pmConversation.getState().add;
     // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call. A reply from a call that read
@@ -242,13 +247,10 @@ export function PmPanel() {
   // H9 fix round 2: offered to the tour while it can run; withdrawn when the panel goes away.
   const askRef = useRef(ask);
   askRef.current = ask;
-  // H9 fix round 3: while a call runs, the action starts no other: it answers false at once.
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
   const ready = Boolean(h?.agents && subjectId);
   useEffect(() => {
     if (!ready) return;
-    pmPanelAction.setState({ askPlan: (q) => (busyRef.current ? Promise.resolve(false) : askRef.current('pmPlan', q)) });
+    pmPanelAction.setState({ askPlan: (q) => askRef.current('pmPlan', q) });
     return () => pmPanelAction.setState({ askPlan: null });
   }, [ready]);
 
