@@ -17,6 +17,8 @@ export const STOP_TEXT: Readonly<Record<AiCheckpointStopReason, string>> = {
   route_changed: 'The route changed while it waited',
   budget: 'No cloud budget',
   cloud_quota: 'Cloud call limit reached for this demo',
+  // H9 fix round 3: the cloud answered 429.
+  cloud_rate_limited: 'Cloud quota or rate limit reached',
 };
 
 export const PROBLEM_TEXT: Readonly<Record<string, string>> = {

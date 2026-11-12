@@ -346,6 +346,8 @@ const REFUSALS: Readonly<Record<string, string>> = {
   offline: 'Waiting for connection. This step needs the cloud, and you are offline, so it is saved here and sent once you reconnect. Nothing was sent.',
   // H9: the hosted demo's per-tab cap. Not an error: the step waits in Action items.
   cloud_quota: 'Cloud calls left in this demo: 0. This step needs the cloud, so it is paused in Action items › Paused AI work; move it to this device or drop it there. Nothing was sent.',
+  // H9 fix round 3: the cloud answered 429. Not offline: it reached the cloud. It waits for you, and is never sent again on its own.
+  cloud_rate_limited: 'The cloud said its quota or rate limit is reached, so this step is paused in Action items › Paused AI work. Resume it later, move it to this device, or drop it.',
   inputs_changed: 'This step\'s inputs changed since it paused (its files, context or task revision), so it was not continued. Run it again.',
   input_too_large_for_device: 'The input is too large for the model on this device, and this route may not use the cloud. Nothing was cut and nothing was sent.',
   route_changed_in_queue: 'Where this task\'s AI runs changed while the call was waiting, so it was stopped before it ran. Run it again.',

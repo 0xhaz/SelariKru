@@ -96,7 +96,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
   if (!source.getTaskRoute || !source.getTaskContext) return null;
   const getTaskRoute = source.getTaskRoute;
   const getTaskContext = source.getTaskContext;
-  const adapter = opts.adapter ?? (opts.sdk ? new FirebaseHybridAssistantAdapter({ sdk: opts.sdk, fetchRoute: fetchRouteFrom(source), isOnline, onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() }) : null);
+  const adapter = opts.adapter ?? (opts.sdk ? new FirebaseHybridAssistantAdapter({ sdk: opts.sdk, fetchRoute: fetchRouteFrom(source), isOnline, onNetworkFailure: (e) => connectivity.getState().reportNetworkFailure(e), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() }) : null);
   if (!adapter) return null;
   const reportRoute = async (p: string, taskId: string, report: RouteRecordReport): Promise<void> => {
     const receipt = await opts.execute({ command: 'route.report', expectedRevision: 0, idempotencyKey: `route-${report.requestId}`, args: { projectId: p, taskId, report } });

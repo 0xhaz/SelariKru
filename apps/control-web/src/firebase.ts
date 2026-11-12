@@ -23,7 +23,7 @@ if (usingAuthEmulator) {
 export function createAdapter(fetchRoute: FetchRoute = async () => { throw new Error('no task route source is wired'); }): FirebaseHybridAssistantAdapter {
   const siteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY as string | undefined;
   // H12: a call that needs the cloud while this browser is offline waits as a checkpoint instead of being sent.
-  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }), fetchRoute, isOnline, onTelemetry: (e) => sessionCalls.getState().add(e), onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() });
+  return new FirebaseHybridAssistantAdapter({ sdk: createFirebaseSdk({ app, recaptchaSiteKey: siteKey || undefined }), fetchRoute, isOnline, onTelemetry: (e) => sessionCalls.getState().add(e), onNetworkFailure: (e) => connectivity.getState().reportNetworkFailure(e), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess() });
 }
 
 export const getOwnerToken = async (): Promise<string> => {

@@ -19,7 +19,7 @@ import { ROUTE_RESUMES, RoutePolicyModeSchema, RouteStepKindSchema, suggestRoute
  * later budget block is recorded as a problem on it (fix round 2, N3). `awaiting_owner` is reserved: nothing sets it yet; a step that waits
  * for the owner is shown through its Action items ask, with the stop reason it already had.
  */
-export const AI_CHECKPOINT_STOP_REASONS = ['offline', 'input_too_large_for_device', 'local_failed_checks', 'awaiting_owner', 'route_changed', 'budget', 'cloud_quota'] as const;
+export const AI_CHECKPOINT_STOP_REASONS = ['offline', 'input_too_large_for_device', 'local_failed_checks', 'awaiting_owner', 'route_changed', 'budget', 'cloud_quota', 'cloud_rate_limited'] as const;
 export type AiCheckpointStopReason = (typeof AI_CHECKPOINT_STOP_REASONS)[number];
 
 /** The stage boundaries. `context`: the task context was read; the others name the call that just finished (or stopped). */
@@ -142,6 +142,8 @@ export function stopReasonFor(code: string | null | undefined): AiCheckpointStop
     case 'budget': return 'budget';
     // H9: the hosted demo's per-tab cloud call cap.
     case 'cloud_quota': return 'cloud_quota';
+    // H9 fix round 3: the cloud answered 429, its quota or rate limit.
+    case 'cloud_rate_limited': return 'cloud_rate_limited';
     default: return null;
   }
 }

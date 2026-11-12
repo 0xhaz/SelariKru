@@ -194,7 +194,7 @@ export interface AdapterOptions {
    */
   readonly isOnline?: () => boolean;
   /** H12: told when a cloud request failed on the network, so the browser counts as offline until it reconnects. */
-  readonly onNetworkFailure?: () => void;
+  readonly onNetworkFailure?: (error: unknown) => void;
   /** H12 fix round 1 (I2): told when an answer came back from the cloud, so a network failure is cleared. */
   readonly onNetworkSuccess?: () => void;
   /**
@@ -207,12 +207,23 @@ export interface AdapterOptions {
   readonly cloudCalls?: { allowed(): boolean; reserve(): boolean; refund(): void };
 }
 
+/** The HTTP status the SDK attached to an error (customErrorData.status), when a response came back. Null: no response. */
+export function httpStatusOf(e: unknown): number | null {
+  const status = (e as { customErrorData?: { status?: unknown } } | null | undefined)?.customErrorData?.status;
+  return typeof status === 'number' ? status : null;
+}
+
 /**
- * H12: an SDK error that means the request never reached the cloud: only the SDK's own fetch or network error codes (fix round 1, I2). A plain TypeError is a bug,
- * not the network, and surfaces as an error. A code only; the message is never read.
+ * H12, H9 fix round 3: an SDK error that means the request never reached the cloud, as @firebase/ai 3.0.0 builds it. A non-OK HTTP response is `fetch-error`
+ * with customErrorData.status: it reached the cloud, so it is never offline. A fetch that got no response is wrapped as `error`, its message ending with the
+ * fetch failure's own (Chrome "Failed to fetch", Firefox "NetworkError…", Safari "Load failed", Node "fetch failed"). The message is only matched here, never
+ * shown or kept. Anything else, a plain TypeError (a bug) included, is not offline.
  */
 export function isNetworkFailure(e: unknown): boolean {
-  return /(^|\/)(fetch-error|network-error|network-request-failed)$/i.test(errorCodeOf(e) ?? '');
+  if (httpStatusOf(e) !== null) return false;
+  if (!/^(AI\/)?error$/.test(errorCodeOf(e) ?? '')) return false;
+  const message = e instanceof Error ? e.message : '';
+  return /Error fetching from \S+: (Failed to fetch|NetworkError\b|Load failed|fetch failed)/.test(message);
 }
 
 export interface AdapterState {
@@ -237,7 +248,7 @@ export class FirebaseHybridAssistantAdapter {
   private readonly onTelemetry: ((e: TelemetryEvent) => void) | undefined;
   private readonly budgetChars: number;
   private readonly isOnline: () => boolean;
-  private readonly onNetworkFailure: (() => void) | undefined;
+  private readonly onNetworkFailure: ((error: unknown) => void) | undefined;
   private readonly onNetworkSuccess: (() => void) | undefined;
   private readonly cloudCalls: AdapterOptions['cloudCalls'];
   private readonly ajv = new Ajv({ strict: false, allErrors: true });
@@ -497,9 +508,11 @@ export class FirebaseHybridAssistantAdapter {
       if (!deviceMustServe && isNetworkFailure(e)) {
         // H9 fix round 2: the request never reached the cloud, so its reserved unit is given back.
         if (reserved) this.cloudCalls?.refund();
-        this.onNetworkFailure?.();
+        this.onNetworkFailure?.(e);
         return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: 'offline', errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
       }
+      // H9 fix round 3: the cloud answered 429 (its quota or rate limit). Not offline, and not sent again on its own: the step pauses with that reason.
+      if (!deviceMustServe && httpStatusOf(e) === 429) return make({ status: 'blocked', requestedMode, input, payloadSha256: hash, blockedReason: 'cloud_rate_limited', errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
       return make({ status: 'error', requestedMode, input, payloadSha256: hash, errorName: e instanceof Error ? e.name : 'Error', errorCode: errorCodeOf(e) });
     }
 

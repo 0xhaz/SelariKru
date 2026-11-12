@@ -1,3 +1,4 @@
+import { isNetworkFailure } from '@selarikru/inference-firebase-web';
 import { useStore } from 'zustand';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 
@@ -22,7 +23,11 @@ export const isOnlineState = (c: Connectivity): boolean => c.navigatorOnline && 
 
 export interface ConnectivityStore extends Connectivity {
   setNavigatorOnline(online: boolean): void;
-  reportNetworkFailure(): void;
+  /**
+   * A cloud request failed on the network. H9 fix round 3: given the error, it is read with the adapter's own classifier (isNetworkFailure): an HTTP error,
+   * a 429 included, reached the cloud and never flips the app offline. Without an error it is taken as said.
+   */
+  reportNetworkFailure(error?: unknown): void;
   reportNetworkSuccess(): void;
   /** Demo only. */
   simulateOffline(offline: boolean): void;
@@ -39,7 +44,8 @@ export function createConnectivity(navigatorOnline = typeof navigator === 'undef
     navigatorOnline, networkFailed: false, probeDue: false, simulatedOffline: false,
     // The browser's own `online` event clears a network failure too: it is the browser saying the connection is back.
     setNavigatorOnline: (online) => { if (online) { stop(); backoff = 0; } set(online ? { navigatorOnline: true, networkFailed: false, probeDue: false } : { navigatorOnline: false }); },
-    reportNetworkFailure: () => {
+    reportNetworkFailure: (...args: unknown[]) => {
+      if (args.length > 0 && !isNetworkFailure(args[0])) return;
       stop();
       backoff = backoff === 0 ? PROBE_BACKOFF_MS.first : Math.min(backoff * 2, PROBE_BACKOFF_MS.max);
       set({ networkFailed: true, probeDue: false });

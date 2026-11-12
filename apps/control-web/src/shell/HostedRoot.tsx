@@ -30,7 +30,7 @@ export default function HostedRoot() {
     sdk, fetchRoute: fetchRouteFrom(source), isOnline, cloudCalls: quota,
     // H9 fix round 1 (I1): the Assistant's and the onboarding guide's calls, for AI calls (this tab only).
     onTelemetry: (e) => sessionCalls.getState().add(e),
-    onNetworkFailure: () => connectivity.getState().reportNetworkFailure(), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess(),
+    onNetworkFailure: (e) => connectivity.getState().reportNetworkFailure(e), onNetworkSuccess: () => connectivity.getState().reportNetworkSuccess(),
   }) : null), [sdk, source, quota]);
   // Demo data: results are labelled so and never evidence, though a real model wrote them.
   const agentRuntime = useMemo(() => (adapter ? { adapter, simulated: true, liveModel: true } : null), [adapter]);

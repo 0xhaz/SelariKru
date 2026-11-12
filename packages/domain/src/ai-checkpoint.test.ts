@@ -52,6 +52,8 @@ describe('AI step checkpoints (H12)', () => {
     expect(stopReasonFor('route_changed_in_queue')).toBe('route_changed');
     // H9: the hosted demo's cloud call cap pauses a cloud step as a checkpoint.
     expect(stopReasonFor('cloud_quota')).toBe('cloud_quota');
+    // H9 fix round 3: the cloud answered 429 (quota or rate limit): a pause with that reason, not offline.
+    expect(stopReasonFor('cloud_rate_limited')).toBe('cloud_rate_limited');
     expect(stopReasonFor('secret_in_input')).toBeNull();
   });
 

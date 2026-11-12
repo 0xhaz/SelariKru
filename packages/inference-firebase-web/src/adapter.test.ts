@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { FirebaseHybridAssistantAdapter, errorCodeOf, routeReportOf, type AssistRequest, type FetchRoute, type FreshRoute, type TelemetryEvent } from './adapter.ts';
 import { RouteRecordReportSchema } from '@selarikru/domain';
+import { AIError, AIErrorCode } from 'firebase/ai';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
+
+/**
+ * H9 fix round 3: SDK errors built exactly as @firebase/ai 3.0.0 builds them (dist/esm/index.esm.js, makeRequest): a non-OK HTTP response is an AIError
+ * `fetch-error` carrying customErrorData.status; a fetch that never got a response is wrapped as an AIError `error` whose message ends with the fetch failure's.
+ */
+const URL_ = 'https://firebasevertexai.googleapis.com/v1beta/projects/p/models/m:generateContent';
+const httpError = (status: number, statusText: string) => new AIError(AIErrorCode.FETCH_ERROR, `Error fetching from ${URL_}: [${status} ${statusText}] Resource exhausted`, { status, statusText });
+const networkError = (fetchMessage = 'Failed to fetch') => new AIError(AIErrorCode.ERROR, `Error fetching from ${URL_}: ${new TypeError(fetchMessage).message}`);
 
 const GOOD = JSON.stringify({ summary: 'Add a board.', acceptanceCriteria: [{ requirementId: 'FB-01', text: 'Shows posts.' }] });
 
@@ -793,15 +802,37 @@ describe('H12: offline', () => {
     expect(ok).toBe(1);
   });
 
-  it('a cloud call whose request fails on the network is offline too, and says so', async () => {
-    const sdk = new FakeSdk();
-    sdk.gate = Promise.reject(Object.assign(new Error('fetch failed'), { name: 'FirebaseError', code: 'AI/fetch-error' }));
-    sdk.gate.catch(() => undefined);
-    let failures = 0;
-    const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
-    fresh.route = server();
-    expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorCode: 'AI/fetch-error' });
-    expect(failures).toBe(1);
+  it('a cloud call whose request fails on the network (the SDK\'s AIError `error` wrapping the fetch failure) is offline too, and says so', async () => {
+    for (const message of ['Failed to fetch', 'NetworkError when attempting to fetch resource.', 'Load failed']) {
+      const sdk = new FakeSdk();
+      sdk.gate = Promise.reject(networkError(message));
+      sdk.gate.catch(() => undefined);
+      let failures = 0;
+      const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
+      fresh.route = server();
+      expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline', errorCode: 'error' });
+      expect(failures).toBe(1);
+    }
+  });
+
+  it('H9 fix round 3: an HTTP error came back from the cloud, so it is never offline: 429 pauses as the cloud quota or rate limit, 500 and 400 are errors', async () => {
+    const run = async (e: unknown) => {
+      const sdk = new FakeSdk();
+      sdk.gate = Promise.reject(e);
+      sdk.gate.catch(() => undefined);
+      let failures = 0;
+      const { adapter } = make(sdk, [], { isOnline: () => true, onNetworkFailure: () => { failures += 1; } });
+      fresh.route = server();
+      return { p: await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route })), failures };
+    };
+    const limited = await run(httpError(429, 'Too Many Requests'));
+    expect(limited.p).toMatchObject({ status: 'blocked', blockedReason: 'cloud_rate_limited', errorCode: 'fetch-error' });
+    expect(limited.failures).toBe(0);
+    for (const [status, text] of [[500, 'Internal Server Error'], [400, 'Bad Request']] as const) {
+      const r = await run(httpError(status, text));
+      expect(r.p).toMatchObject({ status: 'error', blockedReason: null, errorCode: 'fetch-error' });
+      expect(r.failures).toBe(0);
+    }
   });
 });
 
@@ -845,13 +876,26 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
 
   it('H9 fix round 2: a cloud call that fails on the network was never sent: its unit is given back, and it waits as offline', async () => {
     const sdk = new FakeSdk();
-    sdk.gate = Promise.reject(Object.assign(new Error('fetch failed'), { name: 'FirebaseError', code: 'AI/fetch-error' }));
+    sdk.gate = Promise.reject(networkError());
     sdk.gate.catch(() => undefined);
     const quota = cap(5);
     const { adapter } = make(sdk, [], { cloudCalls: quota });
     fresh.route = server();
     expect(await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).toMatchObject({ status: 'blocked', blockedReason: 'offline' });
     expect(quota.used()).toBe(0);
+  });
+
+  it('H9 fix round 3: an HTTP error reached the cloud: a 429 and a 500 each cost their unit', async () => {
+    for (const e of [httpError(429, 'Too Many Requests'), httpError(500, 'Internal Server Error')]) {
+      const sdk = new FakeSdk();
+      sdk.gate = Promise.reject(e);
+      sdk.gate.catch(() => undefined);
+      const quota = cap(5);
+      const { adapter } = make(sdk, [], { cloudCalls: quota });
+      fresh.route = server();
+      expect((await adapter.draftBrief(req({ policy: cloud('ONLY_IN_CLOUD'), route }))).blockedReason).not.toBe('offline');
+      expect(quota.used()).toBe(1);
+    }
   });
 
   it('H9 fix round 1 (I2): two calls at once with one unit left: exactly one is sent, the other pauses as cloud_quota', async () => {
