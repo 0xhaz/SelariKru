@@ -116,3 +116,24 @@ test('H9 fix round 2: when the PM cannot be asked (no run yet), step 5 says it f
   await expect(page.getByTestId('tour-pm-status')).toHaveText(/could not be asked/i, { timeout: 30_000 });
   await expect(tour.getByRole('button', { name: 'Try again' })).toBeVisible();
 });
+
+test('H9 fix round 3: Try again while the earlier PM call is still running starts no second call, and the late answer still counts', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // Every demo agent answer waits for the test, and the tour gives the PM 1 s (a development-only setting for this test).
+  await page.addInitScript(() => {
+    (window as unknown as { __scenario: unknown }).__scenario = { spiedFixture: 'feature-delivery', holdAgents: true };
+    (window as unknown as { __selarikruTourPmTimeoutMs: number }).__selarikruTourPmTimeoutMs = 1_000;
+  });
+  await page.goto('/tests/harness/index.html?tour=1#/office');
+  const tour = page.getByTestId('tour');
+  for (let n = 2; n <= 5; n++) { await tour.getByRole('button', { name: 'Next' }).click(); await expect(tour).toHaveAttribute('data-step', String(n)); }
+  await tour.getByRole('button', { name: 'Ask the PM for a plan' }).click();
+  await expect(page.getByTestId('tour-pm-status')).toHaveText(/could not be asked/i, { timeout: 15_000 });
+  const again = tour.getByRole('button', { name: 'Try again' });
+  await expect(again).toBeDisabled();
+  await expect(page.getByTestId('pm-turn-owner')).toHaveCount(1);
+  await page.evaluate(() => window.__releaseAgents!());
+  await expect(page.getByTestId('tour-pm-status')).toHaveText(/plan is ready/);
+  await expect(page.getByTestId('pm-turn-owner')).toHaveCount(1);
+});

@@ -6,7 +6,8 @@ import { officeOnScreen } from '../../office/OfficeCanvas.tsx';
 import { connectivity } from '../checkpoints/connectivity.ts';
 import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
 import { useHybrid } from '../hybrid/context.tsx';
-import { pmPanelAction } from '../pm/PmPanel.tsx';
+import { pmTimeoutMs, waitForPanel, within } from './wait.ts';
+export { waitForPanel } from './wait.ts';
 import { TOUR_FIXTURE, TOUR_OFFLINE_TASK, TOUR_STEPS, markTourOffered, tourOffered, tourStartHref } from './tour.ts';
 
 /** Who opens the tour: the top bar's "Start the tour", the first-visit offer, or `?tour=1` after the switch to the tour's demo project. */
@@ -92,18 +93,21 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
    * H9 fix round 2: step 5 asks the PM through the panel's own Draft a plan action (pmPanelAction), so it takes the button's exact path: route, lock, history and
    * checkpoint. It waits for the panel's ready signal, never for the page; any failure or timeout ends in a visible failed state with Try again.
    */
+  const inFlight = useRef<Promise<boolean> | null>(null);
+  const [settling, setSettling] = useState(false);
   const askPm = async (): Promise<void> => {
+    // H9 fix round 3: never a second call while the first has not settled (Try again stays disabled until then).
+    if (inFlight.current) return;
     setPm('asking');
-    const within = <T,>(p: Promise<T>, ms: number): Promise<T | 'timeout'> => new Promise((resolve) => { const t = window.setTimeout(() => resolve('timeout'), ms); void p.then((v) => { window.clearTimeout(t); resolve(v); }, () => { window.clearTimeout(t); resolve('timeout'); }); });
-    const ready = new Promise<NonNullable<ReturnType<typeof pmPanelAction.getState>['askPlan']>>((resolve) => {
-      const now = pmPanelAction.getState().askPlan;
-      if (now) { resolve(now); return; }
-      const off = pmPanelAction.subscribe((st) => { if (st.askPlan) { off(); resolve(st.askPlan); } });
-    });
-    const askPlan = await within(ready, 10_000);
+    const askPlan = await waitForPanel(10_000);
     if (askPlan === 'timeout') { setPm('failed'); return; }
-    const ok = await within(askPlan('Draft a plan for the open work.'), 60_000);
-    setPm(ok === true ? 'ready' : 'failed');
+    const call = askPlan('Draft a plan for the open work.').catch(() => false);
+    inFlight.current = call;
+    setSettling(true);
+    // A late answer still counts: it settles the step, ready or failed.
+    void call.then((ok) => { inFlight.current = null; setSettling(false); setPm(ok ? 'ready' : 'failed'); });
+    const ok = await within(call, pmTimeoutMs());
+    if (ok !== true) setPm('failed');
   };
   // Sent after reconnecting, as the checkpoint records it.
   useEffect(() => {
@@ -174,7 +178,7 @@ export function Tour({ projectId, simulated, onOffice }: { projectId: string; si
         {s.pm ? (
           <div className="mt-2 space-y-2" data-testid="tour-pm">
             {pm === 'failed'
-              ? <button type="button" className={buttonQuiet} onClick={() => void askPm()}>Try again</button>
+              ? <button type="button" className={buttonQuiet} disabled={settling} title={settling ? 'The earlier call has not finished yet.' : undefined} onClick={() => void askPm()}>Try again</button>
               : <button type="button" className={buttonQuiet} disabled={pm === 'asking'} onClick={() => void askPm()}>Ask the PM for a plan</button>}
             <p role="status" className="text-sm text-fg" data-testid="tour-pm-status">
               {pm === 'asking' ? 'Asking the PM…' : pm === 'ready' ? 'The plan is ready. Accept plan is below its tasks: nothing changes until you press it.' : pm === 'failed' ? 'The PM could not be asked, or did not return a plan. Try again, or use its panel directly.' : ''}

@@ -1,7 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 import { create } from 'zustand';
-import { createStore } from 'zustand/vanilla';
 import type { BrowserInputs } from '../hybrid/model.ts';
 import { EMPTY_CHECKPOINT_STORE } from '../checkpoints/engine.ts';
 import { planRouteProposals, routeTargets, type ShownRoute } from './routes.ts';
@@ -166,11 +165,8 @@ function DelegationView({ reply, snap }: { reply: Reply; snap: ProjectViewSnapsh
   );
 }
 
-/**
- * H9 fix round 2: the panel's own "Draft a plan" action, offered to the guided tour while the panel can run it (it has the agents and a task to ask about).
- * Null: not ready. The tour calls this, so its question takes exactly the button's path: the same route, lock, history and checkpoint. True: a plan came back.
- */
-export const pmPanelAction = createStore<{ askPlan: ((question: string) => Promise<boolean>) | null }>()(() => ({ askPlan: null }));
+export { pmPanelAction } from './panel-action.ts';
+import { pmPanelAction } from './panel-action.ts';
 
 /** When this tab started: PM checkpoints from before it are remembered turns (H12 PM memory); later ones are already in this tab's conversation. */
 const TAB_STARTED = new Date().toISOString();
@@ -246,10 +242,13 @@ export function PmPanel() {
   // H9 fix round 2: offered to the tour while it can run; withdrawn when the panel goes away.
   const askRef = useRef(ask);
   askRef.current = ask;
+  // H9 fix round 3: while a call runs, the action starts no other: it answers false at once.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   const ready = Boolean(h?.agents && subjectId);
   useEffect(() => {
     if (!ready) return;
-    pmPanelAction.setState({ askPlan: (q) => askRef.current('pmPlan', q) });
+    pmPanelAction.setState({ askPlan: (q) => (busyRef.current ? Promise.resolve(false) : askRef.current('pmPlan', q)) });
     return () => pmPanelAction.setState({ askPlan: null });
   }, [ready]);
 

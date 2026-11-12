@@ -37,6 +37,30 @@ describe('H9 fix round 2: the tour asks the PM through the panel\'s own action, 
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('./Tour.tsx', import.meta.url), 'utf8');
     expect(src).not.toMatch(/dispatchEvent|HTMLTextAreaElement|\.click\(\)|querySelectorAll<HTMLButtonElement>/);
-    expect(src).toContain('pmPanelAction');
+    expect(src).toContain('waitForPanel');
+  });
+});
+
+describe('H9 fix round 3: waiting for the PM panel', () => {
+  it('stops listening for the panel\'s ready signal when the wait times out', async () => {
+    const { waitForPanel } = await import('./wait.ts');
+    const { pmPanelAction } = await import('../pm/panel-action.ts');
+    const { vi } = await import('vitest');
+    vi.useFakeTimers();
+    try {
+      const listeners = () => (pmPanelAction as unknown as { listeners?: Set<unknown> }).listeners;
+      void listeners;
+      let subscribed = 0;
+      const subscribe = pmPanelAction.subscribe;
+      pmPanelAction.subscribe = ((fn: Parameters<typeof subscribe>[0]) => { subscribed += 1; const off = subscribe(fn); return () => { subscribed -= 1; off(); }; }) as typeof subscribe;
+      const waited = waitForPanel(1_000);
+      expect(subscribed).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await waited).toBe('timeout');
+      expect(subscribed).toBe(0);
+      pmPanelAction.subscribe = subscribe;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
