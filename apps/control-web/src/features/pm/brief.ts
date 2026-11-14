@@ -276,7 +276,11 @@ export function decodeNotes(texts: readonly AiCheckpointText[]): { readonly poin
   return { points: texts.filter((t) => t.text.startsWith('P|')).map((t) => t.text.slice(2)).join(''), unsure: texts.filter((t) => t.text.startsWith('U|')).map((t) => t.text.slice(2)).join('') };
 }
 
-/** One notes checkpoint per run and subject task (a checkpoint keeps its task). */
+/**
+ * One notes checkpoint per run and subject task (a checkpoint keeps its task). H13 fix round 2 (N5, noted): the id is derived from the run and task only, not the
+ * owner. The server keys checkpoints by tenant, project and id and refuses another owner's id (404), so two owners of one project writing notes for the same
+ * task would collide there: the second owner's notes would stay on their device. Projects have one owner today.
+ */
 export const notesCheckpointId = (runId: string, taskId: string): string => `ckp_notes_${sha256Hex(`${runId}\u0000${taskId}`).slice(0, 32)}`;
 
 export function notesCheckpoint(n: { projectId: string; runId: string; taskId: string; taskRevision: number; planRevision: number | null; points: string; unsure: string; label: BriefLabel; at: string; createdAt?: string }): AiCheckpoint {

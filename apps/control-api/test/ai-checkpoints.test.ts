@@ -292,4 +292,14 @@ describe('H13 fix round 1 (H2): the owner deletes a checkpoint whose notes becam
     expect((await del('ckp_never_stored_00000000')).statusCode).toBe(204);
     expect((await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_notes_0123456789abcdef/send-claim`, {})).status).not.toBe(200);
   });
+
+  it('fix round 2 (N4): a deleted checkpoint is never escalated', async () => {
+    await save(cp({ checkpointId: 'ckp_escalate_deleted_01', stepKind: 'patch', stage: 'reask', stopReason: 'local_failed_checks', routeMode: 'PREFER_ON_DEVICE', partial: { issues: [], texts: [] } }));
+    expect((await del('ckp_escalate_deleted_01')).statusCode).toBe(204);
+    const r = await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_escalate_deleted_01/escalation`, {});
+    expect(r.status).not.toBe(200);
+    const [row] = await t.db.execute(sql`SELECT escalated_at FROM ai_checkpoints WHERE checkpoint_id = 'ckp_escalate_deleted_01'`);
+    expect(row!['escalated_at']).toBeNull();
+  });
 });
+

@@ -100,6 +100,8 @@ export interface ChainRecorder {
 const STAGE_OF_KIND: Partial<Record<RouteStepKind, AiCheckpointStage>> = { pmPlan: 'plan_draft', pmAnswer: 'pm_turn', pmResearch: 'pm_turn', pmDelegate: 'pm_turn', plan: 'plan_draft', pmVerify: 'pm_turn', pmVerifyNoWeb: 'pm_turn' };
 /** H13: the plan brief's cloud checks: they read no task context and send only the approved brief. */
 const BRIEF_CHECKS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb']);
+/** H13 fix round 2 (N3): checkpoints that carry the owner's plan brief text. */
+const ALWAYS_TOMBSTONE: ReadonlySet<string> = new Set(['researchNotes', 'planBrief', 'pmVerify', 'pmVerifyNoWeb']);
 /** Steps that only ever run in the cloud: never moved to this device, never escalated (fix round 1, H1). */
 export const CLOUD_ONLY_STEPS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb', 'pmResearch']);
 const TASK_STEPS: ReadonlySet<string> = new Set(['criteria', 'breakdown', 'patch', 'review', 'triage', 'prDescription']);
@@ -130,6 +132,11 @@ export interface CheckpointEngine {
    * is always kept on this device only, and a server copy made earlier is deleted.
    */
   keep(cp: AiCheckpoint, opts?: { readonly server?: boolean }): Promise<void>;
+  /**
+   * H13 fix round 2 (N1): the notes of this run and task became restricted. Every brief check made from them, waiting or closed, is rewritten as restricted and
+   * kept on this device only, and its server copy deleted; a waiting one can no longer be sent (its continuation is device only).
+   */
+  restrictBriefChecks(runId: string, taskId: string): Promise<void>;
   /** Reads the device's and the server's checkpoints for this project. */
   load(): Promise<void>;
   /** Re-validates and, where allowed, sends every waiting checkpoint. */
@@ -175,8 +182,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
   /** H13 fix round 1 (H2): checkpoints the server holds (it took a save, or listed them), so a copy that becomes restricted is deleted there. */
   const onServer = new Set<string>();
   /** Deletes the server's copy of a checkpoint that may no longer be stored there. A failure is kept as unsynced and tried again on reconnect. */
-  const tombstone = async (id: string): Promise<void> => {
-    if (!deps.server?.deleteAiCheckpoint || (!onServer.has(id) && !unsynced.has(id))) return;
+  const tombstone = async (id: string, always = false): Promise<void> => {
+    if (!deps.server?.deleteAiCheckpoint || (!always && !onServer.has(id) && !unsynced.has(id))) return;
     try {
       await deps.server.deleteAiCheckpoint(deps.projectId, id);
       onServer.delete(id);
@@ -201,7 +208,9 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       // Fix round 1 (I3): a device-only checkpoint says so itself, so the mark survives a reload.
       const kept = toServer ? cp : { ...cp, deviceOnly: true };
       try { await deps.device.put(deps.ownerKey, kept); } catch { /* No device storage: the screen still holds it for this tab. */ }
-      if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); await tombstone(cp.checkpointId); return; }
+      // Fix round 2 (N3): the plan brief's checkpoints (notes, reviewed brief, checks) always ask the server to delete its copy when they turn device-only, whether
+      // or not this tab saw one there: the delete is idempotent, and another tab may have stored it.
+      if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); await tombstone(cp.checkpointId, ALWAYS_TOMBSTONE.has(cp.stepKind)); return; }
       try {
         const token = claimTokens.get(cp.checkpointId);
         await deps.server!.saveAiCheckpoint!(deps.projectId, token !== undefined ? { ...cp, claimToken: token } : cp);
@@ -519,6 +528,18 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     store,
     attach(r) { runner = r; },
     begin,
+    async restrictBriefChecks(runId, taskId) {
+      for (const cp of Object.values(store.getState().checkpoints)) {
+        if (!BRIEF_CHECKS.has(cp.stepKind) || cp.runId !== runId || cp.taskId !== taskId) continue;
+        if (cp.locked && cp.deviceOnly === true && (cp.partial?.texts ?? []).every((t) => t.classification === 'restricted')) continue;
+        setFor('deviceOnly', cp.checkpointId, true);
+        setFor('asks', cp.checkpointId, undefined);
+        await write({
+          ...cp, labels: ['restricted'], locked: true, deviceOnly: true, continuation: 'device_only', updatedAt: now(),
+          partial: cp.partial ? { ...cp.partial, texts: cp.partial.texts.map((t) => ({ ...t, classification: 'restricted' as const })) } : null,
+        });
+      }
+    },
     async keep(cp, opts = {}) {
       if (opts.server === false && checkpointStorage(cp) === 'server' && !store.getState().deviceOnly[cp.checkpointId]) {
         // On this device only, for now: not marked device-only and not unsynced, so a later save with the server still stores it.
@@ -616,7 +637,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       if (!cp || cp.status !== 'waiting') return;
       setFor('asks', id, undefined);
       setFor('problems', id, undefined);
-      await write({ ...cp, status: 'dropped', updatedAt: now() });
+      // Fix round 2 (N1): a dropped brief check keeps no brief text, here or on the server.
+      await write({ ...cp, status: 'dropped', updatedAt: now(), ...(BRIEF_CHECKS.has(cp.stepKind) ? { partial: { issues: [], texts: [] } } : {}) });
     },
   };
 }

@@ -748,5 +748,49 @@ describe('H13: plan brief notes and checks', () => {
     expect(h.runner.pm).not.toHaveBeenCalled();
     expect(h.engine.store.getState().problems[id]).toEqual(['route_device_only']);
   });
+
+  const withDelete = (h: ReturnType<typeof setup>) => {
+    const deleted: string[] = [];
+    (h.deps.server as { deleteAiCheckpoint?: (p: string, id: string) => Promise<void> }).deleteAiCheckpoint = async (_p, id) => { deleted.push(id); h.server.rows.delete(id); };
+    return deleted;
+  };
+
+  it('fix round 2 (N1): when the notes become restricted, every brief check of that run and task, waiting or closed, is kept on this device only and its server copy deleted', async () => {
+    const h = setup({ currentBriefSha: () => null });
+    const deleted = withDelete(h);
+    const id = await pauseVerify(h, 'b'.repeat(64));
+    const closed = { ...h.engine.store.getState().checkpoints[id]!, checkpointId: 'ckp_verify_closed_0001', status: 'sent' as const };
+    await h.engine.keep(closed);
+    const other = { ...closed, checkpointId: 'ckp_verify_othertask1', taskId: 't9' };
+    await h.engine.keep(other);
+    expect(JSON.stringify([...h.server.rows.values()])).toContain('Boards sort by votes.');
+    await h.engine.restrictBriefChecks('run', 't1');
+    expect(deleted.sort()).toEqual([closed.checkpointId, id].sort());
+    const left = [...h.server.rows.values()].filter((c) => c.taskId === 't1');
+    expect(JSON.stringify(left)).not.toContain('Boards sort by votes.');
+    for (const cid of [id, closed.checkpointId]) {
+      const c = h.engine.store.getState().checkpoints[cid]!;
+      expect(c).toMatchObject({ locked: true, labels: ['restricted'], continuation: 'device_only' });
+      expect(c.partial!.texts.every((t) => t.classification === 'restricted')).toBe(true);
+      expect(h.engine.store.getState().deviceOnly[cid]).toBe(true);
+    }
+    // Another task's check is left alone.
+    expect(h.server.rows.get(other.checkpointId)).toBeDefined();
+  });
+
+  it('fix round 2 (N1): Drop leaves no brief text on the server', async () => {
+    const h = setup({ currentBriefSha: () => null });
+    const id = await pauseVerify(h, 'b'.repeat(64));
+    await h.engine.drop(id);
+    expect(h.server.rows.get(id)).toMatchObject({ status: 'dropped' });
+    expect(JSON.stringify(h.server.rows.get(id))).not.toContain('Boards sort by votes.');
+  });
+
+  it('fix round 2 (N3): a restricted write of notes or a reviewed brief always deletes the server copy, even when this tab never saw one', async () => {
+    const h = setup();
+    const deleted = withDelete(h);
+    await h.engine.keep(notes('restricted'));
+    expect(deleted).toEqual(['ckp_notes_restricted_00000001']);
+  });
 });
 

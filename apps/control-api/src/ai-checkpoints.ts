@@ -180,7 +180,8 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const at = now();
     const [claimed] = await db.update(schema.aiCheckpoints)
       .set({ escalatedAt: at, updatedAt: at, body: sql`jsonb_set(${schema.aiCheckpoints.body}, '{escalatedAt}', to_jsonb(${at.toISOString()}::text))` })
-      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), isNull(schema.aiCheckpoints.escalatedAt)))
+      // Fix round 2 (N4): a row deleted between the read above and this claim is never escalated.
+      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), isNull(schema.aiCheckpoints.escalatedAt), isNull(schema.aiCheckpoints.deletedAt)))
       .returning();
     if (!claimed) throw new AppError(409, 'escalation_refused', 'this step was already escalated once', { reason: 'already_escalated' });
     return { checkpoint: bodyOf(claimed) };

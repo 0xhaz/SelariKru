@@ -352,3 +352,38 @@ for (const width of [1280, 1366, 1440, 1536, 1920]) {
   });
 }
 
+
+test('H13 fix round 2 (N1): a check paused offline, then the notes marked restricted: no server copy holds the brief, and Paused AI work after a reload does not show it', async ({ page }) => {
+  const CANARY = 'CANARY-H13-F2-N1-ROTA';
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/settings?section=workflow');
+  await page.getByTestId('web-research').getByRole('button', { name: 'Turn on Google Search (web research)' }).click();
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  const brief = page.getByTestId('pm-brief');
+  await brief.getByTestId('pm-brief-points').fill(`${CANARY} is the ward rota.\nMost boards sort by votes.`);
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await brief.getByRole('button', { name: 'Approve brief' }).click();
+  // Offline (demo only), the check pauses as a checkpoint.
+  if (!(await page.getByTestId('demo-network').isVisible())) await page.getByRole('button', { name: 'Debug' }).click();
+  await page.getByTestId('demo-network').getByRole('button', { name: 'Go offline' }).click();
+  await brief.getByRole('button', { name: 'Check in the cloud' }).click();
+  await expect(brief.getByTestId('pm-brief-paused')).toContainText('Waiting for connection');
+  await brief.getByTestId('pm-brief-restricted').check();
+  await page.getByTestId('demo-network').getByRole('button', { name: 'Go online' }).click();
+  const server = () => page.evaluate(async () => JSON.stringify(await (window as unknown as { __serverCheckpoints: (p: string) => Promise<unknown> }).__serverCheckpoints('demo-feature-delivery')));
+  await expect.poll(server).not.toContain(CANARY);
+  // Nothing stored after the restriction holds it.
+  const stored = await page.evaluate(() => (window as unknown as { __calls: { checkpoints: { method: string }[] } }).__calls.checkpoints);
+  const after = stored.slice(stored.findIndex((w) => w.method === 'deleteAiCheckpoint'));
+  expect(JSON.stringify(after.filter((w) => w.method === 'saveAiCheckpoint'))).not.toContain(CANARY);
+  // A second load: the paused check is still kept on this device, shown by labels only.
+  await page.goto('/tests/harness/index.html#/actions');
+  const paused = page.getByTestId('paused-work');
+  await expect(paused).toBeVisible();
+  await expect(paused).toContainText('Check plan brief (web)');
+  await expect(paused).toContainText('Restricted: kept on this device');
+  await expect(paused).not.toContainText(CANARY);
+  expect(await page.locator('body').innerText()).not.toContain(CANARY);
+  await expect.poll(server).not.toContain(CANARY);
+});

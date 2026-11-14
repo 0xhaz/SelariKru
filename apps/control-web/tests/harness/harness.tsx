@@ -216,6 +216,8 @@ const store = createProjectionStore({ source: null, projectId: 'proj-1', clock: 
 /** The demo source with `execute` and `openTerminal` spied. Everything else passes through. */
 async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; label: string }> {
   const session = (await loadDemoSession(sc.fault ?? null, { codingWorkers: sc.codingWorkers === 'claude_code' ? 'claude_code' : null }))!;
+  // H13 fix round 2: what the (demo) server's checkpoint list holds now, for specs that check nothing restricted is stored there.
+  (window as unknown as { __serverCheckpoints: (p: string) => Promise<unknown> }).__serverCheckpoints = (p) => session.source.listAiCheckpoints?.(p) ?? Promise.resolve([]);
   let refuseFailureLoads = sc.refuseFailureLoads === true;
   window.__allowFailureLoads = () => { refuseFailureLoads = false; };
   let release: () => void = () => undefined;
@@ -234,7 +236,8 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       return { ...withWorkers, approvals: { ...base.approvals, ...(sc.extraApprovals ?? {}) } as typeof base.approvals, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
     // H13 fix round 1: what reaches the (demo) server's checkpoint store, so a spec can check restricted notes never do.
-    ...(session.source.saveAiCheckpoint ? { saveAiCheckpoint: (projectId: string, cp: Parameters<NonNullable<EngineeringDataSource['saveAiCheckpoint']>>[1]) => { window.__calls.checkpoints.push({ method: 'saveAiCheckpoint', checkpoint: JSON.parse(JSON.stringify(cp)) }); return session.source.saveAiCheckpoint!(projectId, cp); } } : {}),
+    // Fix round 2: recorded once the (demo) server took it, so a save refused while offline is not counted as stored.
+    ...(session.source.saveAiCheckpoint ? { saveAiCheckpoint: async (projectId: string, cp: Parameters<NonNullable<EngineeringDataSource['saveAiCheckpoint']>>[1]) => { await session.source.saveAiCheckpoint!(projectId, cp); window.__calls.checkpoints.push({ method: 'saveAiCheckpoint', checkpoint: JSON.parse(JSON.stringify(cp)) }); } } : {}),
     ...(session.source.deleteAiCheckpoint ? { deleteAiCheckpoint: (projectId: string, id: string) => { window.__calls.checkpoints.push({ method: 'deleteAiCheckpoint', checkpointId: id }); return session.source.deleteAiCheckpoint!(projectId, id); } } : {}),
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });

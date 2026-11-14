@@ -85,6 +85,8 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
   useEffect(() => {
     if (label !== 'restricted') return;
     void keepNotes(true);
+    // Fix round 2 (N1): and every check made from them, paused or done, stays on this device only; its server copy is deleted.
+    void h.checkpoints?.restrictBriefChecks(runId, subjectId);
     const d = pmBrief.getState().runs[key]?.draft;
     if (d && d.label !== 'restricted') set(() => ({ draft: restrictBrief(d), check: null }));
   }, [label, key]); // eslint-disable-line react-hooks/exhaustive-deps
