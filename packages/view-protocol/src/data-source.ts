@@ -67,6 +67,8 @@ export interface EngineeringDataSource {
    * browser adapter calls this immediately before every AI call and never routes from a snapshot. Absent: this source has no route policy.
    */
   getTaskRoute?(projectId: string, taskId: string): Promise<TaskRouteRead>;
+  /** H13, demo only: sample plan brief notes for a demo project, so the flow works straight away. Absent (any live source): none. Demo data, never evidence. */
+  planBriefSample?(projectId: string): { readonly points: string; readonly unsure: string } | null;
   /**
    * What a task's AI agents read, with the context bundle served for `destination` (`cloud` for any cloud-capable route). The source refuses `cloud` when the
    * task's route, with this call's override, keeps it on the device (`context_destination_refused`). Owner only. Absent: this source cannot run the task agents.

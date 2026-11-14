@@ -27,6 +27,8 @@ export interface BriefItem {
 export interface BriefQuestion { readonly id: string; readonly question: string; readonly source: 'unsure' | 'manual'; readonly ticked: boolean; readonly restricted: boolean }
 export interface BriefDraft {
   readonly goal: string;
+  /** Whether the goal is sent with the check. Never for restricted notes. */
+  readonly goalTicked: boolean;
   readonly items: readonly BriefItem[];
   readonly uncertainties: readonly BriefQuestion[];
   readonly omitted: readonly { readonly reason: (typeof PLAN_BRIEF_OMIT_REASONS)[number] }[];
@@ -45,7 +47,7 @@ const secret = (t: string): boolean => redactSecrets(t) !== t;
 export const briefInCount = (points: string, unsure: string): BriefDraft['inCount'] => { const l = planBriefLines(points, unsure); return { points: l.points.length, unsure: l.unsure.length }; };
 
 export function emptyBrief(label: BriefLabel, inCount: BriefDraft['inCount']): BriefDraft {
-  return { goal: '', items: [], uncertainties: [], omitted: [], label, inCount, approvedSha256: null };
+  return { goal: '', goalTicked: label !== 'restricted', items: [], uncertainties: [], omitted: [], label, inCount, approvedSha256: null };
 }
 
 /**
@@ -58,7 +60,7 @@ export function briefFromOutput(data: unknown, label: BriefLabel, inCount: Brief
   const restricted = label === 'restricted';
   const items = d.items.flatMap((x): BriefItem[] => { if (secret(x.text)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, text: one(x.text), kind: x.kind, checkable: x.checkable, source: x.source, ticked: !restricted, restricted }]; });
   const uncertainties = d.uncertainties.flatMap((x): BriefQuestion[] => { if (secret(x.question)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, question: one(x.question), source: 'unsure', ticked: !restricted, restricted }]; });
-  return { goal: secret(d.goal) ? '' : one(d.goal), items, uncertainties, omitted, label, inCount, approvedSha256: null };
+  return { goal: secret(d.goal) ? '' : one(d.goal), goalTicked: !restricted, items, uncertainties, omitted, label, inCount, approvedSha256: null };
 }
 
 /** "N points in, N items + N omitted out". Manual additions count, so the owner can add what is missing by hand. */
@@ -95,6 +97,7 @@ export function editQuestion(d: BriefDraft, id: string, question: string): Edit 
   return bad ? { error: bad } : { draft: unapproved({ ...d, uncertainties: d.uncertainties.map((x) => (x.id === id ? { ...x, question: one(question) } : x)) }) };
 }
 /** A restricted entry stays unticked whatever is asked. */
+export const toggleGoal = (d: BriefDraft): BriefDraft => unapproved({ ...d, goalTicked: d.label !== 'restricted' && !d.goalTicked });
 export const toggleItem = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, items: d.items.map((x) => (x.id === id && !x.restricted ? { ...x, ticked: !x.ticked } : x)) });
 export const toggleQuestion = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, uncertainties: d.uncertainties.map((x) => (x.id === id && !x.restricted ? { ...x, ticked: !x.ticked } : x)) });
 export const removeItem = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, items: d.items.filter((x) => x.id !== id) });
@@ -125,7 +128,7 @@ export function addQuestion(d: BriefDraft, question: string): Edit {
 export function briefPayload(d: BriefDraft): PlanBriefPayload {
   if (d.label === 'restricted') return { goal: '', items: [], uncertainties: [] };
   return {
-    goal: d.goal,
+    goal: d.goalTicked ? d.goal : '',
     items: d.items.filter((x) => x.ticked && !x.restricted).map((x) => ({ id: x.id, kind: x.kind, text: x.text })),
     uncertainties: d.uncertainties.filter((x) => x.ticked && !x.restricted).map((x) => ({ id: x.id, question: x.question })),
   };

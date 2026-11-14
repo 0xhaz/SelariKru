@@ -16,7 +16,9 @@ import { hrefFor } from '../../shell/route.ts';
 import { settingsHref } from '../../shell/views.ts';
 import { pmRefusal } from './copy.ts';
 import { pmProposals } from './proposals.ts';
-import { sanitizeSuggestions } from './suggestions.ts';
+import { SearchSuggestions } from './SearchSuggestions.tsx';
+import { PlanBrief } from './PlanBrief.tsx';
+import type { PlanBriefForPlan } from '@selarikru/inference-firebase-web';
 import { workerIdentity } from '../team/identity.ts';
 import { currentRun } from '../settings/model.ts';
 import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
@@ -55,7 +57,7 @@ export const pmConversation = create<PmStore>((set) => ({
   restrict: (id) => set((s) => ({ turns: s.turns.map((t) => (t.id === id && t.who === 'owner' ? { ...t, restricted: true } : t)) })),
 }));
 
-const ASKS: readonly { kind: PmKind; label: string; what: string }[] = [
+const ASKS: readonly { kind: Exclude<PmKind, 'pmBrief' | 'pmVerify' | 'pmVerifyNoWeb'>; label: string; what: string }[] = [
   { kind: 'pmAnswer', label: 'Ask', what: 'An answer from the project\'s own context, with its sources.' },
   { kind: 'pmResearch', label: 'Research the web', what: 'Cloud only, with Grounding with Google Search. Never for a locked (restricted) task.' },
   { kind: 'pmPlan', label: 'Draft a plan', what: 'A plan revision you can accept in the Assistant\'s replan step.' },
@@ -64,17 +66,6 @@ const ASKS: readonly { kind: PmKind; label: string; what: string }[] = [
 
 const say = (code: string, name?: string): string => pmRefusal(code, name);
 
-/** Search Suggestions from Grounding with Google Search, rendered as given (less anything that runs), in a shadow root so its styles stay its own (the terms require showing it). */
-function SearchSuggestions({ html }: { html: string }) {
-  const host = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = host.current;
-    if (!el) return;
-    const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' });
-    root.innerHTML = sanitizeSuggestions(html);
-  }, [html]);
-  return <div ref={host} data-testid="pm-search-suggestions" />;
-}
 
 function nameOf(snap: ProjectViewSnapshot | null, workerId: string): string {
   if (!snap) return workerId;
@@ -114,6 +105,13 @@ function ReplyView({ reply, snap, browser, onAcceptPlan }: { reply: Reply; snap:
           ) : null}
           {Array.isArray(data['tasks']) ? (
             <div>
+              {typeof data['architecture'] === 'string' ? (
+                <section className="mb-2 rounded-card border border-line p-2" data-testid="pm-plan-architecture" aria-label="Architecture">
+                  <h3 className="text-sm font-medium text-fg">Architecture</h3>
+                  <p className="whitespace-pre-wrap text-fg">{data['architecture']}</p>
+                  <p className="text-sm text-muted">Part of this proposal: accepting the plan records it with the plan&apos;s output; the run&apos;s tasks below are what the plan changes.</p>
+                </section>
+              ) : null}
               {(() => {
                 const tasks = data['tasks'] as { key: string; title: string; role: string; revises?: string }[];
                 // H12: where each task runs, proposed with its reason; accepted with the plan. The proposals were fixed when the reply arrived (fix round 1, I5).
@@ -197,10 +195,10 @@ export function PmPanel() {
 
   // M1: set synchronously, before anything is awaited: two calls in the same tick start one request (a state flag only changes on the next render).
   const asking = useRef<BusyGuard>({ current: false });
-  function ask(kind: PmKind, asked: string = question): Promise<boolean> {
-    return exclusive(asking.current, false, () => askNow(kind, asked));
+  function ask(kind: PmKind, asked: string = question, planBrief?: PlanBriefForPlan): Promise<boolean> {
+    return exclusive(asking.current, false, () => askNow(kind, asked, planBrief));
   }
-  async function askNow(kind: PmKind, asked: string): Promise<boolean> {
+  async function askNow(kind: PmKind, asked: string, planBrief?: PlanBriefForPlan): Promise<boolean> {
     if (!h?.agents || !subjectId) return false;
     const add = pmConversation.getState().add;
     // The history this call may carry: earlier turns with their labels. The catalog drops restricted ones from any cloud-capable call. A reply from a call that read
@@ -212,7 +210,7 @@ export function PmPanel() {
     const ownerId = add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
     setBusy(true);
     try {
-      const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question: asked, questionClassification: label, history, callOverride: override });
+      const outcome = await h.agents.pm({ kind, subjectTaskId: subjectId, question: asked, questionClassification: label, history, callOverride: override, ...(planBrief ? { planBrief } : {}) });
       // The call came back locked (its route said so, whatever this tab's snapshot showed): the question was restricted, and is kept as such.
       if (ownerTurnLabelAfter(label, outcome) === 'restricted' && label !== 'restricted') pmConversation.getState().restrict(ownerId);
       // A plan's route proposals are computed once, here, and are what Accept writes (fix round 1, I5).
@@ -323,6 +321,12 @@ export function PmPanel() {
           {busy ? <p role="status" className="text-sm text-fg">The Project Manager is answering.</p> : null}
         </div>
       )}
+      {h?.agents && run && subjectId ? (
+        <PlanBrief h={h} runId={run.runId} subjectId={subjectId} task={task} deviceOnly={task?.route?.override === 'ONLY_ON_DEVICE' || task?.route?.effective === 'ONLY_ON_DEVICE'} researchGranted={researchGranted} busy={busy}
+          conversation={() => pmConversation.getState().turns.map((t) => t.who === 'owner' ? { who: 'owner' as const, text: t.text, restricted: t.restricted }
+            : { who: 'pm' as const, text: t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? '') : '', restricted: t.reply.outcome.kind === 'result' && t.reply.outcome.result.locked })}
+          onMakePlan={async (b) => { await ask('pmPlan', 'Make the plan from this brief.', b); }} />
+      ) : null}
       {remembered.length > 0 ? (
         <section aria-label="Earlier with the Project Manager" data-testid="pm-memory" className="rounded-card border border-line p-3">
           <h2 className="text-sm font-medium text-muted">Earlier, kept as checkpoints</h2>

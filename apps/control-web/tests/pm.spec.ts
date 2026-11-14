@@ -170,3 +170,79 @@ test('M11: Search Suggestions keep their markup but nothing that runs', async ({
   expect(svg).toContain('<b>kept</b>');
   expect(svg).not.toMatch(/<animate|<set|<noscript|<template/i);
 });
+
+test('H13: the plan brief: points and questions → format on this device → edit one, untick one → approve → check in the cloud → verdicts and answers → make the plan → architecture and tasks → Accept plan', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/settings?section=workflow');
+  await page.getByTestId('web-research').getByRole('button', { name: 'Turn on Google Search (web research)' }).click();
+  await expect(page.getByTestId('web-research')).toHaveAttribute('data-on', 'true');
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  const brief = page.getByTestId('pm-brief');
+  await expect(brief.getByTestId('pm-brief-split')).toHaveText('Gemini Nano formats your points privately on this device; it can\'t search the web. Gemini in the cloud checks each point you approve, answers your questions, then drafts the architecture and plan.');
+  // The demo's sample notes are there, so the flow works straight away.
+  await expect(brief.getByTestId('pm-brief-points')).toHaveValue(/Anyone can post feedback/);
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await expect(brief.getByTestId('pm-brief-count')).toHaveText('5 points and 2 questions in, 5 items + 2 questions + 0 omitted out');
+  await expect(brief.getByTestId('pm-brief-warning')).toHaveCount(0);
+  await expect(brief.getByTestId('pm-brief-only-ticked')).toHaveText('Only the ticked goal, items and questions below are sent to Gemini in the cloud. Nothing else from this project is sent.');
+  // Edit one, untick one.
+  const first = brief.getByTestId('pm-brief-item').first();
+  await first.getByTestId('pm-brief-item-text-edit').click();
+  await first.getByTestId('pm-brief-item-text-input').fill('Anyone can post feedback without signing in.');
+  await first.getByTestId('pm-brief-item-text-save').click();
+  await expect(first.getByTestId('pm-brief-item-text')).toHaveText('Anyone can post feedback without signing in.');
+  await brief.getByTestId('pm-brief-item').nth(1).getByTestId('pm-brief-item-tick').uncheck();
+  await expect(brief.getByRole('button', { name: 'Check in the cloud' })).toBeDisabled();
+  await brief.getByRole('button', { name: 'Approve brief' }).click();
+  await expect(brief.getByTestId('pm-brief-approved')).toHaveText('Approved. Any edit un-approves it.');
+  await brief.getByRole('button', { name: 'Check in the cloud' }).click();
+  const results = brief.getByTestId('pm-brief-results');
+  await expect(results.getByTestId('pm-brief-results-source')).toHaveText('From web research');
+  // Four items were ticked, so four came back; and both questions were answered.
+  await expect(results.getByTestId('pm-brief-verdict')).toHaveCount(4);
+  await expect(results.locator('[data-verdict="supported"]')).toHaveCount(1);
+  await expect(results.getByTestId('pm-brief-answer')).toHaveCount(2);
+  const link = results.getByRole('link').first();
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(link).toHaveAttribute('href', /^https:\/\//);
+  await brief.getByRole('button', { name: 'Make the plan from this brief' }).click();
+  const reply = page.getByTestId('pm-turn-reply').first();
+  await expect(reply.getByTestId('pm-plan-architecture')).toContainText('Demo architecture');
+  await expect(reply.getByTestId('pm-plan-route')).toHaveCount(2);
+  await reply.getByRole('button', { name: 'Accept plan' }).click();
+  await expect(reply.getByTestId('pm-plan-accepted')).toContainText('Accepted as plan rev 2');
+});
+
+test('H13: an edit after approval un-approves the brief; with web research off only the no-web check is offered, labelled not checked against the web', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  const brief = page.getByTestId('pm-brief');
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await brief.getByRole('button', { name: 'Approve brief' }).click();
+  await expect(brief.getByTestId('pm-brief-approved')).toBeVisible();
+  await brief.getByTestId('pm-brief-item').first().getByTestId('pm-brief-item-tick').uncheck();
+  await expect(brief.getByTestId('pm-brief-approved')).toHaveCount(0);
+  await expect(brief.getByTestId('pm-brief-check-blocked')).toContainText('Approve the brief first');
+  await expect(brief.getByRole('button', { name: 'Check in the cloud' })).toBeDisabled();
+  await expect(brief.getByTestId('pm-brief-research-off')).toContainText('Settings › Workflow');
+  await brief.getByRole('button', { name: 'Approve brief' }).click();
+  await brief.getByRole('button', { name: 'Check without web search' }).click();
+  await expect(brief.getByTestId('pm-brief-results-source')).toHaveText('Not checked against the web');
+  await expect(brief.getByTestId('pm-brief-verdict').first()).toBeVisible();
+});
+
+test('H13: a locked subject makes the notes restricted: the brief stays on this device and cannot be checked', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.e2e');
+  const brief = page.getByTestId('pm-brief');
+  await expect(brief.getByTestId('pm-brief-restricted')).toBeChecked();
+  await expect(brief.getByTestId('pm-brief-label')).toContainText('restricted');
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await expect(brief.getByTestId('pm-brief-item').first().getByTestId('pm-brief-item-tick')).toBeDisabled();
+  await expect(brief.getByTestId('pm-brief-item').first()).toContainText('cannot be ticked');
+  await expect(brief.getByTestId('pm-brief-check-blocked')).toContainText('restricted');
+  await expect(brief.getByRole('button', { name: 'Approve brief' })).toBeDisabled();
+});

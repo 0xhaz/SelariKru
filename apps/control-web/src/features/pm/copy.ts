@@ -23,6 +23,15 @@ const REFUSAL: Readonly<Record<string, string>> = {
   route_record_used: 'This proposal was already used once. Ask the Project Manager again.',
   proposal_from_restricted_call: 'This came from a call that read restricted data, so it stays on this device and is not applied.',
   proposal_from_restricted_context: 'This came from a call whose context held restricted data, so it stays on this device and is not applied.',
+  // H13: the plan brief.
+  brief_empty: 'Write at least one point or question first.',
+  brief_restricted: 'These notes are restricted, so the brief stays on this device and is not checked in the cloud.',
+  brief_not_approved: 'Approve the brief first. Any edit after approval un-approves it.',
+  brief_device_only: 'The brief is formatted on this device only, and this call could not run here.',
+  brief_too_large: 'The brief is too large to check: at most 20 items and 10 questions, each up to 280 characters.',
+  verify_locked: 'This task reads restricted data, so the brief is not checked in the cloud for it.',
+  verify_device_only: 'You set this task to run on this device only, so the brief is not checked in the cloud for it.',
+  verify_cloud_only: 'The check runs only in the cloud, and this call could not go there.',
 };
 
 /** A refusal in plain words. `name` is the worker's label, for the refusals that need one. */

@@ -37,6 +37,8 @@ export interface AgentsPort {
   readonly acceptPatch: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>, round: number) => Promise<ProposalAcceptReceipt>) | null;
   /** Where an accepted patch proposal is now, read from the server. Null: never accepted, or the source cannot say. */
   readonly proposalState: ((outcome: Extract<AgentsOutcome, { kind: 'result' }>) => Promise<ProposalAcceptReceipt | null>) | null;
+  /** H13, demo only: sample plan brief notes for this project. Null: none (every live source). */
+  readonly planBriefSample: { readonly points: string; readonly unsure: string } | null;
   /** H11: one turn with the Project Manager, through the same adapter and the subject task's route. */
   pm(req: PmRequest): Promise<PmOutcome & { readonly simulated: boolean; readonly resumed?: AiCheckpointResume }>;
   /** H11: sends the PM's delegation for the server to apply inside the accepted plan. Absent: the source cannot delegate. */
@@ -63,7 +65,7 @@ export function acceptedFrom(outcome: Extract<AgentsOutcome, { kind: 'result' }>
 
 export interface CreateAgentsOptions {
   readonly projectId: string;
-  readonly source: Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan'>;
+  readonly source: Pick<EngineeringDataSource, 'planBriefSample' | 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan'>;
   /** The live adapter (wired to this source's `getTaskRoute`), or none, to build one over `sdk`. */
   readonly adapter?: Pick<FirebaseHybridAssistantAdapter, 'runAgent'>;
   /** The demo's stand-in SDK. */
@@ -120,6 +122,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
   return {
     simulated: opts.simulated,
     liveModel: opts.liveModel === true,
+    planBriefSample: source.planBriefSample?.(projectId) ?? null,
     inFlight: () => calls,
     onInFlight(fn) {
       listeners.add(fn);

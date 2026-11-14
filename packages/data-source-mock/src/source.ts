@@ -1,3 +1,4 @@
+import { demoPlanBriefNotes } from './plan-brief.ts';
 import {
   AuthorizedTerminalRequestSchema, AuthorizedViewCommandSchema, CriteriaRevisionRequestSchema, CursorSchema, DataSourceException, TERMINAL_MAX_LINES, applyEvent, approvalStateAt, cursorToSequence, emptySnapshot,
   isoOf, projectionFromSnapshot, sequenceToCursor,
@@ -785,6 +786,8 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
     getHandoverDiff: (projectId, taskId, checkpointId, path) => handover.diff(project(projectId).fixture.projectId, taskId, checkpointId, path),
 
     /** One task's route, as fresh as the mock's own rows: the effective policy, the lock, the suggestion, and every record, newest first. Simulated. */
+    planBriefSample: (projectId) => demoPlanBriefNotes(projectId),
+
     async getTaskRoute(projectId, taskId) {
       const p = project(projectId);
       const t = p.state.snapshot.tasks[taskId];

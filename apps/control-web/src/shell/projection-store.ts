@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan' | 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend'>;
+export type AgentSource = Pick<EngineeringDataSource, 'planBriefSample' | 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan' | 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -218,6 +218,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
       agentSource: source?.getTaskRoute && source.getTaskContext ? {
         getTaskRoute: source.getTaskRoute.bind(source),
         getTaskContext: source.getTaskContext.bind(source),
+        ...(source.planBriefSample ? { planBriefSample: source.planBriefSample.bind(source) } : {}),
         ...(source.reviseTaskCriteria ? { reviseTaskCriteria: source.reviseTaskCriteria.bind(source) } : {}),
         ...(source.getTaskContextSize ? { getTaskContextSize: source.getTaskContextSize.bind(source) } : {}),
         // H5: the accept path for a checked patch, and the task's base files for the patch agent. An accept refuses to send while the session is not live, as a command does.

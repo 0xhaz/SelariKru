@@ -3,7 +3,7 @@ import type { AiCheckpoint } from '@selarikru/domain';
 import { snapshotOf, task } from '../overview/testing.ts';
 import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefPayload, cloudRefusal, completeness, conversationNotes, decodeBriefTexts, decodeNotes, editItem, editQuestion, emptyBrief,
-  encodeBriefTexts, encodeNotes, latestNotes, notesCheckpoint, notesLabel, planBriefFor, removeItem, screenCheck, setGoal, toggleItem,
+  encodeBriefTexts, encodeNotes, latestNotes, notesCheckpoint, notesLabel, planBriefFor, removeItem, screenCheck, setGoal, toggleGoal, toggleItem,
 } from './brief.ts';
 
 /** A secret-shaped value built at run time, so no key-like literal sits in the source. */
@@ -90,6 +90,9 @@ describe('the plan brief: review and approval (H13 amendment C)', () => {
     expect(p.items.map((x) => x.id)).toEqual(['P1', 'P3', 'P4', 'P5', 'P6']);
     expect(p.items[0]).toEqual({ id: 'P1', kind: 'requirement', text: 'Posts are public.' });
     expect(Object.keys(p).sort()).toEqual(['goal', 'items', 'uncertainties']);
+    expect(p.goal).toBe('A public feedback board.');
+    expect(briefPayload(toggleGoal(a)).goal).toBe('');
+    expect(toggleGoal(a).approvedSha256).toBeNull();
   });
 });
 
