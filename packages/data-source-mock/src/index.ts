@@ -3,6 +3,7 @@ export { mulberry32, seededId } from './prng.ts';
 export { FIXTURE_T0_MS, fixtureTime, scoped, type Fixture, type FixtureId, type TaskSeed, type ApprovalSeed, type Silence } from './builder.ts';
 export { FIXTURE_IDS, EXTRA_FIXTURE_IDS, buildAllFixtures, buildDemoFixtures, buildFixture } from './fixtures.ts';
 export { CLAUDE_DEMO } from './claude.ts';
+export { demoPlanBriefNotes } from './plan-brief.ts';
 export { createMockDataSource, demoMaxAttempts, demoNameFor, type MockDataSource, type MockOptions } from './source.ts';
 import { createMockDataSource, type MockDataSource, type MockOptions } from './source.ts';
 import { createSeededClock } from './clock.ts';

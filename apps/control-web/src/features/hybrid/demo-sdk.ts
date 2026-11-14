@@ -72,8 +72,12 @@ function answer(kind: string, prompt: string): unknown {
       const listed = section(prompt, `Current plan, revision ${/# Current plan, revision (\d+)/.exec(prompt)?.[1] ?? ''}`).flatMap((l) => { const m = /^- ([^\s:]+): .* \(role ([a-z_]+), (\w+)\)$/.exec(l); return m ? [{ taskId: m[1]!, role: m[2]! }] : []; });
       const first = listed[0];
       const req = ids.slice(0, 1);
-      if (!first) return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: req, paths: [root], dependsOn: [] }] };
-      return { tasks: [
+      // H13: made from an approved plan brief, the plan carries an architecture section naming the brief's item ids.
+      const briefIds = /# Approved plan brief/.test(prompt) ? [...prompt.matchAll(/^- (P\d{1,2}) \(/gm)].map((m) => m[1]!) : [];
+      const contradicted = [...prompt.matchAll(/^- (P\d{1,2}) .*\[CONTRADICTED/gm)].map((m) => m[1]!);
+      const architecture = briefIds.length > 0 ? { architecture: `Demo architecture (demo data, not evidence): an API for posts and votes and a list screen, resting on ${briefIds.filter((x) => !contradicted.includes(x)).join(', ') || 'the brief'}.${contradicted.length > 0 ? ` Not built on ${contradicted.join(', ')}: the check contradicted ${contradicted.length === 1 ? 'it' : 'them'}.` : ''}` } : {};
+      if (!first) return { tasks: [{ key: 'T1', title: 'Demo plan step', description: 'Demo data: the work as one task inside the allowed paths.', role: 'backend', requirementIds: req, paths: [root], dependsOn: [] }], ...architecture };
+      return { ...architecture, tasks: [
         { key: 'T1', title: 'Demo plan step (revised)', description: 'Demo data: this task again, narrowed.', role: first.role, requirementIds: req, paths: [root], dependsOn: [], revises: first.taskId },
         { key: 'T2', title: 'Demo follow-up', description: 'Demo data: a new task after it.', role: first.role, requirementIds: req, paths: [root], dependsOn: ['T1'] },
       ] };
@@ -85,9 +89,54 @@ function answer(kind: string, prompt: string): unknown {
       const assignments = open.flatMap((t) => { const w = workers.find((x) => x.role === t.role); return w ? [{ taskId: t.taskId, workerId: w.workerId, why: `Demo: ${t.role} work for a ${t.role} worker.` }] : []; });
       return { assignments: assignments.length > 0 ? assignments.slice(0, 12) : [{ taskId: tasks[0]?.taskId ?? 'none', workerId: workers[0]?.workerId ?? 'none', why: 'Demo: the only pairing listed.' }] };
     }
+    // H13: the plan brief. Formatting keeps every point and question it is given, as the completeness rule says, built from the numbered lines of the prompt.
+    case 'pmBrief': {
+      const numbered = (name: string) => fenced(prompt, name).flatMap((l) => { const m = /^\d+\. (.*)$/.exec(l); return m ? [m[1]!] : []; });
+      const points = numbered('POINTS');
+      const questions = numbered('QUESTIONS');
+      const items = points.slice(0, 20).map((raw, i) => {
+        const conversation = raw.startsWith('(from the conversation) ');
+        const text = raw.replace(/^\(from the conversation\) /, '').slice(0, 280);
+        const kind = /\b(most|usually|typically|many|all)\b/i.test(text) ? 'fact' : /^we (store|use)\b/i.test(text) ? 'decision' : 'requirement';
+        return { id: `P${i + 1}`, text, kind, checkable: kind === 'fact', source: conversation ? 'conversation' : 'points' };
+      });
+      return {
+        goal: `Demo brief: ${(points[0] ?? questions[0] ?? 'the work').replace(/\.$/, '')}.`.slice(0, 280), items,
+        uncertainties: questions.slice(0, 10).map((q, i) => ({ id: `U${i + 1}`, question: q.slice(0, 280) })),
+        omitted: [...points.slice(20), ...questions.slice(10)].map(() => ({ reason: 'duplicate' })),
+      };
+    }
+    case 'pmVerify':
+    case 'pmVerifyNoWeb': {
+      const lines = fenced(prompt, 'BRIEF');
+      const items = lines.flatMap((l) => { const m = /^(P\d{1,2}) \((\w+)\): (.*)$/.exec(l); return m ? [{ id: m[1]!, kind: m[2]! }] : []; });
+      const questions = lines.flatMap((l) => { const m = /^(U\d{1,2}): /.exec(l); return m ? [m[1]!] : []; });
+      const web = kind === 'pmVerify';
+      const sources = web ? { sources: [{ title: 'Demo source (no web search ran)', url: 'https://example.com/selarikru-demo-source' }] } : {};
+      // Facts take turns: supported, contradicted, unclear (consistent, inconsistent, unclear without the web), so every verdict can be seen. A requirement or
+      // decision is not a fact to check.
+      let fact = 0;
+      return {
+        items: items.map((x) => {
+          if (x.kind !== 'fact' && x.kind !== 'assumption') return { id: x.id, verdict: web ? 'not_checkable' : 'unclear', explanation: 'Demo: a requirement or decision, not a fact to check.', ...(web ? { sources: [] } : {}) };
+          const v = (web ? ['supported', 'contradicted', 'unclear'] : ['consistent', 'inconsistent', 'unclear'])[fact++ % 3]!;
+          return { id: x.id, verdict: v, explanation: `Demo: ${web ? 'no web search ran in the demo' : 'not checked against the web'}; the verdict is simulated.`, ...sources };
+        }),
+        uncertainties: questions.map((q) => ({ id: q, answer: `Demo answer: simulated, ${web ? 'no web search ran' : 'not checked against the web'}. A real check answers from ${web ? 'Google Search results' : 'what the model knows'}.`, confidence: 'low', ...sources })),
+      };
+    }
     default:
       return {};
   }
+}
+
+/** The lines inside a fenced block (`----- BEGIN <name> <nonce> -----`). */
+function fenced(prompt: string, name: string): string[] {
+  const lines = prompt.split('\n');
+  const start = lines.findIndex((l) => l.startsWith(`----- BEGIN ${name} `));
+  if (start < 0) return [];
+  const end = lines.findIndex((l, i) => i > start && l.startsWith(`----- END ${name} `));
+  return lines.slice(start + 1, end < 0 ? undefined : end);
 }
 
 const KIND_BY_PROMPT = new Map(Object.values(AGENT_CATALOG).map((d) => [d.rolePrompt, d.kind]));

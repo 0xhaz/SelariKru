@@ -1,5 +1,5 @@
-import { PROJECT_MANAGER_ROLE, workerRoleOf, type RoutePolicyMode } from '@selarikru/domain';
-import type { AgentCatalog, AgentResult, PmTurn } from '@selarikru/inference-firebase-web';
+import { PROJECT_MANAGER_ROLE, canonicalJson, sha256Hex, workerRoleOf, type RoutePolicyMode } from '@selarikru/domain';
+import type { AgentCatalog, AgentResult, PlanBriefForPlan, PlanBriefPayload, PmTurn } from '@selarikru/inference-firebase-web';
 import type { ProjectViewSnapshot, TaskAgentContext, TaskRouteRead, TaskView } from '@selarikru/view-protocol';
 import { destinationFor, taskAgentPolicy } from '../hybrid/runner.ts';
 import { workerIdentity } from '../team/identity.ts';
@@ -9,7 +9,9 @@ import { workerIdentity } from '../team/identity.ts';
  * (its "subject"), so that task's route, lock, context bundle and served-context record apply unchanged (H2 to H5). Research forces the cloud only and is refused on a
  * locked route by the adapter. The conversation lives in this tab; each call carries only a bounded, label-filtered part of it (`pmHistory`).
  */
-export type PmKind = 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate';
+export type PmKind = 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate' | 'pmBrief' | 'pmVerify' | 'pmVerifyNoWeb';
+/** H13: the plan brief's cloud checks. */
+export type BriefCheckKind = 'pmVerify' | 'pmVerifyNoWeb';
 
 export interface PmRequest {
   readonly kind: PmKind;
@@ -21,6 +23,13 @@ export interface PmRequest {
   readonly callOverride: RoutePolicyMode | null;
   /** H12: this turn continues a paused checkpoint (sent after reconnecting, or moved to device only). */
   readonly resume?: { readonly checkpointId: string; readonly kind: 'after_reconnect' | 'escalated' | 'device_only' | 'owner_resume' };
+  /** H13, pmBrief: the owner's points and open questions. Their label is `questionClassification`. */
+  readonly notes?: { readonly points: string; readonly unsure: string };
+  /** H13, a brief check: the approved brief's ticked content, and the hash the owner approved. Its label is `questionClassification`. */
+  readonly brief?: PlanBriefPayload;
+  readonly briefSha256?: string;
+  /** H13, pmPlan: the approved brief with the cloud's verdicts and answers ("Make the plan from this brief"). */
+  readonly planBrief?: PlanBriefForPlan;
 }
 
 export type PmOutcome =
@@ -29,7 +38,7 @@ export type PmOutcome =
 
 export interface PmDeps {
   readonly projectId: string;
-  readonly catalog: Pick<AgentCatalog, 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate'>;
+  readonly catalog: Pick<AgentCatalog, 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate' | 'pmBrief' | 'pmVerify' | 'pmVerifyNoWeb'>;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null, contextId: string) => Promise<TaskAgentContext>;
   readonly snapshot: () => ProjectViewSnapshot | null;
@@ -78,7 +87,47 @@ export async function freshLocks(deps: Pick<PmDeps, 'getTaskRoute'>, snap: Proje
   return out;
 }
 
+/** A stand-in task for a call that reads no task context: it names the subject (its route and lock apply) and carries only the input's label. */
+const stubTask = (taskId: string, classification: string) => ({ taskId, title: '', description: null, criteria: [], allowedPaths: [], classification });
+
+/**
+ * H13: the plan brief's steps. Formatting runs on this device only, always; a check runs in the cloud only and sends only the approved brief, after the same
+ * refusals as web research (lock, device only, and for the web check the owner's grant), plus the brief's own: restricted, or not the brief the owner approved.
+ */
+async function runBriefStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
+  if (req.kind === 'pmBrief' && !(req.notes && (req.notes.points.trim() || req.notes.unsure.trim()))) return { kind: 'refused', code: 'brief_empty' };
+  if (req.kind !== 'pmBrief') {
+    if (req.questionClassification === 'restricted') return { kind: 'refused', code: 'brief_restricted' };
+    if (!req.brief || !req.briefSha256 || sha256Hex(canonicalJson(req.brief)) !== req.briefSha256) return { kind: 'refused', code: 'brief_not_approved' };
+  }
+  let read: TaskRouteRead;
+  try { read = await deps.getTaskRoute(req.subjectTaskId); } catch { return { kind: 'refused', code: 'route_fetch_failed' }; }
+  const snap = deps.snapshot();
+  const runId = snap?.tasks[req.subjectTaskId]?.runId ?? read.runId;
+  const planRevision = snap?.runs[runId]?.planRevision ?? null;
+  const sourceId = `task:${req.subjectTaskId}`;
+  const done = (result: AgentResult): PmOutcome => ({ kind: 'result', result, context: null, planRevision, runId });
+  if (req.kind === 'pmBrief') {
+    // A brief about a locked task is restricted, whatever the panel computed.
+    const label = read.route.lock !== null ? 'restricted' : req.questionClassification;
+    return done(await deps.catalog.pmBrief({
+      projectId: deps.projectId, task: stubTask(req.subjectTaskId, label), bundle: null, sources: [{ id: sourceId, classification: label }], policy: taskAgentPolicy(sourceId),
+      callOverride: 'ONLY_ON_DEVICE', points: req.notes!.points, unsure: req.notes!.unsure, inputClassification: label,
+    }));
+  }
+  const pre = req.kind === 'pmVerify' ? 'research' : 'verify';
+  if (read.route.lock !== null) return { kind: 'refused', code: `${pre}_locked` };
+  if (read.route.override === 'ONLY_ON_DEVICE' || read.route.effective === 'ONLY_ON_DEVICE') return { kind: 'refused', code: `${pre}_device_only` };
+  if (req.kind === 'pmVerify' && !(deps.webResearch?.() ?? false)) return { kind: 'refused', code: 'research_not_granted' };
+  const input = {
+    projectId: deps.projectId, task: stubTask(req.subjectTaskId, 'internal'), bundle: null, sources: [{ id: sourceId, classification: 'internal' as const }], policy: taskAgentPolicy(sourceId),
+    callOverride: 'ONLY_IN_CLOUD' as const, brief: req.brief!, briefClassification: 'internal', ...(req.resume ? { resume: req.resume } : {}),
+  };
+  return done(req.kind === 'pmVerify' ? await deps.catalog.pmVerify(input) : await deps.catalog.pmVerifyNoWeb(input));
+}
+
 export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
+  if (req.kind === 'pmBrief' || req.kind === 'pmVerify' || req.kind === 'pmVerifyNoWeb') return runBriefStep(deps, req);
   if (!req.question.trim()) return { kind: 'refused', code: 'question_empty' };
   const override: RoutePolicyMode | null = req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride;
   let read: TaskRouteRead;
@@ -132,7 +181,11 @@ export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome
   switch (req.kind) {
     case 'pmAnswer': return done(await deps.catalog.pmAnswer(base));
     // The run's current tasks, so the plan can revise them by id (fix round 2, I4).
-    case 'pmPlan': return done(await deps.catalog.pmPlan(snap ? { ...base, plan: planScopeFor(snap, runId, await freshLocks(deps, snap, runId)) } : base));
+    case 'pmPlan': {
+      // H13: made from the approved brief: the brief, its verdicts and answers go in a fenced block. The call's labels and lock rules are unchanged.
+      const withBrief = req.planBrief ? { ...base, brief: req.planBrief } : base;
+      return done(await deps.catalog.pmPlan(snap ? { ...withBrief, plan: planScopeFor(snap, runId, await freshLocks(deps, snap, runId)) } : withBrief));
+    }
     case 'pmDelegate': {
       if (!snap) return { kind: 'refused', code: 'no_snapshot' };
       return done(await deps.catalog.pmDelegate({ ...base, plan: planScopeFor(snap, runId, await freshLocks(deps, snap, runId)) }));

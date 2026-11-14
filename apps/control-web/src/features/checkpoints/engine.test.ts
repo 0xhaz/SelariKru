@@ -621,3 +621,64 @@ describe('H9: a step paused by the hosted demo\'s cloud call cap', () => {
     expect(h.engine.store.getState().asks[rec.id]).toBeUndefined();
   });
 });
+
+describe('H13: plan brief notes and checks', () => {
+  const NOTES_CANARY = 'CANARY-H13-WARD-NAMES-5e1d';
+  const notes = (label: 'internal' | 'restricted'): AiCheckpoint => ({
+    checkpointId: `ckp_notes_${label}_00000001`, projectId: 'p', taskId: 't1', taskRevision: 1, runId: 'run', planRevision: 1, stepKind: 'researchNotes', stage: 'research_notes', callOverride: null,
+    routeMode: null, continuation: 'device_only', labels: [label], locked: label === 'restricted', inputs: { contextId: null, bundleSha256: null, files: [], inputChars: 10 },
+    partial: { issues: [], texts: [{ who: 'owner', text: `P|${NOTES_CANARY} ${label}`, classification: label }] }, stopReason: null, status: 'done', routeRecordId: null, escalatedAt: null, resumedAs: null,
+    createdAt: '2026-11-12T00:00:00.000Z', updatedAt: '2026-11-12T00:00:00.000Z',
+  });
+
+  it('storage split for notes: restricted notes stay on this device and never reach the server; internal ones are stored by both', async () => {
+    const h = setup();
+    await h.engine.keep(notes('restricted'));
+    await h.engine.keep(notes('internal'));
+    expect(JSON.stringify(h.server.saved)).not.toContain(`${NOTES_CANARY} restricted`);
+    expect(JSON.stringify(h.server.saved)).toContain(`${NOTES_CANARY} internal`);
+    expect((await h.device.list('owner_1', 'p')).map((c) => c.checkpointId).sort()).toEqual(['ckp_notes_internal_00000001', 'ckp_notes_restricted_00000001']);
+    expect(h.engine.store.getState().deviceOnly['ckp_notes_restricted_00000001']).toBe(true);
+  });
+
+  const BRIEF_TEXT = [{ who: 'owner' as const, text: 'G\tA board.\nP1\tfact\tBoards sort by votes.', classification: 'internal' as const }];
+  const verifyBlocked = () => result(proposal({ status: 'blocked', blockedReason: 'offline', observedSource: 'UNKNOWN', requestId: 'req_v', route: { taskId: 't1', stepKind: 'pmVerify', callOverride: 'ONLY_IN_CLOUD', effectiveMode: 'ONLY_IN_CLOUD', policySource: 'call', locked: false, fellBack: null, conformance: 'unverified', requestModeMismatch: false } as never }), 'pmVerify');
+  async function pauseVerify(h: ReturnType<typeof setup>, sha: string) {
+    const rec = h.engine.begin({ taskId: 't1', stepKind: 'pmVerify', callOverride: 'ONLY_IN_CLOUD', texts: BRIEF_TEXT, noContext: { runId: 'run', taskRevision: 1, planRevision: 1, labels: ['internal'], briefSha256: sha } });
+    await rec.finish({ kind: 'result', result: verifyBlocked(), context: null });
+    return rec.id;
+  }
+
+  it('offline, a check pauses as a checkpoint waiting for the connection; on reconnect it is re-validated and sent with its approved brief, after reconnecting', async () => {
+    const SHA = 'b'.repeat(64);
+    const withGrant = (): ProjectViewSnapshot => { const s = snap(); return { ...s, settings: [{ scope: 'run', key: 'run', field: 'web_research', desired: true } as never] }; };
+    const h = setup({ currentBriefSha: () => SHA });
+    h.setSnap(withGrant());
+    h.setOnline(false);
+    const id = await pauseVerify(h, SHA);
+    expect(h.engine.store.getState().checkpoints[id]).toMatchObject({ status: 'waiting', stopReason: 'offline', continuation: 'cloud_capable', stepKind: 'pmVerify', inputs: { briefSha256: SHA } });
+    expect(h.server.rows.get(id)).toBeUndefined();
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.runner.pm).toHaveBeenCalledTimes(1);
+    expect(h.runner.pm).toHaveBeenCalledWith(expect.objectContaining({ kind: 'pmVerify', brief: { goal: 'A board.', items: [{ id: 'P1', kind: 'fact', text: 'Boards sort by votes.' }], uncertainties: [] }, briefSha256: SHA, resume: { checkpointId: id, kind: 'after_reconnect' } }));
+  });
+
+  it('editing the brief while the check is paused stops the automatic send (inputs changed); so does turning web research off', async () => {
+    let current: string | null = 'b'.repeat(64);
+    const h = setup({ currentBriefSha: () => current });
+    h.setSnap({ ...snap(), settings: [{ scope: 'run', key: 'run', field: 'web_research', desired: true } as never] });
+    h.setOnline(false);
+    const id = await pauseVerify(h, 'b'.repeat(64));
+    current = null;
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.runner.pm).not.toHaveBeenCalled();
+    expect(h.engine.store.getState().problems[id]).toEqual(['inputs_changed']);
+    current = 'b'.repeat(64);
+    h.setSnap(snap());
+    await h.engine.reconnect();
+    expect(h.runner.pm).not.toHaveBeenCalled();
+    expect(h.engine.store.getState().problems[id]).toEqual(['web_research_off']);
+  });
+});

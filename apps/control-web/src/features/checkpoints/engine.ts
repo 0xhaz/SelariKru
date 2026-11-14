@@ -3,7 +3,8 @@ import {
   stopReasonFor,
   type AiCheckpoint, type AiCheckpointResume, type AiCheckpointStage, type AiCheckpointText, type CheckpointProblem, type CheckpointRecheck, type RoutePolicyMode, type RouteStepKind,
 } from '@selarikru/domain';
-import type { AgentResult } from '@selarikru/inference-firebase-web';
+import type { AgentResult, PlanBriefPayload } from '@selarikru/inference-firebase-web';
+import { decodeBriefTexts } from '../pm/brief.ts';
 import type { EngineeringDataSource, ProjectViewSnapshot, TaskAgentContext, TaskBaseFiles, TaskRouteRead } from '@selarikru/view-protocol';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { AgentActionKind } from '../hybrid/model.ts';
@@ -39,7 +40,7 @@ export interface CheckpointState {
 /** What a resumed step runs through: the agents port (which starts its own recorder, continuing this checkpoint). */
 export interface CheckpointRunner {
   run(req: { taskId: string; kind: AgentActionKind; callOverride: RoutePolicyMode | null; resume?: { checkpointId: string; kind: AiCheckpointResume; files?: readonly { path: string; sha256: string | null }[]; priorIssues?: readonly string[] } }): Promise<unknown>;
-  pm(req: { kind: 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate'; subjectTaskId: string; question: string; questionClassification: 'internal' | 'restricted'; history: readonly never[]; callOverride: RoutePolicyMode | null; resume?: { checkpointId: string; kind: AiCheckpointResume } }): Promise<unknown>;
+  pm(req: { kind: 'pmAnswer' | 'pmResearch' | 'pmPlan' | 'pmDelegate' | 'pmVerify' | 'pmVerifyNoWeb'; subjectTaskId: string; question: string; questionClassification: 'internal' | 'restricted'; history: readonly never[]; callOverride: RoutePolicyMode | null; resume?: { checkpointId: string; kind: AiCheckpointResume }; brief?: PlanBriefPayload; briefSha256?: string }): Promise<unknown>;
 }
 
 export interface CheckpointEngineDeps {
@@ -61,6 +62,11 @@ export interface CheckpointEngineDeps {
    * ignored: the page works the same without it.
    */
   readonly storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
+  /**
+   * H13: the hash of the plan brief the owner has approved now for this checkpoint's run and task, or null when none is approved (edited since, or this tab was
+   * reloaded). A paused check is sent only with the brief it was approved with. Absent: none, so a paused check is never sent on its own.
+   */
+  readonly currentBriefSha?: (cp: AiCheckpoint) => string | null;
 }
 
 export interface ChainStart {
@@ -72,6 +78,11 @@ export interface ChainStart {
   readonly resumedAs?: AiCheckpointResume;
   /** A PM turn: the owner's question, with its label. */
   readonly texts?: readonly AiCheckpointText[];
+  /**
+   * H13: a step that reads no task context (a plan brief check sends only the approved brief): what its checkpoint is made from, so a pause is kept. Its texts
+   * are the brief, with its label.
+   */
+  readonly noContext?: { readonly runId: string; readonly taskRevision: number; readonly planRevision: number | null; readonly labels: AiCheckpoint['labels']; readonly briefSha256: string };
 }
 
 /** How a step ended, as the agents port returns it. */
@@ -86,9 +97,12 @@ export interface ChainRecorder {
   finish(outcome: ChainOutcome, reply?: AiCheckpointText): Promise<void>;
 }
 
-const STAGE_OF_KIND: Partial<Record<RouteStepKind, AiCheckpointStage>> = { pmPlan: 'plan_draft', pmAnswer: 'pm_turn', pmResearch: 'pm_turn', pmDelegate: 'pm_turn', plan: 'plan_draft' };
+const STAGE_OF_KIND: Partial<Record<RouteStepKind, AiCheckpointStage>> = { pmPlan: 'plan_draft', pmAnswer: 'pm_turn', pmResearch: 'pm_turn', pmDelegate: 'pm_turn', plan: 'plan_draft', pmVerify: 'pm_turn', pmVerifyNoWeb: 'pm_turn' };
+/** H13: the plan brief's cloud checks: they read no task context and send only the approved brief. */
+const BRIEF_CHECKS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb']);
 const TASK_STEPS: ReadonlySet<string> = new Set(['criteria', 'breakdown', 'patch', 'review', 'triage', 'prDescription']);
 const PM_STEPS: ReadonlySet<string> = new Set(['pmAnswer', 'pmResearch', 'pmPlan', 'pmDelegate']);
+const webResearchOn = (snap: ProjectViewSnapshot | null, runId: string): boolean => snap?.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'web_research' && x.desired === true) ?? false;
 const LABELS = new Set(['public', 'internal', 'restricted', 'secret']);
 const asLabel = (l: unknown): 'public' | 'internal' | 'restricted' | 'secret' => (typeof l === 'string' && LABELS.has(l) ? l as never : 'restricted');
 const bundleSha = (c: TaskAgentContext): string => sha256Hex(canonicalJson({ pinned: c.bundle.pinned, claims: c.bundle.claims }));
@@ -108,6 +122,8 @@ export interface CheckpointEngine {
   readonly store: StoreApi<CheckpointState>;
   attach(runner: CheckpointRunner): void;
   begin(start: ChainStart): ChainRecorder;
+  /** H13: keeps a checkpoint that is not a step (the plan brief notes), under the same split: on this device always, on the server only when it may be. */
+  keep(cp: AiCheckpoint): Promise<void>;
   /** Reads the device's and the server's checkpoints for this project. */
   load(): Promise<void>;
   /** Re-validates and, where allowed, sends every waiting checkpoint. */
@@ -248,13 +264,23 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
           return;
         }
         if (!draft && outcome.context) draft = { ...base(outcome.context, outcome.context ? 'unknown_ctx' : ''), labels: labelsOf(outcome.context) };
+        if (!draft && start.noContext) {
+          const n = start.noContext;
+          draft = {
+            checkpointId: id, projectId: deps.projectId, taskId: start.taskId, taskRevision: Math.max(1, n.taskRevision), runId: n.runId, planRevision: n.planRevision, stepKind: start.stepKind, stage: 'pm_turn',
+            callOverride: start.callOverride, routeMode: null, continuation: 'device_only', labels: n.labels, locked: false,
+            inputs: { contextId: null, bundleSha256: null, files: [], inputChars: null, briefSha256: n.briefSha256 }, partial: texts.length > 0 ? { issues: [], texts: texts.slice(0, 8) } : null,
+            stopReason: null, status: 'running', routeRecordId: null, escalatedAt: null, resumedAs: null, createdAt: at, updatedAt: at,
+          };
+        }
         if (!draft) return;
         const r = outcome.result;
         draft = { ...draft, ...fromResult(r), stage: STAGE_OF_KIND[start.stepKind] ?? draft.stage, updatedAt: now() };
         if (reply && r.proposal.status === 'ok') texts.push(reply);
         // A PM turn that read restricted text is restricted, and so is everything about it.
         if (r.locked) for (let i = 0; i < texts.length; i++) texts[i] = { ...texts[i]!, classification: 'restricted' };
-        if (texts.length > 0) draft = { ...draft, partial: { issues: draft.partial?.issues ?? [], texts: texts.slice(-8) } };
+        // A brief check's texts are its brief: kept whole, in order.
+        if (texts.length > 0) draft = { ...draft, partial: { issues: draft.partial?.issues ?? [], texts: BRIEF_CHECKS.has(start.stepKind) ? texts.slice(0, 8) : texts.slice(-8) } };
         let stop = stopReasonFor(r.proposal.blockedReason);
         const localFailed = !stop && r.proposal.status === 'invalid' && r.proposal.observedSource === 'ON_DEVICE' && TASK_STEPS.has(start.stepKind);
         if (localFailed) stop = 'local_failed_checks';
@@ -288,6 +314,11 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     const budget = checkpointBudget(run?.policy?.budgetLimitUsd ?? null, run !== undefined && (run.scopeAssessment !== null || run.lifecycle === 'cancelled'));
     let inputs: { -readonly [K in keyof NonNullable<CheckpointRecheck['inputs']>]: NonNullable<CheckpointRecheck['inputs']>[K] } | null = {};
     let context: CheckpointRecheck['context'] = 'ok';
+    if (BRIEF_CHECKS.has(cp.stepKind)) {
+      // H13: a check reads no task context; its input is the approved brief, by hash, and the web check needs the run's web research setting on now.
+      const snapNow = deps.snapshot();
+      return { route: { mode, lock: lock !== null }, taskRevision: read.revision, budget, inputs: { briefSha256: deps.currentBriefSha?.(cp) ?? null }, context: 'not_applicable', ...(cp.stepKind === 'pmVerify' ? { webResearch: webResearchOn(snapNow, cp.runId) } : {}) };
+    }
     if (cp.stepKind === 'pmResearch') {
       // Research reads no task context: there is nothing to serve or check (fix round 1, M4).
       inputs = {};
@@ -343,7 +374,11 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
           return;
         }
       }
-      if (PM_STEPS.has(cp.stepKind)) {
+      if (BRIEF_CHECKS.has(cp.stepKind)) {
+        const brief = decodeBriefTexts(cp.partial?.texts ?? []);
+        if (!brief || !cp.inputs.briefSha256) return;
+        await runner.pm({ kind: cp.stepKind as 'pmVerify' | 'pmVerifyNoWeb', subjectTaskId: cp.taskId, question: '', questionClassification: 'internal', history: [], callOverride, brief, briefSha256: cp.inputs.briefSha256, resume: { checkpointId: cp.checkpointId, kind: how } });
+      } else if (PM_STEPS.has(cp.stepKind)) {
         const q = cp.partial?.texts.find((t) => t.who === 'owner');
         if (!q) return;
         await runner.pm({ kind: cp.stepKind as never, subjectTaskId: cp.taskId, question: q.text, questionClassification: q.classification === 'restricted' || q.classification === 'secret' ? 'restricted' : 'internal', history: [], callOverride, resume: { checkpointId: cp.checkpointId, kind: how } });
@@ -462,6 +497,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     store,
     attach(r) { runner = r; },
     begin,
+    keep: (cp) => write(cp),
     async load() {
       const mine = await deps.device.list(deps.ownerKey, deps.projectId).catch(() => [] as AiCheckpoint[]);
       const theirs = deps.server?.listAiCheckpoints ? await deps.server.listAiCheckpoints(deps.projectId).catch(() => [] as AiCheckpoint[]) : [];
@@ -529,6 +565,12 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       if (!cp || cp.status !== 'abandoned' || !runner) return;
       setFor('dismissed', id, true);
       keepDismissed();
+      if (BRIEF_CHECKS.has(cp.stepKind)) {
+        // Run again only with the brief approved now: the same hash, or nothing is sent.
+        const brief = decodeBriefTexts(cp.partial?.texts ?? []);
+        if (brief && cp.inputs.briefSha256 && deps.currentBriefSha?.(cp) === cp.inputs.briefSha256) await runner.pm({ kind: cp.stepKind as 'pmVerify' | 'pmVerifyNoWeb', subjectTaskId: cp.taskId, question: '', questionClassification: 'internal', history: [], callOverride: cp.callOverride, brief, briefSha256: cp.inputs.briefSha256 });
+        return;
+      }
       if (PM_STEPS.has(cp.stepKind)) {
         const q = cp.partial?.texts.find((t) => t.who === 'owner');
         if (q) await runner.pm({ kind: cp.stepKind as never, subjectTaskId: cp.taskId, question: q.text, questionClassification: q.classification === 'restricted' || q.classification === 'secret' ? 'restricted' : 'internal', history: [], callOverride: cp.callOverride });

@@ -36,6 +36,17 @@ describe('H9 item 2: one view of every AI call, from route records only', () => 
     expect(unknown).toMatchObject({ ran: 'Unknown', ranTone: 'warning', how: 'Unknown', check: 'Not run' });
   });
 
+  it('H13: the plan brief steps are listed with where they ran: formatting on this device, the checks in the cloud', () => {
+    const [noWeb, check, brief] = aiCallRows([
+      rec({ recordId: 'a', reportedAt: '2026-11-12T10:01:00.000Z', stepKind: 'pmBrief', callOverride: 'ONLY_ON_DEVICE', effectiveMode: 'ONLY_ON_DEVICE', policySource: 'call', observedSource: 'ON_DEVICE' }),
+      rec({ recordId: 'b', reportedAt: '2026-11-12T10:02:00.000Z', stepKind: 'pmVerify', callOverride: 'ONLY_IN_CLOUD', effectiveMode: 'ONLY_IN_CLOUD', policySource: 'call', observedSource: 'IN_CLOUD', resumed: 'after_reconnect' }),
+      rec({ recordId: 'c', reportedAt: '2026-11-12T10:03:00.000Z', stepKind: 'pmVerifyNoWeb', callOverride: 'ONLY_IN_CLOUD', effectiveMode: 'ONLY_IN_CLOUD', policySource: 'call', observedSource: 'IN_CLOUD' }),
+    ], titles);
+    expect(brief).toMatchObject({ step: 'Format plan brief', ran: 'On this device', requested: 'Local only (ONLY_ON_DEVICE)', requestedSource: 'This call only' });
+    expect(check).toMatchObject({ step: 'Check plan brief (web)', ran: 'Cloud', how: 'Sent after reconnecting', model: 'gemini-x' });
+    expect(noWeb).toMatchObject({ step: 'Check plan brief (no web)', ran: 'Cloud' });
+  });
+
   it('M1: a call the owner resumed says "Resumed by owner"', () => {
     const [row] = aiCallRows([rec({ recordId: 'a', reportedAt: '2026-11-12T10:03:00.000Z', observedSource: 'IN_CLOUD', resumed: 'owner_resume' as never })], titles);
     expect(row).toMatchObject({ how: 'Resumed by owner' });

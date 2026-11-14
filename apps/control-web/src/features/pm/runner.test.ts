@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectViewSnapshot, TaskRouteRead } from '@selarikru/view-protocol';
 import { snapshotOf, task } from '../overview/testing.ts';
+import { canonicalJson, sha256Hex } from '@selarikru/domain';
 import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, runPmStep, type PmDeps, type PmRequest } from './runner.ts';
 
 const lock = { label: 'restricted' as const, reason: 'x' };
@@ -12,11 +13,11 @@ function snap(): ProjectViewSnapshot {
 }
 
 function deps(over: Partial<PmDeps> = {}, read: TaskRouteRead['route'] = route()): PmDeps & { calls: Record<string, unknown[]> } {
-  const calls: Record<string, unknown[]> = { pmAnswer: [], pmResearch: [], pmPlan: [], pmDelegate: [], context: [] };
+  const calls: Record<string, unknown[]> = { pmAnswer: [], pmResearch: [], pmPlan: [], pmDelegate: [], pmBrief: [], pmVerify: [], pmVerifyNoWeb: [], context: [] };
   const result = (kind: string) => async (input: unknown) => { calls[kind]!.push(input); return { kind, locked: false, proposal: { status: 'ok', data: {} }, report: null } as never; };
   return {
     calls, projectId: 'p', snapshot: snap,
-    catalog: { pmAnswer: result('pmAnswer'), pmResearch: result('pmResearch'), pmPlan: result('pmPlan'), pmDelegate: result('pmDelegate') } as never,
+    catalog: { pmAnswer: result('pmAnswer'), pmResearch: result('pmResearch'), pmPlan: result('pmPlan'), pmDelegate: result('pmDelegate'), pmBrief: result('pmBrief'), pmVerify: result('pmVerify'), pmVerifyNoWeb: result('pmVerifyNoWeb') } as never,
     getTaskRoute: async (taskId) => ({ taskId, revision: 1, runId: 'run', route: read, records: [] }) as never,
     getTaskContext: vi.fn(async (taskId: string) => { calls['context']!.push(taskId); return { task: { title: 'Add posting', description: null, criteria: [], allowedPaths: ['src'], classification: 'internal' }, bundle: null } as never; }),
     webResearch: () => true,
@@ -106,4 +107,54 @@ describe('H12 step 0: the plan scope reads each listed task\'s route again just 
       expect(reads).toEqual(expect.arrayContaining(['t2', 't3']));
     });
   }
+});
+
+describe('H13: the plan brief steps in the runner', () => {
+  const brief = { goal: 'A board.', items: [{ id: 'P1', kind: 'fact' as const, text: 'Boards sort by votes.' }], uncertainties: [{ id: 'U1', question: 'Moderation?' }] };
+  const approved = sha256Hex(canonicalJson(brief));
+  const verify = (over: Partial<PmRequest> = {}) => req({ kind: 'pmVerify', question: '', brief, briefSha256: approved, ...over });
+
+  it('pmBrief is always a device-only call, reads no task context, and carries the notes\' label', async () => {
+    const d = deps({}, route({ effective: 'ONLY_IN_CLOUD', runDefault: 'ONLY_IN_CLOUD' }));
+    await runPmStep(d, req({ kind: 'pmBrief', question: '', notes: { points: 'Posts are public.', unsure: '' } }));
+    expect(d.calls['context']).toEqual([]);
+    expect(d.calls['pmBrief']![0]).toMatchObject({ callOverride: 'ONLY_ON_DEVICE', points: 'Posts are public.', inputClassification: 'internal', bundle: null });
+    const l = deps({}, route({ lock }));
+    await runPmStep(l, req({ kind: 'pmBrief', subjectTaskId: 't2', question: '', notes: { points: 'x', unsure: '' } }));
+    expect(l.calls['pmBrief']![0]).toMatchObject({ inputClassification: 'restricted' });
+    expect(await runPmStep(deps(), req({ kind: 'pmBrief', question: '', notes: { points: ' ', unsure: '' } }))).toEqual({ kind: 'refused', code: 'brief_empty' });
+  });
+
+  it('pmVerify sends only the approved brief, after every check: approved hash, label, lock, device only, the web research setting', async () => {
+    const d = deps();
+    await runPmStep(d, verify());
+    expect(d.calls['context']).toEqual([]);
+    expect(d.calls['pmVerify']![0]).toMatchObject({ brief, bundle: null, callOverride: 'ONLY_IN_CLOUD', briefClassification: 'internal' });
+    expect(await runPmStep(deps(), verify({ briefSha256: 'f'.repeat(64) }))).toEqual({ kind: 'refused', code: 'brief_not_approved' });
+    expect(await runPmStep(deps(), verify({ questionClassification: 'restricted' }))).toEqual({ kind: 'refused', code: 'brief_restricted' });
+    expect(await runPmStep(deps({}, route({ lock })), verify({ subjectTaskId: 't2' }))).toEqual({ kind: 'refused', code: 'research_locked' });
+    expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), verify())).toEqual({ kind: 'refused', code: 'research_device_only' });
+    expect(await runPmStep(deps({}, route({ effective: 'ONLY_ON_DEVICE', runDefault: 'ONLY_ON_DEVICE' })), verify())).toEqual({ kind: 'refused', code: 'research_device_only' });
+    const off = deps({ webResearch: () => false });
+    expect(await runPmStep(off, verify())).toEqual({ kind: 'refused', code: 'research_not_granted' });
+    expect(off.calls['pmVerify']).toEqual([]);
+  });
+
+  it('the no-web check needs no web research grant, only a cloud-capable, unlocked subject', async () => {
+    const d = deps({ webResearch: () => false });
+    await runPmStep(d, verify({ kind: 'pmVerifyNoWeb' }));
+    expect(d.calls['pmVerifyNoWeb']).toHaveLength(1);
+    expect(await runPmStep(deps({}, route({ lock })), verify({ kind: 'pmVerifyNoWeb', subjectTaskId: 't2' }))).toEqual({ kind: 'refused', code: 'verify_locked' });
+    expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), verify({ kind: 'pmVerifyNoWeb' }))).toEqual({ kind: 'refused', code: 'verify_device_only' });
+  });
+
+  it('Make the plan from this brief passes the brief to pmPlan, and nothing else changes', async () => {
+    const d = deps();
+    const planBrief = { goal: 'A board.', checked: 'web' as const, items: [{ id: 'P1', kind: 'fact' as const, text: 'x', verdict: 'contradicted' as const, explanation: 'e' }], uncertainties: [] };
+    await runPmStep(d, req({ kind: 'pmPlan', question: 'Make the plan from this brief.', planBrief }));
+    expect(d.calls['pmPlan']![0]).toMatchObject({ brief: planBrief, question: 'Make the plan from this brief.' });
+    const plain = deps();
+    await runPmStep(plain, req({ kind: 'pmPlan' }));
+    expect(plain.calls['pmPlan']![0]).not.toHaveProperty('brief');
+  });
 });

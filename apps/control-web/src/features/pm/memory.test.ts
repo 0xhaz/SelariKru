@@ -24,4 +24,12 @@ describe('the PM\'s memory (H12 fix round 1, I4)', () => {
     expect(cloud).not.toContain(`${CANARY} locked`);
     expect(cloud).not.toContain(`${CANARY} unknown`);
   });
+
+  it('H13: a plan brief check or the brief notes are not conversation turns, so they are never replayed as history', () => {
+    const snap = snapshotOf({ tasks: [task('open', { route: route() })] });
+    const verify = { ...cp('open'), checkpointId: 'ckp_mem_verify_0001', stepKind: 'pmVerify' as const };
+    const brief = { ...cp('open'), checkpointId: 'ckp_mem_brief_00001', stepKind: 'pmBrief' as const };
+    const notes = { ...cp('open'), checkpointId: 'ckp_mem_notes_00001', stepKind: 'researchNotes' as const };
+    expect(rememberedTurns({ verify, brief, notes }, snap, '2026-11-12T00:00:00.000Z')).toEqual([]);
+  });
 });

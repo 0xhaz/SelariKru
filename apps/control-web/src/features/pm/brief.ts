@@ -1,0 +1,262 @@
+import {
+  canonicalJson, PLAN_BRIEF_LIMITS, RESEARCH_NOTES_KIND, redactSecrets, sha256Hex, strongerLabel,
+  type AiCheckpoint, type AiCheckpointText, type PLAN_BRIEF_CONFIDENCE, type PLAN_BRIEF_ITEM_KINDS, type PLAN_BRIEF_NO_WEB_VERDICTS, type PLAN_BRIEF_OMIT_REASONS, type PLAN_BRIEF_VERDICTS,
+} from '@selarikru/domain';
+import { CONVERSATION_MARKER, planBriefLines, type PlanBriefForPlan, type PlanBriefPayload } from '@selarikru/inference-firebase-web';
+import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
+import { questionLabelFor } from './runner.ts';
+
+/**
+ * H13: the plan brief. The owner gives their points and what they are unsure about; Gemini Nano formats them on this device into a brief that keeps every point
+ * (`pmBrief`); the owner checks and corrects it, ticks what may leave the device, and approves it, which freezes it by hash; the cloud checks each approved point
+ * and answers each question (`pmVerify`, or `pmVerifyNoWeb` without web search); the PM then makes the plan from it. Pure functions: the panel and the engine
+ * call them, so the same rules hold for the button, a resume and a test.
+ */
+export type BriefLabel = 'internal' | 'restricted';
+export type ItemKind = (typeof PLAN_BRIEF_ITEM_KINDS)[number];
+export interface BriefItem {
+  readonly id: string;
+  readonly text: string;
+  readonly kind: ItemKind;
+  readonly checkable: boolean;
+  readonly source: 'points' | 'conversation' | 'manual';
+  readonly ticked: boolean;
+  /** From restricted input: it can never be ticked, so it never leaves this device. */
+  readonly restricted: boolean;
+}
+export interface BriefQuestion { readonly id: string; readonly question: string; readonly source: 'unsure' | 'manual'; readonly ticked: boolean; readonly restricted: boolean }
+export interface BriefDraft {
+  readonly goal: string;
+  readonly items: readonly BriefItem[];
+  readonly uncertainties: readonly BriefQuestion[];
+  readonly omitted: readonly { readonly reason: (typeof PLAN_BRIEF_OMIT_REASONS)[number] }[];
+  /** The notes' label when the brief was made. Restricted: nothing in it may be ticked, and the cloud check is unavailable. */
+  readonly label: BriefLabel;
+  /** How many points and questions the owner gave, for the completeness count. */
+  readonly inCount: { readonly points: number; readonly unsure: number };
+  /** sha256 of the payload the owner approved. Null: not approved (or edited since). */
+  readonly approvedSha256: string | null;
+}
+
+const L = PLAN_BRIEF_LIMITS;
+const one = (t: string): string => t.replace(/\s+/g, ' ').trim();
+const secret = (t: string): boolean => redactSecrets(t) !== t;
+
+export const briefInCount = (points: string, unsure: string): BriefDraft['inCount'] => { const l = planBriefLines(points, unsure); return { points: l.points.length, unsure: l.unsure.length }; };
+
+export function emptyBrief(label: BriefLabel, inCount: BriefDraft['inCount']): BriefDraft {
+  return { goal: '', items: [], uncertainties: [], omitted: [], label, inCount, approvedSha256: null };
+}
+
+/**
+ * The brief from a schema-valid pmBrief output. Every item and question goes through the secret detector: one with a secret-shaped string is dropped and counted
+ * as omitted (private), so the count still adds up and the string never reaches the screen or storage. A secret-shaped goal is cleared.
+ */
+export function briefFromOutput(data: unknown, label: BriefLabel, inCount: BriefDraft['inCount']): BriefDraft {
+  const d = data as { goal: string; items: { id: string; text: string; kind: ItemKind; checkable: boolean; source: 'points' | 'conversation' }[]; uncertainties: { id: string; question: string }[]; omitted: { reason: BriefDraft['omitted'][number]['reason'] }[] };
+  const omitted = [...d.omitted];
+  const restricted = label === 'restricted';
+  const items = d.items.flatMap((x): BriefItem[] => { if (secret(x.text)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, text: one(x.text), kind: x.kind, checkable: x.checkable, source: x.source, ticked: !restricted, restricted }]; });
+  const uncertainties = d.uncertainties.flatMap((x): BriefQuestion[] => { if (secret(x.question)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, question: one(x.question), source: 'unsure', ticked: !restricted, restricted }]; });
+  return { goal: secret(d.goal) ? '' : one(d.goal), items, uncertainties, omitted, label, inCount, approvedSha256: null };
+}
+
+/** "N points in, N items + N omitted out". Manual additions count, so the owner can add what is missing by hand. */
+export function completeness(d: BriefDraft): { readonly ok: boolean; readonly missing: number; readonly extra: number; readonly line: string; readonly warning: string | null } {
+  const given = d.inCount.points + d.inCount.unsure;
+  const out = d.items.length + d.uncertainties.length + d.omitted.length;
+  const fromModel = d.items.filter((x) => x.source !== 'manual').length + d.uncertainties.filter((x) => x.source !== 'manual').length + d.omitted.length;
+  const missing = Math.max(0, given - out);
+  const extra = Math.max(0, fromModel - given);
+  const n = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
+  const line = `${n(d.inCount.points, 'point')} and ${n(d.inCount.unsure, 'question')} in, ${n(d.items.length, 'item')} + ${n(d.uncertainties.length, 'question')} + ${d.omitted.length} omitted out`;
+  const warning = missing > 0 ? `${missing} of what you gave is not in this brief. Add the missing ${missing === 1 ? 'one' : 'ones'} by hand below before you approve it.`
+    : extra > 0 ? `The brief has ${extra} more than you gave. Check nothing was invented, and delete what you did not say.` : null;
+  return { ok: missing === 0 && extra === 0, missing, extra, line, warning };
+}
+
+type Edit = { readonly draft: BriefDraft } | { readonly error: 'too_long' | 'secret' | 'empty' | 'full' };
+const unapproved = (d: BriefDraft): BriefDraft => ({ ...d, approvedSha256: null });
+const checkText = (t: string, max: number): 'too_long' | 'secret' | 'empty' | null => { const v = one(t); return !v ? 'empty' : v.length > max ? 'too_long' : secret(v) ? 'secret' : null; };
+
+export function setGoal(d: BriefDraft, goal: string): Edit {
+  const v = one(goal);
+  if (v.length > L.goalChars) return { error: 'too_long' };
+  if (secret(v)) return { error: 'secret' };
+  return { draft: unapproved({ ...d, goal: v }) };
+}
+export function editItem(d: BriefDraft, id: string, text: string): Edit {
+  const bad = checkText(text, L.itemChars);
+  return bad ? { error: bad } : { draft: unapproved({ ...d, items: d.items.map((x) => (x.id === id ? { ...x, text: one(text) } : x)) }) };
+}
+export const setItemKind = (d: BriefDraft, id: string, kind: ItemKind): BriefDraft => unapproved({ ...d, items: d.items.map((x) => (x.id === id ? { ...x, kind } : x)) });
+export function editQuestion(d: BriefDraft, id: string, question: string): Edit {
+  const bad = checkText(question, L.itemChars);
+  return bad ? { error: bad } : { draft: unapproved({ ...d, uncertainties: d.uncertainties.map((x) => (x.id === id ? { ...x, question: one(question) } : x)) }) };
+}
+/** A restricted entry stays unticked whatever is asked. */
+export const toggleItem = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, items: d.items.map((x) => (x.id === id && !x.restricted ? { ...x, ticked: !x.ticked } : x)) });
+export const toggleQuestion = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, uncertainties: d.uncertainties.map((x) => (x.id === id && !x.restricted ? { ...x, ticked: !x.ticked } : x)) });
+export const removeItem = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, items: d.items.filter((x) => x.id !== id) });
+export const removeQuestion = (d: BriefDraft, id: string): BriefDraft => unapproved({ ...d, uncertainties: d.uncertainties.filter((x) => x.id !== id) });
+
+const nextId = (prefix: 'P' | 'U', ids: readonly string[], max: number): string | null => {
+  for (let i = 1; i <= max; i++) if (!ids.includes(`${prefix}${i}`)) return `${prefix}${i}`;
+  return null;
+};
+export function addItem(d: BriefDraft, text: string, kind: ItemKind): Edit {
+  const bad = checkText(text, L.itemChars);
+  if (bad) return { error: bad };
+  const id = nextId('P', d.items.map((x) => x.id), L.items);
+  if (!id) return { error: 'full' };
+  const restricted = d.label === 'restricted';
+  return { draft: unapproved({ ...d, items: [...d.items, { id, text: one(text), kind, checkable: kind === 'fact' || kind === 'assumption', source: 'manual', ticked: !restricted, restricted }] }) };
+}
+export function addQuestion(d: BriefDraft, question: string): Edit {
+  const bad = checkText(question, L.itemChars);
+  if (bad) return { error: bad };
+  const id = nextId('U', d.uncertainties.map((x) => x.id), L.uncertainties);
+  if (!id) return { error: 'full' };
+  const restricted = d.label === 'restricted';
+  return { draft: unapproved({ ...d, uncertainties: [...d.uncertainties, { id, question: one(question), source: 'manual', ticked: !restricted, restricted }] }) };
+}
+
+/** What the cloud check sends: the ticked goal, items (with kind) and questions. Nothing else. A restricted brief has no payload at all. */
+export function briefPayload(d: BriefDraft): PlanBriefPayload {
+  if (d.label === 'restricted') return { goal: '', items: [], uncertainties: [] };
+  return {
+    goal: d.goal,
+    items: d.items.filter((x) => x.ticked && !x.restricted).map((x) => ({ id: x.id, kind: x.kind, text: x.text })),
+    uncertainties: d.uncertainties.filter((x) => x.ticked && !x.restricted).map((x) => ({ id: x.id, question: x.question })),
+  };
+}
+export const briefSha256 = (p: PlanBriefPayload): string => sha256Hex(canonicalJson(p));
+export const approveBrief = (d: BriefDraft): BriefDraft => ({ ...d, approvedSha256: briefSha256(briefPayload(d)) });
+
+/** Why the cloud check cannot run on this brief now, or null. The panel and the runner use the same rule. */
+export function cloudRefusal(d: BriefDraft | null): 'brief_restricted' | 'brief_not_approved' | 'brief_empty' | null {
+  if (!d) return 'brief_not_approved';
+  if (d.label === 'restricted') return 'brief_restricted';
+  const p = briefPayload(d);
+  if (d.approvedSha256 === null || d.approvedSha256 !== briefSha256(p)) return 'brief_not_approved';
+  if (p.items.length === 0 && p.uncertainties.length === 0) return 'brief_empty';
+  return null;
+}
+
+// ---- the cloud check's results ------------------------------------------------------------------------------------------------
+
+type Verdict = (typeof PLAN_BRIEF_VERDICTS)[number] | (typeof PLAN_BRIEF_NO_WEB_VERDICTS)[number];
+export interface BriefCheck {
+  readonly checked: 'web' | 'no_web';
+  readonly items: readonly { readonly id: string; readonly verdict: Verdict; readonly explanation: string; readonly sources: readonly { readonly title: string; readonly url: string }[] }[];
+  readonly uncertainties: readonly { readonly id: string; readonly answer: string; readonly confidence: (typeof PLAN_BRIEF_CONFIDENCE)[number]; readonly sources: readonly { readonly title: string; readonly url: string }[] }[];
+}
+/** A link the screen may show: https only. Anything else (http, javascript:, data:) is dropped. */
+export function httpsOnly(url: string): boolean {
+  try { return new URL(url).protocol === 'https:'; } catch { return false; }
+}
+export function screenCheck(kind: 'pmVerify' | 'pmVerifyNoWeb', data: unknown): BriefCheck {
+  const d = data as { items: { id: string; verdict: Verdict; explanation: string; sources?: { title: string; url: string }[] }[]; uncertainties: { id: string; answer: string; confidence: BriefCheck['uncertainties'][number]['confidence']; sources?: { title: string; url: string }[] }[] };
+  const src = (s: { title: string; url: string }[] | undefined) => (s ?? []).filter((x) => httpsOnly(x.url)).map((x) => ({ title: x.title, url: x.url }));
+  return {
+    checked: kind === 'pmVerify' ? 'web' : 'no_web',
+    items: d.items.map((x) => ({ id: x.id, verdict: x.verdict, explanation: x.explanation, sources: src(x.sources) })),
+    uncertainties: d.uncertainties.map((x) => ({ id: x.id, answer: x.answer, confidence: x.confidence, sources: src(x.sources) })),
+  };
+}
+
+/** The approved brief as the plan reads it: the ticked items with their verdicts, the ticked questions with their answers. */
+export function planBriefFor(d: BriefDraft, check: BriefCheck): PlanBriefForPlan {
+  const p = briefPayload(d);
+  return {
+    goal: p.goal, checked: check.checked,
+    items: p.items.map((x) => { const v = check.items.find((r) => r.id === x.id); return { ...x, ...(v ? { verdict: v.verdict, explanation: v.explanation } : {}) }; }),
+    uncertainties: p.uncertainties.map((x) => { const v = check.uncertainties.find((r) => r.id === x.id); return { ...x, ...(v ? { answer: v.answer, confidence: v.confidence } : {}) }; }),
+  };
+}
+
+// ---- checkpoint texts ---------------------------------------------------------------------------------------------------------
+
+/** Lines packed into labelled texts of at most 2,000 characters each, so the H12 storage split, its server refusal and its table checks apply unchanged. */
+function pack(lines: readonly string[], label: BriefLabel): AiCheckpointText[] {
+  const out: AiCheckpointText[] = [];
+  let cur = '';
+  for (const l of lines) {
+    const add = cur === '' ? l : `${cur}\n${l}`;
+    if (add.length > 2000 && cur !== '') { out.push({ who: 'owner', text: cur, classification: label }); cur = l; } else cur = add;
+  }
+  if (cur !== '') out.push({ who: 'owner', text: cur, classification: label });
+  return out;
+}
+const unpack = (texts: readonly AiCheckpointText[]): string[] => texts.filter((t) => t.who === 'owner').flatMap((t) => t.text.split('\n'));
+
+/** A paused check's brief: `G<TAB>goal`, `P1<TAB>kind<TAB>text`, `U1<TAB>question`. Whitespace in the text is already one space, so a line never breaks. */
+export function encodeBriefTexts(p: PlanBriefPayload, label: BriefLabel): AiCheckpointText[] {
+  return pack([`G\t${one(p.goal)}`, ...p.items.map((x) => `${x.id}\t${x.kind}\t${one(x.text)}`), ...p.uncertainties.map((x) => `${x.id}\t${one(x.question)}`)], label);
+}
+export function decodeBriefTexts(texts: readonly AiCheckpointText[]): PlanBriefPayload | null {
+  let goal: string | null = null;
+  const items: { id: string; kind: ItemKind; text: string }[] = [];
+  const uncertainties: { id: string; question: string }[] = [];
+  for (const l of unpack(texts)) {
+    const [head, a, b] = l.split('\t');
+    if (head === 'G') goal = a ?? '';
+    else if (/^P\d{1,2}$/.test(head ?? '') && a && b !== undefined) items.push({ id: head!, kind: a as ItemKind, text: b });
+    else if (/^U\d{1,2}$/.test(head ?? '') && a !== undefined) uncertainties.push({ id: head!, question: a });
+    else return null;
+  }
+  return goal === null ? null : { goal, items, uncertainties };
+}
+
+// ---- the notes ----------------------------------------------------------------------------------------------------------------
+
+/** The most each box holds. Nano's input is small: the formatted prompt stays inside its budget. */
+export const NOTES_LIMITS = { pointsChars: 4000, unsureChars: 1500 } as const;
+
+/** The notes' label, computed like the PM question's: the subject's lock, the owner's mark, and any restricted turn they carry. The strongest wins. */
+export function notesLabel(task: Pick<TaskView, 'route'> | undefined, marked: boolean, restrictedTurns: boolean): BriefLabel {
+  return questionLabelFor(task, marked || restrictedTurns);
+}
+
+/** "Add this conversation": the owner's and PM's turns in this tab, as text after the marker line. Restricted when any turn is. */
+export function conversationNotes(turns: readonly { readonly who: 'owner' | 'pm'; readonly text: string; readonly restricted: boolean }[]): { readonly text: string; readonly restricted: boolean } {
+  const lines = turns.filter((t) => t.text.trim()).map((t) => `${t.who === 'owner' ? 'Owner' : 'Project Manager'}: ${one(t.text)}`);
+  return { text: [CONVERSATION_MARKER, ...lines].join('\n'), restricted: turns.some((t) => t.restricted) };
+}
+
+/** Notes as labelled texts: `P|` starts each piece of the points, `U|` each piece of the questions. */
+export function encodeNotes(points: string, unsure: string, label: BriefLabel): AiCheckpointText[] {
+  const chunks = (tag: string, s: string): AiCheckpointText[] => {
+    const out: AiCheckpointText[] = [];
+    for (let i = 0; i < s.length; i += 1998) out.push({ who: 'owner', text: `${tag}${s.slice(i, i + 1998)}`, classification: label });
+    return out;
+  };
+  return [...chunks('P|', points.slice(0, NOTES_LIMITS.pointsChars)), ...chunks('U|', unsure.slice(0, NOTES_LIMITS.unsureChars))];
+}
+export function decodeNotes(texts: readonly AiCheckpointText[]): { readonly points: string; readonly unsure: string } {
+  return { points: texts.filter((t) => t.text.startsWith('P|')).map((t) => t.text.slice(2)).join(''), unsure: texts.filter((t) => t.text.startsWith('U|')).map((t) => t.text.slice(2)).join('') };
+}
+
+/** One notes checkpoint per run and subject task (a checkpoint keeps its task). */
+export const notesCheckpointId = (runId: string, taskId: string): string => `ckp_notes_${sha256Hex(`${runId}\u0000${taskId}`).slice(0, 32)}`;
+
+export function notesCheckpoint(n: { projectId: string; runId: string; taskId: string; taskRevision: number; planRevision: number | null; points: string; unsure: string; label: BriefLabel; at: string; createdAt?: string }): AiCheckpoint {
+  return {
+    checkpointId: notesCheckpointId(n.runId, n.taskId), projectId: n.projectId, taskId: n.taskId, taskRevision: Math.max(1, n.taskRevision), runId: n.runId, planRevision: n.planRevision,
+    stepKind: RESEARCH_NOTES_KIND, stage: 'research_notes', callOverride: null, routeMode: null, continuation: 'device_only', labels: [n.label], locked: n.label === 'restricted',
+    inputs: { contextId: null, bundleSha256: null, files: [], inputChars: n.points.length + n.unsure.length },
+    partial: { issues: [], texts: encodeNotes(n.points, n.unsure, n.label).slice(0, 8) }, stopReason: null, status: 'done', routeRecordId: null, escalatedAt: null, resumedAs: null,
+    createdAt: n.createdAt ?? n.at, updatedAt: n.at,
+  };
+}
+
+/** The run's latest notes, re-judged by the subject's lock now (I4): a task locked since makes them restricted; an unknown route counts as locked. */
+export function latestNotes(checkpoints: Readonly<Record<string, AiCheckpoint>>, snap: ProjectViewSnapshot | null, runId: string): { readonly points: string; readonly unsure: string; readonly label: BriefLabel; readonly taskId: string } | null {
+  const cp = Object.values(checkpoints).filter((c) => c.stepKind === RESEARCH_NOTES_KIND && c.runId === runId && c.status === 'done').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  if (!cp) return null;
+  const route = snap?.tasks[cp.taskId]?.route;
+  const now = !route || route.lock !== null ? 'restricted' : 'internal';
+  const stored = [...cp.labels, ...(cp.partial?.texts ?? []).map((t) => t.classification), ...(cp.locked ? ['restricted'] : [])].reduce<string>((a, l) => strongerLabel(a, l), 'public');
+  const label: BriefLabel = strongerLabel(stored, now) === 'internal' || strongerLabel(stored, now) === 'public' ? 'internal' : 'restricted';
+  return { ...decodeNotes(cp.partial?.texts ?? []), label, taskId: cp.taskId };
+}

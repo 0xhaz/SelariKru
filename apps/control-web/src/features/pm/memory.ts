@@ -7,9 +7,12 @@ import type { ProjectViewSnapshot } from '@selarikru/view-protocol';
  * it was stored with: a task that became locked (or whose route is not known) makes its remembered turns restricted, so they never reach a cloud-capable prompt.
  * Only turns from before this tab are remembered; later ones are already in this tab's conversation.
  */
+/** H13: only the conversation's own steps are turns; the plan brief's steps carry notes and briefs, shown in the brief, never as history. */
+const TURN_STEPS: ReadonlySet<string> = new Set(['pmAnswer', 'pmResearch', 'pmPlan', 'pmDelegate']);
+
 export function rememberedTurns(checkpoints: Readonly<Record<string, AiCheckpoint>>, snap: ProjectViewSnapshot | null, before: string): PmTurn[] {
   return Object.values(checkpoints)
-    .filter((cp) => cp.stepKind.startsWith('pm') && (cp.status === 'done' || cp.status === 'sent') && cp.createdAt < before && (cp.partial?.texts.length ?? 0) > 0)
+    .filter((cp) => TURN_STEPS.has(cp.stepKind) && (cp.status === 'done' || cp.status === 'sent') && cp.createdAt < before && (cp.partial?.texts.length ?? 0) > 0)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .flatMap((cp) => {
       const route = snap?.tasks[cp.taskId]?.route;

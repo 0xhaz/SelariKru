@@ -7,6 +7,7 @@ import { AgentCatalog, FirebaseHybridAssistantAdapter, type AssistantSdk } from 
 import type { DelegationReceipt, DelegationRequest, OwnerDelegationRequest, PmPlanAcceptReceipt, PmPlanAcceptRequest, AuthorizedViewCommand, CommandReceipt, CriteriaRevisionRequest, CriteriaRevisionResult, EngineeringDataSource, ProjectViewSnapshot, ProposalAcceptReceipt, TaskAgentContext, TaskRouteRead } from '@selarikru/view-protocol';
 import { runAgentStep, type AgentRunOutcome, type AgentRunRequest } from './runner.ts';
 import { runPmStep, webResearchGranted, type PmKind, type PmOutcome, type PmRequest } from '../pm/runner.ts';
+import { encodeBriefTexts } from '../pm/brief.ts';
 
 /** A call waiting for or in a model, and where it is meant to run first. For the office's desk marks and the rooftop cloud deck. */
 export interface InFlightCall {
@@ -146,9 +147,14 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
       // H12: one PM turn is one checkpoint: the owner's question with its label, then the reply with its label.
       const contextId = `ctx_${crypto.randomUUID().replace(/-/g, '')}`;
       let subjectRoute: TaskRouteRead['route'] | undefined;
-      const rec = opts.checkpoints?.begin({
-        taskId: req.subjectTaskId, stepKind: req.kind, callOverride: req.callOverride,
-        texts: [{ who: 'owner', text: req.question.slice(0, 2000), classification: req.questionClassification }],
+      // H13: formatting the brief runs on this device and never pauses for the cloud, so it keeps no checkpoint (its notes are kept as their own). A brief check
+      // keeps one made from the approved brief (it reads no task context), so a pause offline waits for the connection with exactly what was approved.
+      const subject = opts.snapshot()?.tasks[req.subjectTaskId];
+      const check = req.kind === 'pmVerify' || req.kind === 'pmVerifyNoWeb';
+      const rec = req.kind === 'pmBrief' || (check && (!req.brief || !req.briefSha256 || !subject)) ? undefined : opts.checkpoints?.begin({
+        taskId: req.subjectTaskId, stepKind: req.kind, callOverride: check ? 'ONLY_IN_CLOUD' : req.callOverride,
+        texts: check ? encodeBriefTexts(req.brief!, 'internal') : [{ who: 'owner', text: req.question.slice(0, 2000), classification: req.questionClassification }],
+        ...(check ? { noContext: { runId: subject!.runId, taskRevision: subject!.revision ?? 1, planRevision: opts.snapshot()?.runs[subject!.runId]?.planRevision ?? null, labels: ['internal' as const], briefSha256: req.briefSha256! } } : {}),
         ...(req.resume ? { resumeOf: req.resume.checkpointId, resumedAs: req.resume.kind } : {}),
       });
       try {
@@ -160,7 +166,7 @@ export function createAgents(opts: CreateAgentsOptions): AgentsPort | null {
             const read = await getTaskRoute(projectId, taskId);
             if (taskId === req.subjectTaskId) subjectRoute = read.route;
             // Only the subject's read is the call in flight; a plan scope's fresh read of each listed task (H12 step 0) is not.
-            if (taskId === req.subjectTaskId && !calls.some((c) => c.callId === callId)) publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride) }]);
+            if (taskId === req.subjectTaskId && !calls.some((c) => c.callId === callId)) publish([...calls, { callId, taskId, kind: req.kind, place: placeOf(read, req.kind === 'pmResearch' || check ? 'ONLY_IN_CLOUD' : req.kind === 'pmBrief' ? 'ONLY_ON_DEVICE' : req.callOverride) }]);
             return read;
           },
           getTaskContext: (taskId, destination, callOverride, contextId) => getTaskContext(projectId, taskId, destination, callOverride, contextId),
