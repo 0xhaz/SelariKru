@@ -81,6 +81,8 @@ const OWNER_ROUTES: [string, string][] = [
   ['POST', `/v1/projects/${PROJECT}/ai-checkpoints`],
   ['POST', `/v1/projects/${PROJECT}/ai-checkpoints/a1/escalation`],
   ['POST', `/v1/projects/${PROJECT}/ai-checkpoints/a1/send-claim`],
+  // H13 fix round 1 (H2): the owner deletes a checkpoint.
+  ['DELETE', `/v1/projects/${PROJECT}/ai-checkpoints/a1`],
 ];
 const RUNNER_ROUTES: [string, string][] = [
   ['POST', '/v1/runners/claim'],
@@ -110,7 +112,7 @@ describe('authentication', () => {
     for (const r of registered) expect(covered, `route ${r} missing from the 401 table`).toContain(r.replace(/:[a-zA-Z]+/g, ':id'));
 
     for (const [method, url] of all) {
-      const res = await call(h.app, method as 'GET' | 'POST', url);
+      const res = await call(h.app, method as 'GET' | 'POST' | 'DELETE', url);
       expect(res.statusCode, `${method} ${url}`).toBe(401);
       expect(res.json().error.code).toBe('unauthenticated');
     }
@@ -124,7 +126,7 @@ describe('authentication', () => {
 
   it('non-owner → 403', async () => {
     for (const [method, url] of OWNER_ROUTES) {
-      const res = await call(h.app, method as 'GET' | 'POST', url, bearer(INTRUDER_TOKEN));
+      const res = await call(h.app, method as 'GET' | 'POST' | 'DELETE', url, bearer(INTRUDER_TOKEN));
       expect(res.statusCode, `${method} ${url}`).toBe(403);
       expect(res.json().error.code).toBe('not_owner');
     }

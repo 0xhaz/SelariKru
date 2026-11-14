@@ -67,7 +67,7 @@ export async function post(app: FastifyInstance, url: string, payload: unknown, 
 }
 
 /** Raw inject with an optional body, for tests that need the whole response (headers included). */
-export function call(app: FastifyInstance, method: 'GET' | 'POST', url: string, headers: Record<string, string> = {}) {
+export function call(app: FastifyInstance, method: 'GET' | 'POST' | 'DELETE', url: string, headers: Record<string, string> = {}) {
   return app.inject(method === 'POST' ? { method, url, payload: {}, headers } : { method, url, headers });
 }
 
