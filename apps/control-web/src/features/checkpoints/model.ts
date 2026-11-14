@@ -7,6 +7,7 @@ import type { CheckpointState } from './engine.ts';
 export const STEP_LABEL: Readonly<Record<string, string>> = {
   criteria: 'Draft criteria', breakdown: 'Break down', patch: 'Propose change', review: 'Review change', triage: 'Explain failure', prDescription: 'Write PR description',
   pmAnswer: 'Ask the PM', pmResearch: 'PM web research', pmPlan: 'PM plan draft', pmDelegate: 'PM assignments', brief: 'Draft brief', plan: 'Plan',
+  pmBrief: 'Format plan brief', pmVerify: 'Check plan brief (web)', pmVerifyNoWeb: 'Check plan brief (no web)', researchNotes: 'Plan brief notes',
 };
 
 export const STOP_TEXT: Readonly<Record<AiCheckpointStopReason, string>> = {
@@ -27,6 +28,7 @@ export const PROBLEM_TEXT: Readonly<Record<string, string>> = {
   locked: 'This task now reads restricted data, so it stays on this device.',
   revision_changed: 'The task has a new revision since it paused, so it was not sent.',
   inputs_changed: 'Its inputs changed since it paused (files, context or task revision), so it was not sent.',
+  web_research_off: 'Web research is off for this run, so the check with Google Search was not sent. Turn on "Google Search (web research)" in Settings › Workflow, or check without web search.',
   budget_missing: 'This run has no budget set, so a cloud step is not sent. Missing is never unlimited: set one in Settings › Workflow.',
   budget_exhausted: 'This run\'s budget is used up, so a cloud step is not sent.',
   context_refused: 'The server did not serve this step\'s context for the cloud, so it was not sent.',

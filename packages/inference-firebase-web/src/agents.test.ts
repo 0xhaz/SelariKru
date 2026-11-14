@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AGENT_KINDS, BrainBundleSchema, RouteRecordReportSchema, canonicalJson, sha256Hex, type AgentKind, type BrainBundle, type RouteRecordReport } from '@selarikru/domain';
 import { FirebaseHybridAssistantAdapter, type AgentCallRequest, type CallSpec, type FetchRoute, type FreshRoute, type TelemetryEvent } from './adapter.ts';
-import { AGENT_CATALOG, AgentCatalog, PM_RESEARCH_MAX_CHARS, delegationOutputSha256, pmReplyTurn, type AgentInputs } from './agents.ts';
+import { AGENT_CATALOG, AgentCatalog, PM_RESEARCH_MAX_CHARS, delegationOutputSha256, planBriefLines, pmReplyTurn, type AgentInputs } from './agents.ts';
 import type { AssistantSdk, DeviceAvailability, ModelSpec, SdkGenerateResult, SdkModel } from './sdk.ts';
 
 /** The only model in these tests. It records what it was given and answers with what the test set. */
@@ -49,6 +49,9 @@ const INPUTS: { [K in AgentKind]: AgentInputs[K] } = {
   pmResearch: { ...common, question: 'How do feedback boards sort posts?', questionClassification: 'internal' },
   pmPlan: { ...common, question: 'Plan posting.', questionClassification: 'internal' },
   pmDelegate: { ...common, question: 'Who takes what?', questionClassification: 'internal', plan: { planRevision: 2, tasks: [{ taskId: 't1', title: 'Add posting', role: 'backend', status: 'ready' }], workers: [{ workerId: 'w1', name: 'Aisyah', role: 'backend', enabled: true }] } },
+  pmBrief: { ...common, points: 'Posts are sorted newest first.\nMost boards sort by votes.', unsure: 'Do boards need moderation?', inputClassification: 'internal' },
+  pmVerify: { ...common, brief: { goal: 'Let people post feedback.', items: [{ id: 'P1', kind: 'requirement', text: 'Posts are sorted newest first.' }, { id: 'P2', kind: 'fact', text: 'Most boards sort by votes.' }], uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }] }, briefClassification: 'internal' },
+  pmVerifyNoWeb: { ...common, brief: { goal: 'Let people post feedback.', items: [{ id: 'P2', kind: 'fact', text: 'Most boards sort by votes.' }], uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }] }, briefClassification: 'internal' },
 };
 
 const GOOD: Record<AgentKind, unknown> = {
@@ -64,6 +67,9 @@ const GOOD: Record<AgentKind, unknown> = {
   pmResearch: { answer: 'By votes or by date.', findings: [{ point: 'Most sort by votes.' }] },
   pmPlan: { tasks: [{ key: 'T1', title: 'API', description: 'Add the route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [] }] },
   pmDelegate: { assignments: [{ taskId: 't1', workerId: 'w1', why: 'Backend work.' }] },
+  pmBrief: { goal: 'Let people post feedback.', items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points' }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }], omitted: [] },
+  pmVerify: { items: [{ id: 'P2', verdict: 'supported', explanation: 'Public boards do.', sources: [{ title: 'A', url: 'https://example.org/a' }] }], uncertainties: [{ id: 'U1', answer: 'Usually.', confidence: 'medium', sources: [] }] },
+  pmVerifyNoWeb: { items: [{ id: 'P2', verdict: 'consistent', explanation: 'Fits what is known.' }], uncertainties: [{ id: 'U1', answer: 'Usually.', confidence: 'low' }] },
 };
 
 function setup(route: FreshRoute = { runDefault: 'ONLY_ON_DEVICE', override: null, lock: null }, opts: { nanoInputBudgetChars?: number } = {}, nonces?: string[]) {
@@ -91,8 +97,8 @@ describe('the catalog', () => {
     }
   });
 
-  // Research is cloud only (its own tests below); every other step runs here on the device.
-  for (const kind of AGENT_KINDS.filter((k) => k !== 'pmResearch')) {
+  // Research and the brief checks are cloud only, and the brief is always device only (their own tests below); every other step runs here on the device.
+  for (const kind of AGENT_KINDS.filter((k) => !['pmResearch', 'pmBrief', 'pmVerify', 'pmVerifyNoWeb'].includes(k))) {
     it(`${kind}: names its task, reads the route, validates the output and reports the route`, async () => {
       const { sdk, state, reports, calls, catalog } = setup();
       sdk.result = { text: JSON.stringify(GOOD[kind]), inferenceSource: 'on_device' };
@@ -804,5 +810,128 @@ describe('H12: a resumed call', () => {
     // An ordinary call says nothing of the kind.
     const plain = await catalog.criteria(INPUTS.criteria);
     expect(plain.report).not.toHaveProperty('resumed');
+  });
+});
+
+describe('H13: the plan brief', () => {
+  const cloudRoute: FreshRoute = { runDefault: 'ONLY_IN_CLOUD', override: null, lock: null };
+  const locked: FreshRoute = { runDefault: 'ONLY_IN_CLOUD', override: null, lock: { label: 'restricted', reason: 'x' } as never };
+
+  it('pmBrief always runs on this device only, whatever the task route; the points are fenced as data and counted', async () => {
+    const { sdk, calls, catalog } = setup(cloudRoute, {}, ['NONCE1']);
+    sdk.result = { text: JSON.stringify(GOOD.pmBrief), inferenceSource: 'on_device' };
+    const r = await catalog.pmBrief({ ...INPUTS.pmBrief, policy: policy('ONLY_IN_CLOUD') });
+    expect(calls[0]!.route.callOverride).toBe('ONLY_ON_DEVICE');
+    expect(sdk.specs).toHaveLength(1);
+    expect(sdk.specs[0]).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
+    expect(sdk.specs[0]).not.toHaveProperty('grounding');
+    expect(r.proposal.status).toBe('ok');
+    expect(r.proposal.observedSource).toBe('ON_DEVICE');
+    expect(r.proposal.route).toMatchObject({ stepKind: 'pmBrief', effectiveMode: 'ONLY_ON_DEVICE', callOverride: 'ONLY_ON_DEVICE' });
+    expect(r.report).toMatchObject({ stepKind: 'pmBrief' });
+    const prompt = sdk.prompts[0]!;
+    expect(prompt).toContain('----- BEGIN POINTS NONCE1 -----\n1. Posts are sorted newest first.\n2. Most boards sort by votes.\n----- END POINTS NONCE1 -----');
+    expect(prompt).toContain('----- BEGIN QUESTIONS NONCE1 -----\n1. Do boards need moderation?\n----- END QUESTIONS NONCE1 -----');
+    expect(prompt).toMatch(/2 points and 1 question/);
+    // Nothing of the task goes with it: the brief formats the owner's own words.
+    for (const leak of ['TASK-TEXT', 'CRITERION-TEXT', 'CLAIM-SERVED']) expect(prompt).not.toContain(leak);
+  });
+
+  it('pmBrief with the device model unavailable: no model is made, nothing goes to the cloud, it says why', async () => {
+    const { sdk, catalog } = setup(cloudRoute);
+    sdk.availabilityValue = 'unavailable';
+    const r = await catalog.pmBrief({ ...INPUTS.pmBrief, policy: policy('ONLY_IN_CLOUD') });
+    expect(r.proposal.status).toBe('blocked');
+    expect(r.proposal.blockedReason).toBe('device_unavailable');
+    expect(sdk.specs).toHaveLength(0);
+    expect(sdk.prompts).toHaveLength(0);
+  });
+
+  it('the brief\'s lines: one point per line, bullets dropped, lines after the conversation marker come from the conversation', () => {
+    const l = planBriefLines('- one\n\n* two\n--- From this conversation ---\nOwner: three', 'q1\n\nq2');
+    expect(l.points).toEqual([{ text: 'one', source: 'points' }, { text: 'two', source: 'points' }, { text: 'Owner: three', source: 'conversation' }]);
+    expect(l.unsure).toEqual(['q1', 'q2']);
+  });
+
+  it('pmVerify runs only in the cloud with Google Search, and sends only the approved brief: canary on task, context, history and notes', async () => {
+    const { sdk, calls, catalog } = setup({ runDefault: 'PREFER_ON_DEVICE', override: null, lock: null });
+    sdk.result = { text: JSON.stringify(GOOD.pmVerify), inferenceSource: 'in_cloud', grounding: { sources: [{ uri: 'https://example.org/g', title: 'G' }], entryPointHtml: '<div>s</div>' } };
+    const r = await catalog.pmVerify({ ...INPUTS.pmVerify, policy: policy('PREFER_ON_DEVICE') });
+    expect(calls[0]!.route.callOverride).toBe('ONLY_IN_CLOUD');
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_IN_CLOUD', allowCloud: true, grounding: 'googleSearch' });
+    expect(r.proposal.status).toBe('ok');
+    expect(r.grounding?.sources).toHaveLength(1);
+    const prompt = sdk.prompts[0]!;
+    expect(prompt).toContain('P1 (requirement): Posts are sorted newest first.');
+    expect(prompt).toContain('U1: Do boards need moderation?');
+    for (const leak of ['TASK-TEXT', 'CRITERION-TEXT', 'CLAIM-SERVED', 'Add posting', 'src', 't1']) expect(prompt).not.toContain(leak);
+  });
+
+  it('pmVerify is refused on a locked route and on a device-only task, before any model call', async () => {
+    const l = setup(locked);
+    expect((await l.catalog.pmVerify(INPUTS.pmVerify)).proposal.blockedReason).toBe('research_locked');
+    expect(l.sdk.specs).toHaveLength(0);
+    const d = setup({ runDefault: 'PREFER_IN_CLOUD', override: 'ONLY_ON_DEVICE', lock: null });
+    expect((await d.catalog.pmVerify({ ...INPUTS.pmVerify, policy: policy('PREFER_IN_CLOUD') })).proposal.blockedReason).toBe('research_device_only');
+    expect(d.sdk.specs).toHaveLength(0);
+  });
+
+  it('pmVerifyNoWeb is a cloud call with no grounding; refused on a locked or device-only task, never answered on the device', async () => {
+    const { sdk, catalog } = setup({ runDefault: 'PREFER_ON_DEVICE', override: null, lock: null });
+    sdk.result = { text: JSON.stringify(GOOD.pmVerifyNoWeb), inferenceSource: 'in_cloud' };
+    const r = await catalog.pmVerifyNoWeb({ ...INPUTS.pmVerifyNoWeb, policy: policy('PREFER_ON_DEVICE') });
+    expect(r.proposal.status).toBe('ok');
+    expect(sdk.specs.at(-1)).toMatchObject({ mode: 'ONLY_IN_CLOUD', allowCloud: true });
+    expect(sdk.specs.at(-1)).not.toHaveProperty('grounding');
+    const l = setup(locked);
+    expect((await l.catalog.pmVerifyNoWeb(INPUTS.pmVerifyNoWeb)).proposal.blockedReason).toBe('verify_locked');
+    expect(l.sdk.specs).toHaveLength(0);
+    const d = setup({ runDefault: 'ONLY_ON_DEVICE', override: null, lock: null });
+    expect((await d.catalog.pmVerifyNoWeb({ ...INPUTS.pmVerifyNoWeb, policy: policy('ONLY_ON_DEVICE') })).proposal.blockedReason).toBe('verify_device_only');
+    expect(d.sdk.specs).toHaveLength(0);
+  });
+
+  it('a check refuses a brief over its bounds, and an answer naming an id it was not given', async () => {
+    const big = setup(cloudRoute);
+    const items = Array.from({ length: 21 }, (_, i) => ({ id: `P${i + 1}`, kind: 'fact' as const, text: 'x' }));
+    expect((await big.catalog.pmVerify({ ...INPUTS.pmVerify, brief: { ...INPUTS.pmVerify.brief, items }, policy: policy('ONLY_IN_CLOUD') })).proposal.blockedReason).toBe('brief_too_large');
+    const long = setup(cloudRoute);
+    expect((await long.catalog.pmVerify({ ...INPUTS.pmVerify, brief: { ...INPUTS.pmVerify.brief, items: [{ id: 'P1', kind: 'fact', text: 'x'.repeat(281) }] }, policy: policy('ONLY_IN_CLOUD') })).proposal.blockedReason).toBe('brief_too_large');
+    const other = setup(cloudRoute);
+    other.sdk.result = { text: JSON.stringify({ items: [{ id: 'P7', verdict: 'supported', explanation: 'e', sources: [] }], uncertainties: [] }), inferenceSource: 'in_cloud', grounding: { sources: [], entryPointHtml: null } };
+    expect((await other.catalog.pmVerify({ ...INPUTS.pmVerify, policy: policy('ONLY_IN_CLOUD') })).proposal.status).toBe('invalid');
+  });
+
+  it('pmPlan from an approved brief: the brief, verdicts and answers are fenced; contradicted items are flagged, unclear ones listed as risks; the hash covers the architecture', async () => {
+    const { sdk, catalog } = setup(cloudRoute, {}, ['N2']);
+    const out = { ...(GOOD.pmPlan as object), architecture: 'An API and a list screen (P1).' };
+    sdk.result = { text: JSON.stringify(out), inferenceSource: 'in_cloud' };
+    const brief = {
+      goal: 'Let people post feedback.', checked: 'web' as const,
+      items: [{ id: 'P1', kind: 'requirement' as const, text: 'Posts are sorted newest first.', verdict: 'not_checkable' as const, explanation: 'A decision.' }, { id: 'P2', kind: 'fact' as const, text: 'Boards never moderate.', verdict: 'contradicted' as const, explanation: 'Most do.' }, { id: 'P3', kind: 'assumption' as const, text: 'Few posts a day.', verdict: 'unclear' as const, explanation: 'Unknown.' }],
+      uncertainties: [{ id: 'U1', question: 'Do boards need moderation?', answer: 'Most moderate.', confidence: 'medium' as const }],
+    };
+    const r = await catalog.pmPlan({ ...INPUTS.pmPlan, brief, policy: policy('ONLY_IN_CLOUD') });
+    expect(r.proposal.status).toBe('ok');
+    const prompt = sdk.prompts[0]!;
+    expect(prompt).toContain('----- BEGIN BRIEF N2 -----');
+    expect(prompt).toContain('from web research');
+    expect(prompt).toMatch(/P2 \(fact\): Boards never moderate\. \[CONTRADICTED: do not build on this\]/);
+    expect(prompt).toMatch(/P3 \(assumption\): Few posts a day\. \[UNCLEAR: list it as a risk\]/);
+    expect(prompt).toContain('U1: Do boards need moderation? Answer (medium confidence): Most moderate.');
+    expect(r.report?.outputSha256).toBe(sha256Hex(canonicalJson(out)));
+    // Without a brief the prompt has no brief block.
+    const plain = setup(cloudRoute);
+    plain.sdk.result = { text: JSON.stringify(GOOD.pmPlan), inferenceSource: 'in_cloud' };
+    await plain.catalog.pmPlan({ ...INPUTS.pmPlan, policy: policy('ONLY_IN_CLOUD') });
+    expect(plain.sdk.prompts[0]!).not.toContain('BEGIN BRIEF');
+  });
+
+  it('a no-web brief reaches the plan labelled "not checked against the web"', async () => {
+    const { sdk, catalog } = setup(cloudRoute);
+    sdk.result = { text: JSON.stringify(GOOD.pmPlan), inferenceSource: 'in_cloud' };
+    await catalog.pmPlan({ ...INPUTS.pmPlan, brief: { goal: 'g', checked: 'no_web', items: [{ id: 'P1', kind: 'fact', text: 'x', verdict: 'inconsistent', explanation: 'e' }], uncertainties: [] }, policy: policy('ONLY_IN_CLOUD') });
+    expect(sdk.prompts[0]!).toContain('not checked against the web');
+    expect(sdk.prompts[0]!).toMatch(/P1 \(fact\): x \[CONTRADICTED: do not build on this\]/);
   });
 });

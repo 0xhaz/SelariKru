@@ -1,5 +1,5 @@
 import {
-  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, canonicalJson, delegationOutputSha256, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
+  AGENT_CITES_CRITERIA, AGENT_ISSUE_CODES, PLAN_BRIEF_LIMITS, type PLAN_BRIEF_CONFIDENCE, type PLAN_BRIEF_ITEM_KINDS, type PLAN_BRIEF_NO_WEB_VERDICTS, type PLAN_BRIEF_VERDICTS, canonicalJson, delegationOutputSha256, AGENT_LIMITS, BrainBundleSchema, bundleContentLabels, checkPatch, sha256Hex, BrainClassificationSchema, ROUTE_STEP_SCOPE, agentOutputJsonSchema, allowedPathProblem, canonicalPath, checkAgentOutput, diffSummary,
   insideAllowedPaths, parseUnifiedDiff, quoteName, reservedPath, roleLabel, secretFileReason, strongerLabel,
   type AgentCheckContext, type AgentKind, type BrainBundle, type BrainOmissionReason, type RouteRecordReport,
 } from '@selarikru/domain';
@@ -81,8 +81,49 @@ export interface AgentInputs {
   /** Cloud only, with Grounding with Google Search; refused on a locked route. */
   readonly pmResearch: PmInput;
   /** Fix round 2 (I4): the run's current tasks, so a plan task may revise one by id (`revises`). */
-  readonly pmPlan: PmInput & { readonly plan?: PmPlanScope };
+  /** H13: `brief`, the approved plan brief with the cloud's checks, when the plan is made from it. */
+  readonly pmPlan: PmInput & { readonly plan?: PmPlanScope; readonly brief?: PlanBriefForPlan };
   readonly pmDelegate: PmInput & { readonly plan: PmPlanScope };
+  /** H13: the owner's points and open questions, formatted into a plan brief. Always on this device only. Missing label: restricted. */
+  readonly pmBrief: AgentBaseInput & { readonly points: string; readonly unsure: string; readonly inputClassification?: unknown };
+  /** H13: the approved brief's ticked content, checked in the cloud with Google Search. Nothing else from the project is sent. */
+  readonly pmVerify: AgentBaseInput & { readonly brief: PlanBriefPayload; readonly briefClassification?: unknown };
+  /** H13: the same check without web search, when web research is off. Labelled "not checked against the web". */
+  readonly pmVerifyNoWeb: AgentBaseInput & { readonly brief: PlanBriefPayload; readonly briefClassification?: unknown };
+}
+
+type ItemKind = (typeof PLAN_BRIEF_ITEM_KINDS)[number];
+/** H13: what a brief check sends: the approved brief's ticked goal, items (with their kind) and questions. */
+export interface PlanBriefPayload {
+  readonly goal: string;
+  readonly items: readonly { readonly id: string; readonly kind: ItemKind; readonly text: string }[];
+  readonly uncertainties: readonly { readonly id: string; readonly question: string }[];
+}
+/** H13: the approved brief as the plan reads it: each item with its verdict, each question with its answer. `checked`: with web search, or not. */
+export interface PlanBriefForPlan {
+  readonly goal: string;
+  readonly checked: 'web' | 'no_web';
+  readonly items: readonly { readonly id: string; readonly kind: ItemKind; readonly text: string; readonly verdict?: (typeof PLAN_BRIEF_VERDICTS)[number] | (typeof PLAN_BRIEF_NO_WEB_VERDICTS)[number]; readonly explanation?: string }[];
+  readonly uncertainties: readonly { readonly id: string; readonly question: string; readonly answer?: string; readonly confidence?: (typeof PLAN_BRIEF_CONFIDENCE)[number] }[];
+}
+
+/** H13: the line "Add this conversation" puts before the turns it appends to the points; the lines after it come from the conversation. */
+export const CONVERSATION_MARKER = '--- From this conversation ---';
+
+/**
+ * H13: the owner's points and questions as the brief counts them: one per non-empty line, leading bullets or numbers dropped. Free text with no line breaks is one
+ * point. The prompt numbers exactly these, and the completeness count compares the brief against them.
+ */
+export function planBriefLines(points: string, unsure: string): { readonly points: readonly { readonly text: string; readonly source: 'points' | 'conversation' }[]; readonly unsure: readonly string[] } {
+  const clean = (l: string): string => l.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\s+/g, ' ').trim();
+  let source: 'points' | 'conversation' = 'points';
+  const out: { text: string; source: 'points' | 'conversation' }[] = [];
+  for (const raw of points.split('\n')) {
+    if (raw.trim() === CONVERSATION_MARKER) { source = 'conversation'; continue; }
+    const t = clean(raw);
+    if (t) out.push({ text: t, source });
+  }
+  return { points: out, unsure: unsure.split('\n').map(clean).filter(Boolean) };
 }
 
 /** One turn of the conversation with the Project Manager, kept in the browser. Its label decides where it may go: a restricted turn never reaches a cloud call. */
@@ -187,6 +228,8 @@ export interface AgentDefinition {
 const NO_INVENTION = 'Use only what is given here. Do not add accounts, integrations or features the task does not ask for.';
 const NO_AUTHORITY = 'You propose; a person decides. Never include shell commands to run, credentials, or claims that something is approved, granted or verified.';
 
+const NO_PRIVATE = 'Leave out personal names, client names, credentials, internal hostnames, file paths and identifiers: write the point without them, or count it as omitted with reason "private".';
+
 const PM_ROLE = [
   'You are the Project Manager for one software project: you coordinate a small team of AI workers and one owner, who decides.',
   'You answer from the project context given here, cite it by its key, and say plainly when it does not say.',
@@ -204,7 +247,33 @@ export const AGENT_CATALOG: Readonly<Record<AgentKind, AgentDefinition>> = {
   },
   pmPlan: {
     kind: 'pmPlan', operation: 'pmPlan', scope: ROUTE_STEP_SCOPE.pmPlan,
-    rolePrompt: [PM_ROLE, 'Draft a plan revision the owner can accept: at most 12 tasks, each with a key T1, T2 and so on, a title, a description, its role, the criterion IDs it serves, its paths and its dependencies. Return JSON matching the schema.', NO_INVENTION, NO_AUTHORITY].join(' '),
+    rolePrompt: [PM_ROLE, 'Draft a plan revision the owner can accept: at most 12 tasks, each with a key T1, T2 and so on, a title, a description, its role, the criterion IDs it serves, its paths and its dependencies. Return JSON matching the schema.',
+      'When an approved plan brief is given, also write "architecture": at most 2,000 characters on the components, the data and the key decisions, each naming the brief item ids (P1, P2 and so on) it rests on.', NO_INVENTION, NO_AUTHORITY].join(' '),
+  },
+  pmBrief: {
+    kind: 'pmBrief', operation: 'pmBrief', scope: ROUTE_STEP_SCOPE.pmBrief,
+    rolePrompt: [
+      'You format a project owner\'s own notes into a structured plan brief. You reformat; you never drop or invent anything.',
+      'Return JSON matching the schema: "goal" (one sentence), "items" (one per point, ids P1, P2 and so on, each short and self-contained, with its kind and whether it can be checked against public information, and "source": "conversation" for points marked as from the conversation, else "points"), "uncertainties" (one per question, ids U1, U2 and so on), and "omitted" (one entry per point or question you did not use, with its reason: private, duplicate or empty).',
+      'Every point and every question must appear exactly once, as an item, an uncertainty or an omitted entry.',
+      NO_PRIVATE, NO_AUTHORITY,
+    ].join(' '),
+  },
+  pmVerify: {
+    kind: 'pmVerify', operation: 'pmVerify', scope: ROUTE_STEP_SCOPE.pmVerify,
+    rolePrompt: [
+      'You check a project\'s plan brief against public information. Search the web for each item and each question.',
+      'Return only a JSON object with "items" (for each item id: a verdict, supported, contradicted, unclear or not_checkable for a decision or requirement that is not a fact, a short explanation, and the web sources it rests on as title and https url) and "uncertainties" (for each question id: a short answer, your confidence high, medium or low, and its sources).',
+      'Use only the ids given. Say unclear when the sources do not settle it.', NO_AUTHORITY,
+    ].join(' '),
+  },
+  pmVerifyNoWeb: {
+    kind: 'pmVerifyNoWeb', operation: 'pmVerifyNoWeb', scope: ROUTE_STEP_SCOPE.pmVerifyNoWeb,
+    rolePrompt: [
+      'You check a project\'s plan brief against what you already know. You cannot search the web, so you never say a point is supported by sources.',
+      'Return JSON matching the schema: "items" (for each item id: consistent, inconsistent or unclear, with a short explanation) and "uncertainties" (for each question id: a short answer and your confidence high, medium or low).',
+      'Use only the ids given. Say unclear when you are not sure.', NO_AUTHORITY,
+    ].join(' '),
   },
   pmDelegate: {
     kind: 'pmDelegate', operation: 'pmDelegate', scope: ROUTE_STEP_SCOPE.pmDelegate,
@@ -270,7 +339,7 @@ export const AGENT_CATALOG: Readonly<Record<AgentKind, AgentDefinition>> = {
 };
 
 /** The JSON Schema the SDK constrains each agent's output to. Brief and criteria keep the onboarding schemas; the others are the domain schemas. */
-export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[], pm: { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[] } = {}): Record<string, unknown> {
+export function agentJsonSchema(kind: AgentKind, criteriaIds: readonly string[], pm: { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[]; briefItemIds?: string[]; briefQuestionIds?: string[] } = {}): Record<string, unknown> {
   if (kind === 'brief') return narrowSchema('draftBrief', criteriaIds);
   if (kind === 'criteria') return narrowSchema('suggestCriteria', criteriaIds);
   return agentOutputJsonSchema(kind, criteriaIds, pm);
@@ -392,6 +461,14 @@ function labelsFor(kind: AgentKind, input: AgentInputs[AgentKind], bundleAs: 'bu
       if (paths) labels.push(...paths.listed.slice(0, PR_SUMMARY_MAX_PATHS).map((x) => x.label));
       break;
     }
+    // H13: the owner's notes, and the brief made from them, carry their own label.
+    case 'pmBrief':
+      labels.push(labelOf((input as AgentInputs['pmBrief']).inputClassification));
+      break;
+    case 'pmVerify':
+    case 'pmVerifyNoWeb':
+      labels.push(labelOf((input as AgentInputs['pmVerify']).briefClassification));
+      break;
     default:
       break;
   }
@@ -454,8 +531,11 @@ function fencedContent(kind: AgentKind, input: AgentInputs[AgentKind]): string[]
   if (kind === 'pmAnswer' || kind === 'pmResearch' || kind === 'pmPlan' || kind === 'pmDelegate') {
     const i = input as PmInput;
     const d = kind === 'pmDelegate' || kind === 'pmPlan' ? (input as AgentInputs['pmDelegate']).plan ?? null : null;
-    return [i.question, ...(i.history ?? []).map((t) => t.text), ...(d ? [...d.workers.map((w) => w.name ?? ''), ...d.tasks.map((t) => t.title)] : [])];
+    const b = kind === 'pmPlan' ? (input as AgentInputs['pmPlan']).brief : undefined;
+    return [i.question, ...(i.history ?? []).map((t) => t.text), ...(d ? [...d.workers.map((w) => w.name ?? ''), ...d.tasks.map((t) => t.title)] : []), ...(b ? briefForPlanLines(b) : [])];
   }
+  if (kind === 'pmBrief') { const i = input as AgentInputs['pmBrief']; return [i.points, i.unsure]; }
+  if (kind === 'pmVerify' || kind === 'pmVerifyNoWeb') return briefPayloadLines((input as AgentInputs['pmVerify']).brief);
   return [];
 }
 
@@ -465,6 +545,35 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
     const q = (input as PmInput).question.trim();
     if (q.length > PM_RESEARCH_MAX_CHARS) return { refused: 'question_too_long' };
     return { prompt: ['# The owner asks', block('QUESTION', '', q, nonce), '', '# What to do', 'Research the question on the web and answer it briefly.'].join('\n'), check: { criteriaIds: [], allowedPaths: [], pm: { sourceIds: [] } } };
+  }
+  // H13: the brief formats the owner's own notes, on the device only: no task, context or history goes with them.
+  if (kind === 'pmBrief') {
+    if (at.cloudCapable) return { refused: 'brief_device_only' };
+    const i = input as AgentInputs['pmBrief'];
+    const l = planBriefLines(i.points, i.unsure);
+    if (l.points.length === 0 && l.unsure.length === 0) return { refused: 'brief_empty' };
+    const n = (x: number, one: string) => `${x} ${one}${x === 1 ? '' : 's'}`;
+    return {
+      prompt: ['# The owner\'s points', block('POINTS', '', l.points.map((p, k) => `${k + 1}. ${p.source === 'conversation' ? '(from the conversation) ' : ''}${p.text}`).join('\n'), nonce), '',
+        '# What the owner is unsure about', block('QUESTIONS', '', l.unsure.map((q, k) => `${k + 1}. ${q}`).join('\n'), nonce), '',
+        '# What to do', `Format these into a plan brief. There are ${n(l.points.length, 'point')} and ${n(l.unsure.length, 'question')}: account for every one, as an item, an uncertainty or an omitted entry.`].join('\n'),
+      check: { criteriaIds: [], allowedPaths: [], pm: { sourceIds: [] } },
+    };
+  }
+  // H13: a brief check sends only the approved brief's ticked content, bounded: no task, criteria, paths, context, history or notes.
+  if (kind === 'pmVerify' || kind === 'pmVerifyNoWeb') {
+    if (!at.cloudCapable || at.locked === true) return { refused: 'verify_cloud_only' };
+    const b = (input as AgentInputs['pmVerify']).brief;
+    const L = PLAN_BRIEF_LIMITS;
+    if (b.goal.length > L.goalChars || b.items.length > L.items || b.uncertainties.length > L.uncertainties || b.items.some((x) => x.text.length > L.itemChars) || b.uncertainties.some((x) => x.question.length > L.itemChars)) return { refused: 'brief_too_large' };
+    if (b.items.length === 0 && b.uncertainties.length === 0) return { refused: 'brief_empty' };
+    const ask = kind === 'pmVerify'
+      ? 'Check each item against the web and answer each question, with the sources you used.'
+      : 'Without web search, say whether each item is consistent with what you know, and answer each question.';
+    return {
+      prompt: ['# The approved plan brief', block('BRIEF', '', briefPayloadLines(b).join('\n'), nonce), '', '# What to do', ask].join('\n'),
+      check: { criteriaIds: [], allowedPaths: [], pm: { briefItemIds: b.items.map((x) => x.id), briefQuestionIds: b.uncertainties.map((x) => x.id) } },
+    };
   }
   const head = header(input, omissions);
   if ('refused' in head) return head;
@@ -546,7 +655,10 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
       if (kind === 'pmPlan') {
         const scope = (input as AgentInputs['pmPlan']).plan;
         if (scope && scope.tasks.length > 0) out.push('', `# Current plan, revision ${scope.planRevision}`, block('PLAN', '', scope.tasks.map(taskLine).join('\n'), nonce));
-        return finish(['Draft a plan revision for this work.', idsLine(ids), ...(scope && scope.tasks.length > 0 ? ['To change a task listed above, give its id as "revises" and keep its role; a task without "revises" is new. Tasks you do not mention stay as they are.'] : [])],
+        // H13: the owner's approved brief, with the cloud's verdicts and answers, fenced as data.
+        const brief = (input as AgentInputs['pmPlan']).brief;
+        if (brief) out.push('', `# Approved plan brief, checked in the cloud (${brief.checked === 'web' ? 'from web research' : 'not checked against the web'})`, block('BRIEF', '', briefForPlanLines(brief).join('\n'), nonce));
+        return finish(['Draft a plan revision for this work.', ...(brief ? ['Make the plan from the approved brief. Do not build on an item marked contradicted; list unclear items as risks. Write the architecture section.'] : []), idsLine(ids), ...(scope && scope.tasks.length > 0 ? ['To change a task listed above, give its id as "revises" and keep its role; a task without "revises" is new. Tasks you do not mention stay as they are.'] : [])],
           // A plan spans the run's roles, so its paths are not bound to the subject task's: the server holds each task to its role's paths at accept.
           { ...base, allowedPaths: [], pm: { ...pm, ...(scope ? { taskIds: nameable(scope), roles: planRoles(scope) } : {}) } });
       }
@@ -596,6 +708,12 @@ export class AgentCatalog {
   pmResearch(input: AgentInputs['pmResearch']): Promise<AgentResult<'pmResearch'>> { return this.run('pmResearch', { ...input, callOverride: 'ONLY_IN_CLOUD' }); }
   pmPlan(input: AgentInputs['pmPlan']): Promise<AgentResult<'pmPlan'>> { return this.run('pmPlan', input); }
   pmDelegate(input: AgentInputs['pmDelegate']): Promise<AgentResult<'pmDelegate'>> { return this.run('pmDelegate', input); }
+  /** H13: the plan brief is always formatted on this device: the call override is device only, and there is never a cloud fallback. */
+  pmBrief(input: AgentInputs['pmBrief']): Promise<AgentResult<'pmBrief'>> { return this.run('pmBrief', { ...input, callOverride: 'ONLY_ON_DEVICE' }); }
+  /** H13: the approved brief, checked in the cloud only, with Google Search; refused on a locked or device-only task, as research is. */
+  pmVerify(input: AgentInputs['pmVerify']): Promise<AgentResult<'pmVerify'>> { return this.run('pmVerify', { ...input, callOverride: 'ONLY_IN_CLOUD' }); }
+  /** H13: the same check in the cloud only, without web search. */
+  pmVerifyNoWeb(input: AgentInputs['pmVerifyNoWeb']): Promise<AgentResult<'pmVerifyNoWeb'>> { return this.run('pmVerifyNoWeb', { ...input, callOverride: 'ONLY_IN_CLOUD' }); }
 
   /**
    * The patch agent's file choice, when matching names found nothing (H5): one small call, on the patch step's route, that picks up to the patch file limit from the
@@ -653,7 +771,8 @@ export class AgentCatalog {
     let checkCtx: AgentCheckContext | null = null;
     const spec: CallSpec = {
       op: def.operation, systemInstruction: def.rolePrompt, schema: agentJsonSchema(kind, ids, pmIdsOf(kind, input)), schemaKey: `${kind}|${ids.join(',')}|${JSON.stringify(pmIdsOf(kind, input))}`, citesCriteria: AGENT_CITES_CRITERIA[kind],
-      ...(kind === 'pmResearch' ? { grounding: 'googleSearch' as const } : {}),
+      ...(kind === 'pmResearch' || kind === 'pmVerify' ? { grounding: 'googleSearch' as const } : {}),
+      ...(kind === 'pmVerifyNoWeb' ? { cloudOnlyCheck: true } : {}),
       prompt: (at) => {
         omissions = [];
         const fenced = fencedContent(kind, input);
@@ -708,7 +827,7 @@ export class AgentCatalog {
     const ctx = checkCtx as AgentCheckContext | null;
     const checked = kind === 'patch' && proposal.status === 'ok' && ctx !== null ? checkPatch(String((proposal.data as { diff?: unknown } | null)?.diff ?? ''), ctx) : null;
     const patch = checked?.ok ? { patch: { results: [...checked.results].map(([path, content]) => ({ path, content })) } } : {};
-    return { kind, proposal, report, reported, omissions, locked: proposal.route?.locked ?? false, ...patch, ...(kind === 'pmResearch' ? { grounding: proposal.grounding ?? null } : {}) };
+    return { kind, proposal, report, reported, omissions, locked: proposal.route?.locked ?? false, ...patch, ...(kind === 'pmResearch' || kind === 'pmVerify' ? { grounding: proposal.grounding ?? null } : {}) };
   }
 }
 
@@ -719,7 +838,8 @@ const nameable = (scope: PmPlanScope): string[] => scope.tasks.filter((t) => t.r
 const planRoles = (scope: PmPlanScope): string[] => [...new Set([...scope.tasks.map((t) => t.role), 'backend', 'frontend'])].sort();
 
 /** The ids a Project Manager call may name, the same ones its prompt lists. */
-function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[] } {
+function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: string[]; taskIds?: string[]; workerIds?: string[]; roles?: string[]; briefItemIds?: string[]; briefQuestionIds?: string[] } {
+  if (kind === 'pmVerify' || kind === 'pmVerifyNoWeb') { const b = (input as AgentInputs['pmVerify']).brief; return { briefItemIds: b.items.map((x) => x.id), briefQuestionIds: b.uncertainties.map((x) => x.id) }; }
   if (kind !== 'pmAnswer' && kind !== 'pmResearch' && kind !== 'pmPlan' && kind !== 'pmDelegate') return {};
   const sourceIds = contextKeys(input.bundle);
   // Fix round 3 (N1, N2): a locked task's id is never one the call may name, so its output never revises or assigns it.
@@ -727,4 +847,22 @@ function pmIdsOf(kind: AgentKind, input: AgentInputs[AgentKind]): { sourceIds?: 
   if (kind !== 'pmDelegate') return { sourceIds };
   const d = input as AgentInputs['pmDelegate'];
   return { sourceIds, taskIds: nameable(d.plan), workerIds: d.plan.workers.filter((w) => w.enabled).map((w) => w.workerId) };
+}
+
+/** H13: a brief check's payload, one line each: the goal, each item with its kind, each question. */
+function briefPayloadLines(b: PlanBriefPayload): string[] {
+  const one = (t: string): string => t.replace(/\s+/g, ' ').trim();
+  return [`Goal: ${one(b.goal) || '(none given)'}`, ...b.items.map((x) => `${x.id} (${x.kind}): ${one(x.text)}`), ...b.uncertainties.map((x) => `${x.id}: ${one(x.question)}`)];
+}
+
+/** H13: the approved brief as the plan reads it. A contradicted (or, without the web, inconsistent) item is flagged so it is not built on; an unclear one is a risk. */
+function briefForPlanLines(b: PlanBriefForPlan): string[] {
+  const one = (t: string): string => t.replace(/\s+/g, ' ').trim();
+  const mark = (v: PlanBriefForPlan['items'][number]['verdict']): string =>
+    v === 'contradicted' || v === 'inconsistent' ? ' [CONTRADICTED: do not build on this]' : v === 'unclear' ? ' [UNCLEAR: list it as a risk]' : v ? ` [${v.replace('_', ' ')}]` : ' [not checked]';
+  return [
+    `Goal: ${one(b.goal) || '(none given)'}`,
+    'Items:', ...b.items.map((x) => `- ${x.id} (${x.kind}): ${one(x.text)}${mark(x.verdict)}${x.explanation ? ` ${one(x.explanation)}` : ''}`),
+    'Open questions:', ...(b.uncertainties.length > 0 ? b.uncertainties.map((x) => `- ${x.id}: ${one(x.question)}${x.answer ? ` Answer (${x.confidence ?? 'unknown'} confidence): ${one(x.answer)}` : ' (not answered)'}`) : ['- (none)']),
+  ];
 }

@@ -5,7 +5,7 @@ const IDS = ['AC-1', 'AC-2'];
 const BASE = 'line one\nline two\nline three\n';
 const files = new Map([['src/app.ts', BASE], ['src/util.ts', 'export const a = 1;\n']]);
 /** H11: what a Project Manager call may name. */
-const PM = { sourceIds: ['brain:c1'], taskIds: ['t1', 't2'], workerIds: ['w1'] };
+const PM = { sourceIds: ['brain:c1'], taskIds: ['t1', 't2'], workerIds: ['w1'], briefItemIds: ['P1', 'P2'], briefQuestionIds: ['U1'] };
 const ctx = (over: Partial<AgentCheckContext> = {}): AgentCheckContext => ({ criteriaIds: IDS, allowedPaths: ['src'], files, pm: PM, ...over });
 
 const GOOD_DIFF = ['--- a/src/app.ts', '+++ b/src/app.ts', '@@ -1,3 +1,3 @@', ' line one', '-line two', '+line 2', ' line three', ''].join('\n');
@@ -28,6 +28,21 @@ const GOOD: Record<AgentKind, unknown> = {
   pmResearch: { answer: 'Most feedback boards sort by votes.', findings: [{ point: 'Sorting by recency is the simplest start.' }] },
   pmPlan: { tasks: [{ key: 'T1', title: 'API', description: 'Add the post route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [] }] },
   pmDelegate: { assignments: [{ taskId: 't1', workerId: 'w1', why: 'Backend work, and Aisyah is free.' }] },
+  // H13: the plan brief Nano formats on the device, and the cloud's checks of it.
+  pmBrief: {
+    goal: 'Let people post and sort feedback.',
+    items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points' }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'conversation' }],
+    uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }],
+    omitted: [{ reason: 'private' }],
+  },
+  pmVerify: {
+    items: [{ id: 'P2', verdict: 'supported', explanation: 'Several public boards sort by votes.', sources: [{ title: 'A board', url: 'https://example.org/a' }] }, { id: 'P1', verdict: 'not_checkable', explanation: 'A decision, not a fact.', sources: [] }],
+    uncertainties: [{ id: 'U1', answer: 'Most public boards moderate posts.', confidence: 'medium', sources: [] }],
+  },
+  pmVerifyNoWeb: {
+    items: [{ id: 'P2', verdict: 'consistent', explanation: 'Fits what is generally known.' }],
+    uncertainties: [{ id: 'U1', answer: 'Usually, yes.', confidence: 'low' }],
+  },
 };
 
 const BAD: Record<AgentKind, unknown[]> = {
@@ -50,6 +65,24 @@ const BAD: Record<AgentKind, unknown[]> = {
     { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', allowedPaths: ['/'] }] }, { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', budgetUsd: 100 }] },
     { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', role: 'admin' }] }, { assignments: [] },
   ],
+  pmBrief: [
+    { goal: 'g', items: [{ id: 'P1', text: 't'.repeat(281), kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: Array.from({ length: 21 }, (_, i) => ({ id: `P${i + 1}`, text: 't', kind: 'fact', checkable: true, source: 'points' })), uncertainties: [], omitted: [] },
+    { goal: 'g', items: [{ id: 'X1', text: 't', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'q' }], omitted: [{ reason: 'boring' }] },
+    { goal: 'g', items: [{ id: 'P1', text: 't', kind: 'opinion', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
+  ],
+  // An id the brief did not have; a web verdict on the no-web variant; an explanation too long; a source with an extra field.
+  pmVerify: [
+    { items: [{ id: 'P9', verdict: 'supported', explanation: 'e', sources: [] }], uncertainties: [] },
+    { items: [{ id: 'P1', verdict: 'consistent', explanation: 'e', sources: [] }], uncertainties: [] },
+    { items: [{ id: 'P1', verdict: 'unclear', explanation: 'e'.repeat(401), sources: [] }], uncertainties: [] },
+    { items: [], uncertainties: [{ id: 'U1', answer: 'a', confidence: 'certain', sources: [] }] },
+  ],
+  pmVerifyNoWeb: [
+    { items: [{ id: 'P1', verdict: 'supported', explanation: 'e' }], uncertainties: [] },
+    { items: [{ id: 'P1', verdict: 'unclear', explanation: 'e', sources: [{ title: 't', url: 'https://example.org' }] }], uncertainties: [] },
+  ],
 };
 
 describe('agent output schemas', () => {
@@ -68,6 +101,20 @@ describe('agent output schemas', () => {
       }
     });
   }
+
+  it('H13: a plan brief with two items of one id is refused as a duplicate key', () => {
+    const dup = { goal: 'g', items: [{ id: 'P1', text: 'a', kind: 'fact', checkable: true, source: 'points' }, { id: 'P1', text: 'b', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] };
+    expect(checkAgentOutput('pmBrief', dup, ctx())).toMatchObject({ ok: false, issues: [{ code: 'duplicate_key' }] });
+    const dupQ = { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'a' }, { id: 'U1', question: 'b' }], omitted: [] };
+    expect(checkAgentOutput('pmBrief', dupQ, ctx())).toMatchObject({ ok: false, issues: [{ code: 'duplicate_key' }] });
+  });
+
+  it('H13: a Project Manager plan may carry an architecture section of at most 2,000 characters', () => {
+    const plan = GOOD.pmPlan as Record<string, unknown>;
+    expect(checkAgentOutput('pmPlan', { ...plan, architecture: 'An API and a list screen (P1, P2).' }, ctx())).toMatchObject({ ok: true });
+    expect(checkAgentOutput('pmPlan', { ...plan, architecture: 'a'.repeat(2001) }, ctx()).ok).toBe(false);
+    expect(checkAgentOutput('plan', { ...(GOOD.plan as object), architecture: 'x' }, ctx()).ok).toBe(false);
+  });
 
   it('issues carry codes and JSON paths, never the model text', () => {
     const r = checkAgentOutput('brief', { summary: 'CANARY-TEXT', acceptanceCriteria: [{ requirementId: 'AC-9', text: 'CANARY-TEXT' }] }, ctx());

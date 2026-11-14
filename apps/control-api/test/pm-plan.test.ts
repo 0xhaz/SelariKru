@@ -111,6 +111,27 @@ describe('accepting a Project Manager plan revises the run\'s tasks (H11 fix rou
   });
 });
 
+describe('H13: a Project Manager plan with an architecture section', () => {
+  it('the architecture is part of the bound output (its hash), and the server still maps the tasks only', async () => {
+    const tasks = [task({ revises: 't_back' })];
+    const data = { tasks, architecture: 'A posting API (P1) and a list screen (P2).' };
+    await t.db.execute(sql`UPDATE client_reports SET payload = payload || ${JSON.stringify({ outputSha256: sha256Hex(canonicalJson(data)) })}::jsonb WHERE report_id = 'rpt_plan'`);
+    const r = await post(h.app, `/v1/runs/${RUN}/proposals/review`, { envelope: { operation: 'pmPlan', status: 'ok', data }, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan' } });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect((r.body.tasks as { taskId: string }[]).map((x) => x.taskId)).toEqual(['t_back']);
+    // The tasks without the architecture are not the plan the call produced.
+    const stripped = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 2, idempotencyKey: 'k-arch-1', tasks: r.body.tasks, agentProposal, pmPlan: { tasks } });
+    expect(stripped.body.error?.code).toBe('plan_output_mismatch');
+    const ok = await post(h.app, `/v1/runs/${RUN}/plan-revisions`, { expectedRevision: 2, idempotencyKey: 'k-arch-2', tasks: r.body.tasks, agentProposal, pmPlan: data });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(201);
+    // An architecture over its bound is refused, as any field the plan schema does not allow.
+    const long = { tasks, architecture: 'a'.repeat(2001) };
+    await t.db.execute(sql`UPDATE client_reports SET payload = payload || ${JSON.stringify({ outputSha256: sha256Hex(canonicalJson(long)) })}::jsonb WHERE report_id = 'rpt_plan'`);
+    const bad = await post(h.app, `/v1/runs/${RUN}/proposals/review`, { envelope: { operation: 'pmPlan', status: 'ok', data: long }, agentProposal: { taskId: 't_back', routeRecordId: 'req_plan' } });
+    expect(bad.status).not.toBe(200);
+  });
+});
+
 describe('H12 step 0: plan-revisions derives the PM plan under its locks, and one pmPlan record accepts one plan', () => {
   /** Resolves once some other backend is waiting on a lock this one holds. */
   async function queuedBehind(tx: Tx): Promise<void> {

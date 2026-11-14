@@ -141,3 +141,35 @@ describe('AI step checkpoints (H12)', () => {
     expect(pmPlanRoutes([{ key: 'T1', label: 'internal', inputChars: 800 }], { nanoBudgetChars: 6000, offline: true })[0]).toMatchObject({ mode: 'ONLY_ON_DEVICE', rule: 'offline' });
   });
 });
+
+describe('H13: the plan brief and its cloud check as checkpoints', () => {
+  const BRIEF = 'b'.repeat(64);
+  const verify = (over: Partial<AiCheckpoint> = {}): AiCheckpoint => cp({
+    stepKind: 'pmVerify', stage: 'pm_turn', callOverride: 'ONLY_IN_CLOUD', planRevision: 0, inputs: { contextId: null, bundleSha256: null, files: [], inputChars: null, briefSha256: BRIEF },
+    partial: { issues: [], texts: [{ who: 'owner', text: 'G\tLet people post.\nP1\tfact\tBoards sort by votes.', classification: 'internal' }] }, ...over,
+  });
+
+  it('research notes are a checkpoint of their own kind, stored by the same split', () => {
+    const notes = cp({ stepKind: 'researchNotes', stage: 'research_notes', status: 'done', stopReason: null, partial: { issues: [], texts: [{ who: 'owner', text: 'P|Posts are public.', classification: 'internal' }] } });
+    expect(AiCheckpointSchema.safeParse(notes).success).toBe(true);
+    expect(checkpointStorage(notes)).toBe('server');
+    expect(checkpointStorage({ ...notes, partial: { issues: [], texts: [{ who: 'owner', text: 'P|Ward names.', classification: 'restricted' }] } })).toBe('device');
+    expect(AiCheckpointSchema.safeParse(verify()).success).toBe(true);
+  });
+
+  it('a paused check is re-validated by the approved brief hash and the web research setting', () => {
+    const now: CheckpointRecheck = { ...fine, inputs: { briefSha256: BRIEF }, context: 'not_applicable', webResearch: true };
+    expect(revalidateCheckpoint(verify(), now)).toEqual({ ok: true });
+    expect(revalidateCheckpoint(verify(), { ...now, inputs: { briefSha256: 'c'.repeat(64) } })).toEqual({ ok: false, problems: ['inputs_changed'] });
+    // No approved brief now (edited after approval, or a reload): changed, never sent.
+    expect(revalidateCheckpoint(verify(), { ...now, inputs: { briefSha256: null } })).toEqual({ ok: false, problems: ['inputs_changed'] });
+    expect(revalidateCheckpoint(verify(), { ...now, webResearch: false })).toEqual({ ok: false, problems: ['web_research_off'] });
+    expect(revalidateCheckpoint(verify(), { ...now, route: { mode: 'ONLY_ON_DEVICE', lock: true } })).toMatchObject({ ok: false, problems: expect.arrayContaining(['locked']) });
+  });
+
+  it('the owner approved exactly what a paused check sends, so it resumes on its own once re-validated, with or without an accepted plan', () => {
+    expect(resumeDisposition(verify(), null)).toBe('automatic');
+    expect(resumeDisposition(verify({ stepKind: 'pmVerifyNoWeb' }), null)).toBe('automatic');
+    expect(resumeDisposition(cp({ stepKind: 'pmResearch' }), { planRevision: 3, taskIds: ['t1'] })).toBe('owner');
+  });
+});

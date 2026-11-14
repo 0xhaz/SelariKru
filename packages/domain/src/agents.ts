@@ -40,8 +40,22 @@ export const AGENT_LIMITS = {
 /** Whether the agent's output cites the task's criterion IDs, so a call without any is refused before it reaches a model. */
 export const AGENT_CITES_CRITERIA: Readonly<Record<AgentKind, boolean>> = {
   brief: true, criteria: true, plan: true, breakdown: true, patch: false, review: true, triage: false, prDescription: true,
-  pmAnswer: false, pmResearch: false, pmPlan: true, pmDelegate: false,
+  pmAnswer: false, pmResearch: false, pmPlan: true, pmDelegate: false, pmBrief: false, pmVerify: false, pmVerifyNoWeb: false,
 };
+
+/**
+ * H13: the plan brief's bounds. The owner's points and open questions go in; Nano returns a goal, items and uncertainties, each short enough to check, and counts
+ * what it left out. The cloud checks the approved brief and nothing else.
+ */
+export const PLAN_BRIEF_LIMITS = { goalChars: 280, itemChars: 280, items: 20, uncertainties: 10, omitted: 40, explanationChars: 400, answerChars: 600, sources: 5 } as const;
+export const PLAN_BRIEF_ITEM_KINDS = ['requirement', 'decision', 'constraint', 'assumption', 'fact'] as const;
+export const PLAN_BRIEF_OMIT_REASONS = ['private', 'duplicate', 'empty'] as const;
+export const PLAN_BRIEF_VERDICTS = ['supported', 'contradicted', 'unclear', 'not_checkable'] as const;
+/** Without web search the cloud can only judge a point against what it knows: never "supported" by the web. */
+export const PLAN_BRIEF_NO_WEB_VERDICTS = ['consistent', 'inconsistent', 'unclear'] as const;
+export const PLAN_BRIEF_CONFIDENCE = ['high', 'medium', 'low'] as const;
+/** A pmPlan's architecture section (H13), part of the call's output and so of its hash; the server maps only the tasks. */
+export const PM_PLAN_ARCHITECTURE_CHARS = 2000;
 
 export const REVIEW_OUTCOMES = ['no_issues', 'changes_suggested', 'blocking_issues'] as const;
 export const REVIEW_SEVERITIES = ['blocker', 'major', 'minor', 'nit'] as const;
@@ -59,6 +73,9 @@ export interface PmIds {
   readonly workerIds?: readonly string[];
   /** Fix round 2 (I4): the roles a PM plan task may take (the plan's roles); absent: the coding roles. */
   readonly roles?: readonly string[];
+  /** H13: the approved brief's item and question ids a check may answer. */
+  readonly briefItemIds?: readonly string[];
+  readonly briefQuestionIds?: readonly string[];
 }
 
 const oneOf = (ids: readonly string[] | undefined): z.ZodType => (ids && ids.length > 0 ? z.enum(ids as [string, ...string[]]) : z.never());
@@ -114,9 +131,32 @@ export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[
           dependsOn: z.array(planKey).max(AGENT_LIMITS.planTasks - 1),
           revises: oneOf(pm.taskIds).optional(),
         })).min(1).max(AGENT_LIMITS.planTasks),
+        // H13: components, data and key decisions, citing the brief's item ids. Shown above the tasks; covered by the call's output hash.
+        architecture: text(PM_PLAN_ARCHITECTURE_CHARS).optional(),
       });
     case 'pmDelegate':
       return z.strictObject({ assignments: z.array(z.strictObject({ taskId: oneOf(pm.taskIds), workerId: oneOf(pm.workerIds), why: text(200) })).min(1).max(AGENT_LIMITS.planTasks) });
+    // H13: the plan brief, formatted on the device. Ids P1..P20 and U1..U10; what was left out is counted with a reason, never quoted.
+    case 'pmBrief': {
+      const B = PLAN_BRIEF_LIMITS;
+      return z.strictObject({
+        goal: z.string().max(B.goalChars),
+        items: z.array(z.strictObject({ id: z.string().regex(/^P(?:[1-9]|1[0-9]|20)$/), text: text(B.itemChars), kind: z.enum(PLAN_BRIEF_ITEM_KINDS), checkable: z.boolean(), source: z.enum(['points', 'conversation']) })).max(B.items),
+        uncertainties: z.array(z.strictObject({ id: z.string().regex(/^U(?:[1-9]|10)$/), question: text(B.itemChars) })).max(B.uncertainties),
+        omitted: z.array(z.strictObject({ reason: z.enum(PLAN_BRIEF_OMIT_REASONS) })).max(B.omitted),
+      });
+    }
+    // H13: the cloud's checks of the approved brief. Only the ids it was given. Web sources are shown as text links, https only (the screen drops any other).
+    case 'pmVerify':
+    case 'pmVerifyNoWeb': {
+      const B = PLAN_BRIEF_LIMITS;
+      const web = kind === 'pmVerify';
+      const sources = { sources: z.array(z.strictObject({ title: text(200), url: z.string().min(1).max(500) })).max(B.sources) };
+      return z.strictObject({
+        items: z.array(z.strictObject({ id: oneOf(pm.briefItemIds), verdict: web ? z.enum(PLAN_BRIEF_VERDICTS) : z.enum(PLAN_BRIEF_NO_WEB_VERDICTS), explanation: text(B.explanationChars), ...(web ? sources : {}) })).max(B.items),
+        uncertainties: z.array(z.strictObject({ id: oneOf(pm.briefQuestionIds), answer: text(B.answerChars), confidence: z.enum(PLAN_BRIEF_CONFIDENCE), ...(web ? sources : {}) })).max(B.uncertainties),
+      });
+    }
   }
 }
 
@@ -220,6 +260,21 @@ export function checkAgentOutput(kind: AgentKind, data: unknown, ctx: AgentCheck
     case 'review':
       checkReview(out as unknown as ReviewOutput, ctx, add);
       break;
+    case 'pmBrief': {
+      const b = out as { items: { id: string }[]; uncertainties: { id: string }[] };
+      const seen = new Set<string>();
+      b.items.forEach((x, i) => { if (seen.has(x.id)) add('duplicate_key', 'items', i, 'id'); seen.add(x.id); });
+      b.uncertainties.forEach((x, i) => { if (seen.has(x.id)) add('duplicate_key', 'uncertainties', i, 'id'); seen.add(x.id); });
+      break;
+    }
+    case 'pmVerify':
+    case 'pmVerifyNoWeb': {
+      const v = out as { items: { id: string }[]; uncertainties: { id: string }[] };
+      const seen = new Set<string>();
+      v.items.forEach((x, i) => { if (seen.has(x.id)) add('duplicate_key', 'items', i, 'id'); seen.add(x.id); });
+      v.uncertainties.forEach((x, i) => { if (seen.has(x.id)) add('duplicate_key', 'uncertainties', i, 'id'); seen.add(x.id); });
+      break;
+    }
     case 'triage': {
       const loc = (out as { location?: { file: string } }).location;
       if (loc && allowedPathProblem(loc.file) !== null) add('path_invalid', 'location', 'file');

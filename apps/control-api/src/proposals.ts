@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson, CRITERION_DESCRIPTIONS, err, mapPmPlan, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
+import { canonicalJson, CRITERION_DESCRIPTIONS, err, mapPmPlan, ok, validateProposal, MAX_ATTEMPTS_CAP, MAX_PROPOSAL_BYTES, PM_PLAN_ARCHITECTURE_CHARS, type ProposalIssue, type Result, type TaskSpec } from '@selarikru/domain';
 import { readFileSync } from 'node:fs';
 import { PlanTaskSchema } from '@selarikru/protocol';
 import { z } from 'zod';
@@ -186,7 +186,8 @@ const PmPlanTaskInput = z.strictObject({
   requirementIds: z.array(z.string().min(1)).min(1).max(8), paths: z.array(z.string().max(512)).min(1).max(8), dependsOn: z.array(z.string()).max(11),
   revises: z.string().min(1).max(200).optional(),
 });
-const PmPlanInput = z.strictObject({ tasks: z.array(PmPlanTaskInput).min(1).max(12) });
+// H13: a plan may carry its architecture section. It is part of the call's output, so its hash binds it; only the tasks are mapped onto the run.
+const PmPlanInput = z.strictObject({ tasks: z.array(PmPlanTaskInput).min(1).max(12), architecture: z.string().min(1).max(PM_PLAN_ARCHITECTURE_CHARS).optional() });
 
 export type PmPlanReviewError = PlanReviewError | { code: 'pm_plan_refused'; reason: string; key: string };
 

@@ -23,7 +23,7 @@ export const AI_CHECKPOINT_STOP_REASONS = ['offline', 'input_too_large_for_devic
 export type AiCheckpointStopReason = (typeof AI_CHECKPOINT_STOP_REASONS)[number];
 
 /** The stage boundaries. `context`: the task context was read; the others name the call that just finished (or stopped). */
-export const AI_CHECKPOINT_STAGES = ['context', 'file_choice', 'patch', 'reask', 'criteria', 'breakdown', 'review', 'triage', 'pr_description', 'plan_draft', 'pm_turn'] as const;
+export const AI_CHECKPOINT_STAGES = ['context', 'file_choice', 'patch', 'reask', 'criteria', 'breakdown', 'review', 'triage', 'pr_description', 'plan_draft', 'pm_turn', 'research_notes'] as const;
 export type AiCheckpointStage = (typeof AI_CHECKPOINT_STAGES)[number];
 
 /**
@@ -51,6 +51,13 @@ const Iso = z.iso.datetime();
 export const AiCheckpointTextSchema = z.strictObject({ who: z.enum(['owner', 'pm']), text: z.string().max(2000), classification: Label });
 export type AiCheckpointText = z.infer<typeof AiCheckpointTextSchema>;
 
+/**
+ * H13: the owner's plan brief notes (their points and open questions) are kept as a checkpoint of their own kind, `researchNotes`, so they take the same storage
+ * split, server refusal and re-judging by the task's lock as the PM's turns. Not a step: nothing runs or resumes from one.
+ */
+export const RESEARCH_NOTES_KIND = 'researchNotes' as const;
+export const AiCheckpointStepKindSchema = z.union([RouteStepKindSchema, z.literal(RESEARCH_NOTES_KIND)]);
+
 export const AiCheckpointSchema = z.strictObject({
   checkpointId: z.string().regex(/^ckp_[A-Za-z0-9_-]{8,80}$/),
   projectId: z.string().min(1).max(200),
@@ -59,7 +66,7 @@ export const AiCheckpointSchema = z.strictObject({
   runId: z.string().min(1).max(200),
   /** The accepted plan revision when the step ran. Null: the run had none the browser could read. */
   planRevision: z.number().int().min(0).nullable(),
-  stepKind: RouteStepKindSchema,
+  stepKind: AiCheckpointStepKindSchema,
   stage: z.enum(AI_CHECKPOINT_STAGES),
   /** The step's one-call override, kept so a resume is the same call. Never stored as a task's route. */
   callOverride: RoutePolicyModeSchema.nullable(),
@@ -83,6 +90,8 @@ export const AiCheckpointSchema = z.strictObject({
     checkId: RecordId.nullable().optional(),
     /** A review or PR description: sha256 of the change it read. */
     changeSha256: Hex64.nullable().optional(),
+    /** H13: a plan brief check: sha256 of the approved brief it sends. Any edit since un-approves it, so it is not sent. */
+    briefSha256: Hex64.nullable().optional(),
   }),
   /** What the chain has so far: the checks' issue codes (`<json path> <code>`, never the answer), and the PM's turns with their labels. */
   partial: z.strictObject({ issues: z.array(z.string().max(160).regex(/^[^\n]*$/)).max(20), texts: z.array(AiCheckpointTextSchema).max(8) }).nullable(),
@@ -159,15 +168,17 @@ export interface CheckpointRecheck {
   /** The run's budget for a cloud call (`checkpointBudget`). */
   readonly budget: 'ok' | 'missing' | 'exhausted';
   /** The step's inputs as they are now. Null: they could not be read, so they count as changed. */
-  readonly inputs: { readonly bundleSha256?: string | null; readonly files?: readonly { readonly path: string; readonly sha256: string | null }[]; readonly changeSha256?: string | null; readonly checkId?: string | null } | null;
+  readonly inputs: { readonly bundleSha256?: string | null; readonly files?: readonly { readonly path: string; readonly sha256: string | null }[]; readonly changeSha256?: string | null; readonly checkId?: string | null; readonly briefSha256?: string | null } | null;
   /**
    * The context backstop (H5): the server served a context for this destination, no stronger than the destination allows. `not_applicable`: the step reads no task
    * context (web research sends only the question), so there is none to check.
    */
   readonly context: 'ok' | 'refused' | 'not_applicable';
+  /** H13: a plan brief check with Google Search: whether the run's web research setting is on now. Absent: not a check that needs it. */
+  readonly webResearch?: boolean;
 }
 
-export const CHECKPOINT_PROBLEMS = ['not_waiting', 'route_unreadable', 'route_changed', 'locked', 'revision_changed', 'inputs_changed', 'budget_missing', 'budget_exhausted', 'context_refused'] as const;
+export const CHECKPOINT_PROBLEMS = ['not_waiting', 'route_unreadable', 'route_changed', 'locked', 'revision_changed', 'inputs_changed', 'budget_missing', 'budget_exhausted', 'context_refused', 'web_research_off'] as const;
 export type CheckpointProblem = (typeof CHECKPOINT_PROBLEMS)[number];
 export type CheckpointRevalidation = { readonly ok: true } | { readonly ok: false; readonly problems: readonly CheckpointProblem[] };
 
@@ -190,8 +201,11 @@ export function revalidateCheckpoint(cp: AiCheckpoint, now: CheckpointRecheck, t
     || (cp.inputs.bundleSha256 !== null && i.bundleSha256 !== undefined && i.bundleSha256 !== cp.inputs.bundleSha256)
     || (cp.inputs.files.length > 0 && !sameFiles(cp.inputs.files, i.files))
     || (cp.inputs.changeSha256 != null && i.changeSha256 !== undefined && i.changeSha256 !== cp.inputs.changeSha256)
-    || (cp.inputs.checkId != null && i.checkId !== undefined && i.checkId !== cp.inputs.checkId);
+    || (cp.inputs.checkId != null && i.checkId !== undefined && i.checkId !== cp.inputs.checkId)
+    // H13: a brief check sends exactly the brief the owner approved: no approved brief now, or another one, is a change.
+    || (cp.inputs.briefSha256 != null && i.briefSha256 !== cp.inputs.briefSha256);
   if (changed) problems.push('inputs_changed');
+  if (now.webResearch === false) problems.push('web_research_off');
   if (to === 'cloud' && now.budget !== 'ok') problems.push(now.budget === 'missing' ? 'budget_missing' : 'budget_exhausted');
   if (now.context === 'refused') problems.push('context_refused');
   return problems.length === 0 ? { ok: true } : { ok: false, problems };
@@ -230,12 +244,15 @@ export function escalationDecision(cp: AiCheckpoint, route: { readonly mode: Rou
 
 /** Steps that change the plan or reach outside the project: always the owner's call. */
 const OWNER_STEPS: ReadonlySet<string> = new Set(['pmPlan', 'pmResearch', 'plan', 'brief']);
+const APPROVED_PAYLOAD_STEPS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb']);
 
 /**
  * Inside the accepted plan a checkpoint resumes on its own (the owner's rule: the PM acts within an approved plan); anything outside it goes to Action items. Inside
  * means: the run has an accepted plan, the checkpoint was made under that same revision, the task is one of its tasks, and the step does not change the plan.
  */
 export function resumeDisposition(cp: AiCheckpoint, plan: { readonly planRevision: number; readonly taskIds: readonly string[] } | null): 'automatic' | 'owner' {
+  // H13: a brief check sends only the brief the owner approved, bound by its hash, which the re-validation checks: the owner already decided this send.
+  if (APPROVED_PAYLOAD_STEPS.has(cp.stepKind)) return 'automatic';
   if (!plan || plan.planRevision < 1 || cp.planRevision !== plan.planRevision || !plan.taskIds.includes(cp.taskId) || OWNER_STEPS.has(cp.stepKind)) return 'owner';
   return 'automatic';
 }
