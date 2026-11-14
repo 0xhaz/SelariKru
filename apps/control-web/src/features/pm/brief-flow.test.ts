@@ -132,9 +132,9 @@ describe('the plan brief on demo data (H13)', () => {
     const ask = (subjectTaskId: string, questionClassification: 'internal' | 'restricted' = 'internal') => agents.pm({ kind: 'pmVerify', subjectTaskId, question: '', questionClassification, history: [], callOverride: null, brief: p, briefSha256: briefSha256(p) });
     expect(await ask(id('contract'), 'restricted')).toMatchObject({ kind: 'refused', code: 'brief_restricted' });
     const locked = Object.values(snapshot.tasks).find((t) => t.route?.lock)!;
-    expect(await ask(locked.taskId)).toMatchObject({ kind: 'refused', code: 'research_locked' });
+    expect(await ask(locked.taskId)).toMatchObject({ kind: 'refused', code: 'verify_locked' });
     const deviceOnly = Object.values(snapshot.tasks).find((t) => t.route && !t.route.lock && t.route.effective === 'ONLY_ON_DEVICE')!;
-    expect(await ask(deviceOnly.taskId)).toMatchObject({ kind: 'refused', code: 'research_device_only' });
+    expect(await ask(deviceOnly.taskId)).toMatchObject({ kind: 'refused', code: 'verify_device_only' });
     expect(rec.specs).toHaveLength(0);
   });
 

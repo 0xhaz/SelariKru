@@ -100,6 +100,8 @@ export interface ChainRecorder {
 const STAGE_OF_KIND: Partial<Record<RouteStepKind, AiCheckpointStage>> = { pmPlan: 'plan_draft', pmAnswer: 'pm_turn', pmResearch: 'pm_turn', pmDelegate: 'pm_turn', plan: 'plan_draft', pmVerify: 'pm_turn', pmVerifyNoWeb: 'pm_turn' };
 /** H13: the plan brief's cloud checks: they read no task context and send only the approved brief. */
 const BRIEF_CHECKS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb']);
+/** Steps that only ever run in the cloud: never moved to this device, never escalated (fix round 1, H1). */
+export const CLOUD_ONLY_STEPS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb', 'pmResearch']);
 const TASK_STEPS: ReadonlySet<string> = new Set(['criteria', 'breakdown', 'patch', 'review', 'triage', 'prDescription']);
 const PM_STEPS: ReadonlySet<string> = new Set(['pmAnswer', 'pmResearch', 'pmPlan', 'pmDelegate']);
 const webResearchOn = (snap: ProjectViewSnapshot | null, runId: string): boolean => snap?.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'web_research' && x.desired === true) ?? false;
@@ -478,6 +480,7 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
 
   async function escalate(id: string): Promise<void> {
     const cp = store.getState().checkpoints[id];
+    if (cp && CLOUD_ONLY_STEPS.has(cp.stepKind)) return;
     if (!cp || cp.status !== 'waiting' || cp.escalatedAt !== null || !deps.server?.claimAiCheckpointEscalation || store.getState().deviceOnly[id]) {
       if (cp && cp.status === 'waiting') setFor('problems', id, [cp.escalatedAt !== null ? 'already_escalated' : 'locked']);
       return;
@@ -557,7 +560,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     escalate,
     async moveToDevice(id) {
       const cp = store.getState().checkpoints[id];
-      if (!cp || cp.status !== 'waiting') return;
+      // H13 fix round 1 (H1): a cloud check (web research, a brief check) cannot run on this device: it is dropped or checked again, never moved.
+      if (!cp || cp.status !== 'waiting' || CLOUD_ONLY_STEPS.has(cp.stepKind)) return;
       await send(cp, 'device_only', 'ONLY_ON_DEVICE');
     },
     async runAgain(id) {

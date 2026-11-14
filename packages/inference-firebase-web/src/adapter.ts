@@ -432,7 +432,8 @@ export class FirebaseHybridAssistantAdapter {
     const deviceMustServe = mode === 'ONLY_ON_DEVICE' || (mode === 'PREFER_ON_DEVICE' && !allowFallback);
     // H11: web search runs only on a cloud-only route, and never for a locked (restricted) task. Refused before any prompt is built or model called.
     if (spec.grounding || spec.cloudOnlyCheck) {
-      const pre = spec.grounding ? 'research' : 'verify';
+      // H13 fix round 1 (M1): a brief check (with or without grounding) has its own codes.
+      const pre = spec.cloudOnlyCheck ? 'verify' : 'research';
       if (current?.lock) return make({ status: 'blocked', requestedMode: mode, blockedReason: `${pre}_locked` });
       // The owner set this task to device only: research never overrides that, whatever the call asks for.
       // Fix round 2: the route the task would use without this call's override (its own override, else the run default or the seed) is device only.

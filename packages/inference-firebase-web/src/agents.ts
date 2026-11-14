@@ -772,7 +772,7 @@ export class AgentCatalog {
     const spec: CallSpec = {
       op: def.operation, systemInstruction: def.rolePrompt, schema: agentJsonSchema(kind, ids, pmIdsOf(kind, input)), schemaKey: `${kind}|${ids.join(',')}|${JSON.stringify(pmIdsOf(kind, input))}`, citesCriteria: AGENT_CITES_CRITERIA[kind],
       ...(kind === 'pmResearch' || kind === 'pmVerify' ? { grounding: 'googleSearch' as const } : {}),
-      ...(kind === 'pmVerifyNoWeb' ? { cloudOnlyCheck: true } : {}),
+      ...(kind === 'pmVerify' || kind === 'pmVerifyNoWeb' ? { cloudOnlyCheck: true } : {}),
       prompt: (at) => {
         omissions = [];
         const fenced = fencedContent(kind, input);

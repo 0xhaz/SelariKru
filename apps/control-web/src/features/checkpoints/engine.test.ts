@@ -681,4 +681,22 @@ describe('H13: plan brief notes and checks', () => {
     expect(h.runner.pm).not.toHaveBeenCalled();
     expect(h.engine.store.getState().problems[id]).toEqual(['web_research_off']);
   });
+
+  it('fix round 1 (H1): Move to device only and Escalate on a paused brief check or web research send nothing', async () => {
+    const SHA = 'b'.repeat(64);
+    const h = setup({ currentBriefSha: () => SHA });
+    h.setOnline(false);
+    const id = await pauseVerify(h, SHA);
+    h.setOnline(true);
+    await h.engine.moveToDevice(id);
+    await h.engine.escalate(id);
+    expect(h.runner.pm).not.toHaveBeenCalled();
+    expect(h.engine.store.getState().checkpoints[id]!.status).toBe('waiting');
+    const r = h.engine.begin({ taskId: 't1', stepKind: 'pmResearch', callOverride: 'ONLY_IN_CLOUD', texts: [{ who: 'owner', text: 'How do boards sort?', classification: 'internal' }] });
+    r.stage({ stage: 'context', context: context(), contextId: 'ctx_r' });
+    await r.finish({ kind: 'result', result: result(proposal({ status: 'blocked', blockedReason: 'offline', observedSource: 'UNKNOWN', requestId: 'req_r' }), 'pmResearch'), context: context() });
+    await h.engine.moveToDevice(r.id);
+    expect(h.runner.pm).not.toHaveBeenCalled();
+  });
 });
+

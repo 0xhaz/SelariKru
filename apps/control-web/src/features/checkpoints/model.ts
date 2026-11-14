@@ -1,6 +1,6 @@
 import { checkpointLabel, type AiCheckpoint, type AiCheckpointStopReason } from '@selarikru/domain';
 import type { Tone } from '@selarikru/ui';
-import type { CheckpointState } from './engine.ts';
+import { CLOUD_ONLY_STEPS, type CheckpointState } from './engine.ts';
 
 /** H12: what the Paused AI work list, the activity feed and the office say about checkpoints. Pure: read from the engine's state and the snapshot's titles. */
 
@@ -104,7 +104,8 @@ export function pausedRows(state: Pick<CheckpointState, 'checkpoints' | 'problem
     return {
       id: cp.checkpointId, taskId: cp.taskId, title, step, headline, stop, tone: problems.length > 0 ? 'warning' : ask ? 'active' : 'neutral',
       sends: sendsText(cp), problems, restricted, busy: state.busy[cp.checkpointId] === true, resume, escalate,
-      moveToDevice: cp.routeMode === 'ONLY_ON_DEVICE' && cp.stopReason === 'input_too_large_for_device' ? 'It is already device only, and too large for this device.' : null,
+      moveToDevice: CLOUD_ONLY_STEPS.has(cp.stepKind) ? 'A cloud check can\'t run on this device. Drop it, or check again.'
+        : cp.routeMode === 'ONLY_ON_DEVICE' && cp.stopReason === 'input_too_large_for_device' ? 'It is already device only, and too large for this device.' : null,
     };
   })];
 }

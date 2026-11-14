@@ -71,3 +71,13 @@ describe('H9: the hosted demo\'s cloud call cap', () => {
     expect(row!.resume).toBe('This demo tab has used all its cloud calls. Move it to this device, or drop it.');
   });
 });
+
+describe('H13 fix round 1 (H1): a cloud check is never moved to this device', () => {
+  it('Move to device only is disabled for a paused brief check and for web research, and says why', () => {
+    for (const stepKind of ['pmVerify', 'pmVerifyNoWeb', 'pmResearch'] as const) {
+      const [row] = pausedRows(state([cp({ stepKind, stage: 'pm_turn', callOverride: 'ONLY_IN_CLOUD' })]), titles, true);
+      expect(row!.moveToDevice).toBe('A cloud check can\'t run on this device. Drop it, or check again.');
+    }
+  });
+});
+

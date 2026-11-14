@@ -869,10 +869,10 @@ describe('H13: the plan brief', () => {
 
   it('pmVerify is refused on a locked route and on a device-only task, before any model call', async () => {
     const l = setup(locked);
-    expect((await l.catalog.pmVerify(INPUTS.pmVerify)).proposal.blockedReason).toBe('research_locked');
+    expect((await l.catalog.pmVerify(INPUTS.pmVerify)).proposal.blockedReason).toBe('verify_locked');
     expect(l.sdk.specs).toHaveLength(0);
     const d = setup({ runDefault: 'PREFER_IN_CLOUD', override: 'ONLY_ON_DEVICE', lock: null });
-    expect((await d.catalog.pmVerify({ ...INPUTS.pmVerify, policy: policy('PREFER_IN_CLOUD') })).proposal.blockedReason).toBe('research_device_only');
+    expect((await d.catalog.pmVerify({ ...INPUTS.pmVerify, policy: policy('PREFER_IN_CLOUD') })).proposal.blockedReason).toBe('verify_device_only');
     expect(d.sdk.specs).toHaveLength(0);
   });
 

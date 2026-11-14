@@ -132,9 +132,9 @@ describe('H13: the plan brief steps in the runner', () => {
     expect(d.calls['pmVerify']![0]).toMatchObject({ brief, bundle: null, callOverride: 'ONLY_IN_CLOUD', briefClassification: 'internal' });
     expect(await runPmStep(deps(), verify({ briefSha256: 'f'.repeat(64) }))).toEqual({ kind: 'refused', code: 'brief_not_approved' });
     expect(await runPmStep(deps(), verify({ questionClassification: 'restricted' }))).toEqual({ kind: 'refused', code: 'brief_restricted' });
-    expect(await runPmStep(deps({}, route({ lock })), verify({ subjectTaskId: 't2' }))).toEqual({ kind: 'refused', code: 'research_locked' });
-    expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), verify())).toEqual({ kind: 'refused', code: 'research_device_only' });
-    expect(await runPmStep(deps({}, route({ effective: 'ONLY_ON_DEVICE', runDefault: 'ONLY_ON_DEVICE' })), verify())).toEqual({ kind: 'refused', code: 'research_device_only' });
+    expect(await runPmStep(deps({}, route({ lock })), verify({ subjectTaskId: 't2' }))).toEqual({ kind: 'refused', code: 'verify_locked' });
+    expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), verify())).toEqual({ kind: 'refused', code: 'verify_device_only' });
+    expect(await runPmStep(deps({}, route({ effective: 'ONLY_ON_DEVICE', runDefault: 'ONLY_ON_DEVICE' })), verify())).toEqual({ kind: 'refused', code: 'verify_device_only' });
     const off = deps({ webResearch: () => false });
     expect(await runPmStep(off, verify())).toEqual({ kind: 'refused', code: 'research_not_granted' });
     expect(off.calls['pmVerify']).toEqual([]);
@@ -157,4 +157,21 @@ describe('H13: the plan brief steps in the runner', () => {
     await runPmStep(plain, req({ kind: 'pmPlan' }));
     expect(plain.calls['pmPlan']![0]).not.toHaveProperty('brief');
   });
+
+  it('fix round 1 (H1, M1): a cloud check or web research never runs as a device-only or escalated resume, or under a device-only call override; a check has its own verify codes', async () => {
+    const r = (over: Partial<PmRequest>) => runPmStep(deps(), req({ kind: 'pmResearch', ...over }));
+    expect(await r({ resume: { checkpointId: 'ckp_x', kind: 'device_only' } })).toEqual({ kind: 'refused', code: 'research_cloud_only' });
+    expect(await r({ resume: { checkpointId: 'ckp_x', kind: 'escalated' } })).toEqual({ kind: 'refused', code: 'research_cloud_only' });
+    expect(await r({ callOverride: 'ONLY_ON_DEVICE' })).toEqual({ kind: 'refused', code: 'research_cloud_only' });
+    for (const kind of ['pmVerify', 'pmVerifyNoWeb'] as const) {
+      const d = deps();
+      expect(await runPmStep(d, verify({ kind, resume: { checkpointId: 'ckp_x', kind: 'device_only' } }))).toEqual({ kind: 'refused', code: 'verify_cloud_only' });
+      expect(await runPmStep(d, verify({ kind, resume: { checkpointId: 'ckp_x', kind: 'escalated' } }))).toEqual({ kind: 'refused', code: 'verify_cloud_only' });
+      expect(await runPmStep(d, verify({ kind, callOverride: 'ONLY_ON_DEVICE' }))).toEqual({ kind: 'refused', code: 'verify_cloud_only' });
+      expect(d.calls[kind]).toEqual([]);
+    }
+    expect(await runPmStep(deps({}, route({ lock })), verify({ subjectTaskId: 't2' }))).toEqual({ kind: 'refused', code: 'verify_locked' });
+    expect(await runPmStep(deps({}, route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE', source: 'task' })), verify())).toEqual({ kind: 'refused', code: 'verify_device_only' });
+  });
 });
+

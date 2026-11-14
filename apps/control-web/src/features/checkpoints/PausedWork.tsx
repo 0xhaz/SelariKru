@@ -48,6 +48,7 @@ export function PausedWork({ engine, titleOf, simulated }: { engine: CheckpointE
             </div>
             )}
             {!r.abandoned && r.resume !== null && r.escalate !== null ? <p className="mt-1 text-sm text-muted">{r.resume}</p> : null}
+            {!r.abandoned && r.moveToDevice !== null ? <p className="mt-1 text-sm text-muted" data-testid="paused-move-off">{r.moveToDevice}</p> : null}
             {r.busy ? <p role="status" className="mt-1 text-sm text-fg">Sending…</p> : null}
           </li>
         ))}

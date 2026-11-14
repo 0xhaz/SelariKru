@@ -115,7 +115,8 @@ async function runBriefStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
       callOverride: 'ONLY_ON_DEVICE', points: req.notes!.points, unsure: req.notes!.unsure, inputClassification: label,
     }));
   }
-  const pre = req.kind === 'pmVerify' ? 'research' : 'verify';
+  if (cloudOnlyBreach(req)) return { kind: 'refused', code: 'verify_cloud_only' };
+  const pre = 'verify';
   if (read.route.lock !== null) return { kind: 'refused', code: `${pre}_locked` };
   if (read.route.override === 'ONLY_ON_DEVICE' || read.route.effective === 'ONLY_ON_DEVICE') return { kind: 'refused', code: `${pre}_device_only` };
   if (req.kind === 'pmVerify' && !(deps.webResearch?.() ?? false)) return { kind: 'refused', code: 'research_not_granted' };
@@ -126,8 +127,15 @@ async function runBriefStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
   return done(req.kind === 'pmVerify' ? await deps.catalog.pmVerify(input) : await deps.catalog.pmVerifyNoWeb(input));
 }
 
+/**
+ * H13 fix round 1 (H1): a cloud-only step (web research, a brief check) never runs as a "moved to device only" or escalated resume, nor under a device-only call
+ * override: none of them may turn into a call this step was not approved for.
+ */
+const cloudOnlyBreach = (req: PmRequest): boolean => req.resume?.kind === 'device_only' || req.resume?.kind === 'escalated' || req.callOverride === 'ONLY_ON_DEVICE';
+
 export async function runPmStep(deps: PmDeps, req: PmRequest): Promise<PmOutcome> {
   if (req.kind === 'pmBrief' || req.kind === 'pmVerify' || req.kind === 'pmVerifyNoWeb') return runBriefStep(deps, req);
+  if (req.kind === 'pmResearch' && cloudOnlyBreach(req)) return { kind: 'refused', code: 'research_cloud_only' };
   if (!req.question.trim()) return { kind: 'refused', code: 'question_empty' };
   const override: RoutePolicyMode | null = req.kind === 'pmResearch' ? 'ONLY_IN_CLOUD' : req.callOverride;
   let read: TaskRouteRead;
