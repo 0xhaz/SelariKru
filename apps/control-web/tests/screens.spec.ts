@@ -171,6 +171,26 @@ for (const size of SIZES) {
       await shot(page, '19-team', size, page.getByRole('heading', { name: 'Team', level: 1 }));
     });
 
+    // H13: the Plan brief: the owner's notes, the brief formatted on this device (one item unticked), and the cloud's verdicts and answers.
+    test('Talk to the PM: the plan brief with its verdicts (H13)', async ({ page }) => {
+      await open(page, '#/settings?section=workflow');
+      await page.getByTestId('web-research').getByRole('button', { name: 'Turn on Google Search (web research)' }).click();
+      await expect(page.getByTestId('web-research')).toHaveAttribute('data-on', 'true');
+      await page.evaluate(() => { window.location.hash = '#/pm'; });
+      await page.getByTestId('pm-subject').selectOption(T('contract'));
+      const brief = page.getByTestId('pm-brief');
+      await brief.getByRole('button', { name: 'Format on this device' }).click();
+      await brief.getByTestId('pm-brief-item').nth(1).getByTestId('pm-brief-item-tick').uncheck();
+      await brief.getByRole('button', { name: 'Approve brief' }).click();
+      await brief.getByRole('button', { name: 'Check in the cloud' }).click();
+      await expect(brief.getByTestId('pm-brief-results')).toBeVisible();
+      // Two pictures of the drawer: the notes and the reviewed brief, then the cloud's verdicts and answers.
+      await brief.getByTestId('pm-brief-points').scrollIntoViewIfNeeded();
+      await shot(page, '20-pm-plan-brief-notes', size, brief.getByTestId('pm-brief-points'));
+      await brief.getByTestId('pm-brief-results').scrollIntoViewIfNeeded();
+      await shot(page, '20-pm-plan-brief-verdicts', size, brief.getByTestId('pm-brief-verdict'));
+    });
+
     test('the tour, step 1', async ({ page }) => {
       await page.clock.setFixedTime(FIXED);
       await page.goto('/?demo&fixture=feature-delivery&tour=1#/office');
