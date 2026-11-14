@@ -455,7 +455,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   const insets = useMemo(() => {
     if (!panelWide) return { top: headerH + 8, left: 8, right: 8, bottom: 8 };
     const right = workerId !== null ? 600 : frame === 'drawer' && !drawerMaximized ? Math.min(drawerWidth, window.innerWidth - 32) + 32 : 16;
-    return { top: 74, left: 312, right, bottom: 16 };
+    // Below the floating bar (10 px down, one or two rows), as the panels are.
+    return { top: headerH > 0 ? headerH + 24 : 74, left: 312, right, bottom: 16 };
   }, [headerH, panelWide, frame, workerId, drawerWidth, drawerMaximized]);
   // Settings is modal: everything else is inert while it is open, so focus cannot leave it.
   const chromeRef = useRef<HTMLDivElement>(null);
@@ -606,7 +607,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
           teamFold={<TeamFoldRegion status={panelStatus} open={foldOpen} onOpenChange={setFoldOpen} regionId={foldId} selectedId={workerId} onOpen={openWorker} mark={mark} />}
         />
         <ConnectionBanner connection={connection} />
-        {devNotice ? <p role="status" data-testid="dev-config-missing" className="z-50 mx-3 mt-3 border-2 border-ink bg-warning-tint px-3 py-1 text-[14px] font-semibold text-fg rounded-[4px] xl:fixed xl:left-1/2 xl:top-[100px] xl:mx-0 xl:mt-0 xl:-translate-x-1/2">{devNotice}</p> : null}
+        {devNotice ? <p role="status" data-testid="dev-config-missing" className="z-50 mx-3 mt-3 border-2 border-ink bg-warning-tint px-3 py-1 text-[14px] font-semibold text-fg rounded-[4px] xl:fixed xl:left-1/2 xl:top-[calc(var(--header-h,74px)+26px)] xl:mx-0 xl:mt-0 xl:-translate-x-1/2">{devNotice}</p> : null}
         {deviceAvailability ? <NanoBanner check={deviceAvailability} snapshot={snapshot} /> : null}
         {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
         {panelWide ? <ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} /> : null}
@@ -614,10 +615,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
 
       {/* The screen in front of the office. Under a worker open beside the team cards it is inert; the scrim and the hint say why it does not respond. */}
       {/* Floating, it is the area right of the team cards; it only takes the pointer while paused, so the office stays clickable around a drawer. */}
-      <div ref={contentRef} className={`relative z-20 min-w-0 xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px] ${drawerBeside ? 'cursor-default after:pointer-events-none after:absolute after:inset-0 after:z-30 after:bg-paper/40 after:content-[\'\']' : 'pointer-events-none'}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
+      <div ref={contentRef} className={`relative z-20 min-w-0 xl:fixed xl:top-[var(--header-h,74px)] xl:right-4 xl:bottom-4 xl:left-[312px] ${drawerBeside ? 'cursor-default after:pointer-events-none after:absolute after:inset-0 after:z-30 after:bg-paper/40 after:content-[\'\']' : 'pointer-events-none'}`} data-testid="page-content" data-frame={frame} data-paused={drawerBeside ? 'true' : undefined}>
         {frame === 'office' ? (
           <>
-            {pausedHint ? <div className="fixed inset-x-0 top-[74px]">{pausedHint}</div> : null}
+            {pausedHint ? <div className="fixed inset-x-0 top-[var(--header-h,74px)]">{pausedHint}</div> : null}
             <OfficeHome world={world} wide={panelWide} activity={<ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} />} />
           </>
         ) : frame === 'settings' ? (
@@ -632,7 +633,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         {(import.meta.env.DEV || import.meta.env.VITE_HOSTED_DEMO === '1') && hosted !== null && debugOpen ? <DebugPanel hosted connection={connection} snapshot={snapshot} world={world} onClose={() => setDebugOpen(false)}><DemoNetwork offline={simulatedOffline} /></DebugPanel> : null}
       </div>
       {/* The page under a worker open beside the team cards is inert, and an inert region is not hit-tested: this catcher gives the paused area its arrow pointer. */}
-      {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[74px] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}
+      {drawerBeside ? <div aria-hidden="true" className="fixed z-[19] cursor-default xl:top-[var(--header-h,74px)] xl:right-4 xl:bottom-4 xl:left-[312px]" /> : null}
       {assistant !== null && assistantOpened ? createPortal(
         <RouteBoundary resetKey="assistant">
           <Suspense fallback={<p role="status" className="text-muted">Loading the assistant</p>}>{assistant}</Suspense>
@@ -660,10 +661,11 @@ function useHeaderHeight(ref: RefObject<HTMLElement | null>): number {
   useEffect(() => {
     const header = ref.current;
     if (!header) return;
-    // Floating, the bar ends 60 px down and the panels start at 74 px; in the page flow it is its own height.
+    // Floating, the panels start 14 px below the bar: 74 px for a one-row bar, lower while it takes two rows (H13 fix round 2, N2); in the page flow it is its own
+    // height.
     const set = (): void => {
       const floating = getComputedStyle(header).position === 'fixed';
-      document.documentElement.style.setProperty('--header-h', floating ? '74px' : `${header.offsetHeight}px`);
+      document.documentElement.style.setProperty('--header-h', floating ? `${Math.round(header.getBoundingClientRect().bottom) + 14}px` : `${header.offsetHeight}px`);
       setH(header.offsetHeight);
     };
     set();

@@ -228,8 +228,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
     navRef.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ inline: 'center', block: 'nearest' });
   }, [route]);
   return (
-    <header ref={ref} data-testid="top-bar" className="panel sticky top-0 z-40 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 xl:fixed xl:left-4 xl:right-4 xl:top-[10px] xl:h-[50px] xl:flex-nowrap xl:gap-x-2.5 xl:py-0">
-      <p className="flex min-w-0 flex-1 items-center gap-2 xl:flex-initial">
+    <header ref={ref} data-testid="top-bar" className="panel sticky top-0 z-40 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 xl:fixed xl:left-4 xl:right-4 xl:top-[10px] xl:gap-x-2.5 min-[1700px]:h-[50px] min-[1700px]:flex-nowrap min-[1700px]:py-0">
+      <p className="flex min-w-0 flex-1 items-center gap-2 min-[1700px]:flex-initial">
         <Mark />
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
@@ -270,8 +270,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
           <AiCounter counts={aiCounts} runId={planRunId} />
         </span>
       ) : null}
-      {/* H13 fix round 1 (M4): from 1280 px the menus take their own width and the project name gives way (it truncates), so the bar never overlaps itself. */}
-      <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:ml-auto xl:w-auto xl:flex-none xl:justify-end xl:overflow-visible xl:p-0">
+      {/* H13 fix round 2 (N2): from 1280 px up to 1700 px the menus take a second row of the floating bar, so nothing overlaps and no control is dropped (the extra 2xl controls need the room); from 1700 px it is one row. */}
+      <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:justify-end min-[1700px]:order-none min-[1700px]:ml-auto min-[1700px]:w-auto min-[1700px]:flex-none min-[1700px]:overflow-visible min-[1700px]:p-0">
         {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
         <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-gold)' } : undefined}>
           Action items
@@ -288,7 +288,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         {onTour ? <button type="button" className="btn text-[14px]" data-testid="start-tour" onClick={onTour}>Start<span className="hidden 2xl:inline"> the</span> tour</button> : null}
         {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title={quota !== null ? 'Demo controls: go offline' : 'Development only'}>Debug</button> : null}
       </nav>
-      <div className="ml-auto flex shrink-0 items-center gap-2 xl:ml-0">
+      <div className="ml-auto flex shrink-0 items-center gap-2 min-[1700px]:ml-0">
         {panelWide ? null : teamToggle}
         {/* Setting up a first project has no live data to be fresh about. */}
         {route === 'onboarding' && connection === 'unavailable' ? null : <Freshness connection={connection} confirmedAt={confirmedAt} nowMs={nowMs} />}

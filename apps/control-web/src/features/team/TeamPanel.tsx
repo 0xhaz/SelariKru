@@ -127,7 +127,7 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 /** The roster beside every page at wide widths. Selecting a worker opens its drawer over the page; nothing navigates. */
 export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
   return (
-    <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[74px] z-10 flex w-[280px] flex-col gap-2">
+    <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[var(--header-h,74px)] z-10 flex w-[280px] flex-col gap-2">
       {/* The "TEAM · N" header, on the deep green signboard so its text meets AA over the office. */}
       <div className="panel-dark flex items-center justify-between gap-2 px-2.5 py-1">
         {/* A label, not a heading: the panel comes before the page's own h1, and the landmark already carries the name. */}

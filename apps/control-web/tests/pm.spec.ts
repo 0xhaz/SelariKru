@@ -322,20 +322,33 @@ test('H13 fix round 1: canary through the panel: a brief made restricted after a
   expect(writes.slice(firstDelete).filter((w) => w.method === 'saveAiCheckpoint' && JSON.stringify(w).includes(CANARY))).toEqual([]);
 });
 
-test('H13 fix round 1 (M4): at 1440 px with "Boards: Talk to the PM" active, no two top-bar controls overlap', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await open(page, '#/pm');
-  const boards = page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ });
-  await expect(boards).toHaveAttribute('title', 'Boards: Talk to the PM');
-  await expect(boards).toHaveAttribute('aria-label', 'Boards: Talk to the PM');
-  const boxes = await page.getByTestId('top-bar').evaluate((bar) => [...bar.querySelectorAll('button, a, [data-testid="sandbox-chip"]')]
-    .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.closest('[hidden]'); })
-    .map((el) => { const r = el.getBoundingClientRect(); return { name: (el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40), x: r.left, y: r.top, w: r.width, h: r.height }; }));
-  expect(boxes.length).toBeGreaterThan(4);
-  const overlaps: string[] = [];
-  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
-    const a = boxes[i]!; const b = boxes[j]!;
-    if (a.x < b.x + b.w - 0.5 && b.x < a.x + a.w - 0.5 && a.y < b.y + b.h - 0.5 && b.y < a.y + a.h - 0.5) overlaps.push(`${a.name} × ${b.name}`);
-  }
-  expect(overlaps).toEqual([]);
-});
+for (const width of [1280, 1366, 1440, 1536, 1920]) {
+  test(`H13 fix rounds 1 (M4) and 2 (N2): at ${width} px with "Boards: Talk to the PM" active, no two top-bar controls overlap and Demo data is uncovered`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page, '#/pm');
+    const boards = page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ });
+    await expect(boards).toHaveAttribute('title', 'Boards: Talk to the PM');
+    await expect(boards).toHaveAttribute('aria-label', 'Boards: Talk to the PM');
+    const boxes = await page.getByTestId('top-bar').evaluate((bar) => [...bar.querySelectorAll('button, a, [data-testid="sandbox-chip"], [data-testid="demo-badge"]')]
+      .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.closest('[hidden]'); })
+      .map((el) => { const r = el.getBoundingClientRect(); return { name: (el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40), x: r.left, y: r.top, w: r.width, h: r.height }; }));
+    expect(boxes.length).toBeGreaterThan(4);
+    const overlaps: string[] = [];
+    for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i]!; const b = boxes[j]!;
+      if (a.x < b.x + b.w - 0.5 && b.x < a.x + a.w - 0.5 && a.y < b.y + b.h - 0.5 && b.y < a.y + a.h - 0.5) overlaps.push(`${a.name} × ${b.name}`);
+    }
+    expect(overlaps).toEqual([]);
+    // The Demo data chip is fully on screen and nothing covers it: its centre and corners hit the chip itself.
+    const covered = await page.getByTestId('demo-badge').evaluate((chip) => {
+      const r = chip.getBoundingClientRect();
+      const points = [[r.left + r.width / 2, r.top + r.height / 2], [r.left + 2, r.top + 2], [r.right - 2, r.top + 2], [r.left + 2, r.bottom - 2], [r.right - 2, r.bottom - 2]];
+      const off = r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight;
+      return { off, hits: points.filter(([x, y]) => { const el = document.elementFromPoint(x!, y!); return !(el === chip || chip.contains(el)); }).length };
+    });
+    expect(covered).toEqual({ off: false, hits: 0 });
+    // Every menu stays reachable: none is cut off at the right edge.
+    for (const b of boxes) expect(b.x + b.w, b.name).toBeLessThanOrEqual(width);
+  });
+}
+

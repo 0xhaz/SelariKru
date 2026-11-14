@@ -60,7 +60,7 @@ export function ViewDrawer({ view, title, paused, children, after, aside = null 
   return (
     <div
       data-testid="view-drawer" data-view={view}
-      className={`panel motion-drawer pointer-events-auto relative z-20 m-0 flex min-w-0 flex-col xl:fixed xl:top-[74px] xl:right-4 xl:bottom-4 ${maximized ? 'xl:left-4' : 'xl:w-[var(--drawer-w)]'}`}
+      className={`panel motion-drawer pointer-events-auto relative z-20 m-0 flex min-w-0 flex-col xl:fixed xl:top-[var(--header-h,74px)] xl:right-4 xl:bottom-4 ${maximized ? 'xl:left-4' : 'xl:w-[var(--drawer-w)]'}`}
       style={{ ['--drawer-w' as string]: `min(${width}px, calc(100vw - 32px))` }}
     >
       {maximized ? null : <ResizeHandle />}
