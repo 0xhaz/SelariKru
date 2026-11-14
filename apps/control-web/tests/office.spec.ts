@@ -30,9 +30,11 @@ test('the office is the default screen: a labelled picture of the team, with its
   await expect(page.getByTestId('activity-item').first()).toBeVisible();
   // The reference's floating layout: the top bar and the team column sit over the office, not beside it.
   const bar = (await page.getByTestId('top-bar').boundingBox())!;
-  expect([Math.round(bar.x), Math.round(bar.y), Math.round(bar.height)]).toEqual([16, 10, 50]);
+  // H13 fix round 2 (N2): below 1700 px the floating bar takes two rows (the menus on the second), and the panels start 14 px below it, wherever it ends.
+  expect([Math.round(bar.x), Math.round(bar.y)]).toEqual([16, 10]);
+  expect(bar.height).toBeGreaterThan(70);
   const team = (await page.getByTestId('team-panel').boundingBox())!;
-  expect([Math.round(team.x), Math.round(team.y), Math.round(team.width)]).toEqual([16, 74, 280]);
+  expect([Math.round(team.x), Math.round(team.y), Math.round(team.width)]).toEqual([16, Math.round(bar.y + bar.height) + 14, 280]);
   const feed = (await page.getByTestId('activity-feed').boundingBox())!;
   expect([Math.round(feed.width), Math.round(feed.height)]).toEqual([280, 220]);
   const { violations } = await new AxeBuilder({ page }).analyze();
