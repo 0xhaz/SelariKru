@@ -1,6 +1,8 @@
 import type { SdkGrounding } from '@selarikru/inference-firebase-web';
 import { create } from 'zustand';
-import { cloudRefusal, type BriefCheck, type BriefDraft } from './brief.ts';
+import type { AiCheckpoint } from '@selarikru/domain';
+import type { ProjectViewSnapshot } from '@selarikru/view-protocol';
+import { cloudRefusal, latestBrief, type BriefCheck, type BriefDraft } from './brief.ts';
 import type { BriefCheckKind } from './runner.ts';
 
 /**
@@ -45,8 +47,11 @@ export const pmBrief = create<BriefStore>((set) => ({
 /** H13 fix round 1 (H3): one entry per run and subject task, as the notes checkpoint is: notes never follow the subject select to another task. */
 export const briefKey = (runId: string, taskId: string): string => `${runId}\u0000${taskId}`;
 
-/** The approved brief's hash for a run and subject task (fix round 1, M3), or null: none approved now (edited since approval, or restricted). */
-export function approvedBriefSha(runId: string, taskId: string): string | null {
-  const d = pmBrief.getState().runs[briefKey(runId, taskId)]?.draft ?? null;
+/**
+ * The approved brief's hash for a run and subject task (fix round 1, M3), or null: none approved now (edited since approval, or restricted). This tab's draft
+ * decides when there is one; otherwise the kept reviewed brief does (fix round 1, I3), so an approval survives a reload.
+ */
+export function approvedBriefSha(runId: string, taskId: string, kept?: Readonly<Record<string, AiCheckpoint>>, snap?: ProjectViewSnapshot | null): string | null {
+  const d = pmBrief.getState().runs[briefKey(runId, taskId)]?.draft ?? (kept ? latestBrief(kept, snap ?? null, runId, taskId) : null);
   return d && cloudRefusal(d) === null ? d.approvedSha256 : null;
 }

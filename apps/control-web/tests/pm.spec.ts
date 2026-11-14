@@ -292,3 +292,32 @@ test('H13 fix round 1 (H3): notes written under a locked subject stay restricted
   await expect(brief.getByTestId('pm-brief-item').first().getByTestId('pm-brief-item-tick')).toBeDisabled();
   expect(await checkpointWrites(page)).not.toContain(CANARY);
 });
+
+test('H13 fix round 1: canary through the panel: a brief made restricted after approval never reaches a cloud prompt', async ({ page }) => {
+  const CANARY = 'CANARY-H13-F1-UI-PAYLOAD';
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/settings?section=workflow');
+  await page.getByTestId('web-research').getByRole('button', { name: 'Turn on Google Search (web research)' }).click();
+  await page.evaluate(() => { window.location.hash = '#/pm'; });
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  const brief = page.getByTestId('pm-brief');
+  await brief.getByTestId('pm-brief-points').fill(`${CANARY} sits in the ward rota.\nMost boards sort by votes.`);
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await brief.getByRole('button', { name: 'Approve brief' }).click();
+  await expect(brief.getByRole('button', { name: 'Check in the cloud' })).toBeEnabled();
+  await brief.getByTestId('pm-brief-restricted').check();
+  await expect(brief.getByTestId('pm-brief-check-blocked')).toContainText('restricted');
+  await expect(brief.getByRole('button', { name: 'Check in the cloud' })).toBeDisabled();
+  await expect(brief.getByTestId('pm-brief-item').first().getByTestId('pm-brief-item-tick')).not.toBeChecked();
+  // Forcing the click does nothing: no check call was recorded, and the canary never left in a checkpoint.
+  await brief.getByRole('button', { name: 'Check in the cloud' }).click({ force: true });
+  const reported = await page.evaluate(() => JSON.stringify((window.__calls.commands as { command?: { command: string; args?: { report?: { stepKind?: string } } } }[])
+    .filter((c) => c.command?.command === 'route.report').map((c) => c.command!.args?.report?.stepKind)));
+  expect(reported).not.toContain('pmVerify');
+  // Saved while internal (Format), the notes and the brief were stored by the server; once restricted, both server copies were deleted, and nothing with the
+  // canary was stored after that.
+  const writes = await page.evaluate(() => (window as unknown as { __calls: { checkpoints: { method: string; checkpointId?: string; checkpoint?: unknown }[] } }).__calls.checkpoints);
+  const firstDelete = writes.findIndex((w) => w.method === 'deleteAiCheckpoint');
+  expect(writes.filter((w) => w.method === 'deleteAiCheckpoint').map((w) => w.checkpointId!.slice(0, 10)).sort()).toEqual(['ckp_brief_', 'ckp_notes_']);
+  expect(writes.slice(firstDelete).filter((w) => w.method === 'saveAiCheckpoint' && JSON.stringify(w).includes(CANARY))).toEqual([]);
+});

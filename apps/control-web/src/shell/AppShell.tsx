@@ -61,7 +61,7 @@ import { NanoBanner } from '../features/hosted/NanoBanner.tsx';
 import { Tour, startTour } from '../features/tour/Tour.tsx';
 import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
 import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
-import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
+import { EMPTY_CHECKPOINT_STORE, createCheckpointEngine, type CheckpointEngine, type CheckpointRunner } from '../features/checkpoints/engine.ts';
 import { defaultDeviceStore } from '../features/checkpoints/device-store.ts';
 import { connectivity, isOnline, onReconnect, useOnlineNow, useSimulatedOffline, watchNavigator } from '../features/checkpoints/connectivity.ts';
 import { checkpointActivity, waitingCloudCalls } from '../features/checkpoints/model.ts';
@@ -337,11 +337,13 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
   // The task agents, and their calls in flight for the office's desk marks and rooftop cloud deck.
   // H12: the AI step checkpoints (the offline queue), kept on this device and, when not restricted, by the server. One engine per project and source.
   const owner = ownerKey ?? (mode === 'mock' ? 'demo-operator' : 'owner');
+  // H13 fix round 1 (I3): the engine's own kept checkpoints back an approval after a reload, before the panel has opened.
+  const engineRef = useRef<CheckpointEngine | null>(null);
   const engine = useMemo(() => {
     const src = state.agentSource;
     if (!agentRuntime || !src?.getTaskRoute || !src.getTaskContext) return null;
     const projectId = state.projectId;
-    return createCheckpointEngine({
+    const created = createCheckpointEngine({
       projectId, ownerKey: owner, device: deviceStore(),
       server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}), ...(src.claimAiCheckpointSend ? { claimAiCheckpointSend: src.claimAiCheckpointSend } : {}), ...(src.deleteAiCheckpoint ? { deleteAiCheckpoint: src.deleteAiCheckpoint } : {}) } : null,
       getTaskRoute: (taskId) => src.getTaskRoute!(projectId, taskId),
@@ -351,8 +353,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       // The projection's own clock: the demo's under demo data, so checkpoints sit in the same timeline as everything else.
       now: () => new Date(store.getState().nowMs),
       // H13: a paused plan brief check is sent only with the brief the owner has approved now, by hash.
-      currentBriefSha: (cp) => approvedBriefSha(cp.runId, cp.taskId),
+      currentBriefSha: (cp) => approvedBriefSha(cp.runId, cp.taskId, engineRef.current?.store.getState().checkpoints, store.getState().projection?.snapshot ?? null),
     });
+    engineRef.current = created;
+    return created;
   }, [agentRuntime, state.agentSource, state.projectId, store, owner]);
   const agents = useMemo((): AgentsPort | null => (agentRuntime && state.agentSource ? createAgents({
     projectId: state.projectId, source: state.agentSource, ...agentRuntime,

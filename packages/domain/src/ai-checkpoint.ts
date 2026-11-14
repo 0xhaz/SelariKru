@@ -56,7 +56,9 @@ export type AiCheckpointText = z.infer<typeof AiCheckpointTextSchema>;
  * split, server refusal and re-judging by the task's lock as the PM's turns. Not a step: nothing runs or resumes from one.
  */
 export const RESEARCH_NOTES_KIND = 'researchNotes' as const;
-export const AiCheckpointStepKindSchema = z.union([RouteStepKindSchema, z.literal(RESEARCH_NOTES_KIND)]);
+/** H13 fix round 1 (I3): the reviewed plan brief and its approval hash (`inputs.briefSha256`), kept like the notes so an approval survives a reload. */
+export const PLAN_BRIEF_KIND = 'planBrief' as const;
+export const AiCheckpointStepKindSchema = z.union([RouteStepKindSchema, z.literal(RESEARCH_NOTES_KIND), z.literal(PLAN_BRIEF_KIND)]);
 
 export const AiCheckpointSchema = z.strictObject({
   checkpointId: z.string().regex(/^ckp_[A-Za-z0-9_-]{8,80}$/),

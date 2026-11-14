@@ -3,7 +3,7 @@ import type { AiCheckpoint } from '@selarikru/domain';
 import { snapshotOf, task } from '../overview/testing.ts';
 import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, decodeBriefTexts, decodeNotes, editItem, editQuestion, emptyBrief,
-  encodeBriefTexts, encodeNotes, latestNotes, notesCheckpoint, notesLabel, planBriefFor, removeItem, screenCheck, setGoal, toggleGoal, toggleItem,
+  encodeBriefTexts, encodeNotes, latestNotes, notesCheckpoint, notesLabel, planBriefFor, removeItem, restrictBrief, screenCheck, setGoal, toggleGoal, toggleItem,
 } from './brief.ts';
 
 /** A secret-shaped value built at run time, so no key-like literal sits in the source. */
@@ -114,6 +114,17 @@ describe('the plan brief: review and approval (H13 amendment C)', () => {
     expect(p.goal).toBe('A public feedback board.');
     expect(briefPayload(toggleGoal(a)).goal).toBe('');
     expect(toggleGoal(a).approvedSha256).toBeNull();
+  });
+});
+
+describe('fix round 1: a draft made restricted', () => {
+  it('when the notes become restricted, the draft does too: nothing ticked, no approval, an empty payload, and the check refused', () => {
+    const a = approveBrief(briefFromOutput(fullOutput, 'internal', briefInLines(POINTS, UNSURE)));
+    const r = restrictBrief(a);
+    expect(r).toMatchObject({ label: 'restricted', approvedSha256: null, goalTicked: false });
+    expect(r.items.every((x) => x.restricted && !x.ticked)).toBe(true);
+    expect(briefPayload(approveBrief(r))).toEqual({ goal: '', items: [], uncertainties: [] });
+    expect(cloudRefusal(approveBrief(r))).toBe('brief_restricted');
   });
 });
 

@@ -7,7 +7,7 @@ import { CLOUD_ONLY_STEPS, type CheckpointState } from './engine.ts';
 export const STEP_LABEL: Readonly<Record<string, string>> = {
   criteria: 'Draft criteria', breakdown: 'Break down', patch: 'Propose change', review: 'Review change', triage: 'Explain failure', prDescription: 'Write PR description',
   pmAnswer: 'Ask the PM', pmResearch: 'PM web research', pmPlan: 'PM plan draft', pmDelegate: 'PM assignments', brief: 'Draft brief', plan: 'Plan',
-  pmBrief: 'Format plan brief', pmVerify: 'Check plan brief (web)', pmVerifyNoWeb: 'Check plan brief (no web)', researchNotes: 'Plan brief notes',
+  pmBrief: 'Format plan brief', pmVerify: 'Check plan brief (web)', pmVerifyNoWeb: 'Check plan brief (no web)', researchNotes: 'Plan brief notes', planBrief: 'Reviewed plan brief',
 };
 
 export const STOP_TEXT: Readonly<Record<AiCheckpointStopReason, string>> = {

@@ -146,3 +146,50 @@ describe('the plan brief on demo data (H13)', () => {
     expect(rec.specs).toHaveLength(0);
   });
 });
+
+describe('fix round 1 (I3): approval survives a reload', () => {
+  it('approve, check while offline, reload, reconnect: the check is sent', async () => {
+    const { pmBrief, approvedBriefSha } = await import('./brief-store.ts');
+    const { briefCheckpoint } = await import('./brief.ts');
+    const { createCheckpointEngine } = await import('../checkpoints/engine.ts');
+    const { memoryDeviceStore } = await import('../checkpoints/device-store.ts');
+    const { connectivity } = await import('../checkpoints/connectivity.ts');
+    const ds = createMockDataSource({ clock: createSeededClock(fixtureTime(0)) });
+    const projectId = 'demo-feature-delivery';
+    const base = await ds.getSnapshot(projectId);
+    const subject = id('contract');
+    const runId = base.tasks[subject]!.runId;
+    const snapshot: ProjectViewSnapshot = { ...base, settings: [...base.settings, { scope: 'run', key: runId, field: 'web_research', desired: true } as never] };
+    const device = memoryDeviceStore();
+    const isOnline = () => connectivity.getState().simulatedOffline === false;
+    const tab = () => {
+      const engine = createCheckpointEngine({
+        projectId, ownerKey: 'demo-operator', device, server: ds, getTaskRoute: (t) => ds.getTaskRoute!(projectId, t), getTaskContext: (t, d, o, c) => ds.getTaskContext!(projectId, t, d, o, c),
+        snapshot: () => snapshot, isOnline, currentBriefSha: (cp) => approvedBriefSha(cp.runId, cp.taskId, engine.store.getState().checkpoints, snapshot),
+      });
+      const agents = createAgents({ projectId, source: ds, sdk: createDemoSdk(), simulated: true, execute: (c) => ds.execute(c), snapshot: () => snapshot, checkpoints: engine })!;
+      engine.attach(agents as never);
+      return { engine, agents };
+    };
+    // Tab 1: approve the brief (kept as a checkpoint), then check it while offline.
+    const one = tab();
+    const d = approveBrief(briefFromOutput({ goal: 'A board.', items: [{ id: 'P1', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] }, 'internal', [{ n: 1, text: 'Most boards sort by votes.', list: 'points' }]));
+    await one.engine.keep(briefCheckpoint({ projectId, runId, taskId: subject, taskRevision: snapshot.tasks[subject]!.revision, planRevision: snapshot.runs[runId]!.planRevision, draft: d, at: '2026-11-14T00:00:00.000Z' }), { server: true });
+    const p = briefPayload(d);
+    connectivity.getState().simulateOffline(true);
+    try {
+      const out = await one.agents.pm({ kind: 'pmVerify', subjectTaskId: subject, question: '', questionClassification: 'internal', history: [], callOverride: null, brief: p, briefSha256: briefSha256(p) });
+      expect(out.kind === 'result' && out.result.proposal.blockedReason).toBe('offline');
+    } finally {
+      connectivity.getState().simulateOffline(false);
+    }
+    // Reload: this tab's memory is gone; the device store and the demo server remain.
+    pmBrief.setState({ runs: {} });
+    const two = tab();
+    await two.engine.load();
+    expect(approvedBriefSha(runId, subject, two.engine.store.getState().checkpoints, snapshot)).toBe(briefSha256(p));
+    await two.engine.reconnect();
+    const sent = Object.values(two.engine.store.getState().checkpoints).find((c) => c.stepKind === 'pmVerify')!;
+    expect(sent).toMatchObject({ status: 'sent', resumedAs: 'after_reconnect' });
+  });
+});

@@ -11,7 +11,7 @@ import { refusalText } from '../hybrid/model.ts';
 import { settingsHref } from '../../shell/views.ts';
 import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
-  notesCheckpoint, notesLabel, planBriefFor, removeItem, type CitedSource, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
+  notesCheckpoint, notesLabel, planBriefFor, removeItem, restrictBrief, briefCheckpoint, latestBrief, type CitedSource, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
 } from './brief.ts';
 import { EMPTY_RUN_BRIEF, briefKey, pmBrief, type RunBrief } from './brief-store.ts';
 import { pmRefusal } from './copy.ts';
@@ -56,7 +56,9 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
   const started = pmBrief((s) => s.runs[key] !== undefined);
   useEffect(() => {
     if (started) return;
-    if (saved) set(() => ({ points: saved.points, unsure: saved.unsure, marked: saved.label === 'restricted' }));
+    // Fix round 1 (I3): the reviewed brief and its approval come back too.
+    const draft = latestBrief(kept, h.snapshot, runId, subjectId, saved);
+    if (saved) set(() => ({ points: saved.points, unsure: saved.unsure, marked: saved.label === 'restricted', ...(draft ? { draft } : {}) }));
     else if (h.agents?.simulated && h.agents.planBriefSample) { const demo = h.agents.planBriefSample; set(() => ({ points: demo.points, unsure: demo.unsure })); }
   }, [started, saved, key]); // eslint-disable-line react-hooks/exhaustive-deps
   // Fix round 1 (H3): a restriction from the subject's lock is the notes' own from then on: it stays, whatever the subject's route says later.
@@ -72,8 +74,20 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
     const at = new Date().toISOString();
     await h.checkpoints.keep(notesCheckpoint({ projectId: h.projectId, runId, taskId: subjectId, taskRevision: s.tasks[subjectId]?.revision ?? 1, planRevision: s.runs[runId]?.planRevision ?? null, points: x.points, unsure: x.unsure, label: notesLabel(task, x.marked, x.restrictedTurns), at }), { server });
   };
+  // Fix round 1 (I3): the reviewed brief, with its approval, is kept under the same split as the notes, so a reload keeps it and a paused check can still be sent.
+  useEffect(() => {
+    const s = h.snapshot;
+    if (!r.draft || !h.checkpoints || !s || !subjectId) return;
+    void h.checkpoints.keep(briefCheckpoint({ projectId: h.projectId, runId, taskId: subjectId, taskRevision: s.tasks[subjectId]?.revision ?? 1, planRevision: s.runs[runId]?.planRevision ?? null, draft: r.draft, at: new Date().toISOString() }), { server: true });
+  }, [r.draft]); // eslint-disable-line react-hooks/exhaustive-deps
   // Fix round 1 (H2): the moment the notes become restricted, they are kept as such, and a server copy is deleted.
-  useEffect(() => { if (label === 'restricted') void keepNotes(true); }, [label, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The brief made from them is restricted too: nothing in it is ticked or approved, so it can never be checked in the cloud.
+  useEffect(() => {
+    if (label !== 'restricted') return;
+    void keepNotes(true);
+    const d = pmBrief.getState().runs[key]?.draft;
+    if (d && d.label !== 'restricted') set(() => ({ draft: restrictBrief(d), check: null }));
+  }, [label, key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function format(): Promise<void> {
     if (!h.agents) return;

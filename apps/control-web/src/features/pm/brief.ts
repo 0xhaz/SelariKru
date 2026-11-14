@@ -1,5 +1,5 @@
 import {
-  canonicalJson, PLAN_BRIEF_LIMITS, RESEARCH_NOTES_KIND, redactSecrets, sha256Hex, strongerLabel,
+  canonicalJson, PLAN_BRIEF_KIND, PLAN_BRIEF_LIMITS, RESEARCH_NOTES_KIND, redactSecrets, sha256Hex, strongerLabel,
   type AiCheckpoint, type AiCheckpointText, type PLAN_BRIEF_CONFIDENCE, type PLAN_BRIEF_ITEM_KINDS, type PLAN_BRIEF_NO_WEB_VERDICTS, type PLAN_BRIEF_OMIT_REASONS, type PLAN_BRIEF_VERDICTS,
 } from '@selarikru/domain';
 import { CONVERSATION_MARKER, planBriefLines, type PlanBriefForPlan, type PlanBriefPayload, type SdkGrounding } from '@selarikru/inference-firebase-web';
@@ -136,6 +136,11 @@ export function addQuestion(d: BriefDraft, question: string, from: readonly numb
   if (!id) return { error: 'full' };
   const restricted = d.label === 'restricted';
   return { draft: unapproved({ ...d, uncertainties: [...d.uncertainties, { id, question: one(question), source: 'manual', from: [...from], ticked: !restricted, restricted }] }) };
+}
+
+/** A draft whose notes became restricted (fix round 1): restricted throughout, nothing ticked, not approved. */
+export function restrictBrief(d: BriefDraft): BriefDraft {
+  return { ...d, label: 'restricted', goalTicked: false, approvedSha256: null, items: d.items.map((x) => ({ ...x, ticked: false, restricted: true })), uncertainties: d.uncertainties.map((x) => ({ ...x, ticked: false, restricted: true })) };
 }
 
 /** What the cloud check sends: the ticked goal, items (with kind) and questions. Nothing else. A restricted brief has no payload at all. */
@@ -293,4 +298,49 @@ export function latestNotes(checkpoints: Readonly<Record<string, AiCheckpoint>>,
   const stored = [...cp.labels, ...(cp.partial?.texts ?? []).map((t) => t.classification), ...(cp.locked ? ['restricted'] : [])].reduce<string>((a, l) => strongerLabel(a, l), 'public');
   const label: BriefLabel = strongerLabel(stored, now) === 'internal' || strongerLabel(stored, now) === 'public' ? 'internal' : 'restricted';
   return { ...decodeNotes(cp.partial?.texts ?? []), label, taskId: cp.taskId };
+}
+
+// ---- the reviewed brief, kept (fix round 1, I3) --------------------------------------------------------------------------------
+
+/** One reviewed brief per run and subject task, as the notes. */
+export const briefCheckpointId = (runId: string, taskId: string): string => `ckp_brief_${sha256Hex(`${runId}\u0000${taskId}`).slice(0, 32)}`;
+
+/** What is kept of a draft: everything but the owner's line texts, which come back from the notes. Its approval hash is `inputs.briefSha256`. */
+type KeptDraft = Omit<BriefDraft, 'inLines' | 'approvedSha256'> & { readonly inLines: readonly { readonly n: number; readonly list: BriefLine['list'] }[] };
+
+/**
+ * The reviewed brief as a checkpoint under the H12 split: its JSON in labelled texts (restricted ones stay on this device, and a server copy is deleted), its
+ * approval hash in `inputs.briefSha256`.
+ */
+export function briefCheckpoint(n: { projectId: string; runId: string; taskId: string; taskRevision: number; planRevision: number | null; draft: BriefDraft; at: string }): AiCheckpoint {
+  const { inLines, approvedSha256, ...rest } = n.draft;
+  const kept: KeptDraft = { ...rest, inLines: inLines.map((l) => ({ n: l.n, list: l.list })) };
+  const json = JSON.stringify(kept);
+  const texts: AiCheckpointText[] = [];
+  for (let i = 0; i < json.length && texts.length < 8; i += 2000) texts.push({ who: 'owner', text: json.slice(i, i + 2000), classification: n.draft.label });
+  return {
+    checkpointId: briefCheckpointId(n.runId, n.taskId), projectId: n.projectId, taskId: n.taskId, taskRevision: Math.max(1, n.taskRevision), runId: n.runId, planRevision: n.planRevision,
+    stepKind: PLAN_BRIEF_KIND, stage: 'research_notes', callOverride: null, routeMode: null, continuation: 'device_only', labels: [n.draft.label], locked: n.draft.label === 'restricted',
+    inputs: { contextId: null, bundleSha256: null, files: [], inputChars: json.length, briefSha256: json.length <= 16000 ? approvedSha256 : null },
+    partial: { issues: [], texts }, stopReason: null, status: 'done', routeRecordId: null, escalatedAt: null, resumedAs: null, createdAt: n.at, updatedAt: n.at,
+  };
+}
+
+/**
+ * The kept reviewed brief for a run and subject task, or null. Re-judged by the subject's lock now: a task locked since makes it restricted, with nothing ticked
+ * and no approval. A text that does not read back is null (nothing is guessed). Line texts come from `notes` when given.
+ */
+export function latestBrief(checkpoints: Readonly<Record<string, AiCheckpoint>>, snap: ProjectViewSnapshot | null, runId: string, taskId: string, notes?: { readonly points: string; readonly unsure: string } | null): BriefDraft | null {
+  const cp = checkpoints[briefCheckpointId(runId, taskId)];
+  if (!cp || cp.stepKind !== PLAN_BRIEF_KIND || cp.status !== 'done') return null;
+  let kept: KeptDraft;
+  try { kept = JSON.parse((cp.partial?.texts ?? []).map((t) => t.text).join('')) as KeptDraft; } catch { return null; }
+  if (!kept || !Array.isArray(kept.items) || !Array.isArray(kept.uncertainties) || !Array.isArray(kept.inLines)) return null;
+  const route = snap?.tasks[taskId]?.route;
+  const stored = [...cp.labels, ...(cp.partial?.texts ?? []).map((t) => t.classification), ...(cp.locked ? ['restricted'] : [])].reduce<string>((a, l) => strongerLabel(a, l), 'public');
+  const restricted = strongerLabel(stored, !route || route.lock !== null ? 'restricted' : 'internal') !== 'internal' && strongerLabel(stored, !route || route.lock !== null ? 'restricted' : 'internal') !== 'public';
+  const lines = notes ? briefInLines(notes.points, notes.unsure) : [];
+  const inLines = kept.inLines.map((l) => ({ n: l.n, list: l.list, text: lines.find((x) => x.n === l.n)?.text ?? `(line ${l.n})` }));
+  const draft: BriefDraft = { ...kept, inLines, approvedSha256: cp.inputs.briefSha256 ?? null };
+  return restricted ? restrictBrief(draft) : draft;
 }
