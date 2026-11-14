@@ -321,3 +321,21 @@ test('H13 fix round 1: canary through the panel: a brief made restricted after a
   expect(writes.filter((w) => w.method === 'deleteAiCheckpoint').map((w) => w.checkpointId!.slice(0, 10)).sort()).toEqual(['ckp_brief_', 'ckp_notes_']);
   expect(writes.slice(firstDelete).filter((w) => w.method === 'saveAiCheckpoint' && JSON.stringify(w).includes(CANARY))).toEqual([]);
 });
+
+test('H13 fix round 1 (M4): at 1440 px with "Boards: Talk to the PM" active, no two top-bar controls overlap', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  const boards = page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: /^Boards/ });
+  await expect(boards).toHaveAttribute('title', 'Boards: Talk to the PM');
+  await expect(boards).toHaveAttribute('aria-label', 'Boards: Talk to the PM');
+  const boxes = await page.getByTestId('top-bar').evaluate((bar) => [...bar.querySelectorAll('button, a, [data-testid="sandbox-chip"]')]
+    .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.closest('[hidden]'); })
+    .map((el) => { const r = el.getBoundingClientRect(); return { name: (el.getAttribute('aria-label') ?? el.textContent ?? '').trim().slice(0, 40), x: r.left, y: r.top, w: r.width, h: r.height }; }));
+  expect(boxes.length).toBeGreaterThan(4);
+  const overlaps: string[] = [];
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+    const a = boxes[i]!; const b = boxes[j]!;
+    if (a.x < b.x + b.w - 0.5 && b.x < a.x + a.w - 0.5 && a.y < b.y + b.h - 0.5 && b.y < a.y + a.h - 0.5) overlaps.push(`${a.name} × ${b.name}`);
+  }
+  expect(overlaps).toEqual([]);
+});

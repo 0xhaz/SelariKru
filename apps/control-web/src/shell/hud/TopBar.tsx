@@ -107,9 +107,11 @@ function Menu({ label, testId, entries, route, extra, urgent, note }: { label: s
   const place = useMenuPlace(open, button, 208);
   return (
     <div ref={box} className="relative" data-more="" onKeyDown={onKey}>
-      <button ref={button} type="button" className="btn text-[14px]" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid={testId}
+      {/* H13 fix round 1 (M4): the active page's name is cut to fit, so the bar never overlaps itself at 1440 px; the full name is the button's title and label. */}
+      <button ref={button} type="button" className="btn flex items-center text-[14px]" aria-expanded={open} aria-controls={id} aria-current={current ? 'page' : undefined} data-testid={testId}
+        title={current ? `${label}: ${current.label}` : undefined} aria-label={current ? `${label}: ${current.label}` : undefined}
         onClick={() => setOpen((o) => !o)} style={urgent ? { background: 'var(--color-gold)' } : undefined}>
-        {label}{extra}{current ? <span className="font-normal">: {current.label}</span> : null}
+        {label}{extra}{current ? <span className="inline-block max-w-[10rem] truncate font-normal">: {current.label}</span> : null}
       </button>
       <ul id={id} hidden={!open} style={place} className="panel motion-menu z-50 m-0 flex w-max list-none flex-col gap-1.5 p-2">
         {note ? <li className="px-1 text-[12px] leading-snug text-fg sm:hidden" data-testid="menu-ai-counts">{note}</li> : null}
@@ -227,7 +229,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
   }, [route]);
   return (
     <header ref={ref} data-testid="top-bar" className="panel sticky top-0 z-40 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 xl:fixed xl:left-4 xl:right-4 xl:top-[10px] xl:h-[50px] xl:flex-nowrap xl:gap-x-2.5 xl:py-0">
-      <p className="flex min-w-0 flex-1 items-center gap-2 xl:flex-none">
+      <p className="flex min-w-0 flex-1 items-center gap-2 xl:flex-initial">
         <Mark />
         {/* At phone width the project is what tells two tabs apart, so it keeps the room and the product name is read out instead. */}
         <b className="sr-only whitespace-nowrap text-[22px] font-bold tracking-[0.02em] sm:not-sr-only">SelariKru</b>
@@ -268,7 +270,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
           <AiCounter counts={aiCounts} runId={planRunId} />
         </span>
       ) : null}
-      <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:w-auto xl:flex-1 xl:justify-end xl:overflow-visible xl:p-0">
+      {/* H13 fix round 1 (M4): from 1280 px the menus take their own width and the project name gives way (it truncates), so the bar never overlaps itself. */}
+      <nav ref={navRef} aria-label="Primary" className="order-3 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto pt-0.5 pb-1 xl:order-none xl:ml-auto xl:w-auto xl:flex-none xl:justify-end xl:overflow-visible xl:p-0">
         {/* Action items is one button and one drawer: what workers ask, and everything else waiting on you. */}
         <a href={hrefFor('actions')} aria-current={route === 'actions' ? 'page' : undefined} data-testid="action-items" className="btn text-[14px]" style={attentionUrgent ? { background: 'var(--color-gold)' } : undefined}>
           Action items
