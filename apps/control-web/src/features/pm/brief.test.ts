@@ -120,9 +120,19 @@ describe('the plan brief: review and approval (H13 amendment C)', () => {
 describe('the cloud check\'s results and the plan (H13 amendment D, E)', () => {
   const a = approveBrief(briefFromOutput(fullOutput, 'internal', briefInLines(POINTS, UNSURE)));
 
+  it('fix round 1 (I2): a source the model cites is matched by host against the search results; an invented one is marked as not from the search', () => {
+    const grounding = { sources: [{ uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc', title: 'boards.example.org' }, { uri: 'https://www.news.example.net/a', title: null }], entryPointHtml: null };
+    const r = screenCheck('pmVerify', { items: [{ id: 'P1', verdict: 'supported', explanation: 'e', sources: [
+      { title: 'Boards', url: 'https://www.boards.example.org/sorting' }, { title: 'News', url: 'https://news.example.net/b' }, { title: 'Made up', url: 'https://invented.example.com/x' },
+    ] }], uncertainties: [] }, grounding);
+    expect(r.items[0]!.sources.map((x) => [x.title, x.matched])).toEqual([['Boards', true], ['News', true], ['Made up', false]]);
+    // Without the search's results nothing the model cites is matched.
+    expect(screenCheck('pmVerify', { items: [{ id: 'P1', verdict: 'supported', explanation: 'e', sources: [{ title: 'B', url: 'https://boards.example.org/' }] }], uncertainties: [] }, null).items[0]!.sources[0]!.matched).toBe(false);
+  });
+
   it('only https sources are kept, as text links', () => {
     const r = screenCheck('pmVerify', { items: [{ id: 'P1', verdict: 'supported', explanation: 'e', sources: [{ title: 'ok', url: 'https://example.org/a' }, { title: 'js', url: 'javascript:alert(1)' }, { title: 'http', url: 'http://example.org' }] }], uncertainties: [] });
-    expect(r.items[0]!.sources).toEqual([{ title: 'ok', url: 'https://example.org/a' }]);
+    expect(r.items[0]!.sources).toEqual([{ title: 'ok', url: 'https://example.org/a', matched: false }]);
     expect(r.checked).toBe('web');
     expect(screenCheck('pmVerifyNoWeb', { items: [], uncertainties: [] }).checked).toBe('no_web');
   });

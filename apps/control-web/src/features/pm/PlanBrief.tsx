@@ -11,7 +11,7 @@ import { refusalText } from '../hybrid/model.ts';
 import { settingsHref } from '../../shell/views.ts';
 import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
-  notesCheckpoint, notesLabel, planBriefFor, removeItem, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
+  notesCheckpoint, notesLabel, planBriefFor, removeItem, type CitedSource, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
 } from './brief.ts';
 import { EMPTY_RUN_BRIEF, briefKey, pmBrief, type RunBrief } from './brief-store.ts';
 import { pmRefusal } from './copy.ts';
@@ -102,7 +102,7 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
     const out = await h.agents.pm({ kind, subjectTaskId: subjectId, question: '', questionClassification: d.label, history: [], callOverride: null, brief: briefPayload(d), briefSha256: sha });
     if (out.kind === 'refused') { set(() => ({ check: { kind, status: 'failed', message: say(out.code) } })); return; }
     const p = out.result.proposal;
-    if (p.status === 'ok') { set(() => ({ check: { kind, status: 'done', result: screenCheck(kind, p.data), grounding: out.result.grounding ?? null, briefSha256: sha, simulated: out.simulated, resumed: false } })); return; }
+    if (p.status === 'ok') { set(() => ({ check: { kind, status: 'done', result: screenCheck(kind, p.data, out.result.grounding ?? null), grounding: out.result.grounding ?? null, briefSha256: sha, simulated: out.simulated, resumed: false } })); return; }
     const stop = stopReasonFor(p.blockedReason);
     if (stop) { set(() => ({ check: { kind, status: 'paused', reason: STOP_TEXT[stop] } })); return; }
     set(() => ({ check: { kind, status: 'failed', message: say(p.blockedReason ?? p.status) } }));
@@ -248,8 +248,11 @@ function CheckResults({ check, draft }: { check: Extract<RunBrief['check'], { st
   const r = check.result;
   const textOf = (id: string) => draft.items.find((x) => x.id === id)?.text ?? id;
   const questionOf = (id: string) => draft.uncertainties.find((x) => x.id === id)?.question ?? id;
-  const Sources = ({ list }: { list: readonly { title: string; url: string }[] }) => list.length === 0 ? null : (
-    <ul className="mt-0.5 text-sm">{list.map((s) => <li key={s.url}><a className="text-active underline underline-offset-2" href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a> <span className="text-muted">({new URL(s.url).host})</span></li>)}</ul>
+  // Fix round 1 (I2): a cited source is a live link only when the search itself returned its site; otherwise it is text, marked as the model's own citation.
+  const Sources = ({ list }: { list: readonly CitedSource[] }) => list.length === 0 ? null : (
+    <ul className="mt-0.5 text-sm">{list.map((s) => s.matched
+      ? <li key={s.url} data-testid="pm-brief-source" data-matched="true"><a className="text-active underline underline-offset-2" href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a> <span className="text-muted">({new URL(s.url).host})</span></li>
+      : <li key={s.url} data-testid="pm-brief-source" data-matched="false"><span className="text-fg">{s.title}</span> <span className="text-muted">({new URL(s.url).host}). Cited by the model, not from the search results.</span></li>)}</ul>
   );
   return (
     <div className="space-y-2 rounded-card border border-line-strong p-3" data-testid="pm-brief-results">
@@ -270,6 +273,7 @@ function CheckResults({ check, draft }: { check: Extract<RunBrief['check'], { st
       ) : null}
       {r.checked === 'web' ? (
         <div className="text-sm" data-testid="pm-brief-web-sources">
+          <h3 className="font-medium text-fg">Web sources from the search</h3>
           {check.grounding && check.grounding.sources.length > 0 ? <ul>{check.grounding.sources.filter((s) => { try { return new URL(s.uri).protocol === 'https:'; } catch { return false; } }).map((s) => <li key={s.uri}><a className="text-active underline underline-offset-2" href={s.uri} target="_blank" rel="noopener noreferrer">{s.title ?? s.uri}</a></li>)}</ul>
             : <p className="text-muted">No web sources came back from the search itself.</p>}
           {check.grounding?.entryPointHtml ? <SearchSuggestions html={check.grounding.entryPointHtml} /> : null}

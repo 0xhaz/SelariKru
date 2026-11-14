@@ -155,7 +155,9 @@ export function createDemoSdk(opts: DemoSdkOptions = {}): AssistantSdk {
       return {
         async generate(prompt: string) {
           await opts.beforeGenerate?.();
-          return { text: JSON.stringify(answer(kind, prompt)), inferenceSource: source };
+          // H13 fix round 1 (I2): a demo brief check with Google Search returns the demo source as its search result too, labelled; nothing was searched.
+          const grounding = kind === 'pmVerify' ? { grounding: { sources: [{ uri: 'https://example.com/selarikru-demo-source', title: 'example.com' }], entryPointHtml: null } } : {};
+          return { text: JSON.stringify(answer(kind, prompt)), inferenceSource: source, ...grounding };
         },
       };
     },

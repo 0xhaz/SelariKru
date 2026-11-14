@@ -2,7 +2,7 @@ import {
   canonicalJson, PLAN_BRIEF_LIMITS, RESEARCH_NOTES_KIND, redactSecrets, sha256Hex, strongerLabel,
   type AiCheckpoint, type AiCheckpointText, type PLAN_BRIEF_CONFIDENCE, type PLAN_BRIEF_ITEM_KINDS, type PLAN_BRIEF_NO_WEB_VERDICTS, type PLAN_BRIEF_OMIT_REASONS, type PLAN_BRIEF_VERDICTS,
 } from '@selarikru/domain';
-import { CONVERSATION_MARKER, planBriefLines, type PlanBriefForPlan, type PlanBriefPayload } from '@selarikru/inference-firebase-web';
+import { CONVERSATION_MARKER, planBriefLines, type PlanBriefForPlan, type PlanBriefPayload, type SdkGrounding } from '@selarikru/inference-firebase-web';
 import type { ProjectViewSnapshot, TaskView } from '@selarikru/view-protocol';
 import { questionLabelFor } from './runner.ts';
 
@@ -165,16 +165,33 @@ export function cloudRefusal(d: BriefDraft | null): 'brief_restricted' | 'brief_
 type Verdict = (typeof PLAN_BRIEF_VERDICTS)[number] | (typeof PLAN_BRIEF_NO_WEB_VERDICTS)[number];
 export interface BriefCheck {
   readonly checked: 'web' | 'no_web';
-  readonly items: readonly { readonly id: string; readonly verdict: Verdict; readonly explanation: string; readonly sources: readonly { readonly title: string; readonly url: string }[] }[];
-  readonly uncertainties: readonly { readonly id: string; readonly answer: string; readonly confidence: (typeof PLAN_BRIEF_CONFIDENCE)[number]; readonly sources: readonly { readonly title: string; readonly url: string }[] }[];
+  readonly items: readonly { readonly id: string; readonly verdict: Verdict; readonly explanation: string; readonly sources: readonly CitedSource[] }[];
+  readonly uncertainties: readonly { readonly id: string; readonly answer: string; readonly confidence: (typeof PLAN_BRIEF_CONFIDENCE)[number]; readonly sources: readonly CitedSource[] }[];
 }
+/** A source the model cited. `matched`: its host is one of the search's own results (fix round 1, I2); otherwise it is shown as text, never as a live link. */
+export interface CitedSource { readonly title: string; readonly url: string; readonly matched: boolean }
 /** A link the screen may show: https only. Anything else (http, javascript:, data:) is dropped. */
 export function httpsOnly(url: string): boolean {
   try { return new URL(url).protocol === 'https:'; } catch { return false; }
 }
-export function screenCheck(kind: 'pmVerify' | 'pmVerifyNoWeb', data: unknown): BriefCheck {
+const hostOf = (s: string): string | null => {
+  const bare = s.trim().toLowerCase();
+  try { return new URL(bare.includes('://') ? bare : `https://${bare}`).hostname.replace(/^www\./, ''); } catch { return null; }
+};
+/**
+ * The hosts the search itself returned: each grounding chunk's title (the search gives the site's domain there; its URI is a redirect) and its URI's host.
+ * Only these back a model-cited source.
+ */
+function searchHosts(grounding: SdkGrounding | null | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const s of grounding?.sources ?? []) for (const h of [s.title ? hostOf(s.title) : null, hostOf(s.uri)]) if (h) out.add(h);
+  return out;
+}
+
+export function screenCheck(kind: 'pmVerify' | 'pmVerifyNoWeb', data: unknown, grounding?: SdkGrounding | null): BriefCheck {
+  const hosts = searchHosts(grounding);
   const d = data as { items: { id: string; verdict: Verdict; explanation: string; sources?: { title: string; url: string }[] }[]; uncertainties: { id: string; answer: string; confidence: BriefCheck['uncertainties'][number]['confidence']; sources?: { title: string; url: string }[] }[] };
-  const src = (s: { title: string; url: string }[] | undefined) => (s ?? []).filter((x) => httpsOnly(x.url)).map((x) => ({ title: x.title, url: x.url }));
+  const src = (s: { title: string; url: string }[] | undefined): CitedSource[] => (s ?? []).filter((x) => httpsOnly(x.url)).map((x) => { const h = hostOf(x.url); return { title: x.title, url: x.url, matched: h !== null && hosts.has(h) }; });
   return {
     checked: kind === 'pmVerify' ? 'web' : 'no_web',
     items: d.items.map((x) => ({ id: x.id, verdict: x.verdict, explanation: x.explanation, sources: src(x.sources) })),

@@ -366,7 +366,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         const o = outcome as PmOutcome & { simulated: boolean };
         if (o.kind === 'result' && o.result.proposal.status === 'ok') {
           const sha = approvedBriefSha(o.runId, req.taskId);
-          if (sha) pmBrief.getState().set(briefKey(o.runId, req.taskId), () => ({ check: { kind, status: 'done', result: screenCheck(kind, o.result.proposal.data), grounding: o.result.grounding ?? null, briefSha256: sha, simulated: o.simulated, resumed: true } }));
+          if (sha) pmBrief.getState().set(briefKey(o.runId, req.taskId), () => ({ check: { kind, status: 'done', result: screenCheck(kind, o.result.proposal.data, o.result.grounding ?? null), grounding: o.result.grounding ?? null, briefSha256: sha, simulated: o.simulated, resumed: true } }));
         }
       } else if (req.kind.startsWith('pm')) {
         pmConversation.getState().add({ who: 'owner', text: req.question ?? '', restricted: req.restricted === true, kind: req.kind as never });
