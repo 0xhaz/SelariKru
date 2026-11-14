@@ -31,9 +31,9 @@ const GOOD: Record<AgentKind, unknown> = {
   // H13: the plan brief Nano formats on the device, and the cloud's checks of it.
   pmBrief: {
     goal: 'Let people post and sort feedback.',
-    items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points' }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'conversation' }],
-    uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }],
-    omitted: [{ reason: 'private' }],
+    items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points', from: [1, 2] }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'conversation', from: [3] }],
+    uncertainties: [{ id: 'U1', question: 'Do boards need moderation?', from: [5] }],
+    omitted: [{ reason: 'private', from: [4] }],
   },
   pmVerify: {
     items: [{ id: 'P2', verdict: 'supported', explanation: 'Several public boards sort by votes.', sources: [{ title: 'A board', url: 'https://example.org/a' }] }, { id: 'P1', verdict: 'not_checkable', explanation: 'A decision, not a fact.', sources: [] }],
@@ -66,11 +66,15 @@ const BAD: Record<AgentKind, unknown[]> = {
     { assignments: [{ taskId: 't1', workerId: 'w1', why: 'w', role: 'admin' }] }, { assignments: [] },
   ],
   pmBrief: [
-    { goal: 'g', items: [{ id: 'P1', text: 't'.repeat(281), kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
-    { goal: 'g', items: Array.from({ length: 21 }, (_, i) => ({ id: `P${i + 1}`, text: 't', kind: 'fact', checkable: true, source: 'points' })), uncertainties: [], omitted: [] },
-    { goal: 'g', items: [{ id: 'X1', text: 't', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
-    { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'q' }], omitted: [{ reason: 'boring' }] },
-    { goal: 'g', items: [{ id: 'P1', text: 't', kind: 'opinion', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: [{ id: 'P1', text: 't'.repeat(281), kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: Array.from({ length: 21 }, (_, i) => ({ id: `P${i + 1}`, text: 't', kind: 'fact', checkable: true, source: 'points', from: [1] })), uncertainties: [], omitted: [] },
+    { goal: 'g', items: [{ id: 'X1', text: 't', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'q', from: [1] }], omitted: [{ reason: 'boring', from: [2] }] },
+    { goal: 'g', items: [{ id: 'P1', text: 't', kind: 'opinion', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] },
+    // Fix round 1 (I1): every entry says which input lines it covers; an omitted entry names at least one.
+    { goal: 'g', items: [{ id: 'P1', text: 't', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] },
+    { goal: 'g', items: [], uncertainties: [], omitted: [{ reason: 'private', from: [] }] },
+    { goal: 'g', items: [{ id: 'P1', text: 't', kind: 'fact', checkable: true, source: 'points', from: [0] }], uncertainties: [], omitted: [] },
   ],
   // An id the brief did not have; a web verdict on the no-web variant; an explanation too long; a source with an extra field.
   pmVerify: [
@@ -103,9 +107,9 @@ describe('agent output schemas', () => {
   }
 
   it('H13: a plan brief with two items of one id is refused as a duplicate key', () => {
-    const dup = { goal: 'g', items: [{ id: 'P1', text: 'a', kind: 'fact', checkable: true, source: 'points' }, { id: 'P1', text: 'b', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] };
+    const dup = { goal: 'g', items: [{ id: 'P1', text: 'a', kind: 'fact', checkable: true, source: 'points', from: [1] }, { id: 'P1', text: 'b', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] };
     expect(checkAgentOutput('pmBrief', dup, ctx())).toMatchObject({ ok: false, issues: [{ code: 'duplicate_key' }] });
-    const dupQ = { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'a' }, { id: 'U1', question: 'b' }], omitted: [] };
+    const dupQ = { goal: 'g', items: [], uncertainties: [{ id: 'U1', question: 'a', from: [1] }, { id: 'U1', question: 'b', from: [2] }], omitted: [] };
     expect(checkAgentOutput('pmBrief', dupQ, ctx())).toMatchObject({ ok: false, issues: [{ code: 'duplicate_key' }] });
   });
 

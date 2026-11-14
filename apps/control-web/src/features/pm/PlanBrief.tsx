@@ -10,7 +10,7 @@ import type { useHybrid } from '../hybrid/context.tsx';
 import { refusalText } from '../hybrid/model.ts';
 import { settingsHref } from '../../shell/views.ts';
 import {
-  addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
+  addItem, addQuestion, approveBrief, briefFromOutput, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
   notesCheckpoint, notesLabel, planBriefFor, removeItem, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
 } from './brief.ts';
 import { EMPTY_RUN_BRIEF, briefKey, pmBrief, type RunBrief } from './brief-store.ts';
@@ -79,7 +79,7 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
     if (!h.agents) return;
     await keepNotes(true);
     setError(null);
-    const inCount = briefInCount(r.points, r.unsure);
+    const inCount = briefInLines(r.points, r.unsure);
     set(() => ({ format: { status: 'running' }, check: null }));
     const out = await h.agents.pm({ kind: 'pmBrief', subjectTaskId: subjectId, question: '', questionClassification: label, history: [], callOverride: null, notes: { points: r.points, unsure: r.unsure } });
     if (out.kind === 'refused') { set(() => ({ format: { status: 'failed', message: say(out.code) } })); return; }
@@ -157,7 +157,7 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
       </p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={buttonPrimary} data-testid="pm-brief-format" disabled={!h.agents || busy || r.format?.status === 'running' || (!r.points.trim() && !r.unsure.trim())} onClick={() => void format()}>Format on this device</button>
-        {!d ? <button type="button" className={buttonQuiet} data-testid="pm-brief-manual" onClick={() => set(() => ({ draft: emptyBrief(label, briefInCount(r.points, r.unsure)) }))}>Write the brief by hand</button> : null}
+        {!d ? <button type="button" className={buttonQuiet} data-testid="pm-brief-manual" onClick={() => set(() => ({ draft: emptyBrief(label, briefInLines(r.points, r.unsure)) }))}>Write the brief by hand</button> : null}
       </div>
       {r.format?.status === 'running' ? <p role="status" className="text-sm text-fg">Gemini Nano is formatting your points on this device.</p> : null}
       {r.format?.status === 'unavailable' ? <p className="text-sm text-warning" data-testid="pm-brief-unavailable">Gemini Nano is not available on this device, so the brief was not formatted. {r.format.reason} Nothing was sent to the cloud: it never formats your notes there. Write the brief by hand below.</p> : null}
@@ -171,6 +171,12 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
           </div>
           {count ? <p className="text-sm text-fg" data-testid="pm-brief-count">{count.line}</p> : null}
           {count?.warning ? <p className="text-sm text-warning" data-testid="pm-brief-warning">{count.warning}</p> : null}
+          {count && count.missingLines.length > 0 ? (
+            <ul className="space-y-1 text-sm" data-testid="pm-brief-missing">{count.missingLines.map((l) => (
+              <li key={l.n} className="flex flex-wrap items-center gap-2"><span className="text-fg">Line {l.n}: {l.text}</span>
+                <button type="button" className={buttonQuiet} data-testid="pm-brief-add-missing" onClick={() => editDraft((y) => l.list === 'points' ? addItem(y, l.text.slice(0, 280), 'requirement', [l.n]) : addQuestion(y, l.text.slice(0, 280), [l.n]))}>Add line {l.n}</button></li>
+            ))}</ul>
+          ) : null}
           <p className="text-sm font-medium text-fg" data-testid="pm-brief-only-ticked">{ONLY_TICKED}</p>
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-2" aria-label="Send the goal" checked={d.goalTicked} disabled={d.label === 'restricted'} onChange={() => editDraft(toggleGoal)} />

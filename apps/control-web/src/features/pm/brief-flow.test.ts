@@ -4,7 +4,7 @@ import type { AssistantSdk, ModelSpec } from '@selarikru/inference-firebase-web'
 import type { ProjectViewSnapshot } from '@selarikru/view-protocol';
 import { createAgents } from '../hybrid/agents.ts';
 import { createDemoSdk } from '../hybrid/demo-sdk.ts';
-import { approveBrief, briefFromOutput, briefInCount, briefPayload, briefSha256, completeness, editItem, emptyBrief, addItem, planBriefFor, screenCheck, toggleItem } from './brief.ts';
+import { approveBrief, briefFromOutput, briefInCount, briefInLines, briefPayload, briefSha256, completeness, editItem, emptyBrief, addItem, planBriefFor, screenCheck, toggleItem } from './brief.ts';
 
 /**
  * H13 end to end on demo data, with the real adapter and agents port: points and questions are formatted on this device, reviewed, approved, checked in the
@@ -59,7 +59,7 @@ describe('the plan brief on demo data (H13)', () => {
     if (formatted.kind !== 'result') return;
     expect(formatted.result.proposal).toMatchObject({ status: 'ok', observedSource: 'ON_DEVICE', requestedMode: 'ONLY_ON_DEVICE' });
     expect(rec.specs.at(-1)).toMatchObject({ mode: 'ONLY_ON_DEVICE', allowCloud: false });
-    let d = briefFromOutput(formatted.result.proposal.data, 'internal', briefInCount(notes.points, notes.unsure));
+    let d = briefFromOutput(formatted.result.proposal.data, 'internal', briefInLines(notes.points, notes.unsure));
     expect(completeness(d).ok).toBe(true);
     // Review: edit one, untick one, approve.
     const edited = editItem(d, d.items[0]!.id, 'Posts are listed newest first, 20 to a page.');
@@ -93,7 +93,7 @@ describe('the plan brief on demo data (H13)', () => {
 
   it('canary: notes, history and task context never reach the check\'s prompt; only the approved brief does', async () => {
     const { agents, rec } = await setup();
-    const d = approveBrief(briefFromOutput({ goal: 'A board.', items: [{ id: 'P1', text: 'Boards sort by votes.', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] }, 'internal', { points: 1, unsure: 0 }));
+    const d = approveBrief(briefFromOutput({ goal: 'A board.', items: [{ id: 'P1', text: 'Boards sort by votes.', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] }, 'internal', [{ n: 1, text: 'x', list: 'points' }]));
     const p = briefPayload(d);
     await agents.pm({
       kind: 'pmVerify', subjectTaskId: id('contract'), question: `${CANARY} question`, questionClassification: 'internal', callOverride: null, brief: p, briefSha256: briefSha256(p),
@@ -112,7 +112,7 @@ describe('the plan brief on demo data (H13)', () => {
     expect(out.kind === 'result' && out.result.proposal).toMatchObject({ status: 'blocked', blockedReason: 'device_unavailable' });
     expect(rec.specs).toHaveLength(0);
     // By hand.
-    const one = addItem(emptyBrief('internal', briefInCount(notes.points, notes.unsure)), 'Posts are public.', 'requirement');
+    const one = addItem(emptyBrief('internal', briefInLines(notes.points, notes.unsure)), 'Posts are public.', 'requirement');
     expect('draft' in one).toBe(true);
     if (!('draft' in one)) return;
     const d = approveBrief(one.draft);
@@ -127,7 +127,7 @@ describe('the plan brief on demo data (H13)', () => {
 
   it('restricted notes, a locked subject or a device-only subject: no check, no cloud call', async () => {
     const { agents, rec, snapshot } = await setup();
-    const d = approveBrief(briefFromOutput({ goal: 'g', items: [{ id: 'P1', text: 'x', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] }, 'internal', { points: 1, unsure: 0 }));
+    const d = approveBrief(briefFromOutput({ goal: 'g', items: [{ id: 'P1', text: 'x', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] }, 'internal', [{ n: 1, text: 'x', list: 'points' }]));
     const p = briefPayload(d);
     const ask = (subjectTaskId: string, questionClassification: 'internal' | 'restricted' = 'internal') => agents.pm({ kind: 'pmVerify', subjectTaskId, question: '', questionClassification, history: [], callOverride: null, brief: p, briefSha256: briefSha256(p) });
     expect(await ask(id('contract'), 'restricted')).toMatchObject({ kind: 'refused', code: 'brief_restricted' });
@@ -140,7 +140,7 @@ describe('the plan brief on demo data (H13)', () => {
 
   it('with web research off the check with Google Search is refused with the message; the no-web check still runs', async () => {
     const { agents, rec } = await setup({ webResearch: false });
-    const d = approveBrief(briefFromOutput({ goal: 'g', items: [{ id: 'P1', text: 'x', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [], omitted: [] }, 'internal', { points: 1, unsure: 0 }));
+    const d = approveBrief(briefFromOutput({ goal: 'g', items: [{ id: 'P1', text: 'x', kind: 'fact', checkable: true, source: 'points', from: [1] }], uncertainties: [], omitted: [] }, 'internal', [{ n: 1, text: 'x', list: 'points' }]));
     const p = briefPayload(d);
     expect(await agents.pm({ kind: 'pmVerify', subjectTaskId: id('contract'), question: '', questionClassification: 'internal', history: [], callOverride: null, brief: p, briefSha256: briefSha256(p) })).toMatchObject({ kind: 'refused', code: 'research_not_granted' });
     expect(rec.specs).toHaveLength(0);

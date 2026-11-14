@@ -67,7 +67,7 @@ const GOOD: Record<AgentKind, unknown> = {
   pmResearch: { answer: 'By votes or by date.', findings: [{ point: 'Most sort by votes.' }] },
   pmPlan: { tasks: [{ key: 'T1', title: 'API', description: 'Add the route.', role: 'backend', requirementIds: ['AC-1'], paths: ['src/api'], dependsOn: [] }] },
   pmDelegate: { assignments: [{ taskId: 't1', workerId: 'w1', why: 'Backend work.' }] },
-  pmBrief: { goal: 'Let people post feedback.', items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points' }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'points' }], uncertainties: [{ id: 'U1', question: 'Do boards need moderation?' }], omitted: [] },
+  pmBrief: { goal: 'Let people post feedback.', items: [{ id: 'P1', text: 'Posts are sorted newest first.', kind: 'requirement', checkable: false, source: 'points', from: [1] }, { id: 'P2', text: 'Most boards sort by votes.', kind: 'fact', checkable: true, source: 'points', from: [2] }], uncertainties: [{ id: 'U1', question: 'Do boards need moderation?', from: [3] }], omitted: [] },
   pmVerify: { items: [{ id: 'P2', verdict: 'supported', explanation: 'Public boards do.', sources: [{ title: 'A', url: 'https://example.org/a' }] }], uncertainties: [{ id: 'U1', answer: 'Usually.', confidence: 'medium', sources: [] }] },
   pmVerifyNoWeb: { items: [{ id: 'P2', verdict: 'consistent', explanation: 'Fits what is known.' }], uncertainties: [{ id: 'U1', answer: 'Usually.', confidence: 'low' }] },
 };
@@ -831,8 +831,10 @@ describe('H13: the plan brief', () => {
     expect(r.report).toMatchObject({ stepKind: 'pmBrief' });
     const prompt = sdk.prompts[0]!;
     expect(prompt).toContain('----- BEGIN POINTS NONCE1 -----\n1. Posts are sorted newest first.\n2. Most boards sort by votes.\n----- END POINTS NONCE1 -----');
-    expect(prompt).toContain('----- BEGIN QUESTIONS NONCE1 -----\n1. Do boards need moderation?\n----- END QUESTIONS NONCE1 -----');
+    expect(prompt).toContain('----- BEGIN QUESTIONS NONCE1 -----\n3. Do boards need moderation?\n----- END QUESTIONS NONCE1 -----');
     expect(prompt).toMatch(/2 points and 1 question/);
+    // Fix round 1 (I1): one numbering for both lists, and each entry names the lines it covers.
+    expect(prompt).toMatch(/"from"/);
     // Nothing of the task goes with it: the brief formats the owner's own words.
     for (const leak of ['TASK-TEXT', 'CRITERION-TEXT', 'CLAIM-SERVED']) expect(prompt).not.toContain(leak);
   });

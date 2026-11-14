@@ -255,7 +255,7 @@ export const AGENT_CATALOG: Readonly<Record<AgentKind, AgentDefinition>> = {
     rolePrompt: [
       'You format a project owner\'s own notes into a structured plan brief. You reformat; you never drop or invent anything.',
       'Return JSON matching the schema: "goal" (one sentence), "items" (one per point, ids P1, P2 and so on, each short and self-contained, with its kind and whether it can be checked against public information, and "source": "conversation" for points marked as from the conversation, else "points"), "uncertainties" (one per question, ids U1, U2 and so on), and "omitted" (one entry per point or question you did not use, with its reason: private, duplicate or empty).',
-      'Every point and every question must appear exactly once, as an item, an uncertainty or an omitted entry.',
+      'Every line must be covered at least once, as an item, an uncertainty or an omitted entry, each naming its line numbers in "from".',
       NO_PRIVATE, NO_AUTHORITY,
     ].join(' '),
   },
@@ -552,11 +552,15 @@ function build(kind: AgentKind, input: AgentInputs[AgentKind], at: At, omissions
     const i = input as AgentInputs['pmBrief'];
     const l = planBriefLines(i.points, i.unsure);
     if (l.points.length === 0 && l.unsure.length === 0) return { refused: 'brief_empty' };
+    if (l.points.length + l.unsure.length > PLAN_BRIEF_LIMITS.inputLines) return { refused: 'brief_too_many_lines' };
     const n = (x: number, one: string) => `${x} ${one}${x === 1 ? '' : 's'}`;
+    // Fix round 1 (I1): one numbering, points first and then questions, so every entry can name the lines it covers.
+    const last = l.points.length;
     return {
       prompt: ['# The owner\'s points', block('POINTS', '', l.points.map((p, k) => `${k + 1}. ${p.source === 'conversation' ? '(from the conversation) ' : ''}${p.text}`).join('\n'), nonce), '',
-        '# What the owner is unsure about', block('QUESTIONS', '', l.unsure.map((q, k) => `${k + 1}. ${q}`).join('\n'), nonce), '',
-        '# What to do', `Format these into a plan brief. There are ${n(l.points.length, 'point')} and ${n(l.unsure.length, 'question')}: account for every one, as an item, an uncertainty or an omitted entry.`].join('\n'),
+        '# What the owner is unsure about', block('QUESTIONS', '', l.unsure.map((q, k) => `${last + k + 1}. ${q}`).join('\n'), nonce), '',
+        '# What to do', `Format these into a plan brief. There are ${n(l.points.length, 'point')} and ${n(l.unsure.length, 'question')}, lines 1 to ${last + l.unsure.length}: account for every line, as an item, an uncertainty or an omitted entry.`,
+        'Give each item, uncertainty and omitted entry "from": the numbers of the lines it comes from. You may group lines into one item; every line number must appear at least once.'].join('\n'),
       check: { criteriaIds: [], allowedPaths: [], pm: { sourceIds: [] } },
     };
   }

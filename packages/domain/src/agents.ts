@@ -47,7 +47,7 @@ export const AGENT_CITES_CRITERIA: Readonly<Record<AgentKind, boolean>> = {
  * H13: the plan brief's bounds. The owner's points and open questions go in; Nano returns a goal, items and uncertainties, each short enough to check, and counts
  * what it left out. The cloud checks the approved brief and nothing else.
  */
-export const PLAN_BRIEF_LIMITS = { goalChars: 280, itemChars: 280, items: 20, uncertainties: 10, omitted: 40, explanationChars: 400, answerChars: 600, sources: 5 } as const;
+export const PLAN_BRIEF_LIMITS = { goalChars: 280, itemChars: 280, items: 20, uncertainties: 10, omitted: 40, explanationChars: 400, answerChars: 600, sources: 5, inputLines: 60 } as const;
 export const PLAN_BRIEF_ITEM_KINDS = ['requirement', 'decision', 'constraint', 'assumption', 'fact'] as const;
 export const PLAN_BRIEF_OMIT_REASONS = ['private', 'duplicate', 'empty'] as const;
 export const PLAN_BRIEF_VERDICTS = ['supported', 'contradicted', 'unclear', 'not_checkable'] as const;
@@ -139,11 +139,14 @@ export function agentOutputSchema(kind: AgentKind, criteriaIds: readonly string[
     // H13: the plan brief, formatted on the device. Ids P1..P20 and U1..U10; what was left out is counted with a reason, never quoted.
     case 'pmBrief': {
       const B = PLAN_BRIEF_LIMITS;
+      // Fix round 1 (I1): `from`, the input line numbers (points first, then questions) each entry covers, so completeness is checked per point. Grouping is
+      // allowed; an item that names no line is shown as invented. An omitted entry names at least one.
+      const from = z.array(z.int().min(1).max(B.inputLines)).max(B.inputLines);
       return z.strictObject({
         goal: z.string().max(B.goalChars),
-        items: z.array(z.strictObject({ id: z.string().regex(/^P(?:[1-9]|1[0-9]|20)$/), text: text(B.itemChars), kind: z.enum(PLAN_BRIEF_ITEM_KINDS), checkable: z.boolean(), source: z.enum(['points', 'conversation']) })).max(B.items),
-        uncertainties: z.array(z.strictObject({ id: z.string().regex(/^U(?:[1-9]|10)$/), question: text(B.itemChars) })).max(B.uncertainties),
-        omitted: z.array(z.strictObject({ reason: z.enum(PLAN_BRIEF_OMIT_REASONS) })).max(B.omitted),
+        items: z.array(z.strictObject({ id: z.string().regex(/^P(?:[1-9]|1[0-9]|20)$/), text: text(B.itemChars), kind: z.enum(PLAN_BRIEF_ITEM_KINDS), checkable: z.boolean(), source: z.enum(['points', 'conversation']), from })).max(B.items),
+        uncertainties: z.array(z.strictObject({ id: z.string().regex(/^U(?:[1-9]|10)$/), question: text(B.itemChars), from })).max(B.uncertainties),
+        omitted: z.array(z.strictObject({ reason: z.enum(PLAN_BRIEF_OMIT_REASONS), from: from.min(1) })).max(B.omitted),
       });
     }
     // H13: the cloud's checks of the approved brief. Only the ids it was given. Web sources are shown as text links, https only (the screen drops any other).

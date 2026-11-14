@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AiCheckpoint } from '@selarikru/domain';
 import { snapshotOf, task } from '../overview/testing.ts';
 import {
-  addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefPayload, cloudRefusal, completeness, conversationNotes, decodeBriefTexts, decodeNotes, editItem, editQuestion, emptyBrief,
+  addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, decodeBriefTexts, decodeNotes, editItem, editQuestion, emptyBrief,
   encodeBriefTexts, encodeNotes, latestNotes, notesCheckpoint, notesLabel, planBriefFor, removeItem, screenCheck, setGoal, toggleGoal, toggleItem,
 } from './brief.ts';
 
@@ -14,16 +14,15 @@ const POINTS = ['Posts are public.', 'Newest first.', 'Votes are one per person.
 const UNSURE = ['Do boards need moderation?', 'Is sort by votes usual?', 'How many posts a day?'].join('\n');
 const fullOutput = {
   goal: 'A public feedback board.',
-  items: POINTS.split('\n').slice(0, 6).map((t, i) => ({ id: `P${i + 1}`, text: t, kind: 'requirement', checkable: i === 0, source: 'points' })),
-  uncertainties: UNSURE.split('\n').map((q, i) => ({ id: `U${i + 1}`, question: q })),
-  omitted: [{ reason: 'private' }],
+  items: POINTS.split('\n').slice(0, 6).map((t, i) => ({ id: `P${i + 1}`, text: t, kind: 'requirement', checkable: i === 0, source: 'points', from: [i + 1] })),
+  uncertainties: UNSURE.split('\n').map((q, i) => ({ id: `U${i + 1}`, question: q, from: [8 + i] })),
+  omitted: [{ reason: 'private', from: [7] }],
 };
 
 describe('the plan brief: completeness (H13 amendment B)', () => {
   it('given 7 points and 3 questions, the brief accounts for all 10 (items, questions and omitted)', () => {
-    const inCount = briefInCount(POINTS, UNSURE);
-    expect(inCount).toEqual({ points: 7, unsure: 3 });
-    const d = briefFromOutput(fullOutput, 'internal', inCount);
+    expect(briefInCount(POINTS, UNSURE)).toEqual({ points: 7, unsure: 3 });
+    const d = briefFromOutput(fullOutput, 'internal', briefInLines(POINTS, UNSURE));
     const c = completeness(d);
     expect(c).toMatchObject({ ok: true, missing: 0 });
     expect(c.line).toBe('7 points and 3 questions in, 6 items + 3 questions + 1 omitted out');
@@ -31,18 +30,18 @@ describe('the plan brief: completeness (H13 amendment B)', () => {
 
   it('a model that drops one shows the warning, and adding the missing one by hand settles it', () => {
     const dropped = { ...fullOutput, omitted: [] };
-    const d = briefFromOutput(dropped, 'internal', briefInCount(POINTS, UNSURE));
+    const d = briefFromOutput(dropped, 'internal', briefInLines(POINTS, UNSURE));
     const c = completeness(d);
     expect(c.ok).toBe(false);
     expect(c.missing).toBe(1);
-    expect(c.warning).toMatch(/1 of what you gave is not in this brief/);
-    const fixed = addItem(d, 'Admins can hide posts.', 'requirement');
+    expect(c.warning).toMatch(/Line 7 is not in this brief/);
+    const fixed = addItem(d, 'Admins can hide posts.', 'requirement', [7]);
     expect('draft' in fixed && completeness(fixed.draft).ok).toBe(true);
   });
 
   it('an item with a secret-shaped string is dropped and counted as omitted (private), so the count still adds up', () => {
-    const out = { ...fullOutput, items: [...fullOutput.items.slice(0, 5), { id: 'P6', text: `Token ${FAKE_TOKEN} works.`, kind: 'fact', checkable: true, source: 'points' }] };
-    const d = briefFromOutput(out, 'internal', briefInCount(POINTS, UNSURE));
+    const out = { ...fullOutput, items: [...fullOutput.items.slice(0, 5), { id: 'P6', text: `Token ${FAKE_TOKEN} works.`, kind: 'fact', checkable: true, source: 'points', from: [6] }] };
+    const d = briefFromOutput(out, 'internal', briefInLines(POINTS, UNSURE));
     expect(d.items.map((x) => x.id)).not.toContain('P6');
     expect(JSON.stringify(d)).not.toContain(FAKE_TOKEN);
     expect(d.omitted.filter((o) => o.reason === 'private')).toHaveLength(2);
@@ -50,12 +49,34 @@ describe('the plan brief: completeness (H13 amendment B)', () => {
   });
 });
 
+describe('fix round 1 (I1): completeness per point, by line number', () => {
+  it('a model that drops point 3 and invents an item: the warning names line 3, the invented item is flagged, and line 3 can be added by hand', () => {
+    const items = fullOutput.items.filter((x) => x.id !== 'P3').concat([{ id: 'P7', text: 'Add dark mode.', kind: 'requirement', checkable: false, source: 'points', from: [] }]);
+    const d = briefFromOutput({ ...fullOutput, items }, 'internal', briefInLines(POINTS, UNSURE));
+    const c = completeness(d);
+    expect(c.ok).toBe(false);
+    expect(c.missingLines).toEqual([{ n: 3, text: 'Votes are one per person.', list: 'points' }]);
+    expect(c.invented).toEqual(['P7']);
+    expect(c.warning).toContain('Line 3 is not in this brief');
+    expect(c.warning).toContain('P7');
+    // Grouping is allowed: one item may cover several lines.
+    const grouped = briefFromOutput({ ...fullOutput, items: [{ ...fullOutput.items[0]!, from: [1, 2, 3, 4, 5, 6] }] }, 'internal', briefInLines(POINTS, UNSURE));
+    expect(completeness(grouped)).toMatchObject({ ok: true, missing: 0 });
+    const fixed = addItem(removeItem(d, 'P7'), 'Votes are one per person.', 'requirement', [3]);
+    expect('draft' in fixed && completeness(fixed.draft).ok).toBe(true);
+  });
+
+  it('points and questions are numbered as one list, questions after points', () => {
+    expect(briefInLines('a\nb', 'q').map((l) => [l.n, l.list])).toEqual([[1, 'points'], [2, 'points'], [3, 'questions']]);
+  });
+});
+
 describe('the plan brief: review and approval (H13 amendment C)', () => {
-  const d0 = briefFromOutput(fullOutput, 'internal', briefInCount(POINTS, UNSURE));
+  const d0 = briefFromOutput(fullOutput, 'internal', briefInLines(POINTS, UNSURE));
 
   it('everything is ticked by default; restricted input can never be ticked', () => {
     expect(d0.items.every((x) => x.ticked)).toBe(true);
-    const r = briefFromOutput(fullOutput, 'restricted', briefInCount(POINTS, UNSURE));
+    const r = briefFromOutput(fullOutput, 'restricted', briefInLines(POINTS, UNSURE));
     expect(r.items.every((x) => !x.ticked && x.restricted)).toBe(true);
     expect(toggleItem(r, 'P1').items[0]!.ticked).toBe(false);
     expect(cloudRefusal(approveBrief(r))).toBe('brief_restricted');
@@ -97,7 +118,7 @@ describe('the plan brief: review and approval (H13 amendment C)', () => {
 });
 
 describe('the cloud check\'s results and the plan (H13 amendment D, E)', () => {
-  const a = approveBrief(briefFromOutput(fullOutput, 'internal', briefInCount(POINTS, UNSURE)));
+  const a = approveBrief(briefFromOutput(fullOutput, 'internal', briefInLines(POINTS, UNSURE)));
 
   it('only https sources are kept, as text links', () => {
     const r = screenCheck('pmVerify', { items: [{ id: 'P1', verdict: 'supported', explanation: 'e', sources: [{ title: 'ok', url: 'https://example.org/a' }, { title: 'js', url: 'javascript:alert(1)' }, { title: 'http', url: 'http://example.org' }] }], uncertainties: [] });
@@ -152,7 +173,7 @@ describe('the plan brief notes (H13 amendment A, §1)', () => {
   });
 
   it('an empty manual brief starts with the counts of what was given', () => {
-    const d = emptyBrief('internal', briefInCount(POINTS, UNSURE));
+    const d = emptyBrief('internal', briefInLines(POINTS, UNSURE));
     expect(completeness(d)).toMatchObject({ ok: false, missing: 10 });
   });
 });

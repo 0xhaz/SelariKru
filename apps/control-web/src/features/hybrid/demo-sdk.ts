@@ -91,19 +91,22 @@ function answer(kind: string, prompt: string): unknown {
     }
     // H13: the plan brief. Formatting keeps every point and question it is given, as the completeness rule says, built from the numbered lines of the prompt.
     case 'pmBrief': {
-      const numbered = (name: string) => fenced(prompt, name).flatMap((l) => { const m = /^\d+\. (.*)$/.exec(l); return m ? [m[1]!] : []; });
-      const points = numbered('POINTS');
-      const questions = numbered('QUESTIONS');
+      // Fix round 1 (I1): each entry names the line it comes from.
+      const numbered = (name: string) => fenced(prompt, name).flatMap((l) => { const m = /^(\d+)\. (.*)$/.exec(l); return m ? [{ n: Number(m[1]), text: m[2]! }] : []; });
+      const pointLines = numbered('POINTS');
+      const questionLines = numbered('QUESTIONS');
+      const points = pointLines.map((x) => x.text);
+      const questions = questionLines.map((x) => x.text);
       const items = points.slice(0, 20).map((raw, i) => {
         const conversation = raw.startsWith('(from the conversation) ');
         const text = raw.replace(/^\(from the conversation\) /, '').slice(0, 280);
         const kind = /\b(most|usually|typically|many|all)\b/i.test(text) ? 'fact' : /^we (store|use)\b/i.test(text) ? 'decision' : 'requirement';
-        return { id: `P${i + 1}`, text, kind, checkable: kind === 'fact', source: conversation ? 'conversation' : 'points' };
+        return { id: `P${i + 1}`, text, kind, checkable: kind === 'fact', source: conversation ? 'conversation' : 'points', from: [pointLines[i]!.n] };
       });
       return {
         goal: `Demo brief: ${(points[0] ?? questions[0] ?? 'the work').replace(/\.$/, '')}.`.slice(0, 280), items,
-        uncertainties: questions.slice(0, 10).map((q, i) => ({ id: `U${i + 1}`, question: q.slice(0, 280) })),
-        omitted: [...points.slice(20), ...questions.slice(10)].map(() => ({ reason: 'duplicate' })),
+        uncertainties: questionLines.slice(0, 10).map((q, i) => ({ id: `U${i + 1}`, question: q.text.slice(0, 280), from: [q.n] })),
+        omitted: [...pointLines.slice(20), ...questionLines.slice(10)].map((x) => ({ reason: 'duplicate', from: [x.n] })),
       };
     }
     case 'pmVerify':

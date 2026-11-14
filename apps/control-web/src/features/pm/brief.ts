@@ -20,22 +20,26 @@ export interface BriefItem {
   readonly kind: ItemKind;
   readonly checkable: boolean;
   readonly source: 'points' | 'conversation' | 'manual';
+  /** Fix round 1 (I1): the input lines (points first, then questions, from 1) it covers. Empty from the model: invented. */
+  readonly from: readonly number[];
   readonly ticked: boolean;
   /** From restricted input: it can never be ticked, so it never leaves this device. */
   readonly restricted: boolean;
 }
-export interface BriefQuestion { readonly id: string; readonly question: string; readonly source: 'unsure' | 'manual'; readonly ticked: boolean; readonly restricted: boolean }
+export interface BriefQuestion { readonly id: string; readonly question: string; readonly source: 'unsure' | 'manual'; readonly from: readonly number[]; readonly ticked: boolean; readonly restricted: boolean }
+/** One line the owner gave, numbered as the prompt numbers it. */
+export interface BriefLine { readonly n: number; readonly text: string; readonly list: 'points' | 'questions' }
 export interface BriefDraft {
   readonly goal: string;
   /** Whether the goal is sent with the check. Never for restricted notes. */
   readonly goalTicked: boolean;
   readonly items: readonly BriefItem[];
   readonly uncertainties: readonly BriefQuestion[];
-  readonly omitted: readonly { readonly reason: (typeof PLAN_BRIEF_OMIT_REASONS)[number] }[];
+  readonly omitted: readonly { readonly reason: (typeof PLAN_BRIEF_OMIT_REASONS)[number]; readonly from: readonly number[] }[];
   /** The notes' label when the brief was made. Restricted: nothing in it may be ticked, and the cloud check is unavailable. */
   readonly label: BriefLabel;
-  /** How many points and questions the owner gave, for the completeness count. */
-  readonly inCount: { readonly points: number; readonly unsure: number };
+  /** The lines the owner gave, for the completeness check (fix round 1, I1). */
+  readonly inLines: readonly BriefLine[];
   /** sha256 of the payload the owner approved. Null: not approved (or edited since). */
   readonly approvedSha256: string | null;
 }
@@ -44,37 +48,47 @@ const L = PLAN_BRIEF_LIMITS;
 const one = (t: string): string => t.replace(/\s+/g, ' ').trim();
 const secret = (t: string): boolean => redactSecrets(t) !== t;
 
-export const briefInCount = (points: string, unsure: string): BriefDraft['inCount'] => { const l = planBriefLines(points, unsure); return { points: l.points.length, unsure: l.unsure.length }; };
+export const briefInCount = (points: string, unsure: string): { readonly points: number; readonly unsure: number } => { const l = planBriefLines(points, unsure); return { points: l.points.length, unsure: l.unsure.length }; };
+/** The owner's lines as the prompt numbers them: points from 1, then the questions after them. */
+export function briefInLines(points: string, unsure: string): BriefLine[] {
+  const l = planBriefLines(points, unsure);
+  return [...l.points.map((p, i): BriefLine => ({ n: i + 1, text: p.text, list: 'points' })), ...l.unsure.map((q, i): BriefLine => ({ n: l.points.length + i + 1, text: q, list: 'questions' }))];
+}
 
-export function emptyBrief(label: BriefLabel, inCount: BriefDraft['inCount']): BriefDraft {
-  return { goal: '', goalTicked: label !== 'restricted', items: [], uncertainties: [], omitted: [], label, inCount, approvedSha256: null };
+export function emptyBrief(label: BriefLabel, inLines: readonly BriefLine[]): BriefDraft {
+  return { goal: '', goalTicked: label !== 'restricted', items: [], uncertainties: [], omitted: [], label, inLines, approvedSha256: null };
 }
 
 /**
  * The brief from a schema-valid pmBrief output. Every item and question goes through the secret detector: one with a secret-shaped string is dropped and counted
  * as omitted (private), so the count still adds up and the string never reaches the screen or storage. A secret-shaped goal is cleared.
  */
-export function briefFromOutput(data: unknown, label: BriefLabel, inCount: BriefDraft['inCount']): BriefDraft {
-  const d = data as { goal: string; items: { id: string; text: string; kind: ItemKind; checkable: boolean; source: 'points' | 'conversation' }[]; uncertainties: { id: string; question: string }[]; omitted: { reason: BriefDraft['omitted'][number]['reason'] }[] };
-  const omitted = [...d.omitted];
+export function briefFromOutput(data: unknown, label: BriefLabel, inLines: readonly BriefLine[]): BriefDraft {
+  const d = data as { goal: string; items: { id: string; text: string; kind: ItemKind; checkable: boolean; source: 'points' | 'conversation'; from: number[] }[]; uncertainties: { id: string; question: string; from: number[] }[]; omitted: { reason: BriefDraft['omitted'][number]['reason']; from: number[] }[] };
+  const omitted = d.omitted.map((o) => ({ reason: o.reason, from: [...o.from] }));
   const restricted = label === 'restricted';
-  const items = d.items.flatMap((x): BriefItem[] => { if (secret(x.text)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, text: one(x.text), kind: x.kind, checkable: x.checkable, source: x.source, ticked: !restricted, restricted }]; });
-  const uncertainties = d.uncertainties.flatMap((x): BriefQuestion[] => { if (secret(x.question)) { omitted.push({ reason: 'private' }); return []; } return [{ id: x.id, question: one(x.question), source: 'unsure', ticked: !restricted, restricted }]; });
-  return { goal: secret(d.goal) ? '' : one(d.goal), goalTicked: !restricted, items, uncertainties, omitted, label, inCount, approvedSha256: null };
+  const items = d.items.flatMap((x): BriefItem[] => { if (secret(x.text)) { omitted.push({ reason: 'private', from: [...x.from] }); return []; } return [{ id: x.id, text: one(x.text), kind: x.kind, checkable: x.checkable, source: x.source, from: [...x.from], ticked: !restricted, restricted }]; });
+  const uncertainties = d.uncertainties.flatMap((x): BriefQuestion[] => { if (secret(x.question)) { omitted.push({ reason: 'private', from: [...x.from] }); return []; } return [{ id: x.id, question: one(x.question), source: 'unsure', from: [...x.from], ticked: !restricted, restricted }]; });
+  return { goal: secret(d.goal) ? '' : one(d.goal), goalTicked: !restricted, items, uncertainties, omitted, label, inLines, approvedSha256: null };
 }
 
-/** "N points in, N items + N omitted out". Manual additions count, so the owner can add what is missing by hand. */
-export function completeness(d: BriefDraft): { readonly ok: boolean; readonly missing: number; readonly extra: number; readonly line: string; readonly warning: string | null } {
-  const given = d.inCount.points + d.inCount.unsure;
-  const out = d.items.length + d.uncertainties.length + d.omitted.length;
-  const fromModel = d.items.filter((x) => x.source !== 'manual').length + d.uncertainties.filter((x) => x.source !== 'manual').length + d.omitted.length;
-  const missing = Math.max(0, given - out);
-  const extra = Math.max(0, fromModel - given);
+/**
+ * "N points in, N items + N omitted out", checked per line (fix round 1, I1): every line the owner gave must be covered by some item, question or omitted entry
+ * (grouping is allowed); an item or question from the model that names no line it came from is invented. The missing lines are offered for adding by hand.
+ */
+export function completeness(d: BriefDraft): { readonly ok: boolean; readonly missing: number; readonly missingLines: readonly BriefLine[]; readonly invented: readonly string[]; readonly line: string; readonly warning: string | null } {
+  const known = new Set(d.inLines.map((l) => l.n));
+  const covered = new Set([...d.items, ...d.uncertainties, ...d.omitted].flatMap((x) => x.from));
+  const missingLines = d.inLines.filter((l) => !covered.has(l.n));
+  const invented = [...d.items, ...d.uncertainties].filter((x) => x.source !== 'manual' && !x.from.some((n) => known.has(n))).map((x) => x.id);
   const n = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
-  const line = `${n(d.inCount.points, 'point')} and ${n(d.inCount.unsure, 'question')} in, ${n(d.items.length, 'item')} + ${n(d.uncertainties.length, 'question')} + ${d.omitted.length} omitted out`;
-  const warning = missing > 0 ? `${missing} of what you gave is not in this brief. Add the missing ${missing === 1 ? 'one' : 'ones'} by hand below before you approve it.`
-    : extra > 0 ? `The brief has ${extra} more than you gave. Check nothing was invented, and delete what you did not say.` : null;
-  return { ok: missing === 0 && extra === 0, missing, extra, line, warning };
+  const points = d.inLines.filter((l) => l.list === 'points').length;
+  const line = `${n(points, 'point')} and ${n(d.inLines.length - points, 'question')} in, ${n(d.items.length, 'item')} + ${n(d.uncertainties.length, 'question')} + ${d.omitted.length} omitted out`;
+  const parts = [
+    ...missingLines.map((l) => `Line ${l.n} is not in this brief: "${l.text}".`),
+    ...(invented.length > 0 ? [`${invented.join(', ')} ${invented.length === 1 ? 'does' : 'do'} not come from anything you gave: check ${invented.length === 1 ? 'it was' : 'they were'} not invented, and delete what you did not say.`] : []),
+  ];
+  return { ok: missingLines.length === 0 && invented.length === 0, missing: missingLines.length, missingLines, invented, line, warning: parts.length > 0 ? parts.join(' ') : null };
 }
 
 type Edit = { readonly draft: BriefDraft } | { readonly error: 'too_long' | 'secret' | 'empty' | 'full' };
@@ -107,21 +121,21 @@ const nextId = (prefix: 'P' | 'U', ids: readonly string[], max: number): string 
   for (let i = 1; i <= max; i++) if (!ids.includes(`${prefix}${i}`)) return `${prefix}${i}`;
   return null;
 };
-export function addItem(d: BriefDraft, text: string, kind: ItemKind): Edit {
+export function addItem(d: BriefDraft, text: string, kind: ItemKind, from: readonly number[] = []): Edit {
   const bad = checkText(text, L.itemChars);
   if (bad) return { error: bad };
   const id = nextId('P', d.items.map((x) => x.id), L.items);
   if (!id) return { error: 'full' };
   const restricted = d.label === 'restricted';
-  return { draft: unapproved({ ...d, items: [...d.items, { id, text: one(text), kind, checkable: kind === 'fact' || kind === 'assumption', source: 'manual', ticked: !restricted, restricted }] }) };
+  return { draft: unapproved({ ...d, items: [...d.items, { id, text: one(text), kind, checkable: kind === 'fact' || kind === 'assumption', source: 'manual', from: [...from], ticked: !restricted, restricted }] }) };
 }
-export function addQuestion(d: BriefDraft, question: string): Edit {
+export function addQuestion(d: BriefDraft, question: string, from: readonly number[] = []): Edit {
   const bad = checkText(question, L.itemChars);
   if (bad) return { error: bad };
   const id = nextId('U', d.uncertainties.map((x) => x.id), L.uncertainties);
   if (!id) return { error: 'full' };
   const restricted = d.label === 'restricted';
-  return { draft: unapproved({ ...d, uncertainties: [...d.uncertainties, { id, question: one(question), source: 'manual', ticked: !restricted, restricted }] }) };
+  return { draft: unapproved({ ...d, uncertainties: [...d.uncertainties, { id, question: one(question), source: 'manual', from: [...from], ticked: !restricted, restricted }] }) };
 }
 
 /** What the cloud check sends: the ticked goal, items (with kind) and questions. Nothing else. A restricted brief has no payload at all. */
