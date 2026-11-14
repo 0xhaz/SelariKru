@@ -303,6 +303,22 @@ export function createLiveDataSource(options: LiveDataSourceOptions): LiveDataSo
       }, 'an escalated checkpoint', false, {}, true);
     },
 
+    /** H13 fix round 1 (H2): the owner deletes their own checkpoint: its notes became restricted after a server copy existed. */
+    async deleteAiCheckpoint(projectId, checkpointId): Promise<void> {
+      assertOpen();
+      let res: Response;
+      try {
+        res = await request(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints/${encodeURIComponent(checkpointId)}`, { method: 'DELETE' });
+      } catch (e) {
+        throw fail(fromThrown(e));
+      }
+      if (!res.ok) {
+        const wire = await readWireError(res);
+        const e = toDataSourceError(wire);
+        throw fail({ ...e, message: `${wire.code}: ${wire.message}` });
+      }
+    },
+
     /** H12 fix round 1 (M1): one tab sends a waiting checkpoint. */
     claimAiCheckpointSend(projectId, checkpointId): Promise<AiCheckpoint> {
       return readJson(`/v1/projects/${encodeURIComponent(projectId)}/ai-checkpoints/${encodeURIComponent(checkpointId)}/send-claim`, {

@@ -33,16 +33,20 @@ export interface RunBrief {
 export const EMPTY_RUN_BRIEF: RunBrief = { points: '', unsure: '', marked: false, restrictedTurns: false, draft: null, format: null, check: null };
 
 interface BriefStore {
+  /** By `briefKey(runId, taskId)`. */
   readonly runs: Readonly<Record<string, RunBrief>>;
-  set(runId: string, fn: (r: RunBrief) => Partial<RunBrief>): void;
+  set(key: string, fn: (r: RunBrief) => Partial<RunBrief>): void;
 }
 export const pmBrief = create<BriefStore>((set) => ({
   runs: {},
-  set: (runId, fn) => set((s) => { const cur = s.runs[runId] ?? EMPTY_RUN_BRIEF; return { runs: { ...s.runs, [runId]: { ...cur, ...fn(cur) } } }; }),
+  set: (key, fn) => set((s) => { const cur = s.runs[key] ?? EMPTY_RUN_BRIEF; return { runs: { ...s.runs, [key]: { ...cur, ...fn(cur) } } }; }),
 }));
 
-/** The approved brief's hash for a run, or null: none approved now (edited since approval, restricted, or this tab was reloaded). */
-export function approvedBriefSha(runId: string): string | null {
-  const d = pmBrief.getState().runs[runId]?.draft ?? null;
+/** H13 fix round 1 (H3): one entry per run and subject task, as the notes checkpoint is: notes never follow the subject select to another task. */
+export const briefKey = (runId: string, taskId: string): string => `${runId}\u0000${taskId}`;
+
+/** The approved brief's hash for a run and subject task (fix round 1, M3), or null: none approved now (edited since approval, or restricted). */
+export function approvedBriefSha(runId: string, taskId: string): string | null {
+  const d = pmBrief.getState().runs[briefKey(runId, taskId)]?.draft ?? null;
   return d && cloudRefusal(d) === null ? d.approvedSha256 : null;
 }

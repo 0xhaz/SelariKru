@@ -48,7 +48,7 @@ export interface CheckpointEngineDeps {
   /** Who the device store is scoped to: the signed-in owner (or the demo's operator). */
   readonly ownerKey: string;
   readonly device: DeviceCheckpointStore;
-  readonly server: Pick<EngineeringDataSource, 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend'> | null;
+  readonly server: Pick<EngineeringDataSource, 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend' | 'deleteAiCheckpoint'> | null;
   readonly getTaskRoute: (taskId: string) => Promise<TaskRouteRead>;
   readonly getTaskContext: (taskId: string, destination: 'local' | 'cloud', callOverride: RoutePolicyMode | null, contextId: string) => Promise<TaskAgentContext>;
   /** Fix round 1 (H2): the task's files at its base, to check a paused patch's chosen files are unchanged. Absent: they cannot be checked, so they count as changed. */
@@ -117,7 +117,7 @@ const codeOf = (e: unknown): string => /^([a-z_]+):/.exec(e instanceof Error ? e
  * H9 step 0 (F1): the server's refusals of a checkpoint write. Only these mean the server's copy won and is adopted here. Every other failure (offline, a network
  * error, any 5xx, a 401 while the token is renewed) never settled anything: the write is kept and sent again on reconnect.
  */
-export const CHECKPOINT_REFUSALS: ReadonlySet<string> = new Set(['checkpoint_closed', 'checkpoint_claimed', 'checkpoint_not_found', 'invalid_request', 'checkpoint_secret']);
+export const CHECKPOINT_REFUSALS: ReadonlySet<string> = new Set(['checkpoint_closed', 'checkpoint_claimed', 'checkpoint_not_found', 'invalid_request', 'checkpoint_secret', 'checkpoint_deleted']);
 const isRefusal = (e: unknown): boolean => CHECKPOINT_REFUSALS.has(codeOf(e));
 
 export interface CheckpointEngine {
@@ -125,7 +125,11 @@ export interface CheckpointEngine {
   attach(runner: CheckpointRunner): void;
   begin(start: ChainStart): ChainRecorder;
   /** H13: keeps a checkpoint that is not a step (the plan brief notes), under the same split: on this device always, on the server only when it may be. */
-  keep(cp: AiCheckpoint): Promise<void>;
+  /**
+   * H13 fix round 1 (H2): `server: false` keeps it on this device only, for now (the notes while they are typed, before their label is settled). A restricted one
+   * is always kept on this device only, and a server copy made earlier is deleted.
+   */
+  keep(cp: AiCheckpoint, opts?: { readonly server?: boolean }): Promise<void>;
   /** Reads the device's and the server's checkpoints for this project. */
   load(): Promise<void>;
   /** Re-validates and, where allowed, sends every waiting checkpoint. */
@@ -168,6 +172,19 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     if (on) unsynced.add(id); else unsynced.delete(id);
     try { await deps.device.setUnsynced(deps.ownerKey, deps.projectId, id, on); } catch { /* No device storage: this tab still remembers it. */ }
   };
+  /** H13 fix round 1 (H2): checkpoints the server holds (it took a save, or listed them), so a copy that becomes restricted is deleted there. */
+  const onServer = new Set<string>();
+  /** Deletes the server's copy of a checkpoint that may no longer be stored there. A failure is kept as unsynced and tried again on reconnect. */
+  const tombstone = async (id: string): Promise<void> => {
+    if (!deps.server?.deleteAiCheckpoint || (!onServer.has(id) && !unsynced.has(id))) return;
+    try {
+      await deps.server.deleteAiCheckpoint(deps.projectId, id);
+      onServer.delete(id);
+      await markUnsynced(id, false);
+    } catch {
+      await markUnsynced(id, true);
+    }
+  };
   /** Fix round 2 (N4): the claim token this tab holds for a checkpoint it is sending. Sent with its writes; never stored on the device. */
   const claimTokens = new Map<string, string>();
 
@@ -184,10 +201,11 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       // Fix round 1 (I3): a device-only checkpoint says so itself, so the mark survives a reload.
       const kept = toServer ? cp : { ...cp, deviceOnly: true };
       try { await deps.device.put(deps.ownerKey, kept); } catch { /* No device storage: the screen still holds it for this tab. */ }
-      if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); return; }
+      if (!toServer) { setFor('deviceOnly', cp.checkpointId, true); await tombstone(cp.checkpointId); return; }
       try {
         const token = claimTokens.get(cp.checkpointId);
         await deps.server!.saveAiCheckpoint!(deps.projectId, token !== undefined ? { ...cp, claimToken: token } : cp);
+        onServer.add(cp.checkpointId);
         // The save that ends the send spends the token.
         if (token !== undefined) claimTokens.delete(cp.checkpointId);
         await markUnsynced(cp.checkpointId, false);
@@ -500,10 +518,19 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     store,
     attach(r) { runner = r; },
     begin,
-    keep: (cp) => write(cp),
+    async keep(cp, opts = {}) {
+      if (opts.server === false && checkpointStorage(cp) === 'server' && !store.getState().deviceOnly[cp.checkpointId]) {
+        // On this device only, for now: not marked device-only and not unsynced, so a later save with the server still stores it.
+        patch((s) => ({ checkpoints: { ...s.checkpoints, [cp.checkpointId]: cp } }));
+        try { await deps.device.put(deps.ownerKey, cp); } catch { /* the screen still holds it */ }
+        return;
+      }
+      await write(cp);
+    },
     async load() {
       const mine = await deps.device.list(deps.ownerKey, deps.projectId).catch(() => [] as AiCheckpoint[]);
       const theirs = deps.server?.listAiCheckpoints ? await deps.server.listAiCheckpoints(deps.projectId).catch(() => [] as AiCheckpoint[]) : [];
+      for (const c of theirs) onServer.add(c.checkpointId);
       // H9 step 0 (F2): what this device wrote and the server never took is read back, so it is sent on reconnect.
       for (const id of await deps.device.listUnsynced(deps.ownerKey, deps.projectId).catch(() => [] as string[])) unsynced.add(id);
       const merged: Record<string, AiCheckpoint> = { ...store.getState().checkpoints };

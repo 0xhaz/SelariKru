@@ -64,6 +64,8 @@ interface Project {
   readonly usedDelegations: Map<string, { print: string; result: DelegationReceipt }>;
   /** H12: AI step checkpoints the demo keeps as the server would: public and internal only, by checkpoint id. Simulated. */
   readonly aiCheckpoints: Map<string, AiCheckpoint>;
+  /** H13 fix round 1 (H2): checkpoint ids the owner deleted. Never listed or stored again. */
+  readonly deletedCheckpoints: Set<string>;
   /** Fix round 2 (N4): the claim token of each checkpoint being sent. */
   readonly claimTokens: Map<string, string>;
 }
@@ -176,6 +178,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       reportContexts: new Map(),
       usedDelegations: new Map(),
       aiCheckpoints: new Map(),
+      deletedCheckpoints: new Set(),
       claimTokens: new Map(),
       routeRecords: fixture.routes ? seededRouteRecords(fixture.routes, seededRouteSettings(fixture.routes, ''), scoped(fixture.id, 'run')) : new Map(),
       state: projectionFromSnapshot(emptySnapshot({ projectId: fixture.projectId, observedAt: isoOf(clock.nowMs() + fixture.startSec * 1000), provenance: 'simulated' })),
@@ -843,6 +846,7 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
         const label = p.contextLabels.get(cp.inputs.contextId);
         if (label !== undefined && !['public', 'internal'].includes(label)) throw restricted();
       }
+      if (p.deletedCheckpoints.has(cp.checkpointId)) throw fail('unavailable', 'checkpoint_deleted: this checkpoint was deleted by its owner and is not stored again');
       const prior = p.aiCheckpoints.get(cp.checkpointId);
       if (prior && prior.taskId !== cp.taskId) throw fail('unavailable', 'checkpoint_not_found: no such checkpoint');
       if (prior && !['running', 'waiting', 'sending'].includes(prior.status) && prior.status !== cp.status) throw fail('unavailable', `checkpoint_closed: this step was already ${prior.status.replace(/_/g, ' ')}`);
@@ -856,6 +860,13 @@ export function createMockDataSource(options: MockOptions): MockDataSource {
       const { claimToken: _token, ...stored } = cp;
       void _token;
       p.aiCheckpoints.set(cp.checkpointId, { ...stored, escalatedAt: prior?.escalatedAt ?? null });
+    },
+    async deleteAiCheckpoint(projectId, checkpointId) {
+      offlineCheck();
+      const p = project(projectId);
+      p.aiCheckpoints.delete(checkpointId);
+      p.claimTokens.delete(checkpointId);
+      p.deletedCheckpoints.add(checkpointId);
     },
     async listAiCheckpoints(projectId) {
       offlineCheck();

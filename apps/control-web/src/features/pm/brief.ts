@@ -254,8 +254,8 @@ export function notesCheckpoint(n: { projectId: string; runId: string; taskId: s
 }
 
 /** The run's latest notes, re-judged by the subject's lock now (I4): a task locked since makes them restricted; an unknown route counts as locked. */
-export function latestNotes(checkpoints: Readonly<Record<string, AiCheckpoint>>, snap: ProjectViewSnapshot | null, runId: string): { readonly points: string; readonly unsure: string; readonly label: BriefLabel; readonly taskId: string } | null {
-  const cp = Object.values(checkpoints).filter((c) => c.stepKind === RESEARCH_NOTES_KIND && c.runId === runId && c.status === 'done').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+export function latestNotes(checkpoints: Readonly<Record<string, AiCheckpoint>>, snap: ProjectViewSnapshot | null, runId: string, taskId?: string): { readonly points: string; readonly unsure: string; readonly label: BriefLabel; readonly taskId: string } | null {
+  const cp = Object.values(checkpoints).filter((c) => c.stepKind === RESEARCH_NOTES_KIND && c.runId === runId && (taskId === undefined || c.taskId === taskId) && c.status === 'done').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   if (!cp) return null;
   const route = snap?.tasks[cp.taskId]?.route;
   const now = !route || route.lock !== null ? 'restricted' : 'internal';

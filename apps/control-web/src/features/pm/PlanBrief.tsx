@@ -13,7 +13,7 @@ import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInCount, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
   notesCheckpoint, notesLabel, planBriefFor, removeItem, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
 } from './brief.ts';
-import { EMPTY_RUN_BRIEF, pmBrief, type RunBrief } from './brief-store.ts';
+import { EMPTY_RUN_BRIEF, briefKey, pmBrief, type RunBrief } from './brief-store.ts';
 import { pmRefusal } from './copy.ts';
 import type { BriefCheckKind } from './runner.ts';
 import { SearchSuggestions } from './SearchSuggestions.tsx';
@@ -41,33 +41,43 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
   busy: boolean; onMakePlan: (brief: PlanBriefForPlan) => Promise<void>;
 }) {
   const id = useId();
-  const r: RunBrief = pmBrief((s) => s.runs[runId]) ?? EMPTY_RUN_BRIEF;
-  const set = (fn: (x: RunBrief) => Partial<RunBrief>) => pmBrief.getState().set(runId, fn);
+  // Fix round 1 (H3): the notes belong to this run and subject task; switching the subject shows that task's own notes.
+  const key = briefKey(runId, subjectId);
+  const r: RunBrief = pmBrief((s) => s.runs[key]) ?? EMPTY_RUN_BRIEF;
+  const set = (fn: (x: RunBrief) => Partial<RunBrief>) => pmBrief.getState().set(key, fn);
   const kept = useStore(h.checkpoints?.store ?? EMPTY_CHECKPOINT_STORE, (s) => s.checkpoints);
-  const saved = useMemo(() => latestNotes(kept, h.snapshot, runId), [kept, h.snapshot, runId]);
+  const saved = useMemo(() => latestNotes(kept, h.snapshot, runId, subjectId), [kept, h.snapshot, runId, subjectId]);
   const locked = task?.route?.lock !== null && task?.route?.lock !== undefined;
   const label = notesLabel(task, r.marked, r.restrictedTurns);
   const [error, setError] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
 
-  // The run's notes, once: as kept (re-judged by the subject's lock now), else the demo's sample notes.
-  const started = pmBrief((s) => s.runs[runId] !== undefined);
+  // The notes, once: as kept (re-judged by the subject's lock now), else the demo's sample notes.
+  const started = pmBrief((s) => s.runs[key] !== undefined);
   useEffect(() => {
     if (started) return;
-    if (saved) set(() => ({ points: saved.points, unsure: saved.unsure, restrictedTurns: saved.label === 'restricted' }));
+    if (saved) set(() => ({ points: saved.points, unsure: saved.unsure, marked: saved.label === 'restricted' }));
     else if (h.agents?.simulated && h.agents.planBriefSample) { const demo = h.agents.planBriefSample; set(() => ({ points: demo.points, unsure: demo.unsure })); }
-  }, [started, saved, runId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [started, saved, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fix round 1 (H3): a restriction from the subject's lock is the notes' own from then on: it stays, whatever the subject's route says later.
+  useEffect(() => { if (locked && !r.marked) set(() => ({ marked: true })); }, [locked, r.marked, key]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Kept as a checkpoint under the H12 split: restricted notes on this device only. */
-  const keepNotes = (x: RunBrief = pmBrief.getState().runs[runId] ?? EMPTY_RUN_BRIEF): void => {
+  /**
+   * Kept as a checkpoint under the H12 split. Fix round 1 (H2): while typed (on blur) they stay on this device only; Save notes and Format store them with the
+   * server too, once their label is settled. Restricted notes are only ever on this device, and a server copy made before is deleted.
+   */
+  const keepNotes = async (server: boolean, x: RunBrief = pmBrief.getState().runs[key] ?? EMPTY_RUN_BRIEF): Promise<void> => {
     const s = h.snapshot;
     if (!h.checkpoints || !s || !subjectId || (!x.points.trim() && !x.unsure.trim())) return;
     const at = new Date().toISOString();
-    void h.checkpoints.keep(notesCheckpoint({ projectId: h.projectId, runId, taskId: subjectId, taskRevision: s.tasks[subjectId]?.revision ?? 1, planRevision: s.runs[runId]?.planRevision ?? null, points: x.points, unsure: x.unsure, label: notesLabel(task, x.marked, x.restrictedTurns), at }));
+    await h.checkpoints.keep(notesCheckpoint({ projectId: h.projectId, runId, taskId: subjectId, taskRevision: s.tasks[subjectId]?.revision ?? 1, planRevision: s.runs[runId]?.planRevision ?? null, points: x.points, unsure: x.unsure, label: notesLabel(task, x.marked, x.restrictedTurns), at }), { server });
   };
+  // Fix round 1 (H2): the moment the notes become restricted, they are kept as such, and a server copy is deleted.
+  useEffect(() => { if (label === 'restricted') void keepNotes(true); }, [label, key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function format(): Promise<void> {
     if (!h.agents) return;
-    keepNotes();
+    await keepNotes(true);
     setError(null);
     const inCount = briefInCount(r.points, r.unsure);
     set(() => ({ format: { status: 'running' }, check: null }));
@@ -118,29 +128,32 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
         <p className="mt-1 max-w-prose text-sm text-muted" data-testid="pm-brief-split">{SPLIT}</p>
         {h.agents?.simulated ? <p className="mt-1 text-sm font-medium text-warning">Demo data: the brief, its checks and the plan are simulated. They are never evidence.</p> : null}
       </div>
+      <label className="flex items-start gap-2 text-sm text-fg"><input type="checkbox" className="mt-0.5" data-testid="pm-brief-restricted" checked={r.marked || locked} disabled={locked || r.marked}
+        onChange={(e) => { set(() => ({ marked: e.target.checked })); }} /><span>These notes are restricted: keep them, and the brief made from them, on this device only. Tick this before you write anything restricted. Once restricted, notes stay restricted.</span></label>
       <label className="block text-sm">
         <span className="font-medium text-fg">Your points</span>
         <span className="block text-muted">Requirements, decisions, constraints and facts: one per line, or free text.</span>
         <textarea className="mt-1 block w-full rounded-chip border border-line-strong bg-bg p-2 text-fg" rows={5} maxLength={NOTES_LIMITS.pointsChars} value={r.points} data-testid="pm-brief-points"
-          onChange={(e) => set(() => ({ points: e.target.value }))} onBlur={() => keepNotes()} />
+          onChange={(e) => { set(() => ({ points: e.target.value })); setSavedNote(null); }} onBlur={() => void keepNotes(false)} />
       </label>
       <label className="block text-sm">
         <span className="font-medium text-fg">What you&apos;re unsure about</span>
         <span className="block text-muted">Open questions, one per line.</span>
         <textarea className="mt-1 block w-full rounded-chip border border-line-strong bg-bg p-2 text-fg" rows={3} maxLength={NOTES_LIMITS.unsureChars} value={r.unsure} data-testid="pm-brief-unsure"
-          onChange={(e) => set(() => ({ unsure: e.target.value }))} onBlur={() => keepNotes()} />
+          onChange={(e) => { set(() => ({ unsure: e.target.value })); setSavedNote(null); }} onBlur={() => void keepNotes(false)} />
       </label>
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" className={buttonQuiet} data-testid="pm-brief-add-conversation" disabled={conversation().length === 0}
-          onClick={() => { const c = conversationNotes(conversation()); set((x) => ({ points: `${x.points.trimEnd()}${x.points.trim() ? '\n' : ''}${c.text}`.slice(0, NOTES_LIMITS.pointsChars), restrictedTurns: x.restrictedTurns || c.restricted })); keepNotes(); }}>
+          onClick={() => { const c = conversationNotes(conversation()); set((x) => ({ points: `${x.points.trimEnd()}${x.points.trim() ? '\n' : ''}${c.text}`.slice(0, NOTES_LIMITS.pointsChars), restrictedTurns: x.restrictedTurns || c.restricted })); void keepNotes(false); }}>
           Add this conversation
         </button>
-        <label className="flex items-center gap-2 text-sm text-fg"><input type="checkbox" data-testid="pm-brief-restricted" checked={r.marked || locked} disabled={locked} onChange={(e) => { set(() => ({ marked: e.target.checked })); }} />These notes are restricted</label>
+        <button type="button" className={buttonQuiet} data-testid="pm-brief-save" disabled={!r.points.trim() && !r.unsure.trim()} onClick={() => { void keepNotes(true).then(() => setSavedNote(label === 'restricted' ? 'Saved on this device only.' : 'Saved on this device and by the server.')); }}>Save notes</button>
+        {savedNote ? <span role="status" className="text-sm text-fg" data-testid="pm-brief-saved">{savedNote}</span> : null}
       </div>
       <p className="text-sm text-fg" data-testid="pm-brief-label">
         Label: <b>{label}</b>. {label === 'restricted'
           ? `Kept only on this device, and the brief made from them is never sent to the cloud${locked ? ': this task reads restricted data' : r.restrictedTurns ? ': they hold a restricted turn' : ''}.`
-          : 'Kept on this device and by the server, like the Project Manager\'s turns.'}
+          : 'Kept on this device while you type; Save notes or Format also stores them with the server, like the Project Manager\'s turns.'}
       </p>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={buttonPrimary} data-testid="pm-brief-format" disabled={!h.agents || busy || r.format?.status === 'running' || (!r.points.trim() && !r.unsure.trim())} onClick={() => void format()}>Format on this device</button>

@@ -268,3 +268,28 @@ describe('AI step checkpoints on the server (H12)', () => {
     });
   });
 });
+
+describe('H13 fix round 1 (H2): the owner deletes a checkpoint whose notes became restricted', () => {
+  const del = (id: string, headers?: Record<string, string>) => h.app.inject({ method: 'DELETE', url: `/v1/projects/${PROJECT}/ai-checkpoints/${id}`, headers: headers ?? { authorization: 'Bearer firebase-owner-token' } });
+  const notes = (text: string): AiCheckpoint => cp({
+    checkpointId: 'ckp_notes_0123456789abcdef', stepKind: 'researchNotes', stage: 'research_notes', status: 'done', stopReason: null, routeMode: null, continuation: 'device_only',
+    partial: { issues: [], texts: [{ who: 'owner', text: `P|${text}`, classification: 'internal' }] },
+  });
+
+  it('saved internal, then deleted: no table holds the canary, the list never serves the id again, and a stale save of it is refused', async () => {
+    expect((await save(notes(CANARY))).status).toBe(201);
+    expect(await canaryFound()).not.toEqual([]);
+    expect((await del('ckp_notes_0123456789abcdef', bearer(INTRUDER_TOKEN))).statusCode).toBe(403);
+    expect((await del('ckp_notes_0123456789abcdef')).statusCode).toBe(204);
+    expect(await canaryFound()).toEqual([]);
+    expect((await list()).body.checkpoints).toEqual([]);
+    const stale = await save(notes(CANARY));
+    expect(stale.body.error?.code).toBe('checkpoint_deleted');
+    expect(await canaryFound()).toEqual([]);
+    expect((await list()).body.checkpoints).toEqual([]);
+    // Deleting again, or an id the server never had, changes nothing.
+    expect((await del('ckp_notes_0123456789abcdef')).statusCode).toBe(204);
+    expect((await del('ckp_never_stored_00000000')).statusCode).toBe(204);
+    expect((await post(h.app, `/v1/projects/${PROJECT}/ai-checkpoints/ckp_notes_0123456789abcdef/send-claim`, {})).status).not.toBe(200);
+  });
+});

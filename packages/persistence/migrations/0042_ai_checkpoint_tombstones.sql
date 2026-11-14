@@ -1,0 +1,1 @@
+ALTER TABLE "ai_checkpoints" ADD COLUMN "deleted_at" timestamp with time zone;

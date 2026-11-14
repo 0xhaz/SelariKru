@@ -112,6 +112,8 @@ export interface EngineeringDataSource {
   claimAiCheckpointEscalation?(projectId: string, checkpointId: string): Promise<AiCheckpoint>;
   /** H12 fix round 1 (M1): claims a waiting checkpoint for sending (waiting → sending), so only one tab sends it. A second claim is refused (`checkpoint_claimed`). */
   claimAiCheckpointSend?(projectId: string, checkpointId: string): Promise<AiCheckpoint>;
+  /** H13 fix round 1 (H2): deletes the owner's own checkpoint (notes that became restricted). The id is never listed or stored again. */
+  deleteAiCheckpoint?(projectId: string, checkpointId: string): Promise<void>;
   disconnect(): void;
 }
 

@@ -133,4 +133,14 @@ describe('the demo\'s AI step checkpoints (H12)', () => {
     const { snap, runId } = await setup();
     expect(snap.runs[runId]!.policy?.budgetLimitUsd).toMatchObject({ basis: 'configured' });
   });
+
+  it('H13 fix round 1 (H2): the owner deletes a checkpoint; the demo never lists it again and refuses a later save of it', async () => {
+    const { ds, f, cp } = await setup();
+    await ds.saveAiCheckpoint!(f.projectId, cp());
+    await ds.deleteAiCheckpoint!(f.projectId, 'ckp_demo_000000001');
+    expect(await ds.listAiCheckpoints!(f.projectId)).toEqual([]);
+    await expect(ds.saveAiCheckpoint!(f.projectId, cp())).rejects.toThrow(/checkpoint_deleted/);
+    expect(await ds.listAiCheckpoints!(f.projectId)).toEqual([]);
+  });
 });
+

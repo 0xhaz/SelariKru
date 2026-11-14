@@ -66,7 +66,7 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const { id: projectId } = req.params as { id: string };
     await requireProject(db, tenantId, projectId);
     const rows = await db.select().from(schema.aiCheckpoints)
-      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.ownerUid, uid)))
+      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.ownerUid, uid), isNull(schema.aiCheckpoints.deletedAt)))
       .orderBy(desc(schema.aiCheckpoints.updatedAt)).limit(LIST_LIMIT);
     // Fix round 1 (I4): judged again by each task's lock now (computed as every route read computes it): a checkpoint stored while its task was internal is
     // withheld once the task reads restricted data, so it never reaches a browser that would send it to the cloud.
@@ -95,7 +95,10 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
       if (inserted.length > 0) return true;
       const [prior] = await tx.select().from(schema.aiCheckpoints)
         .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, cp.checkpointId))).for('update');
-      if (prior && (prior.ownerUid !== uid || prior.taskId !== cp.taskId)) throw new AppError(404, 'checkpoint_not_found', 'no such checkpoint');
+      if (prior && prior.ownerUid !== uid) throw new AppError(404, 'checkpoint_not_found', 'no such checkpoint');
+      // H13 fix round 1 (H2): a deleted id stays deleted: a stale tab cannot store it again.
+      if (prior && prior.deletedAt !== null) throw new AppError(410, 'checkpoint_deleted', 'this checkpoint was deleted by its owner and is not stored again');
+      if (prior && prior.taskId !== cp.taskId) throw new AppError(404, 'checkpoint_not_found', 'no such checkpoint');
       // A closed checkpoint stays closed: a stale tab cannot send it again by saving it as waiting.
       if (prior && CLOSED.has(prior.status) && prior.status !== cp.status) throw new AppError(409, 'checkpoint_closed', `this step was already ${prior.status.replace(/_/g, ' ')}; it is not reopened`);
       // Fix round 2 (N4): a row being sent takes a save only from the tab holding its claim, and only to what a send ends in. Another tab may close a claim left
@@ -127,7 +130,7 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const claimToken = randomBytes(24).toString('base64url');
     const [claimed] = await db.update(schema.aiCheckpoints)
       .set({ status: 'sending', updatedAt: at, claimToken, body: sql`jsonb_set(jsonb_set(${schema.aiCheckpoints.body}, '{status}', '"sending"'::jsonb), '{updatedAt}', to_jsonb(${at.toISOString()}::text))` })
-      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), eq(schema.aiCheckpoints.status, 'waiting')))
+      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), eq(schema.aiCheckpoints.status, 'waiting'), isNull(schema.aiCheckpoints.deletedAt)))
       .returning();
     if (!claimed) {
       const [row] = await db.select({ status: schema.aiCheckpoints.status }).from(schema.aiCheckpoints)
@@ -139,6 +142,25 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     return { checkpoint: { ...bodyOf(claimed), claimToken } };
   });
 
+  // H13 fix round 1 (H2): the owner deletes their own checkpoint (notes that became restricted after a server copy existed). Its body is scrubbed and the row kept
+  // as a tombstone, so the id is never listed, claimed or stored again. An id the server never had gets a tombstone too, so a save still in flight cannot land.
+  // Another owner's row is left alone, and the answer is the same, so nothing about it is told.
+  app.delete('/v1/projects/:id/ai-checkpoints/:checkpointId', guard, async (req, reply) => {
+    const uid = ownerOf(req);
+    const { id: projectId, checkpointId } = req.params as { id: string; checkpointId: string };
+    await requireProject(db, tenantId, projectId);
+    if (!/^ckp_[A-Za-z0-9_-]{8,80}$/.test(checkpointId)) throw new AppError(400, 'invalid_request', 'not a checkpoint id', { field: 'checkpointId' });
+    const at = now();
+    const scrubbed = { checkpointId, locked: false, labels: [], partial: null, deleted: true } as unknown as Record<string, unknown>;
+    await db.insert(schema.aiCheckpoints).values({ tenantId, projectId, checkpointId, ownerUid: uid, taskId: '(deleted)', status: 'dropped', stopReason: null, body: scrubbed, escalatedAt: null, claimToken: null, createdAt: at, updatedAt: at, deletedAt: at })
+      .onConflictDoUpdate({
+        target: [schema.aiCheckpoints.tenantId, schema.aiCheckpoints.projectId, schema.aiCheckpoints.checkpointId],
+        set: { status: 'dropped', stopReason: null, body: scrubbed, claimToken: null, updatedAt: at, deletedAt: sql`coalesce(${schema.aiCheckpoints.deletedAt}, ${at.toISOString()}::timestamptz)` },
+        setWhere: eq(schema.aiCheckpoints.ownerUid, uid),
+      });
+    return reply.code(204).send();
+  });
+
   // Escalation, at most once (H12): a stopped Local first step whose local result failed its checks may continue in the cloud. Judged here on the route as it is now,
   // then claimed by one conditional update: a reload, a second tab or a retry gets `already_escalated`.
   app.post('/v1/projects/:id/ai-checkpoints/:checkpointId/escalation', guard, async (req) => {
@@ -146,7 +168,7 @@ export function registerAiCheckpointRoutes(app: FastifyInstance, ctx: AppContext
     const { id: projectId, checkpointId } = req.params as { id: string; checkpointId: string };
     await requireProject(db, tenantId, projectId);
     const [row] = await db.select().from(schema.aiCheckpoints)
-      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid)));
+      .where(and(eq(schema.aiCheckpoints.tenantId, tenantId), eq(schema.aiCheckpoints.projectId, projectId), eq(schema.aiCheckpoints.checkpointId, checkpointId), eq(schema.aiCheckpoints.ownerUid, uid), isNull(schema.aiCheckpoints.deletedAt)));
     if (!row) throw new AppError(404, 'checkpoint_not_found', 'no such checkpoint');
     const cp = bodyOf(row);
     const task = await loadTaskRoute(db, tenantId, projectId, cp.taskId, config.nanoInputBudgetChars);

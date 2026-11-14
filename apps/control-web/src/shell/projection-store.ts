@@ -53,7 +53,7 @@ export interface ProjectionStoreState {
 }
 
 /** The reads the task agents need from the source. */
-export type AgentSource = Pick<EngineeringDataSource, 'planBriefSample' | 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan' | 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend'>;
+export type AgentSource = Pick<EngineeringDataSource, 'planBriefSample' | 'getTaskRoute' | 'getTaskContext' | 'getTaskContextSize' | 'reviseTaskCriteria' | 'acceptPatchProposal' | 'getTaskFiles' | 'listTaskFiles' | 'getProposalState' | 'delegate' | 'assign' | 'acceptPmPlan' | 'saveAiCheckpoint' | 'listAiCheckpoints' | 'claimAiCheckpointEscalation' | 'claimAiCheckpointSend' | 'deleteAiCheckpoint'>;
 
 /** Reads of the handovers, and the owner's two actions. An action refuses to send while the session is not live, as a command does. */
 export interface HandoverPort {
@@ -231,6 +231,7 @@ export function createProjectionStore(options: { source: EngineeringDataSource |
         ...(source.listAiCheckpoints ? { listAiCheckpoints: source.listAiCheckpoints.bind(source) } : {}),
         ...(source.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: source.claimAiCheckpointEscalation.bind(source) } : {}),
         ...(source.claimAiCheckpointSend ? { claimAiCheckpointSend: source.claimAiCheckpointSend.bind(source) } : {}),
+        ...(source.deleteAiCheckpoint ? { deleteAiCheckpoint: source.deleteAiCheckpoint.bind(source) } : {}),
         ...(source.getTaskFiles ? { getTaskFiles: source.getTaskFiles.bind(source) } : {}),
         ...(source.listTaskFiles ? { listTaskFiles: source.listTaskFiles.bind(source) } : {}),
         ...(source.getProposalState ? { getProposalState: source.getProposalState.bind(source) } : {}),

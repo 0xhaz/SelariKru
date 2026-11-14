@@ -23,6 +23,11 @@ export const aiCheckpoints = pgTable(
     escalatedAt: tstz('escalated_at'),
     /** Fix round 2 (N4): the claim token of the tab sending this row, while it is `sending`. */
     claimToken: text('claim_token'),
+    /**
+     * H13 fix round 1 (H2): the owner deleted it (its notes became restricted after a server copy existed). The row stays as a tombstone with its body scrubbed:
+     * never listed, never claimed, and a later save of the same id is refused, so a stale tab cannot bring it back.
+     */
+    deletedAt: tstz('deleted_at'),
     body: jsonb('body').$type<Record<string, unknown>>().notNull(),
     createdAt: tstz('created_at').notNull(),
     updatedAt: tstz('updated_at').notNull(),

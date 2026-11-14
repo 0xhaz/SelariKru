@@ -64,4 +64,21 @@ describe('live AI step checkpoints (H12)', () => {
     expect(live.calls[0]).toMatchObject({ url: 'http://x/v1/projects/p/ai-checkpoints/ckp_0123456789abcdef/send-claim', method: 'POST' });
     await expect(live.s.claimAiCheckpointSend!('p', 'ckp_0123456789abcdef')).rejects.toThrow(/checkpoint_claimed/);
   });
+
+  it('H13 fix round 1 (H2): deletes the owner\'s own checkpoint with DELETE; a refusal keeps its code', async () => {
+    const calls: { url: string; method: string }[] = [];
+    const statuses = [204, 403];
+    const s = createLiveDataSource({
+      baseUrl: 'http://x', getToken: async () => 't',
+      fetch: (async (url: string, init?: RequestInit) => {
+        calls.push({ url: String(url), method: init?.method ?? 'GET' });
+        const status = statuses[calls.length - 1]!;
+        return status === 204 ? new Response(null, { status }) : new Response(JSON.stringify({ error: { code: 'forbidden', message: 'no' } }), { status });
+      }) as unknown as typeof fetch,
+    });
+    await s.deleteAiCheckpoint!('p', 'ckp_0123456789abcdef');
+    expect(calls[0]).toEqual({ url: 'http://x/v1/projects/p/ai-checkpoints/ckp_0123456789abcdef', method: 'DELETE' });
+    await expect(s.deleteAiCheckpoint!('p', 'ckp_0123456789abcdef')).rejects.toBeInstanceOf(DataSourceException);
+  });
 });
+

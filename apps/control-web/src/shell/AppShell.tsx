@@ -67,7 +67,7 @@ import { connectivity, isOnline, onReconnect, useOnlineNow, useSimulatedOffline,
 import { checkpointActivity, waitingCloudCalls } from '../features/checkpoints/model.ts';
 import { PausedWork } from '../features/checkpoints/PausedWork.tsx';
 import { pausedRows } from '../features/checkpoints/model.ts';
-import { approvedBriefSha, pmBrief } from '../features/pm/brief-store.ts';
+import { approvedBriefSha, briefKey, pmBrief } from '../features/pm/brief-store.ts';
 import { screenCheck } from '../features/pm/brief.ts';
 import type { PmOutcome } from '../features/pm/runner.ts';
 import { pmConversation } from '../features/pm/PmPanel.tsx';
@@ -343,7 +343,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
     const projectId = state.projectId;
     return createCheckpointEngine({
       projectId, ownerKey: owner, device: deviceStore(),
-      server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}), ...(src.claimAiCheckpointSend ? { claimAiCheckpointSend: src.claimAiCheckpointSend } : {}) } : null,
+      server: src.saveAiCheckpoint ? { saveAiCheckpoint: src.saveAiCheckpoint, ...(src.listAiCheckpoints ? { listAiCheckpoints: src.listAiCheckpoints } : {}), ...(src.claimAiCheckpointEscalation ? { claimAiCheckpointEscalation: src.claimAiCheckpointEscalation } : {}), ...(src.claimAiCheckpointSend ? { claimAiCheckpointSend: src.claimAiCheckpointSend } : {}), ...(src.deleteAiCheckpoint ? { deleteAiCheckpoint: src.deleteAiCheckpoint } : {}) } : null,
       getTaskRoute: (taskId) => src.getTaskRoute!(projectId, taskId),
       getTaskContext: (taskId, destination, callOverride, contextId) => src.getTaskContext!(projectId, taskId, destination, callOverride, contextId),
       ...(src.getTaskFiles ? { getTaskFiles: (taskId: string, paths: readonly string[]) => src.getTaskFiles!(projectId, taskId, paths) } : {}),
@@ -351,7 +351,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       // The projection's own clock: the demo's under demo data, so checkpoints sit in the same timeline as everything else.
       now: () => new Date(store.getState().nowMs),
       // H13: a paused plan brief check is sent only with the brief the owner has approved now, by hash.
-      currentBriefSha: (cp) => approvedBriefSha(cp.runId),
+      currentBriefSha: (cp) => approvedBriefSha(cp.runId, cp.taskId),
     });
   }, [agentRuntime, state.agentSource, state.projectId, store, owner]);
   const agents = useMemo((): AgentsPort | null => (agentRuntime && state.agentSource ? createAgents({
@@ -365,8 +365,8 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         const kind = req.kind;
         const o = outcome as PmOutcome & { simulated: boolean };
         if (o.kind === 'result' && o.result.proposal.status === 'ok') {
-          const sha = approvedBriefSha(o.runId);
-          if (sha) pmBrief.getState().set(o.runId, () => ({ check: { kind, status: 'done', result: screenCheck(kind, o.result.proposal.data), grounding: o.result.grounding ?? null, briefSha256: sha, simulated: o.simulated, resumed: true } }));
+          const sha = approvedBriefSha(o.runId, req.taskId);
+          if (sha) pmBrief.getState().set(briefKey(o.runId, req.taskId), () => ({ check: { kind, status: 'done', result: screenCheck(kind, o.result.proposal.data), grounding: o.result.grounding ?? null, briefSha256: sha, simulated: o.simulated, resumed: true } }));
         }
       } else if (req.kind.startsWith('pm')) {
         pmConversation.getState().add({ who: 'owner', text: req.question ?? '', restricted: req.restricted === true, kind: req.kind as never });

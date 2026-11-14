@@ -698,5 +698,41 @@ describe('H13: plan brief notes and checks', () => {
     await h.engine.moveToDevice(r.id);
     expect(h.runner.pm).not.toHaveBeenCalled();
   });
+
+  it('fix round 1 (H2): notes kept on blur stay on this device; saved internal and then marked restricted, the server copy is deleted and the device copy is restricted', async () => {
+    const h = setup();
+    const deleted: string[] = [];
+    (h.deps.server as { deleteAiCheckpoint?: (p: string, id: string) => Promise<void> }).deleteAiCheckpoint = async (_p, id) => { deleted.push(id); h.server.rows.delete(id); };
+    const internal = notes('internal');
+    // On blur: on this device only.
+    await h.engine.keep(internal, { server: false });
+    expect(h.server.saved).toEqual([]);
+    expect((await h.device.list('owner_1', 'p')).map((c) => c.checkpointId)).toEqual([internal.checkpointId]);
+    // Save notes: the label is settled, so it is stored by the server too.
+    await h.engine.keep(internal, { server: true });
+    expect(JSON.stringify([...h.server.rows.values()])).toContain(NOTES_CANARY);
+    // Marked restricted: the same notes, now restricted. The server copy is deleted; the device copy is restricted.
+    const restricted: AiCheckpoint = { ...internal, labels: ['restricted'], locked: true, partial: { issues: [], texts: [{ who: 'owner', text: `P|${NOTES_CANARY} internal`, classification: 'restricted' }] }, updatedAt: '2026-11-12T00:01:00.000Z' };
+    await h.engine.keep(restricted, { server: true });
+    expect(deleted).toEqual([internal.checkpointId]);
+    expect(JSON.stringify([...h.server.rows.values()])).not.toContain(NOTES_CANARY);
+    const [dev] = await h.device.list('owner_1', 'p');
+    expect(dev).toMatchObject({ labels: ['restricted'], deviceOnly: true });
+  });
+
+  it('fix round 1 (H2): a delete that could not reach the server is tried again on reconnect', async () => {
+    const h = setup();
+    let up = true;
+    const deleted: string[] = [];
+    (h.deps.server as { deleteAiCheckpoint?: (p: string, id: string) => Promise<void> }).deleteAiCheckpoint = async (_p, id) => { if (!up) throw new Error('unavailable: network error'); deleted.push(id); };
+    const internal = notes('internal');
+    await h.engine.keep(internal, { server: true });
+    up = false;
+    await h.engine.keep({ ...internal, labels: ['restricted'], locked: true, partial: { issues: [], texts: [{ who: 'owner', text: 'P|x', classification: 'restricted' }] } }, { server: true });
+    expect(deleted).toEqual([]);
+    up = true;
+    await h.engine.reconnect();
+    expect(deleted).toEqual([internal.checkpointId]);
+  });
 });
 

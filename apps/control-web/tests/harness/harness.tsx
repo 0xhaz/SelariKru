@@ -87,7 +87,7 @@ interface Scenario {
 declare global {
   interface Window {
     __scenario?: Scenario;
-    __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[] };
+    __calls: { adapter: unknown[]; api: unknown[]; commands: unknown[]; sequences: number[]; checkpoints: unknown[] };
     __spiedSource?: EngineeringDataSource;
     __advance?: (ms: number) => void;
     __allowFailureLoads?: () => void;
@@ -102,7 +102,7 @@ declare global {
 }
 
 const sc: Scenario = window.__scenario ?? {};
-window.__calls = { adapter: [], api: [], commands: [], sequences: [] };
+window.__calls = { adapter: [], api: [], commands: [], sequences: [], checkpoints: [] };
 let device: Readiness['device'] = sc.device ?? 'available';
 
 const gate = (): { p: Promise<void>; release: () => void } => {
@@ -233,6 +233,9 @@ async function spiedShell(fixtureId: string): Promise<{ store: ProjectionStore; 
       const patched = (id: string, t: (typeof base.tasks)[string]): (typeof base.tasks)[string] => ({ ...t, ...(sc.dependsOn && id in sc.dependsOn ? { dependsOn: sc.dependsOn[id]! } : {}), ...(sc.taskPatch?.[id] ?? {}) });
       return { ...withWorkers, approvals: { ...base.approvals, ...(sc.extraApprovals ?? {}) } as typeof base.approvals, workers: Object.fromEntries(Object.entries(base.workers).map(([id, w]) => [id, { ...w, ...(sc.workerPatch?.[id] ?? {}) }])), runs: Object.fromEntries(Object.entries(base.runs).map(([id, r]) => [id, { ...r, ...(sc.runPatch ?? {}) }])), tasks: Object.fromEntries(Object.entries(base.tasks).map(([id, t]) => [id, patched(id, t)])), attempts: Object.fromEntries(Object.entries(base.attempts).map(([id, a]) => [id, { ...a, ...(sc.attemptPatch?.['*'] ?? {}), ...(sc.attemptPatch?.[id] ?? {}) }])) };
     },
+    // H13 fix round 1: what reaches the (demo) server's checkpoint store, so a spec can check restricted notes never do.
+    ...(session.source.saveAiCheckpoint ? { saveAiCheckpoint: (projectId: string, cp: Parameters<NonNullable<EngineeringDataSource['saveAiCheckpoint']>>[1]) => { window.__calls.checkpoints.push({ method: 'saveAiCheckpoint', checkpoint: JSON.parse(JSON.stringify(cp)) }); return session.source.saveAiCheckpoint!(projectId, cp); } } : {}),
+    ...(session.source.deleteAiCheckpoint ? { deleteAiCheckpoint: (projectId: string, id: string) => { window.__calls.checkpoints.push({ method: 'deleteAiCheckpoint', checkpointId: id }); return session.source.deleteAiCheckpoint!(projectId, id); } } : {}),
     execute: (command) => {
       window.__calls.commands.push({ method: 'execute', command });
       if (sc.holdExecute) return new Promise(() => {});

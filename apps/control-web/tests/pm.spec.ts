@@ -246,3 +246,49 @@ test('H13: a locked subject makes the notes restricted: the brief stays on this 
   await expect(brief.getByTestId('pm-brief-check-blocked')).toContainText('restricted');
   await expect(brief.getByRole('button', { name: 'Approve brief' })).toBeDisabled();
 });
+
+const checkpointWrites = (page: Page) => page.evaluate(() => JSON.stringify((window as unknown as { __calls: { checkpoints: unknown[] } }).__calls.checkpoints));
+
+test('H13 fix round 1 (H2): notes typed and left are kept on this device only; saved and then marked restricted, the server copy is deleted', async ({ page }) => {
+  const CANARY = 'CANARY-H13-F1-H2-WARD-ROTA';
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  const brief = page.getByTestId('pm-brief');
+  await brief.getByTestId('pm-brief-points').fill(`${CANARY} first`);
+  await brief.getByTestId('pm-brief-unsure').click();
+  await brief.getByTestId('pm-brief-restricted').check();
+  await expect(brief.getByTestId('pm-brief-label')).toContainText('restricted');
+  await brief.getByRole('button', { name: 'Save notes' }).click();
+  await expect(brief.getByTestId('pm-brief-saved')).toHaveText('Saved on this device only.');
+  expect(await checkpointWrites(page)).not.toContain(CANARY);
+  // Another subject's notes: saved while internal, they are stored by the server; marked restricted, that copy is deleted.
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.api');
+  await brief.getByTestId('pm-brief-points').fill(`${CANARY} second`);
+  await brief.getByRole('button', { name: 'Save notes' }).click();
+  await expect(brief.getByTestId('pm-brief-saved')).toHaveText('Saved on this device and by the server.');
+  await expect.poll(() => checkpointWrites(page)).toContain(`${CANARY} second`);
+  await brief.getByTestId('pm-brief-restricted').check();
+  await expect.poll(() => checkpointWrites(page)).toContain('deleteAiCheckpoint');
+  expect(await checkpointWrites(page)).not.toContain(`${CANARY} first`);
+});
+
+test('H13 fix round 1 (H3): notes written under a locked subject stay restricted when the subject changes, never reach the server, and cannot be ticked', async ({ page }) => {
+  const CANARY = 'CANARY-H13-F1-H3-PATIENTS';
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, '#/pm');
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.e2e');
+  const brief = page.getByTestId('pm-brief');
+  await expect(brief.getByTestId('pm-brief-restricted')).toBeChecked();
+  await brief.getByTestId('pm-brief-points').fill(`${CANARY}: list the ward rota.`);
+  await brief.getByRole('button', { name: 'Save notes' }).click();
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.contract');
+  await expect(brief.getByTestId('pm-brief-points')).not.toHaveValue(new RegExp(CANARY));
+  await brief.getByRole('button', { name: 'Save notes' }).click();
+  await page.getByTestId('pm-subject').selectOption('feature-delivery.e2e');
+  await expect(brief.getByTestId('pm-brief-points')).toHaveValue(new RegExp(CANARY));
+  await expect(brief.getByTestId('pm-brief-label')).toContainText('restricted');
+  await brief.getByRole('button', { name: 'Format on this device' }).click();
+  await expect(brief.getByTestId('pm-brief-item').first().getByTestId('pm-brief-item-tick')).toBeDisabled();
+  expect(await checkpointWrites(page)).not.toContain(CANARY);
+});
