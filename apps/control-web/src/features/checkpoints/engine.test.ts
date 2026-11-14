@@ -734,5 +734,19 @@ describe('H13: plan brief notes and checks', () => {
     await h.engine.reconnect();
     expect(deleted).toEqual([internal.checkpointId]);
   });
+
+  it('fix round 1 (M1): a paused check whose task is now device only is not sent, and says why', async () => {
+    const SHA = 'b'.repeat(64);
+    let r = route();
+    const h = setup({ currentBriefSha: () => SHA }, () => r);
+    h.setSnap({ ...snap(), settings: [{ scope: 'run', key: 'run', field: 'web_research', desired: true } as never] });
+    h.setOnline(false);
+    const id = await pauseVerify(h, SHA);
+    r = route({ override: 'ONLY_ON_DEVICE', effective: 'ONLY_ON_DEVICE' });
+    h.setOnline(true);
+    await h.engine.reconnect();
+    expect(h.runner.pm).not.toHaveBeenCalled();
+    expect(h.engine.store.getState().problems[id]).toEqual(['route_device_only']);
+  });
 });
 

@@ -178,9 +178,11 @@ export interface CheckpointRecheck {
   readonly context: 'ok' | 'refused' | 'not_applicable';
   /** H13: a plan brief check with Google Search: whether the run's web research setting is on now. Absent: not a check that needs it. */
   readonly webResearch?: boolean;
+  /** H13 fix round 1 (M1): a brief check: the subject's route without the check's own override is device only now (its override or its effective route). */
+  readonly deviceOnly?: boolean;
 }
 
-export const CHECKPOINT_PROBLEMS = ['not_waiting', 'route_unreadable', 'route_changed', 'locked', 'revision_changed', 'inputs_changed', 'budget_missing', 'budget_exhausted', 'context_refused', 'web_research_off'] as const;
+export const CHECKPOINT_PROBLEMS = ['not_waiting', 'route_unreadable', 'route_changed', 'locked', 'revision_changed', 'inputs_changed', 'budget_missing', 'budget_exhausted', 'context_refused', 'web_research_off', 'route_device_only'] as const;
 export type CheckpointProblem = (typeof CHECKPOINT_PROBLEMS)[number];
 export type CheckpointRevalidation = { readonly ok: true } | { readonly ok: false; readonly problems: readonly CheckpointProblem[] };
 
@@ -208,6 +210,7 @@ export function revalidateCheckpoint(cp: AiCheckpoint, now: CheckpointRecheck, t
     || (cp.inputs.briefSha256 != null && i.briefSha256 !== cp.inputs.briefSha256);
   if (changed) problems.push('inputs_changed');
   if (now.webResearch === false) problems.push('web_research_off');
+  if (now.deviceOnly === true) problems.push('route_device_only');
   if (to === 'cloud' && now.budget !== 'ok') problems.push(now.budget === 'missing' ? 'budget_missing' : 'budget_exhausted');
   if (now.context === 'refused') problems.push('context_refused');
   return problems.length === 0 ? { ok: true } : { ok: false, problems };

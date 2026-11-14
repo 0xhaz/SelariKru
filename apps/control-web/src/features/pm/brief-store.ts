@@ -2,7 +2,11 @@ import type { SdkGrounding } from '@selarikru/inference-firebase-web';
 import { create } from 'zustand';
 import type { AiCheckpoint } from '@selarikru/domain';
 import type { ProjectViewSnapshot } from '@selarikru/view-protocol';
-import { cloudRefusal, latestBrief, type BriefCheck, type BriefDraft } from './brief.ts';
+import { stopReasonFor } from '@selarikru/domain';
+import { STOP_TEXT } from '../checkpoints/model.ts';
+import { cloudRefusal, latestBrief, screenCheck, type BriefCheck, type BriefDraft } from './brief.ts';
+import { pmRefusal } from './copy.ts';
+import type { PmOutcome } from './runner.ts';
 import type { BriefCheckKind } from './runner.ts';
 
 /**
@@ -54,4 +58,20 @@ export const briefKey = (runId: string, taskId: string): string => `${runId}\u00
 export function approvedBriefSha(runId: string, taskId: string, kept?: Readonly<Record<string, AiCheckpoint>>, snap?: ProjectViewSnapshot | null): string | null {
   const d = pmBrief.getState().runs[briefKey(runId, taskId)]?.draft ?? (kept ? latestBrief(kept, snap ?? null, runId, taskId) : null);
   return d && cloudRefusal(d) === null ? d.approvedSha256 : null;
+}
+
+/**
+ * H13 fix round 1 (M2): what the panel shows after a paused check was sent again. A refusal shows as failed with its reason; a call that paused again as
+ * paused; an ok one as done, and only while the brief it checked is still the one approved (`sha`).
+ */
+export function checkStateAfterResume(kind: BriefCheckKind, out: PmOutcome & { readonly simulated?: boolean }, sha: string | null): CheckState {
+  if (out.kind === 'refused') return { kind, status: 'failed', message: pmRefusal(out.code) };
+  const p = out.result.proposal;
+  if (p.status === 'ok') {
+    if (!sha) return { kind, status: 'failed', message: 'The brief changed after it was approved, so this check is not shown. Approve it and check it again.' };
+    return { kind, status: 'done', result: screenCheck(kind, p.data, out.result.grounding ?? null), grounding: out.result.grounding ?? null, briefSha256: sha, simulated: out.simulated === true, resumed: true };
+  }
+  const stop = stopReasonFor(p.blockedReason);
+  if (stop) return { kind, status: 'paused', reason: STOP_TEXT[stop] };
+  return { kind, status: 'failed', message: pmRefusal(p.blockedReason ?? p.status) };
 }

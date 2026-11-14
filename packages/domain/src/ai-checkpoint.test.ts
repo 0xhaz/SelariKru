@@ -173,3 +173,12 @@ describe('H13: the plan brief and its cloud check as checkpoints', () => {
     expect(resumeDisposition(cp({ stepKind: 'pmResearch' }), { planRevision: 3, taskIds: ['t1'] })).toBe('owner');
   });
 });
+
+describe('H13 fix round 1 (M1): a paused brief check whose subject is now device only', () => {
+  it('is not sent: the re-validation reports it', () => {
+    const v = cp({ stepKind: 'pmVerify', stage: 'pm_turn', callOverride: 'ONLY_IN_CLOUD', inputs: { contextId: null, bundleSha256: null, files: [], inputChars: null, briefSha256: 'b'.repeat(64) } });
+    const now: CheckpointRecheck = { ...fine, inputs: { briefSha256: 'b'.repeat(64) }, context: 'not_applicable', webResearch: true };
+    expect(revalidateCheckpoint(v, { ...now, deviceOnly: true })).toEqual({ ok: false, problems: ['route_device_only'] });
+    expect(revalidateCheckpoint(v, { ...now, deviceOnly: false })).toEqual({ ok: true });
+  });
+});

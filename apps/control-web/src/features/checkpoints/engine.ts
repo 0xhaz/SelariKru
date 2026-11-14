@@ -337,7 +337,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
     if (BRIEF_CHECKS.has(cp.stepKind)) {
       // H13: a check reads no task context; its input is the approved brief, by hash, and the web check needs the run's web research setting on now.
       const snapNow = deps.snapshot();
-      return { route: { mode, lock: lock !== null }, taskRevision: read.revision, budget, inputs: { briefSha256: deps.currentBriefSha?.(cp) ?? null }, context: 'not_applicable', ...(cp.stepKind === 'pmVerify' ? { webResearch: webResearchOn(snapNow, cp.runId) } : {}) };
+      return { route: { mode, lock: lock !== null }, taskRevision: read.revision, budget, inputs: { briefSha256: deps.currentBriefSha?.(cp) ?? null }, context: 'not_applicable', ...(cp.stepKind === 'pmVerify' ? { webResearch: webResearchOn(snapNow, cp.runId) } : {}),
+        deviceOnly: read.route.override === 'ONLY_ON_DEVICE' || read.route.effective === 'ONLY_ON_DEVICE' };
     }
     if (cp.stepKind === 'pmResearch') {
       // Research reads no task context: there is nothing to serve or check (fix round 1, M4).

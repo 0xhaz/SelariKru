@@ -28,6 +28,7 @@ export const PROBLEM_TEXT: Readonly<Record<string, string>> = {
   locked: 'This task now reads restricted data, so it stays on this device.',
   revision_changed: 'The task has a new revision since it paused, so it was not sent.',
   inputs_changed: 'Its inputs changed since it paused (files, context or task revision), so it was not sent.',
+  route_device_only: 'This task now runs on this device only, so the cloud check was not sent. Drop it, or check again.',
   web_research_off: 'Web research is off for this run, so the check with Google Search was not sent. Turn on "Google Search (web research)" in Settings › Workflow, or check without web search.',
   budget_missing: 'This run has no budget set, so a cloud step is not sent. Missing is never unlimited: set one in Settings › Workflow.',
   budget_exhausted: 'This run\'s budget is used up, so a cloud step is not sent.',

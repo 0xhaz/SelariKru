@@ -67,8 +67,7 @@ import { connectivity, isOnline, onReconnect, useOnlineNow, useSimulatedOffline,
 import { checkpointActivity, waitingCloudCalls } from '../features/checkpoints/model.ts';
 import { PausedWork } from '../features/checkpoints/PausedWork.tsx';
 import { pausedRows } from '../features/checkpoints/model.ts';
-import { approvedBriefSha, briefKey, pmBrief } from '../features/pm/brief-store.ts';
-import { screenCheck } from '../features/pm/brief.ts';
+import { approvedBriefSha, briefKey, checkStateAfterResume, pmBrief } from '../features/pm/brief-store.ts';
 import type { PmOutcome } from '../features/pm/runner.ts';
 import { pmConversation } from '../features/pm/PmPanel.tsx';
 import type { AgentActionKind } from '../features/hybrid/model.ts';
@@ -367,11 +366,10 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
       if (req.kind === 'pmVerify' || req.kind === 'pmVerifyNoWeb') {
         // H13: a paused brief check, sent after reconnecting: its result goes where the brief lives.
         const kind = req.kind;
+        // Fix round 1 (M2): a refused or paused resume is shown too, not only a result.
         const o = outcome as PmOutcome & { simulated: boolean };
-        if (o.kind === 'result' && o.result.proposal.status === 'ok') {
-          const sha = approvedBriefSha(o.runId, req.taskId);
-          if (sha) pmBrief.getState().set(briefKey(o.runId, req.taskId), () => ({ check: { kind, status: 'done', result: screenCheck(kind, o.result.proposal.data, o.result.grounding ?? null), grounding: o.result.grounding ?? null, briefSha256: sha, simulated: o.simulated, resumed: true } }));
-        }
+        const runId = o.kind === 'result' ? o.runId : store.getState().projection?.snapshot?.tasks[req.taskId]?.runId;
+        if (runId) pmBrief.getState().set(briefKey(runId, req.taskId), () => ({ check: checkStateAfterResume(kind, o, approvedBriefSha(runId, req.taskId, engineRef.current?.store.getState().checkpoints, store.getState().projection?.snapshot ?? null)) }));
       } else if (req.kind.startsWith('pm')) {
         pmConversation.getState().add({ who: 'owner', text: req.question ?? '', restricted: req.restricted === true, kind: req.kind as never });
         pmConversation.getState().add({ who: 'pm', reply: { kind: req.kind as never, subjectTaskId: req.taskId, outcome: outcome as never } });
