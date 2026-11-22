@@ -27,7 +27,8 @@ On-device calls need desktop Chrome with the built-in Prompt API (Gemini Nano). 
 
 1. Use a recent desktop Chrome on a machine that meets the guide's disk, memory and GPU requirements.
 2. If the API is not on by default in your version, enable the Prompt API and the on-device model in `chrome://flags`, as the guide describes, then relaunch Chrome.
-3. Open `chrome://on-device-internals` to see the model's state. The first use may start a download. The app also offers to download the model where Chrome allows it.
+3. For the **Gemma 4** on-device model, enable `chrome://flags/#gemma4-for-built-in-ai` and relaunch. We tested with Chrome 157. Without the flag, Chrome serves its default Nano model, and the app works the same way.
+4. Open `chrome://on-device-internals` to see the model's state. The first use may start a download. The app also offers to download the model where Chrome allows it.
 
 **Without Nano**, the app says so in one calm banner when it first loads, and lists what each route will do:
 
@@ -63,12 +64,38 @@ pnpm --filter @selarikru/control-web exec vite preview --outDir dist-hosted
 
 The build fails if any `VITE_FIREBASE_*` variable or the reCAPTCHA site key is missing. It also refuses to build with an App Check debug token set.
 
+### Deploying the hosted demo
+
+The hosted demo is a static site on **Firebase Hosting** (the free Spark plan is enough). It has no server and no database. Set up the project in the Firebase and Google Cloud consoles first:
+
+1. Create a **reCAPTCHA Enterprise** key for your Hosting domains (`<project>.web.app` and `<project>.firebaseapp.com`), and register it as the web app's **App Check** provider.
+2. **Enforce App Check** for Firebase AI Logic, and set a per-user rate limit for AI Logic.
+3. Restrict the web **API key** to your Hosting domains and the APIs the app uses. Use a key that has never been committed.
+
+Then run:
+
+```sh
+pnpm check:hosted                 # builds dist-hosted and runs the pre-deploy check
+firebase deploy --only hosting    # runs the same build and check first; a failed check uploads nothing
+```
+
+The pre-deploy check ([tools/deploy/check-hosted.mjs](tools/deploy/check-hosted.mjs)) fails if the build has:
+
+- a benchmark or test page, or source maps;
+- no CSP;
+- an internal file reference or local path;
+- a token or private key;
+- no reCAPTCHA site key;
+- a Firebase API key that appears anywhere in git history.
+
+It never prints a key.
+
 ### Automated tests
 
 ```sh
 pnpm typecheck
 pnpm --filter @selarikru/control-web exec vitest run
-pnpm --filter @selarikru/control-web exec playwright test   # starts its own dev server on port 5174
+pnpm --filter @selarikru/control-web exec playwright test   # starts its own dev server on port 5174 (set PW_PORT to change it)
 ```
 
 No test needs a key: the build tests use placeholder values.

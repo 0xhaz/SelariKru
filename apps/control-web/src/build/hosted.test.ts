@@ -88,6 +88,10 @@ describe('H9: Firebase Hosting config (hosting only, never deployed from here)',
     expect(rc.projects.default).toBe('selarikru');
   });
 
+  it('builds the hosted demo and runs the pre-deploy check before every deploy, so a failed check uploads nothing', () => {
+    expect((json.hosting as unknown as { predeploy: string[] }).predeploy).toEqual(['pnpm --filter @selarikru/control-web build:hosted', 'node tools/deploy/check-hosted.mjs']);
+  });
+
   it('sends the security headers on every response, with a CSP that matches the page\'s meta CSP', () => {
     const all = headersFor('**');
     expect(all['Content-Security-Policy']).toBe(CONTENT_SECURITY_POLICY);

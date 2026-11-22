@@ -17,7 +17,8 @@
     "db:down": "docker compose -f infra/docker-compose.yml down -v",
     "dev:stack": "node infra/dev-stack.mjs",
     "dev:demo": "node infra/dev-demo.mjs",
-    "dev:real": "node infra/dev-real.mjs"
+    "dev:real": "node infra/dev-real.mjs",
+    "check:hosted": "pnpm --filter @selarikru/control-web build:hosted && node tools/deploy/check-hosted.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

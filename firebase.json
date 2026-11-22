@@ -1,6 +1,7 @@
 {
   "hosting": {
     "public": "apps/control-web/dist-hosted",
+    "predeploy": ["pnpm --filter @selarikru/control-web build:hosted", "node tools/deploy/check-hosted.mjs"],
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "rewrites": [{ "source": "**", "destination": "/index.html" }],
     "headers": [
