@@ -22,10 +22,13 @@ function hitTest(s: OfficeScene, sx: number, sy: number): Target | null {
   const l = s.layout;
   if (!l) return null;
   const { x, y } = s.camera.screenToWorld(sx, sy);
-  const bots = [...s.bots.values()].sort((a, b) => b.y - a.y);
+  // P1: the Project Manager is hit where it stands now, among the crew (nearest the viewer first). It is the PLAN table's hit: Talk to the PM.
+  const bots = [...s.bots.values(), ...(s.pm ? [s.pm] : [])].sort((a, b) => b.y - a.y);
   for (const b of bots) {
     const rect = s.botRect(b);
-    if (inside(rect, x, y)) return { hit: { kind: 'agent', id: b.config.id, rect }, rect };
+    if (!inside(rect, x, y)) continue;
+    if (b === s.pm) return { hit: { kind: 'lead', id: 'pm', rect }, rect };
+    return { hit: { kind: 'agent', id: b.config.id, rect }, rect };
   }
   for (const h of l.hits) if (inside(h.rect, x, y)) return { hit: h, rect: h.rect };
   return null;
@@ -60,7 +63,7 @@ export function attachInput(s: OfficeScene): () => void {
   const updateHover = (e: PointerEvent): void => {
     const p = local(e);
     const target = hitTest(s, p.x, p.y);
-    s.hover = target ? { rect: target.rect, agentId: target.hit.kind === 'agent' ? target.hit.id : null } : null;
+    s.hover = target ? { rect: target.rect, agentId: target.hit.kind === 'agent' || (target.hit.kind === 'lead' && target.hit.id === 'pm') ? target.hit.id : null } : null;
     el.style.cursor = down?.dragging ? 'grabbing' : target ? 'pointer' : 'grab';
     s.hooks.onHover(target ? { ...s.describe(target.hit.kind, target.hit.kind === 'env' ? s.layout?.racks.find((r) => r.name === target.hit.id)?.agentId ?? target.hit.id : target.hit.id), x: e.clientX, y: e.clientY } : null);
     s.invalidate();

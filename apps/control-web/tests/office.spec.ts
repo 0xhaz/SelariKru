@@ -669,3 +669,102 @@ test.describe('H9: the office floor, a grid of desks, a shared table and a kopit
     await expect.poll(async () => where(page, id)).toEqual({ kopitiam: true, atDesk: false, atTable: false, walking: false });
   });
 });
+
+test.describe('P1: the Project Manager is a robot that walks, only when something happens', () => {
+  type Tile = [number, number];
+  type Pm = {
+    world: { recentEvents?: unknown; meeting?: { pm: boolean } } | null;
+    recentEvents: { kind: string; agentId?: string }[];
+    layout: { lead: { seat: Tile }; table: { pmSpot: Tile }; plan: { spot: Tile } };
+    bots: Map<string, { tile(l: unknown): Tile }>;
+    speed: number;
+    pmOnScreen(): { x: number; y: number } | null;
+    pmWhere(): { tile: Tile; walking: boolean; seated: boolean; errand: string | null } | null;
+  };
+  const office = (page: Page) => page.evaluate(() => Boolean((window as unknown as { __selarikruOffice?: Pm }).__selarikruOffice?.world));
+  const pmWhere = (page: Page) => page.evaluate(() => (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.pmWhere()!);
+  const pmOnScreen = (page: Page) => page.evaluate(() => (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.pmOnScreen()!);
+  const places = (page: Page) => page.evaluate(() => { const l = (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.layout; return { seat: l.lead.seat, table: l.table.pmSpot, board: l.plan.spot }; });
+  const advance = (page: Page, ms: number) => page.evaluate((n) => (window as unknown as { __advance: (ms: number) => void }).__advance(n), ms);
+
+  test.describe('with motion allowed', () => {
+    test.use({ reducedMotion: 'no-preference' });
+    test.setTimeout(150_000);
+
+    test('in the demo script, an accepted plan and a delegation walk it to the plan board and to the worker, then back to its desk', async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await spied(page, 'feature-delivery');
+      await expect.poll(() => office(page)).toBe(true);
+      const { seat, board } = await places(page);
+      // It rests at its desk, seated, and does not wander.
+      await expect.poll(async () => { const w = await pmWhere(page); return w.tile.join() === seat.join() && w.seated && !w.walking; }).toBe(true);
+      const before = await pmOnScreen(page);
+      expect((await pmWhere(page)).errand).toBeNull();
+      // Every tile it stands on, sampled each frame from here on (the walk is quicker at 4x, the demo speed).
+      await page.evaluate(() => {
+        const s = (window as unknown as { __selarikruOffice: Pm & { speed: number } }).__selarikruOffice;
+        s.speed = 4;
+        const seen: string[] = [];
+        (window as unknown as { __pmTiles: string[] }).__pmTiles = seen;
+        const sample = (): void => { const w = s.pmWhere(); if (w && seen.at(-1) !== w.tile.join()) seen.push(w.tile.join()); requestAnimationFrame(sample); };
+        requestAnimationFrame(sample);
+      });
+      // The script accepts plan revision 2, then the PM delegates the search index to runner_local_1.
+      await advance(page, 10_000);
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.recentEvents.map((e) => e.kind)), { timeout: 20_000 }).toEqual(expect.arrayContaining(['planAccepted', 'delegated']));
+      // Its place on screen changes over time: it walks.
+      await expect.poll(async () => { const now = await pmOnScreen(page); return Math.hypot(now.x - before.x, now.y - before.y) > 4; }, { timeout: 20_000 }).toBe(true);
+      // It reaches the plan board, then stands beside the worker, then is back at its desk.
+      const worker = await page.evaluate(() => { const s = (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice; return s.bots.get('runner_local_1')!.tile(s.layout); });
+      await expect.poll(async () => { const w = await pmWhere(page); return w.tile.join() === seat.join() && !w.walking && w.errand === null; }, { timeout: 120_000 }).toBe(true);
+      const tiles = await page.evaluate(() => (window as unknown as { __pmTiles: string[] }).__pmTiles.map((t) => t.split(',').map(Number) as [number, number]));
+      expect(tiles.some(([x, y]) => x === board[0] && y === board[1])).toBe(true);
+      expect(tiles.some(([x, y]) => Math.abs(x - worker[0]) + Math.abs(y - worker[1]) === 1)).toBe(true);
+      // Tile by tile: never a jump of more than one tile between frames.
+      for (let i = 1; i < tiles.length; i++) expect(Math.abs(tiles[i]![0] - tiles[i - 1]![0]) + Math.abs(tiles[i]![1] - tiles[i - 1]![1])).toBeLessThanOrEqual(2);
+      expect((await pmWhere(page)).seated).toBe(true);
+    });
+
+    test('hovering the PM names it and clicking it opens Talk to the PM, wherever it stands', async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await spied(page, 'feature-delivery');
+      await expect.poll(() => office(page)).toBe(true);
+      await expect.poll(async () => (await pmWhere(page)).seated).toBe(true);
+      const at = await pmOnScreen(page);
+      await page.mouse.move(at.x, at.y);
+      await expect(page.getByTestId('office-tooltip')).toContainText('Project manager');
+      await page.mouse.click(at.x, at.y);
+      await expect(page).toHaveURL(/#\/pm/);
+    });
+  });
+
+  test('reduced motion: a delegation walks nothing; the PM stays placed at its desk, where the errand ends', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'feature-delivery');
+    await expect.poll(() => office(page)).toBe(true);
+    const { seat } = await places(page);
+    await advance(page, 10_000);
+    await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.recentEvents.some((e) => e.kind === 'delegated'))).toBe(true);
+    await expect.poll(() => pmWhere(page)).toEqual({ tile: seat, walking: false, seated: true, errand: null });
+  });
+
+  test('reduced motion: when a review starts the PM is placed straight at the shared table, with no walk', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await spied(page, 'healthy-parallel-work');
+    await expect.poll(() => office(page)).toBe(true);
+    const { table } = await places(page);
+    const id = await page.evaluate(() => (window as unknown as { __selarikruOffice: { layout: { desks: { agentId: string }[] } } }).__selarikruOffice.layout.desks[0]!.agentId);
+    const task = await page.evaluate((who) => (window as unknown as { __selarikruOffice: { world: { cues: { agentId: string; taskId: string | null }[] } } }).__selarikruOffice.world.cues.find((c) => c.agentId === who)!.taskId!, id);
+    await page.evaluate((t) => {
+      Object.assign((window as unknown as { __scenario: Record<string, unknown> }).__scenario, { taskPatch: { [t]: { status: 'verifying' } } });
+      (window as unknown as { __projection: { getState(): { resync(): void } } }).__projection.getState().resync();
+    }, task);
+    await expect.poll(() => pmWhere(page)).toEqual({ tile: table, walking: false, seated: false, errand: null });
+    // The hit box is where the PM stands now: away from its desk, it still names it and opens Talk to the PM.
+    const at = await pmOnScreen(page);
+    await page.mouse.move(at.x, at.y);
+    await expect(page.getByTestId('office-tooltip')).toContainText('Project manager');
+    await page.mouse.click(at.x, at.y);
+    await expect(page).toHaveURL(/#\/pm/);
+  });
+});

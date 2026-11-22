@@ -11,7 +11,9 @@ import { PlanNotes } from './actors/planNotes.ts';
 import * as live from './draw/live.ts';
 import { drawBadge, drawEmote, drawFace, drawNameTag, cornerMarks, footShadow } from './draw/overlay.ts';
 import { buildStatic } from './draw/static.ts';
-import { pmCanvas } from './draw/robots.ts';
+import { pmCanvases } from './draw/robots.ts';
+import { createPm, placePm, pmSpot, thinkPm, type PmContext } from './actors/pm.ts';
+import { pmErrands, type ErrandStep } from './actors/errands.ts';
 import { Camera, type Insets, type WorldTransform } from './engine/camera.ts';
 import { C } from './engine/palette.ts';
 import { CanvasPen } from './engine/pen.ts';
@@ -32,6 +34,8 @@ export class OfficeScene {
   private staticCanvas: HTMLCanvasElement | null = null;
   belt: BeltPath | null = null;
   readonly bots = new Map<string, Bot>();
+  /** P1: the Project Manager's robot, a Bot in its own frames. Null before the first layout. */
+  pm: Bot | null = null;
   private parcels: Parcel[] = [];
   private stages = new Map<string, OfficeParcel>();
   /** Demo only: 1x, 2x or 4x on the office animation (walking and the belt). Never on data. */
@@ -167,9 +171,6 @@ export class OfficeScene {
     return this.world ? live.roofLook(this.world.roof[place], this.roofFresh()[place]) : 'idle';
   }
 
-  /** H11: until when the Project Manager shows a talk bubble after a delegation. */
-  private pmTalkUntil = -1;
-
   /** The last events read from the world, newest last (development test hook). */
   readonly recentEvents: OfficeEvent[] = [];
 
@@ -202,7 +203,11 @@ export class OfficeScene {
       this.staticCanvas = buildStatic(l, input);
       this.camera.setWorldSize(l.worldW, l.worldH);
       if (first) { this.camera.home(false); this.homed = this.host.clientWidth > 0; }
-      this.pmPos = tileCentre(l, l.lead.seat);
+      // P1: the PM starts where it rests (its desk, or the shared table while a meeting is on), with no walk.
+      this.pm ??= createPm(l, pmCanvases(), world.pm.name);
+      this.pm.queue.clear();
+      this.pm.emote = null;
+      placePm(this.pm, l, pmSpot(this.pm, l, { to: 'pmHome' }, this.pmContext()));
       for (const b of this.bots.values()) {
         b.errand = null;
         b.path = [];
@@ -210,6 +215,8 @@ export class OfficeScene {
       }
     }
     const l = this.layout;
+    const pm = this.pm!;
+    if (pm.config.name !== world.pm.name) pm.config = { ...pm.config, name: world.pm.name };
     // H11: an inactive worker has its desk but no robot.
     const ids = new Set(input.agents.filter((a) => a.active !== false).map((a) => a.id));
     for (const id of [...this.bots.keys()]) if (!ids.has(id)) this.bots.delete(id);
@@ -257,7 +264,14 @@ export class OfficeScene {
         b.pause = 0;
         Object.assign(b, tileCentre(l, restingSpot(b, l, this.stateOf(b.config.id))?.tile ?? seatOf(b, l) ?? l.door));
       }
-    } else if (!first) this.dispatch(officeEvents(before, world), l);
+      pm.queue.clear();
+      pm.emote = null;
+      placePm(pm, l, pmSpot(pm, l, { to: 'pmHome' }, this.pmContext()));
+      this.notes.release();
+    } else if (!first) {
+      this.dispatch(officeEvents(before, world), l);
+      this.planPm(before, world, l);
+    }
     // A held roof visit ends when the world has no cloud call for that worker, whatever the events said.
     for (const c of world.cues) this.bots.get(c.agentId)?.queue.follow(c);
     if (this.reducedMotion) {
@@ -298,15 +312,13 @@ export class OfficeScene {
       const pos = this.belt!.pos(this.belt!.len);
       this.effects.text(`${p.label} MERGED`, pos.x, pos.y - 26, C.green);
     });
-    // H9: the PM walks between its desk and the shared table, straight across the open floor.
-    {
-      const to = this.pmTarget(l);
-      const dx = to.x - this.pmPos.x;
-      const dy = to.y - this.pmPos.y;
-      const dist = Math.hypot(dx, dy);
-      const stepPx = 40 * dt * this.speed;
-      if (dist <= stepPx) this.pmPos = to;
-      else this.pmPos = { x: this.pmPos.x + (dx / dist) * stepPx, y: this.pmPos.y + (dy / dist) * stepPx };
+    // P1: the PM walks the grid like the crew, on its errands only.
+    const pm = this.pm;
+    if (pm) {
+      pm.emote = pm.emote && pm.emote.until > t ? pm.emote : null;
+      const arrived = thinkPm(pm, l, this.pmContext(), t);
+      if (arrived) this.pmArrived(arrived);
+      pm.move(dt * this.speed, l);
     }
     for (const [k, v] of this.pulses) this.pulses.set(k, Math.max(0, v - dt * 0.6));
     this.effects.update(dt);
@@ -321,6 +333,8 @@ export class OfficeScene {
     for (const e of events) {
       this.recentEvents.push(e);
       if (this.recentEvents.length > 20) this.recentEvents.shift();
+      // P1: a delegation and an accepted plan are the Project Manager's errands (planPm): its walk carries their envelope and emotes.
+      if (e.kind === 'delegated' || e.kind === 'planAccepted') continue;
       const who = 'agentId' in e ? [e.agentId] : 'agentIds' in e ? e.agentIds : [];
       for (const id of who) {
         const bot = this.bots.get(id);
@@ -337,7 +351,7 @@ export class OfficeScene {
         if (typeof at !== 'string') return at.agent;
         if (at === 'plan') return { x: l.lead.rect.x + l.lead.rect.w / 2, y: l.lead.rect.y + 10 };
         if (at === 'actions') return tileCentre(l, l.door);
-        if (at === 'pm') { const c = tileCentre(l, l.lead.seat); return { x: c.x, y: c.y - 16 }; }
+        if (at === 'pm') return this.pmHead(l);
         const g = l.gate;
         return g ? { x: g.x + g.w / 2, y: g.y } : tileCentre(l, l.door);
       };
@@ -347,7 +361,7 @@ export class OfficeScene {
         else if (fx.kind === 'burst') { const g = xy('gate'); this.effects.burst(g.x, g.y + 10, [C.green, C.gold, C.leafL, C.white], 22); }
         else if (fx.kind === 'text') { const g = xy('gate'); this.effects.text(fx.text, g.x, g.y - 20, fx.tone === 'pass' ? C.green : C.red); }
         else if (fx.kind === 'gate') this.gateMode = { mode: 'changes', at: this.t };
-        else if (fx.kind === 'pmEmote') this.pmTalkUntil = this.t + 2;
+        else if (fx.kind === 'pmEmote' && this.pm) this.pm.emote = { type: 'talk', until: this.t + 2 };
         else if (fx.kind === 'flyBack') {
           const g = xy('gate');
           const to = point(fx.to);
@@ -382,17 +396,60 @@ export class OfficeScene {
       bot.seated = rest.seated;
       bot.face = rest.face;
     }
-    this.pmPos = this.pmTarget(l);
+    // P1: no walking: the PM is placed where its errands end, which is where it rests (its desk, or the shared table during a meeting).
+    if (this.pm) {
+      this.pm.queue.clear();
+      placePm(this.pm, l, pmSpot(this.pm, l, { to: 'pmHome' }, this.pmContext()));
+    }
     this.gateMode = { mode: this.world?.verifying ? 'reviewing' : 'idle', at: 0 };
   }
 
-  /** H9: where the PM is: at the shared table while a plan or a review is in progress there, otherwise at its desk (top centre). */
-  private pmPos = { x: 0, y: 0 };
-  private pmTarget(l: OfficeLayout): { x: number; y: number } {
-    return tileCentre(l, this.world?.meeting?.pm ? l.table.pmSpot : l.lead.seat);
+  /** P1: what the PM's places depend on: a meeting at the shared table, and where each worker's robot is. */
+  private pmContext(): PmContext {
+    const l = this.layout;
+    return { meeting: this.world?.meeting?.pm === true, agentTile: (id) => { const b = this.bots.get(id); return b && l ? b.tile(l) : null; } };
   }
 
-  /** Where the PM is going (development test hook). */
+  /** Over the PM's head, where its envelopes leave from. */
+  private pmHead(l: OfficeLayout): { x: number; y: number } {
+    const pm = this.pm;
+    if (!pm) { const c = tileCentre(l, l.lead.seat); return { x: c.x, y: c.y - 16 }; }
+    return { x: pm.x, y: pm.headY || pm.y - 16 };
+  }
+
+  /**
+   * P1: the PM's errands for what changed (pmErrands): to the shared table and back with a meeting, to the plan board for an accepted plan, and to each
+   * worker a task was delegated to. Past the cap a delegation gets only its envelope, from where the PM is.
+   */
+  private planPm(before: OfficeWorld | null, world: OfficeWorld, l: OfficeLayout): void {
+    const pm = this.pm;
+    if (!pm) return;
+    const plan = pmErrands(before, world, pm.queue.count('pmDelegate'));
+    for (const errand of plan.errands) pm.queue.push(errand);
+    // Walking home with more to do: it turns to the next errand where it is.
+    if (plan.errands.length > 0 && pm.queue.skipTrailing('pmHome')) pm.path = [];
+    if (!this.reducedMotion && plan.errands.some((e) => e[0]?.to === 'pmBoard')) this.notes.hold();
+    for (const id of plan.deskEnvelopes) {
+      this.bots.get(id)?.queue.push([{ to: 'here', emote: 'mail', linger: 2 }]);
+      if (this.reducedMotion) continue;
+      const from = this.pmHead(l);
+      this.effects.envelope(from.x, from.y, id);
+      pm.emote = { type: 'talk', until: this.t + 2 };
+    }
+  }
+
+  /** P1: what happens where the PM arrives: the notes are pinned at the board; at a worker, its envelope flies across and the worker gets the mail emote. */
+  private pmArrived(step: ErrandStep): void {
+    const pm = this.pm;
+    if (!pm) return;
+    if (step.to === 'pmBoard') this.notes.pin(this.t);
+    if (step.to === 'pmDelegate' && step.agentId) {
+      this.effects.envelope(pm.x, pm.headY || pm.y - 16, step.agentId);
+      this.bots.get(step.agentId)?.queue.push([{ to: 'here', emote: 'mail', linger: 2 }]);
+    }
+  }
+
+  /** Where the PM rests now: the shared table while a plan or a review is in progress there, otherwise its desk (development test hook). */
   pmPlace(): 'desk' | 'table' {
     return this.world?.meeting?.pm ? 'table' : 'desk';
   }
@@ -454,21 +511,18 @@ export class OfficeScene {
 
     const bots = [...this.bots.values()];
     for (const bot of bots) bot.render(t, this.stateOf(bot.config.id));
-    for (const bot of bots) footShadow(p, bot);
-    for (const bot of [...bots].sort((a, b) => a.y - b.y)) g.drawImage(bot.sprite, bot.spriteX, bot.spriteY);
-    // H11: the Project Manager at the PLAN table, always there; it talks while the owner's PM call runs, and when it delegates.
-    {
-      // H9: at its desk (top centre), or at the shared table while a plan or a review is in progress.
-      const seat = this.pmPos.x === 0 && this.pmPos.y === 0 ? tileCentre(l, l.lead.seat) : this.pmPos;
-      const atTable = world.meeting?.pm === true;
-      const sprite = pmCanvas();
-      const px = Math.round(seat.x) - 6;
-      const py = Math.round(seat.y) - 15 - (atTable ? 0 : 10);
-      p.rect(px + 1, py + 15, 10, 2, C.shadow, 0.25);
-      g.drawImage(sprite, px, py);
-      const talking = world.pm.busy || this.t < this.pmTalkUntil;
-      if (talking) live.pmBubble(p, px + 6, py - 13, this.reducedMotion ? 0 : t);
-      if (this.reducedMotion || talking || this.hover?.agentId === 'pm') live.pmTag(p, world.pm.name, px + 6, py - (talking ? 22 : 9));
+    // H11: the Project Manager, always in the office; it types while the owner's PM call runs. P1: it walks among the crew, so it is drawn in their order.
+    const pm = this.pm;
+    if (pm) pm.render(t, world.pm.busy ? 'working' : 'idle');
+    const crowd = pm ? [...bots, pm] : bots;
+    for (const bot of crowd) footShadow(p, bot);
+    for (const bot of [...crowd].sort((a, b) => a.y - b.y)) g.drawImage(bot.sprite, bot.spriteX, bot.spriteY);
+    if (pm) {
+      const emote = pm.emote !== null && pm.emote.until > this.t;
+      if (emote) drawEmote(p, pm, 'idle', t, this.t);
+      else if (world.pm.busy) live.pmBubble(p, pm.x, pm.headY - 13, this.reducedMotion ? 0 : t);
+      const talking = emote || world.pm.busy;
+      if (this.reducedMotion || talking || pm.path.length > 0 || this.hover?.agentId === 'pm') live.pmTag(p, world.pm.name, Math.round(pm.x), pm.headY - (talking ? 22 : 9));
     }
     for (const bot of bots) {
       const state = this.stateOf(bot.config.id);
@@ -500,6 +554,22 @@ export class OfficeScene {
     if (!b) return null;
     const r = this.botRect(b);
     return this.camera.worldToScreen(r.x + r.w / 2, r.y + r.h / 2);
+  }
+
+  /** P1: where the Project Manager is on screen, in CSS pixels relative to the canvas (development test hook). Null before the first world. */
+  pmOnScreen(): { x: number; y: number } | null {
+    const pm = this.pm;
+    if (!pm || !this.layout) return null;
+    const r = this.botRect(pm);
+    return this.camera.worldToScreen(r.x + r.w / 2, r.y + r.h / 2);
+  }
+
+  /** P1: where the Project Manager stands, in tiles, and whether it is walking (development test hook). */
+  pmWhere(): { tile: [number, number]; walking: boolean; seated: boolean; errand: string | null } | null {
+    const pm = this.pm;
+    const l = this.layout;
+    if (!pm || !l) return null;
+    return { tile: pm.tile(l), walking: pm.path.length > 0, seated: pm.seated, errand: pm.queue.current()?.to ?? null };
   }
 
   /** The words for what the pointer is over, for the tooltip. */
