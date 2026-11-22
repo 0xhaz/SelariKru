@@ -350,6 +350,27 @@ describe('streaming and resync', () => {
     session.stop();
   });
 
+  it('P1: the feature-delivery loop has the Project Manager at work: a plan revision is accepted, then it delegates the search index to the free backend worker', async () => {
+    const f = buildFixture('feature-delivery');
+    const id = sc('feature-delivery', 'search');
+    const first = await snap('feature-delivery');
+    // What the scene opens on is unchanged: plan revision 1, the search index waiting for a cloud start, with no delegation yet.
+    expect(Object.values(first.s.runs)[0]!.planRevision).toBe(1);
+    expect(first.s.tasks[id]!.delegation ?? null).toBeNull();
+    expect(first.s.tasks[id]!.placementBlock).toBe('approval_required:cloud_start');
+    const later = f.events.filter((e) => Date.parse(e.occurredAt) > Date.parse(fixtureTime(f.startSec)));
+    expect(later.map((e) => e.type)).toEqual(['plan.accepted', 'task.delegated', 'placement.blocked']);
+    // The PM's walk (to the board, the kopitiam and back) fits before the loop wraps: the last event is well after the delegation.
+    expect(Date.parse(later[2]!.occurredAt) - Date.parse(later[1]!.occurredAt)).toBeGreaterThanOrEqual(30_000);
+    const after = await snap('feature-delivery', 60);
+    expect(Object.values(after.s.runs)[0]!.planRevision).toBe(2);
+    expect(after.s.tasks[id]!.delegation).toMatchObject({ workerId: 'runner_local_1', planRevision: 2, actor: 'agent' });
+    // The worker the PM chose holds the task's role, as the server's delegation rule requires; the search index still waits for its cloud start.
+    expect(Object.values(after.s.tasks).find((t) => t.attemptIds.some((a) => after.s.attempts[a]?.runnerId === 'runner_local_1') && t.taskId === sc('feature-delivery', 'api'))!.role).toBe('backend');
+    expect(after.s.tasks[id]!.placementBlock).toBe('approval_required:cloud_start');
+    expect(after.s.tasks[id]!.status).toBe(first.s.tasks[id]!.status);
+  });
+
   it('a session that starts before the first plan.accepted gets the board when it arrives', async () => {
     const f = { ...buildFixture('healthy-parallel-work'), startSec: 0 };
     const ds = make([f]);

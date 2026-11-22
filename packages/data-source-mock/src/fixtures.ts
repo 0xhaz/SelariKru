@@ -11,6 +11,8 @@ const LOCAL = 'runner_local_1';
 const LOCAL2 = 'runner_local_2';
 const CLOUD = 'runner_cloud_1';
 const ASSISTANT_DEVICE = { mode: 'PREFER_ON_DEVICE', observedSource: 'on_device' } as const;
+/** The Project Manager, as the services record it on a delegation (H11). */
+const PM_AGENT = { kind: 'agent', id: 'pm' } as const;
 
 function done(b: FixtureBuilder, f: Omit<Fixture, 'projectId' | 'events' | 'tasks' | 'approvals' | 'silences'>): Fixture {
   return { ...f, projectId: b.projectId, events: b.buildEvents(), tasks: b.taskSeeds, approvals: b.approvalSeeds, silences: b.silences, budgetStopping: b.budgetStopping };
@@ -318,6 +320,12 @@ function featureDelivery(): Fixture {
   // The list UI's first attempt failed a check, so the demo can ask an agent to explain it; the repair attempt is running.
   b.complete('web', 'att_web_1', 110, LOCAL2).verdict('web', 'att_web_1', 115, 'failed', { checkId: 'ci:web', summary: '2 of 24 checks failed: the feedback list is not sorted newest first' });
   b.start('web', 'att_web_2', 120, LOCAL2, 'local', 'cloud', 2);
+  // P1: after the scene opens, the Project Manager is seen at work. Plan revision 2 is accepted (it lists the later stages again, unchanged), then the PM
+  // delegates the search index to the backend worker that is free, under the server's rule (same role, a ready task). The scheduler then records the
+  // same placement block again: the search index still waits for its cloud start. That last event keeps the loop going while the PM walks.
+  b.plan(2, ['integrate', 'e2e', 'review'], 204);
+  b.emit('task.delegated', 207, { task: 'search', actor: PM_AGENT, payload: { workerId: LOCAL, planRevision: 2, revision: 1 } });
+  b.emit('placement.blocked', 245, { task: 'search', payload: { reason: 'approval_required:cloud_start', mode: 'local-first' } });
   return done(b, {
     id: 'feature-delivery', name: 'Feature delivery', startSec: 200, assistant: ASSISTANT_DEVICE, budgetLimitUsd: 25,
     // Every route mode is in use: the run default is Local first from onboarding; the contract runs Cloud only, the API Cloud first, the integration Local only, and
