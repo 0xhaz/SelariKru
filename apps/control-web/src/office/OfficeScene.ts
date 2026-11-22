@@ -206,6 +206,7 @@ export class OfficeScene {
       // P1: the PM starts where it rests (its desk, or the shared table while a meeting is on), with no walk.
       this.pm ??= createPm(l, pmCanvases(), world.pm.name);
       this.pm.queue.clear();
+      this.notes.release(this.t);
       this.pm.emote = null;
       placePm(this.pm, l, pmSpot(this.pm, l, { to: 'pmHome' }, this.pmContext()));
       for (const b of this.bots.values()) {
@@ -267,7 +268,7 @@ export class OfficeScene {
       pm.queue.clear();
       pm.emote = null;
       placePm(pm, l, pmSpot(pm, l, { to: 'pmHome' }, this.pmContext()));
-      this.notes.release();
+      this.notes.release(this.t);
     } else if (!first) {
       this.dispatch(officeEvents(before, world), l);
       this.planPm(before, world, l);
@@ -351,7 +352,6 @@ export class OfficeScene {
         if (typeof at !== 'string') return at.agent;
         if (at === 'plan') return { x: l.lead.rect.x + l.lead.rect.w / 2, y: l.lead.rect.y + 10 };
         if (at === 'actions') return tileCentre(l, l.door);
-        if (at === 'pm') return this.pmHead(l);
         const g = l.gate;
         return g ? { x: g.x + g.w / 2, y: g.y } : tileCentre(l, l.door);
       };
@@ -361,7 +361,6 @@ export class OfficeScene {
         else if (fx.kind === 'burst') { const g = xy('gate'); this.effects.burst(g.x, g.y + 10, [C.green, C.gold, C.leafL, C.white], 22); }
         else if (fx.kind === 'text') { const g = xy('gate'); this.effects.text(fx.text, g.x, g.y - 20, fx.tone === 'pass' ? C.green : C.red); }
         else if (fx.kind === 'gate') this.gateMode = { mode: 'changes', at: this.t };
-        else if (fx.kind === 'pmEmote' && this.pm) this.pm.emote = { type: 'talk', until: this.t + 2 };
         else if (fx.kind === 'flyBack') {
           const g = xy('gate');
           const to = point(fx.to);
@@ -399,6 +398,7 @@ export class OfficeScene {
     // P1: no walking: the PM is placed where its errands end, which is where it rests (its desk, or the shared table during a meeting).
     if (this.pm) {
       this.pm.queue.clear();
+      this.notes.release(this.t);
       placePm(this.pm, l, pmSpot(this.pm, l, { to: 'pmHome' }, this.pmContext()));
     }
     this.gateMode = { mode: this.world?.verifying ? 'reviewing' : 'idle', at: 0 };
@@ -429,13 +429,41 @@ export class OfficeScene {
     // Walking home with more to do: it turns to the next errand where it is.
     if (plan.errands.length > 0 && pm.queue.skipTrailing('pmHome')) pm.path = [];
     if (!this.reducedMotion && plan.errands.some((e) => e[0]?.to === 'pmBoard')) this.notes.hold();
+    // Under reduced motion nothing walks, so the PM never arrives: what an arrival shows is shown now, still (talk on the PM, mail on each worker).
+    if (this.reducedMotion) {
+      const delegated = plan.errands.flatMap((e) => (e[0]?.to === 'pmDelegate' && e[0].agentId ? [e[0].agentId] : []));
+      for (const id of delegated) this.mail(id);
+      if (delegated.length > 0 || plan.errands.some((e) => e[0]?.to === 'pmBoard')) this.showEmote(pm, 'talk');
+    }
     for (const id of plan.deskEnvelopes) {
-      this.bots.get(id)?.queue.push([{ to: 'here', emote: 'mail', linger: 2 }]);
+      this.mail(id);
+      this.showEmote(pm, 'talk');
       if (this.reducedMotion) continue;
       const from = this.pmHead(l);
       this.effects.envelope(from.x, from.y, id);
-      pm.emote = { type: 'talk', until: this.t + 2 };
     }
+  }
+
+  /** P1: a worker gets its mail: an emote where it stands. */
+  private mail(id: string): void {
+    const bot = this.bots.get(id);
+    if (!bot) return;
+    bot.queue.push([{ to: 'here', emote: 'mail', linger: 2 }]);
+    // Under reduced motion the queue is settled without running, so the emote is set here.
+    if (this.reducedMotion) this.showEmote(bot, 'mail');
+  }
+
+  /**
+   * P1: shows an emote. With motion it lasts two seconds of animation. Under reduced motion the scene's clock stands still, so it is drawn without
+   * animation and taken down after a few seconds of real time.
+   */
+  private showEmote(bot: Bot, type: 'talk' | 'mail'): void {
+    if (!this.reducedMotion) { bot.emote = { type, until: this.t + 2 }; return; }
+    const emote = { type, until: Number.POSITIVE_INFINITY };
+    bot.emote = emote;
+    const timer = window.setTimeout(() => { if (bot.emote === emote) { bot.emote = null; this.invalidate(); } }, 4000);
+    this.cleanups.push(() => window.clearTimeout(timer));
+    this.invalidate();
   }
 
   /** P1: what happens where the PM arrives: the notes are pinned at the board; at a worker, its envelope flies across and the worker gets the mail emote. */
@@ -445,7 +473,7 @@ export class OfficeScene {
     if (step.to === 'pmBoard') this.notes.pin(this.t);
     if (step.to === 'pmDelegate' && step.agentId) {
       this.effects.envelope(pm.x, pm.headY || pm.y - 16, step.agentId);
-      this.bots.get(step.agentId)?.queue.push([{ to: 'here', emote: 'mail', linger: 2 }]);
+      this.mail(step.agentId);
     }
   }
 

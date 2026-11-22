@@ -65,9 +65,8 @@ test('the tour runs end to end on demo data, by keyboard, each step on the real 
   await next(5);
   // H9 fix round 1 (M2): the PM is asked for a plan on demo data, through its own panel, and its plan offers Accept plan.
   await expect(page).toHaveURL(/#\/pm/);
-  // P1: the step points at the Project Manager robot in the office, which walks for an accepted plan and for each delegation.
-  await expect(tour).toContainText('walks to the plan board');
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice?: { pmOnScreen(): unknown } }).__selarikruOffice?.pmOnScreen() ?? null)).not.toBeNull();
+  // P1: the step is on the PM panel, so it sends you to the Office to watch the PM robot walk; it does not claim the robot is on screen here.
+  await expect(tour).toContainText('then open the Office to watch the PM walk to the plan board');
   await tour.getByRole('button', { name: 'Ask the PM for a plan' }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByTestId('pm-accept-plan')).toBeVisible({ timeout: 20_000 });

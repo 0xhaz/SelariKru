@@ -49,4 +49,22 @@ describe('plan notes', () => {
     n.update([...two, { taskId: 'v', column: 0, status: 'running', ownerId: null }], board, 0.016, 20, false);
     expect(born(n, 'v')).toBe(20);
   });
+
+  it('P1: a hold the PM never finishes (its errands were cleared) is released, and the waiting notes still flash; nothing else does', () => {
+    const born = (n: PlanNotes, id: string) => (n as unknown as { notes: Map<string, { born: number }> }).notes.get(id)!.born;
+    const n = new PlanNotes();
+    n.update(note(0), board, 0.016, 0, false);
+    n.hold();
+    n.update([...note(0), { taskId: 'u', column: 0, status: 'running', ownerId: null }], board, 0.016, 5, false);
+    expect(born(n, 'u')).toBeLessThan(0);
+    n.release(7);
+    expect(born(n, 'u')).toBe(7);
+    expect(born(n, 't')).toBeLessThan(0);
+    // Released: the next new note flashes as it arrives.
+    n.update([...note(0), { taskId: 'u', column: 0, status: 'running', ownerId: null }, { taskId: 'v', column: 0, status: 'running', ownerId: null }], board, 0.016, 9, false);
+    expect(born(n, 'v')).toBe(9);
+    // With nothing held, a release flashes nothing.
+    n.release(11);
+    expect(born(n, 't')).toBeLessThan(0);
+  });
 });

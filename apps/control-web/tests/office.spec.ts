@@ -720,7 +720,7 @@ test.describe('P1: the Project Manager is a robot that walks, only when somethin
       const tiles = await page.evaluate(() => (window as unknown as { __pmTiles: string[] }).__pmTiles.map((t) => t.split(',').map(Number) as [number, number]));
       expect(tiles.some(([x, y]) => x === board[0] && y === board[1])).toBe(true);
       expect(tiles.some(([x, y]) => Math.abs(x - worker[0]) + Math.abs(y - worker[1]) === 1)).toBe(true);
-      // Tile by tile: never a jump of more than one tile between frames.
+      // Tile by tile: between two sampled frames it moves at most two tiles (a slow frame at 4x can cover two), never a jump across the floor.
       for (let i = 1; i < tiles.length; i++) expect(Math.abs(tiles[i]![0] - tiles[i - 1]![0]) + Math.abs(tiles[i]![1] - tiles[i - 1]![1])).toBeLessThanOrEqual(2);
       expect((await pmWhere(page)).seated).toBe(true);
     });
@@ -738,14 +738,30 @@ test.describe('P1: the Project Manager is a robot that walks, only when somethin
     });
   });
 
-  test('reduced motion: a delegation walks nothing; the PM stays placed at its desk, where the errand ends', async ({ page }) => {
+  test('reduced motion: a delegation walks nothing; the PM stays placed at its desk, and the emotes still show: talk on the PM, mail on the worker', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await spied(page, 'feature-delivery');
     await expect.poll(() => office(page)).toBe(true);
     const { seat } = await places(page);
+    // Every place the PM is drawn at from here on, sampled each frame: it must never walk or leave its desk.
+    await page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice;
+      const seen: { tile: string; walking: boolean }[] = [];
+      (window as unknown as { __pmSeen: typeof seen }).__pmSeen = seen;
+      const sample = (): void => { const w = s.pmWhere(); if (w) seen.push({ tile: w.tile.join(), walking: w.walking }); requestAnimationFrame(sample); };
+      requestAnimationFrame(sample);
+    });
     await advance(page, 10_000);
     await expect.poll(() => page.evaluate(() => (window as unknown as { __selarikruOffice: Pm }).__selarikruOffice.recentEvents.some((e) => e.kind === 'delegated'))).toBe(true);
+    const emotes = () => page.evaluate(() => {
+      const s = (window as unknown as { __selarikruOffice: { pm: { emote: { type: string } | null }; bots: Map<string, { emote: { type: string } | null }> } }).__selarikruOffice;
+      return { pm: s.pm.emote?.type ?? null, worker: s.bots.get('runner_local_1')!.emote?.type ?? null };
+    });
+    await expect.poll(emotes).toEqual({ pm: 'talk', worker: 'mail' });
     await expect.poll(() => pmWhere(page)).toEqual({ tile: seat, walking: false, seated: true, errand: null });
+    const seen = await page.evaluate(() => (window as unknown as { __pmSeen: { tile: string; walking: boolean }[] }).__pmSeen);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.filter((x) => x.walking || x.tile !== seat.join())).toEqual([]);
   });
 
   test('reduced motion: when a review starts the PM is placed straight at the shared table, with no walk', async ({ page }) => {

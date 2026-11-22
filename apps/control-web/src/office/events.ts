@@ -87,7 +87,7 @@ export function officeEvents(prev: OfficeWorld | null, next: OfficeWorld): Offic
   return out;
 }
 
-/** The walk an event sends a robot on. Events with no walk return no steps. */
+/** The walk an event sends a robot on. Events with no walk return no steps. A delegation and an accepted plan are the PM's errands (P1: pmErrands). */
 export function errandFor(e: OfficeEvent): ErrandStep[] {
   switch (e.kind) {
     case 'claimed':
@@ -100,29 +100,24 @@ export function errandFor(e: OfficeEvent): ErrandStep[] {
     case 'prMerged': return [{ to: 'here', emote: 'heart', linger: 2 }];
     case 'needsYou': return [{ to: 'seat', emote: 'talk' }];
     case 'answered': return [{ to: 'here', emote: 'mail', linger: 2 }];
-    case 'delegated': return [{ to: 'here', emote: 'mail', linger: 2 }];
     default: return [];
   }
 }
 
-export type EffectPoint = 'plan' | 'actions' | 'gate' | 'pm' | { readonly agent: string };
+export type EffectPoint = 'plan' | 'actions' | 'gate' | { readonly agent: string };
 
 export type OfficeEffect =
   | { readonly kind: 'envelope'; readonly from: EffectPoint; readonly to: EffectPoint }
   | { readonly kind: 'burst'; readonly at: 'gate' }
   | { readonly kind: 'text'; readonly at: 'gate'; readonly text: string; readonly tone: 'pass' | 'fail' }
   | { readonly kind: 'gate'; readonly look: 'changes' }
-  | { readonly kind: 'flyBack'; readonly label: string; readonly to: EffectPoint }
-  /** The Project Manager robot shows an emote (H11). */
-  | { readonly kind: 'pmEmote'; readonly emote: 'talk' };
+  | { readonly kind: 'flyBack'; readonly label: string; readonly to: EffectPoint };
 
 /** The effects an event shows. Under reduced motion the scene shows only their end state (no flight, no burst). */
 export function effectsFor(e: OfficeEvent): OfficeEffect[] {
   switch (e.kind) {
     case 'needsYou': return [{ kind: 'envelope', from: { agent: e.agentId }, to: 'actions' }];
     case 'answered': return [{ kind: 'envelope', from: 'plan', to: { agent: e.agentId } }];
-    case 'delegated': return [{ kind: 'envelope', from: 'pm', to: { agent: e.agentId } }, { kind: 'pmEmote', emote: 'talk' }];
-    case 'planAccepted': return [{ kind: 'pmEmote', emote: 'talk' }];
     case 'verified': return [{ kind: 'burst', at: 'gate' }, { kind: 'text', at: 'gate', text: 'VERIFIED', tone: 'pass' }];
     case 'changes': return [
       // The candidate belongs to the run, not one worker, so it flies back to the PLAN table.

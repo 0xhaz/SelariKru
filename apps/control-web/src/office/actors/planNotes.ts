@@ -36,8 +36,9 @@ export class PlanNotes {
     this.waiting.clear();
   }
 
-  /** P1: drops a hold the PM will never finish (a new epoch). */
-  release(): void {
+  /** P1: ends a hold the PM will never finish (its errands were cleared): the notes that waited flash now, and nothing else does. */
+  release(t: number): void {
+    for (const id of this.waiting) { const n = this.notes.get(id); if (n) n.born = t; }
     this.held = false;
     this.waiting.clear();
   }

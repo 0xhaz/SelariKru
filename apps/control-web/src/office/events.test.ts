@@ -107,22 +107,23 @@ describe('round 2: no invented events', () => {
 });
 
 describe('the Project Manager\'s events (H11)', () => {
-  it('a delegation recorded for a worker\'s task sends an envelope from the PM to that worker, who shows mail; the PM talks', () => {
+  it('a delegation recorded for a worker\'s task is an event; its walk, envelope and emotes are the PM\'s errand (P1: pmErrands), not a worker errand or a scene effect', () => {
     const d = { taskId: 't9', workerId: 'w1', planRevision: 2, at: '2026-11-11T00:00:05Z' };
     const e = officeEvents(world({ delegations: [] }), world({ delegations: [d] }));
     expect(e).toEqual([{ kind: 'delegated', agentId: 'w1', planRevision: 2 }]);
-    expect(errandFor(e[0]!)).toEqual([{ to: 'here', emote: 'mail', linger: 2 }]);
-    expect(effectsFor(e[0]!)).toEqual([{ kind: 'envelope', from: 'pm', to: { agent: 'w1' } }, { kind: 'pmEmote', emote: 'talk' }]);
+    expect(errandFor(e[0]!)).toEqual([]);
+    expect(effectsFor(e[0]!)).toEqual([]);
     // The same delegation again is not a new event.
     expect(officeEvents(world({ delegations: [d] }), world({ delegations: [d] }))).toEqual([]);
     // A delegation to a worker with no desk in the office (unknown) moves no one.
     expect(officeEvents(world({ delegations: [] }), world({ delegations: [{ ...d, workerId: 'nobody' }] }))).toEqual([]);
   });
 
-  it('a newly accepted plan revision for the same run makes the PM speak; another run or the same revision does nothing', () => {
+  it('a newly accepted plan revision for the same run is an event (the PM\'s errand to the board, P1); another run or the same revision does nothing', () => {
     const e = officeEvents(world({ planRevision: 1 }), world({ planRevision: 2 }));
     expect(e).toEqual([{ kind: 'planAccepted', planRevision: 2 }]);
-    expect(effectsFor(e[0]!)).toEqual([{ kind: 'pmEmote', emote: 'talk' }]);
+    expect(errandFor(e[0]!)).toEqual([]);
+    expect(effectsFor(e[0]!)).toEqual([]);
     expect(officeEvents(world({ planRevision: 2 }), world({ planRevision: 2 }))).toEqual([]);
     expect(officeEvents(world({ planRevision: 1 }), world({ planRunId: 'other', planRevision: 2 }))).toEqual([]);
   });

@@ -41,7 +41,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
   },
   {
     title: 'Ask the Project Manager',
-    body: 'The Project Manager is an AI agent too. Ask it for a plan: it drafts one on demo data, and the plan is a proposal until you accept it. In the office, the PM walks to the plan board when a plan is accepted, and to each worker it delegates a task to.',
+    body: 'The Project Manager is an AI agent too. Ask it for a plan: it drafts one on demo data, and the plan is a proposal until you accept it. Accept it, then open the Office to watch the PM walk to the plan board, and to each worker it delegates a task to.',
     hash: '#/pm', target: '[data-testid="pm-accept-plan"] || [data-testid="pm-question"]', pm: true,
   },
   {
