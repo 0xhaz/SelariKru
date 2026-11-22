@@ -1,8 +1,9 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { base, blueprint, configured, costPlan, failed, ready } from './onboarding-fixtures.ts';
+import { ORIGIN } from './origin.ts';
 
-const API = 'http://127.0.0.1:5174/mockapi';
+const API = `${ORIGIN}/mockapi`;
 const SHOT_DIR = process.env['T61_SHOT_DIR'];
 const SIZES = [[1440, 900], [1024, 768], [768, 1024], [375, 812]] as const;
 

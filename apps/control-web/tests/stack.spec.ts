@@ -1,10 +1,11 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { ORIGIN } from './origin.ts';
 
 /** A confirmation inside Settings. Settings is itself a dialog (the modal over the office), so it is left out. */
 const confirmDialog = (page: Page) => page.getByRole('dialog').filter({ hasNot: page.getByTestId('settings-page') });
 
-const ORIGIN = 'http://127.0.0.1:5174';
+
 
 /** Presses Tab until `target` has focus, and checks it draws a real focus ring. Never clicks: anything this cannot reach is not reachable by keyboard. */
 async function tabTo(page: Page, target: Locator, max = 300): Promise<void> {

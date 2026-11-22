@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
+import { ORIGIN } from './origin.ts';
 
-const ORIGIN = 'http://127.0.0.1:5174';
+
 
 async function open(page: Page, width = 1440): Promise<string[]> {
   const requests: string[] = [];

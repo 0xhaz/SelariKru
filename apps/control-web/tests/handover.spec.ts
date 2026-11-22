@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import { ORIGIN } from './origin.ts';
 
 /** Checkpoint continuation on demo data: the confirmation, the handover's states in words, a restart offer on Decisions. No network, no runtime. */
 
@@ -71,7 +72,7 @@ test('continue a running local task in cloud: the confirmation says what is carr
   await page.getByRole('button', { name: 'Advance 10 s' }).click();
   await expect(api.getByTestId('handover-state')).toContainText('Running');
   // No request left this page for a runtime or provider: demo data only.
-  expect(requests.filter((u) => !u.startsWith('http://127.0.0.1:5174'))).toEqual([]);
+  expect(requests.filter((u) => !u.startsWith(ORIGIN))).toEqual([]);
 });
 
 test('the worker drawer offers it with its eligibility, and shows the steps once asked', async ({ page }) => {

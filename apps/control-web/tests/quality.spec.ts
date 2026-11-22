@@ -5,8 +5,9 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { base, blueprint, configured, costPlan, ready } from './onboarding-fixtures.ts';
+import { ORIGIN } from './origin.ts';
 
-const API = 'http://127.0.0.1:5174/mockapi';
+const API = `${ORIGIN}/mockapi`;
 const TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
 
 /** Presses Tab until `target` has focus. Never clicks: anything this cannot reach is not reachable by keyboard. */

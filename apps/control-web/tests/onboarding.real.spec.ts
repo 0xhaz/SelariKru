@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { API_POLICY, OWNER_TOKEN, bearer, enrolRunner, get, makeHarness, post, setupTestDb, testConfig, type TestDb } from '../../control-api/test/helpers.ts';
 import type { ReadinessProbes } from '../../control-api/src/index.ts';
+import { ORIGIN } from './origin.ts';
 
 /**
  * The whole flow in a browser against the real control API and a throwaway Postgres schema. Only the machine's `git` and `gh` answers are faked, so no real repository or GitHub is touched.
@@ -8,7 +9,7 @@ import type { ReadinessProbes } from '../../control-api/src/index.ts';
  */
 test.describe.configure({ mode: 'serial' });
 
-const WEB_ORIGIN = 'http://127.0.0.1:5174';
+const WEB_ORIGIN = ORIGIN;
 const probes: ReadinessProbes = {
   sourceCheckout: '/srv/source',
   git: async () => ({ checkout: { ok: true, reason: 'The checkout is a git repository.' }, identity: { status: 'passed', reason: 'Origin matches.' }, base: { sha: 'a'.repeat(40), reason: 'Resolved.' }, stack: { status: 'passed', reason: 'The frozen contract is there.' } }),

@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import { ORIGIN } from './origin.ts';
 
 async function open(page: Page, query = ''): Promise<void> {
   await page.goto(`/?demo${query}#/summary`);
@@ -88,7 +89,7 @@ test('Demo data badge persists in mock mode', async ({ page }) => {
 test('under demo data the live assistant is not mounted and Firebase is not contacted', async ({ page }) => {
   const external: string[] = [];
   page.on('request', (r) => {
-    if (!r.url().startsWith('http://127.0.0.1:5174/') && !r.url().startsWith('data:')) external.push(r.url());
+    if (!r.url().startsWith(`${ORIGIN}/`) && !r.url().startsWith('data:')) external.push(r.url());
   });
   await open(page);
   // The Assistant is in the Settings menu for now (T5.12).
