@@ -342,6 +342,16 @@ describe('fix 1 (M1, M4, M6)', () => {
     expect(kept).toEqual({ ckp_stale_running1: 'abandoned', ckp_fresh_running1: 'running', ckp_old_wait_00001: 'waiting' });
     expect(h.server.rows.get('ckp_stale_running1')).toMatchObject({ status: 'abandoned' });
   });
+
+  it('research notes and the reviewed plan brief are the owner\'s saved work, not finished steps: they are never purged, however old', async () => {
+    const h = setup({ now: () => new Date('2026-11-22T12:00:00.000Z') });
+    const base = { projectId: 'p', taskId: 't1', taskRevision: 1, runId: 'run', planRevision: 1, stage: 'context' as const, callOverride: null, routeMode: 'ONLY_ON_DEVICE' as const, continuation: 'device_only' as const, labels: ['internal' as const], locked: false, inputs: { contextId: null, bundleSha256: null, files: [], inputChars: null }, partial: null, stopReason: null, routeRecordId: null, escalatedAt: null, resumedAs: null, createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' };
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_notes_old0001', stepKind: 'researchNotes' as never, status: 'done' } as never);
+    await h.device.put('owner_1', { ...base, checkpointId: 'ckp_brief_old0001', stepKind: 'planBrief' as never, status: 'done' } as never);
+    await h.engine.load();
+    const kept = (await h.device.list('owner_1', 'p')).map((c) => c.checkpointId).sort();
+    expect(kept).toEqual(['ckp_brief_old0001', 'ckp_notes_old0001']);
+  });
 });
 
 describe('the checkpoint engine (H12)', () => {

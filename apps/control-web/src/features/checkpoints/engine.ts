@@ -102,6 +102,8 @@ const STAGE_OF_KIND: Partial<Record<RouteStepKind, AiCheckpointStage>> = { pmPla
 const BRIEF_CHECKS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb']);
 /** H13 fix round 2 (N3): checkpoints that carry the owner's plan brief text. */
 const ALWAYS_TOMBSTONE: ReadonlySet<string> = new Set(['researchNotes', 'planBrief', 'pmVerify', 'pmVerifyNoWeb']);
+/** Kept until the owner removes them: the age purge (M6) is for finished steps, not for the owner's notes and reviewed brief. */
+const SAVED_WORK: ReadonlySet<string> = new Set(['researchNotes', 'planBrief']);
 /** Steps that only ever run in the cloud: never moved to this device, never escalated (fix round 1, H1). */
 export const CLOUD_ONLY_STEPS: ReadonlySet<string> = new Set(['pmVerify', 'pmVerifyNoWeb', 'pmResearch']);
 const TASK_STEPS: ReadonlySet<string> = new Set(['criteria', 'breakdown', 'patch', 'review', 'triage', 'prDescription']);
@@ -583,7 +585,8 @@ export function createCheckpointEngine(deps: CheckpointEngineDeps): CheckpointEn
       for (const cp of Object.values(merged)) {
         const age = at - Date.parse(cp.updatedAt);
         if ((cp.status === 'running' || cp.status === 'sending') && age > ABANDON_AFTER_MS) await abandon(cp);
-        else if (CLOSED_STATUSES.has(cp.status) && age > PURGE_AFTER_MS) {
+        // Research notes and the reviewed plan brief are the owner's saved work, not finished steps: never purged by age.
+        else if (CLOSED_STATUSES.has(cp.status) && age > PURGE_AFTER_MS && !SAVED_WORK.has(cp.stepKind)) {
           try { await deps.device.remove(deps.ownerKey, deps.projectId, cp.checkpointId); } catch { /* left for the next load */ }
           patch((s) => { const next = { ...s.checkpoints }; delete next[cp.checkpointId]; return { checkpoints: next }; });
         }
