@@ -19,6 +19,28 @@ interface Note {
 
 export class PlanNotes {
   private notes = new Map<string, Note>();
+  /** P1: set while the Project Manager carries an accepted plan to the board: new notes wait for it to pin them. */
+  private held = false;
+  private waiting = new Set<string>();
+
+  /** P1: a plan was accepted and the PM is on its way: notes that appear now flash only once it pins them. */
+  hold(): void {
+    this.held = true;
+  }
+
+  /** P1: the PM is at the board: the notes that waited flash now (every note, when none were new). */
+  pin(t: number): void {
+    const ids = this.waiting.size > 0 ? [...this.waiting] : [...this.notes.keys()];
+    for (const id of ids) { const n = this.notes.get(id); if (n) n.born = t; }
+    this.held = false;
+    this.waiting.clear();
+  }
+
+  /** P1: drops a hold the PM will never finish (a new epoch). */
+  release(): void {
+    this.held = false;
+    this.waiting.clear();
+  }
 
   update(mine: readonly OfficeNote[], board: PxRect, dt: number, t: number, settle: boolean) {
     const seen = new Set<string>();
@@ -31,7 +53,11 @@ export class PlanNotes {
         const ty = board.y + 11 + Math.floor(i / 4) * 7;
         const n = this.notes.get(task.taskId);
         if (n) Object.assign(n, { tx, ty, hidden: i >= 16 });
-        else this.notes.set(task.taskId, { x: tx, y: ty, tx, ty, hidden: i >= 16, born: this.notes.size ? t : -10 });
+        else {
+          const fresh = this.notes.size > 0;
+          if (fresh && this.held) this.waiting.add(task.taskId);
+          this.notes.set(task.taskId, { x: tx, y: ty, tx, ty, hidden: i >= 16, born: fresh && !this.held ? t : -10 });
+        }
       });
     }
     for (const id of [...this.notes.keys()]) if (!seen.has(id)) this.notes.delete(id);

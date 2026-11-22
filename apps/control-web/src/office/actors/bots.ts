@@ -34,9 +34,14 @@ export class Bot {
   spriteX = 0;
   spriteY = 0;
   private sprites: Record<Facing, HTMLCanvasElement>;
+  /** P1: a robot of its own build (the Project Manager) keeps its frames whatever its colour. */
+  private readonly ownSprites: boolean;
+  /** P1: hovers: a slow bob at rest, faster while it walks (the Project Manager). A worker stands on the floor and bobs only while it walks. */
+  hover = false;
 
-  constructor(public config: DeskAgent, public index: number) {
-    this.sprites = robotCanvases(config.color);
+  constructor(public config: DeskAgent, public index: number, sprites?: Record<Facing, HTMLCanvasElement>) {
+    this.ownSprites = sprites !== undefined;
+    this.sprites = sprites ?? robotCanvases(config.color);
     this.sprite = this.sprites.back;
   }
 
@@ -45,7 +50,7 @@ export class Bot {
   }
 
   restyle(config: DeskAgent): void {
-    if (config.color !== this.config.color) this.sprites = robotCanvases(config.color);
+    if (config.color !== this.config.color && !this.ownSprites) this.sprites = robotCanvases(config.color);
     this.config = config;
   }
 
@@ -87,10 +92,13 @@ export class Bot {
     }
   }
 
-  /** Picks the sprite and its position for this frame. A worker stands on the floor; it bobs one pixel while it walks. */
+  /**
+   * Picks the sprite and its position for this frame. A worker stands on the floor; it bobs one pixel while it walks. A hovering robot also bobs at rest,
+   * more slowly. Under reduced motion `t` is 0 and nothing walks, so nothing bobs.
+   */
   render(t: number, state: RobotState): void {
     const moving = this.path.length > 0;
-    const bob = moving ? Math.floor(t * 8 + this.index) % 2 : 0;
+    const bob = moving ? Math.floor(t * 8 + this.index) % 2 : this.hover ? Math.floor(t * 2) % 2 : 0;
     this.spriteX = Math.round(this.x) - ROBOT_W / 2;
     this.spriteY = Math.round(this.y) - ROBOT_H - bob;
     let f: Facing = 'front';

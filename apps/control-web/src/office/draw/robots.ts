@@ -60,20 +60,50 @@ export function robotCanvases(color: string): Record<Facing, HTMLCanvasElement> 
 }
 
 /**
- * The Project Manager (H11): the same crew build in a gold songkok-style cap, holding a cream clipboard across its apron. Always at the PLAN desk.
+ * The Project Manager (H11): the same crew build in a gold songkok-style cap, holding a cream clipboard across its apron. P1: it walks like the crew, so it
+ * has a frame for each facing; the clipboard shows from the front and at its side, and is hidden from behind.
  */
-const PM_FRONT = [
-  '....oooo....', '...oKKKKo...', '..oKgKKKKo..', '.oooooooooo.',
-  '.ohBBBBBBBo.', '.oBFFFFFFBo.', '.oBFFFFFFBo.', '.oBBBBBBBbo.', '..oooooooo..',
-  '.oBPPPPPPBo.', 'oBoPPPPPPoBo', 'oBoPMMMMPoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
-];
-let pmCache: HTMLCanvasElement | null = null;
-/** The Project Manager's sprite, front facing (it sits at the PLAN desk and turns to the board). */
-export function pmCanvas(): HTMLCanvasElement {
+const PM_CAP = ['....oooo....', '...oKKKKo...', '..oKgKKKKo..', '.oooooooooo.'];
+const PM_CAP_SIDE = ['...oooo.....', '..oKKKKo....', '.oKgKKKKo...', '.ooooooooooo'];
+export const PM_ROWS = {
+  front: [
+    ...PM_CAP,
+    '.ohBBBBBBBo.', '.oBFFFFFFBo.', '.oBFFFFFFBo.', '.oBBBBBBBbo.', '..oooooooo..',
+    '.oBPPPPPPBo.', 'oBoPPPPPPoBo', 'oBoPMMMMPoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
+  ],
+  back: [
+    ...PM_CAP,
+    '.ohBBBBBBBo.', '.oBBBBBBBBo.', '.oBBbbbbBBo.', '.oBBBBBBBbo.', '..oooooooo..',
+    '.oBBBBBBBBo.', 'oBoBBBBBBoBo', 'oBoBbbbbBoBo', '.o.obbbbo.o.', '...oG..Go...', '...oo..oo...',
+  ],
+  /** Seated at the PLAN desk, seen from behind, the clipboard set down and both hands on the keys. */
+  type: [
+    ...PM_CAP,
+    '.ohBBBBBBBo.', '.oBBBBBBBBo.', '.oBBbbbbBBo.', '.oBBBBBBBbo.', '..oooooooo..',
+    'ooBBBBBBBBoo', 'oBBBbBBbBBBo', '.oBBBbbBBBo.', '..obbbbbbo..', '...o....o...', '............',
+  ],
+  side: [
+    ...PM_CAP_SIDE,
+    '.ohBBBBBBBo.', '.oBBBBFFFFo.', '.oBBBBFFFFo.', '.oBBBBBBBbo.', '..oooooooo..',
+    '..oBBBBPPPo.', '..oBBBoPMPo.', '..oBBBoPPPo.', '..obbbbbbo..', '...oGo.oGo..', '...oo..oo...',
+  ],
+} as const satisfies Record<'front' | 'back' | 'type' | 'side', readonly string[]>;
+const PM_BODY = '#8a5a8c';
+let pmCache: Record<Facing, HTMLCanvasElement> | null = null;
+/** P1: the Project Manager's frames for every facing, built once. */
+export function pmCanvases(): Record<Facing, HTMLCanvasElement> {
   if (pmCache) return pmCache;
-  const body = '#8a5a8c';
-  pmCache = spriteCanvas(PM_FRONT, { o: toneShift(body, -0.62), B: body, b: toneShift(body, -0.22), h: toneShift(body, 0.5), K: C.goldDark, g: C.gold, F: C.screen, P: C.cream, M: C.inkSoft, G: C.deskDD });
+  const body = PM_BODY;
+  const pal = { o: toneShift(body, -0.62), B: body, b: toneShift(body, -0.22), h: toneShift(body, 0.5), K: C.goldDark, g: C.gold, F: C.screen, P: C.cream, M: C.inkSoft, G: C.deskDD };
+  const side = spriteCanvas(PM_ROWS.side, pal);
+  pmCache = { front: spriteCanvas(PM_ROWS.front, pal), back: spriteCanvas(PM_ROWS.back, pal), type: spriteCanvas(PM_ROWS.type, pal), side, sideL: flipCanvas(side) };
   return pmCache;
+}
+/** The Project Manager's colour, for its foot shadow and tag. */
+export const PM_COLOR = PM_BODY;
+/** The Project Manager's front frame (its portrait). */
+export function pmCanvas(): HTMLCanvasElement {
+  return pmCanvases().front;
 }
 
 /**

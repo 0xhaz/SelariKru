@@ -3,8 +3,15 @@
 // An errand is a list of steps. A robot runs one errand at a time, one step at a time: it walks to the step's place, lingers there (showing an emote
 // or carrying a tiffin if the step says so), then takes the next step. A held step (a roof box while the worker's AI call is in flight) waits until it is released.
 
-/** Where a step goes. `here` stays put; the scene turns the rest into tiles. */
-export type ErrandPlace = 'plan' | 'table' | 'seat' | 'roofDevice' | 'roofCloud' | 'drop' | 'prs' | 'here';
+import { officeEvents } from '../events.ts';
+import type { OfficeWorld } from '../model.ts';
+
+/**
+ * Where a step goes. `here` stays put; the scene turns the rest into tiles. P1: the Project Manager's own places are `pmTable` (its place at the shared
+ * table), `pmBoard` (in front of the plan board), `pmDelegate` (beside the worker named by the step) and `pmHome` (the shared table while a meeting is on,
+ * else its seat at the PLAN desk).
+ */
+export type ErrandPlace = 'plan' | 'table' | 'seat' | 'roofDevice' | 'roofCloud' | 'drop' | 'prs' | 'here' | 'pmTable' | 'pmBoard' | 'pmDelegate' | 'pmHome';
 export type ErrandEmote = 'talk' | 'mail' | 'ok' | 'heart';
 
 export interface ErrandStep {
@@ -16,6 +23,8 @@ export interface ErrandStep {
   readonly carry?: boolean;
   /** Waits here until `release(hold)`: on the roof while the worker's AI call is in flight. */
   readonly hold?: 'call';
+  /** P1: the worker a `pmDelegate` step walks to. */
+  readonly agentId?: string;
 }
 
 export class ErrandQueue {
@@ -95,6 +104,23 @@ export class ErrandQueue {
     return place;
   }
 
+  /** P1: how many queued errands go to this place (the PM's delegation trips, for their cap). */
+  count(place: ErrandPlace): number {
+    return this.errands.filter((e) => e.some((s) => s.to === place)).length;
+  }
+
+  /**
+   * P1: drops the current errand's last step when it is a walk to this place and another errand is queued, so the PM goes from one trip straight to the
+   * next instead of home in between. Returns true when it dropped one.
+   */
+  skipTrailing(place: ErrandPlace): boolean {
+    const first = this.errands[0];
+    if (!first || this.errands.length < 2 || first.length !== 1 || first[0]!.to !== place) return false;
+    this.errands.shift();
+    this.arrivedAt = null;
+    return true;
+  }
+
   private next(): void {
     const first = this.errands[0];
     if (!first) return;
@@ -102,4 +128,40 @@ export class ErrandQueue {
     if (first.length === 0) this.errands.shift();
     this.arrivedAt = null;
   }
+}
+
+/** P1: at most this many delegation trips are queued for the PM; a delegation past it gets only its envelope, sent from the PM's desk. */
+export const PM_TRIP_CAP = 4;
+
+export interface PmPlan {
+  /** The PM's new errands, in order. */
+  readonly errands: ErrandStep[][];
+  /** Workers whose delegation is past the cap: an envelope from the PM's desk, and no walk. */
+  readonly deskEnvelopes: string[];
+}
+
+/**
+ * P1: the Project Manager's errands for what changed between two worlds in a row. Every one follows a real change: a meeting at the shared table starting
+ * or ending, a plan revision accepted for the same run, or a delegation recorded for a worker in the office. The first world and a new epoch replay nothing.
+ * `queuedTrips` is how many delegation trips are already queued, so the cap holds across worlds.
+ */
+export function pmErrands(prev: OfficeWorld | null, next: OfficeWorld, queuedTrips = 0): PmPlan {
+  const errands: ErrandStep[][] = [];
+  const deskEnvelopes: string[] = [];
+  if (prev === null || prev.epoch !== next.epoch) return { errands, deskEnvelopes };
+  const was = prev.meeting?.pm === true;
+  const now = next.meeting?.pm === true;
+  if (now && !was) errands.push([{ to: 'pmTable' }]);
+  if (was && !now) errands.push([{ to: 'pmHome' }]);
+  const events = officeEvents(prev, next);
+  if (events.some((e) => e.kind === 'planAccepted')) errands.push([{ to: 'pmBoard', linger: 2, emote: 'talk' }, { to: 'pmHome' }]);
+  // One trip per worker, in the order the delegations were recorded.
+  const workers: string[] = [];
+  for (const e of events) if (e.kind === 'delegated' && !workers.includes(e.agentId)) workers.push(e.agentId);
+  let room = Math.max(0, PM_TRIP_CAP - queuedTrips);
+  for (const agentId of workers) {
+    if (room > 0) { errands.push([{ to: 'pmDelegate', agentId, linger: 1.6, emote: 'talk' }, { to: 'pmHome' }]); room -= 1; }
+    else deskEnvelopes.push(agentId);
+  }
+  return { errands, deskEnvelopes };
 }

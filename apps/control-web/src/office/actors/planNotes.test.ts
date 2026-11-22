@@ -26,4 +26,27 @@ describe('plan notes', () => {
     n.update(note(3), board, 0.016, 1, true);
     expect(at(n).x).toBe(at(n).tx);
   });
+
+  it('P1: after a plan is accepted, the new notes are pinned when the Project Manager reaches the board, not before', () => {
+    const born = (n: PlanNotes, id: string) => (n as unknown as { notes: Map<string, { born: number }> }).notes.get(id)!.born;
+    const two = [{ taskId: 't', column: 0 as const, status: 'running' as const, ownerId: null }, { taskId: 'u', column: 0 as const, status: 'running' as const, ownerId: null }];
+    const n = new PlanNotes();
+    n.update(note(0), board, 0.016, 0, false);
+    n.hold();
+    n.update(two, board, 0.016, 5, false);
+    // Not flashing yet: the PM is still on its way.
+    expect(born(n, 'u')).toBeLessThan(0);
+    n.pin(9);
+    expect(born(n, 'u')).toBe(9);
+    // A note that was already up is left alone.
+    expect(born(n, 't')).toBeLessThan(0);
+    // With nothing new, the pin flashes every note on the wall.
+    n.hold();
+    n.pin(12);
+    expect(born(n, 't')).toBe(12);
+    expect(born(n, 'u')).toBe(12);
+    // Without a hold a new note flashes as it arrives, as before.
+    n.update([...two, { taskId: 'v', column: 0, status: 'running', ownerId: null }], board, 0.016, 20, false);
+    expect(born(n, 'v')).toBe(20);
+  });
 });
