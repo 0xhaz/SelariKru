@@ -5,6 +5,16 @@ const REPO = 'https://github.com/0xhaz/SelariKru';
 /** The commands, exactly as TESTING.md gives them: clone, install, and `pnpm start` (infra/start.mjs), which checks the machine, starts everything and opens Chrome. */
 export const RUN_LOCALLY_COMMANDS = ['git clone https://github.com/0xhaz/SelariKru.git', 'cd SelariKru', 'pnpm install', 'pnpm start'] as const;
 
+/** Under the team header on wide screens: one line and the Run locally button. */
+export function RunLocallyCard() {
+  return (
+    <div className="panel flex items-center justify-between gap-2 px-2.5 py-1.5" data-testid="run-locally-card">
+      <p className="min-w-0 text-[13px] text-fg">Run it on your own computer</p>
+      <RunLocallyButton />
+    </div>
+  );
+}
+
 /** The hosted demo's way to the full app: a top-bar button and a native modal dialog with the commands to run it on your own computer. */
 export function RunLocallyButton() {
   const [open, setOpen] = useState(false);

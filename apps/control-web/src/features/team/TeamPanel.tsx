@@ -125,7 +125,7 @@ function Count({ status, testId = 'team-needs-you' }: { status: PanelStatus; tes
 }
 
 /** The roster beside every page at wide widths. Selecting a worker opens its drawer over the page; nothing navigates. */
-export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined }) {
+export function TeamPanelSide({ status, selectedId, onOpen, mark, below = null }: { status: PanelStatus; selectedId: string | null; onOpen: (id: string) => void; mark?: RowMark | undefined; below?: ReactNode }) {
   return (
     <aside aria-labelledby="team-panel-title" data-testid="team-panel" data-variant="side" className="fixed bottom-[250px] left-4 top-[var(--header-h,74px)] z-10 flex w-[280px] flex-col gap-2">
       {/* The "TEAM · N" header, on the deep green signboard so its text meets AA over the office. */}
@@ -137,6 +137,8 @@ export function TeamPanelSide({ status, selectedId, onOpen, mark }: { status: Pa
         </p>
         <a href="#/settings" className="btn shrink-0 px-2 text-[12px] normal-case tracking-normal">Team settings</a>
       </div>
+      {/* Under the team header: the hosted demo's way to the full app (Run locally). */}
+      {below}
       <div className="scroll-thin -ml-4 flex min-h-0 flex-col overflow-y-auto pt-1 pr-1 pb-2 pl-4">
         {status.kind === 'ready' && status.panel.rows.length > 0 ? null : <div className="panel px-2.5 py-1"><Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /></div>}
         {status.kind === 'ready' && status.panel.rows.length > 0 ? <Rows status={status} selectedId={selectedId} onOpen={onOpen} grid={false} mark={mark} /> : null}

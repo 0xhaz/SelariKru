@@ -53,6 +53,9 @@ test('hosted demo: the top bar shows the cloud calls left, and Debug offers only
 test('hosted demo: Run locally opens a dialog with the clone, install and start commands; Esc closes it and focus returns', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, { hostedQuota: { limit: 40, used: 0 } });
+  // Wide screens: under the team header, not in the top bar.
+  await expect(page.getByTestId('run-locally-card').getByTestId('run-locally')).toBeVisible();
+  await expect(page.locator('nav[aria-label="Primary"]').getByTestId('run-locally')).toHaveCount(0);
   await page.getByTestId('run-locally').click();
   const dialog = page.getByRole('dialog', { name: 'Run SelariKru on your computer' });
   await expect(dialog).toBeVisible();
@@ -63,6 +66,23 @@ test('hosted demo: Run locally opens a dialog with the clone, install and start 
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   await expect(page.getByTestId('run-locally')).toBeFocused();
+});
+
+test('hosted demo, narrow window: Run locally is in the top bar (no side team panel)', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await open(page, { hostedQuota: { limit: 40, used: 0 } });
+  await expect(page.locator('nav[aria-label="Primary"]').getByTestId('run-locally')).toBeVisible();
+  await expect(page.getByTestId('run-locally-card')).toHaveCount(0);
+});
+
+test('hosted demo at 1920 px: the Plan wall label stays on one line, clear of the cloud-calls chip', async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1000 });
+  await open(page, { hostedQuota: { limit: 40, used: 0 } });
+  const label = page.getByText('Plan wall', { exact: true });
+  await expect(label).toBeVisible();
+  const [chip, text] = [await page.getByTestId('cloud-quota').boundingBox(), await label.boundingBox()];
+  expect(text!.height).toBeLessThan(24);
+  expect(text!.x).toBeGreaterThanOrEqual(chip!.x + chip!.width);
 });
 
 test('not the hosted demo (?demo): no Run locally button', async ({ page }) => {

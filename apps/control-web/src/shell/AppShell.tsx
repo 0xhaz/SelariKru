@@ -58,6 +58,7 @@ import type { CloudQuota } from '../features/hosted/cloud-quota.ts';
 import { quotaText } from '../features/hosted/quota-store.ts';
 import { EMPTY_QUOTA_STORE } from '../features/hosted/quota-store.ts';
 import { NanoBanner } from '../features/hosted/NanoBanner.tsx';
+import { RunLocallyCard } from '../features/hosted/RunLocally.tsx';
 import { Tour, startTour } from '../features/tour/Tour.tsx';
 import { createAgents, type AgentsPort } from '../features/hybrid/agents.ts';
 import { hybridResults, resultKey } from '../features/hybrid/context.tsx';
@@ -609,7 +610,7 @@ export function AppShell({ store, mode, projectLabel, account, assistant, onboar
         <ConnectionBanner connection={connection} />
         {devNotice ? <p role="status" data-testid="dev-config-missing" className="z-50 mx-3 mt-3 border-2 border-ink bg-warning-tint px-3 py-1 text-[14px] font-semibold text-fg rounded-[4px] xl:fixed xl:left-1/2 xl:top-[calc(var(--header-h,74px)+26px)] xl:mx-0 xl:mt-0 xl:-translate-x-1/2">{devNotice}</p> : null}
         {deviceAvailability ? <NanoBanner check={deviceAvailability} snapshot={snapshot} /> : null}
-        {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} /> : null}
+        {panelWide ? <TeamPanelSide status={panelStatus} selectedId={workerId} onOpen={openWorker} mark={mark} below={hosted ? <RunLocallyCard /> : null} /> : null}
         {panelWide ? <ActivityFeed items={activity} fallback={fallback} nowMs={state.nowMs} stale={stale} /> : null}
       </div>
 

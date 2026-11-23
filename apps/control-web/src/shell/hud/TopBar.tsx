@@ -239,8 +239,9 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <span className="min-w-0 truncate text-[15px] text-muted xl:max-w-[11rem]" data-testid="project-label"><span aria-hidden="true" className="hidden sm:inline">— </span><span className="sr-only">, project </span><em className="font-semibold not-italic text-fg">{projectLabel}</em></span>
       </p>
       {runs.length > 0 ? (
-        <label className="hidden items-center gap-2 text-[14px] 2xl:flex">
-          <span className="text-muted">Plan wall</span>
+        <label className="hidden shrink-0 items-center gap-2 text-[14px] 2xl:flex">
+          {/* Never squeezed: a shrinking label wrapped onto two lines over the hosted demo's cloud-calls chip. */}
+          <span className="whitespace-nowrap text-muted">Plan wall</span>
           <select className="field w-[11rem] py-0 text-[14px]" value={planRunId ?? ''} onChange={(e) => onPlanRun(e.target.value || null)} aria-label="Run shown on the plan wall">
             <option value="">Current run</option>
             {runs.map((r) => <option key={r.runId} value={r.runId}>{r.label}</option>)}
@@ -286,7 +287,8 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
         <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
-        {quota !== null ? <RunLocallyButton /> : null}
+        {/* Wide screens show it under the team header instead (RunLocallyCard). */}
+        {quota !== null && !panelWide ? <RunLocallyButton /> : null}
         {onTour ? <button type="button" className="btn text-[14px]" data-testid="start-tour" onClick={onTour}>Start<span className="hidden 2xl:inline"> the</span> tour</button> : null}
         {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title={quota !== null ? 'Demo controls: go offline' : 'Development only'}>Debug</button> : null}
       </nav>
