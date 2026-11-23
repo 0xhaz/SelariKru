@@ -1,6 +1,7 @@
 // Adapted from jsm-hq (MIT), see THIRD_PARTY_NOTICES.md
 
 import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { RunLocallyButton } from '../../features/hosted/RunLocally.tsx';
 import { TONE_TEXT, formatAge, formatClock, toneGlyph, type Tone } from '@selarikru/ui';
 import type { OfficeRunChoice } from '../../office/model.ts';
 import type { AiRunCounts } from './activity.ts';
@@ -285,6 +286,7 @@ export const TopBar = forwardRef<HTMLElement, TopBarProps>(function TopBar(props
         <a href={hrefFor('evidence')} aria-current={route === 'evidence' ? 'page' : undefined} className="btn text-[14px]">PRs</a>
         <TerminalMenu workers={workers} selectedId={selectedWorker} />
         <a href={hrefFor('settings')} aria-current={topBarHomeOf(route) === 'Settings' ? 'page' : undefined} className="btn text-[14px]">Settings</a>
+        {quota !== null ? <RunLocallyButton /> : null}
         {onTour ? <button type="button" className="btn text-[14px]" data-testid="start-tour" onClick={onTour}>Start<span className="hidden 2xl:inline"> the</span> tour</button> : null}
         {onDebug ? <button type="button" className="btn text-[14px]" aria-pressed={debugOpen} onClick={onDebug} title={quota !== null ? 'Demo controls: go offline' : 'Development only'}>Debug</button> : null}
       </nav>

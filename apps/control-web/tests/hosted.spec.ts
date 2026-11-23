@@ -50,6 +50,27 @@ test('hosted demo: the top bar shows the cloud calls left, and Debug offers only
   await panel.getByRole('button', { name: 'Go online' }).click();
 });
 
+test('hosted demo: Run locally opens a dialog with the clone, install and start commands; Esc closes it and focus returns', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, { hostedQuota: { limit: 40, used: 0 } });
+  await page.getByTestId('run-locally').click();
+  const dialog = page.getByRole('dialog', { name: 'Run SelariKru on your computer' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByTestId('run-locally-commands')).toHaveText('git clone https://github.com/0xhaz/SelariKru.git\ncd SelariKru\npnpm install\npnpm start');
+  await expect(dialog.getByRole('link', { name: 'Full steps in TESTING.md' })).toHaveAttribute('href', 'https://github.com/0xhaz/SelariKru/blob/main/TESTING.md');
+  const { violations } = await new AxeBuilder({ page }).include('[data-testid="run-locally-dialog"]').analyze();
+  expect(violations.map((v) => v.id)).toEqual([]);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId('run-locally')).toBeFocused();
+});
+
+test('not the hosted demo (?demo): no Run locally button', async ({ page }) => {
+  await page.goto('/?demo#/office');
+  await expect(page.getByTestId('team-panel-row').first()).toBeVisible();
+  await expect(page.getByTestId('run-locally')).toHaveCount(0);
+});
+
 test('H9 fix round 1 (I3): in dev with no Firebase config, a visible notice says AI calls will fail and what to add', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, { devConfigMissing: true });
