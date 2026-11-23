@@ -40,6 +40,17 @@ On-device calls need desktop Chrome with the built-in Prompt API (Gemini Nano). 
 
 You need Node 24, pnpm 9 and Docker. Copy `.env.example` to `.env` (repository root), and `apps/control-web/.env.example` to `apps/control-web/.env.local`. Each file lists the variable **names** only. Fill in your own values, and never commit them.
 
+**One command.** After `pnpm install`, `pnpm start` checks your machine, then starts everything: Postgres, the Auth Emulator, the control API, the web app and the local runner. Then it opens Chrome at http://127.0.0.1:5173. `pnpm start --check` runs only the checks, and lists anything to fix. Ctrl+C stops everything. The optional settings are at the end of `.env.example`.
+
+```sh
+git clone https://github.com/0xhaz/SelariKru.git
+cd SelariKru
+pnpm install
+pnpm start
+```
+
+To start the parts one at a time instead:
+
 ```sh
 pnpm install
 
