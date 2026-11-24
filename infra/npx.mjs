@@ -14,8 +14,8 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const CLONE_URL = process.env.SELARIKRU_CLONE_URL ?? 'https://github.com/0xhaz/SelariKru.git';
-const PROJECT_ID = 'proj_real_local';
-const RUN_ID = 'run_real_local';
+const PROJECT_ID = 'proj_starter_local'; // not the real-run default (proj_real_local), so it never collides with a project an existing local stack already seeded
+const RUN_ID = 'run_starter_local';
 const OWNER_EMAIL = 'owner@selarikru.invalid';
 const OWNER_PASSWORD = 'real-run-local-only-password'; // the real-run seed's default; Auth Emulator only, not a secret
 const WIN = platform() === 'win32';
