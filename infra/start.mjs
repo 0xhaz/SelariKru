@@ -55,8 +55,10 @@ check(Boolean(process.env.SELARIKRU_OWNER_UID), '.env has SELARIKRU_OWNER_UID', 
 check(envFileHas('apps/control-web/.env.local', 'VITE_FIREBASE_API_KEY'), 'apps/control-web/.env.local has the Firebase web config', 'Copy apps/control-web/.env.example to apps/control-web/.env.local and fill in your Firebase web config.');
 const source = process.env.SELARIKRU_SOURCE_REPO;
 if (source) check(isAbsolute(source) && existsSync(join(source, '.git')), 'SELARIKRU_SOURCE_REPO is a git checkout', 'Set SELARIKRU_SOURCE_REPO in .env to the absolute path of the project checkout to build, or remove it.');
-const paired = existsSync(join(RUNNER_HOME, 'credentials.json'));
-console.log(`  ${paired ? 'ok  ' : 'note'} local runner paired${paired ? '' : ': not yet. The app runs without it; pair it once from Settings (see TESTING.md), then start again.'}`);
+let paired = existsSync(join(RUNNER_HOME, 'credentials.json'));
+// With a source repository, dev-real seeds the owner's Auth Emulator account, so an unpaired runner is paired automatically once the API is up.
+const autoPair = !paired && Boolean(source);
+console.log(`  ${paired ? 'ok  ' : 'note'} local runner paired${paired ? '' : autoPair ? ': not yet. It will be paired with this stack once the API is up.' : ': not yet. The app runs without it; set SELARIKRU_SOURCE_REPO to have it paired automatically (see TESTING.md).'}`);
 const busy = [];
 for (const [port, name] of [[5173, 'web app'], [API_PORT, 'control API'], [AUTH_PORT, 'Auth Emulator']]) if (await portInUse(port)) busy.push(`${port} (${name})`);
 check(busy.length === 0, 'ports 5173, 8787 and 9099 are free', `Something is already using ${busy.join(', ')}. Stop it (an earlier SelariKru in another terminal?) and try again.`);
@@ -118,6 +120,35 @@ if (!(await waitForPort(API_PORT, 'The control API', 180))) process.exit(1);
 
 start('the web app', 'pnpm', ['--filter', '@selarikru/control-web', 'dev', '--host', '127.0.0.1', '--port', '5173', '--strictPort']);
 if (!(await waitForPort(5173, 'The web app', 60))) process.exit(1);
+
+// First start: pair the runner with this local stack. Loopback only: the owner signs in to the Auth Emulator (the seeded account's emulator-only
+// password), asks the API for a one-time pairing code, and the runner enrols with it. The code is never printed.
+const pairRunner = async () => {
+  const email = process.env.SELARIKRU_REAL_OWNER_EMAIL?.trim() || 'owner@selarikru.invalid';
+  const password = process.env.SELARIKRU_REAL_OWNER_PASSWORD?.trim() || 'real-run-local-only-password';
+  try {
+    const signIn = await fetch(`http://127.0.0.1:${AUTH_PORT}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=local-emulator`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password, returnSecureToken: true }),
+    });
+    const { idToken } = await signIn.json();
+    if (!signIn.ok || !idToken) throw new Error(`the emulator sign-in failed (HTTP ${signIn.status})`);
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/v1/runners/pairing-codes`, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${idToken}` }, body: JSON.stringify({ location: 'local' }),
+    });
+    const { pairingCode } = await res.json();
+    if (!res.ok || !pairingCode) throw new Error(`the API refused a pairing code (HTTP ${res.status})`);
+    const r = spawnSync('pnpm', ['--filter', '@selarikru/local-runner', 'exec', 'tsx', 'src/main.ts', 'pair', '--api', `http://127.0.0.1:${API_PORT}`, '--code', pairingCode, '--label', 'this computer'], { stdio: 'inherit', env: process.env, shell: platform() === 'win32' });
+    if (r.status !== 0) throw new Error('the runner could not enrol');
+    return true;
+  } catch (e) {
+    say(`could not pair the runner (${e instanceof Error ? e.message : String(e)}). The app runs without it; see TESTING.md to pair it by hand.`);
+    return false;
+  }
+};
+if (autoPair) {
+  say('pairing the local runner with this stack');
+  paired = await pairRunner();
+}
 
 if (paired) {
   const repos = (process.env.SELARIKRU_RUNNER_REPOS ?? '').split(',').map((s) => s.trim()).filter(Boolean).flatMap((r) => ['--repo', r]);

@@ -5,7 +5,7 @@
 You give the Project Manager your rough notes. Gemini Nano turns them into a brief on your own machine. Gemini in the cloud checks the brief against Google Search and drafts the plan. The PM hands each task to a frontend or backend worker. Every change a worker proposes is applied, built and tested by a local runner on your computer, which uses no model, and each verified change arrives as a draft pull request on GitHub.
 
 - **Try it:** <https://selarikru.web.app>. This is a hosted demo on demo data, and its AI calls are real.
-- **Run it yourself:** `git clone`, `pnpm install`, `pnpm start` (see [Getting started](#getting-started)).
+- **Run it yourself:** `npx github:0xhaz/SelariKru` (see [Getting started](#getting-started)).
 - **Testing guide:** [TESTING.md](TESTING.md)
 - **Licence:** [Apache-2.0](LICENSE)
 
@@ -198,7 +198,21 @@ Open <https://selarikru.web.app> in desktop Chrome. You don't need an account. T
 
 ### Your own computer
 
-You need Node 24, pnpm 9, Docker, the Firebase CLI and desktop Chrome.
+You need Node 24, pnpm (`corepack enable`), git, Docker, the Firebase CLI and desktop Chrome, plus your own Firebase project with AI Logic and App Check turned on. Then run one command:
+
+```sh
+npx github:0xhaz/SelariKru
+```
+
+This does four things:
+1. It clones SelariKru into a `SelariKru` folder and runs `pnpm install`.
+2. On the first run, it asks you to paste your Firebase web config (the `firebaseConfig` object from the Firebase console) and your App Check site key. It writes them to the two git-ignored env files.
+3. It sets up a small local Feedback Board project for the team to build, with GitHub off.
+4. It runs `pnpm start`, which pairs the local runner with the stack on first start and opens Chrome at <http://127.0.0.1:5173>.
+
+Sign in with `owner@selarikru.invalid` and password `real-run-local-only-password`. Both exist only in the local Auth Emulator, so they're not secrets. Run the same command again to start SelariKru next time, and press Ctrl+C to stop it.
+
+To do it by hand instead:
 
 ```sh
 git clone https://github.com/0xhaz/SelariKru.git
@@ -210,9 +224,7 @@ pnpm start --check                                              # lists anything
 pnpm start
 ```
 
-`pnpm start` checks your machine, then starts PostgreSQL, the Auth Emulator, the control API, the web app and the paired local runner, and opens Chrome at <http://127.0.0.1:5173>. Ctrl+C stops everything.
-
-You need your own Firebase project with AI Logic and App Check turned on. The env files list the variable names only, and no keys are committed. [TESTING.md](TESTING.md) covers:
+`pnpm start` checks your machine, then starts PostgreSQL, the Auth Emulator, the control API, the web app and the local runner, and opens Chrome. The env files list the variable names only, and no keys are committed. [TESTING.md](TESTING.md) covers:
 - pairing the runner;
 - connecting a project to GitHub;
 - running each part on its own;
@@ -248,7 +260,7 @@ Browser tests (Playwright) are in `apps/control-web/tests/`.
 | `services/workflow` | The database scheduler: claims, leases, fencing and budgets |
 | `services/verifier` | The independent verifier for the example project's acceptance contract |
 | `examples/feedback-board-starter` | A small Express and React app that SelariKru builds features into in the demo |
-| `infra/` | `pnpm start` and the dev stack scripts |
+| `infra/` | The `npx` launcher (`npx.mjs`), `pnpm start` (`start.mjs`) and the dev stack scripts |
 | `tools/benchmarks` | The benchmark harness |
 
 `packages/harness-claude` is an optional adapter for running Claude Code as a coding worker. **It is off by default and isn't used in this submission:** with `SELARIKRU_CODING_WORKERS` unset, the runner registers no model worker and only applies changes.
@@ -272,7 +284,7 @@ The submission period began at **1:30 PM PT on 11 Nov 2026**. This repository st
   - **Plan brief:** device formatting (`pmBrief`), a cloud check grounded with Google Search (`pmVerify`), and restricted notes kept off the server.
   - **The Project Manager's errands:** a walking PM that delivers each task, and the new shophouse office floor.
   - **The benchmark:** Gemma 4 on device against Gemini in the cloud.
-  - **`pnpm start`,** and the **Run locally** guide on the hosted demo.
+  - **`npx github:0xhaz/SelariKru` and `pnpm start`,** and the **Run locally** guide on the hosted demo.
   - An accessibility pass, and fixes from review.
 
 **Third-party code:**

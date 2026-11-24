@@ -4,6 +4,9 @@
   "private": true,
   "description": "SelariKru: hybrid local/cloud coding-agent workspace",
   "license": "Apache-2.0",
+  "bin": {
+    "selarikru": "infra/npx.mjs"
+  },
   "packageManager": "pnpm@9.12.2",
   "engines": {
     "node": ">=24 <25",

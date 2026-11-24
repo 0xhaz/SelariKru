@@ -59,6 +59,7 @@ test('hosted demo: Run locally opens a dialog with the clone, install and start 
   await page.getByTestId('run-locally').click();
   const dialog = page.getByRole('dialog', { name: 'Run SelariKru on your computer' });
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByTestId('run-locally-command')).toHaveText('npx github:0xhaz/SelariKru');
   await expect(dialog.getByTestId('run-locally-commands')).toHaveText('git clone https://github.com/0xhaz/SelariKru.git\ncd SelariKru\npnpm install\npnpm start');
   await expect(dialog.getByRole('link', { name: 'Full steps in TESTING.md' })).toHaveAttribute('href', 'https://github.com/0xhaz/SelariKru/blob/main/TESTING.md');
   const { violations } = await new AxeBuilder({ page }).include('[data-testid="run-locally-dialog"]').analyze();

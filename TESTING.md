@@ -40,7 +40,9 @@ On-device calls need desktop Chrome with the built-in Prompt API (Gemini Nano). 
 
 You need Node 24, pnpm 9 and Docker. Copy `.env.example` to `.env` (repository root), and `apps/control-web/.env.example` to `apps/control-web/.env.local`. Each file lists the variable **names** only. Fill in your own values, and never commit them.
 
-**One command.** After `pnpm install`, `pnpm start` checks your machine, then starts everything: Postgres, the Auth Emulator, the control API, the web app and the local runner. Then it opens Chrome at http://127.0.0.1:5173. `pnpm start --check` runs only the checks, and lists anything to fix. Ctrl+C stops everything. The optional settings are at the end of `.env.example`.
+**From any terminal:** `npx github:0xhaz/SelariKru`. It clones the repository into `./SelariKru`, installs it, and on the first run asks you to paste your Firebase web config (Firebase console › Project settings › Your apps) and App Check site key. It writes the two env files and sets up a local Feedback Board project (a git repository under `.local/starter/`, with GitHub off). Then it runs `pnpm start`. Sign in with `owner@selarikru.invalid` / `real-run-local-only-password` (Auth Emulator only). Run it again from the same folder to start next time.
+
+**One command, in a checkout.** After `pnpm install`, `pnpm start` checks your machine, then starts everything: Postgres, the Auth Emulator, the control API, the web app and the local runner. Then it opens Chrome at http://127.0.0.1:5173. On the first start with `SELARIKRU_SOURCE_REPO` set, it pairs the local runner with the stack by itself (loopback only, using the seeded emulator owner). `pnpm start --check` runs only the checks, and lists anything to fix. Ctrl+C stops everything. The optional settings are at the end of `.env.example`.
 
 ```sh
 git clone https://github.com/0xhaz/SelariKru.git
