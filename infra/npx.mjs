@@ -44,7 +44,7 @@ const flags = args.filter((a) => a.startsWith('--'));
 const folderArg = args.find((a) => !a.startsWith('--'));
 
 // What this step needs. pnpm start checks the rest (Docker, the Firebase CLI, free ports).
-if (Number(process.versions.node.split('.')[0]) !== 24) fail(`SelariKru needs Node 24 (found ${process.versions.node}). Switch to Node 24 (for example \`nvm use 24\`) and run this again.`);
+if (Number(process.versions.node.split('.')[0]) !== 24) fail(`SelariKru needs Node 24 (found ${process.versions.node} at ${process.execPath}). Switch to Node 24 (for example \`nvm use 24\`) and run this again.`);
 if (!has('git', ['--version'])) fail('SelariKru needs git. Install it and run this again.');
 if (!has('pnpm', ['--version'])) fail('SelariKru needs pnpm. Run `corepack enable`, then run this again.');
 
@@ -109,29 +109,39 @@ if (!existsSync(webEnvFile) || !existsSync(envFile)) {
   if (!existsSync(webEnvFile)) {
     console.log('SelariKru calls Firebase AI Logic from your browser, so it needs your own Firebase web app.');
     console.log('In the Firebase console, open Project settings › General › Your apps, and copy the firebaseConfig object.');
-    console.log('(Turn on AI Logic and App Check for that project first; TESTING.md shows how.)\n');
-    let parsed;
+    console.log('(Turn on AI Logic and App Check for that project first; TESTING.md › "Your own Firebase project" shows how.)');
+    console.log('No Firebase project yet? Press Enter to skip: SelariKru still starts, and only the AI calls wait until you add the config.\n');
+    let parsed = null;
     for (let attempt = 0; attempt < 2; attempt++) {
-      console.log('Paste it here, then press Enter on an empty line:');
+      console.log('Paste it here, then press Enter on an empty line (or just Enter to skip):');
       const pasted = [];
       for (;;) {
         const line = await nextLine();
-        if (line === null || (line.trim() === '' && pasted.length > 0)) break;
-        if (line.trim() !== '') pasted.push(line);
+        if (line === null || line.trim() === '') break; // an empty line ends the paste; one before any paste skips
+        pasted.push(line);
+      }
+      if (pasted.length === 0) {
+        parsed = null;
+        break;
       }
       parsed = parseFirebaseConfig(pasted.join('\n'));
       if (parsed.missing.length === 0) break;
-      console.log(`That config is missing ${parsed.missing.join(', ')}. Copy the whole object and try again.\n`);
+      console.log(`That config is missing ${parsed.missing.join(', ')}. Copy the whole object and try again, or press Enter to skip.\n`);
     }
-    if (parsed.missing.length > 0) {
+    if (parsed?.missing.length > 0) {
       rl.close();
-      fail('No complete Firebase config. Fill in apps/control-web/.env.local by hand (see apps/control-web/.env.example), then run this again.');
+      fail('No complete Firebase config. Fill in apps/control-web/.env.local by hand (see apps/control-web/.env.example), or run this again and press Enter to skip.');
     }
-    console.log('\nYour App Check reCAPTCHA Enterprise site key (App Check › Apps in the Firebase console).');
-    const siteKey = ((await nextLine('Site key, or Enter to skip (AI calls fail while App Check is enforced without it): ')) ?? '').trim();
+    let siteKey = '';
+    if (parsed) {
+      console.log('\nYour App Check reCAPTCHA Enterprise site key (App Check › Apps in the Firebase console).');
+      siteKey = ((await nextLine('Site key, or Enter to skip (AI calls fail while App Check is enforced without it): ')) ?? '').trim();
+    } else {
+      console.log('Skipped. To turn on the AI calls later, add your Firebase web config to apps/control-web/.env.local (see TESTING.md) and restart.');
+    }
     writePrivate(webEnvFile, [
       '# Written by npx github:0xhaz/SelariKru on first run. Git-ignored; never commit it.',
-      ...Object.entries(parsed.values).map(([k, v]) => `${k}=${v}`),
+      ...(parsed ? Object.entries(parsed.values).map(([k, v]) => `${k}=${v}`) : ['# No Firebase web config yet: the VITE_FIREBASE_* values from apps/control-web/.env.example go here.']),
       `VITE_RECAPTCHA_SITE_KEY=${siteKey}`,
       'VITE_API_BASE_URL=http://127.0.0.1:8787',
       'VITE_AUTH_EMULATOR_URL=http://127.0.0.1:9099',

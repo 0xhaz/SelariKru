@@ -40,7 +40,7 @@ On-device calls need desktop Chrome with the built-in Prompt API (Gemini Nano). 
 
 You need Node 24, pnpm 9 and Docker. Copy `.env.example` to `.env` (repository root), and `apps/control-web/.env.example` to `apps/control-web/.env.local`. Each file lists the variable **names** only. Fill in your own values, and never commit them.
 
-**From any terminal:** `npx github:0xhaz/SelariKru`. It clones the repository into `./SelariKru`, installs it, and on the first run asks you to paste your Firebase web config (Firebase console › Project settings › Your apps) and App Check site key. It writes the two env files and sets up a local Feedback Board project (a git repository under `.local/starter/`, with GitHub off). Then it runs `pnpm start`. Sign in with `owner@selarikru.invalid` / `real-run-local-only-password` (Auth Emulator only). Run it again from the same folder to start next time.
+**From any terminal:** `npx github:0xhaz/SelariKru`. It clones the repository into `./SelariKru`, installs it, and on the first run asks you to paste your Firebase web config (Firebase console › Project settings › Your apps) and App Check site key. No Firebase project yet? Press Enter to skip: SelariKru still starts, and only the AI calls wait for the config (see [Your own Firebase project](#your-own-firebase-project)). It writes the two env files and sets up a local Feedback Board project (a git repository under `.local/starter/`, with GitHub off). Then it runs `pnpm start`. Sign in with `owner@selarikru.invalid` / `real-run-local-only-password` (Auth Emulator only). Run it again from the same folder to start next time.
 
 **One command, in a checkout.** After `pnpm install`, `pnpm start` checks your machine, then starts everything: Postgres, the Auth Emulator, the control API, the web app and the local runner. Then it opens Chrome at http://127.0.0.1:5173. On the first start with `SELARIKRU_SOURCE_REPO` set, it pairs the local runner with the stack by itself (loopback only, using the seeded emulator owner). `pnpm start --check` runs only the checks, and lists anything to fix. Ctrl+C stops everything. The optional settings are at the end of `.env.example`.
 
@@ -67,6 +67,18 @@ pnpm dev:real      # stack + a real run against a local checkout (see .env.examp
 ```
 
 AI calls in the local stack need your own Firebase project's web config. Set the `VITE_FIREBASE_*` values, plus `VITE_RECAPTCHA_SITE_KEY` for App Check, in `apps/control-web/.env.local`.
+
+### Your own Firebase project
+
+The local stack starts without one, but its AI calls need one. Setting it up takes about five minutes, all on the free Spark plan:
+
+1. In the [Firebase console](https://console.firebase.google.com), create a project.
+2. Open **AI Logic** and click **Get started** with the **Gemini Developer API**.
+3. Open **Project settings › General › Your apps** and add a **web app**. Copy its `firebaseConfig` object: that is what `npx github:0xhaz/SelariKru` asks you to paste. By hand, its six values go in the `VITE_FIREBASE_*` lines of `apps/control-web/.env.local`.
+4. Open **App Check**, register the web app with **reCAPTCHA Enterprise** (create a key that allows `localhost` and `127.0.0.1`), and copy the site key into `VITE_RECAPTCHA_SITE_KEY`.
+5. Start SelariKru and open Chrome's console. In local development, App Check prints a **debug token** there. Add it in **App Check › Apps › Manage debug tokens**. Keep it private: never paste it into chat, an issue or a commit.
+
+Restart `pnpm start` after changing `.env.local`.
 
 To build and preview the hosted demo locally, set the same variables in the environment, then run:
 

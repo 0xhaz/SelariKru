@@ -206,7 +206,7 @@ npx github:0xhaz/SelariKru
 
 This does four things:
 1. It clones SelariKru into a `SelariKru` folder and runs `pnpm install`.
-2. On the first run, it asks you to paste your Firebase web config (the `firebaseConfig` object from the Firebase console) and your App Check site key. It writes them to the two git-ignored env files.
+2. On the first run, it asks you to paste your Firebase web config (the `firebaseConfig` object from the Firebase console) and your App Check site key. It writes them to the two git-ignored env files. Without a Firebase project yet, press Enter to skip: SelariKru still starts, and only the AI calls wait for the config ([TESTING.md › Your own Firebase project](TESTING.md#your-own-firebase-project)).
 3. It sets up a small local Feedback Board project for the team to build, with GitHub off.
 4. It runs `pnpm start`, which pairs the local runner with the stack on first start and opens Chrome at <http://127.0.0.1:5173>.
 
