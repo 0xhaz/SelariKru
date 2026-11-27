@@ -54,6 +54,14 @@ export function questionLabelFor(task: Pick<TaskView, 'route'> | undefined, mark
   return markedRestricted || (task?.route?.lock !== null && task?.route?.lock !== undefined) ? 'restricted' : 'internal';
 }
 
+/**
+ * The label of one PM ask. "Make the plan from this brief" sends fixed words and the approved brief, which is internal (a restricted brief is never checked, so it
+ * never offers this button): the panel's checkbox is for a typed question and does not apply. A locked task still makes it restricted.
+ */
+export function askLabelFor(task: Pick<TaskView, 'route'> | undefined, markedRestricted: boolean, fromApprovedBrief: boolean): 'internal' | 'restricted' {
+  return questionLabelFor(task, fromApprovedBrief ? false : markedRestricted);
+}
+
 /** Whether the owner granted web research for this run (off unless saved on). */
 export function webResearchGranted(snap: ProjectViewSnapshot | null, runId: string | null): boolean {
   return snap !== null && runId !== null && snap.settings.some((x) => x.scope === 'run' && x.key === runId && x.field === 'web_research' && x.desired === true);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ProjectViewSnapshot, TaskRouteRead } from '@selarikru/view-protocol';
 import { snapshotOf, task } from '../overview/testing.ts';
 import { canonicalJson, sha256Hex } from '@selarikru/domain';
-import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, runPmStep, type PmDeps, type PmRequest } from './runner.ts';
+import { askLabelFor, delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, runPmStep, type PmDeps, type PmRequest } from './runner.ts';
 
 const lock = { label: 'restricted' as const, reason: 'x' };
 const route = (over: Partial<TaskRouteRead['route']> = {}) => ({ effective: 'PREFER_IN_CLOUD', source: 'run', runDefault: 'PREFER_IN_CLOUD', override: null, overrideRevision: 0, lock: null, suggestion: null, lastObserved: null, ...over }) as never;
@@ -37,6 +37,12 @@ describe('the Project Manager runner (H11 fix round 1)', () => {
     expect(questionLabelFor(snap().tasks['t2']!, false)).toBe('restricted');
     expect(questionLabelFor(snap().tasks['t1']!, false)).toBe('internal');
     expect(questionLabelFor(snap().tasks['t1']!, true)).toBe('restricted');
+  });
+
+  it('a plan made from the approved brief ignores the typed-question checkbox, but a locked task still makes it restricted', () => {
+    expect(askLabelFor(snap().tasks['t1']!, true, true)).toBe('internal');
+    expect(askLabelFor(snap().tasks['t1']!, true, false)).toBe('restricted');
+    expect(askLabelFor(snap().tasks['t2']!, false, true)).toBe('restricted');
   });
 
   it('H2: the runner raises the label itself when the subject task is locked', async () => {

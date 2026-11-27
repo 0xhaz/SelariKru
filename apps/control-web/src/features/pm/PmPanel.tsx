@@ -21,7 +21,7 @@ import { PlanBrief } from './PlanBrief.tsx';
 import type { PlanBriefForPlan } from '@selarikru/inference-firebase-web';
 import { workerIdentity } from '../team/identity.ts';
 import { currentRun } from '../settings/model.ts';
-import { delegationAssignments, ownerTurnLabelAfter, planScopeFor, questionLabelFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
+import { askLabelFor, delegationAssignments, ownerTurnLabelAfter, planScopeFor, webResearchGranted, type PmKind, type PmOutcome } from './runner.ts';
 
 /**
  * H11: Talk to the Project Manager. One single-turn Firebase AI Logic call per question, about one task of the run (its route, lock and context apply), with a
@@ -205,8 +205,8 @@ export function PmPanel() {
     // restricted text is itself restricted (`pmReplyTurn`), so its paraphrase never reaches the cloud either (fix round 1, H2).
     const history: PmTurn[] = [...remembered].concat(pmConversation.getState().turns.flatMap((t): PmTurn[] => t.who === 'owner' ? [{ who: 'owner', text: t.text, classification: t.restricted ? 'restricted' : 'internal' }]
       : t.reply.outcome.kind === 'result' && t.reply.outcome.result.proposal.status === 'ok' ? [pmReplyTurn(t.reply.outcome.result, String((t.reply.outcome.result.proposal.data as { answer?: unknown } | null)?.answer ?? ''))] : []));
-    // A question about a locked task is restricted, whatever the checkbox says.
-    const label = questionLabelFor(task, restricted);
+    // A question about a locked task is restricted, whatever the checkbox says. A plan from the approved brief does not take the typed question's checkbox.
+    const label = askLabelFor(task, restricted, planBrief !== undefined);
     const ownerId = add({ who: 'owner', text: asked, restricted: label === 'restricted', kind });
     setBusy(true);
     try {
