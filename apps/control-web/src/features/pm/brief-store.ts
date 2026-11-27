@@ -73,5 +73,13 @@ export function checkStateAfterResume(kind: BriefCheckKind, out: PmOutcome & { r
   }
   const stop = stopReasonFor(p.blockedReason);
   if (stop) return { kind, status: 'paused', reason: STOP_TEXT[stop] };
-  return { kind, status: 'failed', message: pmRefusal(p.blockedReason ?? p.status) };
+  return { kind, status: 'failed', message: checkFailureText(p) };
+}
+
+/** Why a check that reached the model did not come back ok. A model error names the SDK's code (never its message, which can quote the request). */
+export function checkFailureText(p: { readonly status: string; readonly blockedReason: string | null; readonly errorCode?: string | null }): string {
+  if (p.status === 'error' && p.blockedReason === null) {
+    return `Gemini in the cloud returned an error${p.errorCode ? ` (${p.errorCode})` : ''}, so the brief was not checked. Chrome's console shows the Firebase error. A wrong App Check site key, an unregistered debug token or AI Logic not being set up are the usual causes.`;
+  }
+  return pmRefusal(p.blockedReason ?? p.status);
 }

@@ -55,6 +55,7 @@ check(Boolean(process.env.SELARIKRU_OWNER_UID), '.env has SELARIKRU_OWNER_UID', 
 // Without the Firebase web config the app still starts (a dev placeholder stands in); only the AI calls need it.
 const firebaseConfigured = envFileHas('apps/control-web/.env.local', 'VITE_FIREBASE_API_KEY');
 console.log(`  ${firebaseConfigured ? 'ok  ' : 'note'} apps/control-web/.env.local has the Firebase web config${firebaseConfigured ? '' : ': not yet. SelariKru starts, but the AI calls need it. TESTING.md › "Your own Firebase project" shows how.'}`);
+if (firebaseConfigured && !envFileHas('apps/control-web/.env.local', 'VITE_RECAPTCHA_SITE_KEY')) console.log('  note apps/control-web/.env.local has no VITE_RECAPTCHA_SITE_KEY: App Check is off, so cloud AI calls fail while your project enforces it (calls on this device still work).');
 const source = process.env.SELARIKRU_SOURCE_REPO;
 if (source) check(isAbsolute(source) && existsSync(join(source, '.git')), 'SELARIKRU_SOURCE_REPO is a git checkout', 'Set SELARIKRU_SOURCE_REPO in .env to the absolute path of the project checkout to build, or remove it.');
 let paired = existsSync(join(RUNNER_HOME, 'credentials.json'));

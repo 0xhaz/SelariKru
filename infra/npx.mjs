@@ -135,7 +135,7 @@ if (!existsSync(webEnvFile) || !existsSync(envFile)) {
     let siteKey = '';
     if (parsed) {
       console.log('\nYour App Check reCAPTCHA Enterprise site key (App Check › Apps in the Firebase console).');
-      siteKey = ((await nextLine('Site key, or Enter to skip (AI calls fail while App Check is enforced without it): ')) ?? '').trim();
+      siteKey = ((await nextLine('Site key, or Enter to skip (without it, every cloud AI call fails while App Check is enforced): ')) ?? '').trim();
     } else {
       console.log('Skipped. To turn on the AI calls later, add your Firebase web config to apps/control-web/.env.local (see TESTING.md) and restart.');
     }

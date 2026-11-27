@@ -13,7 +13,7 @@ import {
   addItem, addQuestion, approveBrief, briefFromOutput, briefInLines, briefPayload, cloudRefusal, completeness, conversationNotes, editItem, editQuestion, emptyBrief, latestNotes, NOTES_LIMITS,
   notesCheckpoint, notesLabel, planBriefFor, removeItem, restrictBrief, briefCheckpoint, latestBrief, type CitedSource, removeQuestion, screenCheck, setGoal, setItemKind, toggleGoal, toggleItem, toggleQuestion, type BriefDraft, type ItemKind,
 } from './brief.ts';
-import { EMPTY_RUN_BRIEF, briefKey, pmBrief, type RunBrief } from './brief-store.ts';
+import { EMPTY_RUN_BRIEF, briefKey, checkFailureText, pmBrief, type RunBrief } from './brief-store.ts';
 import { pmRefusal } from './copy.ts';
 import type { BriefCheckKind } from './runner.ts';
 import { SearchSuggestions } from './SearchSuggestions.tsx';
@@ -121,7 +121,7 @@ export function PlanBrief({ h, runId, subjectId, task, deviceOnly, researchGrant
     if (p.status === 'ok') { set(() => ({ check: { kind, status: 'done', result: screenCheck(kind, p.data, out.result.grounding ?? null), grounding: out.result.grounding ?? null, briefSha256: sha, simulated: out.simulated, resumed: false } })); return; }
     const stop = stopReasonFor(p.blockedReason);
     if (stop) { set(() => ({ check: { kind, status: 'paused', reason: STOP_TEXT[stop] } })); return; }
-    set(() => ({ check: { kind, status: 'failed', message: say(p.blockedReason ?? p.status) } }));
+    set(() => ({ check: { kind, status: 'failed', message: checkFailureText(p) } }));
   }
 
   const d = r.draft;
