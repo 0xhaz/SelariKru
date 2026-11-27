@@ -2,7 +2,7 @@
 
 **A small AI software team in your browser, running on Gemini Nano on your device when it can and on Gemini in the cloud when it needs to, all through Firebase AI Logic.**
 
-You give the Project Manager your rough notes. Gemini Nano turns them into a brief on your own machine. Gemini in the cloud checks the brief against Google Search and drafts the plan. The PM hands each task to a frontend or backend worker. Every change a worker proposes is applied, built and tested by a local runner on your computer, which uses no model, and each verified change arrives as a draft pull request on GitHub.
+You give the Project Manager your rough notes. Gemini Nano turns them into a brief on your own machine. Gemini in the cloud checks the brief, with Google Search where your Gemini plan includes it, and drafts the plan. The PM hands each task to a frontend or backend worker. Every change a worker proposes is applied, built and tested by a local runner on your computer, which uses no model, and each verified change arrives as a draft pull request on GitHub.
 
 - **Try it:** <https://selarikru.web.app>. This is a hosted demo on demo data, and its AI calls are real.
 - **Run it yourself:** `npx github:0xhaz/SelariKru` (see [Getting started](#getting-started)).
@@ -55,6 +55,7 @@ Every AI call in the app goes through **Firebase AI Logic's hybrid inference** i
 |---|---|---|
 | `pmBrief` | Formats your rough points into a brief, and checks that every line is accounted for | Local only (always on the device) |
 | `pmVerify` | Checks the approved brief against Google Search, item by item, with sources | Cloud only, grounded with Google Search |
+| `pmVerifyNoWeb` | The same check without web search, labelled "Not checked against the web" | Cloud only |
 | `pmPlan` | Drafts the architecture and a task plan from the checked brief | Cloud first |
 | `pmResearch` | Answers a question from the web, with sources | Cloud first, grounded with Google Search |
 | `pmAnswer` | Answers your questions about the project | Local first |
@@ -65,6 +66,8 @@ Every AI call in the app goes through **Firebase AI Logic's hybrid inference** i
 | `reviewChange` | Reviews a diff | Cloud first |
 | `triageFailure` | Explains a failed build or test | Local first |
 | `describePullRequest` | Writes the draft PR's description | Local first |
+
+The two web steps, `pmVerify` and `pmResearch`, are off until you turn on **Google Search (web research)** for a run, and they need a Gemini API plan that includes Grounding with Google Search. On a project whose free tier has none, a grounded call is refused with HTTP 429 and kept as paused work; `pmVerifyNoWeb` checks the brief without it.
 
 Bounded steps are suggested as *Local first* and broad ones as *Cloud first*, and a long input or a restricted label changes that (see [How a call's route is chosen](#how-a-calls-route-is-chosen)). You can set any task's route yourself, except on a restricted task.
 
@@ -179,7 +182,7 @@ flowchart TD
 ## Features
 
 - **The Office:** a pixel-art shophouse with a desk for each worker and a Project Manager who walks to the plan board and delivers each task. A rooftop shows the **On this device · Gemini Nano** and **Cloud · Gemini** boxes lighting up as calls run.
-- **Plan brief:** rough notes become a brief on your device. You approve what's sent, it's checked in the cloud with Google Search, and the plan is drafted from it.
+- **Plan brief:** rough notes become a brief on your device. You approve what's sent, it's checked in the cloud (with Google Search, or without it when web research is off), and the plan is drafted from it.
 - **Per-task routes,** each with a plain-language reason, and a lock for restricted data.
 - **Workers that propose diffs,** for you to review. A local runner applies, builds and tests each one, and the verified change arrives as a draft PR.
 - **Offline and budget handling:** paused steps are saved as checkpoints and sent after reconnecting. You can also move a paused step to your device or drop it.

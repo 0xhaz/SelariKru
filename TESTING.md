@@ -80,6 +80,8 @@ The local stack starts without one, but its AI calls need one. Setting it up tak
 
 Restart `pnpm start` after changing `.env.local`.
 
+The brief's **Check in the cloud** and the PM's **Research the web** use Grounding with Google Search, which some free Gemini tiers do not include (the call is refused with HTTP 429). Leave **Settings › Workflow › Google Search (web research)** off and use **Check without web search** instead.
+
 To build and preview the hosted demo locally, set the same variables in the environment, then run:
 
 ```sh
